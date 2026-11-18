@@ -22,10 +22,17 @@ function modelFields(repositoryId) {
   return [field('接口 URL', url), note(modelUrlRule), preview, field('API Key', key), field('模型名', name), pick, actions, result];
 }
 
+// #1078: this row is a live region, and a reader announces any child-node change inside it — including the same words
+// written again. The poll re-answers every five seconds, so the sentence and the class are only written when they really
+// differ; re-assigning an unchanged answer would interrupt the reader with nothing new.
+function writeActionsStatus(message, text, className) {
+  if (message.className !== className) message.className = className;
+  if (message.textContent !== text) message.textContent = text;
+}
+
 // #878: the status is redrawn from `current` every time the card is built, so the expired marker lives in state (`read`)
 // rather than only in this node. A failed refresh keeps the last readable answer and says it may no longer be current.
 function showActionsFailureStatus(message, status, read) {
-  message.className = status?.error ? 'endpoint-warning' : 'muted';
   const readable = status?.error ? status.error === 'actions_workflow_run_subscription_missing'
     ? '配置错误：此仓库使用的 App 安装未订阅 Webhook 事件「Workflow run」，Actions 失败分析已停止，不读取运行、不重跑、不提报。'
       + `请 App 管理员在 App 设置的 Permissions & events → Subscribe to events 勾选「Workflow run」并保存。${eventPermissionNotes.workflow_run}`
@@ -35,8 +42,8 @@ function showActionsFailureStatus(message, status, read) {
     : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「模型」页为 Actions 失败处理选择可用的模型，或检查项目默认模型。`
     : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
     : status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。';
-  message.textContent = !read ? readable : `${readable} 读取失败，${read.at
-    ? `显示上次结果（上次成功读取：${timestamp(read.at)}），可能已过期。` : '暂时没有可显示的上次结果。'}`;
+  writeActionsStatus(message, !read ? readable : `${readable} 读取失败，${read.at
+    ? `显示上次结果（上次成功读取：${timestamp(read.at)}），可能已过期。` : '暂时没有可显示的上次结果。'}`, status?.error ? 'endpoint-warning' : 'muted');
 }
 async function refreshActionsFailureStatus(token) {
   if (token !== renderToken || current?.section !== 'triggers' || !current.policy.actions_failures_enabled) return;
@@ -56,7 +63,7 @@ async function refreshActionsFailureStatus(token) {
     const answer = pollAfterError(error, current.actionsFailuresDelay || 0);
     if (answer.terminal) {
       const message = document.querySelector('[data-actions-status]');
-      if (message) { message.className = 'endpoint-warning'; message.textContent = '配置检查已停止：当前身份无法读取这个仓库的设置。请刷新身份或联系管理员后重新打开本页。'; }
+      if (message) writeActionsStatus(message, '配置检查已停止：当前身份无法读取这个仓库的设置。请刷新身份或联系管理员后重新打开本页。', 'endpoint-warning');
       return;
     }
     current.actionsFailuresRead = { at: current.actionsFailuresSeenAt || null }; current.actionsFailuresDelay = answer.delay; delay = answer.delay;
