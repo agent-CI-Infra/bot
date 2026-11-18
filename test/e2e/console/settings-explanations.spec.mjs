@@ -25,13 +25,13 @@ test('存储与服务角色页顶部的长说明折进可展开的说明，数�
     await expect(storage).toBeVisible();
     await expect(storage).not.toHaveAttribute('open');
     // The long explanation is folded; what the page is about and when it was last refreshed is not.
-    await expect(panel.getByText('这里统计 bot 使用的各类存储')).toBeHidden();
+    await expect(panel.getByText('这里统计已采集的文件与项目工作卷')).toBeHidden();
     await expect(panel).toContainText(/最近刷新|尚未刷新/);
     // The disclosure opens from the keyboard: focus the summary and press Enter.
     await storage.locator('summary').focus();
     await page.keyboard.press('Enter');
     await expect(storage).toHaveAttribute('open', '');
-    await expect(panel.getByText('这里统计 bot 使用的各类存储')).toBeVisible();
+    await expect(panel.getByText('这里统计已采集的文件与项目工作卷')).toBeVisible();
 
     await page.goto(h.admin + '/#/settings/service-roles');
     const roles = panel.getByTestId('advanced-help').filter({ hasText: '服务角色' }).first();

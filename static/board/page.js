@@ -67,8 +67,18 @@ function boardShell() {
   const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
   const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
-  const categories=boardSelect('工作类型',boardCategories(),category==='all'?'':category);categories.label.classList.add('board-field');
+  // #482: the work type and the repository condition are compact selects in the toolbar beside the view selector, not
+  // rows inside the filter fold. Both write the same filters they always did (category, repository_id), so a saved view
+  // still restores them and the chips still show and remove them. A project board owns its repository, so it gets none.
+  const categories=boardSelect('工作类型',boardCategories(),category==='all'?'':category);
+  categories.label.className='board-field board-worktype-choice';categories.select.id='board-worktype-select';
   categories.select.addEventListener('change',()=>apply('category',categories.select.value,true));
+  const repository=projectRoute()?null:boardSelect('仓库',[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],boardFilter('repository_id')||'');
+  if(repository){
+    repository.label.className='board-field board-repository-choice';repository.select.id='board-repository-select';
+    // The repository condition changes which columns a repository-grouped board has, so this one rebuilds the shell.
+    repository.select.addEventListener('change',()=>apply('repository_id',repository.select.value,true));
+  }
   const execution=boardOptions('执行状态',[['','全部状态'],...boardExecutionStatuses],boardFilter('execution_status')||'',value=>apply('execution_status',value));
   const types=boardOptions('对象类型',boardTypes,boardState.type==='all'?'':boardState.type,async value=>{
     boardSetType(value);boardShell();await boardLoadCards();
@@ -79,7 +89,7 @@ function boardShell() {
     if((boardFilter('text')||'')===input.value.trim())return;apply('text',input.value.trim());},300);});search.append(input);
   const closed=element('label','','board-check'),check=document.createElement('input');check.type='checkbox';check.checked=boardFilter('include_closed')===true;
   check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
-  controls.append(categories.label,execution,types,search,closed);filters.append(controls);
+  controls.append(execution,types,search,closed);filters.append(controls);
   const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
   const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
   // #482: grouping stays one compact select; choosing a dimension the builtin view does not store opens the save dialog.
@@ -105,7 +115,8 @@ function boardShell() {
   const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
   const create=consoleLink(consolePageAddress('new-task'),'新建任务');create.id='board-create-task';create.classList.add('board-create-task');
-  arrangement.append(groups.label,viewControls,more.menu,element('span','','board-spacer'),status,create,boardButton('刷新',()=>boardLoadCards()));
+  // #482: 视图 → 仓库 → 工作类型 lead the row; grouping and the secondary view operations follow them.
+  arrangement.append(viewControls,...(repository?[repository.label]:[]),categories.label,groups.label,more.menu,element('span','','board-spacer'),status,create,boardButton('刷新',()=>boardLoadCards()));
   toolbar.append(filters,chips,arrangement);
   const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';
   mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});

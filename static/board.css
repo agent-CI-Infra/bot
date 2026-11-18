@@ -69,6 +69,9 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-option[aria-pressed=true]{background:var(--color-brand);color:var(--color-text-inverse);border-color:var(--color-brand)}
 .board-option[aria-pressed=true]:hover{background:var(--color-brand)}
 .board-grouping{flex:0 1 auto}
+/* #482: the repository condition and the work type sit beside the view selector as compact selects, in that order. */
+.board-repository-choice,.board-worktype-choice{flex:0 1 auto;min-width:0}
+.board-arrangement .board-repository-choice select,.board-arrangement .board-worktype-choice select{max-width:170px}
 .board-filter-controls>label{min-width:0;gap:4px;font-size:var(--font-size-1)}
 .board-filter-controls select,.board-search input{height:32px;padding:4px 8px;font-size:var(--font-size-label)}
 .board-filter-controls .board-search{flex:1;min-width:170px;max-width:300px}
@@ -112,21 +115,24 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-filter-controls label,.board-filter-controls select{width:100%;max-width:none}
   .board-filter-controls .board-search{max-width:none;min-width:0}
   /* The view row gets a line of its own: sharing it with `⋯`, 新建任务 and 刷新 squeezed the selector to 18px at 320 and
-     put 保存视图 22px under the menu. The three actions move up beside 按…分列 instead, so the toolbar keeps its height
-     (a fourth row pushed the first card under the fixed bottom bar) and nothing can shrink into a neighbour. */
-  .board-arrangement{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:6px;align-items:center}
-  .board-arrangement>.board-grouping{grid-column:1;grid-row:1;min-width:0;flex-direction:column;gap:4px}
-  .board-arrangement>.board-view-controls{grid-column:1/-1;grid-row:2;flex-wrap:wrap;min-width:0}
+     put 保存视图 22px under the menu. #482 then moved the repository and work-type selects here out of the filter fold, so
+     they take the second line two-up and the remaining actions keep the third. Nothing can shrink into a neighbour. */
+  .board-arrangement{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;align-items:center}
+  .board-arrangement>.board-view-controls{grid-column:1/-1;grid-row:1;flex-wrap:wrap;min-width:0}
   .board-view-controls .board-view-choice{flex:1 1 120px;min-width:120px}
   .board-view-controls .board-view-choice select{width:100%;max-width:none}
   .board-view-controls .board-save{flex:none;padding:4px 8px}
   .board-view-controls .board-view-state{flex:none}
-  .board-grouping>.board-options-label{line-height:1.4}
+  .board-arrangement>.board-repository-choice{grid-column:1;grid-row:2;min-width:0;flex-direction:column;align-items:stretch;gap:4px}
+  .board-arrangement>.board-worktype-choice{grid-column:2;grid-row:2;min-width:0;flex-direction:column;align-items:stretch;gap:4px}
+  .board-arrangement>.board-repository-choice select,.board-arrangement>.board-worktype-choice select{width:100%;max-width:none;min-width:0}
+  .board-arrangement>.board-grouping{grid-column:3;grid-row:2;min-width:0;flex-direction:column;gap:4px}
+  .board-arrangement>.board-grouping>.board-options-label{line-height:1.4}
   .board-arrangement>.board-grouping select{width:100%;max-width:none;min-width:0}
-  .board-arrangement>.board-menu{grid-column:2;grid-row:1}
-  .board-arrangement>.board-create-task{grid-column:3;grid-row:1}
-  .board-arrangement>button{grid-column:4;grid-row:1}
-  .board-status{grid-row:3;grid-column:1/-1;font-size:var(--font-size-1);white-space:normal;flex-wrap:wrap}
+  .board-arrangement>.board-menu{grid-column:1;grid-row:3;justify-self:start}
+  .board-arrangement>.board-create-task{grid-column:2;grid-row:3}
+  .board-arrangement>button{grid-column:3;grid-row:3;justify-self:end}
+  .board-status{grid-row:4;grid-column:1/-1;font-size:var(--font-size-1);white-space:normal;flex-wrap:wrap}
   .board-spacer{display:none}
   .board-menu-panel{right:0}
   .board-mobile-group{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:var(--font-size-1)}
