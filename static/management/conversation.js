@@ -74,6 +74,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   };
   const showAccessError = err => {
     if (disposed) return;
+    // #616: the failure state owns the panel. A conversation, an open shortcut drawer or a half-read history from the
+    // scope that just failed is not usable under the card, so it is closed here instead of being left to each caller.
+    conversation = null; historyReady = false; active = null; showTools(false); updateBusy();
     welcome.hidden = true;
     const empty = consoleState('无法打开管理会话', managementAccessMessage(err), { tone: 'error', retry: () => openConversation().catch(showAccessError) });
     const reload = empty.querySelector('button'); if (reload) reload.textContent = '重试';
