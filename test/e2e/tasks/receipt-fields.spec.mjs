@@ -13,7 +13,7 @@ async function login(page, f) {
 }
 const open = async (page, f, id) => { await page.goto(f.h.admin + '/#/management/commands/' + id); return page.locator('#management-receipt-page'); };
 
-test('a receipt shows the idempotency key with what a repeat submission does, and names a missing impact', async ({ page }) => {
+test('a receipt shows the idempotency key with what a repeat submission does, and the impact the server recorded', async ({ page }) => {
   const f = await managementFixture(), writes = [];
   page.on('request', request => {
     const url = new URL(request.url());
@@ -29,8 +29,13 @@ test('a receipt shows the idempotency key with what a repeat submission does, an
     const idempotency = panel.locator('[data-receipt-idempotency]');
     await expect(idempotency).toContainText(receipt.idempotency_key);
     await expect(idempotency).toContainText('同一个幂等键重放不会重复执行');
-    // The impact of a command is not part of what the server records today: the page says that instead of leaving a gap.
-    await expect(panel.locator('[data-receipt-impact]')).toContainText('服务端未提供影响描述');
+    // The impact row reads the notice this receipt actually carries (#355), and only because the server recorded an
+    // effect with it. The sentence comes from the receipt itself, so the assertion cannot drift from its contract.
+    expect(receipt.result.effect).toBeTruthy();
+    expect(typeof receipt.result.notice).toBe('string');
+    const impact = panel.locator('[data-receipt-impact]');
+    await expect(impact).toContainText(receipt.result.notice);
+    await expect(impact).not.toContainText('服务端未提供影响描述');
     // A successful command has its own outcome section, and it is not phrased as a failure or an unknown result.
     const result = panel.locator('[data-receipt-result]');
     await expect(result).toHaveAttribute('data-receipt-result', 'succeeded');
@@ -59,6 +64,8 @@ test('a failed command keeps its refusal in the failure section, apart from the 
     // The fields that are not the outcome stay out of the outcome section, so a refusal cannot read as a result.
     await expect(panel.locator('[data-receipt-record]')).toContainText('回执 ID');
     await expect(result).not.toContainText('回执 ID');
+    // A refusal records no effect, and so no impact: the row keeps its honest fallback rather than borrowing a notice.
+    await expect(panel.locator('[data-receipt-impact]')).toContainText('服务端未提供影响描述');
   } finally { await f.close(); }
 });
 
@@ -66,7 +73,7 @@ test('an unconfirmed command has its own section, and a recorded impact is shown
   const f = await managementFixture();
   try {
     const unknown = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Unconfirmed prompt.' })).value;
-    f.h.store.run("UPDATE management_commands SET state='unknown', result=? WHERE id=?", JSON.stringify({ error: 'external_result_unknown', impact: '之后的新任务会使用这段提示词。' }), unknown.id);
+    f.h.store.run("UPDATE management_commands SET state='unknown', result=? WHERE id=?", JSON.stringify({ error: 'external_result_unknown', effect: 'future_tasks', impact: '之后的新任务会使用这段提示词。', notice: '这条 notice 应该让位给 result.impact。' }), unknown.id);
     await login(page, f);
     const panel = await open(page, f, unknown.id);
     const result = panel.locator('[data-receipt-result]');
@@ -78,7 +85,34 @@ test('an unconfirmed command has its own section, and a recorded impact is shown
     const impact = panel.locator('[data-receipt-impact]');
     await expect(impact).toContainText('之后的新任务会使用这段提示词。');
     await expect(impact).not.toContainText('服务端未提供影响描述');
+    // A recorded impact outranks a notice even when an effect backs the notice, so the row names the more specific field.
+    await expect(impact).not.toContainText('这条 notice 应该让位给 result.impact。');
     // The idempotency rule holds for an unconfirmed command too: that is exactly when it matters.
     await expect(panel.locator('[data-receipt-idempotency]')).toContainText('同一个幂等键重放不会重复执行');
+  } finally { await f.close(); }
+});
+
+test('a notice without an effect statement stays out of the impact row', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    // Two shapes where the server writes a notice but no effect: a command retired by the approval-flow removal
+    // (src/management/storage.ts) and a configuration PR that is still pending merge (src/management/configuration-pr.ts).
+    const retiredNotice = '审批流程已取消，这条等待审批的命令没有执行；需要时请重新发起。';
+    const retired = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Retired prompt.' })).value;
+    f.h.store.run("UPDATE management_commands SET state='failed', result=? WHERE id=?", JSON.stringify({ error: 'approval_retired', notice: retiredNotice }), retired.id);
+    const pendingNotice = '待合入默认分支；当前实际行为尚未改变。';
+    const pending = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Pending prompt.' })).value;
+    f.h.store.run("UPDATE management_commands SET state='succeeded', result=? WHERE id=?", JSON.stringify({ state: 'pending_merge', effective: false, notice: pendingNotice }), pending.id);
+    await login(page, f);
+    for (const [id, notice] of [[retired.id, retiredNotice], [pending.id, pendingNotice]]) {
+      const panel = await open(page, f, id);
+      await expect(panel).toBeVisible();
+      const impact = panel.locator('[data-receipt-impact]');
+      // The notice is the outcome or a caveat, not an effect on future work: the honest fallback stands, and the notice
+      // stays in the record section where it belongs.
+      await expect(impact).toContainText('服务端未提供影响描述');
+      await expect(impact).not.toContainText(notice);
+      await expect(panel.locator('[data-receipt-record]')).toContainText(notice);
+    }
   } finally { await f.close(); }
 });
