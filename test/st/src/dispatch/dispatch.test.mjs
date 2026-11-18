@@ -507,7 +507,7 @@ test('the Manager comments on and labels the event Issue before dispatching; it 
   assert.equal(ledger.filter(row => row.state === 'refused').length, 2, 'the path naming another repository, once per attempt (a repository argument is invalid before any record)');
   assert.equal(f.h.store.get("SELECT count(*) n FROM audit WHERE user_id='role:manager' AND action='github.write.sent'").n, 2);
   // A Manager whose role only reads is not offered the tool.
-  saveConfiguration(f.h.store, '101', { expected_revision: roleConfiguration(f.h.store, '101').revision, enabled: false, roles: [{ role_id: 'manager', permissions: { github_issues: 'read', github_pull_requests: 'read', github_contents: 'read' } }] }, 'fixture');
+  saveConfiguration(f.h.store, '101', { expected_revision: roleConfiguration(f.h.store, '101').revision, enabled: false, roles: [{ role_id: 'manager', permissions: { github_issues: 'read', github_pull_requests: 'read', github_contents: 'read', github_actions: 'read' } }] }, 'fixture');
   f.state.message = null; f.state.decide = () => ({ decision: 'ignore', option_ids: [], reason: '无需处理' });
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 6 }, sender: alice }, 'read-only-manager');
   await run();

@@ -68,6 +68,7 @@ export function roleStorageV2(s: Store) {
   CREATE TABLE IF NOT EXISTS role_snapshots(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,role TEXT NOT NULL,config_revision INTEGER NOT NULL,role_revision INTEGER NOT NULL,snapshot TEXT NOT NULL,created_at TEXT NOT NULL);
   `);
   resetBuiltinRolePermissions(s);
+  actionsWriteFollowsIssues(s);
   retireAcpRoleBindings(s);
   retireAcpTaskExecutionConfigs(s);
 }
@@ -187,6 +188,35 @@ export function resetBuiltinRolePermissions(s: Store) {
       const now = new Date().toISOString(), { updated_at, updated_by, ...config } = { ...current, roles, revision: current.revision + 1 };
       const saved = { ...config, updated_at: now, updated_by: 'migration:381' };
       s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:381', now);
+      s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
+    }
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+  });
+}
+
+/**
+ * One-time upgrade (#1072): Actions got a write mode (starting workflows). Saved roles never chose it, so each role that
+ * writes Issues and reads Actions takes Actions write, like the new defaults; a role that cannot read Actions, or whose
+ * Actions items are custom, keeps them. The project capability ceiling still bounds every write. Like migration:381, each
+ * changed project gets a new configuration revision, so running role runs keep the snapshot they started with.
+ */
+export function actionsWriteFollowsIssues(s: Store) {
+  const marker = 'migration:1072:actions-write';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  s.transaction(() => {
+    for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%'")) {
+      let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+      if (stored?.schema !== 2 || !Array.isArray(stored.roles)) continue;
+      const repositoryId = String(row.key).slice('roles:'.length), current = roleConfiguration(s, repositoryId, stored);
+      let changed = false;
+      const roles = current.roles.map(role => {
+        if (role.permissions.github_issues !== 'write' || role.permissions.github_actions !== 'read') return role;
+        changed = true; return { ...role, permissions: { ...role.permissions, github_actions: 'write' as const }, revision: role.revision + 1 };
+      });
+      if (!changed) continue;
+      const now = new Date().toISOString(), { updated_at, updated_by, ...config } = { ...current, roles, revision: current.revision + 1 };
+      const saved = { ...config, updated_at: now, updated_by: 'migration:1072' };
+      s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:1072', now);
       s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
     }
     s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());

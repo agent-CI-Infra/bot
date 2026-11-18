@@ -213,7 +213,7 @@ function permissionEditor(permissions, items, change, prefix = '', fixed = false
     for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
       const listed = shown.filter(item => item.group === group); if (!listed.length) continue;
       const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
-      if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案属于框架交付，由项目工作类型的写入控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。读写还以项目能力上限为顶：「可评论和打标签」只到 Issue 和 Pull Request，「可开发并开 PR」才含 Contents。'));
+      if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案属于框架交付，由项目工作类型的写入控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。读写还以项目能力上限为顶：「可评论和打标签」只到 Issue、Pull Request 和 Actions（触发工作流），「可开发并开 PR」才含 Contents。'));
       for (const item of listed) section.append(permissionRow(permissions, item, change, prefix, fixed));
       host.append(section);
     }

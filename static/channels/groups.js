@@ -3,7 +3,7 @@ const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已
 // What a group may do is its binding's level (#849); each level adds to the one before it.
 const bindingLevelOptions = [
   ['read', '只读问答', '读取范围内仓库的 Issue、PR、代码和 Actions，查本群会话记录；不写 GitHub，不建任务。'],
-  ['comment', '可评论和打标签', '另外可以在 Issue 和 PR 上评论、加删标签、指派人、新建 Issue；PR 读写也包括开 PR、发检视（含批准和要求修改）和请求检视人。不改代码，不合并。'],
+  ['comment', '可评论和打标签', '另外可以在 Issue 和 PR 上评论、加删标签、指派人、新建 Issue，并触发 Actions 工作流（例如「跑一下 Nightly」）；PR 读写也包括开 PR、发检视（含批准和要求修改）和请求检视人。不改代码，不合并。'],
   ['dispatch', '可派活', '另外可以把工作交给项目 Manager 新建任务，并查看、追加说明、修改约定、暂停、重试或取消范围内的任务；任务按项目自己的设置和模型执行。'],
   ['custom', '高级：逐项设置', '按下面每一项单独选择。Contents 读写（提交文件、推送分支、在群里合并 PR）只能在这里打开。'],
 ];

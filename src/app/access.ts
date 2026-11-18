@@ -5,7 +5,7 @@ import { appEvents, appPermissions, missingEvents, missingPermissions } from '..
 // for a task a person confirmed as a CI change, see tasks/pull-request.ts) and Actions failure analysis needs workflow_run;
 // both, like releases, run only through a GitHub App installation. Tokens still request only what each use needs; this
 // table only says which features a missing grant stops.
-export const features = ['review', 'review_threads', 'development', 'ci_reads', 'ci_checks', 'board', 'release', 'ci_changes', 'actions_failures'] as const;
+export const features = ['review', 'review_threads', 'development', 'ci_reads', 'ci_checks', 'board', 'release', 'ci_changes', 'actions_failures', 'actions_dispatch'] as const;
 export type Feature = typeof features[number];
 interface Needs { permissions: Record<string, string>; events?: string[]; app?: boolean }
 export const featureNeeds: Record<Feature, Needs> = {
@@ -23,6 +23,9 @@ export const featureNeeds: Record<Feature, Needs> = {
   release: { app: true, permissions: { metadata: 'read', contents: 'write', actions: 'write', pull_requests: 'read' } },
   ci_changes: { app: true, permissions: { metadata: 'read', contents: 'write', pull_requests: 'write', workflows: 'write' } },
   actions_failures: { app: true, permissions: { metadata: 'read', contents: 'read', actions: 'write', issues: 'write' }, events: ['workflow_run'] },
+  // Starting a workflow through github_write (#1072): project scheduled tasks, the management assistant and Feishu groups.
+  // A bot account with the Write role can start one too, so it is not App-only.
+  actions_dispatch: { permissions: { metadata: 'read', actions: 'write' } },
 };
 const rank: Record<string, number> = { read: 1, write: 2, admin: 3 };
 // The baseline raised to what any feature needs, and every event any feature listens to.
@@ -56,7 +59,7 @@ export function accessGaps(accountType: string, grant: string | null, events: st
   const role = value as Record<string, unknown>, gaps: AccessGap[] = [];
   if (!(role.admin === true || role.maintain === true || role.push === true)) {
     const current = role.triage === true ? 'triage' : role.pull === true ? 'read' : null;
-    gaps.push({ kind: 'role', name: 'repository_role', required: 'write', current, features: current ? ['review', 'review_threads', 'development'] : features.filter(feature => !featureNeeds[feature].app) });
+    gaps.push({ kind: 'role', name: 'repository_role', required: 'write', current, features: current ? ['review', 'review_threads', 'development', 'actions_dispatch'] : features.filter(feature => !featureNeeds[feature].app) });
   }
   gaps.push({ kind: 'account', name: 'github_app', features: appOnly });
   return gaps;

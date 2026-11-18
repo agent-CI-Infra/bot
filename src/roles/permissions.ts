@@ -66,7 +66,7 @@ export const permissionItems: PermissionItem[] = [
   platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理共享项目计划和通知订阅，目标与收件人仍受项目范围限制。')),
   github(access('github_issues','Issue',githubReads,['github_write'],'只读：查看 Issue、评论和标签。读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。')),
   github(access('github_pull_requests','Pull Request',githubReads,['github_write'],'只读：查看 PR、diff 和检视。读写：还可以用 github_write 开 PR、修改 PR，评论，发检视（包括批准和要求修改）、请求检视人。合并 PR 属于 Contents 读写。')),
-  github(access('github_actions','Actions',[...githubReads,'read_job_log'],[],'查看工作流运行、job 和日志。Actions 失败处理的重跑由项目工作类型的写入控制，不需要角色的写权限。')),
+  github(access('github_actions','Actions',[...githubReads,'read_job_log'],['github_write'],'只读：查看工作流运行、job 和日志。读写：还可以用 github_write 触发声明了 workflow_dispatch 的工作流。失败处理的重跑不需要这项。')),
   github(access('github_contents','Contents',githubReads,['github_write'],'只读：读取代码和提交。读写：还可以用 github_write 提交文件、创建 Git 对象、分支和引用、合并 PR，可以直接推送到分支。')),
   github(access('github_checks','Checks',githubReads,[],'读取检查运行和结论；尚未提供写入检查结果的角色工具。')),
   github(access('github_statuses','Commit Status',githubReads,[],'读取提交状态；尚未提供发布状态的角色工具。')),
@@ -101,7 +101,7 @@ export const githubReadScopes = (p: RolePermissions): string[] => githubResource
 export function githubWriteAllowed(p: RolePermissions, resource: string, operation?: 'create' | 'reply' | 'labels'): boolean {
   return resourceAllowed(p, resource, 'write') || !!operation && resourceAllowed(p, resource, operation);
 }
-export const githubWriteResources = ['issues','pull_requests','contents'] as const;
+export const githubWriteResources = ['issues','pull_requests','contents','actions'] as const;
 /** github_write is offered when any route is allowed. */
 export const githubWrites = (p: RolePermissions): boolean => githubWriteResources.some(resource => ['write','create','reply','labels'].some(operation => resourceAllowed(p, resource, operation as ResourceOperation)));
 const empty = (): RolePermissions => Object.fromEntries(permissionItems.map(item => [item.id,item.modes[0]!]));
@@ -256,11 +256,13 @@ export const permitsTool = (permissions: RolePermissions, tool: string) => permi
 
 /**
  * Built-in defaults (#381): only the Manager writes to GitHub (Issues, Pull requests and Contents, limited to the repository
- * of the event or task it handles); every other role reads every GitHub resource. Deliveries need no role write.
+ * of the event or task it handles); every other role reads every GitHub resource. Deliveries need no role write. Actions
+ * write (starting workflows, #1072) follows Issues write, so the Manager and its project scheduled tasks can start one.
  */
 export function defaultPermissions(id: string, kind: RoleKind): RolePermissions {
   const p = empty();
   for (const resource of githubResources) p[keyOf(resource)] = id === 'manager' && (githubWriteResources as readonly string[]).includes(resource) ? 'write' : 'read';
+  p.github_actions = p.github_issues === 'write' ? 'write' : p.github_actions!;
   p.computer = 'allow';
   if (kind === 'controller') { p.project_tasks = 'write'; if (id !== 'coordinator') p.delegation = 'allow'; }
   else { p.computer = 'allow'; p.browser = 'allow'; p.project_memory = kind === 'writer' ? 'write' : 'read'; }

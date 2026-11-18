@@ -198,7 +198,7 @@ test('a project that turns off the QA gate publishes a tested candidate without 
 // The Manager's GitHub resources set to read: it then holds no GitHub write to lend.
 function noGithubWrites(s) {
   const cfg = roleConfiguration(s, 'r'), manager = cfg.roles.find(role => role.role_id === cfg.controller.role);
-  for (const resource of ['issues', 'pull_requests', 'contents']) manager.permissions['github_' + resource] = 'read';
+  for (const resource of ['issues', 'pull_requests', 'contents', 'actions']) manager.permissions['github_' + resource] = 'read';
   s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify(cfg));
 }
 // Grants without a model: the ceilings, the source, older tasks and the post_review boundary.

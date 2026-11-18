@@ -8,7 +8,7 @@ import { workType } from './catalog.js';
  *
  * - read: answer and review in chat; nothing is written on GitHub.
  * - comment: every write on Issues and Pull requests (comments, labels, titles and bodies, assignees, closing, new Issues,
- *   reviews) and Actions reruns; no code.
+ *   reviews), Actions reruns and starting workflows (workflow_dispatch, #1072); no code.
  * - develop: change code and open PRs as well, including Contents writes and merging, which the Manager holds by default.
  *
  * Every write the bot makes sits under it: the deliveries of work types, and github_write of project roles, Feishu groups and
@@ -29,7 +29,7 @@ export const ceilingTitles: Record<Ceiling, string> = { read: '只读问答', co
  */
 export const ceilingScopes: Record<Ceiling, string> = {
   read: '不在 GitHub 上写任何内容',
-  comment: '可以写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、新建 Issue、发检视，不改代码',
+  comment: '可以写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、新建 Issue、发检视；可以触发 Actions 工作流，不改代码',
   develop: '另外可以改代码、开 PR、写分支和合并 PR' };
 
 /**
@@ -57,7 +57,8 @@ export function projectCeiling(store: Store, repositoryId: string, policy: Row |
 const writeLevels: Record<string, Ceiling> = { reply: 'comment', labels: 'comment', issue: 'comment', actions_rerun: 'comment', code: 'develop', pull_request: 'develop',
   release_notes: 'read' };
 export const writeLevel = (write: string): Ceiling => writeLevels[write] ?? 'develop';
-/** The level a github_write on a GitHub resource needs: merging a PR and pushing are Contents writes. */
+/** The level a github_write on a GitHub resource needs: merging a PR and pushing are Contents writes; Issues, pull requests
+ * and Actions (starting a workflow) need comment. */
 export const resourceLevel = (resource: string): Ceiling => resource === 'contents' ? 'develop' : 'comment';
 /**
  * The level a work type needs to run at all: reviews, replies and Actions failure handling write on GitHub, development

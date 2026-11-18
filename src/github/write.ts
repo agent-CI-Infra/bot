@@ -10,7 +10,7 @@ import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
  *
  * An agent names a repository-relative REST route (`POST /issues/12/comments`) and its JSON body, plus a key. The control
  * plane maps the route to the GitHub resource that GitHub's fine-grained permissions use for it (Issues, Pull requests,
- * Contents), checks the caller's role still has write on that resource, mints a token with exactly that permission for this
+ * Contents, Actions), checks the caller's role still has write on that resource, mints a token with exactly that permission for this
  * one call, sends the request, revokes the token and returns the useful part of GitHub's answer. The agent never holds a
  * token that can write.
  *
@@ -20,9 +20,12 @@ import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
  *   event, a group or management turn) a key that already reached GitHub is answered from the ledger.
  * - Every call is recorded in github_writes (who, repository, method, path, a request digest, GitHub's status and URL) and in
  *   the project audit.
+ * - Starting a workflow (#1072) always asks GitHub for the run it created (return_run_details), so the agent and the ledger
+ *   hold the run's id and link. Whether the workflow declares workflow_dispatch, whether the ref is right and whether a run is
+ *   already going are GitHub's and the agent's to judge: GitHub refuses what it cannot run (for example 422).
  */
 
-export type WriteResource = 'issues' | 'pull_requests' | 'contents';
+export type WriteResource = 'issues' | 'pull_requests' | 'contents' | 'actions';
 /** The legacy custom operation a route matches (see resourceAllowed); none means the resource's full write. */
 export type WriteOperation = 'create' | 'reply' | 'labels';
 export const writeMethods = ['POST', 'PATCH', 'PUT', 'DELETE'] as const;
@@ -41,7 +44,8 @@ export interface WriteContext {
 // One route: `shared` routes act on an Issue or a pull request by number (GitHub keeps both under /issues), `comment` routes on
 // an Issue or PR conversation comment by id. human: which body fields people read and therefore get their mentions escaped.
 // base64: whether body.content is base64 file content always (contents) or only with encoding base64 (blobs).
-interface Route { methods: string[]; pattern: RegExp; resource: WriteResource | 'shared' | 'comment'; operation?: WriteOperation; human?: 'text' | 'review'; base64?: 'always' | 'encoding' }
+// dispatch: a workflow_dispatch, whose body always asks GitHub to return the run it started.
+interface Route { methods: string[]; pattern: RegExp; resource: WriteResource | 'shared' | 'comment'; operation?: WriteOperation; human?: 'text' | 'review'; base64?: 'always' | 'encoding'; dispatch?: boolean }
 const n = '([1-9]\\d{0,9})', segment = '[^/]+';
 const route = (methods: string, path: string, resource: Route['resource'], extra: Partial<Route> = {}): Route =>
   ({ methods: methods.split('|'), pattern: new RegExp('^' + path + '$'), resource, ...extra });
@@ -75,14 +79,17 @@ const routes: Route[] = [
   route('PUT', '/contents/.+', 'contents', { base64: 'always' }), route('DELETE', '/contents/.+', 'contents'),
   route('POST', '/git/blobs', 'contents', { base64: 'encoding' }), route('POST', '/git/(?:trees|commits|tags|refs)', 'contents'),
   route('PATCH|DELETE', '/git/refs/.+', 'contents'),
-  route('PUT', `/pulls/${n}/merge`, 'contents'), route('POST', '/merges', 'contents')
+  route('PUT', `/pulls/${n}/merge`, 'contents'), route('POST', '/merges', 'contents'),
+  // Actions: start a workflow by its file name or id (#1072).
+  route('POST', `/actions/workflows/${segment}/dispatches`, 'actions', { dispatch: true })
 ];
 
 const fn = (name: string, description: string, properties: any, required: string[]) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 const description = 'Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository (/repos/{owner}/{repo} is implied), with the REST JSON body. '
   + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
-  + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}. '
-  + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests or Contents) and the project\'s capability ceiling allows it (comment for Issues and pull requests, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
+  + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}; '
+  + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked). '
+  + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
   + 'Mentions (@) in titles and bodies people read are escaped and secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
   + 'Use github_read to check state before writing; write only what your task needs.';
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
@@ -92,8 +99,8 @@ export const githubWriteInstructions = ' If github_write is among your tools, yo
 /** The tool of task entries and the Manager: the repository is the one of the task or event. */
 export const githubWriteTool = fn('github_write', description, properties, ['method', 'path', 'key']);
 /** github_write as a generic task's delivery tool (#814): the task's grant and its source govern it, not the executing role. */
-export const grantedGithubWriteTool = fn('github_write', description.replace("Allowed only where your role has write on the route's GitHub resource (Issues, Pull requests or Contents)",
-  "Offered because this task was granted GitHub writes; each call is allowed only where the task's source (the roles that created or delegated it, a group's level) has write on the route's GitHub resource (Issues, Pull requests or Contents)"), properties, ['method', 'path', 'key']);
+export const grantedGithubWriteTool = fn('github_write', description.replace("Allowed only where your role has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)",
+  "Offered because this task was granted GitHub writes; each call is allowed only where the task's source (the roles that created or delegated it, a group's level) has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)"), properties, ['method', 'path', 'key']);
 /** The tool of assistants that serve several repositories: the repository is chosen per call and checked against their scope. */
 export const scopedGithubWriteTool = fn('github_write', description.replace('(/repos/{owner}/{repo} is implied)', 'of the selected repository') + ' The repository argument selects one repository you may use; any other is refused.',
   { repository: { type: 'string', description: 'Repository full name (owner/name).' }, ...properties }, ['repository', 'method', 'path', 'key']);
@@ -161,7 +168,7 @@ function sanitize(entry: Route, body: unknown, redactor: Redactor, marker: strin
     return title ? text.replace(/[\r\n]+/g, ' ').trim() : text;
   };
   const marked = (value: unknown) => typeof value === 'string' ? value + '\n\n' + marker : value;
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return plain(body);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return entry.dispatch && body === undefined ? { return_run_details: true } : plain(body);
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
     if (entry.human && key === 'title') result[key] = human(value, true);
@@ -171,6 +178,7 @@ function sanitize(entry: Route, body: unknown, redactor: Redactor, marker: strin
     else if (key === 'content' && typeof value === 'string' && (entry.base64 === 'always' || entry.base64 === 'encoding' && (body as any).encoding === 'base64')) result[key] = base64Content(value, redactor);
     else result[key] = plain(value);
   }
+  if (entry.dispatch) result.return_run_details = true;
   return result;
 }
 function base64Content(value: string, redactor: Redactor): string {
@@ -187,7 +195,7 @@ function summarize(value: any): any {
   if (Array.isArray(value)) return value.slice(0, 100).map(item => item && typeof item === 'object' && typeof item.name === 'string' ? item.name : summarize(item));
   if (!value || typeof value !== 'object') return value ?? null;
   const out: Record<string, unknown> = {};
-  for (const key of ['id', 'number', 'html_url', 'state', 'title', 'name', 'ref', 'sha', 'merged', 'message', 'draft'])
+  for (const key of ['id', 'number', 'html_url', 'state', 'title', 'name', 'ref', 'sha', 'merged', 'message', 'draft', 'workflow_run_id', 'run_url'])
     if (['string', 'number', 'boolean'].includes(typeof value[key])) out[key] = value[key];
   if (value.object?.sha) out.object = { sha: value.object.sha, type: value.object.type ?? null };
   if (value.commit?.sha) out.commit = { sha: value.commit.sha, html_url: value.commit.html_url ?? null };
@@ -227,13 +235,13 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   const audit = (state: string, status: number | null, url: string | null) => store.audit(auditActor(context.actor), 'github.write.' + state,
     `${method} ${path}${status ? ' ' + status : ''}${url ? ' ' + url : ''}`, String(repository.id));
   const refuse = (error: string, detail?: string, extra: Record<string, unknown> = {}) => { record('refused', { error }); return { error, ...extra, ...(detail ? { detail } : {}) }; };
-  // The project's capability ceiling (#850) bounds every caller's writes: Issues and pull requests need comment, Contents
-  // (files, refs, merging) develop. It is read live, like the caller's own permission.
+  // The project's capability ceiling (#850) bounds every caller's writes: Issues, pull requests and Actions need comment,
+  // Contents (files, refs, merging) develop. It is read live, like the caller's own permission.
   const aboveCeiling = (resource: WriteResource) => {
     const ceiling = projectCeiling(store, String(repository.id)), needed = resourceLevel(resource);
     return covers(ceiling, needed) ? null : refuse('capability_ceiling', `This project's capability ceiling is ${ceiling}; ${resourceName(resource)} writes need ${needed}. Nothing was sent; a project administrator can raise the ceiling.`, { needed, ceiling });
   };
-  if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges.`);
+  if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges, workflow dispatches.`);
   // CI changes are bot pull requests that people review and merge (#931). github_write's token never has the Workflows
   // permission, so GitHub refuses a ref update that would change .github/workflows/; a file write there is refused here,
   // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
@@ -328,7 +336,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     for (const github of issued) await github.revokeTokens('github_write');
   }
 }
-const resourceName = (resource: WriteResource) => ({ issues: 'Issues', pull_requests: 'Pull requests', contents: 'Contents' })[resource];
+const resourceName = (resource: WriteResource) => ({ issues: 'Issues', pull_requests: 'Pull requests', contents: 'Contents', actions: 'Actions' })[resource];
 const auditActor = (actor: WriteActor) => actor.principal_id ? String(actor.principal_id)
   : actor.service_role_id ? 'service:' + actor.service_role_id : 'role:' + (actor.role ?? actor.kind);
 

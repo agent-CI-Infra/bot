@@ -4,7 +4,7 @@ import { Store } from '../../../../dist/storage/database.js';
 import { normalizePermissions, permissionItems, permissionTools, permitsManagement, permitsTool, resourceAllowed, updatePermissions, fullPermissions, defaultPermissions, githubWriteAllowed, narrowPermissions } from '../../../../dist/roles/permissions.js';
 import { OwnTasks } from '../../../../dist/service-roles/own-tasks.js';
 import { serviceMemory } from '../../../../dist/service-roles/resources.js';
-import { roleConfiguration, resetBuiltinRolePermissions } from '../../../../dist/roles/definition.js';
+import { roleConfiguration, resetBuiltinRolePermissions, actionsWriteFollowsIssues } from '../../../../dist/roles/definition.js';
 import { assertTaskExternalEffect, taskReadScopes, withTaskPermissions } from '../../../../dist/tasks/management.js';
 
 test('legacy computer and GitHub subsets survive reads and identical saves without gaining resource actions',()=>{
@@ -42,7 +42,8 @@ test('framework deliveries follow the work type, not the executing role\'s GitHu
 
 test('only the Manager writes by default; write offers github_write on its resource and narrowing keeps the ceiling (#381)',()=>{
   const manager=defaultPermissions('manager','controller');
-  assert.deepEqual(['issues','pull_requests','contents','actions','checks','statuses'].map(r=>manager['github_'+r]),['write','write','write','read','read','read']);
+  // Actions write (starting workflows, #1072) follows Issues write.
+  assert.deepEqual(['issues','pull_requests','contents','actions','checks','statuses'].map(r=>manager['github_'+r]),['write','write','write','write','read','read']);
   for(const [id,kind] of [['coordinator','controller'],['dev','writer'],['test','observer'],['reviewer','observer'],['ux','observer'],['qa','evaluator'],['custom','observer']]){
     const p=defaultPermissions(id,kind);
     assert.ok(['issues','pull_requests','contents','actions','checks','statuses'].every(r=>p['github_'+r]==='read'),id);
@@ -85,6 +86,30 @@ test('saved built-in roles take the new default permissions once; settings and c
   const saved=JSON.parse(s.get("SELECT value FROM settings WHERE key='roles:r'").value);saved.roles.find(r=>r.role_id==='dev').permissions.github_issues='write';
   s.run("UPDATE settings SET value=? WHERE key='roles:r'",JSON.stringify(saved));resetBuiltinRolePermissions(s);
   assert.equal(roleConfiguration(s,'r').roles.find(r=>r.role_id==='dev').permissions.github_issues,'write');
+});
+
+test('saved roles that write Issues and read Actions take Actions write once; the others keep theirs (#1072)',t=>{
+  const s=new Store(':memory:',Buffer.alloc(32,2));t.after(()=>s.close());
+  s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,?,'now')",s.secrets.seal({token:'fixture'},'account:a'));
+  s.run("INSERT INTO repositories VALUES('r','fixture/r','10','a')");
+  const config=roleConfiguration(s,'r');delete config.legacy;config.revision=7;
+  const role=id=>config.roles.find(r=>r.role_id===id);
+  // As saved before #1072: Actions had no write mode.
+  role('manager').permissions=updatePermissions(role('manager').permissions,{github_actions:'read'});
+  role('dev').permissions=updatePermissions(role('dev').permissions,{github_issues:'write'});
+  config.roles.push({...role('reviewer'),role_id:'auditor',permissions:updatePermissions(role('reviewer').permissions,{github_issues:'write',github_actions:'none'})});
+  s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify(config));
+  s.run("DELETE FROM settings WHERE key='migration:1072:actions-write'");
+  actionsWriteFollowsIssues(s);
+  const after=roleConfiguration(s,'r'),find=id=>after.roles.find(r=>r.role_id===id);
+  assert.deepEqual([after.revision,after.updated_by],[8,'migration:1072']);
+  assert.deepEqual(['manager','dev','reviewer','auditor'].map(id=>find(id).permissions.github_actions),['write','write','read','none']);
+  assert.deepEqual(['manager','reviewer'].map(id=>find(id).revision-role(id).revision),[1,0]);
+  assert.equal(s.get("SELECT actor FROM role_config_revisions WHERE repository_id='r' AND revision=8").actor,'migration:1072');
+  // Once: an administrator who sets it back to read keeps that.
+  const saved=JSON.parse(s.get("SELECT value FROM settings WHERE key='roles:r'").value);saved.roles.find(r=>r.role_id==='manager').permissions.github_actions='read';
+  s.run("UPDATE settings SET value=? WHERE key='roles:r'",JSON.stringify(saved));actionsWriteFollowsIssues(s);
+  assert.equal(roleConfiguration(s,'r').roles.find(r=>r.role_id==='manager').permissions.github_actions,'read');
 });
 
 test('private memory and own-task controls are isolated by conversation, principal and authorization fence',async t=>{
