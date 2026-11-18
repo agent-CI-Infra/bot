@@ -28,12 +28,14 @@ async function github(t) {
     const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     let match;
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/installation$/.exec(path))) return send({ id: 55, account: { id: match[1].endsWith('201') ? 20 : 10, login: 'agent-test-zone' },
-      permissions: { contents: 'read', issues: 'write', pull_requests: 'read', actions: 'read', checks: 'read', statuses: 'read', metadata: 'read' } });
+      permissions: { contents: 'read', issues: 'write', pull_requests: 'read', actions: 'write', checks: 'read', statuses: 'read', metadata: 'read' } });
     if (path === '/app/installations/55/access_tokens') return send({ token: 'fixture-read-token-' + state.requests.length, expires_at: new Date(Date.now() + 3600000).toISOString(), permissions: body.permissions }, 201);
     if (path === '/installation/token') return send({});
     if ((match = /^\/repositories\/(\d+)$/.exec(path))) return send({ id: Number(match[1]), full_name: 'agent-test-zone/admin-fixture-' + match[1], owner: { id: match[1] === '201' ? 20 : 10 }, default_branch: 'main' });
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/pulls$/.exec(path))) return send(state.pulls[match[1]] ?? []);
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/issues$/.exec(path)) && req.method === 'POST') return send({ id: 4400, number: 44, title: body.title, body: body.body, state: 'open', html_url: `https://github.com/agent-test-zone/${match[1]}/issues/44` }, 201);
+    if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/actions\/workflows\/nightly\.yml\/dispatches$/.exec(path)) && req.method === 'POST')
+      return send({ workflow_run_id: 9001, run_url: `https://api.github.com/repos/agent-test-zone/${match[1]}/actions/runs/9001`, html_url: `https://github.com/agent-test-zone/${match[1]}/actions/runs/9001` });
     if (path === '/repos/agent-test-zone/admin-fixture-101/contents/src/channels/service.ts') return send({ type: 'file', encoding: 'base64', content: Buffer.from('export class ChannelService {}').toString('base64') });
     send({ message: 'unexpected fixture request ' + path }, 404);
   });
@@ -612,6 +614,38 @@ test('a group whose level writes Issues files one in a repository in scope with 
   assert.ok(!offered[0].includes('github_write'));
   assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
   assert.equal(f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/issues')).length, 1);
+});
+
+test('a comment group starts a workflow someone asks for and gets its run link; bindings saved before take Actions write once and keep their fence (#1072)', async t => {
+  const f = await fixture(t), { h } = f;
+  assert.equal((await f.bind()).status, 200);
+  const level = await f.setLevel('comment');
+  assert.deepEqual([level.level, level.permissions.github_actions], ['comment', 'write']);
+  h.store.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='101'");
+  const nightly = ['github_write', { repository: repo(101), method: 'POST', path: '/actions/workflows/nightly.yml/dispatches', key: 'nightly', body: { ref: 'main' } }];
+  f.modelState.respond = async (body, res) => observations(body).length ? say(res, '已触发 Nightly。') : call(res, ...nightly);
+  const row = await done(f, await post(h, f.id, groupMessage('bot 跑一下 Nightly')));
+  assert.equal(row.state, 'completed', row.error);
+  const seen = observations(f.requests.at(-1))[0];
+  assert.deepEqual([seen.repository, seen.result.workflow_run_id, seen.result.html_url, seen.result.status], [repo(101), 9001, 'https://github.com/agent-test-zone/admin-fixture-101/actions/runs/9001', 200]);
+  // GitHub is asked for the run it started, with a token that holds Actions write only.
+  const sent = f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/dispatches'));
+  assert.deepEqual(sent.map(r => r.body), [{ ref: 'main', return_run_details: true }]);
+  assert.ok(f.gh.state.requests.filter(r => r.path.endsWith('/access_tokens')).some(r => JSON.stringify(r.body.permissions) === JSON.stringify({ actions: 'write', metadata: 'read' })));
+  assert.equal(h.store.get("SELECT html_url FROM github_writes WHERE state='sent' AND path LIKE '/actions/%'").html_url, 'https://github.com/agent-test-zone/admin-fixture-101/actions/runs/9001');
+  // A comment binding saved before #1072 read Actions: on its own it now reads as custom. The upgrade gives it Actions write
+  // once, so it reads as comment again, without a new revision or fence: the group's history and computer stay.
+  const binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', f.chat.id);
+  h.store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?', JSON.stringify({ ...JSON.parse(binding.permissions), github_actions: 'read' }), binding.id);
+  const view = async () => (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === f.chat.id);
+  assert.equal((await view()).level, 'custom');
+  const fence = new ChannelServiceBindings(h.store, undefined).fence(f.chat.id);
+  h.store.run("DELETE FROM settings WHERE key='channel_service_binding_actions_write_migrated'");
+  await h.stop(); await h.start();
+  const upgraded = await view();
+  assert.deepEqual([upgraded.level, upgraded.permissions.github_actions, upgraded.revision], ['comment', 'write', binding.revision]);
+  assert.equal(new ChannelServiceBindings(h.store, undefined).fence(f.chat.id), fence);
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.actions_write_migrated'").n, 1);
 });
 
 test('a project administrator binds one group at read and another at dispatch; every member of the dispatch group creates tasks, nobody in the read group writes (#849)', async t => {

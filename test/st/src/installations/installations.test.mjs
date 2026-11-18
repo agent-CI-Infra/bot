@@ -405,10 +405,10 @@ test('sync conclusions count installations and retain gaps, account failures and
   assert.equal(conclusion(good).tone, 'view-success');
   // Installation gaps cover every feature, so an installation missing only workflow_run is not all normal.
   const missing = structuredClone(good); missing.results[0].installations[0].gaps = [
-    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] },
+    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures', 'actions_dispatch'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   missing.results[0].app.missing_events = ['issue_comment'];
-  assert.match(message(missing), /并非全部正常。fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）；未订阅事件 Workflow run（影响 Actions 失败分析）。点仓库行上的提示查看处理方法。/);
+  assert.match(message(missing), /并非全部正常。fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析、触发 Actions 工作流）；未订阅事件 Workflow run（影响 Actions 失败分析）。点仓库行上的提示查看处理方法。/);
   assert.equal(conclusion(missing).tone, '');
   assert.match(message(missing), /App 定义仍有缺口，请到「全局设置 → 机器人账号」查看/);
   missing.results.push({ account_id: 'broken', error: 'github_http_503' });

@@ -17,13 +17,13 @@
 | 档位 | 含义 | GitHub 写入 |
 | --- | --- | --- |
 | `read` 只读问答 | 在飞书和控制台里回答、检视讨论 | 无 |
-| `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视，Actions 失败可以重跑一次；不改代码 | Issues、Pull requests |
+| `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视，Actions 失败可以重跑一次，可以触发 Actions 工作流；不改代码 | Issues、Pull requests、Actions（触发工作流） |
 | `develop` 可开发并开 PR | 还可以改代码、交付 bot PR | 再加 Contents（文件、分支和引用、合并 PR） |
 
 合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档；提示词要求 bot 不自行合并，见[在角色配置里调整行为](rules.md#bot-开的-pr-怎样跟进修改)。上限在启动项目时选择（默认 `comment`；受信任组织可以预设它下面的项目启动时的档位，见[管理员手册](admin.md)），之后由项目管理员在「监听与触发」修改。bot 的每一次写入都在上限之内：
 
 - 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察和发行说明在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
-- `github_write`：Issues 和 Pull requests 路由要 `comment`，Contents 路由要 `develop`。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
+- `github_write`：Issues、Pull requests 和 Actions 路由要 `comment`，Contents 路由要 `develop`。Actions 路由只有触发工作流（`POST /actions/workflows/{文件名或 id}/dispatches`，#1072），见[定时任务](schedules.md#定时触发-workflow)。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
 - 交付代码：上限低于 `develop` 时，给任务授予 `pull_request`（建任务时的 `writes`、`intent=development`、PR 终点，或之后的 `grant_writes`）返回 403 `capability_ceiling`（`detail.needed` 为 `develop`），Manager 的 `create_task`／`grant_writes` 得到同样的拒绝并可以改做报告。普通任务开 PR 前默认还要独立 QA 通过，项目可以在「能力上限」里关掉这道门槛，关掉后仍要通过项目测试命令；没有配置测试命令的项目仍要独立 QA。
 - 事件开关只决定哪些 GitHub 事件交给 Manager，不增加写权限。
 
@@ -142,7 +142,7 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 - **CI 观察**：请求写成事件，发布记录在 `observation_event` 里等待决定；建了任务才有 `observation_task`，不处理时 `observation_error` 写明 Manager 的理由。
 - **发行说明**：控制面核验每个来源恰好出现一次，标题和链接由控制面写出；Manager 不处理时按内置规则直接列出来源。
 - **Actions 失败处理**：日志引用核验、单次重跑预算和同一失败只报一次不变；Manager 不处理时这次失败记为 `ignored`，不重跑也不提报。
-- **定时检查**（项目定时任务，#1027）：计划的 `workflow` 写 `manager.check`，结果留在任务记录和 GitHub 上，不发飞书；`parameters.instruction` 写要检查什么。`parameters.file_issues` 会覆盖执行角色的 GitHub 写权限：为真时即使角色没有写权限也允许检查任务用 `github_write` 提报或回复 Issue，为假时即使角色有写权限也拒绝，未设置时跟随角色策略。到期成为 `schedule.due` 事件：已有检查内容时直接建任务，否则由 Manager 按「定时检查」章节决定（授权身份是计划的服务主体，由 Manager 角色执行）；无论计划如何设置，写入仍受项目能力上限约束，上限至少为 `comment` 时才可以经 `github_write` 提报 Issue 和评论，见[定时任务](schedules.md)。
+- **定时检查**（项目定时任务，#1027）：计划的 `workflow` 写 `manager.check`，结果留在任务记录和 GitHub 上，不发飞书；`parameters.instruction` 写要检查什么。`parameters.file_issues` 会覆盖执行角色的 GitHub 写权限：为真时即使角色没有写权限也允许检查任务用 `github_write` 提报或回复 Issue，为假时即使角色有写权限也拒绝，未设置时跟随角色策略。到期成为 `schedule.due` 事件：已有检查内容时直接建任务，否则由 Manager 按「定时检查」章节决定（授权身份是计划的服务主体，由 Manager 角色执行）；无论计划如何设置，写入仍受项目能力上限约束，上限至少为 `comment` 时才可以经 `github_write` 提报 Issue、评论或触发工作流，见[定时任务](schedules.md)。
 - 合并队列、发布 outbox、对账、PR head 校验、bot 分支归属、以开发标签为依据的开发在发布前标签仍在、发布前测试都不变。
 
 ## 升级迁移

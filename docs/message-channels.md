@@ -156,7 +156,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 | 档位 | `level` | 权限项 |
 | --- | --- | --- |
 | 只读问答 | `read` | GitHub 各资源只读、本群会话记录；不写 GitHub，不建任务 |
-| 可评论和打标签 | `comment` | 另有 Issue 和 Pull Request 读写：用 `github_write` 评论、加删标签、指派人、新建 Issue；Pull Request 读写同时允许开 PR、发检视（包括批准和要求修改）、请求检视人和更新 PR 分支。不含 Contents 写，所以不能提交文件或合并。群内任何成员还可以让助手管理本群的定时任务（`conversation_schedules`，#851），见「会话定时任务」 |
+| 可评论和打标签 | `comment` | 另有 Issue、Pull Request 和 Actions 读写：用 `github_write` 评论、加删标签、指派人、新建 Issue，触发声明了 `workflow_dispatch` 的工作流（在群里说「跑一下 Nightly」，#1072）；Pull Request 读写同时允许开 PR、发检视（包括批准和要求修改）、请求检视人和更新 PR 分支。不含 Contents 写，所以不能提交文件或合并。群内任何成员还可以让助手管理本群的定时任务（`conversation_schedules`，#851），见「会话定时任务」 |
 | 可派活 | `dispatch` | 另有 `delegation: allow` 和 `project_tasks: write`：经 Manager 新建任务，查看、追加说明、修改约定、暂停、重试和取消范围内的任务 |
 
 高级模式（`custom`）逐项设置统一权限目录（见 [共用角色权限](role-pool.md#shared-role-permissions)）里的每一项，例如打开虚拟电脑、项目知识或 Contents 读写。Contents 写（提交文件、推送分支、在群里合并 PR）只在高级模式里出现，三个档位都不含。逐项设置正好等于某一档时，绑定显示为那一档。保存时只能给档位或逐项设置之一；都不给时保持原档位，新绑定从只读问答开始。项目管理员（对范围有 `config.write`）自己就能为本项目的群选择任意档位，不需要超级管理员，同一项目的不同群可以各自不同。
@@ -178,6 +178,8 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 群内有效权限 = 绑定的档位 ∩ 绑定范围 ∩ 授权者当前仍有效的授权（该仓库的 `config.write` 及工具所需能力）∩ 各项目的能力上限（`comment` 才能写 Issues 和 PR，`develop` 才能写 Contents 和建开发任务，见[项目能力上限](workflows.md#项目能力上限)）∩ GitHub App 安装权限（写令牌按资源签发，安装没有的权限 GitHub 不会签发，写入在发出前拒绝）。服务角色的权限项不再作用于群。授权者失去某个仓库的权限时只暂停这个仓库；全部仓库都不可达时绑定显示暂停，群里 @ 助手会收到一条写明授权人和处理办法的说明（见[何时核验 GitHub 权限](identity-authorization.md#何时核验-github-权限)）。授权人不需要为此保持控制台登录：后台刷新和群回合会续期他的 GitHub 派生授权。不校验群内发言人的绑定、权限或成员快照，未绑定的普通成员和外部成员也按绑定的档位使用助手；来源真实性仍由飞书事件签名、连接版本和本地消息账本校验。服务角色被停用时群内说明原因，不改用其他角色；仍有启用中绑定的服务角色不能删除（`service_role_in_use`）。
 
 升级时（#849）每条已有绑定一次性得到它当时所用服务角色的权限项，原样复制，不扩大：仓库问答助手的群成为只读问答；自定义角色的群按其权限项显示为对应档位，对不上任何一档的显示为高级，其中旧派活附带的任务控制等过渡值保留原有操作，直到维护人改选。绑定的 revision 和授权围栏不变，进行中的回答和已有摘要不受影响；审计记 `channel.service_binding.level_migrated`。原来的服务角色继续作为提示词和模型使用。
+
+「可评论和打标签」和「可派活」两档加上 Actions 读写时（#1072），已有绑定按同一规则升级一次：Issue 读写、Actions 只读的绑定得到 Actions 读写，所以原来是这两档的绑定仍显示为原档位；Actions 不可读或逐项设置为高级子集的不变。绑定的 revision 不变，审计记 `channel.service_binding.actions_write_migrated`。
 
 群聊助手获得的工具都在服务端按绑定范围校验，一次请求可以跨多个仓库，不需要先选项目：
 

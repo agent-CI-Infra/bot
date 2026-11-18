@@ -70,7 +70,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     const row = id => page.locator(`.global-project-row[data-repository-id="${id}"]`), message = page.locator('#message'), chip = id => row(id).locator('[data-permission]');
     const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
     await sync.click(); await expect(message).toContainText('权限和事件订阅并非全部正常。');
-    await expect(message).toContainText('fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）');
+    await expect(message).toContainText('fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析、触发 Actions 工作流）');
     await expect(message).toContainText('未订阅事件 Pull request review（影响检视、开发）'); await expect(message).toContainText('未订阅事件 Check run（影响控制台检查状态展示）'); await expect(message).toContainText('未订阅事件 Workflow run（影响 Actions 失败分析）');
     await expect(message).not.toContainText('paused');
     for (const id of ['101', '202']) {
@@ -84,12 +84,16 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(items.nth(1)).toContainText('Workflows 需要「Read and write」，现在「No access」');
     await expect(items.nth(1)).toContainText('把 Workflows 设为「Read and write」并保存；新增权限要由安装所有者（fixture）在 GitHub 的安装设置里接受');
     await expect(items.nth(1)).toContainText('经确认的 CI 改动（手动使用时）：推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来');
+    // #1072: a project that cannot write Actions cannot start workflows either; it has no switch, so it reads as manual use.
+    await expect(items.nth(0)).toContainText('触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流');
     await expect(items.nth(4)).toContainText('未订阅事件 Check run');
     await expect(items.nth(6)).toContainText('Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）');
     await expect(items.nth(6)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
     for (const [width, height] of [[1365, 900], [1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
       await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-${width}.png` });
+      await items.nth(0).evaluate(node => node.scrollIntoView({ block: 'start' }));
+      await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-actions-${width}.png` });
       expect(await gapsView.evaluate(view => view.scrollWidth <= view.clientWidth)).toBe(true);
     }
     await page.setViewportSize({ width: 1365, height: 900 }); await gapsView.getByRole('button', { name: '关闭', exact: true }).click(); await expect(gapsView).toBeHidden();

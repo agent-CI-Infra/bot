@@ -26,14 +26,15 @@ const terminal = (error: unknown) => error instanceof HttpError && error.status 
 /**
  * The three permission levels a binding offers (#849), as items of the shared permission catalog. Each level adds to the
  * previous one: read is GitHub reads plus the conversation tools every group has; comment adds github_write on Issues and
- * pull requests (comments, labels, assignees, new Issues); dispatch adds creating and managing project tasks through the
- * Manager. Contents write, and so merging from the group, is only available as an individual item (custom).
+ * pull requests (comments, labels, assignees, new Issues) and on Actions (starting a workflow, #1072); dispatch adds
+ * creating and managing project tasks through the Manager. Contents write, and so merging from the group, is only available
+ * as an individual item (custom).
  */
 export const bindingLevels = ['read', 'comment', 'dispatch'] as const;
 export type BindingLevel = typeof bindingLevels[number] | 'custom';
 export function levelPermissions(level: typeof bindingLevels[number]): RolePermissions {
   const p = normalizePermissions({ github: 'read' }, true);
-  if (level !== 'read') { p.github_issues = 'write'; p.github_pull_requests = 'write'; }
+  if (level !== 'read') { p.github_issues = 'write'; p.github_pull_requests = 'write'; p.github_actions = 'write'; }
   if (level === 'dispatch') { p.delegation = 'allow'; p.project_tasks = 'write'; }
   return p;
 }
@@ -83,7 +84,23 @@ export function serviceBindingStorage(store: Store): void {
   store.run("UPDATE channel_service_bindings SET owner_id=configured_by WHERE owner_id=''");
   migrateEmployees(store);
   migrateLevels(store);
+  migrateActionsWrite(store);
   migrateModelGrants(store);
+}
+/** Once (#1072): comment and dispatch gained Actions write. A binding that writes Issues and reads Actions takes it too, so
+ * it keeps reading as its level; like project roles, Actions write follows Issues write. Nothing narrows, so the revision
+ * and the fence (see fence) stay: no turn is stopped and the group's history stays readable. */
+function migrateActionsWrite(store: Store): void {
+  if (store.get("SELECT 1 FROM settings WHERE key='channel_service_binding_actions_write_migrated'")) return;
+  store.transaction(() => {
+    for (const binding of store.all('SELECT id,permissions FROM channel_service_bindings WHERE permissions IS NOT NULL ORDER BY created_at,id')) {
+      let p: RolePermissions; try { p = normalizePermissions(JSON.parse(String(binding.permissions)), true); } catch { continue; }
+      if (p.github_issues !== 'write' || p.github_actions !== 'read') continue;
+      store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?', stored({ ...p, github_actions: 'write' }), binding.id);
+      store.audit('system', 'channel.service_binding.actions_write_migrated', binding.id);
+    }
+    store.run("INSERT INTO settings VALUES('channel_service_binding_actions_write_migrated',?) ON CONFLICT(key) DO NOTHING", new Date().toISOString());
+  });
 }
 /** The started projects a binding's scope covers: each chosen repository, or every project of the organization. A group reads
  * all of them, so its model must serve all of them (#849). */
@@ -185,12 +202,15 @@ export class ChannelServiceBindings {
     return current;
   }
   /** Changes whenever what the group may see changes: chat sources, binding (its level included), role or any grantor's
-   * authority. The level sits where the role's items used to, so a binding migrated with its role's items keeps its fence. */
+   * authority. The level sits where the role's items used to, so a binding migrated with its role's items keeps its fence.
+   * Starting workflows (#1072) changes nothing the group may read, so Actions write enters the fence as Actions read: the
+   * upgrade that added it to comment and dispatch keeps every group's fence, and with it the group's history, computer and
+   * queued replies. A person who changes the items still changes the fence, through the binding revision. */
   fence(chat: string): string {
-    const binding = this.get(chat), role = binding && serviceRole(this.store, binding.service_role_id);
+    const binding = this.get(chat), role = binding && serviceRole(this.store, binding.service_role_id), items = binding && this.permissions(binding);
     return digest(JSON.stringify({ context: this.store.get('SELECT context_revision FROM channel_chats WHERE id=?', chat)?.context_revision,
       binding: binding ? [binding.id, binding.revision, binding.enabled, revision(this.store, binding.principal_id)] : null,
-      role: role ? [role.id, role.enabled, stored(this.permissions(binding!))] : null,
+      role: role ? [role.id, role.enabled, stored(items!.github_actions === 'write' ? { ...items!, github_actions: 'read' } : items!)] : null,
       grants: binding ? this.grants(binding).map(g => [g.id, revision(this.store, g.grantor_id)]) : [] }));
   }
   /** Projects inside the binding's grants, split by whether each grantor still holds config.write and the capability there. */

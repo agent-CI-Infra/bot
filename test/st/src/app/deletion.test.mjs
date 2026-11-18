@@ -350,7 +350,7 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status, 200);
   const gaps = async () => Object.fromEntries((await admin('/api/installations')).value.repositories.map(r => [r.id, r.access_gaps]));
   const appGaps = [
-    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] },
+    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures', 'actions_dispatch'] },
     { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
     { kind: 'event', name: 'check_run', features: ['ci_checks'] },
     { kind: 'event', name: 'status', features: ['ci_checks'] },
@@ -368,7 +368,7 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
     [['101', 'fixture/project-101', 0, true], ['202', 'fixture/project-202', 0, false], ['303', 'fixture/project-303', 1, false]]);
   // A bot account below write also cannot review, close fixed review threads or develop.
   h.store.run("UPDATE installed_repositories SET permissions=? WHERE repository_id='303'", JSON.stringify({ pull: true }));
-  assert.deepEqual((await gaps())['303'][0], { kind: 'role', name: 'repository_role', required: 'write', current: 'read', features: ['review', 'review_threads', 'development'] });
+  assert.deepEqual((await gaps())['303'][0], { kind: 'role', name: 'repository_role', required: 'write', current: 'read', features: ['review', 'review_threads', 'development', 'actions_dispatch'] });
   // Events not read yet are unknown rather than missing.
   h.store.run("UPDATE installed_repositories SET events=NULL WHERE repository_id='101'");
   const unread = (await admin('/api/installations')).value.repositories.find(r => r.id === '101');
@@ -465,7 +465,7 @@ test('an older audit with foreign keys is rebuilt without them and keeps its rec
 });
 
 test('the project list marks reduced permissions, refreshes stale ones once, and links to global project administration', async () => {
-  const gap = [{ kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] }];
+  const gap = [{ kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures', 'actions_dispatch'] }];
   const event = (name, features) => ({ kind: 'event', name, features });
   const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', owner_login: 'fixture', installed: true, registered: true, enabled: true, review_enabled: true,
     development_enabled: false, actions_failures_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, access_gaps: [], permissions_stale: false, ...extra });
@@ -517,7 +517,7 @@ test('the project list marks reduced permissions, refreshes stale ones once, and
   assert.match(permission(third).title, /未订阅事件 Pull request review/);
   // A gap the opened dialog explains per feature, naming whether each is on, off or used by hand.
   permission(third).listeners.click[0]();
-  assert.equal(page.run('accessView').querySelectorAll('dd')[2].textContent, '发版本（手动使用时）：打不了标签、写不了 Release、重跑不了发布运行；Actions 失败分析（未开启）：读不到运行、重跑不了外部失败、提报不了 Issue。');
+  assert.equal(page.run('accessView').querySelectorAll('dd')[2].textContent, '发版本（手动使用时）：打不了标签、写不了 Release、重跑不了发布运行；Actions 失败分析（未开启）：读不到运行、重跑不了外部失败、提报不了 Issue；触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流（例如定时触发 Nightly）。');
   page.run('accessView').close();
   // The five-second task refresh reads the list again but leaves permission badges alone.
   page.requests.length = 0; listing = listing.map(r => ({ ...r, access_gaps: [], permissions_stale: false, running_tasks: 2 })); const badge = permission(first);

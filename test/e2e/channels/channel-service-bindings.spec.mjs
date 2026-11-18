@@ -38,10 +38,15 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.locator('#feishu-group-editor')).toBeVisible();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-101', exact: true })).toBeChecked();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-102', exact: true })).toBeChecked();
+    // #1072: from comment up, a group may also start workflows ("跑一下 Nightly").
+    await expect(page.locator('.feishu-level-choices')).toContainText('并触发 Actions 工作流（例如「跑一下 Nightly」）');
+    mkdirSync('.tmp/channel-service-bindings-1072', { recursive: true });
+    await page.locator('.feishu-level-choices').evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
+    await page.screenshot({ path: `.tmp/channel-service-bindings-1072/levels-${width}.png` });
     await page.getByLabel('可派活', { exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding.getByText('权限档位：可派活', { exact: true })).toBeVisible();
-    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'write', github_issues: 'write', github_contents: 'read' });
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'write', github_issues: 'write', github_actions: 'write', github_contents: 'read' });
     // Merging from the group (Contents write) is only an individual item, starting from the level chosen before.
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
     await expect(page.getByLabel('可派活', { exact: true })).toBeChecked();
