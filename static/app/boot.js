@@ -8,11 +8,14 @@ function timestamp(value) {
 // A row that appends " · zone" only does so when there is a reading in front of it; otherwise it says so.
 function stamped(value, zone) {
   const reading = timestampAt(value, zone);
-  return reading ? reading + ' · ' + zone : '时间无法识别';
+  return reading ? reading + ' · ' + zone : '时间或时区无法识别';
 }
-// Rows that print a local reading keep their own wording for a value they cannot read.
+// A row keeps its own wording when the value is missing, and says the value cannot be read when it is there but
+// unreadable. timestamp() itself still returns '' for both, so its other 90 call sites (and their .slice() uses) do
+// not change.
 function timeText(value, fallback = '时间未知') {
-  return timestamp(value) || fallback;
+  if (value == null || value === '') return fallback;
+  return timestamp(value) || '时间或时区无法识别';
 }
 // The same reading in a named zone, for the rows that keep a " · zone" suffix.
 function timestampAt(value, zone) {
