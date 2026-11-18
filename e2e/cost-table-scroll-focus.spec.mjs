@@ -27,9 +27,9 @@ const assertBoxes = (list, where) => {
   return list;
 };
 
-// Tab really enters it: press Tab from the last filter control until a scroll box has focus.
-const tabIntoScrollBox = async (page, panel) => {
-  await page.locator(`${panel} .cost-filters input, ${panel} input`).first().focus();
+// Walk from the preceding control, as a keyboard user would.
+const tabIntoScrollBox = async (page, start) => {
+  await start.focus();
   for (let step = 0; step < 40; step++) {
     await page.keyboard.press('Tab');
     if (await page.evaluate(() => document.activeElement?.classList?.contains('cost-table-scroll'))) return true;
@@ -85,7 +85,7 @@ test('the cost tables that scroll at 390 are reachable, named, and measured agai
     expect(narrow.filter(box => box.overflow && box.visible).length).toBeGreaterThan(0);
 
     // Tab reaches the first scroll box, the site focus ring is drawn, and the arrow key really scrolls it.
-    expect(await tabIntoScrollBox(page, '#costs-panel'), 'Tab enters a scroll box').toBe(true);
+    expect(await tabIntoScrollBox(page, page.locator('#costs-panel input').first()), 'Tab enters a scroll box').toBe(true);
     const ring = await focusRing(page);
     expect(ring.style, 'the scroll box draws the site focus ring').not.toBe('none');
     expect(parseFloat(ring.width), 'the focus ring has width').toBeGreaterThan(0);
@@ -135,6 +135,8 @@ test('the storage tables that scroll at 390 are reachable and named, and a table
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const panel = page.locator('#settings-panel');
     await expect(panel).toContainText('这里统计');
+    const details = panel.getByText('查看采集、回收与项目明细', { exact: true });
+    await details.click();
 
     // 1440: a table that fits keeps no Tab stop of its own.
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -149,7 +151,7 @@ test('the storage tables that scroll at 390 are reachable and named, and a table
     expect(narrow.filter(box => box.overflow && box.visible).length, 'the storage tables overflow at 390').toBeGreaterThan(0);
     const reachable = await page.locator('#settings-panel .storage-projects[tabindex="0"]').count();
     expect(reachable, 'a scrolling storage table is a Tab stop').toBeGreaterThan(0);
-    expect(await tabIntoScrollBox(page, '#settings-panel'), 'Tab enters a storage scroll box').toBe(true);
+    expect(await tabIntoScrollBox(page, details), 'Tab enters a storage scroll box').toBe(true);
     await page.screenshot({ path: '.tmp/904-captures/storage-390-focused.png', fullPage: true });
 
     expect(errors).toEqual([]);

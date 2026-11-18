@@ -7,6 +7,22 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
+
+function incompleteKinds(error, roots) {
+  const all = () => [...roots.values()].map(root => root.kind);
+  if (error.code !== 1) return all();
+  const kinds = new Set();
+  // GNU du still prints measured subtotals for directories it could only partly read. Attribute
+  // its ordinary C-locale diagnostics to the operand; an ambiguous error affects the whole scan.
+  for (const line of (error.stderr ?? '').trimEnd().split('\n')) {
+    const path = /^du: cannot (?:access|read directory) '([^']+)': /.exec(line)?.[1];
+    const root = path && [...roots.keys()].find(root => path === root || path.startsWith(root + sep));
+    if (!root) return all();
+    kinds.add(roots.get(root).kind);
+  }
+  return kinds;
+}
+
 export async function storageFootprint(database, locations) {
   const devices = new Map(), roots = new Map(), missing = new Set(), entries = [];
   const operands = [
@@ -42,11 +58,11 @@ export async function storageFootprint(database, locations) {
     // --one-file-system excludes nested volumes. NUL delimiters also handle tabs/newlines in names.
     try {
       const { stdout } = await execute('nice', ['-n', '19', 'du', '-x', '-B1', '--max-depth=1', '--null', '--', ...roots.keys()],
-        { timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024 }).catch(error => {
-          for (const root of roots.values()) missing.add(root.kind);
+        { timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C', QUOTING_STYLE: 'shell-escape-always' } }).catch(error => {
+          for (const kind of incompleteKinds(error, roots)) missing.add(kind);
           return { stdout: error.stdout ?? '' };
         });
-      for (const line of stdout.split('\0')) {
+      for (const line of stdout.split('\0').slice(0, -1)) {
         const tab = line.indexOf('\t');
         if (tab < 0) continue;
         const path = line.slice(tab + 1), bytes = Number(line.slice(0, tab)), root = roots.get(path);

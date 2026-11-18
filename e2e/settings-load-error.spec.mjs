@@ -71,6 +71,8 @@ test('存储 read failure shows the error card and recovers through 重新加载
       hash: '#/settings/storage', patterns: [/\/api\/storage(\?|$)/],
       heading: '存储读取失败', recovered: '这里统计'
     });
+    await expect(page.locator('.storage-share-table')).toContainText('fixture/project-101');
+    await page.getByText('查看采集、回收与项目明细', { exact: true }).click();
     await expect(page.locator('#settings-panel .storage-projects').first()).toBeVisible();
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
