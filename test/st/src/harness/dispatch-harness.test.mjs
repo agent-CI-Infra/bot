@@ -25,7 +25,8 @@ test('event dispatch uses a real Pi session and retains native binding without a
  s.run("INSERT INTO accounts VALUES('a','fixture','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/repo','10','a')");
  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','101',?,'fixture',?,'now')",'http://127.0.0.1:'+provider.address().port+'/v1',s.secrets.seal({value:'fixture-key'},'model:m'));
  s.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
- roleApi(s,{id:'admin',role:'project_admin',repositories:['101']},'PUT',new URL('http://local/api/repositories/101/roles'),{enabled:true,expected_revision:0,roles:[{role_id:'manager',harness_ref:{id:'pi'}}]});
+ // No role configuration: the defaults run the Manager on Pi (#1068).
+ assert.equal(roleApi(s,{id:'admin',role:'project_admin',repositories:['101']},'GET',new URL('http://local/api/repositories/101/roles'),{}).configuration.roles.find(r=>r.role_id==='manager').harness_ref.id,'pi');
  recordEvent(s,{repositoryId:'101',key:'dispatch-probe',type:'schedule.due',source:'schedule',summary:'Inspect event',facts:{},options:[{id:'check',work:'task.request',title:'Check',spec:{type:'request',key:'probe',request:'Inspect',principal:null}}]});
  const dispatcher=new Dispatcher(s,(store,context)=>managerDecision(store,context,undefined,manager));dispatcher.tick();await dispatcher.idle();
  const event=s.get('SELECT * FROM dispatch_events');assert.equal(event.state,'decided',JSON.stringify({error:event.error,result:event.result}));

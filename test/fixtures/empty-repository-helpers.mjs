@@ -6,6 +6,7 @@ import {harness,setup,account,repository,pinLegacyTaskConfiguration} from './hel
 import {TaskEngine} from '../../dist/agent/engine.js';
 import {treeSha} from '../../dist/agent/common.js';
 import {captureTaskConfiguration} from '../../dist/tasks/configuration.js';
+import { nativeRoles } from './native-roles.mjs';
 
 export async function emptyRepositoryFixture(t,options={}){
   let branch='empty',generation=1,engine;const comments=[],operations=[],commit='a'.repeat(40),tree=options.files?treeSha(options.files):'b'.repeat(40);
@@ -40,6 +41,8 @@ export async function emptyRepositoryFixture(t,options={}){
     return {repository_id:'101',state:'ready',generation,desired:'ready',revision:1};
   }};
   const h=await harness(undefined,manager,store=>({engine:engine=new TaskEngine(store,manager,githubUrl, undefined, acceptanceFixture)})),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  // Pre-Manager protocol snapshots: the roles of such a task (the Manager's retry decision included) run in process.
+  nativeRoles(h.store,'101');
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:options.modelUrl??githubUrl+'/v1',api_key:'fixture-key',model_name:'fixture-model'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,model_id:options.modelConfigured===false?null:model.id});
   await h.hook(a.path,a.secret,'first-issue',{repository:{id:101},action:'opened',issue:{number:1,title:'First issue',body:'Please review this project.'}});

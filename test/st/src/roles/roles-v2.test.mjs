@@ -394,9 +394,11 @@ function controllerScript(extra = []) {
 }
 test('an unconfigured project runs its ordinary task through Manager and delegates without opting in', async t => {
   const script = controllerScript(), f = await fixture(t, body => isController(body) ? script(body) : call('finish', { summary: 'default team delivered' }));
-  const result = await runTeam(f.spec, { prepare: async () => {} });
+  // Its roles run the recommended backend (#1068): the Manager and Dev get Pi sessions on the project computer.
+  const runner = fakeRunner(), workspace = new Workspace(f.s, runner.manager, { ...f.task, workspace_id: randomBytes(24).toString('hex') }, f.spec.redactor, async () => {}, () => {});
+  const result = await runTeam(f.spec, { prepare: async () => {}, controller: controllerWorkspace(workspace), worker: controllerWorkspace(workspace) });
   assert.equal(result.summary, 'default team delivered');
-  assert.deepEqual(f.s.all('SELECT DISTINCT role FROM task_runs ORDER BY role').map(row => row.role), ['dev', 'manager']);
+  assert.deepEqual(f.s.all('SELECT DISTINCT role,harness FROM task_runs ORDER BY role').map(row => row.role + ':' + row.harness), ['dev:pi', 'manager:pi']);
   assert.equal(f.s.get("SELECT 1 FROM settings WHERE key='roles:r'"), undefined);
   assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n, 1);
   assert.equal(f.records.get('t').acceptance, null, 'Manager nomination cannot replace independent QA');
@@ -649,8 +651,10 @@ function installOldV2(f) {
   delete config.legacy;
   config.revision = 1; config.enabled = true;
   config.controller.entries = { development: true, request: true, review: true, actions: true };
+  // Saved before the dev role's backend applied to the review and Actions entries (no entry_harness_source).
+  delete config.follows_default;
   for (const role of config.roles) {
-    role.revision = 1;
+    role.revision = 1; delete role.entry_harness_source;
     const harness = harnesses.find(h => h.id === (role.role_id === 'manager' ? 'pi' : 'native'));
     role.harness_ref = { id: harness.id, version: harness.version };
   }

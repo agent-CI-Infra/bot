@@ -141,8 +141,9 @@ const roleData = (config, { workflow = 'development.issue', configured = true } 
   models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: { source: 'project', name: 'fixture-model' } })) });
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'codex'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
+// The page's draft is the configuration the server sends, defaults included (#1068).
 function rolesDraft(data) {
-  return {controller:{role:data.configuration.controller.role},roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
+  return {controller:{role:data.configuration.controller.role},roles:data.configuration.roles.map(role=>({...role})),skills:[],required_stages:[]};
 }
 function rolesPage(data) {
   data.permission_items = [{id:'computer',name:'使用虚拟电脑',group:'platform',modes:['deny','allow'],detail:'读取、修改工作区文件和执行命令。'}];
@@ -229,15 +230,22 @@ test('a role\'s permissions show what differs from its defaults and fold the res
   const all=roleForm(data,'dev').form.querySelector('.role-permissions');
   assert.equal(all.querySelector('[data-testid=role-permission-defaults]'),null);assert.equal(labels(all).length,3);
 });
-test('role form preserves stored backends and recommends Pi only for an unsaved project', () => {
-  const config={schema:2,revision:0,enabled:true,legacy:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
-  const saved=roleForm(roleData(config),'manager');
-  assert.equal(saved.form.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'native');
-  const fresh=roleForm(roleData(config,{configured:false}),'manager');
-  assert.equal(fresh.form.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'pi');
-  const list=rolesPage(roleData(config,{configured:false}));
-  assert.equal(list.cards[0].querySelector('[data-role-version]').textContent,'尚未保存。可先使用推荐配置。');
-  assert.match(text(list.table.querySelector('tr[data-role=manager]')), /推荐配置/);
+test('role form shows the backends the server sends; a project on the defaults says it follows them, a custom one offers restoring them', () => {
+  const backend = view => view.form.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value;
+  const custom={schema:2,revision:3,enabled:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
+  assert.equal(backend(roleForm(roleData(custom),'manager')),'native');
+  // The server defines the recommended configuration (#1068); the page no longer changes a backend on its own.
+  const defaults={schema:2,revision:0,enabled:true,follows_default:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]};
+  assert.equal(backend(roleForm(roleData(defaults,{configured:false}),'manager')),'pi');
+  assert.equal(backend(roleForm(roleData({...defaults,roles:team('native')},{configured:false}),'manager')),'native');
+  const list=rolesPage(roleData(defaults,{configured:false}));
+  assert.equal(list.cards[0].querySelector('[data-role-version]').textContent,'正在使用默认配置，内置默认更新时自动跟随。');
+  assert.match(text(list.table.querySelector('tr[data-role=manager]')), /已启用 · 默认配置/);
+  assert.equal(list.cards[0].querySelector('[data-testid=restore-default-roles]'),null);
+  const own=rolesPage(roleData(custom));
+  assert.equal(own.cards[0].querySelector('[data-role-version]').textContent,'已保存');
+  assert.match(text(own.cards[0].querySelector('[data-testid=role-config-source]')),/这是项目自己的配置，内置默认更新时不会改变。/);
+  assert.equal(own.cards[0].querySelector('[data-testid=restore-default-roles]').textContent,'恢复默认');
 });
 
 // ---- Against the real control plane: the page reads the same routes and fields the server returns. ----
@@ -275,6 +283,9 @@ test('independent QA started by development and review delivery is named in the 
   const p = await realProject(t), model = await heldModel(t);
   const fixture = (await p.admin('/api/models', 'POST', { repository_id: '101', model_name: 'qa-fixture', api_url: model.url, api_key: 'fixture-key' })).value.model;
   await p.admin('/api/repositories/101/policy', 'PATCH', { model_id: fixture.id });
+  // QA's backend is beside the point here and its verification checkout is a stub, so QA runs in process.
+  const roles = (await p.admin('/api/repositories/101/roles')).value;
+  assert.equal((await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, roles: [{ role_id: 'qa', harness_ref: { id: 'native' } }] })).status, 200);
   const cases = [['dev-qa', 'development.issue', { kind: 'code', reference: 'task:dev-qa:candidate', version: 'tree0123456789abcdef', content: { tree_sha: 'tree0123456789abcdef' } }],
     ['review-qa', 'review.issue', { kind: 'report', reference: 'task:review-qa:candidate', version: 'report0123456789', content: { summary: 'Review report' } }]];
   for (const [id, kind, artifact] of cases) {

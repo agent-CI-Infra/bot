@@ -18,6 +18,7 @@ import { instanceUsage } from '../../../../dist/roles/role-run.js';
 import { roleHarness } from '../../../../dist/roles/harness.js';
 import { knowledgeActor, authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { ProjectMemory } from '../../../../dist/memory/project.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 
@@ -30,6 +31,7 @@ function fixture(t, env = {}, config = {}) {
   let s = new Store(file, key);
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
   s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')");
+  nativeRoles(s, 'r');
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','codex fixture','{}')");
   new TaskRecords(s).contract('t', { goal: 'codex fixture', scope: ['fixture'], criteria: ['Read the task fact'], endpoint: 'artifact' });
   const path = join(root, 'codex.json');

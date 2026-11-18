@@ -17,6 +17,7 @@ import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs'
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../../../../dist/roles/protocol.js';
 import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, instanceUsage, recordCheckpoint } from '../../../../dist/roles/role-run.js';
 import { verifyRunEnvironment } from '../../../../dist/projects/run-environment.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const call = (name, args, id = 'c' + randomBytes(3).toString('hex')) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -30,6 +31,8 @@ async function fixture(t, handler, { usage = () => ({ prompt_tokens: 100, comple
   const s = new Store(':memory:', randomBytes(32));
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
   s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')"); s.run("INSERT INTO repositories VALUES('other','private/other','o','a')");
+  // RoleRun protocol cases drive roles in process, as on the configuration a project had before #1068.
+  nativeRoles(s, 'r');
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t','r','task.request','running','implement fixture','{}',1,1)");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('o','other','task.request','running','other project','{}',1,1)");
   const records = new TaskRecords(s);

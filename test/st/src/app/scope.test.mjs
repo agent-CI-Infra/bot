@@ -10,10 +10,11 @@ import {taskTools} from '../../../../dist/tasks/record-tools.js';
 import {runRole} from '../../../../dist/roles/run.js';
 import {evaluateDelivery} from '../../../../dist/tasks/acceptance.js';
 import {Redactor} from '../../../../dist/agent/common.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 const unpack=v=>typeof v==='string'?(()=>{try{return unpack(JSON.parse(v));}catch{return v;}})():Array.isArray(v)?v.map(unpack).join(' '):v&&typeof v==='object'?Object.entries(v).map(([k,x])=>k+' '+unpack(x)).join(' '):String(v);
 const call=(name,a,id='c')=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(a)}}]});
 async function setup(t,handler){
- const s=new Store(':memory:',randomBytes(32));s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/repo','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','import atomically','{}')");
+ const s=new Store(':memory:',randomBytes(32));s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/repo','o','a')");nativeRoles(s,'r');s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','import atomically','{}')");
  const records=new TaskRecords(s);records.contract('t',{goal:'Import without partial writes',scope:['one','two','three','four','five'],criteria:['Failure preserves existing data'],endpoint:'artifact'});
  const server=createServer(async(req,res)=>{try{let raw='';for await(const c of req)raw+=c;const message=await handler(JSON.parse(raw));res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));}catch(e){res.writeHead(500);res.end(JSON.stringify({error:String(e)}));}});server.listen(0,'127.0.0.1');await once(server,'listening');
  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','r','http://127.0.0.1:'+server.address().port+'/v1','fixture',s.secrets.seal({value:'test-key'},'model:m'),'now');s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('r','m',1,1)");
