@@ -183,3 +183,22 @@ test('items not measured yet are null and named, not a measured zero', async t =
   const reclaim = Object.fromEntries(view.reclaimable.map(item => [item.key, item]));
   assert.equal(reclaim.manager_free_pages.bytes, null); assert.equal(reclaim.docker_build_cache.bytes, null); assert.equal(reclaim.docker_unused_images.count, null);
 });
+
+test('a removed workspace invalidates both the stored reading and an overlapping volume scan', async t => {
+  const f = await managerFixture(t);
+  await f.projects.register('101');
+  f.projects.db.prepare('INSERT INTO computer_storage VALUES(?,?,?,?)').run('101', 1, '2000-01-01T00:00:00Z', JSON.stringify({ total_bytes: 9000 }));
+  const pending = Promise.withResolvers(), workspace = id();
+  f.docker.runner = async (_, input) => {
+    if (input.type === 'storage_scan') { await pending.promise; return { ok: true, result: { total_bytes: 9000 } }; }
+    return { ok: true, result: { removed: [{ name: workspace, bytes: 4000 }] } };
+  };
+  f.projects.scanStorage();
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'tasks_remove', entries: [{ name: workspace, active_at: 1 }] } });
+  assert.equal(f.projects.storage().computers.length, 0);
+  pending.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.projects.storage().computers.length, 0, 'a pre-removal scan cannot repopulate the total');
+  f.docker.runner = async () => ({ ok: true, result: { total_bytes: 5000, complete: true } });
+  f.projects.scanStorage(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.projects.storage().computers[0].result.total_bytes, 5000);
+});

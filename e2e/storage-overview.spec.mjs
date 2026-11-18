@@ -77,6 +77,9 @@ test('the administrator can inspect shares and reclaim expired files from storag
     await reclaim.focus(); await reclaim.press('Enter');
     await expect(reclaim).toBeDisabled(); await expect(reclaim).toBeEnabled();
     await expect(parent.getByText(/已清理 1 项/)).toBeVisible();
+    await parent.getByText('保留天数与项目设置', { exact: true }).click();
+    await expect(parent.locator('.storage-settings')).toContainText('浏览器证据 1 个目录');
+    await parent.getByText('保留天数与项目设置', { exact: true }).click();
     expect(existsSync(eligible)).toBe(false); expect(existsSync(protectedDir)).toBe(true);
     for (const [width, height] of [[1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height }); await reclaim.scrollIntoViewIfNeeded();

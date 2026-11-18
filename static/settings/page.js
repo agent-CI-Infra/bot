@@ -101,7 +101,11 @@ async function retentionCard(size, count, time, refresh) {
       if (!section.isConnected) return;
       result = await api('/api/storage/reclaim'); show(result);
     }
-    if (section.isConnected) await refresh?.(section);
+    if (section.isConnected) {
+      const updated = await api('/api/storage/retention');
+      history.replaceChildren(cleanupFacts(updated));
+      await refresh?.(section);
+    }
   }
   function problem(err) { action.disabled = false; announceSave(outcome, '无法确认回收状态，请稍后重试。' + readErrorText(err), true); }
   action.addEventListener('click', async () => {
@@ -114,12 +118,17 @@ async function retentionCard(size, count, time, refresh) {
   section.append(note('按已保存天数清理过期正文、证据和工作区。运行中的任务、会话及为打开的 PR 保留的工作区继续受保护。'), action, outcome);
   settingsPanel.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
   section.append(settingsPanel);
-  const last = view.last_cleanup;
-  settingsPanel.append(facts([
-    ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
-      + ((last.trajectories?.failed || last.deliveries?.failed || last.evidence?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.evidence?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
-      + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
-    ['群聊记录', view.chats ? `${count(view.chats.configured)} / ${count(view.chats.chats)} 个群设置了保留天数${view.chats.configured ? `（${view.chats.min_days}–${view.chats.max_days} 天）` : ''}；在频道控制台按群设置` : '没有群聊']]));
+  const history = element('div');
+  function cleanupFacts(current) {
+    const last = current.last_cleanup;
+    return facts([
+      ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
+        + ((last.trajectories?.failed || last.deliveries?.failed || last.evidence?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.evidence?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
+        + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
+      ['群聊记录', current.chats ? `${count(current.chats.configured)} / ${count(current.chats.chats)} 个群设置了保留天数${current.chats.configured ? `（${current.chats.min_days}–${current.chats.max_days} 天）` : ''}；在频道控制台按群设置` : '没有群聊']]);
+  }
+  history.append(cleanupFacts(view));
+  settingsPanel.append(history);
   return section;
 }
 const settingsCards = {
