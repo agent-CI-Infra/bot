@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { loadConsole } from '../../fixtures/console-page.mjs';
 
 // #691: the console showed the same kind of timestamp three ways — the shared clock ("2026-11-18 09:03:00"),
 // zh-CN medium ("2026年11月18日 09:03:00") and the browser's own language ("11/18/2026, 9:03:00 AM" in en-US).
@@ -23,23 +24,23 @@ const FILES = ['app/boot.js', 'knowledge.js', 'channels/feishu-page.js', 'channe
 // One row per displayed time (file:line in the issue's list): the token on that row, and the exact call the row makes.
 // The call is matched with its arguments, so a row cannot pass by having the helper mentioned somewhere else.
 const ROWS = [
-  ['knowledge.js', '时间未提供', /timestamp\(value\)\s*\|\|/],
-  ['channels/feishu-page.js', '有效期', /timestamp\(p\.expires_at\)/],
+  ['knowledge.js', 'function metadata(file)', /timeText\(file\.created_at, '时间未提供'\)/],
+  ['channels/feishu-page.js', '有效期', /timeText\(p\.expires_at\)/],
   ['channels/transfer.js', 'messages.append(facts', /timestamp\(m\.created_at\)/],
   ['channels/transfer.js', '最后收到事件', /timestamp\(c\.health\.last_received_at\)/],
   ['channels/transfer.js', '未知发送者', /timestamp\(m\.created_at\)/],
-  ['project/model-address.js', '目录匹配不唯一', /timestamp\(match\.fetched_at\)/],
-  ['project/model-catalog.js', '快照：', /timestamp\(status\.fetched_at\)/],
-  ['project/model-catalog.js', '当前：', /timestamp\(match\.fetched_at\)/],
+  ['project/model-address.js', '目录匹配不唯一', /timeText\(match\.fetched_at\)/],
+  ['project/model-catalog.js', '快照：', /timeText\(status\.fetched_at\)/],
+  ['project/model-catalog.js', '当前：', /timeText\(match\.fetched_at\)/],
   ['schedules.js', '迁移时间', /timestamp\(m\.created_at\)/],
-  ['schedules.js', '无记录', /timestampAt\(value,zone\)/],
-  ['channels/schedules.js', 'scheduleTime', /timestampAt\(at, zone\)/],
-  ['settings/page.js', 'state.last_pass ?', /timestamp\(state\.last_pass\.finished_at\)/],
-  ['settings/page.js', 'const time = value =>', /timestamp\(value\)/],
-  ['settings/page.js', 'phase.finished_at', /timestamp\(phase\.finished_at\)/],
-  ['subscriptions.js', '未安排发送', /timestampAt\(value,result\.timezone\)/],
+  ['schedules.js', '无记录', /stamped\(value,zone\)/],
+  ['channels/schedules.js', 'scheduleTime', /timestampAt\(at, zone\) \|\|/],
+  ['settings/page.js', 'state.last_pass ?', /timeText\(state\.last_pass\.finished_at\)/],
+  ['settings/page.js', 'const time = value =>', /timeText\(value\)/],
+  ['settings/page.js', 'phase.finished_at', /timeText\(phase\.finished_at\)/],
+  ['subscriptions.js', '未安排发送', /stamped\(value,result\.timezone\)/],
   ['subscriptions.js', 'model.lastReadRevision=value.revision', /timestamp\(new Date\(\)\)/],
-  ['schedule-records.js', 'const at = (value, zone', /timestampAt\(value, zone\)/],
+  ['schedule-records.js', 'const at = (value, zone', /stamped\(value, zone\)/],
 ];
 
 // Every new Intl.DateTimeFormat(...) call in the text, with its own parentheses balanced, so the rule can read the
@@ -109,4 +110,17 @@ test('every displayed time calls the shared clock helper, and knowledge uses it 
   const definition = boot.slice(start, start + 400);
   assert.match(definition, /timeZone\s*:/, 'timestampAt must pass a timeZone');
   assert.match(definition, /hourCycle\s*:\s*['"]h23['"]/, "timestampAt must pin hourCycle 'h23'");
+});
+
+// #691 review: an unreadable time used to be rendered by Intl.format, which threw and let each row show its own
+// fallback. timestampAt() returns '' for a bad value, so a row that appends ' · zone' unconditionally printed a bare
+// suffix. The shared contract is: an unreadable value gets its own text, never a zone with no reading in front of it.
+test('an unreadable time gets its own text instead of a bare zone suffix', () => {
+  const page = loadConsole(['static/app.js', 'static/channels/schedules.js'], () => [404, {}]);
+  assert.equal(page.run("timestampAt('not-a-date','UTC')"), '');
+  assert.equal(page.run("stamped('not-a-date','UTC')"), '时间无法识别');
+  assert.equal(page.run("stamped(null,'UTC')"), '时间无法识别');
+  assert.equal(page.run("stamped('2026-11-18T09:03:00Z','UTC')"), '2026-11-18 09:03:00 · UTC');
+  assert.equal(page.run("scheduleTime('not-a-date','Asia/Shanghai')"), '时间无法识别');
+  assert.equal(page.run("scheduleTime('2026-11-18T09:03:00Z','Asia/Shanghai')"), '2026-11-18 17:03:00');
 });
