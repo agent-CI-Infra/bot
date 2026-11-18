@@ -11,30 +11,35 @@ const STATIC = new URL('../../../static/', import.meta.url);
 const source = file => readFileSync(new URL(file, STATIC), 'utf8');
 
 // Files that render a clock. boot.js carries the shared helpers; the rest are the pages with a time row.
+// Deliberately not here: the zh-CN thousand separators in costs.js, metrics.js, settings/page.js:160 and
+// storage-overview.js (numbers, not clocks) and the timezone-name lookups in costs.js and manager.js (a zone name is
+// not a time reading). The rules below only judge the rows that print a time.
 const FILES = ['app/boot.js', 'knowledge.js', 'channels/feishu-page.js', 'channels/transfer.js',
   'project/model-address.js', 'project/model-catalog.js', 'schedules.js', 'channels/schedules.js',
   'settings/page.js', 'subscriptions.js', 'schedule-records.js'];
 
 // One row per displayed time (file:line in the issue's list): a token unique to that row, and the helper it must call.
 // Rows that keep a zone suffix call timestampAt(value, zone); the rest call timestamp(value).
+// One row per displayed time (file:line in the issue's list): the token on that row, and the exact call the row makes.
+// The call is matched with its arguments, so a row cannot pass by having the helper mentioned somewhere else.
 const ROWS = [
-  ['knowledge.js', '时间未提供', 'timestamp'],
-  ['channels/feishu-page.js', '有效期', 'timestamp'],
-  ['channels/transfer.js', 'messages.append(facts', 'timestamp'],
-  ['channels/transfer.js', '最后收到事件', 'timestamp'],
-  ['channels/transfer.js', '未知发送者', 'timestamp'],
-  ['project/model-address.js', '目录匹配不唯一', 'timestamp'],
-  ['project/model-catalog.js', '快照：', 'timestamp'],
-  ['project/model-catalog.js', '当前：', 'timestamp'],
-  ['schedules.js', '迁移时间', 'timestamp'],
-  ['schedules.js', '无记录', 'timestampAt'],
-  ['channels/schedules.js', 'scheduleTime', 'timestampAt'],
-  ['settings/page.js', 'state.last_pass ?', 'timestamp'],
-  ['settings/page.js', 'const time = value =>', 'timestamp'],
-  ['settings/page.js', 'phase.finished_at', 'timestamp'],
-  ['subscriptions.js', '未安排发送', 'timestampAt'],
-  ['subscriptions.js', 'model.lastReadRevision=value.revision', 'timestamp'],
-  ['schedule-records.js', 'const at = (value, zone', 'timestampAt'],
+  ['knowledge.js', '时间未提供', /timestamp\(value\)\s*\|\|/],
+  ['channels/feishu-page.js', '有效期', /timestamp\(p\.expires_at\)/],
+  ['channels/transfer.js', 'messages.append(facts', /timestamp\(m\.created_at\)/],
+  ['channels/transfer.js', '最后收到事件', /timestamp\(c\.health\.last_received_at\)/],
+  ['channels/transfer.js', '未知发送者', /timestamp\(m\.created_at\)/],
+  ['project/model-address.js', '目录匹配不唯一', /timestamp\(match\.fetched_at\)/],
+  ['project/model-catalog.js', '快照：', /timestamp\(status\.fetched_at\)/],
+  ['project/model-catalog.js', '当前：', /timestamp\(match\.fetched_at\)/],
+  ['schedules.js', '迁移时间', /timestamp\(m\.created_at\)/],
+  ['schedules.js', '无记录', /timestampAt\(value,zone\)/],
+  ['channels/schedules.js', 'scheduleTime', /timestampAt\(at, zone\)/],
+  ['settings/page.js', 'state.last_pass ?', /timestamp\(state\.last_pass\.finished_at\)/],
+  ['settings/page.js', 'const time = value =>', /timestamp\(value\)/],
+  ['settings/page.js', 'phase.finished_at', /timestamp\(phase\.finished_at\)/],
+  ['subscriptions.js', '未安排发送', /timestampAt\(value,result\.timezone\)/],
+  ['subscriptions.js', 'model.lastReadRevision=value.revision', /timestamp\(new Date\(\)\)/],
+  ['schedule-records.js', 'const at = (value, zone', /timestampAt\(value, zone\)/],
 ];
 
 // Every new Intl.DateTimeFormat(...) call in the text, with its own parentheses balanced, so the rule can read the
@@ -52,32 +57,48 @@ function intlCalls(text) {
   return calls;
 }
 
+// What a page may not do with a clock. Kept as one function so the same rule can be exercised on synthetic shapes,
+// which is what proves it is a rule and not "any Intl call passes".
+function clockProblems(text) {
+  const problems = [];
+  const ban = (pattern, why) => { if (pattern.test(text)) problems.push(why); };
+  ban(/new Date\([^)]*\)\.toLocaleString\(/, 'toLocaleString()');
+  ban(/\.toLocaleTimeString\(/, 'toLocaleTimeString()');
+  ban(/\.toLocaleDateString\(/, 'toLocaleDateString()');
+  ban(/\bhour12\s*:/, 'hour12');
+  ban(/\b(?:dateStyle|timeStyle)\s*:/, 'dateStyle/timeStyle');
+  for (const call of intlCalls(text)) {
+    // The one allowed shape: this same call names its zone and pins a 24-hour clock.
+    if (!/timeZone\s*:/.test(call)) problems.push('Intl.DateTimeFormat without timeZone');
+    if (!/hourCycle\s*:\s*['"]h23['"]/.test(call)) problems.push("Intl.DateTimeFormat without hourCycle 'h23'");
+  }
+  return problems;
+}
+
 test('no console page formats a displayed time with the browser locale or a 12-hour clock', () => {
   for (const file of FILES) {
-    const text = source(file);
-    assert.doesNotMatch(text, /new Date\([^)]*\)\.toLocaleString\(/, `${file} formats a time with toLocaleString()`);
-    assert.doesNotMatch(text, /\.toLocaleTimeString\(/, `${file} formats a time with toLocaleTimeString()`);
-    assert.doesNotMatch(text, /\.toLocaleDateString\(/, `${file} formats a date with toLocaleDateString()`);
-    assert.doesNotMatch(text, /\bhour12\s*:/, `${file} picks a 12/24-hour clock`);
-    assert.doesNotMatch(text, /\b(?:dateStyle|timeStyle)\s*:/, `${file} formats a time with dateStyle/timeStyle`);
-    // Intl is allowed only where the call names its zone and pins a 24-hour clock; a call without them is the
-    // browser-language clock this issue is about.
-    for (const call of intlCalls(text)) {
-      assert.match(call, /timeZone\s*:/, `${file} formats a time without naming its zone: ${call.slice(0, 80)}`);
-      assert.match(call, /hourCycle\s*:\s*'h23'/, `${file} formats a time without hourCycle 'h23': ${call.slice(0, 80)}`);
-    }
+    const problems = clockProblems(source(file));
+    assert.deepEqual(problems, [], `${file}: ${problems.join(', ')}`);
   }
+});
+
+test('the clock rule rejects every browser-language shape and accepts only the explicit-zone one', () => {
+  assert.deepEqual(clockProblems("new Date(value).toLocaleString()"), ['toLocaleString()']);
+  assert.deepEqual(clockProblems("new Date(value).toLocaleTimeString()"), ['toLocaleTimeString()']);
+  assert.deepEqual(clockProblems('new Intl.DateTimeFormat("zh-CN",{hour12:true,timeZone:"UTC"})'), ['hour12', 'Intl.DateTimeFormat without hourCycle \'h23\'']);
+  assert.deepEqual(clockProblems('new Intl.DateTimeFormat("zh-CN",{hourCycle:"h12",timeZone:"UTC"})'), ["Intl.DateTimeFormat without hourCycle 'h23'"]);
+  assert.deepEqual(clockProblems('new Intl.DateTimeFormat("zh-CN",{hourCycle:"h23"})'), ['Intl.DateTimeFormat without timeZone']);
+  assert.deepEqual(clockProblems("new Intl.DateTimeFormat('en-CA',{timeZone:zone,hourCycle:'h23'})"), []);
 });
 
 test('every displayed time calls the shared clock helper, and knowledge uses it instead of a local one', () => {
   const lines = file => source(file).split('\n').map((line, index) => ({ line, number: index + 1 }));
-  for (const [file, token, helper] of ROWS) {
-    // A row can wrap over a few lines (schedule-records' at()), so the helper is looked for in the row and just after it.
+  for (const [file, token, call] of ROWS) {
+    // A row can wrap over a few lines (schedule-records' at()), so the exact call is looked for from the row it starts on.
     const all = lines(file), start = all.findIndex(({ line }) => line.includes(token));
     assert.ok(start >= 0, `${file} no longer has the row "${token}"`);
-    const nearby = all.slice(start, start + 5);
-    assert.ok(nearby.some(({ line }) => line.includes(helper + '(')),
-      `${file}: "${token}" must call ${helper}() (row ${all[start].number})`);
+    const nearby = all.slice(start, start + 6).map(({ line }) => line).join('\n');
+    assert.match(nearby, call, `${file}: "${token}" must call ${call} (row ${all[start].number})`);
   }
   // knowledge.js used to shadow the shared clock with a local one; that shadow is what kept its page at the browser locale.
   assert.doesNotMatch(source('knowledge.js'), /\b(?:const|let|var)\s+timestamp\s*=/, 'knowledge.js shadows the shared clock');
@@ -87,5 +108,5 @@ test('every displayed time calls the shared clock helper, and knowledge uses it 
   assert.ok(start >= 0, 'app/boot.js must define timestampAt(value, zone)');
   const definition = boot.slice(start, start + 400);
   assert.match(definition, /timeZone\s*:/, 'timestampAt must pass a timeZone');
-  assert.match(definition, /hourCycle\s*:\s*'h23'/, "timestampAt must pin hourCycle 'h23'");
+  assert.match(definition, /hourCycle\s*:\s*['"]h23['"]/, "timestampAt must pin hourCycle 'h23'");
 });
