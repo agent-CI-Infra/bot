@@ -361,10 +361,10 @@ function warningIcon() {
   return svg;
 }
 // One dialog lists every gap of a repository: what is missing, how to fix it, and which features it stops.
-const accessView = document.createElement('dialog'); accessView.className = 'access-dialog'; accessView.setAttribute('aria-labelledby', 'access-title');
+const accessView = document.createElement('dialog'); accessView.className = 'access-dialog'; accessView.setAttribute('aria-labelledby', 'access-gap-title');
 document.body.append(accessView);
 function openAccessGaps(row) {
-  const title = element('h2', '权限与事件缺口 · ' + row.full_name); title.id = 'access-title';
+  const title = element('h2', '权限与事件缺口 · ' + row.full_name); title.id = 'access-gap-title';
   const list = element('ol', '', 'access-gaps');
   for (const gap of row.access_gaps) {
     const item = element('li', ''), facts = element('dl', '');

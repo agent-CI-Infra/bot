@@ -247,7 +247,7 @@ function syncConsoleShell() {
     permission.replaceChildren(...(row?.access_gaps?.length ? [permissionBadge(row)] : []));
   }
   const locationBox = $('console-location'), overview = project?.section === 'overview', globalHeader = $('console-project-header');
-  const activeOverview = overview && current?.section === 'overview' && !current.unavailable;
+  const activeOverview = overview && String(current?.id) === String(project.id) && current.section === 'overview' && !!current.repository && !current.unavailable;
   const existingHead = globalHeader.querySelector('.project-head');
   const nextHead = activeOverview ? $('project-page').querySelector('.project-head') : null;
   if (nextHead && nextHead !== existingHead) { existingHead?.remove(); globalHeader.prepend(nextHead); }

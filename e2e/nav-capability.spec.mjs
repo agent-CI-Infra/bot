@@ -34,19 +34,28 @@ test('the shared shell groups projects by organization and keeps the selected pr
     await expect(permission).toBeVisible(); await expect(permission).toContainText('权限不足');
     // The badge opens the same gap dialog the project list uses, and Escape returns to it.
     await permission.click();
-    await expect(page.getByRole('dialog')).toContainText('权限与事件缺口 · alpha/project-101');
-    await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).not.toBeVisible();
+    const gapDialog = page.getByRole('dialog', { name: '权限与事件缺口 · alpha/project-101', exact: true });
+    await expect(gapDialog).toContainText('权限与事件缺口 · alpha/project-101');
+    await page.keyboard.press('Escape'); await expect(gapDialog).toBeHidden();
     await expect(permission).toBeFocused();
     // Switching to a project whose snapshot has not answered yet must clear the previous project's badge at once: the
     // badge names a project and opens its dialog, so keeping it would describe something other than the scope text.
     // The snapshot is delayed here, because an assertion that retries cannot tell a cleared badge from a late answer.
     await page.route('**/api/installations?repository_id=102', async route => { await new Promise(resolve => setTimeout(resolve, 2500)); await route.continue(); });
+    await page.evaluate(() => {
+      const header = document.querySelector('#console-project-header'), transitions = [];
+      const observer = new MutationObserver(() => transitions.push(header.hidden));
+      observer.observe(header, { attributes: true, attributeFilter: ['hidden'] });
+      window.navCapabilityTransitions = { observer, transitions };
+    });
     const read102 = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && new URL(response.url()).searchParams.get('repository_id') === '102');
     await switchConsoleProject(page, '102');
     await expect(page.locator('#console-context')).toContainText('beta / project-102');
     await expect(page.locator('#console-project-header .workbench-tabs')).toHaveAttribute('data-project-id', '102');
     expect(await page.locator('#console-project-header [data-permission]').count()).toBe(0);
     await read102;
+    expect(await page.evaluate(() => window.navCapabilityTransitions.transitions)).toContain(true);
+    await page.evaluate(() => window.navCapabilityTransitions.observer.disconnect());
     await page.unroute('**/api/installations?repository_id=102');
     // Re-reading the installation list drops the snapshot the navigation cached earlier, so the badge on returning to
     // the project comes from the new read instead of the page session's first answer.
