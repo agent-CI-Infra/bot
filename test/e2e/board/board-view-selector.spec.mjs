@@ -91,6 +91,7 @@ test('320/390 未保存态：视图、保存、新建任务与更多操作互不
         const more = document.querySelector('#board-view-menu .board-menu-toggle');
         const state = document.getElementById('board-view-state');
         const create = document.getElementById('board-create-task');
+        const work = document.getElementById('board-worktype-select');
         const style = getComputedStyle(select), canvas = document.createElement('canvas'), ctx = canvas.getContext('2d');
         ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
         const selected = select.options[select.selectedIndex];
@@ -98,13 +99,14 @@ test('320/390 未保存态：视图、保存、新建任务与更多操作互不
         const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
         const saveBox = box(save);
         const hit = (fx) => { const e = document.elementFromPoint(saveBox.left + saveBox.width * fx, saveBox.top + saveBox.height / 2); return e ? (e.id || e.tagName.toLowerCase()) : null; };
-        const controls = [['view', select], ['state', state], ['save', save], ['more', more], ['create', create]];
+        const controls = [['view', select], ['work', work], ['state', state], ['save', save], ['more', more], ['create', create]];
+        const hitAt = node => { const b = node.getBoundingClientRect(); const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e ? (e.id || e.tagName.toLowerCase()) : null; };
         const overlaps = [];
         for (let i = 0; i < controls.length; i += 1) for (let j = i + 1; j < controls.length; j += 1) {
           if (overlap(box(controls[i][1]), box(controls[j][1]))) overlaps.push([controls[i][0], controls[j][0]]);
         }
-        return { select: box(select), save: saveBox, more: box(more), name, textWidth: ctx.measureText(name).width, padding,
-          overlaps, hitAtSaveCentre: hit(0.5), hitAtSaveRight: hit(0.95), docWidth: document.documentElement.scrollWidth, innerWidth };
+        return { select: box(select), save: saveBox, more: box(more), work: box(work), name, textWidth: ctx.measureText(name).width, padding,
+          overlaps, hitAtSaveCentre: hit(0.5), hitAtSaveRight: hit(0.95), hitAtWork: hitAt(work), docWidth: document.documentElement.scrollWidth, innerWidth };
       });
       // The view name has to fit inside the selector: its text plus the control's own padding and its arrow.
       expect(m.select.width - m.padding - 16).toBeGreaterThanOrEqual(m.textWidth);
@@ -113,6 +115,10 @@ test('320/390 未保存态：视图、保存、新建任务与更多操作互不
       expect(m.overlaps).toEqual([]);
       expect(m.hitAtSaveCentre).toBe('board-save');
       expect(m.hitAtSaveRight).toBe('board-save');
+      // #482 review: the work type moved out of the filter fold, so the phone must reach it too, on the first screen.
+      expect(m.hitAtWork).toBe('board-worktype-select');
+      expect(m.work.width).toBeGreaterThanOrEqual(90);
+      expect(m.work.bottom).toBeLessThanOrEqual(height);
       expect(m.docWidth).toBeLessThanOrEqual(m.innerWidth);
     }
     // The same collision appears at 768 in the clean state (the selector's right edge ran 4px under `⋯`).
@@ -121,13 +127,20 @@ test('320/390 未保存态：视图、保存、新建任务与更多操作互不
     await expect(page.locator('#board-view-state')).toBeHidden();
     await page.waitForTimeout(300);
     const clean = await page.evaluate(() => {
-      const box = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+      const box = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
       const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
       const select = document.getElementById('board-view-select');
       const more = document.querySelector('#board-view-menu .board-menu-toggle');
-      return { selects: box(select), more: box(more), overlaps: overlap(box(select), box(more)) };
+      const work = document.getElementById('board-worktype-select');
+      const hitAt = node => { const b = node.getBoundingClientRect(); const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e ? (e.id || e.tagName.toLowerCase()) : null; };
+      return { selects: box(select), more: box(more), work: box(work), workHit: hitAt(work), docWidth: document.documentElement.scrollWidth, innerWidth,
+        overlaps: overlap(box(select), box(more)) || overlap(box(select), box(work)) || overlap(box(more), box(work)) };
     });
     expect(clean.overlaps).toBe(false);
+    // #482 review: 768 must reach the work type too, with no neighbour on top of it and no horizontal overflow.
+    expect(clean.workHit).toBe('board-worktype-select');
+    expect(clean.work.width).toBeGreaterThanOrEqual(90);
+    expect(clean.docWidth).toBeLessThanOrEqual(clean.innerWidth);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
 
@@ -192,5 +205,69 @@ test('工作类型紧挨视图：1440 一排按视图→工作类型，390 首�
     await expect(page.getByLabel('视图', { exact: true })).toHaveValue(saved.id);
     await expect(more).toHaveAttribute('aria-expanded', 'false');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+// #482 review, blocking: at 390 the toolbar must keep origin/main's three-line height. A fourth line took the board's
+// scroll area down to 4px, so the first card's title sat under the fixed bottom bar where no scroll could reach it and a
+// click could never land — CI showed it as e2e/metrics.spec.mjs:7 timing out at 30s against a 4.9s green baseline. The
+// live status now closes the actions line instead of opening one of its own.
+test('390 工具栏最多三行：状态非空时点第一张卡打开任务详情，固定底栏不挡', async ({ page }) => {
+  const { h, admin, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 }); await login(page, h.admin, password);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(h.admin + '/#/reviews');
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#board-status')).toContainText('项工作');
+    const layout = await page.evaluate(() => {
+      const arrangement = document.querySelector('.board-arrangement');
+      // Lines, not element tops: the row is centred, so a button and a select in the same line start at different y.
+      const bands = [];
+      for (const box of [...arrangement.children].filter(node => node.getClientRects().length).map(node => node.getBoundingClientRect()).sort((a, b) => a.top - b.top)) {
+        const band = bands.find(row => Math.min(row.bottom, box.bottom) - Math.max(row.top, box.top) > 1);
+        if (band) { band.top = Math.min(band.top, box.top); band.bottom = Math.max(band.bottom, box.bottom); } else bands.push({ top: box.top, bottom: box.bottom });
+      }
+      const statusBox = document.querySelector('#board-status').getBoundingClientRect();
+      const refreshBox = [...arrangement.querySelectorAll(':scope > button')].pop().getBoundingClientRect();
+      const sharesActionsLine = Math.min(statusBox.bottom, refreshBox.bottom) - Math.max(statusBox.top, refreshBox.top) > 1;
+      const nav = document.querySelector('#console-mobile-nav').getBoundingClientRect();
+      const scroll = document.getElementById('board-columns').getBoundingClientRect();
+      return { rows: bands.length, sharesActionsLine, navTop: Math.round(nav.top),
+        scroll: { top: Math.round(scroll.top), bottom: Math.round(scroll.bottom), height: Math.round(scroll.height) },
+        docWidth: document.documentElement.scrollWidth, innerWidth };
+    });
+    // Three lines is the ceiling, the board keeps a real scroll area, and that area ends above the fixed bottom bar.
+    expect(layout.rows).toBeLessThanOrEqual(3);
+    expect(layout.sharesActionsLine).toBe(true);
+    expect(layout.scroll.height).toBeGreaterThan(80);
+    expect(layout.scroll.bottom).toBeLessThanOrEqual(layout.navTop + 1);
+    expect(layout.docWidth).toBeLessThanOrEqual(layout.innerWidth);
+    // A real click on the first visible card's title — the action metrics.spec.mjs:60 could not complete.
+    const title = page.locator('[data-card-key="101/issue/1"][data-card-category="review.issue"] .board-card-title');
+    // The phone shows one column at a time; 当前分组 picks it, so walk the options until the task's card is on screen.
+    for (const value of await page.locator('#board-mobile-group option').evaluateAll(nodes => nodes.map(node => node.value))) {
+      await page.locator('#board-mobile-group').selectOption(value);
+      if (await title.isVisible()) break;
+    }
+    await expect(title).toBeVisible();
+    await title.click({ timeout: 5000 });
+    // A card with several tasks asks which one first; either way the detail itself must open, not a dead tap.
+    const picker = page.locator('#task-picker-dialog[open] #task-picker-actions');
+    if (await picker.count()) await picker.getByRole('button').first().click();
+    // The phone shows the task summary inside #task-side and, for a route-level read, the detail page itself. Both must
+    // arrive: the side panel exists for the metrics read, and the visible detail is reachable above the fixed bottom bar.
+    await expect(page.locator('#task-side')).toBeAttached();
+    const detail = page.getByRole('heading', { name: '检视 · Issue #1', exact: true, level: 1 }).first();
+    await expect(detail).toBeVisible();
+    const reached = await detail.evaluate(node => {
+      const r = node.getBoundingClientRect();
+      const hit = document.elementFromPoint(Math.round(r.left + Math.min(40, r.width / 2)), Math.round(r.top + r.height / 2));
+      const nav = document.querySelector('#console-mobile-nav');
+      const bar = nav && getComputedStyle(nav).position === 'fixed' ? nav.getBoundingClientRect() : null;
+      return { inside: !!hit && (hit === node || node.contains(hit)), bottom: Math.round(r.bottom), navTop: bar ? Math.round(bar.top) : null };
+    });
+    expect(reached.inside).toBe(true);
+    if (reached.navTop !== null) expect(reached.bottom).toBeLessThanOrEqual(reached.navTop);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
