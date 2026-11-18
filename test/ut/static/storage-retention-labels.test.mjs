@@ -12,8 +12,7 @@ const retention = () => ({
   projects: [{ id: '101', name: 'fixture-project' }],
   last_cleanup: null,
 });
-// static/settings/page.js is one file of the settings bundle and calls settingsCard(), which static/settings/nav.js defines.
-const page = () => loadConsole(['static/app.js', 'static/views/widgets.js', 'static/project/fields.js', 'static/costs.js', 'static/settings/nav.js', 'static/settings/page.js'],
+const page = () => loadConsole(['static/app.js', 'static/views/widgets.js', 'static/project/fields.js', 'static/costs.js', 'static/settings.js'],
   (method, path) => path === '/api/storage/retention' ? [200, retention()] : [200, {}]);
 
 test('each per-project retention input carries its project name', async () => {

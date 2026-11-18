@@ -1,6 +1,8 @@
 /** @console-modules
  * settings/nav.js
  * settings/storage-overview.js
+ * settings/render.js
+ * settings/retention.js
  * settings/page.js
  * settings/agent-tools.js
  * settings/projects.js
