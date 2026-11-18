@@ -43,7 +43,7 @@ function sets(t, runnerDir) {
   // reported as skipped instead of run.
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_OPTIONS;
-  const child = spawn(process.execPath, ['scripts/test-sets.mjs', fixture], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['test/framework/test-sets.mjs', fixture], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     const output = [];
     child.stdout.on('data', chunk => output.push(chunk));

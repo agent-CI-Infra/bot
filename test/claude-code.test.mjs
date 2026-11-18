@@ -774,7 +774,7 @@ test('Claude smoke probe requires an explicit public launch profile', () => {
   mkdirSync('.tmp/claude-smoke-env', { recursive: true });
   const root = resolve('.tmp/claude-smoke-env');
   assert.throws(
-    () => execFileSync(process.execPath, ['scripts/claude-code-smoke.mjs', join(root, 'must-not-create')], { env: { LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] }),
+    () => execFileSync(process.execPath, ['test/live/claude-code/claude-code-smoke.mjs', join(root, 'must-not-create')], { env: { LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] }),
     e => e.status === 1 && String(e.stderr).includes('BOT_CLAUDE_CODE_CONFIG'),
   );
   assert.equal(existsSync(join(root, 'must-not-create')), false);

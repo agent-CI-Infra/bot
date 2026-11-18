@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{symlinkSync,mkdirSync}from'node:fs';
-import{externalFixture}from'./external-helpers.mjs';import{verifySignature}from'../dist/core/security.js';
+import{externalFixture}from'../../external-helpers.mjs';import{verifySignature}from'../../../dist/core/security.js';
 process.chdir('/data');mkdirSync('.tmp',{recursive:true});symlinkSync('/app/static','static');
 const h=await externalFixture(),seen=new Set();let delivered=0,signedSecret,created;
 const receiver=createServer(async(req,res)=>{try{let raw='';for await(const chunk of req)raw+=chunk;assert.ok(verifySignature(Buffer.from(raw),signedSecret,req.headers['x-bot-signature-256']));const event=JSON.parse(raw);

@@ -85,7 +85,7 @@ jobs:
         with:
           pattern: unit-test-shard-*
           path: .tmp/unit-shards
-      - run: node scripts/unit-shards.mjs merge .tmp/unit-shards
+      - run: node test/framework/unit-shards.mjs merge .tmp/unit-shards
         if: always()
       - name: All shard jobs succeeded
         env:

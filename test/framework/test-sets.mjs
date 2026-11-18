@@ -1,15 +1,14 @@
 // Runs the unit tests as test sets: the files of one set run one after another in a node --test process of their own,
 // and different sets run at the same time. Each set gets its own TMPDIR and HOME inside one run directory under .tmp/,
-// and its processes may only connect to loopback (scripts/test-network-guard.mjs). Rules for writing tests that fit
+// and its processes may only connect to loopback (test/framework/test-network-guard.mjs). Rules for writing tests that fit
 // this: docs/development.md, section 测试集与并行.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, cpus } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { discoverSets, planShards } from './test-plan.mjs';
 
-const usage = 'usage: node scripts/test-sets.mjs [--jobs N] [--shard INDEX/TOTAL] [test/<name>.test.mjs ...]';
+const usage = 'usage: node test/framework/test-sets.mjs [--jobs N] [--shard INDEX/TOTAL] [test/.../<name>.test.mjs ...]';
 let jobs = Number(process.env.BOT_TEST_JOBS) || availableParallelism(), shardArg = process.env.BOT_TEST_SHARD;
 const picked = [];
 for (let i = 2; i < process.argv.length; i++) {
@@ -39,7 +38,7 @@ mkdirSync('.tmp', { recursive: true });
 // recorded duration (new ones, or every set on a fresh checkout) go first, the bigger files before the smaller.
 const timings = resolve('.tmp/test-set-durations.json'), previous = (() => { try { return JSON.parse(readFileSync(timings, 'utf8')); } catch { return {}; } })();
 const queue = [...sets.values()].sort((a, b) => (previous[b.name] ?? (shardArg ? b.weight : Infinity)) - (previous[a.name] ?? (shardArg ? a.weight : Infinity)) || b.size - a.size);
-const run = mkdtempSync(resolve('.tmp/tests-')), guard = pathToFileURL(resolve('scripts/test-network-guard.mjs')).href;
+const run = mkdtempSync(resolve('.tmp/tests-')), guard = new URL('./test-network-guard.mjs', import.meta.url).href;
 const began = Date.now(), seconds = at => ((at - began) / 1000).toFixed(1), results = [], children = new Set();
 let active = 0, peak = 0, stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { stopping = true; for (const child of children) child.kill(signal); });
@@ -76,7 +75,7 @@ async function runSet(set) {
   results.push(result);
   // A set's output is printed in one piece when it finishes, so the output of sets that ran together never interleaves.
   process.stdout.write(`# set ${set.name} (${set.files.join(' ')}) ${result.state}, +${seconds(start)}s to +${seconds(result.end)}s\n${text}`
-    + (blocked ? `# connections outside loopback, blocked by scripts/test-network-guard.mjs:\n${blocked.trimEnd().replace(/^/gm, '#   ')}\n` : ''));
+    + (blocked ? `# connections outside loopback, blocked by test/framework/test-network-guard.mjs:\n${blocked.trimEnd().replace(/^/gm, '#   ')}\n` : ''));
   if (ok) rmSync(root, { recursive: true, force: true });
 }
 await Promise.all(Array.from({ length: Math.min(jobs, queue.length) }, async () => { while (queue.length && !stopping) await runSet(queue.shift()); }));

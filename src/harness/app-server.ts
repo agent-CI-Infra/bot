@@ -10,7 +10,7 @@ import type { HarnessEvent } from './session.js';
  * `thread/start` or a verified `thread/resume`, `turn/start` until a terminal `turn/completed`, `turn/interrupt`,
  * and explicit server approval responses.
  *
- * `scripts/codex-protocol-lock.mjs` regenerates the JSON Schema against the tested CLI version (`codexAppServer.cli`)
+ * `test/live/codex/codex-protocol-lock.mjs` regenerates the JSON Schema against the tested CLI version (`codexAppServer.cli`)
  * and compares `schemaDigest`; runtime runs accept versions matching `COMPATIBLE_CLI_RANGES.codex`.
  */
 export const codexAppServer = {

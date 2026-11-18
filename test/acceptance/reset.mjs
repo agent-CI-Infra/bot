@@ -4,7 +4,7 @@
 //
 //   ACCEPTANCE_GITHUB_TOKEN   the tester's token (Administration, Contents, Issues, Pull requests, Workflows write)
 //   ACCEPTANCE_GITHUB_API_URL default https://api.github.com
-//   node bot-acceptance/reset.mjs [--dry-run]
+//   node test/acceptance/reset.mjs [--dry-run]
 //
 // It only ever touches the fixture: the repository name is fixed here, not taken from the environment.
 import { pathToFileURL } from 'node:url';

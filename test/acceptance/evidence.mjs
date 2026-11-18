@@ -3,7 +3,7 @@
 // the project row, every task with its detail and public log, webhook deliveries and costs. It signs in as the super
 // administrator bootstrap created, so it works even when the operator account was never made.
 //
-//   node bot-acceptance/evidence.mjs
+//   node test/acceptance/evidence.mjs
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // The test AI's door to the console: one request as the project administrator bootstrap created, printed as JSON.
 //
-//   node bot-acceptance/console.mjs GET '/api/tasks?repository_id={repo}&limit=20'
-//   node bot-acceptance/console.mjs PATCH /api/repositories/{repo}/policy '{"test_command":"sh scripts/test.sh"}'
-//   echo '{"…":…}' | node bot-acceptance/console.mjs POST /api/repositories/{repo}/workflows -
+//   node test/acceptance/console.mjs GET '/api/tasks?repository_id={repo}&limit=20'
+//   node test/acceptance/console.mjs PATCH /api/repositories/{repo}/policy '{"test_command":"sh scripts/test.sh"}'
+//   echo '{"…":…}' | node test/acceptance/console.mjs POST /api/repositories/{repo}/workflows -
 //
 // {repo} stands for the fixture's repository id from target.json. Only /api/ paths on the instance under test are accepted;
 // the session is the project administrator's, so the bot itself enforces what this account may see and change.

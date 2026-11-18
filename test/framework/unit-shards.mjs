@@ -156,5 +156,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     console.log(text); if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + '\n');
   } else if (command === 'weights' && paths.length >= 3) {
     console.log(JSON.stringify(candidateWeights(plan, paths.map(path => JSON.parse(readFileSync(path, 'utf8')))), null, 2));
-  } else throw new Error('usage: node scripts/unit-shards.mjs merge <artifact-directory> | weights <balance.json> <balance.json> <balance.json> [...]');
+  } else throw new Error('usage: node test/framework/unit-shards.mjs merge <artifact-directory> | weights <balance.json> <balance.json> <balance.json> [...]');
 }

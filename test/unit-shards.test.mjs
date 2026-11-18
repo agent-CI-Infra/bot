@@ -4,8 +4,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { parse } from 'yaml';
-import { discoverSets, planShards, loadWeights } from '../scripts/test-plan.mjs';
-import { mergeReports, candidateWeights, summarizeReports, writeResults, readReports } from '../scripts/unit-shards.mjs';
+import { defaultTestFiles, discoverSets, planShards, loadWeights } from './framework/test-plan.mjs';
+import { mergeReports, candidateWeights, summarizeReports, writeResults, readReports } from './framework/unit-shards.mjs';
 
 function fixture(t) {
   mkdirSync('.tmp', { recursive: true });
@@ -160,7 +160,7 @@ test('weight candidates need three complete runs and normalize whole-runner slow
 });
 
 async function run(args, env) {
-  const child = spawn(process.execPath, ['scripts/test-sets.mjs', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['test/framework/test-sets.mjs', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   const chunks = []; child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
   const code = await new Promise((done, reject) => { child.on('error', reject); child.on('close', done); });
   return { code, output: Buffer.concat(chunks).toString() };
@@ -206,12 +206,39 @@ test('the workflow keeps the unit gate dependent on two four-worker shards and p
   assert.equal(step.env.BOT_TEST_JOBS, '4'); assert.equal(step.env.BOT_REQUIRE_PI, '1');
   assert.equal(step.env.BOT_TEST_SHARD, '${{ matrix.shard }}/2');
   assert.equal(gate.name, 'unit'); assert.equal(gate.needs, 'unit-shards'); assert.match(gate.if, /always\(\)/);
-  assert.ok(gate.steps.some(step => step.run === 'node scripts/unit-shards.mjs merge .tmp/unit-shards'));
-  assert.equal(gate.steps.find(step => step.run === 'node scripts/unit-shards.mjs merge .tmp/unit-shards').if, 'always()');
+  assert.ok(gate.steps.some(step => step.run === 'node test/framework/unit-shards.mjs merge .tmp/unit-shards'));
+  assert.equal(gate.steps.find(step => step.run === 'node test/framework/unit-shards.mjs merge .tmp/unit-shards').if, 'always()');
   assert.ok(gate.steps.some(step => step.env?.SHARD_RESULT === '${{ needs.unit-shards.result }}' && step.run.includes('= success')));
   assert.ok(shard.steps.some(step => step.if === 'always()' && step.with?.name?.includes('github.run_attempt')));
   assert.ok(gate.steps.some(step => step.with?.name === 'unit-summary'));
   const uploads = [...shard.steps, ...gate.steps].filter(step => step.uses?.startsWith('actions/upload-artifact@') && step.with?.path?.startsWith('.tmp/unit-'));
   assert.equal(uploads.length, 3, 'both shard reports, the balance report and the Nightly summary must be configured');
   for (const step of uploads) assert.equal(step.with['include-hidden-files'], true, 'the explicit JSON reports under .tmp must upload');
+});
+
+test('recursive discovery scans nested ut and st tiers, skips live/docker/acceptance, preserves weights and rejects duplicate basenames', t => {
+  mkdirSync('.tmp', { recursive: true });
+  const root = mkdtempSync('.tmp/nested-discovery-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const sub of ['ut/src/board', 'st/src/tasks', 'live/tasks', 'docker/projects', 'acceptance'])
+    mkdirSync(join(root, sub), { recursive: true });
+  writeFileSync(join(root, 'flat.test.mjs'), "import { test } from 'node:test'; test('flat', () => {});\n");
+  writeFileSync(join(root, 'ut/src/board/board.test.mjs'), "import { test } from 'node:test'; test('ut', () => {});\n");
+  writeFileSync(join(root, 'st/src/tasks/tasks.test.mjs'), "import { test } from 'node:test'; test('st', () => {});\n");
+  writeFileSync(join(root, 'ut/src/board/skip.live.test.mjs'), "import { test } from 'node:test'; test('live', () => {});\n");
+  writeFileSync(join(root, 'live/tasks/probe.test.mjs'), "import { test } from 'node:test'; test('outside', () => {});\n");
+  const discovered = defaultTestFiles(root);
+  assert.deepEqual(discovered, [
+    `${root}/flat.test.mjs`,
+    `${root}/st/src/tasks/tasks.test.mjs`,
+    `${root}/ut/src/board/board.test.mjs`,
+  ]);
+  const sets = discoverSets(discovered);
+  assert.deepEqual(sets.map(set => set.name), ['flat', 'tasks', 'board']);
+  const planned = planShards(sets, 2, { board: 7, tasks: 21, flat: 1 });
+  assert.equal(planned.shards.flatMap(s => s.sets).find(s => s.name === 'board').weight, 7);
+  assert.equal(planned.shards.flatMap(s => s.sets).find(s => s.name === 'tasks').weight, 21);
+
+  writeFileSync(join(root, 'st/src/tasks/board.test.mjs'), "import { test } from 'node:test'; test('collision', () => {});\n");
+  assert.throws(() => discoverSets(defaultTestFiles(root)), /duplicate test-set name "board"/);
 });

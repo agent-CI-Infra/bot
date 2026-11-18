@@ -40,21 +40,21 @@ docker compose -f docker/compose.yaml -f docker/compose.build.yaml config --quie
 
 ### 测试集与并行
 
-`npm test` 构建之后由 [`scripts/test-sets.mjs`](../scripts/test-sets.mjs) 把 `test/*.test.mjs` 分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。设置 `BOT_TEST_SUMMARY=<文件>` 时，同样的总数还写成简单 JSON（`{"metrics": [{"name", "value", "unit"}]}`）；Nightly 从分片报告另行汇总同格式的 `unit-summary`，并上传 e2e 的 JUnit 报告（`PLAYWRIGHT_JUNIT=<文件>` 时 Playwright 另写一份），公共看板据此画定时运行的趋势图。
+`npm test` 构建之后由 [`test/framework/test-sets.mjs`](../test/framework/test-sets.mjs) 把 `test/ut/**/*.test.mjs`、`test/st/**/*.test.mjs`（及根目录过渡期 `test/*.test.mjs`）分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。设置 `BOT_TEST_SUMMARY=<文件>` 时，同样的总数还写成简单 JSON（`{"metrics": [{"name", "value", "unit"}]}`）；Nightly 从分片报告另行汇总同格式的 `unit-summary`，并上传 e2e 的 JUnit 报告（`PLAYWRIGHT_JUNIT=<文件>` 时 Playwright 另写一份），公共看板据此画定时运行的趋势图。
 
-Actions 的 UT 固定使用两台 runner，每台四路；PR、合并队列和 Nightly 复用同一配置。`npm test -- --jobs 4 --shard 1/2` 与 `--shard 2/2` 分别运行两片，也可设置 `BOT_TEST_SHARD=1/2`。分片按 [`scripts/test-set-weights.json`](../scripts/test-set-weights.json) 的历史耗时，从重到轻放入预计工作量较少的一片；新测试按文件大小估算。完整命名测试集不拆开。分片归属只由提交中的源码与权重决定，本地耗时缓存只影响片内顺序，不能改变归属。普通本地 `npm test` 仍跑全部集。
+Actions 的 UT 固定使用两台 runner，每台四路；PR、合并队列和 Nightly 复用同一配置。`npm test -- --jobs 4 --shard 1/2` 与 `--shard 2/2` 分别运行两片，也可设置 `BOT_TEST_SHARD=1/2`。分片按 [`test/framework/test-set-weights.json`](../test/framework/test-set-weights.json) 的历史耗时，从重到轻放入预计工作量较少的一片；新测试按文件大小估算。完整命名测试集不拆开。分片归属只由提交中的源码与权重决定，本地耗时缓存只影响片内顺序，不能改变归属。普通本地 `npm test` 仍跑全部集。
 
-`BOT_TEST_REPORT=<文件>` 保存逐集覆盖、耗时、TAP 总数、分片计划哈希、提交／运行／attempt 和 runner 型号。Actions 每次 attempt 都保留各片报告；`unit` 必需检查等待两片成功，并通过 [`scripts/unit-shards.mjs`](../scripts/unit-shards.mjs) 核对当前计划、完整且不重复的集／文件、失败及取消、TAP 总数。缺片、错源或不完整报告均不能通过。仅重跑失败作业时，可带上同一运行和计划中较早 attempt 的成功片，选择每片最新报告，首次失败产物继续保留。Nightly 的 `unit-summary` 保留 tests/pass/fail/failed sets 等指标，失败或缺片时也先写已知统计再让门禁失败；missing sets/report errors 明示不完整，未知测试数不虚构。`duration` 是两片测试池从最早开始到最晚结束的墙钟秒数（不含安装／构建），缺片、缺时间或混合 attempt 时省略；`pool duration max` 单独表示最慢片纯池秒数。每次运行另保存 `unit-test-balance-attempt-<N>`，包含选中的逐片报告、纯池 max/min、尾部空闲比例和预计工作量。诊断产物 `unit-test-*` 排在 `unit-summary` 后，避免挤出看板有界读取的指标产物。
+`BOT_TEST_REPORT=<文件>` 保存逐集覆盖、耗时、TAP 总数、分片计划哈希、提交／运行／attempt 和 runner 型号。Actions 每次 attempt 都保留各片报告；`unit` 必需检查等待两片成功，并通过 [`test/framework/unit-shards.mjs`](../test/framework/unit-shards.mjs) 核对当前计划、完整且不重复的集／文件、失败及取消、TAP 总数。缺片、错源或不完整报告均不能通过。仅重跑失败作业时，可带上同一运行和计划中较早 attempt 的成功片，选择每片最新报告，首次失败产物继续保留。Nightly 的 `unit-summary` 保留 tests/pass/fail/failed sets 等指标，失败或缺片时也先写已知统计再让门禁失败；missing sets/report errors 明示不完整，未知测试数不虚构。`duration` 是两片测试池从最早开始到最晚结束的墙钟秒数（不含安装／构建），缺片、缺时间或混合 attempt 时省略；`pool duration max` 单独表示最慢片纯池秒数。每次运行另保存 `unit-test-balance-attempt-<N>`，包含选中的逐片报告、纯池 max/min、尾部空闲比例和预计工作量。诊断产物 `unit-test-*` 排在 `unit-summary` 后，避免挤出看板有界读取的指标产物。
 
 定期巡检分别比较每片排队、准备、构建、纯池与总作业耗时、集数、累计集耗时及慢集，并记录整体完成时间和 runner 秒之和。不要把冷缓存、CPU 型号或跨 attempt 等待误当分配失衡。至少三轮可比的完整成功运行持续出现纯池 max/min ≥ 1.15 且相差 ≥ 30 秒时，作为调整线索；严重单次尾部也需调查。权重更新须从完整报告生成候选，校准代码／硬件／并行变化，再经 PR 与真实 CI 复核：
 
 ```bash
-node scripts/unit-shards.mjs weights .tmp/run-a/unit-balance.json .tmp/run-b/unit-balance.json .tmp/run-c/unit-balance.json > .tmp/weights-candidate.json
+node test/framework/unit-shards.mjs weights .tmp/run-a/unit-balance.json .tmp/run-b/unit-balance.json .tmp/run-c/unit-balance.json > .tmp/weights-candidate.json
 ```
 
 此命令要求至少三个不同运行、相同测试语料与分片计划的完整报告，先用片内中位比率归一化 runner 的整体快慢，再取逐集中位数；只输出候选，不自动修改权重或并发。确认持续失衡与候选分配后，在独立分支更新权重，并比较改前／改后的真实均衡指标。不得为提速删覆盖、放宽预算或增加盲目重试。
 
-运行器为每个集在 `.tmp/tests-*/<集名>/` 下准备独立资源：`TMPDIR` 指向其中的 `tmp/`，`HOME` 指向 `home/`（同时清除 `XDG_*` 目录变量，遵循 XDG 的程序回落到这个 HOME），`BOT_TEST_SET` 是集名，环境变量是这个集的进程自己的副本。集通过后删除它的目录，失败时保留并打印路径。集内的进程只能连接回环地址：[`scripts/test-network-guard.mjs`](../scripts/test-network-guard.mjs) 经 `NODE_OPTIONS` 加载到集内的每个 Node.js 进程，连接其他地址时按连接被拒绝处理，并让这个集失败，即使被测代码吞掉了这个错误。直接用 `node --test test/<文件>` 运行单个文件也可以，这时临时目录在系统临时目录下，也没有网络限制。
+运行器为每个集在 `.tmp/tests-*/<集名>/` 下准备独立资源：`TMPDIR` 指向其中的 `tmp/`，`HOME` 指向 `home/`（同时清除 `XDG_*` 目录变量，遵循 XDG 的程序回落到这个 HOME），`BOT_TEST_SET` 是集名，环境变量是这个集的进程自己的副本。集通过后删除它的目录，失败时保留并打印路径。集内的进程只能连接回环地址：[`test/framework/test-network-guard.mjs`](../test/framework/test-network-guard.mjs) 经 `NODE_OPTIONS` 加载到集内的每个 Node.js 进程，连接其他地址时按连接被拒绝处理，并让这个集失败，即使被测代码吞掉了这个错误。直接用 `node --test test/<文件>` 运行单个文件也可以，这时临时目录在系统临时目录下，也没有网络限制。
 
 新测试放进已有文件，或新建一个文件自成一个集，并自备独立资源：
 
@@ -66,7 +66,7 @@ node scripts/unit-shards.mjs weights .tmp/run-a/unit-balance.json .tmp/run-b/uni
 
 集内串行：同一个文件里的用例本来就依次运行。如果几个文件共用一份无法拆开的资源、不能同时运行，在每个文件里写一行 `// test-set: <集名> <原因>`，运行器把它们放进同一个集依次运行；这一行缺少原因时 `npm test` 拒绝运行。优先给每个文件准备独立资源，而不是合并成一个集；目前所有文件都各自成集。
 
-真实外部服务例外：会真实访问飞书开放平台、GitHub 或其他外部服务的测试放在 `test/<名字>.live.test.mjs`。`npm test` 不运行这类文件，运行器也拒绝把它们当作测试集；需要时带上所需凭据，用 `node --test test/<名字>.live.test.mjs` 单独运行。只在断言或夹具里出现 `api.github.com`、飞书字段，或者访问本地假服务器（`test/fixtures/`、`test/git-server.mjs` 等）的测试不属于例外，留在并行的测试集里。目前没有 `.live.test.mjs` 文件，现有单元测试都只连接本地假服务器。
+真实外部服务例外：会真实访问飞书开放平台、GitHub、模型供应商或本机 CLI 的实况／探针测试放在 `test/live/<模块>/`（如 `*.live.test.mjs`、`*-smoke.mjs`、`*-probe.mjs`）。`npm test` 不运行这类文件，运行器也拒绝把它们当作测试集；需要时带上所需凭据，用 `node --test test/live/<模块>/<名字>.live.test.mjs` 单独运行。只在断言或夹具里出现 `api.github.com`、飞书字段，或者访问本地假服务器（`test/fixtures/`、`test/git-server.mjs` 等）的测试不属于例外，留在并行的测试集里。
 
 浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`。每个 `e2e/*.spec.mjs` 文件是一个测试集，文件内的用例依次运行，不同文件由同一台机器上的 Playwright worker 并行执行；默认 worker 数为 Node.js 的 `availableParallelism()`，本地和 CI 使用同一配置，CI 仍只有一个 `e2e` 作业，不通过增加 runner 分片。可用 `npm run test:e2e -- --workers 4` 限制并发，或 `--workers 1` 作串行对照；命令后跟文件名只运行指定集。
 

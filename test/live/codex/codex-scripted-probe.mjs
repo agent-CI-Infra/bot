@@ -1,11 +1,11 @@
 // Opt-in probe of the real Codex CLI through the full role-run path, against a scripted Responses endpoint instead of a model.
-// Usage: npm run build && node scripts/codex-scripted-probe.mjs [work-dir] [model-slug...]
+// Usage: npm run build && node test/live/codex/codex-scripted-probe.mjs [work-dir] [model-slug...]
 // No credentials are used: a throwaway CODEX_HOME declares a local provider. The scripted "model" tries a host command and a
 // file patch, then reads the task fact and submits it through the Bot MCP tools. It checks what the CLI offered the model,
 // that the host command never ran and the patch was declined, and that the role result came only from the task tools.
 // This verifies the CLI and the client, not any model's behaviour. Exit code 1 means a check failed.
 import assert from 'node:assert/strict';import {createServer} from 'node:http';import {mkdirSync,writeFileSync,rmSync,readdirSync} from 'node:fs';import {join,resolve} from 'node:path';import {randomBytes} from 'node:crypto';
-import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole} from '../dist/roles/run.js';import {Redactor} from '../dist/agent/common.js';import {instanceUsage} from '../dist/roles/role-run.js';
+import {Store} from '../../../dist/storage/database.js';import {TaskRecords} from '../../../dist/tasks/service.js';import {runRole} from '../../../dist/roles/run.js';import {Redactor} from '../../../dist/agent/common.js';import {instanceUsage} from '../../../dist/roles/role-run.js';
 const [dir,...slugs]=process.argv.slice(2),work=resolve(dir??'.tmp/codex-scripted-probe'),models=slugs.length?slugs:['gpt-6.1-sol','gpt-5.1-codex'];
 const report=[];let failed=false;
 for(const model of models){
