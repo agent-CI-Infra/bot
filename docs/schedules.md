@@ -53,7 +53,7 @@ GitHub Actions 的 `schedule` 触发在 GitHub 负载高时会推迟，有时被
 
 「定时任务与通知」页的「常用模板」里有「使用定时触发 workflow 模板」，填好这条指令和每天 00:00 的时间，改成自己的 workflow 文件名、分支和时间即可；管理助手的提示词里有同一个示例，可以直接在对话里让它建。
 
-- **怎么触发**：Manager 执行这条任务，用 `github_write` 调 `POST /actions/workflows/{文件名或 id}/dispatches`，正文是 `ref` 和可选的 `inputs`。控制面总是带上 `return_run_details: true`，GitHub 返回 200 和这次运行的 `workflow_run_id`、`run_url`、`html_url`，agent 拿到运行链接写进报告，写入账本记下 `html_url`。每次调用单独签发只带 `actions: write` 的令牌，用完撤销；同一个 key 不会触发第二次，和其他写入一样记账本和审计。
+- **怎么触发**：Manager 执行这条任务，用 `github_write` 调 `POST /actions/workflows/{文件名或 id}/dispatches`，正文是 `ref` 和可选的 `inputs`。控制面总是带上 `return_run_details: true`，GitHub 返回 200 和这次运行的 `workflow_run_id`、`run_url`、`html_url`，agent 拿到运行链接写进报告，写入账本记下 `html_url`。每次调用单独签发只带 `actions: write` 的令牌，用完撤销；同一个 key 不会触发第二次，和其他写入一样记账本和审计。触发前查运行用 `github_read`（例如 `GET /actions/workflows/nightly.yml/runs?status=in_progress`）：第一次读取时签发只读令牌，范围是执行角色和任务来源都允许读的 GitHub 资源，每次读取重新核对，任务结束时撤销。只读令牌只能由 GitHub App 签发，机器人账号的项目读取时返回 `github_app_required`，agent 在报告里说明没查成。
 - **谁可以**：项目能力上限至少「可评论和打标签」（`comment`），执行角色有 Actions 读写（Manager 默认有，见[共用角色权限](role-pool.md#shared-role-permissions)）。GitHub 账户还要有 `actions: write`：GitHub App 缺这项时，项目列表的权限缺口里会列出「触发 Actions 工作流」；机器人账号需要仓库 Write 角色。管理助手和「可评论和打标签」及以上档位的飞书群也可以触发，例如在群里说「跑一下 Nightly」。计划的「创建 Issue 的权限」选「拒绝」时，这条任务不提供 `github_write`，也就不能触发；用于触发的计划保持「跟随角色」（模板的默认值）或「允许」。项目团队执行这类报告任务时，`github_write` 由 Manager 自己调用，只读的工作角色拿不到。
 - **平台不预先检查**：workflow 有没有声明 `workflow_dispatch`、`ref` 对不对、有没有运行正在跑，都交给 GitHub 的返回（例如 422）和 agent 自己判断。「触发前先看有没有正在跑的」写在指令里，不是固定流程。
 
