@@ -66,13 +66,15 @@ function serviceRoleCard(view, initial, level = 'h3') {
   }, level);
   return live.section;
 }
-function serviceRoleCreate(view) {
+// #1039: the card the form inserts in place is a card of the calling page, so the page names its level too; the default
+// stays h3 for the Feishu page, where the form is not rendered.
+function serviceRoleCreate(view, level = 'h3') {
   const section = settingsCard('新建服务角色'), name = input('name', '', { maxLength: 80, required: true }), responsibility = textarea('responsibility', '', { maxLength: 2000, rows: 2 });
   section.append(note('新角色是一份提示词和模型，可以用在多个群里；每个群能做什么由它的群绑定的权限档位决定。保存后可以在它的卡片里选择模型和填写提示词。'),
     actionForm([field('名称', name), field('职责说明', responsibility)], '新建', async () => {
       if (!name.value.trim()) throw new Error('先填写名称');
       const created = (await serviceRoleRequest('/api/service-roles', 'POST', { name: name.value, responsibility: responsibility.value })).service_role;
-      view.roles.push(created); section.before(serviceRoleCard(view, created)); name.value = ''; responsibility.value = '';
+      view.roles.push(created); section.before(serviceRoleCard(view, created, level)); name.value = ''; responsibility.value = '';
     }));
   return section;
 }
