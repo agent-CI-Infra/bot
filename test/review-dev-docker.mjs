@@ -52,7 +52,7 @@ writeFileSync(override,`services:
 `);
 const env={...process.env,DOCKER_CONFIG:resolve('.tmp/review-dev/docker'),BUILDX_CONFIG:resolve('.tmp/review-dev/buildx'),BOT_PORT:'18891'};
 const docker=args=>execFileSync('docker',args,{env,encoding:'utf8',maxBuffer:8*1024*1024});
-const compose=args=>docker(['compose','-f','compose.yaml','-f','compose.build.yaml','-f',override,'-p',project,...args]);
+const compose=args=>docker(['compose','-f','docker/compose.yaml','-f','docker/compose.build.yaml','-f',override,'-p',project,...args]);
 const base='http://127.0.0.1:18891',fixture='http://127.0.0.1:18894',id=()=>randomBytes(24).toString('hex');
 const password=id(),memberPassword=id(),githubToken=id(),modelKey=id(),webhookSecret=id();let cookie='',csrf='',deployment,managerToken='';
 const evidence={checks:[],ports:[18891,18893,18894],project};

@@ -1,8 +1,8 @@
 # Runs the images published from main; nothing is built on this machine.
-#   docker compose up -d
+#   docker compose -f docker/compose.yaml up -d   (or download compose.yaml alone and run: docker compose up -d)
 # BOT_IMAGE_TAG (default latest, the head of main) pins every image to a release such as v1.2.0 or to sha-<commit>.
 # Upgrade with `docker compose pull` and `docker compose up -d`. Never add --volumes (-v) to `down`: that deletes
-# the master key, the internal credentials and the databases. compose.build.yaml builds the same services from source.
+# the master key, the internal credentials and the databases. docker/compose.build.yaml builds the same services from source.
 services:
   key-init:
     image: ghcr.io/agent-ci-infra/bot-control-plane:${BOT_IMAGE_TAG:-latest}

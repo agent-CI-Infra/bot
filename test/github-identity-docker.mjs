@@ -19,7 +19,7 @@ const passed = value => { evidence.checks.push(value); console.log('PASS ' + val
 async function ready() { for (let i = 0; i < 100; i++) { try { if ((await fetch(base + '/healthz')).ok) return; } catch {} await new Promise(r => setTimeout(r, 100)); } throw new Error('isolated_container_not_ready'); }
 const post = (path, body) => fetch(fixture + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 try {
-  writeFileSync(resolve(output, 'build.log'), docker(['build', '-t', image, '.'])); compose(['up', '-d']);
+  writeFileSync(resolve(output, 'build.log'), docker(['build', '-f', 'docker/control-plane.Dockerfile', '-t', image, '.'])); compose(['up', '-d']);
   base = 'http://' + compose(['port', 'identity', '8791']).trim(); fixture = 'http://' + compose(['port', 'identity', '8080']).trim(); await ready();
   await post('/fixture/config', { origin: base, fixture });
   const password = randomBytes(20).toString('hex');

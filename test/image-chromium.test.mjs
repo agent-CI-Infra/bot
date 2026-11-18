@@ -3,18 +3,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const files = {
-  project: readFileSync('images/project/Dockerfile', 'utf8'),
-  control: readFileSync('Dockerfile', 'utf8'),
-  manager: readFileSync('manager/Dockerfile', 'utf8'),
-  tunnel: readFileSync('tunnel/Dockerfile', 'utf8'),
-  wrapper: readFileSync('scripts/bot-chromium.sh', 'utf8')
+  project: readFileSync('docker/project-computer.Dockerfile', 'utf8'),
+  control: readFileSync('docker/control-plane.Dockerfile', 'utf8'),
+  manager: readFileSync('docker/manager.Dockerfile', 'utf8'),
+  tunnel: readFileSync('docker/tunnel.Dockerfile', 'utf8'),
+  wrapper: readFileSync('docker/bot-chromium.sh', 'utf8')
 };
 
 test('project and control-plane images preinstall Chromium at the documented path', () => {
   for (const [name, text] of [['project', files.project], ['control', files.control]]) {
     assert.match(text, /chromium fonts-liberation/, `${name} image must apt-install the chromium package`);
     assert.match(text, /fonts-noto-cjk/, `${name} image must include a CJK font for evidence screenshots`);
-    assert.match(text, /COPY scripts\/bot-chromium\.sh \/usr\/local\/bin\/bot-chromium/);
+    assert.match(text, /COPY docker\/bot-chromium\.sh \/usr\/local\/bin\/bot-chromium/);
     assert.match(text, /ENV BOT_BROWSER_EXECUTABLE=\/usr\/local\/bin\/bot-chromium/);
   }
   assert.match(files.wrapper, /HOME="\$\{BOT_BROWSER_HOME:-\/tmp\/bot-chromium-home\}"/);

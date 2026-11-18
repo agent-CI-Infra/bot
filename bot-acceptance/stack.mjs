@@ -24,7 +24,7 @@ export function settings(env = process.env) {
   if (!/^bot-acceptance[a-z0-9-]*$/.test(project)) throw new Error('ACCEPTANCE_PROJECT must start with bot-acceptance');
   if (!['quick', 'named'].includes(tunnel)) throw new Error('ACCEPTANCE_TUNNEL is quick or named');
   if (!/^\d+$/.test(port)) throw new Error('ACCEPTANCE_PORT must be a port number');
-  const files = ['-f', join(root, 'compose.yaml'), ...(tunnel === 'quick' ? ['-f', join(root, 'bot-acceptance/compose.quick-tunnel.yaml')] : [])];
+  const files = ['-f', join(root, 'docker/compose.yaml'), ...(tunnel === 'quick' ? ['-f', join(root, 'bot-acceptance/compose.quick-tunnel.yaml')] : [])];
   return { project, tunnel, port, files };
 }
 

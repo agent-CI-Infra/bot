@@ -437,7 +437,7 @@ test('control-plane browser modules do not import playwright-core', () => {
 });
 
 test('manager image copies browser-policy and import-checks manager modules', () => {
-  const dockerfile = readFileSync(new URL('../manager/Dockerfile', import.meta.url), 'utf8');
+  const dockerfile = readFileSync(new URL('../docker/manager.Dockerfile', import.meta.url), 'utf8');
   assert.match(dockerfile, /runner\/browser-policy\.mjs/);
   assert.match(dockerfile, /import\('\.?\/manager\/projects\.mjs'\)/);
   assert.match(dockerfile, /import\('\.?\/manager\/run-environments\.mjs'\)/);

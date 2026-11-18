@@ -52,7 +52,7 @@ async function hook(id, action, event = 'installation', extra = {}) {
   assert.equal(response.status, 200); return response.json();
 }
 try {
-  writeFileSync(resolve(output, 'build.log'), docker(['build', '--tag', image, '.']));
+  writeFileSync(resolve(output, 'build.log'), docker(['build', '-f', 'docker/control-plane.Dockerfile', '--tag', image, '.']));
   compose(['up', '-d']);
   const address = (service, port) => 'http://' + compose(['port', service, String(port)]).trim();
   base = hookBase = address('bot', 8791); fixtureBase = address('github', 8080);

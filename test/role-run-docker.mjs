@@ -53,7 +53,7 @@ try {
   for (const name of readdirSync('runner')) if (name.endsWith('.mjs')) cpSync(join('runner', name), join(context, 'runner', name));
   writeFileSync(join(context, 'Dockerfile'), `FROM ${base}\nUSER root\nCOPY runner/ /opt/runner/\nRUN mkdir -p /opt/agent-tools && chown 10001:10001 /opt/agent-tools && chmod 755 /opt/agent-tools && for f in /opt/runner/*.mjs; do node --check "$f"; done && chmod a-w /opt/runner /opt/runner/*.mjs\nUSER 10001:10001\n`);
   sh('docker', ['build', '-q', '-t', image, '--label', 'department.bot.deployment=' + deployment, context]);
-  sh('docker', ['build', '-q', '-f', 'manager/Dockerfile', '-t', managerImage, '--label', 'department.bot.deployment=' + deployment, '.']);
+  sh('docker', ['build', '-q', '-f', 'docker/manager.Dockerfile', '-t', managerImage, '--label', 'department.bot.deployment=' + deployment, '.']);
   passed('test image built from ' + base);
 
   projects = new Projects({ database: join(work, 'manager.sqlite'), docker: new HostDocker(), deployment, image, egress: false });

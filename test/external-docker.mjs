@@ -9,7 +9,7 @@ mkdirSync('.cache/docker',{recursive:true});mkdirSync('.cache/buildx',{recursive
 const env={...process.env,DOCKER_CONFIG:resolve('.cache/docker'),BUILDX_CONFIG:resolve('.cache/buildx')};
 const docker=args=>execFileSync('docker',args,{env,stdio:'inherit'});
 try{
-  docker(['build','-t',image,'.']);
+  docker(['build','-f','docker/control-plane.Dockerfile','-t',image,'.']);
   docker(['run','--rm','--name',name,'--label','department.bot.test=external-executors','--network','none','--read-only',
     '--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/data:rw,uid=10001,gid=10001,mode=0700',
     '--tmpfs','/tmp:rw,uid=10001,gid=10001,mode=0700','--mount','type=bind,source='+resolve('test')+',target=/app/test,readonly',

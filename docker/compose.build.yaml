@@ -1,0 +1,42 @@
+# Builds every image from this checkout instead of pulling the published ones. It only overrides image names and
+# adds build contexts, so use it on top of docker/compose.yaml, which holds the rest of the deployment:
+#   docker compose -f docker/compose.yaml -f docker/compose.build.yaml up -d --build
+# When passing `--project-directory .` (to keep the repository root as the Compose working directory and .env base),
+# set `BOT_BUILD_CONTEXT=.` so the build context still resolves to the repository root.
+services:
+  key-init:
+    image: department-bot-control-plane:local
+    build:
+      context: ${BOT_BUILD_CONTEXT:-..}
+      dockerfile: docker/control-plane.Dockerfile
+  bot:
+    image: department-bot-control-plane:local
+    build:
+      context: ${BOT_BUILD_CONTEXT:-..}
+      dockerfile: docker/control-plane.Dockerfile
+    environment:
+      # Built from this checkout, not a published tag: the settings page reports a source build.
+      BOT_IMAGE_TAG: ""
+  webhook:
+    image: department-bot-control-plane:local
+    build:
+      context: ${BOT_BUILD_CONTEXT:-..}
+      dockerfile: docker/control-plane.Dockerfile
+  tunnel:
+    image: department-bot-cloudflare-tunnel:local
+    build:
+      context: ${BOT_BUILD_CONTEXT:-..}
+      dockerfile: docker/tunnel.Dockerfile
+  manager:
+    image: department-bot-computer-manager:local
+    build:
+      context: ${BOT_BUILD_CONTEXT:-..}
+      dockerfile: docker/manager.Dockerfile
+    environment:
+      # Must stay equal to the project-image reference below.
+      BOT_PROJECT_IMAGE: department-bot-project-computer:local
+  project-image:
+    image: department-bot-project-computer:local
+    build:
+      context: ${BOT_BUILD_CONTEXT:-..}
+      dockerfile: docker/project-computer.Dockerfile
