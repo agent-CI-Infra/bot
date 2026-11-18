@@ -64,9 +64,12 @@ function projectEventFiltersCard(manager, target, live) {
   // interrupt the reader (#874).
   const status = element('p', '', 'muted'); status.dataset.actionsStatus = '';
   status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.setAttribute('aria-atomic', 'true');
-  if (target.policy.actions_failures_enabled) showActionsFailureStatus(status, target.actionsFailures, target.actionsFailuresRead); else status.textContent = '未开启。';
+  // #1079: the policy sentence sits beside the row, not inside it — the row is a live region and the policy is context,
+  // not news, so it never gets announced as a result. The row writes it in only when it has nothing else to show.
+  const policy = element('p', '', 'muted'); policy.dataset.actionsPolicy = ''; policy.hidden = true;
+  if (target.policy.actions_failures_enabled) showActionsFailureStatus(status, target.actionsFailures, target.actionsFailuresRead, policy); else status.textContent = '未开启。';
   fields.append(boxes, labels('issue.labels', '有人给 Issue 加上这些标签时'), labels('pull_request.labels', '有人给 PR 加上这些标签时'));
-  form.append(fields, status, message, buttons);
+  form.append(fields, status, policy, message, buttons);
   form.addEventListener('submit', async event => {
     event.preventDefault(); if (!editable || !live()) return; submit.disabled = true; message.textContent = '';
     const list = key => form.elements[key].value.split(',').map(label => label.trim()).filter(Boolean);
