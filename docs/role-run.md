@@ -120,7 +120,7 @@ SELECT type, data FROM task_history WHERE task_id = '<task>'
 ORDER BY id;
 ```
 
-验证命令：`npm test`（`test/role-run.test.mjs`、`test/run-environments.test.mjs`）与真实 Docker 隔离验收 `npm run test:isolation:docker`（验收记录在 Issue #169）。
+验证命令：`npm test`（`test/st/src/roles/role-run.test.mjs`、`test/st/src/projects/run-environments.test.mjs`）与真实 Docker 隔离验收 `npm run test:isolation:docker`（验收记录在 Issue #169）。
 
 正式 task 与主会话使用同一外部模型账本。容器内 Claude Code 与 Codex 通过控制面多格式模型网关记录每次上游模型请求与真实 token 明细，并与协议事件（Claude Code 的 `result.usage` 对账及 Codex 的 `thread/tokenUsage/updated` 增量）配合：未取得完整 token 计数的中断请求记入 `unknown_requests`（`lower_bound`），明确 4xx 拒绝记为已知零 token，任务预算不重复叠加同一回执的投影账单。
 

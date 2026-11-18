@@ -1,6 +1,6 @@
 /* Token names match the shared console contract; these values apply the #223 visual baseline.
    Pinned values in the first nine declaration lines must stay exactly as written
-   (see test/console-tokens.test.mjs SHARED). Extra tokens in #551 retire leftover
+   (see test/ut/static/console-tokens.test.mjs SHARED). Extra tokens in #551 retire leftover
    hard-coded colours and type sizes in style.css and access.css. */
 :root {
   --color-bg: #f5f7fb; --color-surface: #fff; --color-surface-alt: #f8fafc;
@@ -276,7 +276,7 @@ body.console-ready .management-page { left: var(--console-rail); }
   /* #554: a smaller state mark on phones, so a state's actions stay above the fold. */
   .console-state-icon { width: 24px; height: 24px; }
   /* The management feed is a short scroller above the composer: on phones its state is compact and carries no mark,
-     so 重试 stays in view at 390x844 (e2e/management.spec.mjs). */
+     so 重试 stays in view at 390x844 (test/e2e/management/management.spec.mjs). */
   .management-panel .console-state { padding: var(--space-5) var(--space-4); gap: var(--space-3); }
   .management-panel .console-state-icon { display: none; }
   .console-page-head { margin-top: 0; margin-bottom: var(--space-6); }

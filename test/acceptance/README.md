@@ -78,4 +78,4 @@ node test/acceptance/stack.mjs down
 
 ## 测试
 
-`test/bot-acceptance-scripts.test.mjs` 让 `bootstrap.mjs` 对真实控制面和本地 GitHub、模型夹具走完整个初始化，并覆盖 `reset.mjs` 的调用顺序和 `wait.mjs` 的结束条件；它在 `npm test` 里运行，控制台 API 变了而脚本没跟上时会失败。
+`test/st/acceptance/bot-acceptance-scripts.test.mjs` 让 `bootstrap.mjs` 对真实控制面和本地 GitHub、模型夹具走完整个初始化，并覆盖 `reset.mjs` 的调用顺序和 `wait.mjs` 的结束条件；它在 `npm test` 里运行，控制台 API 变了而脚本没跟上时会失败。

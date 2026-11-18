@@ -1,0 +1,58 @@
+import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
+import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { harness, repository, testPassword } from '../../fixtures/helpers.mjs';
+
+test('管理员完成初始化、登记账号，项目管理员只看到自己的仓库', async ({ page, browser }) => {
+  const h = await harness();
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  const password = testPassword(), admin = h.client();
+  try {
+    await page.goto(h.admin);
+    await expect(page.getByRole('heading', { name: '创建第一名管理员' })).toBeVisible();
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '初始化并登录' }).click();
+    await page.getByRole('link', { name: '项目', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '项目' })).toBeVisible();
+    // Repositories come only from installation sync; there is no manual registration form.
+    await expect(page.getByRole('button', { name: '新增', exact: true })).toHaveCount(0); await expect(page.getByRole('button', { name: '手动登记仓库' })).toHaveCount(0);
+    await admin('/api/auth/login', 'POST', { username: 'administrator', password });
+    // Accounts live in global settings.
+    await page.getByRole('link', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
+    await expect(page).toHaveURL(/#\/settings\/accounts$/); await page.getByRole('button', { name: '新增账号', exact: true }).click();
+    const secret = randomBytes(24).toString('hex');
+    await page.getByLabel('账号名称', { exact: true }).fill('Browser account');
+    await page.getByLabel('机器人 Token（仅机器人账号）', { exact: true }).fill(testPassword());
+    await page.getByLabel('Webhook 签名凭据', { exact: true }).fill(secret);
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(page.locator('#settings-panel').getByText('Browser account', { exact: true })).toBeVisible();
+    const a = (await admin('/api/accounts')).value.accounts[0];
+    await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+    const memberPassword = testPassword();
+    await admin('/api/users', 'POST', { username: 'project-admin', password: memberPassword, repository_ids: ['101'] });
+    await page.getByRole('link', { name: '项目', exact: true }).click();
+    await expect(page.locator('#rows')).toContainText('fixture/project-101');
+    await expect(page.locator('#rows')).toContainText('fixture/project-202');
+    mkdirSync('.tmp/screenshots', { recursive: true });
+    await page.setViewportSize({ width: 1365, height: 900 }); await page.screenshot({ path: '.tmp/screenshots/admin-desktop.png', fullPage: true });
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
+    await page.getByLabel('用户名', { exact: true }).fill('project-admin'); await page.getByLabel('密码', { exact: true }).fill(memberPassword);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    // Each project row opens its settings page through the "设置" action.
+    await page.locator('#rows .row').filter({ hasText: 'fixture/project-101' }).getByRole('button', { name: '设置', exact: true }).click();
+    await expect(page).toHaveURL(/#\/projects\/101\/basic$/); await expect(page.getByRole('link', { name: '基本设置', exact: true })).toBeVisible();
+    await switchConsoleProject(page, '');
+    await expect(page.locator('#rows')).toContainText('fixture/project-101');
+    await expect(page.locator('#rows')).not.toContainText('fixture/project-202');
+    await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '接入向导', exact: true })).toBeHidden();
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/screenshots/project-mobile.png', fullPage: true });
+    const context = await browser.newContext(), fresh = await context.newPage(); await fresh.goto(h.admin);
+    await expect(fresh.getByRole('heading', { name: '登录', exact: true })).toBeVisible(); await context.close();
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); const { rmSync } = await import('node:fs'); rmSync(h.directory, { recursive: true, force: true }); }
+});

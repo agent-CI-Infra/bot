@@ -17,10 +17,7 @@ function collect(dir) {
   return files;
 }
 
-const files = [
-  ...['manager', 'runner', 'tunnel', 'webhook', 'static', 'scripts', 'public-board', 'test', 'e2e'].flatMap(collect),
-  ...(existsSync('playwright.config.mjs') ? ['playwright.config.mjs'] : []),
-].sort((a, b) => a.localeCompare(b, 'en'));
+const files = ['manager', 'runner', 'tunnel', 'webhook', 'static', 'scripts', 'public-board', 'test'].flatMap(collect).sort((a, b) => a.localeCompare(b, 'en'));
 
 const queue = [...files];
 const workers = Math.min(availableParallelism(), 16, Math.max(1, queue.length));

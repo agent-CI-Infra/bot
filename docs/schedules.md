@@ -86,7 +86,7 @@
 
 闭合 Schema 见 `src/schedules/schema.ts`，不能在客户端注入 actor、tenant、能力或 SQL。面板展示时区、未来触发、最近成功、跳过/暂停原因、交接人和迁移去向；诊断记录关联事件、occurrence、业务运行和消息。
 
-验证：`npm ci`、`npm run check`、`npm test`（`test/schedules.test.mjs` 覆盖项目定时任务、事件订阅通知和日报迁移，`test/channel-schedules.test.mjs` 覆盖会话定时任务）；用户场景为 `npx playwright test e2e/schedules.spec.mjs e2e/management.spec.mjs`。浏览器证据输出到工作树忽略目录 `.tmp/schedules-166/`，测试使用独立 SQLite、随机 localhost 端口、本地模型和渠道夹具，不接触部署数据或真实 GitHub 写入。
+验证：`npm ci`、`npm run check`、`npm test`（`test/st/src/schedules/schedules.test.mjs` 覆盖项目定时任务、事件订阅通知和日报迁移，`test/st/src/channels/channel-schedules.test.mjs` 覆盖会话定时任务）；用户场景为 `npx playwright test -c test/e2e/playwright.config.mjs test/e2e/schedules/schedules.spec.mjs test/e2e/management/management.spec.mjs`。浏览器证据输出到工作树忽略目录 `.tmp/schedules-166/`，测试使用独立 SQLite、随机 localhost 端口、本地模型和渠道夹具，不接触部署数据或真实 GitHub 写入。
 
 ### 控制台运行与通知记录
 

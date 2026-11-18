@@ -1,0 +1,172 @@
+import { acceptanceFixture } from '../../../fixtures/acceptance-fixture.mjs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { harness, setup, account, repository, testPassword } from '../../../fixtures/helpers.mjs';
+import { normalizeUsage, withTaskMetrics, beginModelRequest, finishModelRequest } from '../../../../dist/metrics/accounting.js';
+import { metricTask, usageRequest } from '../../../fixtures/metrics-fixtures.mjs';
+import { TaskEngine } from '../../../../dist/agent/engine.js';
+const price={currency:'USD',input_per_million:2,output_per_million:10,cache_per_million:0.2};
+async function fixture(t){const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');const model=(await admin('/api/models','POST',{repository_id:null,api_url:'https://model.invalid/v1',api_key:testPassword(),model_name:'fixture',pricing:price})).value.model;return {h,admin,model};}
+test('usage normalizes compatible cache counters without inventing missing or malformed values',()=>{
+  assert.deepEqual(normalizeUsage({prompt_tokens:100,completion_tokens:20,prompt_tokens_details:{cached_tokens:80}}),{input_tokens:100,output_tokens:20,cached_input_tokens:80});
+  assert.deepEqual(normalizeUsage({prompt_tokens:100,completion_tokens:20,prompt_cache_hit_tokens:60}),{input_tokens:100,output_tokens:20,cached_input_tokens:60});
+  assert.deepEqual(normalizeUsage({input_tokens:100,output_tokens:20,input_tokens_details:{cached_tokens:0}}),{input_tokens:100,output_tokens:20,cached_input_tokens:0});
+  for(const invalid of [null,{}, {prompt_tokens:-1,completion_tokens:'20',prompt_cache_hit_tokens:9007199254740992}])assert.deepEqual(normalizeUsage(invalid),{input_tokens:null,output_tokens:null,cached_input_tokens:null});
+  assert.equal(normalizeUsage({prompt_tokens:10,completion_tokens:1,prompt_cache_hit_tokens:11}).cached_input_tokens,null);
+});
+test('runtime pauses during queue and waits, accumulates retries and is live only during execution',async t=>{
+  const {h,admin}=await fixture(t);metricTask(h.store,'timed');
+  assert.equal((await admin('/api/tasks/timed')).value.task.metrics.runtime_ms,0);
+  h.store.run("UPDATE tasks SET status='running' WHERE id='timed'");const now=Date.now();
+  h.store.run("UPDATE task_metrics SET runtime_ms=1200,active_since=? WHERE task_id='timed'",now-3000);
+  assert.equal(withTaskMetrics(h.store,[{id:'timed'}],now)[0].metrics.runtime_ms,4200);
+  h.store.run("UPDATE tasks SET status='waiting_environment' WHERE id='timed'");
+  const paused=h.store.get("SELECT runtime_ms FROM task_metrics WHERE task_id='timed'").runtime_ms;
+  assert.ok(paused>=4200);assert.equal(withTaskMetrics(h.store,[{id:'timed'}],now+86400000)[0].metrics.runtime_ms,paused);
+  h.store.run("UPDATE tasks SET status='queued' WHERE id='timed'");h.store.run("UPDATE tasks SET status='running' WHERE id='timed'");
+  h.store.run("UPDATE task_metrics SET active_since=? WHERE task_id='timed'",Date.now()-2000);h.store.run("UPDATE tasks SET status='succeeded' WHERE id='timed'");
+  const final=(await admin('/api/tasks/timed')).value.task.metrics;assert.ok(final.runtime_ms>=paused+2000);assert.equal(final.running,false);
+  assert.equal((await admin('/api/tasks?kind=review')).value.tasks[0].metrics.runtime_ms,final.runtime_ms);
+  assert.equal((await admin('/api/board/cards/101/issue/1/tasks')).value.tasks[0].metrics.runtime_ms,final.runtime_ms);
+});
+test('cost uses the request price snapshot, subtracts cache from input and counts usage once',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'priced');const task=h.store.get("SELECT * FROM tasks WHERE id='priced'");
+  const id=beginModelRequest(h.store,task,'one',{id:model.id,model:'fixture',pricing:price});
+  await admin('/api/models/'+model.id,'PATCH',{version:model.version,pricing:{...price,input_per_million:20}});
+  const usage={prompt_tokens:1000,completion_tokens:200,prompt_cache_hit_tokens:750};finishModelRequest(h.store,id,usage,200);finishModelRequest(h.store,id,usage,200);
+  const row=h.store.get('SELECT * FROM model_requests WHERE id=?',id);assert.equal(row.input_per_million,2);assert.equal(row.cost,0.00265);
+  const metrics=(await admin('/api/tasks/priced')).value.task.metrics;
+  assert.equal(metrics.input_tokens,1000);assert.equal(metrics.output_tokens,200);assert.equal(metrics.cached_input_tokens,750);assert.equal(metrics.cache_hit_rate,0.75);assert.equal(metrics.requests,1);
+  assert.equal(metrics.costs[0].amount,0.00265);
+});
+test('missing usage and cache remain unknown; hit rate is weighted by tokens',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'weighted');
+  usageRequest(h.store,'weighted',model.id,{usage:{prompt_tokens:100,completion_tokens:10,prompt_cache_hit_tokens:90}});
+  usageRequest(h.store,'weighted',model.id,{usage:{prompt_tokens:900,completion_tokens:90,prompt_cache_hit_tokens:90}});
+  let m=(await admin('/api/tasks/weighted')).value.task.metrics;assert.equal(m.cache_hit_rate,0.18);assert.equal(m.cached_input_tokens,180);
+  metricTask(h.store,'missing');usageRequest(h.store,'missing',model.id,{usage:null});
+  m=(await admin('/api/tasks/missing')).value.task.metrics;assert.equal(m.input_tokens,null);assert.equal(m.cached_input_tokens,null);assert.equal(m.cache_hit_rate,null);assert.equal(m.unpriced_requests,1);
+  metricTask(h.store,'cache-unknown');usageRequest(h.store,'cache-unknown',model.id,{usage:{prompt_tokens:100,completion_tokens:2}});
+  m=(await admin('/api/tasks/cache-unknown')).value.task.metrics;assert.equal(m.cached_input_tokens,null);assert.equal(m.cache_missing_requests,1);assert.equal(m.unpriced_requests,1);
+});
+test('daily costs separate UTC dates, currencies, unknown charges and projects within authorization',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'a');metricTask(h.store,'b','202');
+  usageRequest(h.store,'a',model.id,{cost:2});usageRequest(h.store,'b',model.id,{cost:3});usageRequest(h.store,'a',model.id,{date:'2026-10-23',cost:4});
+  usageRequest(h.store,'a',model.id,{currency:'CNY',cost:20});usageRequest(h.store,'a',model.id,{priced:false});
+  const query='/api/costs?from=2026-10-22&to=2026-10-23';let result=(await admin(query)).value;
+  assert.equal(result.summary.cost,9);assert.equal(result.summary.requests,4);assert.equal(result.summary.unpriced_requests,1);assert.equal(result.days.length,3);assert.equal(result.timezone,'UTC');
+  assert.deepEqual([result.summary.input_tokens,result.summary.output_tokens,result.summary.cached_input_tokens],[4000000,0,0]);
+  assert.equal((await admin(query+'&currency=CNY')).value.summary.cost,20);
+  const password=testPassword();await admin('/api/users','POST',{username:'cost-member',password,repository_ids:['101']});
+  const member=h.client();await member('/api/auth/login','POST',{username:'cost-member',password});result=(await member(query)).value;
+  assert.equal(result.summary.cost,6);assert.ok(result.days.every(r=>r.repository_id==='101'));assert.ok(!JSON.stringify(result).includes('project-202'));
+  assert.deepEqual(result.prices.map(p=>p.input_per_million),[2,4]);
+  assert.equal((await member(query+'&repository_id=202')).status,403);assert.equal((await member('/api/tasks/b')).status,404);
+  for(const suffix of ['from=bad','from=2026-02-30','from=2020-01-01&to=2026-01-01','from=2026-10-24&to=2026-10-23','currency=EUR'])assert.equal((await admin('/api/costs?'+suffix)).status,400);
+  const plan=h.store.all('EXPLAIN QUERY PLAN SELECT id FROM model_requests WHERE repository_id=? AND requested_at>=? AND requested_at<?','101','2026-10-22','2026-10-24');assert.ok(plan.some(r=>r.detail.includes('model_request_repo_date')));
+});
+test('costs count the requests priced in the other currency instead of dropping them from the total',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'other-currency');metricTask(h.store,'other-project','202');
+  usageRequest(h.store,'other-currency',model.id,{cost:2,id:'usd-one'});
+  usageRequest(h.store,'other-currency',model.id,{cost:3,id:'usd-two',date:'2026-10-23'});
+  usageRequest(h.store,'other-currency',model.id,{currency:'CNY',cost:20,id:'cny-one'});
+  usageRequest(h.store,'other-currency',model.id,{currency:'CNY',cost:20,id:'cny-two',date:'2026-10-23'});
+  usageRequest(h.store,'other-currency',model.id,{priced:false,id:'unpriced'});
+  usageRequest(h.store,'other-project',model.id,{currency:'CNY',cost:20,id:'cny-other-project'});
+  const query='/api/costs?from=2026-10-22&to=2026-10-23';
+  // The selected currency keeps its total; the requests it leaves out are named per currency, so no request disappears.
+  let result=(await admin(query)).value;
+  assert.equal(result.currency,'USD');assert.equal(result.summary.requests,3);assert.equal(result.summary.unpriced_requests,1);
+  assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:3}]);
+  result=(await admin(query+'&currency=CNY')).value;
+  assert.equal(result.summary.requests,4);assert.equal(result.summary.unpriced_requests,1);
+  assert.deepEqual(result.other_currencies,[{currency:'USD',requests:2}]);
+  // The extra counts honor the same scope as the totals: the project filter drops the other project's request.
+  result=(await admin(query+'&repository_id=101')).value;
+  assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:2}]);
+  result=(await admin(query+'&repository_id=202')).value;
+  assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:1}]);
+  assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,6);
+});
+test('other_currencies counts exactly the rows the totals count, never a service-role request',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'currency-project');
+  usageRequest(h.store,'currency-project',model.id,{cost:2,id:'usd-project'});
+  usageRequest(h.store,'currency-project',model.id,{currency:'CNY',cost:20,id:'cny-project'});
+  // Service roles work outside any project, so their requests carry no repository and the totals drop them.
+  usageRequest(h.store,'currency-project',model.id,{currency:'CNY',cost:20,id:'cny-assistant'});
+  h.store.run("UPDATE model_requests SET repository_id=NULL WHERE rowid=(SELECT max(rowid) FROM model_requests)");
+  const query='/api/costs?from=2026-10-22&to=2026-10-23';
+  const usd=(await admin(query)).value;
+  assert.equal(usd.summary.requests,1);
+  assert.deepEqual(usd.other_currencies,[{currency:'CNY',requests:1}]);
+  const cny=(await admin(query+'&currency=CNY')).value;
+  assert.equal(cny.summary.requests,1);
+  assert.deepEqual(cny.other_currencies,[{currency:'USD',requests:1}]);
+});
+test('costs return distinct saved prices within the selected scope, without inventing prices for unpriced requests',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'prices');metricTask(h.store,'other-prices','202');
+  usageRequest(h.store,'prices',model.id,{cost:2,id:'price-a',usage:{prompt_tokens:1000,completion_tokens:20,prompt_cache_hit_tokens:750}});
+  usageRequest(h.store,'prices',model.id,{cost:3,id:'price-b',usage:{prompt_tokens:2000,completion_tokens:30,prompt_cache_hit_tokens:1000}});
+  usageRequest(h.store,'prices',model.id,{cost:2,id:'price-a-again'});
+  usageRequest(h.store,'prices',model.id,{priced:false,id:'unpriced',date:'2026-10-23'});
+  usageRequest(h.store,'other-prices',model.id,{cost:9,id:'other-repository'});
+  usageRequest(h.store,'prices',model.id,{cost:8,id:'other-date',date:'2026-10-21'});
+  usageRequest(h.store,'prices',model.id,{cost:7,id:'other-currency',currency:'CNY'});
+  const query='/api/costs?from=2026-10-22&to=2026-10-23&repository_id=101',result=(await admin(query)).value;
+  assert.deepEqual([result.summary.input_tokens,result.summary.output_tokens,result.summary.cached_input_tokens],[2003000,50,1750]);
+  assert.deepEqual(result.prices,[2,3].map(input=>({model_name:'fixture',currency:'USD',input_per_million:input,output_per_million:10,cache_per_million:0.2})));
+  assert.equal(result.summary.unpriced_requests,1);
+  const noPrice=(await admin('/api/costs?from=2026-10-23&to=2026-10-23&repository_id=101')).value;
+  assert.deepEqual(noPrice.prices,[]);assert.equal(noPrice.summary.unpriced_requests,1);
+  assert.deepEqual((await admin(query+'&currency=CNY')).value.prices,[{model_name:'fixture',currency:'CNY',input_per_million:7,output_per_million:10,cache_per_million:0.2}]);
+});
+test('pricing preserves model contracts, enforces ownership and rejects stale contract versions without losing history',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'history');usageRequest(h.store,'history',model.id);
+  const password=testPassword();await admin('/api/users','POST',{username:'pricing-member',password,repository_ids:['101']});
+  const member=h.client();await member('/api/auth/login','POST',{username:'pricing-member',password});await admin('/api/models/'+model.id+'/projects','PUT',{repository_ids:['101']});
+  assert.equal((await member('/api/models/'+model.id,'PATCH',{version:1,pricing:price})).status,403);
+  const own=(await member('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid',api_key:testPassword(),model_name:'own'})).value.model;
+  const priced=await member('/api/models/'+own.id,'PATCH',{version:1,pricing:price});
+  assert.equal(priced.status,200);assert.equal(priced.value.model.version,1);
+  const repriced=await member('/api/models/'+own.id,'PATCH',{version:1,pricing:{...price,input_per_million:20}});
+  assert.equal(repriced.status,200);assert.equal(repriced.value.model.version,1);
+  assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,model_name:'renamed'})).value.model.version,2);
+  assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,pricing:price})).status,409);
+  for(const invalid of [{...price,input_per_million:-1},{...price,currency:'EUR'},{...price,currency:['USD']},{...price,output_per_million:'10'},{currency:'USD',input_per_million:1000001}])assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:model.version,pricing:invalid})).status,400);
+  assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:1,pricing:{currency:'USD',input_per_million:2}})).status,200);
+  assert.equal((await admin('/api/models/'+model.id)).value.model.pricing,null); // No catalog can supply the omitted rates.
+  assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:1,pricing:null})).status,200);assert.equal((await admin('/api/models/'+model.id)).value.model.pricing,null);
+  assert.equal(h.store.get("SELECT sum(cost) cost FROM model_requests WHERE task_id='history'").cost,2);
+});
+test('legacy tasks are explicitly incomplete after migration; collected metrics and charges survive restart',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'old');usageRequest(h.store,'old',model.id);
+  h.store.run("DELETE FROM task_metrics WHERE task_id='old'");h.store.run("DELETE FROM settings WHERE key='task_metrics_v1'");
+  await h.stop();await h.start();const m=(await admin('/api/tasks/old')).value.task.metrics;assert.equal(m.complete,false);assert.equal(m.input_tokens,1000000);assert.equal(m.costs[0].amount,2);
+  metricTask(h.store,'new');assert.equal((await admin('/api/tasks/new')).value.task.metrics.complete,true);
+});
+test('engine recovery excludes downtime and task deletion retains historical project charges',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'interrupted');usageRequest(h.store,'interrupted',model.id);
+  h.store.run("UPDATE tasks SET status='running',next_run_at=? WHERE id='interrupted'",Date.now()+86400000);
+  h.store.run("UPDATE task_metrics SET runtime_ms=4321,active_since=? WHERE task_id='interrupted'",Date.now()-86400000);
+  const engine=new TaskEngine(h.store,{call:async()=>null}, undefined, undefined, acceptanceFixture);engine.start();await engine.close();
+  const recovered=(await admin('/api/tasks/interrupted')).value.task.metrics;assert.equal(recovered.runtime_ms,4321);assert.equal(recovered.complete,false);assert.equal(recovered.running,false);
+  h.store.run("DELETE FROM tasks WHERE id='interrupted'");assert.equal(h.store.get('SELECT count(*) n FROM task_metrics').n,0);
+  assert.equal(h.store.get('SELECT task_id FROM model_requests').task_id,null);
+  assert.equal((await admin('/api/costs?from=2026-10-22&to=2026-10-22')).value.summary.cost,2);
+});
+
+import {recordExternalModelRequest} from '../../../../dist/metrics/accounting.js';
+test('external receipts use visible configured prices and cumulative updates never duplicate charges',async t=>{
+  const {h,admin}=await fixture(t);
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://provider.invalid/v1',api_key:'fixture-external-key',model_name:'provider/model.1',pricing:price})).value.model;
+  assert.ok(model.id);
+  const task={id:'external-task',repository_id:'101'},receipt={key:'external-request',source:'provider_requests',model:'MODEL-1',started_at:new Date().toISOString(),finished:true,input_tokens:100,output_tokens:20,cached_input_tokens:40};
+  const id=recordExternalModelRequest(h.store,task,'external-run',receipt);
+  assert.equal(h.store.get('SELECT currency FROM model_requests WHERE id=?',id).currency,'USD');
+  assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',id).cost,0.000328);
+  recordExternalModelRequest(h.store,task,'external-run',{...receipt,input_tokens:150,output_tokens:30,cached_input_tokens:50});
+  recordExternalModelRequest(h.store,task,'external-run',receipt);
+  assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',id).cost,0.00051);assert.equal(h.store.get('SELECT count(*) n FROM model_requests WHERE external_key=?',receipt.key).n,1);
+  const unknownCache=recordExternalModelRequest(h.store,task,'external-run',{...receipt,key:'unknown-cache',cached_input_tokens:null});assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',unknownCache).cost,null,'missing cache data is not a cache miss');
+  const hidden=recordExternalModelRequest(h.store,{id:'other',repository_id:'202'},'other-run',{...receipt,key:'hidden-price'});assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',hidden).cost,null);
+});

@@ -133,7 +133,7 @@ webhook 载荷里没有"检查是否全绿""当前用户是否 maintainer""是�
 1. 在 `modules/` 新建文件，实现 `AutomationModule`（`id` + `plan`），只做规划。
 2. 在 `registry.ts` 的 `builtInModules` 注册。
 3. 如需要新的仓库开关，在 `config.ts` 的 schema、默认值和校验里加字段，在 `repository-config.ts` 的 YAML 字段映射里放行 snake_case 写法，并在 `management.ts` 的 PATCH 字段列表放行。
-4. 在 `test/automation.test.mjs` 里用事件 + 事实固定行为，覆盖"事实缺失 → fail closed"。
+4. 在 `test/st/src/automation/automation.test.mjs` 里用事件 + 事实固定行为，覆盖"事实缺失 → fail closed"。
 
 ## 信任边界
 

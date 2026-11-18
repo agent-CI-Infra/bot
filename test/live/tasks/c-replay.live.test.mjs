@@ -3,10 +3,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,writeFileSync,mkdirSync,copyFileSync,chmodSync} from 'node:fs';
 import {join} from 'node:path';
-import {fixture} from '../../integration-engine.test.mjs';
+import {fixture} from '../../st/src/tasks/integration-engine.test.mjs';
 import {Store} from '../../../dist/storage/database.js';
 import {evaluateDelivery} from '../../../dist/tasks/acceptance.js';
-import {acceptanceFixture} from '../../acceptance-fixture.mjs';
+import {acceptanceFixture} from '../../fixtures/acceptance-fixture.mjs';
 import {TaskRecords} from '../../../dist/tasks/service.js';
 
 test('live C replay: published PR QA return resumes real Manager/Dev and passes fresh QA',{

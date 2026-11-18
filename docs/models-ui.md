@@ -26,10 +26,10 @@
 
 ## 验证
 
-- `test/model-probe.test.mjs`：草稿测试的真实上游地址、已保存 Key 复用、版本拒绝、跨项目和共享权限、失败响应脱敏及不保存草稿。
-- `test/model-provider.test.mjs`：供应商更新原子性、成员/版本快照、地址冲突、权限及事务回滚。
-- `e2e/model-console.spec.mjs`：搜索、价格缺失、草稿测试、80 个模型的选择、390px 编辑器、并发冲突比较与同地址不同范围隔离。
-- `e2e/models-by-provider.spec.mjs`：原有项目与共享模型新增、测试、URL/Key 更换、撤销、取消及失败恢复流程。
+- `test/st/src/models/model-probe.test.mjs`：草稿测试的真实上游地址、已保存 Key 复用、版本拒绝、跨项目和共享权限、失败响应脱敏及不保存草稿。
+- `test/st/src/models/model-provider.test.mjs`：供应商更新原子性、成员/版本快照、地址冲突、权限及事务回滚。
+- `test/e2e/models/model-console.spec.mjs`：搜索、价格缺失、草稿测试、80 个模型的选择、390px 编辑器、并发冲突比较与同地址不同范围隔离。
+- `test/e2e/models/models-by-provider.spec.mjs`：原有项目与共享模型新增、测试、URL/Key 更换、撤销、取消及失败恢复流程。
 
 ## 真实页面预览
 
