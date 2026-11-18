@@ -54,6 +54,9 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     const create = cardOf('新建服务角色');
     await create.getByLabel('名称', { exact: true }).fill('可信 committer 群'); await create.getByRole('button', { name: '新建', exact: true }).click();
     const custom = cardOf('可信 committer 群');
+    // #1039: a card created in place is a card of this page, so it must be the h2 the page gives every card, not the
+    // serviceRoleCard default h3 that would read it as a child of the card above.
+    expect(await page.getByRole('heading', { name: '可信 committer 群', exact: true }).evaluate(node => node.tagName), '#1039: a card created in place is a card of this page, so its title must be the page h2, not the h3 default that reads it as a child of the card above').toBe('H2');
     await expect(custom).toContainText('自定义'); await expect(custom).toContainText('由每个群绑定的权限档位决定');
     await custom.getByLabel('启用').uncheck(); await custom.getByRole('button', { name: '保存', exact: true }).click();
     await expect(custom).toContainText('已停用');

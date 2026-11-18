@@ -40,8 +40,8 @@ async function outlineProblems(page, route) {
 }
 // Settings cards load after the shell. Wait deterministically for the real outline instead of a fixed delay: sample the
 // headings inside the panel until the signature is non-empty and unchanged across two consecutive samples, so a slow
-// page is never judged while only the page title exists (that outline would pass silently). An empty signature never
-// counts as settled; the caller then fails on "no visible heading" rather than passing green.
+// page is never judged while only the page title exists (that outline would pass silently). Exhausting the attempts is a
+// failure, not a "use the last sample anyway" success: an outline that never settles cannot be asserted green.
 async function settledHeadings(page, attempts = 200) {
   const sample = () => page.evaluate(() => [...document.querySelectorAll('#settings-panel h1, #settings-panel h2, #settings-panel h3, #settings-panel h4, #settings-panel h5, #settings-panel h6')]
     .map(node => `${node.tagName} ${node.textContent.trim()}`).join('\n'));
@@ -52,7 +52,7 @@ async function settledHeadings(page, attempts = 200) {
     if (current && current === previous) return current;
     previous = current;
   }
-  return previous;
+  return { settled: false, signature: previous };
 }
 async function openSettings(page, base, route) {
   await page.goto(base + '/' + route);
@@ -60,7 +60,9 @@ async function openSettings(page, base, route) {
   await expect(content).toBeVisible();
   await expect(content).not.toContainText('正在加载…');
   // The settled signature is what openSettings guarantees; outlineProblems re-reads the viewport-visible headings.
-  expect(await settledHeadings(page), `${route}: the settings panel never rendered a stable heading outline`).not.toBe('');
+  const settled = await settledHeadings(page);
+  expect(typeof settled, `${route}: the settings panel headings never settled (last sample: ${JSON.stringify(settled)})`).toBe('string');
+  expect(settled.length, `${route}: the settings panel rendered no heading`).toBeGreaterThan(0);
   return content;
 }
 

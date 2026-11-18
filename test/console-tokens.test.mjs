@@ -170,6 +170,11 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.match(serviceRoles, /querySelector\(level\)/, 'the saved name is rewritten on the heading of that level');
   assert.match(read('static/settings/page.js'), /serviceRoleCard\(view, role, 'h2'\)/, 'the settings page asks for h2');
   assert.match(read('static/channels/assistant-roles.js'), /serviceRoleCard\(view, role\)/, 'the Feishu bindings page keeps h3');
+  // A card created in place is a card of the calling page too: the create form passes the level on, so the new card is an
+  // h2 on settings instead of falling back to the h3 default and reading as a child of the card above it.
+  assert.match(serviceRoles, /function serviceRoleCreate\(view, level = 'h3'\)/, 'the create form takes the same level');
+  assert.match(serviceRoles, /section\.before\(serviceRoleCard\(view, created, level\)\)/, 'the created card is drawn at that level');
+  assert.match(read('static/settings/page.js'), /serviceRoleCreate\(view, 'h2'\)/, 'the settings page creates h2 cards');
   assert.match(views, /\.step-meta\{[^}]*color:\s*var\(--color-text-muted\);font-size:\s*var\(--font-size-1\)/);
   assert.match(views, /button\.linkish\{[^}]*color:\s*var\(--color-brand\)/);
   assert.match(views, /\.choice\{[^}]*color:\s*var\(--color-text\)/);
