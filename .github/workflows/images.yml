@@ -92,7 +92,12 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.description=${{ matrix.description }}
           cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }}
+          # #1115: only a run that publishes, or the Nightly run that calls this workflow, may write the cache. A pull
+          # request or merge queue run has no cache write scope, and then buildx fails the whole build after the image
+          # is built ("failed to reserve cache: cache write denied"); such a run reads main's cache instead, which is
+          # the same rule checks.yml states for the test cache. The Nightly run is event workflow_call and PUBLISH is
+          # false there, so the event name has to be part of the condition.
+          cache-to: ${{ (env.PUBLISH == 'true' || github.event_name == 'workflow_call') && format('type=gha,scope={0}', matrix.name) || '' }}
 
       # Start the preinstalled browser as the runtime user in the compose sandbox (read-only root,
       # tmpfs /tmp, no capabilities). This is what catches a missing writable HOME; a build-only job would not.
