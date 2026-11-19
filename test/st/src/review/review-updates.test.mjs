@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { recordRevision } from '../../../../dist/github/publisher.js';
-import { enqueueRefusal, otherBotRevisionLimit, pullRequestNeeded, queueWebhook, updateTrigger } from '../../../../dist/review/queue.js';
+import { enqueueRefusal, pullRequestNeeded, queueWebhook, updateTrigger } from '../../../../dist/review/queue.js';
 import { emptyRepositoryFixture } from '../../../fixtures/empty-repository-helpers.mjs';
 
 // Reviews of what a person changes after an Issue or PR was opened: edits, comments, reviews and replies to review comments.
@@ -166,38 +166,21 @@ test('a review of the bot\'s own pull request offers what it found as a revision
   engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, { object: {} }, { findings: [finding('F3')] }, true); assert.equal(revisions().length, 2);
 });
 
-test('a review that only another review bot started counts for the loop guard as well (#1104 review)', async t => {
-  const { h, engine, task, finding, revisions } = await botPullRequest(t);
-  const byBot = (id, sha) => [{ ...task, head_sha: sha }, { object: {}, trigger: { reason: 'review_comment', actor: 'copilot[bot]', actor_id: '77', actor_type: 'Bot',
-    url: `https://github.invalid/pull/7#discussion_r${id}`, source: { type: 'review_comment', id } } }];
-  for (let i = 1; i <= otherBotRevisionLimit + 1; i++) {
-    const [reviewed, input] = byBot(100 + i, String(i).repeat(40).slice(0, 40).replace(/[^0-9a-f]/g, 'a'));
-    engine.queueDevelopment({}, reviewed, input, { findings: [finding('F' + i)] }, true);
-    h.store.run("UPDATE tasks SET status='completed' WHERE kind='development.pr'");
-  }
-  // Three revisions came from the bot's comments through reviews; the fourth is held back like a direct one.
-  assert.equal(revisions().length, otherBotRevisionLimit);
-  assert.deepEqual(JSON.parse(revisions()[0].input).revision.triggered_by.map(r => [r.author, r.author_type]), [['copilot[bot]', 'Bot']]);
-  // A review a person started is not held back.
-  engine.queueDevelopment({}, { ...task, head_sha: 'e'.repeat(40) }, { object: {}, trigger: { reason: 'comment', actor: 'alice', actor_id: '5', source: { type: 'comment', id: 500 } } }, { findings: [finding('F9')] }, true);
-  assert.equal(revisions().length, otherBotRevisionLimit + 1);
-});
-
-test('another review bot stops revising the bot\'s pull request after a few revisions in a row; a person\'s request resets it (#1104)', async t => {
+test('another review bot\'s requests have no limit of the control plane\'s own; the Manager gets the counts (#1104)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  const request = (author_type, author_id, id) => ({ type: 'review_comment', id: String(id), author: author_type === 'Bot' ? 'copilot[bot]' : 'alice', author_id, author_type, url: 'u', body: 'b' });
-  const refusal = requests => enqueueRefusal(h.store, '101', 'development.pr', 7, 'c'.repeat(40), { revision: { source: 'request', requests } });
-  const done = (r, task, at) => h.store.run("INSERT INTO bot_pr_requests VALUES('101',7,?,?,?,?,?,'u','done',?,?)", r.type, r.id, r.author, r.author_id, r.author_type, task, at);
-  for (let i = 1; i < otherBotRevisionLimit; i++) done(request('Bot', '77', i), 'rev-' + i, `2026-11-19T0${i}:00:00Z`);
-  assert.equal(refusal([request('Bot', '77', 10)]), null);
-  done(request('Bot', '77', otherBotRevisionLimit), 'rev-' + otherBotRevisionLimit, '2026-11-19T05:00:00Z');
-  assert.equal(refusal([request('Bot', '77', 11)]).code, 'other_bot_revision_limit');
-  // Another bot keeps its own count, and a request that a person joins is never held back.
-  assert.equal(refusal([request('Bot', '78', 12)]), null);
-  assert.equal(refusal([request('Bot', '77', 13), request('User', '5', 14)]), null);
-  // A person's request carried out after them starts the count again.
-  done(request('User', '5', 15), 'rev-person', '2026-11-19T06:00:00Z');
-  assert.equal(refusal([request('Bot', '77', 16)]), null);
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
+  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-source',?,'source',0)", 'c'.repeat(40));
+  const done = (id, author_id, author_type, task) => h.store.run("INSERT INTO bot_pr_requests VALUES('101',7,'review_comment',?,'x',?,?,'u','done',?,?)", String(id), author_id, author_type, task, new Date().toISOString());
+  for (let i = 1; i <= 5; i++) done(i, '77', 'Bot', 'rev-' + i);
+  done(6, '5', 'User', 'rev-6');
+  const request = { type: 'review_comment', id: '20', author: 'copilot[bot]', author_id: '77', author_type: 'Bot', url: 'u', body: 'b' };
+  assert.equal(enqueueRefusal(h.store, '101', 'development.pr', 7, 'c'.repeat(40), { revision: { source: 'request', requests: [request] } }), null);
+  // The next comment of that bot reaches the Manager with how often the pull request was revised, and for whom.
+  const pr = { number: 7, state: 'open', draft: false, head: { sha: 'c'.repeat(40) }, user: { id: 999 } }, copilot = { type: 'Bot', login: 'copilot[bot]', id: 77 };
+  assert.equal(queueWebhook(h.store, '101', 'pull_request_review_comment', { repository: { id: 101 }, action: 'created', sender: copilot, pull_request: pr,
+    comment: { id: 21, body: 'Still untested.', author_association: 'NONE', html_url: 'https://github.invalid/pull/7#discussion_r21', path: 'a.js', line: 3 } }, 'bot-21'), 1);
+  const facts = JSON.parse(h.store.get("SELECT facts FROM dispatch_events WHERE type='pull_request.updated' ORDER BY rowid DESC").facts);
+  assert.deepEqual(facts.revisions, { for_requests: 6, for_this_author: 5 });
 });
 
 test('the revision count of a bot pull request counts the revisions nobody asked for (informational since #1104)', async t => {
