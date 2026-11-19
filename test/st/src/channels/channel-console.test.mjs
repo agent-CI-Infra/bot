@@ -154,7 +154,7 @@ test('conversation own task history remains visible across service binding sourc
 
 test('a project task delegated by the group is linked to its conversation and disappears when its source changes', async t => {
   const f = await channelFixture(t);
-  await repositoryAssistant(f, { project_tasks: 'read', delegation: 'allow' });
+  await repositoryAssistant(f, { project_tasks: 'create' });
   const chat = await boundGroup(f);
   scriptedModel(f, [['create_project_task', { repository: 'agent-test-zone/admin-fixture-101', request: '核对群助手的页面入口并给出报告',
     contract: { goal: '核对群助手的入口', scope: ['static/channels.js'], criteria: ['报告包含实际路径'], endpoint: '提交核对报告' } }], '任务已交给项目团队。']);

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { RoleKind } from './catalog.js';
 
-export type PermissionMode = 'none' | 'read' | 'write' | 'allow' | 'deny' | 'custom';
+export type PermissionMode = 'none' | 'read' | 'create' | 'write' | 'allow' | 'deny' | 'custom';
 export type RolePermissions = Record<string, PermissionMode>;
 interface PermissionItem { id: string; name: string; modes: PermissionMode[]; read: string[]; write: string[]; detail: string; group?: string; supported?: boolean }
 const access = (id: string, name: string, read: string[], write: string[], detail: string): PermissionItem => ({ id, name, modes: write.length ? ['none', 'read', 'write'] : ['none', 'read'], read, write, detail });
@@ -71,6 +71,11 @@ export const permissionItems: PermissionItem[] = [
   github(access('github_checks','Checks',githubReads,[],'读取检查运行和结论；尚未提供写入检查结果的角色工具。')),
   github(access('github_statuses','Commit Status',githubReads,[],'读取提交状态；尚未提供发布状态的角色工具。')),
 ];
+// Only a group binding has a binding_id with which to authorize changes to its own tasks.
+export const groupTaskModes = ['none', 'read', 'create', 'write'] as const;
+export const groupPermissionItems = permissionItems.filter(item => item.id !== 'delegation').map(item =>
+  item.id === 'project_tasks' ? { ...item, modes: [...groupTaskModes], name: '项目任务权限',
+    detail: '不可访问、只读、可新增或完全可读写。可新增只允许补充或取消本绑定创建的任务。' } : item);
 export const servicePermissionIds = permissionItems.map(item => item.id);
 /**
  * The items a project role's editor offers (#850). project_configuration and schedules only govern the management tools,
@@ -211,6 +216,9 @@ export function permissionTools(value: RolePermissions): string[] {
     if (['read','write'].includes(p.legacy_repository!)) for(const name of ['read_file','read_version_file','compare_versions'])tools.add(name);
     if (p.legacy_repository === 'write') tools.add('write_file');
     if (p.legacy_commands === 'allow') tools.add('run_command');
+  }
+  if (p.project_tasks === 'create') {
+    for (const name of ['list_project_tasks', 'read_project_task', 'create_project_task', 'manage_project_task', 'management_query', 'management_command']) tools.add(name);
   }
   if (p.project_tasks === 'custom') {
     const item = permissionItems.find(item => item.id === 'project_tasks')!;

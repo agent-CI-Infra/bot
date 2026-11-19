@@ -76,8 +76,8 @@ Project work roles, the management assistant and Feishu group bindings (whose le
 | Group | Setting | Levels | Actual operations |
 | --- | --- | --- | --- |
 | Platform | `computer` | deny / allow | Read and write the assigned workspace, run commands/tests. Fixed-candidate and environment isolation still apply. |
-| Platform | `delegation` | deny / allow | Assign another enabled role; a group hands work to the project Manager. Own tasks need no delegation. |
-| Platform | `project_tasks` | none / read / write | Inspect other tasks; write also modifies tasks and sends coordination/scheduling changes. Received notices and own task progress are basic. |
+| Platform | `delegation` | deny / allow | Assign another enabled role. Group bindings set task creation through their project task tier. Own tasks need no delegation. |
+| Platform | `project_tasks` | none / read / write | Inspect other tasks; write also modifies tasks and sends coordination/scheduling changes. Group bindings additionally offer `create`: query and create tasks, then add instructions to or cancel tasks created by that binding. Received notices and own task progress are basic. |
 | Platform | `project_memory` | none / read / write | Read shared knowledge or propose knowledge changes through the existing validation. |
 | Platform | `project_configuration` | none / read / write | Assistants only (the management assistant and group bindings): query or change supported project settings and role definitions through the management service. |
 | Platform | `schedules` | none / read / write | Assistants only: query or change project schedules and notification subscriptions. Destination checks still apply. |

@@ -4,9 +4,24 @@ const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已
 const bindingLevelOptions = [
   ['read', '只读问答', '读取范围内仓库的 Issue、PR、代码和 Actions，查本群会话记录；不写 GitHub，不建任务。'],
   ['comment', '可评论和打标签', '另外可以在 Issue 和 PR 上评论、加删标签、指派人、新建 Issue，并触发 Actions 工作流（例如「跑一下 Nightly」）；PR 读写也包括开 PR、发检视（含批准和要求修改）和请求检视人。不改代码，不合并。'],
-  ['dispatch', '可派活', '另外可以把工作交给项目 Manager 新建任务，并查看、追加说明、修改约定、暂停、重试或取消范围内的任务；任务按项目自己的设置和模型执行。'],
+  ['dispatch', '可派活', '另外可以把工作交给项目 Manager 新建任务，查看范围内任务，并补充说明或取消本群创建的任务；任务按项目自己的设置和模型执行。'],
   ['custom', '高级：逐项设置', '按下面每一项单独选择。Contents 读写（提交文件、推送分支、在群里合并 PR）只能在这里打开。'],
 ];
+const groupTaskOptions = [
+  ['none', '不可访问', '无法查看、创建或管理项目任务。'],
+  ['read', '只读', '查看范围内任务的列表、进展与详情。'],
+  ['create', '只读 + 可新增', '查看范围内任务，经 Manager 派活，只能给本群创建的任务补充说明或取消。'],
+  ['write', '完全可读写', '查看和创建任务，还可暂停、重试、取消、补充说明或修改范围内任何任务的约定。'],
+];
+function groupTaskScope(binding) {
+  const option = groupTaskOptions.find(([id]) => id === binding.task_mode);
+  if (option) return option[1] + ' · ' + option[2];
+  const p = binding.permissions, legacy = p.project_tasks === 'custom', tasks = legacy ? p.legacy_project_tasks : p.project_tasks;
+  const controls = legacy && p.legacy_delegation_controls === 'allow';
+  const rights = [p.delegation === 'allow' && '新建任务', (controls || ['read', 'write'].includes(tasks)) && '查看任务',
+    (controls || tasks === 'write') && '追加说明和取消', (controls || tasks === 'write' && !legacy) && '修改约定', tasks === 'write' && '暂停和重试'];
+  return '保留旧权限 · ' + (rights.filter(Boolean).join('、') || '无法访问任务');
+}
 const bindingLevelName = level => bindingLevelOptions.find(([id]) => id === level)?.[1] || level;
 // The individual items of a binding, for the advanced level. Transitional values migrated from an older role stay
 // selectable until another mode is chosen.
@@ -14,7 +29,7 @@ function bindingItemsEditor(permissions, items) {
   const box = element('div', '', 'role-permissions');
   for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
     const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
-    for (const item of items.filter(item => item.group === group)) {
+    for (const item of items.filter(item => item.group === group && item.id !== 'project_tasks')) {
       const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
       if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom]);
       const row = element('div', '', 'role-permission-row');
@@ -35,8 +50,8 @@ function bindingSaveError(err) {
 // One line per binding: the level, or for an advanced binding the items it opens.
 function bindingLevelSummary(b, items) {
   if (b.level !== 'custom') return bindingLevelName(b.level);
-  const open = items.filter(item => !['none', 'deny'].includes(b.permissions[item.id])).map(item => `${item.name} ${permissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
-  return '高级：' + (open.join('；') || '全部关闭');
+  const open = items.filter(item => item.id !== 'project_tasks' && !['none', 'deny'].includes(b.permissions[item.id])).map(item => `${item.name} ${permissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
+  return '高级：' + (open.join('；') || '逐项设置');
 }
 
 // Group bindings list + on-demand creator/permission editor.
@@ -144,15 +159,28 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   }
   const presetOf = id => data.levels.find(level => level.id === id)?.permissions;
   const chosenLevel = () => [...levelControls].find(([, control]) => control.checked)?.[0] || 'read';
+  const taskModes = element('fieldset', '', 'feishu-level-choices');
+  const selectedTaskMode = () => taskModes.querySelector('input:checked').value;
+  const fillTaskMode = mode => {
+    taskModes.replaceChildren(element('legend', '项目任务权限'));
+    const options = [...groupTaskOptions];
+    if (mode === 'custom') options.push(['custom', '保留旧权限', groupTaskScope(data.bindings.find(b => b.chat_id === chat.value))]);
+    for (const [id, title, detail] of options) {
+      const control = document.createElement('input');
+      control.type = 'radio'; control.name = 'binding_task_mode'; control.value = id; control.checked = id === mode;
+      const label = element('label', '', 'check'); label.append(control, ' ' + title);
+      taskModes.append(label, note(detail));
+    }
+  };
   const showItems = () => {
     itemsWrap.hidden = chosenLevel() !== 'custom';
     if (!itemsWrap.hidden && !itemsWrap.childElementCount) { edited = structuredClone(startFrom || {}); itemsWrap.append(bindingItemsEditor(edited, data.permission_items)); }
   };
   for (const [id, control] of levelControls) control.addEventListener('change', () => {
-    if (id !== 'custom') { startFrom = presetOf(id); itemsWrap.replaceChildren(); }
+    if (id !== 'custom') { startFrom = presetOf(id); fillTaskMode(startFrom.project_tasks); itemsWrap.replaceChildren(); }
     showItems();
   });
-  levels.append(itemsWrap,
+  levels.append(taskModes, itemsWrap,
     element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按这一档使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
   form.append(levels);
 
@@ -206,7 +234,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     // A disabled binding is enabled again at its last level; a new one starts at read.
     const level = current?.level || 'read';
     for (const [id, control] of levelControls) control.checked = id === level;
-    startFrom = current?.permissions || presetOf('read'); itemsWrap.replaceChildren(); showItems();
+    startFrom = current?.permissions || presetOf('read'); fillTaskMode(current?.task_mode || 'none'); itemsWrap.replaceChildren(); showItems();
     participation.value = current?.participation || 'mentions';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;
@@ -222,8 +250,14 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     const selected = organizationKind.checked ? { kind: 'organization', organization: organization.value } : { kind: 'repositories', repositories: [...boxes].filter(([, control]) => control.checked).map(([id]) => id) };
     try {
       const level = chosenLevel();
+      const preset = presetOf(level), taskMode = selectedTaskMode();
+      const permissions = { ...(level === 'custom' ? edited : preset) };
+      // The task selector controls creation too. Omitting both fields preserves an older grant on an unrelated edit.
+      delete permissions.delegation;
+      if (taskMode === 'custom') delete permissions.project_tasks;
+      else permissions.project_tasks = taskMode;
       await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', { service_role_id: role.value, scope: selected, participation: participation.value,
-        ...(level === 'custom' ? { permissions: edited } : { level }), enabled: true, expected_revision: expected });
+        ...(preset && preset.project_tasks === taskMode ? { level } : { permissions }), enabled: true, expected_revision: expected });
       if (location.hash.includes('?')) history.replaceState(null, '', '#/identity/feishu');
       await start();
     } catch (err) { status.textContent = bindingSaveError(err); save.disabled = false; }
@@ -280,6 +314,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
       note('项目范围：' + scopeText),
       ...(b.scope.organization && b.enabled ? [note(b.reachable.length ? `可达仓库（${b.reachable.length}）：${b.reachable.join('、')}` : '当前组织范围下暂无可达仓库')] : []),
       note('权限档位：' + bindingLevelSummary(b, data.permission_items)),
+      note('项目任务权限：' + groupTaskScope(b)),
       note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation)),
       note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
       channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); updateOption(b.chat); }),
