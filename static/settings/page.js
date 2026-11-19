@@ -152,32 +152,35 @@ const settingsCards = {
   async installations(request, ref) {
     if (ref) return installationDetail(request, ref);
     // The console already loaded the registered accounts at start (app.js), so the archive view adds no request of its own.
-    const { installations } = await api('/api/installations/archive'), section = settingsCard('GitHub App 安装档案', 'h2'),
+    const { installations } = await api('/api/installations/archive'), section = settingsCard(t('settings.installations.list_title'), 'h2'),
       apps = new Map(accounts.filter(account => account.type === 'github_app').map(account => [String(account.app_id), account]));
-    section.append(note('安装范围与控制台角色分别管理。事件触发者和申请者不代表当前有权管理的人。'));
-    if (!installations.length) section.append(note('尚无安装档案。同步后也会保留零仓库安装和历史证据缺失标记。'));
+    section.append(note(t('settings.installations.list_note')));
+    if (!installations.length) section.append(note(t('settings.installations.list_empty')));
     for (const installation of installations) {
-      const item = settingsCard(`${installation.target.login || '目标待同步'} · 安装 ${installation.installation.installation_id}`), evidence = installation.evidence;
-      const owner = apps.get(String(installation.installation.app_id)), granted = Object.entries(installation.permissions || {}).map(([name, level]) => `${permissionNames[name] || name}（${accessNames[level] || level}）`).join('、');
-      const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未知／未提供';
-      item.append(facts([['所属账号', owner ? `${owner.name}（GitHub App · App ID ${owner.app_id}）` : '未匹配到已登记账号（App 已删除或凭据已撤销）'],
-        ['授权来源', evidence.creation_event_id ? 'GitHub App 安装事件（签名验证）' : '历史证据缺失，授权来源未知'],
-        ['安装授权（GitHub 返回）', granted || '未同步到权限，不能据此判断缺什么'],
-        ['GitHub 目标 ID', installation.target.id || '待同步'], ['目标类型', installation.target.type || '待同步'],
-        ['状态', ({ active: '有效', pending_sync: '等待同步', suspended: '已暂停', deleted: '已卸载' })[installation.status]],
-        ['范围', installation.repository_selection === 'all' ? '全部仓库' : installation.repository_selection === 'selected' ? '指定仓库' : '待同步'],
-        ['完整性', ({ complete: '完整', pending: '等待同步', stale: '待核实', error: '同步失败，保留最近成功快照' })[installation.completeness]],
-        ['安装事件触发者', person(evidence.sender)], ['申请者', person(evidence.requester)], ['批准者', evidence.approval.label],
-        ['历史证据', evidence.history_missing ? '历史证据缺失' : '已保留签名安装事件'],
-        ['最近成功同步', installation.last_success_at ? timestamp(installation.last_success_at) : '尚未成功同步'],
-        ['投影／范围／权限版本', `${installation.projection_version} / ${installation.scope_version} / ${installation.permissions_version}`]]));
-      if (!evidence.requester) item.append(note('未提供申请者不等于从未申请。历史安装查询不能补齐完整批准历史。'));
-      if (installation.error) item.append(note(`同步错误：${installation.error}`));
+      const item = settingsCard(t('settings.installations.item_title', { login: installation.target.login || t('settings.installations.target_pending'), id: installation.installation.installation_id })), evidence = installation.evidence;
+      const owner = apps.get(String(installation.installation.app_id)), granted = installationGrantText(installation.permissions);
+      const person = value => installationPerson(value, 'person_unknown');
+      item.append(facts([[t('settings.installations.fact_account'), owner ? t('settings.installations.account_app', { name: owner.name, app: owner.app_id }) : t('settings.installations.account_unmatched')],
+        [t('settings.installations.fact_source'), evidence.creation_event_id ? t('settings.installations.source_event') : t('settings.installations.source_missing')],
+        [t('settings.installations.fact_granted'), granted || t('settings.installations.permissions_missing')],
+        [t('settings.installations.fact_target_id'), installation.target.id || t('settings.installations.scope_pending')],
+        [t('settings.installations.fact_target_type'), installation.target.type || t('settings.installations.scope_pending')],
+        [t('settings.installations.fact_status'), installationStatusName(installation.status)],
+        [t('settings.installations.fact_scope'), installationScopeName(installation.repository_selection)],
+        [t('settings.installations.fact_completeness'), installationCompletenessName(installation.completeness)],
+        [t('settings.installations.fact_sender'), person(evidence.sender)], [t('settings.installations.fact_requester'), person(evidence.requester)],
+        [t('settings.installations.fact_approver'), evidence.approval.label],
+        [t('settings.installations.fact_evidence'), evidence.history_missing ? t('settings.installations.evidence_missing') : t('settings.installations.evidence_kept')],
+        [t('settings.installations.fact_last_sync'), installation.last_success_at ? timestamp(installation.last_success_at) : t('settings.installations.never_synced')],
+        [t('settings.installations.fact_versions'), t('settings.installations.versions_value', {
+          projection: installation.projection_version, scope: installation.scope_version, permissions: installation.permissions_version })]]));
+      if (!evidence.requester) item.append(note(t('settings.installations.requester_note')));
+      if (installation.error) item.append(note(t('settings.installations.sync_error', { message: installation.error })));
       // Missing permissions are checked against the App that owns this installation, when its credential still exists.
       if (owner?.credentials_configured) item.append(appPermissionCheck(owner));
-      else if (owner) item.append(note('这个 App 的凭据已撤销，无法检查安装缺少哪些权限。'));
+      else if (owner) item.append(note(t('settings.installations.credential_revoked_list')));
       // The detail page reads the same snapshot plus its repositories and events; the list stays a summary.
-      item.append(settingsLink('#/settings/installations/' + [installation.installation.github_host, installation.installation.app_id, installation.installation.installation_id].join('/'), '查看安装详情'));
+      item.append(settingsLink('#/settings/installations/' + [installation.installation.github_host, installation.installation.app_id, installation.installation.installation_id].join('/'), t('settings.installations.view_detail')));
       section.append(item);
     }
     return [section];
