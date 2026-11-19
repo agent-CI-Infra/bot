@@ -323,18 +323,23 @@ test('the bot\'s own pull request and its own pushes are not reviewed again; a p
   const effect = 'e'.repeat(48);
   f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('dev-13','101','development.issue','publishing','dev',6)");
   f.h.store.run("INSERT INTO github_effects VALUES(?,'dev-13','pull_request',?,'inflight',NULL,?)", effect, JSON.stringify({ head: 'bot/issue-6-dev-13', base: 'main' }), `<!-- dept-bot:${effect} -->`);
-  const marked = { ...pr, number: 13, body: `Fixes #6.\n\n<!-- dept-bot:${effect} -->`, head: { sha: head, ref: 'bot/issue-6-dev-13', repo: { id: 101 } } };
-  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: marked, sender: bot }, 'own-open-13'), 0);
+  // The fixture account is a bot account, an ordinary GitHub user: the client recorded whom it acts as when it identified itself.
+  f.h.store.run("INSERT INTO github_actors SELECT account_id,'999','fixture-bot',? FROM repositories WHERE id='101'", new Date().toISOString());
+  const marked = { ...pr, number: 13, user: { id: 999, login: 'fixture-bot', type: 'User' }, body: `Fixes #6.\n\n<!-- dept-bot:${effect} -->`, head: { sha: head, ref: 'bot/issue-6-dev-13', repo: { id: 101 } } };
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: marked, sender: { ...bot, type: 'User' } }, 'own-open-13'), 0);
   assert.deepEqual(events(f.h).map(e => [e.state, JSON.parse(e.result).filtered]), [['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request']]);
   assert.match(events(f.h)[0].reason, /独立检视、测试和 QA/);
   // A copied marker is not the bot's pull request: a person's, or one from another branch, is reviewed as usual (#1104 review).
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 15, user: { id: 5, login: 'alice', type: 'User' } }, sender: alice }, 'copied-by-person'), 1);
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 16, head: { ...marked.head, ref: 'feature/x' } }, sender: bot }, 'copied-other-branch'), 1);
+  const otherApp = { id: 1234, login: 'other-app[bot]', type: 'Bot' };
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 17, user: otherApp }, sender: otherApp }, 'copied-by-app'), 1);
   // Someone else's push to the bot's branch, and a person's own pull request, still reach the Manager.
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', pull_request: { ...pr, head: { sha: 'c'.repeat(40) } }, sender: alice }, 'person-push'), 1);
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...pr, number: 14, body: 'Mine.', user: { id: 5 } }, sender: alice }, 'person-open'), 1);
-  await f.run();
-  assert.equal(f.requests.length, 4);
+  // The dispatcher claims at most four events at a time.
+  await f.run(); await f.run();
+  assert.equal(f.requests.length, 5);
 });
 
 test('a member\'s comment on the bot\'s pull request reaches the Manager as a revision it can start, once per comment (#1104)', async t => {

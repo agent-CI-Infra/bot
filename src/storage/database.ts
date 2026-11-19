@@ -180,6 +180,8 @@ export class Store {
         state TEXT NOT NULL,response TEXT,marker TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS development_candidates(task_id TEXT PRIMARY KEY REFERENCES tasks(id),data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_branches(repository_id TEXT NOT NULL,branch TEXT NOT NULL,task_id TEXT NOT NULL,PRIMARY KEY(repository_id,branch));
+      -- The GitHub account each configured account acts as (#1104), as the client last identified it; webhooks use it to recognize pull requests the bot opened.
+      CREATE TABLE IF NOT EXISTS github_actors(account_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,login TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_pull_requests(repository_id TEXT NOT NULL,number INTEGER NOT NULL,pr_id TEXT NOT NULL,author_id TEXT NOT NULL,
         head_repository_id TEXT NOT NULL,branch TEXT NOT NULL,sha TEXT NOT NULL,source_task_id TEXT NOT NULL,revisions INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(repository_id,number));

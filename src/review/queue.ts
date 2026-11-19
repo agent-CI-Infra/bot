@@ -49,13 +49,15 @@ const botWrote = (payload: any, body: unknown) => payload?.sender?.type === 'Bot
 /**
  * A pull request this bot opened (#1104): its ownership record. An opening can arrive before the record is written; only then
  * the publication marker in its description counts, and only when it matches that publication: the effect that opened a pull
- * request from this branch of this repository, written by a development of this repository, and a bot account as the author.
- * Anyone can copy a marker into a description, but not the bot's branch, repository and account. Null otherwise.
+ * request from this branch of this repository, written by a development of this repository, and the account this
+ * repository's GitHub account acts as (github_actors, written when the client identified itself before publishing) as the
+ * author. Anyone can copy a marker into a description, but not the bot's branch and account. Null otherwise.
  */
 function botPullRequest(store: Store, repositoryId: string, pr: any, opening = false): { author_id: string; source_task_id: string | null } | null {
   const owned = store.get('SELECT author_id,source_task_id FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, Number(pr?.number));
   if (owned) return String(owned.author_id) === String(pr?.user?.id ?? '') ? { author_id: String(owned.author_id), source_task_id: owned.source_task_id ?? null } : null;
-  if (!opening || pr?.user?.type !== 'Bot' || String(pr?.head?.repo?.id ?? '') !== String(repositoryId) || typeof pr?.head?.ref !== 'string') return null;
+  const actor = opening ? store.get('SELECT a.actor_id FROM repositories r JOIN github_actors a ON a.account_id=r.account_id WHERE r.id=?', repositoryId)?.actor_id : null;
+  if (!actor || String(pr?.user?.id ?? '') !== String(actor) || String(pr?.head?.repo?.id ?? '') !== String(repositoryId) || typeof pr?.head?.ref !== 'string') return null;
   for (const match of String(pr?.body ?? '').matchAll(/<!-- dept-bot:([a-f0-9]{48}) -->/g)) {
     const effect = store.get(`SELECT e.task_id,e.request FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE e.id=? AND t.repository_id=? AND e.kind='pull_request'
       AND t.kind LIKE 'development.%'`, match[1]!, repositoryId);
