@@ -31,6 +31,8 @@ export async function publicBoardFixture(t, collector) {
     if (path === '/app/installations/1/access_tokens') { state.tokens++; return send(201, { token: 'ghs_fixture_read', expires_at: '2099-01-01T00:00:00Z', permissions: body.permissions }); }
     if (path === '/repositories/101' || path === '/repos/octo/hello') return send(200, meta());
     if (path.endsWith('/actions/runs')) {
+      const window = new URL(req.url, 'http://fake').searchParams.get('created');
+      if (state.failRunBackfill && window?.startsWith(meta().created_at + '..')) return send(503, {});
       const runs = [...(state.runs ? [{ id: 900, name: 'CI', workflow_id: 12, event: 'push', status: 'completed', conclusion: 'success', head_branch: 'main', head_sha: 'a'.repeat(40), run_attempt: 1, created_at: new Date().toISOString(), run_started_at: new Date().toISOString(), updated_at: new Date().toISOString(), html_url: 'https://github.com/octo/hello/actions/runs/900', pull_requests: [] }] : []), ...state.extraRuns];
       return send(200, { total_count: runs.length, workflow_runs: runs });
     }
@@ -81,4 +83,34 @@ export function scheduledNightly(state, count = 8) {
     state.jobs[id] = [{ name: 'unit', status: 'completed', conclusion: failed ? 'failure' : 'success', started_at: started, completed_at: new Date(Date.parse(started) + (1400 + i * 35) * 1000).toISOString(),
       steps: failed ? [{ name: 'npm test', conclusion: 'failure' }] : [] }];
   }
+}
+
+// Calendar samples include two attempts of the same run on different Shanghai dates.
+// Return midnight two days ago so assertions are independent of the machine's time zone.
+export function calendarRuns(state) {
+  const day = 86400_000, offset = 8 * 3600_000;
+  const midnight = Math.floor((Date.now() + offset) / day) * day - offset - 2 * day;
+  const at = seconds => new Date(midnight + seconds * 1000).toISOString();
+  const run = (id, event, name, seconds, overrides = {}) => ({
+    id, workflow_id: id, event, name, head_branch: 'main', head_sha: 'bcdef0123456789', run_attempt: 1,
+    created_at: at(seconds), run_started_at: at(seconds), updated_at: at(seconds + 74), status: 'completed',
+    conclusion: 'success', html_url: `https://github.com/octo/hello/actions/runs/${id}`, ...overrides,
+  });
+  state.extraRuns.push(
+    run(8100, 'pull_request', 'Build packages', -60, { head_branch: 'topic', conclusion: 'failure' }),
+    run(8100, 'pull_request', 'Build packages', -60, { head_branch: 'topic', run_attempt: 2,
+      run_started_at: at(800), updated_at: at(845) }),
+    run(8102, 'pull_request_target', 'Release checks', 30),
+    run(8101, 'pull_request', 'Lint', 5, { conclusion: 'skipped' }),
+    run(8103, 'merge_group', 'Version checks', 65, { conclusion: 'timed_out' }),
+    run(8104, 'schedule', 'Audit', 70),
+    run(8105, 'workflow_dispatch', 'Audit', 90, { workflow_id: 8104 }),
+    run(8106, 'release', 'Publish packages', 130),
+    run(8107, 'workflow_dispatch', '版本构建', 150, { conclusion: 'cancelled' }),
+    run(8108, 'push', 'Unit tests', 210),
+    run(8109, 'workflow_dispatch', 'Nightly in name only', 260, { head_branch: 'topic' }),
+    run(8110, 'push', 'Unit tests', 310, { head_branch: 'topic', conclusion: 'neutral' }),
+    run(8111, 'workflow_call', 'Build', 350, { status: 'in_progress', conclusion: null }),
+  );
+  return new Date(midnight + offset).toISOString().slice(0, 10);
 }

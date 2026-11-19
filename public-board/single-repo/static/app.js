@@ -512,6 +512,47 @@
     return html;
   }
 
+  const LANE_OUTCOMES = { success: '成功', failure: '失败 / 超时', cancelled: '取消 / 跳过', running: '运行中', other: '其他' };
+  function compactDuration(seconds) {
+    if (seconds == null) return '—';
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}`;
+  }
+
+  function laneMark(run, day, zone) {
+    const state = run.conclusion || run.status;
+    let outcome = 'other';
+    if (run.status && run.status !== 'completed') outcome = 'running';
+    else if (state === 'success') outcome = 'success';
+    else if (['cancelled', 'skipped'].includes(state)) outcome = 'cancelled';
+    else if (['failure', 'timed_out', 'startup_failure'].includes(state)) outcome = 'failure';
+    const seconds = run.duration_s;
+    const detail = [`${run.name || '未知 workflow'} · ${run.event || '未知事件'}`,
+      `${CONCLUSION_NAME[state] || state || '未知'} · 耗时 ${dur(seconds)} · 第 ${run.attempt} 次尝试`,
+      `分支 ${run.branch || '—'} · ${run.sha || '—'}`, `${day} ${run.time}（${zone}）`].join('\n');
+    return link(run.url, esc(compactDuration(seconds)), ` class="ci-run ${outcome}" aria-label="${esc(detail)}"${tip(detail)}`);
+  }
+
+  function runCalendar(lanes) {
+    const { rows, days, zone } = lanes;
+    const axis = days.map(day => `<th scope="col"><time datetime="${esc(day.date)}">${dayLabel(day.date)}</time></th>`).join('');
+    const body = rows.map(row => {
+      const cells = row.days.map((runs, i) => {
+        const day = days[i];
+        if (!day.collected) return `<td class="uncollected" aria-label="未采集"${tip(day.date + ' 未采集')}></td>`;
+        return `<td><div class="ci-stack">${runs.map(run => laneMark(run, day.date, zone)).join('')}</div></td>`;
+      }).join('');
+      return `<tr><th scope="row">${esc(row.label)}</th>${cells}</tr>`;
+    }).join('');
+    const legend = Object.entries(LANE_OUTCOMES).map(([key, name]) => `<span><i class="ci-run ${key}"></i>${name}</span>`).join('')
+      + (days.some(day => !day.collected) ? '<span><i class="uncollected"></i>未采集</span>' : '');
+    return sectionHead('近 30 天运行记录') + `<div class="card ci-calendar"><p>按 ${esc(zone)} 创建日期排列，同一天从上到下由早到晚。每块显示最后一次尝试的耗时与状态。</p>
+      <div class="ci-lanes-scroll"><table dir="ltr" aria-label="近 30 天运行记录"><thead><tr><th scope="col">触发通道</th>${axis}</tr></thead><tbody>${body}</tbody></table></div>
+      <div class="legend">${legend}</div></div>`;
+  }
+
   function renderCI(sec, line) {
     const d = sec?.data, trunk = trunkName(line);
     let html = sectionState(sec, 'CI');
@@ -525,6 +566,7 @@
       { label: `${trunk}中位耗时`, value: dur(d.main.median_duration_s) },
       { label: '采样 run', value: n(d.runs_sampled), sub: `job 明细取最近 ${d.job_history_runs} 次${trunk} run` },
     ]);
+    if (d.lanes) html += runCalendar(d.lanes);
     html += `<div class="grid wide" style="margin-top:12px">
       ${card(`最近一次${trunk} run`, d.latest_main ? `${kv([
         ['Run', `${link(d.latest_main.run.url, esc(d.latest_main.run.title))} ${conclusionBadge(d.latest_main.run.conclusion)}`],
@@ -670,6 +712,17 @@
     });
   }
 
+  // The scrollport starts at its right edge (the newest day). A redraw replaces
+  // the table, so retain the reader's offset even while the CI tab is hidden.
+  let calendarOffset = 0;
+  function restoreCalendarOffset() {
+    const calendar = $('.ci-lanes-scroll');
+    if (calendar?.clientWidth) calendar.scrollLeft = calendarOffset;
+  }
+  document.addEventListener('scroll', ({ target }) => {
+    if (target.classList?.contains('ci-lanes-scroll') && target.clientWidth) calendarOffset = target.scrollLeft;
+  }, true);
+
   function renderTabs() {
     const snap = STATE.snap;
     const render = (id, fn) => { const el = $(`#tab-${id}`); if (el) el.innerHTML = fn(); };
@@ -685,6 +738,7 @@
     safe('prs', () => renderPRs(snap.sections.prs));
     const line = currentLine(snap);
     safe('ci', () => lineBar(snap) + renderCI(lineSection(snap, 'ci'), line) + renderScheduled(lineSection(snap, 'scheduled')));
+    restoreCalendarOffset();
     try { if (window.GSBBoard) window.GSBBoard.onSnapshot(snap); } catch (err) { console.error(err); }
     mountBoard();
     drawTrends();
@@ -800,7 +854,7 @@
   // Browsers throttle timers in background tabs; re-sync as soon as the tab is visible again.
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { clearTimeout(STATE.pollTimer); load(); } });
 
-  window.addEventListener('hashchange', () => { STATE.tab = activeTab(); renderShell(); mountBoard(); document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${STATE.tab}`)); drawTrends(); drawScheduled(); });
+  window.addEventListener('hashchange', () => { STATE.tab = activeTab(); renderShell(); mountBoard(); document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${STATE.tab}`)); restoreCalendarOffset(); drawTrends(); drawScheduled(); });
   // Tooltip layer: any element with data-tip.
   const tipEl = $('#tooltip');
   // Beside an element (for keyboard focus); a trend chart anchors it to its crosshair instead.

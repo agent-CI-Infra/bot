@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
-import { publicBoardFixture } from '../../fixtures/public-board-fixtures.mjs';
+import { calendarRuns, publicBoardFixture } from '../../fixtures/public-board-fixtures.mjs';
 import { PublicBoards } from '../../../dist/public-board/service.js';
 import { testPassword } from '../../fixtures/helpers.mjs';
 
@@ -21,10 +21,10 @@ test('verified deliveries update both public contracts through the real local co
   assert.equal(snapshot.repository.name, 'octo/hello');
   assert.equal(snapshot.repository.stars, 1);
   assert.ok(snapshot.sections.ci);
-  // Generic data only (#938): no gate lanes, test reports or coverage, whatever the repository's CI looks like.
-  assert.equal(snapshot.schema_version, 4);
+  // Generic data only (#938): no gate verdicts, test reports or coverage, whatever the repository's CI looks like.
+  assert.equal(snapshot.schema_version, 5);
   assert.deepEqual(Object.keys(snapshot.sections).sort(), ['ci', 'issues', 'ops', 'prs', 'repo', 'scheduled']);
-  assert.equal(snapshot.sections.ci.data.lanes, undefined); assert.equal(snapshot.sections.ci.data.gates, undefined);
+  assert.equal(snapshot.sections.ci.data.gates, undefined);
   assert.equal((await get('/boards/octo/hello/data/history/manifest.json')).status, 200);
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos.map(r => r.fullName), ['octo/hello']);
   // The gate page's data and the E2E records are gone with them.
@@ -56,6 +56,36 @@ test('verified deliveries update both public contracts through the real local co
   assert.equal(h.store.get('SELECT count(*) n FROM installed_repositories WHERE private=1').n, 2);
   assert.equal((await get('/boards/octo/hello/data/snapshot.json')).status, 404);
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos, []);
+});
+
+test('the Actions calendar groups every trigger, keeps reruns on their creation day and distinguishes uncollected days', async t => {
+  const { boards, state, hook, get } = await publicBoardFixture(t);
+  state.runs = false;
+  state.failRunBackfill = true;
+  const date = calendarRuns(state);
+  await hook('calendar'); await boards.drain();
+  const read = async () => (await get('/boards/octo/hello/data/snapshot.json')).data.sections.ci.data.lanes;
+  const { zone, days, rows } = await read();
+  assert.equal(zone, 'Asia/Shanghai');
+  assert.equal(days.length, 30);
+  const i = days.findIndex(day => day.date === date);
+  assert.equal(i, 27);
+  assert.ok(days.slice(0, i - 1).every(day => !day.collected));
+  assert.ok(days.slice(i - 1).every(day => day.collected));
+  const byLane = Object.fromEntries(rows.map(row => [row.key, row.days]));
+  const ids = Object.fromEntries(rows.map(row => [row.key, row.days.flat().map(run => run.id)]));
+  assert.deepEqual(ids, { pr: [8100, 8101, 8102], merge_queue: [8103], daily: [8104, 8105],
+    release: [8106, 8107], main: [8108, 8109], other: [8110, 8111] });
+  assert.deepEqual(byLane.pr[i].map(run => run.time), ['00:00:05', '00:00:30']);
+  const [retry] = byLane.pr[i - 1];
+  assert.deepEqual([retry.name, retry.attempt, retry.conclusion, retry.duration_s, retry.time, retry.sha],
+    ['Build packages', 2, 'success', 45, '23:59:00', 'bcdef01']);
+  assert.equal(byLane.other[i][1].duration_s, null);
+  assert.ok(!state.requests.some(r => /actions\/runs\/(8100|8103|8111)\/artifacts/.test(r.path)));
+  // Once the scan reaches repository creation, the earlier empty days are known.
+  state.failRunBackfill = false;
+  await hook('completed-backfill'); await boards.drain();
+  assert.ok((await read()).days.every(day => day.collected));
 });
 
 test('installation seeds initial collection and repositories without CI still get their community data and board', async t => {
@@ -231,5 +261,5 @@ test('collecting again after the upgrade removes what the gate, coverage and E2E
       for (const field of ['tests', 'coverage', 'reports_status']) assert.equal(field in run, false, `${file}: ${field}`);
     }
   }
-  assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.schema_version, 4);
+  assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.schema_version, 5);
 });

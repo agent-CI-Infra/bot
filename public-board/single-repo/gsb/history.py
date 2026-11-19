@@ -19,7 +19,7 @@ def read_json(path, default):
 # Searchable summary of each record. Runs keep what places them on a branch
 # line (trigger, linked PRs, target, head repository); PRs keep their branches.
 INDEX_FIELDS = ("id", "number", "attempt", "tag", "name", "title", "state", "status", "conclusion", "channel", "workflow_id",
-                "event", "pull_requests", "base_branch", "head_repo", "head", "base", "head_sha", "started_at", "author",
+                "event", "pull_requests", "base_branch", "head_repo", "head", "base", "head_sha", "started_at", "duration_s", "author",
                 "labels", "assignees", "created_at", "updated_at", "closed_at", "merged_at", "branch", "sha", "url")
 
 
