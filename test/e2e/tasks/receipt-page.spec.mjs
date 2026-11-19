@@ -17,6 +17,7 @@ const open = async (page, f, id) => { await page.goto(f.h.admin + '/#/management
 
 test('a receipt opens as its own page with the project, the change and the recorded diff', async ({ page }) => {
   const f = await managementFixture(), errors = [], reads = [], writes = [];
+  const projects = Promise.withResolvers();
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => {
     const url = new URL(request.url());
@@ -27,15 +28,19 @@ test('a receipt opens as its own page with the project, the change and the recor
     const prompt = 'Inspect evidence and cite the original logs.';
     const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt })).value;
     expect(receipt.state).toBe('succeeded');
+    // A person can open the receipt while sign-in is still reading the project list.
+    await page.route('**/api/repositories', async route => { await projects.promise; await route.continue(); });
     await login(page, f);
     const panel = await open(page, f, receipt.id);
     await expect(panel).toBeVisible();
     await expect(panel.getByRole('heading', { name: '命令回执', exact: true })).toBeVisible();
-    // State, operation and the project by the name the console already loaded — not the bare id in the receipt.
+    // The receipt arrives first. The later project list supplies the name and link without a second receipt read.
     await expect(panel.locator('[data-receipt-state]')).toHaveText('已执行');
     await expect(panel).toContainText('更新工作配置');
+    projects.resolve();
     await expect(panel).toContainText('agent-test-zone/admin-fixture-101');
     await expect(panel).not.toContainText('项目 101');
+    await expect(panel.getByRole('link', { name: '打开项目' })).toHaveAttribute('href', '#/projects/101/basic');
     // The initiator of this console command is the person reading it; a receipt from someone else says so instead.
     await expect(panel.locator('[data-receipt-initiator]')).toContainText('你');
     // What the command named and what it wrote, structurally rather than as one JSON blob.
@@ -61,7 +66,7 @@ test('a receipt opens as its own page with the project, the change and the recor
     await expect(page.locator('#management-receipt-page')).toContainText('agent-test-zone/admin-fixture-101');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
-  } finally { await f.close(); }
+  } finally { projects.resolve(); await f.close(); }
 });
 
 test('a failed command says why it did not run instead of showing the bare server code', async ({ page }) => {

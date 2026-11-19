@@ -69,7 +69,13 @@ function receiptSourceLine(receipt) {
 async function renderManagementReceiptPage(id) {
   const page = managementReceiptPage(), nav = page.querySelector('.project-nav'), content = page.querySelector('.project-content');
   // A completed render of this id is already on screen: show it instead of reading the same receipt again.
-  if (receiptShownId === id) { page.hidden = false; return; }
+  if (receiptShownId === id) {
+    // Boot may have finished loading the project names since this receipt was rendered.
+    const projectLine = content.querySelector('[data-receipt-project]');
+    if (projectLine) syncReceiptProject(projectLine);
+    page.hidden = false;
+    return;
+  }
   page.hidden = false;
   const back = element('a', '返回管理助手'); back.href = consolePageAddress('management'); nav.replaceChildren(back);
   content.replaceChildren(element('p', '正在加载命令回执…', 'muted'));
@@ -104,6 +110,14 @@ async function renderManagementReceiptPage(id) {
   receiptShownId = id;
   window.scrollTo(0, 0);
 }
+function syncReceiptProject(line) {
+  const id = line.dataset.receiptProject;
+  const project = (typeof repositories === 'undefined' ? [] : repositories).find(row => String(row.id) === id);
+  if (project && line.firstChild?.textContent === project.full_name && line.querySelector('a')) return;
+  line.textContent = project ? project.full_name : `项目 ${id}`;
+  if (project) line.append(' · ', managementReceiptLink('#/projects/' + id + '/basic', '打开项目'));
+}
+
 function managementReceiptBody(receipt) {
   const operation = managementOperationLabels[receipt.operation] ?? receipt.operation, nodes = [];
   // The same state machine the transcript card uses: the page never restates a state the console can already name.
@@ -114,9 +128,9 @@ function managementReceiptBody(receipt) {
   head.append(element('h1', '命令回执'), state); nodes.push(head);
   nodes.push(element('p', explanation, 'management-receipt-page-note'));
   // The project is named from the list the console already loaded; the initiator is only called "you" when it is you.
-  const project = (typeof repositories === 'undefined' ? [] : repositories).find(row => String(row.id) === String(receipt.project_id));
-  const projectLine = element('span', project ? project.full_name : `项目 ${receipt.project_id}`);
-  if (project) projectLine.append(' · ', managementReceiptLink('#/projects/' + receipt.project_id + '/basic', '打开项目'));
+  const projectLine = element('span', '');
+  projectLine.dataset.receiptProject = String(receipt.project_id);
+  syncReceiptProject(projectLine);
   const initiator = element('span', ''); initiator.dataset.receiptInitiator = '';
   initiator.textContent = me && String(receipt.principal_id) === String(me.id)
     ? '你（当前登录用户） · ' + receipt.principal_id
