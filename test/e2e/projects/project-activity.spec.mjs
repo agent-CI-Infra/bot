@@ -37,7 +37,14 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
     await expect(card('最近任务').getByRole('button')).toHaveCount(8); // Four completed plus four active/queued tasks.
     mkdirSync('.tmp/project-activity', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    const workBox = await card('正在执行 1／1').boundingBox(), queueBox = await card('排队任务 3').boundingBox(), historyBox = await card('最近任务').boundingBox();
+    // #1124: the activity panel is rebuilt every five seconds and a rebuild replaces the card nodes, so a read that
+    // spans one gets null instead of a geometry. Ask for a rebuild, then measure the nodes that were there before it:
+    // that is exactly what one sampling window sees.
+    const titles = ['正在执行 1／1', '排队任务 3', '最近任务'];
+    const stale = await Promise.all(titles.map(title => card(title).elementHandle()));
+    await page.evaluate(() => { void refreshProjectStatus(renderToken); });
+    await expect.poll(() => Promise.all(stale.map(handle => handle.evaluate(node => node.isConnected))), { timeout: 10000 }).toEqual([false, false, false]);
+    const [workBox, queueBox, historyBox] = await Promise.all(stale.map(handle => handle.boundingBox()));
     expect(queueBox.x).toBeGreaterThan(workBox.x + workBox.width); expect(historyBox.width).toBeGreaterThan(workBox.width * 1.9);
     expect(historyBox.y).toBeGreaterThan(queueBox.y + queueBox.height);
     await page.screenshot({ path: '.tmp/project-activity/desktop.png', fullPage: true });
