@@ -184,7 +184,7 @@ test('a super administrator choosing a restricted shared model grants it to the 
   // Shared models serve every project unless restricted (#850); restricted to none, 101 may not choose it.
   await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: [] });
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 400);
-  assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id, test_command: 'npm test', max_revisions: 2 })).value.policy.model_id, shared.id);
+  assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id, test_command: 'npm test' })).value.policy.model_id, shared.id);
   assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', shared.id, '101'));
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { review_pr_updates: false })).value.policy.review_pr_updates, 0);
 });

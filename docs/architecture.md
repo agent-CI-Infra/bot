@@ -106,16 +106,17 @@ PR 新提交（#770）不再让正在做的任务作废。推送事件交给 Man
 
 PR 的标签由仓库自己的规则决定（#845）：仓库的贡献指南或 skill（例如 `create-github-pr` 要求选一个 `release:*` 类别）告诉 agent 选哪个，`create_pull_request`（以及角色团队和普通任务的软件交付 `submit_delivery`）可以带可选的 `labels`。规则与检视的分类标签相同（`src/review/labels.ts`）：每个标签必须是仓库已有的，不能是保留标签（`agent/`、`pr/`、`gate/` 开头，`blocker`、`priority/critical`），也不能是 bot 自己的检视标签和开发标签，最多 8 个。不满足时在发布任何分支之前以工具错误 `pull_request_labels_refused` 返回，列出每个被拒的标签和原因，agent 改正后再调用。PR 创建或更新之后，控制面对照仓库和 PR 当前的标签再筛一次后加上：已有的不重复加，人在同一类（`type/…` 这类前缀）已经选过的不覆盖；GitHub 拒绝加标签时只在任务日志记 `pr_labels` 和错误码，不影响已发布的 PR。平台代码和提示词不针对任何仓库。
 
-webhook 不直接创建开发任务，开发只由 Manager 按上述依据创建。同一 Issue 已有排队、重试、等待配置／环境／权限／PR head／发布或执行中的 `development.issue` 时，不再创建第二条开发任务。PR 对话里的 `@` 和其他更新只再次检视当前 head，不直接启动开发或推送提交；入队后 head 变化时，这条评论检视转到新 head，并因此同时算作这个 head 的检视。bot 自己创建的 PR 例外见下一段：检视采纳的修改要求会启动一次修订。
+webhook 不直接创建开发任务，开发只由 Manager 按上述依据创建。同一 Issue 已有排队、重试、等待配置／环境／权限／PR head／发布或执行中的 `development.issue` 时，不再创建第二条开发任务。PR 对话里的 `@` 和其他更新只再次检视当前 head，不直接启动开发或推送提交；入队后 head 变化时，这条评论检视转到新 head，并因此同时算作这个 head 的检视。bot 自己创建的 PR 例外见下一段：上面的意见可以直接交给修订。
 
 
-别人的 PR 只检视，不产生向作者分支提交的任务；分支名或机器人名称不能代替归属记录。由本系统创建的 PR 保存不可变 PR ID、作者、head 仓库、分支和发布 SHA，只有这些身份仍匹配、策略允许且确有修改项时才在原分支跟进。跟进有三种来源：
+别人的 PR 只检视，不产生向作者分支提交的任务；分支名或机器人名称不能代替归属记录。由本系统创建的 PR 保存不可变 PR ID、作者、head 仓库、分支和发布 SHA，只有这些身份仍匹配、策略允许时才在原分支跟进（#1104）：
 
-- **成员的要求**：检视 bot 的 PR 时，模型判断每条人的评论、检视和行内评论是要求修改还是只是提问；要照做的修改写成可执行、在目标内、不需要人决定的 finding，并用 `requested_in`（`comment`／`review`／`review_comment` 和 GitHub ID）指出是哪条评论要求的。可以指出的只有这次检视回应的评论：每条更新触发记录都带来源评论的类型、ID 和发言人（`source`、`actor_id`），检视 bot 自己的 PR 时作为 `discussion_requests` 交给模型；它们来自验签的 webhook，入队时已限定为 `OWNER`、`MEMBER`、`COLLABORATOR` 或其他机器人。控制面不再用 API 复核 `author_association`：安装令牌看不到私有的组织成员身份，会把成员答成 `CONTRIBUTOR`；API 只用来读取评论原文。不是本 bot 写的、在列表里的请求才排一个 `development.pr`。人的要求不占修订预算、不设上限；每条评论只促成一次修订（记在 `bot_pr_requests`）。人触发的检视找到了要改的地方却没有写 `requested_in` 时，这些修改算作回应触发它的那条评论；其他机器人的评论不这样代替。
-- **其他检视机器人的意见**：同样用 `requested_in` 指出，作者是 `type: Bot` 且不是本 bot；模型先判断意见是否成立，只采纳合理的。每个机器人对同一个 PR 最多促成一次修订，避免两个机器人互相触发。
-- **bot 自己的检视**：只有新 head 的检视（不是评论或更新触发的检视；评论或更新触发的检视途中接收过推送时也算）里自己的可执行意见会启动修订，默认最多 3 轮，可在 policy 的 max_revisions 中设置 0–10；Issue 的再次检视要继续推进这个 Issue 已有的 bot PR 时也计入同一预算，用完后不再自动开发。因前两种来源而修订时，同一次检视里 bot 自己的可执行意见一起修改。
+- **不再单独检视**：开发在开 PR 之前已经过独立检视 agent、仓库测试和独立 QA，所以 bot 自己开的 PR（`pull_request.opened`／`ready_for_review`）和 bot 自己推的提交（`synchronize` 的发送者是 PR 作者，即本 bot）在入口过滤为 `bot_own_pull_request`，不交给 Manager。识别依据是 `bot_pull_requests` 的归属记录；PR 打开事件先于归属记录到达时，看 PR 正文里发布记录（`github_effects`，种类 `pull_request`）的标记。别人推到 bot 分支上的提交照常检视。
+- **意见直接交给 Manager**：成员（`OWNER`、`MEMBER`、`COLLABORATOR`）或其他检视机器人在 bot 的 PR 上的评论、检视和行内评论，除了「检视」「通用回复」之外，还给 Manager 一个「修订 bot PR」（`development.pr`）的选项，带上这条意见：类型、GitHub ID、作者、作者类型、链接和原文（`revision.requests`），续接时也可以交给正在运行的修订（`merge.kinds` 含 `development.pr`）。它们来自验签的 webhook，入队时已限定为上述作者；控制面不再用 API 复核 `author_association`（安装令牌看不到私有的组织成员身份）。Manager 决定修订、回复、请检视或忽略；修订按这条意见的类型和 ID 去重，同一条意见只修订一次（记在 `bot_pr_requests`）。同一个 PR 同时只有一个修订任务，已有修订时建新修订会被拒绝（`revision_active`），原因返回给 Manager，由它续接正在跑的那一个。
+- **其他检视机器人防循环**：只由其他机器人意见发起的修订，同一个机器人在同一个 PR 上已经连续促成 3 次（中间有人的意见被修订就重新计数）时拒绝（`other_bot_revision_limit`），原因返回给 Manager。
+- **有人要求的检视**：人或 Manager 要求检视 bot 的 PR 时照常检视；发布的检视里有可以修改的问题（可执行、在目标内、不需要人决定）时，`review.published` 事件把「修订 bot PR」交给 Manager，带上这些问题，不设修订预算：bot 的推送不再触发检视，所以不会循环。
 
-修订任务的上下文带 `revision_requests`（作者、类型、链接和评论原文），只有因这些要求而修订时，推送后不计入修订轮数。同一个 PR 同时只有一个修订任务；已有修订在排队或执行时，新的要求记为待处理（`pending`），任务日志记 `revision_deferred`，之后对这个 PR 的检视会把它们放进 `discussion_requests` 再采纳。不另开 PR，不强推，不自动合并。
+修订任务的上下文带 `revision_requests`（作者、类型、链接和意见原文）和 `actionable_findings`（来自检视时），目标沿用打开 PR 的那次开发。修订照常走开发 → 独立检视 → 测试 → QA，推送后控制面在 PR 上发评论，@ 提意见的人并附修订说明；没有改动时（提问、或修订认为意见不对）也把说明发到 PR 上回答他们。不另开 PR，不强推，不自动合并。项目设置里原来的修订轮数（`max_revisions`）已经取消。
 
 ## 仓库只读探索
 

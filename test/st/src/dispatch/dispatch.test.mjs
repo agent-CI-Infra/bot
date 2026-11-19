@@ -305,6 +305,65 @@ test('the built-in rule for clear Issues is a project_rule basis when a review c
   assert.match(system, /How to change the code, which tests to run and which existing labels to use still follow the repository's own documents and skills\./);
 });
 
+// The bot's own pull request #12 for Issue #5 (#1104), opened by the development 'dev' with its brief.
+function botPullRequest(f) {
+  f.h.store.run("UPDATE policies SET development_enabled=1,capability_ceiling='develop' WHERE repository_id='101'");
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number) VALUES('dev','101','development.issue','pr_opened','dev',?,5)",
+    JSON.stringify({ manager: { brief: { goal: 'Keep the last CRLF line.' } } }));
+  f.h.store.run("INSERT INTO bot_pull_requests VALUES('101',12,'pr-12','999','101','bot/issue-5-dev',?,'dev',0)", head);
+  return { number: 12, state: 'open', draft: false, title: 'Keep the last CRLF line', body: 'Fixes #5.', user: { id: 999, login: 'fixture-bot[bot]', type: 'Bot' }, head: { sha: head } };
+}
+
+test('the bot\'s own pull request and its own pushes are not reviewed again; a person\'s push to its branch is (#1104)', async t => {
+  const f = await fixture(t), pr = botPullRequest(f), bot = { type: 'Bot', login: 'fixture-bot[bot]', id: 999 }, next = 'b'.repeat(40);
+  f.state.decide = () => ({ decision: 'ignore', reason: 'fixture' });
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: pr, sender: bot }, 'own-open'), 0);
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', pull_request: { ...pr, head: { sha: next } }, before: head, after: next, sender: bot }, 'own-push'), 0);
+  // An opening that arrives before the ownership record is recognized by the publication marker in its description.
+  const effect = 'e'.repeat(48);
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('dev-13','101','development.issue','publishing','dev',6)");
+  f.h.store.run("INSERT INTO github_effects VALUES(?,'dev-13','pull_request','{}','sent',NULL,?)", effect, `<!-- dept-bot:${effect} -->`);
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...pr, number: 13, body: `Fixes #6.\n\n<!-- dept-bot:${effect} -->` }, sender: bot }, 'own-open-13'), 0);
+  assert.deepEqual(events(f.h).map(e => [e.state, JSON.parse(e.result).filtered]), [['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request']]);
+  assert.match(events(f.h)[0].reason, /独立检视、测试和 QA/);
+  // Someone else's push to the bot's branch, and a person's own pull request, still reach the Manager.
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', pull_request: { ...pr, head: { sha: 'c'.repeat(40) } }, sender: alice }, 'person-push'), 1);
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...pr, number: 14, body: 'Mine.', user: { id: 5 } }, sender: alice }, 'person-open'), 1);
+  await f.run();
+  assert.equal(f.requests.length, 2);
+});
+
+test('a member\'s comment on the bot\'s pull request reaches the Manager as a revision it can start, once per comment (#1104)', async t => {
+  const f = await fixture(t), pr = botPullRequest(f);
+  const comment = (id, body) => ({ action: 'created', sender: alice, issue: { number: 12, state: 'open', title: pr.title, pull_request: {}, user: { id: 999 } },
+    comment: { id, body, author_association: 'MEMBER', html_url: `https://github.invalid/pull/12#issuecomment-${id}`, user: { login: 'alice', type: 'User' } } });
+  let seen = null;
+  f.state.decide = input => { seen = input; return { decision: 'create', option_ids: ['development'], reason: '成员要求修改错误信息' }; };
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', comment(301, 'Please name the SKU in the error.'), 'c-301', pr), 1);
+  await f.run();
+  // Beside a review and a reply, the Manager could revise the pull request; no review stands in between.
+  assert.equal(seen.event.facts.bot_pull_request, true);
+  // The Manager prompt says what such a comment calls for, and that the bot's own pull requests are not reviewed again.
+  const system = f.requests[0].messages[0].content.replace(/\s+/g, ' ');
+  assert.match(system, /The bot's own pull requests and its own pushes do not come here/);
+  assert.match(system, /on the bot's own pull request \(`facts\.bot_pull_request`\) \| judge what it asks\. A change to make: create \*\*Follow up bot PR\*\*/);
+  assert.equal(seen.work.create.find(o => o.id === 'development')?.work, 'development.pr'); assert.ok(seen.work.create.some(o => o.id === 'review'));
+  const revision = tasks(f.h).find(task => task.kind === 'development.pr');
+  assert.ok(revision, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
+  assert.deepEqual(JSON.parse(revision.input).revision.requests.map(r => [r.type, r.id, r.author, r.author_type, r.body]),
+    [['comment', '301', 'alice', 'User', 'Please name the SKU in the error.']]);
+  assert.equal(f.h.store.get("SELECT state,task_id FROM bot_pr_requests WHERE source_id='301'").task_id, revision.id);
+  // While it runs, another comment: a second revision is refused with the reason, and the Manager continues the running one.
+  f.state.decide = (input, round) => round === 0 ? { decision: 'create', option_ids: ['development'], reason: '再改一处' }
+    : { decision: 'continue', option_ids: [input.options.continue.find(c => c.kind === 'development.pr').id], reason: '交给正在跑的修订' };
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', comment(302, 'Also log it.'), 'c-302', pr), 1);
+  await f.run();
+  const event = events(f.h).at(-1);
+  assert.deepEqual([event.decision, JSON.parse(event.refusals).map(r => r.code)], ['continue', ['revision_active']]);
+  assert.equal(tasks(f.h).filter(task => task.kind === 'development.pr').length, 1);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?', revision.id).n, 1);
+});
+
 test('filtered events never reach the Manager, and each keeps why', async t => {
   const f = await fixture(t);
   f.state.decide = () => assert.fail('the Manager must not be asked');

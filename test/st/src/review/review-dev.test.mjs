@@ -256,7 +256,7 @@ test('a later attempt gets the candidate of an earlier one as references, not th
   assert.ok(raw.length<120000,'the prompt does not grow with the earlier attempt: '+raw.length);
 });
 
-test('active Issue development blocks another task, and a PR comment review revises only for requests it took on',async t=>{
+test('active Issue development blocks another task, and a review someone asked for on the bot PR offers one revision at a time',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true});
   for(const status of ['queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication','running','preparing','implementing','validating','publishing','result_ready']){
@@ -268,9 +268,9 @@ test('active Issue development blocks another task, and a PR comment review revi
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('source','101','development.issue','succeeded','source',?)",JSON.stringify({review:{implementation_goal:'Fix the bug'}}));
   engine.owned=()=>({source_task_id:'source',revisions:0});
   const task={id:'review',repository_id:'101',kind:'review.pr',object_number:7,head_sha:'c'.repeat(40),source_delivery_id:null};
-  // A mention reviews again; the bot's own findings from that review never start a revision by themselves.
+  // A review a mention asked for offers what it found as a revision (#1104); a second one waits for that revision to end.
   engine.queueDevelopment({},task,{object:{},comment:{id:501,body:'@bot'}},result,true);
-  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,0);
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,1);
   engine.queueDevelopment({},task,{object:{}},result,true);
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,1);
 });

@@ -40,8 +40,8 @@ import { assigneesOf, developmentReady } from '../review/queue.js';
 import { issueClaims } from '../review/claims.js';
 import { dueProgress, milestoneToolName, reportMilestone, settleProgress, startProgress } from '../review/progress.js';
 import { taskBasis } from '../dispatch/basis.js';
-import { actionableFinding, developmentGoal, discussionRequests, developmentApproved,
-  ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, revisionRequests, type DevelopmentOffer, type GoAhead, type RevisionRequest } from '../review/development.js';
+import { actionableFinding, developmentGoal, developmentApproved,
+  ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, type DevelopmentOffer, type GoAhead } from '../review/development.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
@@ -73,8 +73,7 @@ import '../releases/observe.js';
 import '../releases/notes.js';
 import '../actions/analysis.js';
 
-export { actionableFinding, discussionRequests } from '../review/development.js';
-export type { RevisionRequest } from '../review/development.js';
+export { actionableFinding } from '../review/development.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 // The policy a task resolves its rules with, read after the rule fetch: a project's pending .bot/ import (#935) runs in
@@ -519,6 +518,8 @@ export class TaskEngine {
         this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify({...JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data),published}),id);
         return {pr:published};
       };
+      // A revision people asked for names their comments, so each person sees what answered them (#1104).
+      const requestedBy=()=>(input.revision?.requests||[]).map((r:any)=>`@${r.author} (${r.url||r.type+' '+r.id})`).join(', ');
       const publishDevelopment=async()=>{
         update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
@@ -530,7 +531,8 @@ export class TaskEngine {
         integratedPublication(this.store,task,commit);
         // An Issue's development reports its pull request in its status comment (#1047); a revision of the bot's own pull
         // request still says so on that pull request.
-        if(task.kind!=='development.issue')await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
+        const asked=requestedBy();
+        if(task.kind!=='development.issue')await publisher.discussion('development-result',`${asked?`Revised as requested by ${asked}.\n\n`:''}Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
         update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         await issueProgress();
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
@@ -577,10 +579,9 @@ export class TaskEngine {
           if(owned){
             const source=this.store.get('SELECT input FROM tasks WHERE id=?',owned.source_task_id);
             implementationGoal=source?developmentGoal(JSON.parse(source.input)):'';
-            if(development){
-              actionableFindings=(input.review?.findings||[]).filter(actionableFinding);
-              if(!implementationGoal||!actionableFindings.length)stop('revision_scope_unconfirmed','needs_replan',`PR #${task.object_number} 缺少已确认的实现目标或可执行检视意见。`);
-            }
+            // A revision carries what to change: the requests people or other review bots made on the pull request, or the
+            // actionable findings of a review someone asked for (#1104). The Manager chose to revise; its brief may add more.
+            if(development)actionableFindings=(input.review?.findings||[]).filter(actionableFinding);
           }
         }
         if(input.contract?.completeness==='explicit')implementationGoal=input.contract.goal;
@@ -680,10 +681,7 @@ export class TaskEngine {
             // A finished review's next round (#770): what it continues and how to see what changed since. The earlier round
             // is summarized here; a session that still holds it is told so at its start (the conversation's boundary below).
             ...(review&&Number(input.round)>1?{continuation:continuationContext(input,ref.object.sha,pr,false)}:{}),
-            // On a pull request this bot opened: the comments, reviews and inline comments this review answers. Each change the
-            // review takes on from one of them names it in requested_in.
-            ...(review&&pr&&this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number)
-              ?{discussion_requests:discussionRequests(this.store,task,input)}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
+            ...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer),...managerContext(input)}};
@@ -793,6 +791,9 @@ export class TaskEngine {
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
           if(snapshot.tree_sha===input.snapshot_tree){
             const checked=await accept({...args,status:'no_changes',tree_sha:snapshot.tree_sha});if(checked.error)return checked;
+            // A revision that changes nothing (a question, a request it judged wrong) still answers the people who asked (#1104).
+            if(development&&task.kind==='development.pr'&&requestedBy())await new Publisher(this.store,github,task,validate,undefined,log)
+              .discussion('development-result',`Answering ${requestedBy()}: no code change.\n\n${String(args.summary||'')}`);
             if(development)update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }
@@ -899,13 +900,10 @@ export class TaskEngine {
             // Whether someone else has taken the Issue on is the Manager's judgement (#1047); it gets the facts as they are now.
             if(approved){const issue=seen??await github.object(task.kind,task.object_number).catch(()=>({number:task.object_number}));approved={...approved,claims:await issueClaims(github,this.store,issue,{comments:true})};}
           }
-          // Who wrote the comments a review of the bot's own pull request took on is read from GitHub before the transaction.
-          const requests=await this.revisionRequests(github,task,result,input).catch(()=>[]);
-          if(requests.length)log({type:'revision_requests',requests:requests.map(r=>({type:r.type,id:r.id,author:r.author,author_type:r.author_type,url:r.url}))});
           this.store.transaction(()=>{
             // The cursor now says what the published result covers: the updates after it start the next round (#770).
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null,review_update_cursor:covered});
-            this.queueDevelopment(github,task,input,result,approved,requests);
+            this.queueDevelopment(github,task,input,result,approved);
           });
         }
         else {
@@ -1020,8 +1018,7 @@ export class TaskEngine {
   owned(github:GitHub,task:Row,pr:any):Row{return ownedPullRequest(this.store,github,task,pr);}
   label(task:Row){return developmentLabelForTask(this.store,task);}
   async developmentApproved(github:GitHub,task:Row):Promise<GoAhead|null>{return developmentApproved(this,github,task);}
-  async revisionRequests(github:GitHub,task:Row,result:any,input:any={}):Promise<RevisionRequest[]>{return revisionRequests(github,task,result,input);}
-  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved:DevelopmentOffer|null=null,requests:RevisionRequest[]=[]){return queueDevelopment(this,github,task,input,result,approved,requests);}
+  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved:DevelopmentOffer|null=null){return queueDevelopment(this,github,task,input,result,approved);}
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
     const coordination=coordinationApi(this.store,user,method,url,input);if(coordination!==undefined)return coordination;
     const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;

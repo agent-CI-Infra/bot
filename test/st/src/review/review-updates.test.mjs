@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { recordRevision } from '../../../../dist/github/publisher.js';
-import { pullRequestNeeded, queueWebhook, updateTrigger } from '../../../../dist/review/queue.js';
+import { enqueueRefusal, otherBotRevisionLimit, pullRequestNeeded, queueWebhook, updateTrigger } from '../../../../dist/review/queue.js';
 import { emptyRepositoryFixture } from '../../../fixtures/empty-repository-helpers.mjs';
 
 // Reviews of what a person changes after an Issue or PR was opened: edits, comments, reviews and replies to review comments.
@@ -134,115 +134,56 @@ test('PR comments, reviews, replies to review comments and description edits rev
   assert.equal(updateTrigger('issue_comment', { action: 'created', sender: user, ...conversation }).kind, 'review.pr');
 });
 
-// A bot pull request, the Issue development that opened it, and a GitHub that holds the text of the comments a review cites.
-// `offered` are the comments a review answered, as the queue lets them in: members' and other bots', never strangers'.
-async function botPullRequest(t, maxRevisions = 1) {
+// A bot pull request and the Issue development that opened it (#1104): what a review of it found that the bot can change is
+// offered to the Manager as a revision, with no budget; people's comments reach the Manager directly (dispatch.test.mjs).
+async function botPullRequest(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true, max_revisions: maxRevisions });
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number) VALUES('source','101','development.issue','pr_opened','source',?,1)", JSON.stringify({ review: { implementation_goal: 'Reject shipments larger than the stock.' } }));
-  // The PR has used up its revision budget: requests do not need it.
-  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-source',?,'source',5)", 'c'.repeat(40));
+  // Many revisions already: there is no budget any more.
+  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-source',?,'source',9)", 'c'.repeat(40));
   const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture); engine.owned = () => h.store.get('SELECT * FROM bot_pull_requests WHERE number=7');
-  const text = { '/issues/comments/11': 'Please name the SKU in the error.', '/issues/comments/15': 'Also log it.', '/pulls/comments/21': 'This branch is untested.',
-    '/pulls/comments/22': 'Rename the variable.', '/pulls/7/reviews/31': 'Line too long.', '/issues/comments/13': 'Summary' };
-  const github = { actorId: '999', path: path => path, request: async (_method, path) => { if (!(path in text)) throw new Error('404 ' + path); return { body: text[path] }; } };
-  const offer = (type, id, author, author_id, author_type = 'User') => ({ type, id, author, author_id, author_type, url: `https://github.invalid/${type}/${id}` });
-  const offered = [offer('comment', 11, 'alice', '5'), offer('comment', 15, 'alice', '5'), offer('review_comment', 21, 'copilot[bot]', '77', 'Bot'),
-    offer('review_comment', 22, 'copilot[bot]', '77', 'Bot'), offer('review', 31, 'lint[bot]', '78', 'Bot'), offer('comment', 13, 'fixture-bot', '999', 'Bot')];
   const task = { id: 'review', repository_id: '101', kind: 'review.pr', object_number: 7, head_sha: 'c'.repeat(40), source_delivery_id: null };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('review','101','review.pr','succeeded','review',7)");
-  const finding = (requested_in, body = 'F1') => ({ body, format: 'discussion', selection_reason: 'x', actionable: true, within_goal: true, requires_human_decision: false, ...(requested_in ? { requested_in } : {}) });
-  const review = async (findings, input = { object: {}, trigger: { reason: 'comment', actor: 'alice' } }) => {
-    const result = { requires_code_change: true, clarification_required: false, findings };
-    input = { ...input, context: { discussion_requests: input.context?.discussion_requests ?? offered } };
-    const requests = await engine.revisionRequests(github, task, result, input);
-    engine.queueDevelopment(github, task, input, result, false, requests);
-    return requests;
-  };
+  const finding = (body, actionable = true) => ({ body, format: 'discussion', selection_reason: 'x', actionable, within_goal: true, requires_human_decision: false });
   const revisions = () => h.store.all("SELECT * FROM tasks WHERE kind='development.pr' ORDER BY created_at,rowid");
-  const finish = () => h.store.run("UPDATE tasks SET status='completed' WHERE kind='development.pr'");
-  return { h, engine, review, finding, revisions, finish, offered, task };
+  return { h, engine, task, finding, revisions };
 }
 
-test('a member\'s request on the bot\'s own PR revises it without a budget; questions, strangers and the bot itself do not', async t => {
-  const { h, review, finding, revisions, finish } = await botPullRequest(t);
-  // Only a comment the review answered counts: a stranger's never got in (12), the bot's own is refused (13), and one the
-  // review did not answer (14, another PR) is unknown. The bot's own finding of the same review goes along.
-  const requests = await review([finding({ type: 'comment', id: 11 }, 'F1'), finding({ type: 'comment', id: 12 }), finding({ type: 'comment', id: 13 }), finding({ type: 'comment', id: 14 }), finding(null, 'F2')]);
-  assert.deepEqual(requests.map(r => [r.type, r.id, r.author, r.author_type, r.body]), [['comment', '11', 'alice', 'User', 'Please name the SKU in the error.']]);
-  let [revision] = revisions(), input = JSON.parse(revision.input);
+test('a review of the bot\'s own pull request offers what it found as a revision, with no budget and one at a time (#1104)', async t => {
+  const { h, engine, task, finding, revisions } = await botPullRequest(t);
+  // Nothing the bot can change: nothing is offered.
+  engine.queueDevelopment({}, task, { object: {} }, { findings: [finding('A question answered.', false)] }, true);
+  assert.equal(revisions().length, 0);
+  // Actionable findings become one revision, whatever triggered the review; only those findings go along.
+  engine.queueDevelopment({}, task, { object: {}, comment: { id: 501, body: '@bot please review' } }, { findings: [finding('F1'), finding('Noted.', false)] }, true);
   assert.equal(revisions().length, 1);
-  assert.deepEqual([input.revision.source, input.revision.requests.map(r => r.id), input.review.findings.map(f => f.body)], ['request', ['11'], ['F1', 'F2']]);
-  assert.match(revision.unique_key, /:requests:comment:11$/);
-  finish();
-  // The same comment never revises twice; a review that only answers a question revises nothing.
-  await review([finding({ type: 'comment', id: 11 })]); assert.equal(revisions().length, 1);
-  await review([{ ...finding(null), actionable: false }]); assert.equal(revisions().length, 1);
-  // A request the review leaves to a person (requires_human_decision) is not acted on.
-  await review([{ ...finding({ type: 'comment', id: 15 }), requires_human_decision: true }]); assert.equal(revisions().length, 1);
-  // A later request of a member revises again, still without a budget.
-  await review([finding({ type: 'comment', id: 15 })]); assert.equal(revisions().length, 2); finish();
-  assert.deepEqual(h.store.all("SELECT source_id,state FROM bot_pr_requests ORDER BY source_id").map(r => [r.source_id, r.state]), [['11', 'done'], ['15', 'done']]);
-});
-
-test('a member\'s comment that started the review stands for the changes it found when the review named no request', async t => {
-  const { review, finding, revisions, finish } = await botPullRequest(t);
-  const asked = (source, extra = {}) => ({ object: {}, trigger: { reason: 'comment', actor: 'alice', source, ...extra } });
-  // Another bot's comment never stands in, merged updates make the trigger ambiguous, and a review with nothing to change
-  // (it answered a question) revises nothing.
-  await review([finding(null)], asked({ type: 'review_comment', id: 21 }, { actor_type: 'Bot', actor: 'copilot[bot]' })); assert.equal(revisions().length, 0);
-  await review([finding(null)], { ...asked({ type: 'comment', id: 11 }), merged_updates: [{ reason: 'comment' }] }); assert.equal(revisions().length, 0);
-  await review([{ ...finding(null), actionable: false }], asked({ type: 'comment', id: 11 })); assert.equal(revisions().length, 0);
-  // The member's comment that started it: its changes revise the PR, once, each finding once.
-  await review([finding(null, 'F1'), finding(null, 'F2')], asked({ type: 'comment', id: 11 }));
   const input = JSON.parse(revisions()[0].input);
-  assert.deepEqual([revisions().length, input.revision.requests.map(r => r.id), input.review.findings.map(f => f.body)], [1, ['11'], ['F1', 'F2']]);
-  finish();
-  await review([finding(null)], asked({ type: 'comment', id: 11 })); assert.equal(revisions().length, 1);
-  // A trigger the queue never let in (a stranger) is not among the comments the review answered.
-  await review([finding(null)], asked({ type: 'comment', id: 12 })); assert.equal(revisions().length, 1);
-});
-
-test('another review bot revises the bot\'s PR at most once, and a request waits while a revision runs', async t => {
-  const { h, review, finding, revisions, finish, task } = await botPullRequest(t);
-  await review([finding({ type: 'review_comment', id: 21 })]); assert.equal(revisions().length, 1);
-  assert.equal(JSON.parse(revisions()[0].input).revision.requests[0].author_type, 'Bot'); finish();
-  // The same bot again, on another comment: no second revision. A different bot gets its one.
-  await review([finding({ type: 'review_comment', id: 22 })]); assert.equal(revisions().length, 1);
-  await review([finding({ type: 'review', id: 31 })]); assert.equal(revisions().length, 2);
-  // While that revision is queued, a member's request waits as pending, and a later review lists it again.
-  await review([finding({ type: 'comment', id: 15 })]); assert.equal(revisions().length, 2);
-  assert.equal(h.store.get("SELECT state FROM bot_pr_requests WHERE source_id='15'").state, 'pending');
-  assert.ok(h.store.all("SELECT content FROM task_logs WHERE task_id='review'").some(l => JSON.parse(l.content).type === 'revision_deferred'));
-  const { discussionRequests } = await import('../../../../dist/agent/engine.js');
-  assert.deepEqual(discussionRequests(h.store, task, {}).map(r => [r.type, r.id, r.author, r.pending]), [['comment', 15, 'alice', true]]);
-  finish();
-  await review([finding({ type: 'comment', id: 15 })], { object: {}, context: { discussion_requests: discussionRequests(h.store, task, {}) } });
-  assert.equal(revisions().length, 3);
-  assert.equal(h.store.get("SELECT state FROM bot_pr_requests WHERE source_id='15'").state, 'done');
-});
-
-test('without a request, an update review of the bot\'s PR never revises, and its own findings keep the revision budget', async t => {
-  const { h, engine, finding, revisions } = await botPullRequest(t, 1);
-  const task = { id: 'review', repository_id: '101', kind: 'review.pr', object_number: 7, head_sha: 'c'.repeat(40), source_delivery_id: null };
-  const result = { requires_code_change: true, clarification_required: false, findings: [finding(null)] };
-  engine.queueDevelopment({}, task, { object: {}, trigger: { reason: 'pull_request_edited' } }, result, true);
-  assert.equal(revisions().length, 0);
-  // One that took a push meanwhile is the review of that head; the budget (5 used of 1) still applies.
-  engine.queueDevelopment({}, task, { object: {}, trigger: { reason: 'pull_request_edited' }, merged_updates: [{ reason: 'pushed' }] }, result, true);
-  assert.equal(revisions().length, 0);
-  // A head review with only its own findings: the budget (5 used of 1) stops it.
-  engine.queueDevelopment({}, task, { object: {} }, result, true); assert.equal(revisions().length, 0);
-  h.store.run('UPDATE bot_pull_requests SET revisions=0');
-  engine.queueDevelopment({}, task, { object: {} }, result, true); assert.equal(revisions().length, 1);
-  assert.equal(JSON.parse(revisions()[0].input).revision.source, 'review');
-  // A comment review that moved to a pushed head meanwhile revises like the review of that head it stands for.
+  assert.deepEqual([input.revision.source, input.review.implementation_goal, input.review.findings.map(f => f.body)], ['review', 'Reject shipments larger than the stock.', ['F1']]);
+  // A second review while that revision is queued: still one revision of the pull request.
+  engine.queueDevelopment({}, task, { object: {} }, { findings: [finding('F2')] }, true); assert.equal(revisions().length, 1);
   h.store.run("UPDATE tasks SET status='completed' WHERE kind='development.pr'");
-  engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, { object: {}, comment: { id: 5 }, heads: ['c'.repeat(40), 'd'.repeat(40)] }, result, true);
-  assert.equal(revisions().length, 2);
+  engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, { object: {} }, { findings: [finding('F3')] }, true); assert.equal(revisions().length, 2);
 });
 
-test('a revision someone asked for does not use the revision budget; one from the bot\'s own review does', async t => {
+test('another review bot stops revising the bot\'s pull request after a few revisions in a row; a person\'s request resets it (#1104)', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const request = (author_type, author_id, id) => ({ type: 'review_comment', id: String(id), author: author_type === 'Bot' ? 'copilot[bot]' : 'alice', author_id, author_type, url: 'u', body: 'b' });
+  const refusal = requests => enqueueRefusal(h.store, '101', 'development.pr', 7, 'c'.repeat(40), { revision: { source: 'request', requests } });
+  const done = (r, task, at) => h.store.run("INSERT INTO bot_pr_requests VALUES('101',7,?,?,?,?,?,'u','done',?,?)", r.type, r.id, r.author, r.author_id, r.author_type, task, at);
+  for (let i = 1; i < otherBotRevisionLimit; i++) done(request('Bot', '77', i), 'rev-' + i, `2026-11-19T0${i}:00:00Z`);
+  assert.equal(refusal([request('Bot', '77', 10)]), null);
+  done(request('Bot', '77', otherBotRevisionLimit), 'rev-' + otherBotRevisionLimit, '2026-11-19T05:00:00Z');
+  assert.equal(refusal([request('Bot', '77', 11)]).code, 'other_bot_revision_limit');
+  // Another bot keeps its own count, and a request that a person joins is never held back.
+  assert.equal(refusal([request('Bot', '78', 12)]), null);
+  assert.equal(refusal([request('Bot', '77', 13), request('User', '5', 14)]), null);
+  // A person's request carried out after them starts the count again.
+  done(request('User', '5', 15), 'rev-person', '2026-11-19T06:00:00Z');
+  assert.equal(refusal([request('Bot', '77', 16)]), null);
+});
+
+test('the revision count of a bot pull request counts the revisions nobody asked for (informational since #1104)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-source',?,'source',0)", 'a'.repeat(40));
   const count = () => ({ ...h.store.get('SELECT revisions,sha FROM bot_pull_requests WHERE number=7') });
@@ -280,19 +221,18 @@ test('another review bot\'s comments on the bot\'s own PR are reviewed; on other
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
 });
 
-test('an Issue review continues the bot PR for that Issue only within the revision budget', async t => {
+test('an Issue review continues the bot PR for that Issue with no revision budget (#1104)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true, max_revisions: 2 });
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
   const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture), result = { requires_code_change: true, clarification_required: false, findings: [] };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,summary) VALUES('dev-1','101','development.issue',1,'pr_opened','')");
-  h.store.run("INSERT INTO bot_pull_requests VALUES('101',9,'9009','999','101','bot/issue-1-dev-1','a',?,2)", 'dev-1');
+  h.store.run("INSERT INTO bot_pull_requests VALUES('101',9,'9009','999','101','bot/issue-1-dev-1','a',?,5)", 'dev-1');
   const task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1, source_delivery_id: null };
-  const object = { title: 'Fix it', body: 'Please fix the parser.', labels: [] }, development = () => h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue' AND id<>'dev-1'").n;
-  const requested = { ...result, request_quote: 'Please fix the parser.', issue_requests_code: true, implementation_goal: 'Fix the parser.' };
+  const object = { title: 'Fix it', body: 'Please fix the parser.', labels: [] };
   const goAhead = { label: 'bot-develop', labeled_by: 'alice', assignees: [] };
-  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, goAhead); assert.equal(development(), 0);
-  h.store.run("UPDATE bot_pull_requests SET revisions=1"); h.store.run("UPDATE tasks SET status='completed' WHERE id='dev-1'");
-  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, goAhead); assert.equal(development(), 1);
+  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, { ...result, implementation_goal: 'Fix the parser.' }, goAhead);
+  const event = h.store.get("SELECT facts FROM dispatch_events WHERE type='review.published'");
+  assert.equal(JSON.parse(event.facts).development.bot_pull_request, true);
 });
 
 test('a queued PR update review prepares the current head instead of being superseded', async t => {
