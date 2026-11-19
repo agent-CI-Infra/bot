@@ -1,7 +1,8 @@
 // Repository onboarding (#934): #/onboarding/<repository id>, the one page a repository's administrator goes through, from
-// 开始接入 to the completion page. The conversation with the management assistant runs on the left; the repository profile,
-// the questions and the plan it produced are on the right (one tab each on a phone). After the confirmation the plan side
-// shows the start request (#933) and the receipts of each item (#932), and the completion page says what the bot does now.
+// 开始接入 to the completion page. The conversation with the management assistant runs on the left; the repository profile
+// and the plan it produced are on the right (one tab each on a phone). The questions it asks are a card in the conversation,
+// under the turns that asked them. After the confirmation the plan side shows the start request (#933) and the receipts of
+// each item (#932), and the completion page says what the bot does now.
 // Everything drawn is read back from the control plane (src/management/onboarding*.ts): a reload, or another device, opens
 // the same state. The page keeps only which tab a phone shows.
 
@@ -88,9 +89,9 @@ function mountRepositoryOnboarding(page, id, initial) {
   let busy = '', pollTimer = 0, phase = '', project = null, showHistory = false;
   // What the reader chose but has not sent yet survives a repaint: items left out of the plan, answers being chosen.
   const excluded = new Set(), answers = new Map(); let excludedPlan = null, answersFor = null;
-  const messages = new Map(), turns = new Map(), signatures = {};
+  const messages = new Map(), turns = new Map(), questionCards = new Map(), questionCalls = new Map(), signatures = {};
   const tabKey = 'repository-onboarding-tab:' + id;
-  let shownTab = (() => { try { return sessionStorage.getItem(tabKey) || 'chat'; } catch { return 'chat'; } })();
+  let shownTab = (() => { try { const saved = sessionStorage.getItem(tabKey); return ['chat', 'profile', 'plan'].includes(saved) ? saved : 'chat'; } catch { return 'chat'; } })();
   const alive = () => !disposed && me === user && root.isConnected;
 
   // ---- Skeleton ----
@@ -116,14 +117,14 @@ function mountRepositoryOnboarding(page, id, initial) {
     box.setAttribute('role', 'tabpanel'); box.setAttribute('aria-labelledby', 'ro-tab-' + key);
     const body = element('div', '', 'ro-panel-body'); if (title) box.append(element('h2', title)); box.append(body); return { box, body };
   };
-  const chat = panel('chat', '', 'ro-chat'), profilePanel = panel('profile', '仓库画像', 'ro-profile'), questionsPanel = panel('questions', '问题', 'ro-questions'), planPanel = panel('plan', '方案', 'ro-plan');
+  const chat = panel('chat', '', 'ro-chat'), profilePanel = panel('profile', '仓库画像', 'ro-profile'), planPanel = panel('plan', '方案', 'ro-plan');
   const tabButtons = {};
-  for (const [key, caption] of [['chat', '对话'], ['profile', '画像'], ['questions', '问题'], ['plan', '方案']]) {
+  for (const [key, caption] of [['chat', '对话'], ['profile', '画像'], ['plan', '方案']]) {
     const b = button(caption, () => showTab(key), 'quiet ro-tab'); b.id = 'ro-tab-' + key; b.setAttribute('role', 'tab'); b.setAttribute('aria-controls', 'ro-panel-' + key);
     b.append(element('span', '', 'ro-tab-badge')); tabButtons[key] = b; tabs.append(b);
   }
-  side.append(profilePanel.box, questionsPanel.box, planPanel.box); layout.append(chat.box, side); work.append(tabs, layout);
-  const historyToggle = button('查看接入对话、问题和方案', () => { showHistory = !showHistory; paint(); }, 'quiet ro-history-toggle'); historyToggle.hidden = true;
+  side.append(profilePanel.box, planPanel.box); layout.append(chat.box, side); work.append(tabs, layout);
+  const historyToggle = button('查看接入对话和方案', () => { showHistory = !showHistory; paint(); }, 'quiet ro-history-toggle'); historyToggle.hidden = true;
   root.append(head, done, historyToggle, work); page.replaceChildren(root);
 
   // The conversation: its feed, a status line and the composer with 停止.
@@ -219,10 +220,10 @@ function mountRepositoryOnboarding(page, id, initial) {
   }
 
   // ---- Conversation ----
-  function resetFeed() { streamController?.abort(); cursor = 0; active = null; messages.clear(); turns.clear(); welcome.hidden = false; feed.replaceChildren(welcome); }
+  function resetFeed() { streamController?.abort(); cursor = 0; active = null; messages.clear(); turns.clear(); questionCards.clear(); questionCalls.clear(); answers.clear(); answersFor = null; welcome.hidden = false; feed.replaceChildren(welcome); }
   function turn(messageId) {
     if (turns.has(messageId)) return turns.get(messageId);
-    const record = messages.get(messageId), item = element('article', '', 'ro-turn');
+    const record = messages.get(messageId), item = element('article', '', 'ro-turn'); item.dataset.messageId = messageId;
     if (record?.input?.content) {
       const own = record.principal_id === me.id, mine = element('div', '', 'ro-user');
       mine.append(element('strong', own ? '你' : '其他管理员'), element('p', record.input.content)); item.append(mine);
@@ -230,9 +231,9 @@ function mountRepositoryOnboarding(page, id, initial) {
     const assistant = element('div', '', 'ro-assistant'), meta = element('div', '', 'ro-assistant-meta'), badge = element('span', '', 'ro-turn-state');
     meta.append(element('strong', '接入助手'), badge);
     const reads = element('details', '', 'ro-reads'), readsSummary = element('summary', ''), readsList = element('ul', ''); reads.append(readsSummary, readsList); reads.hidden = true;
-    const replies = element('div', '', 'ro-replies');
-    assistant.append(meta, reads, replies); item.append(assistant); feed.append(item); welcome.hidden = true;
-    const value = { item, badge, reads, readsSummary, readsList, replies, count: 0, provisional: null, state: record?.state ?? 'pending', stage: '正在连接助手' };
+    const replies = element('div', '', 'ro-replies'), cards = element('div', '', 'ro-question-cards');
+    assistant.append(meta, reads, replies, cards); item.append(assistant); feed.append(item); welcome.hidden = true;
+    const value = { item, badge, reads, readsSummary, readsList, replies, cards, count: 0, provisional: null, state: record?.state ?? 'pending', stage: '正在连接助手' };
     turns.set(messageId, value); paintTurn(value); return value;
   }
   function paintTurn(value) {
@@ -248,6 +249,65 @@ function mountRepositoryOnboarding(page, id, initial) {
     value.replies.append(node); value.provisional = entry; return entry;
   }
   const settle = value => { if (value.provisional) { renderManagementMarkdown(value.provisional.node, value.provisional.text); value.provisional = null; } };
+  // A successful ask_onboarding_questions call is drawn under the assistant replies of the turn that asked it, so a reload
+  // rebuilds every card from the conversation events. Only the session's latest questions stay editable; older cards read only.
+  function renderQuestionCard(callId, messageId, questions) {
+    if (questionCards.has(callId)) return questionCards.get(callId);
+    const askedNow = view.questions?.message_id === messageId && JSON.stringify(view.questions.questions) === JSON.stringify(questions);
+    if (askedNow && answersFor !== view.questions.asked_at) { answers.clear(); answersFor = view.questions.asked_at; }
+    const node = element('section', '', 'ro-question-card'); node.dataset.messageId = messageId;
+    const form = document.createElement('form'); form.className = 'ro-question-form';
+    const noteNode = element('p', '这一组问题已结束。要改主意，直接在对话里告诉助手。', 'muted ro-question-note');
+    form.append(noteNode);
+    const fieldsets = [];
+    questions.forEach((q, index) => {
+      const radioName = `q-${callId}-${q.id}`, ownName = `own-${callId}-${q.id}`, key = callId + ':' + q.id;
+      const set = element('fieldset', '', 'ro-question');
+      set.append(element('legend', `${index + 1}. ${q.question}`));
+      const options = element('div', '', 'ro-options');
+      for (const option of q.options) {
+        const label = element('label', '', 'ro-option'), radio = document.createElement('input'); radio.type = 'radio'; radio.name = radioName; radio.value = option.label;
+        radio.checked = option.label === (answers.get(key)?.choice ?? q.recommended);
+        const text = element('span', '', 'ro-option-text'); text.append(element('strong', option.label));
+        if (option.label === q.recommended) text.append(element('span', '推荐', 'status status-info ro-recommended'));
+        if (option.description) text.append(element('small', option.description));
+        label.append(radio, text); options.append(label);
+      }
+      const own = input(ownName, answers.get(key)?.extra ?? '', { placeholder: '其他想法（可选），例如只对某些目录这样做', maxLength: 1000 }); own.setAttribute('aria-label', `第 ${index + 1} 题的补充`);
+      set.append(options, element('p', '推荐理由：' + q.reason, 'muted ro-reason'), own); fieldsets.push(set); form.append(set);
+    });
+    const submit = element('button', '提交回答', 'btn-primary'); submit.type = 'submit'; form.append(submit);
+    node.append(form);
+    form.addEventListener('input', () => {
+      for (const q of questions) answers.set(callId + ':' + q.id, { choice: form.elements[`q-${callId}-${q.id}`]?.value, extra: form.elements[`own-${callId}-${q.id}`]?.value ?? '' });
+    });
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (!questionCards.get(callId)?.open) return;
+      const lines = questions.map((q, index) => {
+        const chosen = form.elements[`q-${callId}-${q.id}`]?.value, extra = form.elements[`own-${callId}-${q.id}`]?.value.trim();
+        return `${index + 1}. ${q.question}\n   → ${chosen || '（没有选）'}${extra ? `；补充：${extra}` : ''}`;
+      });
+      void say('我的回答：\n' + lines.join('\n'));
+    });
+    const card = { node, form, fieldsets, note: noteNode, submit, questions, messageId, open: false };
+    questionCards.set(callId, card); turn(messageId).cards.append(node); paintQuestionCards(); return card;
+  }
+  function latestQuestionCard() {
+    if (!view.questions) return null;
+    let latest = null;
+    for (const card of questionCards.values()) if (card.messageId === view.questions.message_id && JSON.stringify(card.questions) === JSON.stringify(view.questions.questions)) latest = card;
+    return latest;
+  }
+  function paintQuestionCards() {
+    const latest = latestQuestionCard();
+    for (const card of questionCards.values()) {
+      card.open = phase === 'answering' && card === latest;
+      card.note.hidden = card.open; card.submit.hidden = !card.open; card.submit.disabled = !card.open || !!busy;
+      card.submit.textContent = busy === 'send' ? '正在提交…' : '提交回答';
+      for (const set of card.fieldsets) set.disabled = !card.open || !!busy;
+    }
+  }
   // What one tool call did, in words: which file or list was read, a question asked, a draft saved.
   function stepText(data) {
     const args = data.arguments || {};
@@ -266,8 +326,18 @@ function mountRepositoryOnboarding(page, id, initial) {
     else if (row.type === 'tool_call') {
       settle(value);
       if (data.name === 'send_message') return paintTurn(value);
+      if (data.name === 'ask_onboarding_questions' && data.arguments?.questions) questionCalls.set(data.call_id, data.arguments);
       value.count++; value.stage = stepText(data); value.readsList.append(element('li', stepText(data)));
-    } else if (row.type === 'tool_error') value.readsList.append(element('li', '未成功：' + (data.error || data.name), 'view-error'));
+    } else if (row.type === 'tool_result') {
+      const asked = questionCalls.get(data.call_id);
+      if (asked && data.name === 'ask_onboarding_questions') {
+        questionCalls.delete(data.call_id);
+        if (data.result?.recorded === true) renderQuestionCard(data.call_id, row.message_id, asked.questions);
+      }
+    } else if (row.type === 'tool_error') {
+      questionCalls.delete(data.call_id);
+      value.readsList.append(element('li', '未成功：' + (data.error || data.name), 'view-error'));
+    }
     else if (row.type === 'message') {
       // A stage message the assistant sent while working (#435).
       settle(value); const note = element('div', '', 'ro-stage management-markdown'); renderManagementMarkdown(note, data.text || ''); value.replies.append(note); value.stage = '已发送进展';
@@ -354,46 +424,6 @@ function mountRepositoryOnboarding(page, id, initial) {
     const summary = element('div', '', 'management-markdown ro-profile-summary'); renderManagementMarkdown(summary, p.summary);
     const sources = element('details', '', 'ro-sources'); sources.append(element('summary', `依据（读取了 ${p.sources.length} 处）`), ...p.sources.map(s => element('p', s, 'muted')));
     body.replaceChildren(summary, list, sources);
-  }
-  function paintQuestions() {
-    const questions = view.questions, signature = JSON.stringify(questions ?? null) + phase + busy;
-    if (signatures.questions === signature) return; signatures.questions = signature;
-    const body = questionsPanel.body;
-    if (!questions?.questions?.length) { body.replaceChildren(note('助手需要你决定的事会以问题出现在这里，每题有推荐答案，也可以直接打字回答。')); return; }
-    if (answersFor !== questions.asked_at) { answers.clear(); answersFor = questions.asked_at; }
-    const open = phase === 'answering', form = document.createElement('form'); form.className = 'ro-question-form';
-    if (!open) form.append(note('这些问题已经回答过。要改主意，直接在对话里告诉助手。'));
-    questions.questions.forEach((q, index) => {
-      const set = element('fieldset', '', 'ro-question'); set.disabled = !open || !!busy;
-      set.append(element('legend', `${index + 1}. ${q.question}`));
-      const options = element('div', '', 'ro-options');
-      for (const option of q.options) {
-        const label = element('label', '', 'ro-option'), radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'q-' + q.id; radio.value = option.label;
-        radio.checked = option.label === (answers.get(q.id)?.choice ?? q.recommended);
-        const text = element('span', '', 'ro-option-text'); text.append(element('strong', option.label));
-        if (option.label === q.recommended) text.append(element('span', '推荐', 'status status-info ro-recommended'));
-        if (option.description) text.append(element('small', option.description));
-        label.append(radio, text); options.append(label);
-      }
-      const own = input('own-' + q.id, answers.get(q.id)?.extra ?? '', { placeholder: '其他想法（可选），例如只对某些目录这样做', maxLength: 1000 }); own.setAttribute('aria-label', `第 ${index + 1} 题的补充`);
-      set.append(options, element('p', '推荐理由：' + q.reason, 'muted ro-reason'), own); form.append(set);
-    });
-    if (open) {
-      const submit = element('button', busy === 'send' ? '正在提交…' : '提交回答', 'btn-primary'); submit.type = 'submit'; submit.disabled = !!busy;
-      form.append(submit);
-    }
-    form.addEventListener('input', () => {
-      for (const q of questions.questions) answers.set(q.id, { choice: form.querySelector(`input[name="q-${CSS.escape(q.id)}"]:checked`)?.value, extra: form.elements['own-' + q.id]?.value ?? '' });
-    });
-    form.addEventListener('submit', event => {
-      event.preventDefault();
-      const lines = questions.questions.map((q, index) => {
-        const chosen = form.querySelector(`input[name="q-${CSS.escape(q.id)}"]:checked`)?.value, extra = form.elements['own-' + q.id]?.value.trim();
-        return `${index + 1}. ${q.question}\n   → ${chosen || '（没有选）'}${extra ? `；补充：${extra}` : ''}`;
-      });
-      void say('我的回答：\n' + lines.join('\n'));
-    });
-    body.replaceChildren(form);
   }
   // One change of the plan in words: what it is now and what it becomes.
   function changeBody(change) {
@@ -578,7 +608,18 @@ function mountRepositoryOnboarding(page, id, initial) {
       case 'analyzing': return [primary('分析中…', () => {}, true), button('停止', () => void stopTurn(), 'btn-secondary')];
       case 'stalled': return [primary('重试分析', () => void say('请继续分析这个仓库，给出问题和推荐方案。')), secondary('重新开始', () => void restart()), consoleLink('#/projects', '返回项目列表')];
       case 'conversation': return [primary('请助手给出方案', () => void say('请根据目前的分析给出推荐方案。'))];
-      case 'answering': return [primary('去回答问题', () => { showTab('questions'); questionsPanel.box.scrollIntoView({ block: 'start' }); questionsPanel.box.querySelector('input')?.focus(); })];
+      case 'answering': return [primary('去回答问题', () => {
+        showTab('chat');
+        const card = latestQuestionCard();
+        if (!card) {
+          reconnect.hidden = false;
+          showProblem('问题卡片还没有读取到。先点「重新连接」读取这次提问，再点「去回答问题」。');
+          return;
+        }
+        showProblem('');
+        card.node.scrollIntoView({ block: 'center' });
+        card.form.querySelector('input[type=radio]')?.focus();
+      })];
       case 'confirming': return [primary(view.plan.changes.length ? '去确认方案' : '没有要改的', () => { showTab('plan'); planPanel.box.scrollIntoView({ block: 'start' }); planPanel.box.querySelector('button[type=submit]')?.focus(); }, !view.plan.changes.length)];
       case 'requested': return [secondary(busy === 'withdraw' ? '正在撤回…' : '撤回申请', () => void withdraw())];
       case 'applying': return [primary('应用中…', () => {}, true)];
@@ -615,15 +656,14 @@ function mountRepositoryOnboarding(page, id, initial) {
     paintSteps(); nextText.textContent = nextStepText(); nextActions.replaceChildren(...actionsFor());
     const finished = phase === 'done';
     done.hidden = !finished; historyToggle.hidden = !finished; work.hidden = finished && !showHistory;
-    historyToggle.textContent = showHistory ? '收起接入对话、问题和方案' : '查看接入对话、问题和方案'; historyToggle.setAttribute('aria-expanded', String(showHistory));
+    historyToggle.textContent = showHistory ? '收起接入对话和方案' : '查看接入对话和方案'; historyToggle.setAttribute('aria-expanded', String(showHistory));
     if (finished) { paintDone(); void loadProject(); }
-    paintProfile(); paintQuestions(); paintPlan();
+    paintProfile(); paintQuestionCards(); paintPlan();
     const running = !!active, open = !!view.session;
     message.disabled = !open || phase === 'applying'; send.disabled = !open || running || !!busy || phase === 'applying'; stop.hidden = !running;
     composer.classList.toggle('is-running', running);
     // A stop that was asked for keeps its line until the turn ends; otherwise the line follows the turn.
     if (!running || !status.dataset.held) { delete status.dataset.held; showStatus(!open ? '还没有开始分析。' : running ? '助手正在处理，可以先写下一条消息。' : phase === 'applying' ? '方案应用中，暂时不能发消息。' : '就绪 · 可以继续补充情况或请助手调整方案'); }
-    tabButtons.questions.querySelector('.ro-tab-badge').textContent = phase === 'answering' ? String(view.questions.questions.length) : '';
     tabButtons.plan.querySelector('.ro-tab-badge').textContent = phase === 'confirming' && view.plan.changes.length ? String(view.plan.changes.length) : '';
     schedulePoll();
   }

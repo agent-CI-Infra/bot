@@ -1,17 +1,20 @@
 // #934: scenario A of #929 in the browser, at 1440 and at 390. An administrator of a repository whose organization is not
-// trusted opens 开始接入, the assistant reads the repository and asks; the answers bring a plan; confirming it asks a super
-// administrator, who approves in 待处理; the plan is applied with receipts and a failed item is retried on the completion
-// page. A reload, and at 1440 a second device, come back to the same state. GitHub and the model are local fixtures.
+// trusted opens 开始接入, the assistant reads the repository and asks; its questions are a selectable card in the conversation
+// and the answers bring a plan; confirming it asks a super administrator, who approves in 待处理; the plan is applied with
+// receipts and a failed item is retried on the completion page. A reload, and at 1440 a second device, come back to the same
+// state. GitHub and the model are local fixtures.
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, assistantModel } from '../../fixtures/onboarding-fixture.mjs';
 
 const output = '.tmp/repository-onboarding-934';
+// A 40-character unbroken ASCII run in the second question makes a card that cannot be wider than a phone.
+const longAscii = 'kindbugkindfeaturekinddocskindchore'.padEnd(40, 'x');
 const questions = [
   { id: 'level', question: '要不要让 bot 自动开发简单问题？', options: [{ label: '先只检视和打标签', description: '能力上限「可评论和打标签」' }, { label: '也开发简单问题', description: '能力上限「可开发并开 PR」' }],
     recommended: '先只检视和打标签', reason: '仓库还没有 CI，先看检视的质量。' },
-  { id: 'labels', question: '分类标签怎么定？', options: [{ label: '用 kind/ 前缀', description: '新建 kind/bug、kind/feature' }, { label: '沿用现有标签', description: '现在只有 bug' }],
+  { id: 'labels', question: '分类标签怎么定？' + longAscii, options: [{ label: '用 kind/ 前缀', description: '新建 kind/bug、kind/feature' }, { label: '沿用现有标签', description: '现在只有 bug' }],
     recommended: '用 kind/ 前缀', reason: '现有标签不够用来分类。' },
 ];
 const plan = {
@@ -86,20 +89,64 @@ for (const width of [1440, 390]) test(`场景 A 在 ${width} 宽度下走完接�
     await expect(chat).toContainText('请先回答两个问题');
     await expect(chat.locator('.ro-reads summary')).toHaveText('读取与操作 2 步');
     await shot(page, '03-analysis');
+    // The questions are a card under the asking turn's assistant replies; the side panel and the phone tab are gone.
+    const questionCard = chat.locator('.ro-question-card');
+    const questionTurn = chat.locator('.ro-turn').filter({ has: page.locator('.ro-question-card') });
+    await expect(questionTurn).toHaveCount(1);
+    await expect(questionTurn.locator('.ro-replies')).toContainText('请先回答两个问题');
+    await expect(questionTurn).toContainText('要不要让 bot 自动开发简单问题？');
+    await expect(questionTurn).toContainText(longAscii);
+    expect(await questionTurn.evaluate(turn => {
+      const replies = turn.querySelector('.ro-replies'), card = turn.querySelector('.ro-question-card');
+      return !!replies && !!card && !!(replies.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    await expect(page.locator('.ro-panel[data-panel=questions]')).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: /问题/ })).toHaveCount(0);
     if (width === 390) {
-      await expect(page.getByRole('tab', { name: /问题/ })).toContainText('2');
-      await page.getByRole('tab', { name: /问题/ }).click();
+      expect(await page.locator('.ro-tabs .ro-tab').allTextContents()).toEqual(['对话', '画像', '方案']);
+      await page.getByRole('tab', { name: /画像/ }).click();
       await expect(chat).toBeHidden();
+      // If the conversation events have not rebuilt the card yet, the action says what to do instead of doing nothing.
+      const events = '**/api/management/conversations/*/events*';
+      await page.route(events, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ messages: [], events: [], has_more: false }) }));
+      await page.reload();
+      await expect(phase).toHaveText('待回答');
+      await expect(questionCard).toHaveCount(0);
+      await next.getByRole('button', { name: '去回答问题' }).click();
+      await expect(page.locator('.ro-problem')).toContainText('问题卡片还没有读取到');
+      await expect(page.getByRole('button', { name: '重新连接' })).toBeVisible();
+      await page.unroute(events);
+      await page.reload();
+      await expect(questionCard).toBeVisible();
     }
-    const questionsPanel = page.locator('.ro-questions');
-    await expect(questionsPanel.getByRole('radio', { name: /先只检视和打标签/ })).toBeChecked();
-    await expect(questionsPanel).toContainText('推荐理由：仓库还没有 CI，先看检视的质量。');
-    await questionsPanel.getByLabel('第 2 题的补充').fill('标签颜色沿用 GitHub 默认');
+    // 去回答问题 brings the conversation back, scrolls the card into view and focuses the first option of the first question.
+    await next.getByRole('button', { name: '去回答问题' }).click();
+    if (width === 390) {
+      await expect(page.locator('.ro-page')).toHaveAttribute('data-tab', 'chat'); await expect(chat).toBeVisible();
+      // The long, unbroken question text wraps instead of widening the conversation or the card.
+      const feed = chat.locator('.ro-feed');
+      expect(await feed.evaluate(node => node.scrollWidth)).toBeLessThanOrEqual(await feed.evaluate(node => node.clientWidth) + 1);
+      expect(await questionCard.evaluate(node => node.scrollWidth)).toBeLessThanOrEqual(await questionCard.evaluate(node => node.clientWidth) + 1);
+    }
+    await expect(questionCard).toBeInViewport();
+    await expect(questionCard.getByRole('radio', { name: /先只检视和打标签/ })).toBeFocused();
+    await expect(questionCard.getByRole('radio', { name: /先只检视和打标签/ })).toBeChecked();
+    await expect(questionCard).toContainText('推荐理由：仓库还没有 CI，先看检视的质量。');
+    await expect(questionCard).toContainText('也开发简单问题');
+    await questionCard.getByLabel('第 2 题的补充').fill('标签颜色沿用 GitHub 默认');
+    // Repainting the page through its own history toggle keeps the unsent choice and note.
+    await page.evaluate(() => document.querySelector('.ro-history-toggle').click());
+    await expect(questionCard.getByRole('radio', { name: /先只检视和打标签/ })).toBeChecked();
+    await expect(questionCard.getByLabel('第 2 题的补充')).toHaveValue('标签颜色沿用 GitHub 默认');
     await shot(page, '04-questions');
-    await questionsPanel.getByRole('button', { name: '提交回答' }).click();
+    await questionCard.getByRole('button', { name: '提交回答' }).click();
 
     // The plan: every item says what changes and where; one is left out before confirming.
     await expect(phase).toHaveText('待确认');
+    // The answered card stays in the conversation as a read-only card.
+    await expect(questionCard.getByRole('radio').first()).toBeDisabled();
+    await expect(questionCard).toContainText('这一组问题已结束');
+    await expect(questionCard.getByRole('button', { name: '提交回答' })).toBeHidden();
     if (width === 390) await page.getByRole('tab', { name: /方案/ }).click();
     const planPanel = page.locator('.ro-plan');
     await expect(planPanel.locator('.ro-change')).toHaveCount(5);
@@ -130,8 +177,19 @@ for (const width of [1440, 390]) test(`场景 A 在 ${width} 宽度下走完接�
     await expect(planPanel.locator('[data-item=start]')).toContainText('等待审批');
     await expect(planPanel.locator('[data-item=conventions]')).toContainText('确认时去掉了这一项。');
     await shot(page, '07-requested');
+    // A stored tab from before the change (questions) falls back to the conversation instead of a blank page; the card survives.
+    await page.evaluate(() => sessionStorage.setItem('repository-onboarding-tab:103', 'questions'));
     await page.reload();
     await expect(phase).toHaveText('已申请（等待超管）');
+    const reloadedCard = page.locator('.ro-chat .ro-question-card');
+    await expect(reloadedCard).toBeVisible();
+    await expect(reloadedCard).toContainText('这一组问题已结束');
+    await expect(reloadedCard.getByRole('radio').first()).toBeDisabled();
+    if (width === 390) {
+      await expect(page.locator('.ro-page')).toHaveAttribute('data-tab', 'chat');
+      await expect(page.locator('.ro-chat')).toBeVisible();
+      expect(await page.locator('.ro-tabs .ro-tab').allTextContents()).toEqual(['对话', '画像', '进度']);
+    }
     if (width === 1440) {
       const other = await browser.newContext({ viewport }), device = await other.newPage();
       await device.goto(f.h.admin); await device.getByRole('link', { name: '使用 GitHub 登录' }).click();

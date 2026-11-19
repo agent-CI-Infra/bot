@@ -243,7 +243,8 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
 #management-receipt-page .side-card > p { margin: 6px 0 0; overflow-wrap: anywhere; }
 #management-receipt-page .rule-table td:last-child { text-align: left; white-space: normal; }
 #management-receipt-page .rule-table td:first-child { white-space: nowrap; color: var(--color-text-muted); }
-/* #934 repository onboarding page: the conversation on the left, profile / questions / plan on the right; one tab each on a phone. */
+/* #934 repository onboarding page: the conversation on the left, profile / plan on the right; one tab each on a phone.
+   The assistant's questions are a card inside the conversation, under the turn that asked them. */
 .ro-page { display: grid; gap: var(--space-5); min-width: 0; }
 .ro-head.console-page-head { display: grid; gap: var(--space-4); margin-bottom: 0; }
 .ro-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4); }
@@ -302,9 +303,14 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
 .ro-sources { font-size: var(--font-size-1); }
 .ro-sources summary { cursor: pointer; width: fit-content; color: var(--color-text-muted); }
 .ro-sources p { margin: var(--space-2) 0 0; overflow-wrap: anywhere; }
-.ro-question-form, .ro-plan-form { display: grid; gap: var(--space-5); }
+.ro-question-form, .ro-plan-form { display: grid; gap: var(--space-5); min-width: 0; }
+.ro-question-cards { display: grid; gap: var(--space-3); min-width: 0; }
+.ro-question-card { display: grid; gap: var(--space-4); min-width: 0; padding: var(--space-4) var(--space-5) var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); scroll-margin-top: var(--space-5); }
+.ro-question-card > .ro-question-form { gap: var(--space-4); }
+.ro-question-card > .ro-question-form > button[type=submit] { justify-self: start; }
+.ro-question-note { margin: 0; }
 .ro-question { display: grid; gap: var(--space-3); margin: 0; padding: 0; border: 0; min-width: 0; }
-.ro-question legend { padding: 0; margin-bottom: var(--space-3); font-weight: 600; line-height: var(--line-height-body); }
+.ro-question legend { padding: 0; margin-bottom: var(--space-3); font-weight: 600; line-height: var(--line-height-body); overflow-wrap: anywhere; }
 .ro-options { display: grid; gap: var(--space-3); }
 .ro-option { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-surface); cursor: pointer; }
 .ro-option:has(input:checked) { border-color: var(--color-brand); background: var(--color-brand-weak); }
@@ -355,14 +361,14 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
 .ro-recommendation .actions { flex-wrap: wrap; align-items: center; }
 @media (max-width: 767px) {
   .ro-next { padding: var(--space-4); }
-  .ro-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); margin-bottom: var(--space-4); position: sticky; top: 0; z-index: 2; padding: var(--space-2) 0; background: var(--color-bg); }
+  .ro-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); margin-bottom: var(--space-4); position: sticky; top: 0; z-index: 2; padding: var(--space-2) 0; background: var(--color-bg); }
   .ro-tab { position: relative; min-height: var(--control-min); padding: 0 var(--space-2); }
   .ro-tabs .ro-tab[aria-selected=true] { border-color: var(--color-brand); background: var(--color-brand-weak); color: var(--color-brand); font-weight: 600; }
   .ro-tab-badge:not(:empty) { display: inline-grid; place-items: center; min-width: 18px; height: 18px; margin-left: 4px; padding: 0 4px; border-radius: 9px; background: var(--color-brand); color: var(--color-text-inverse); font-size: var(--font-size-micro); }
   .ro-layout, .ro-side { display: block; }
   .ro-panel { display: none; }
   .ro-page[data-tab=chat] .ro-panel[data-panel=chat], .ro-page[data-tab=profile] .ro-panel[data-panel=profile],
-  .ro-page[data-tab=questions] .ro-panel[data-panel=questions], .ro-page[data-tab=plan] .ro-panel[data-panel=plan] { display: block; }
+  .ro-page[data-tab=plan] .ro-panel[data-panel=plan] { display: block; }
   .ro-chat { position: static; }
   .ro-chat .ro-panel-body { height: calc(100dvh - 220px); min-height: 380px; padding: var(--space-4); }
   .ro-panel > h2 { padding: var(--space-4) var(--space-4) 0; }
