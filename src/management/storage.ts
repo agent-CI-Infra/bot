@@ -60,14 +60,40 @@ function onboardingStorage(store: Store): void {
     CREATE INDEX IF NOT EXISTS onboarding_application_repository ON onboarding_applications(repository_id,confirmed_at);
     CREATE TABLE IF NOT EXISTS onboarding_receipts(application_id TEXT NOT NULL REFERENCES onboarding_applications(id),item TEXT NOT NULL,position INTEGER NOT NULL,
       state TEXT NOT NULL,error TEXT,detail TEXT,executed_by TEXT,attempts INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(application_id,item));
-    -- Requests to start a repository for super administrators to decide (#933, see onboarding-requests.ts); one open per repository.
-    CREATE TABLE IF NOT EXISTS onboarding_requests(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,application_id TEXT NOT NULL REFERENCES onboarding_applications(id),
-      requested_by TEXT NOT NULL,requested_at TEXT NOT NULL,state TEXT NOT NULL,decided_by TEXT,decided_at TEXT,reason TEXT,decision TEXT,updated_at TEXT NOT NULL);
+    -- Requests to start a repository for super administrators to decide (#933, #1133, see onboarding-requests.ts); one open per repository.
+    CREATE TABLE IF NOT EXISTS onboarding_requests(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,application_id TEXT REFERENCES onboarding_applications(id),
+      requested_by TEXT NOT NULL,requested_at TEXT NOT NULL,state TEXT NOT NULL,decided_by TEXT,decided_at TEXT,reason TEXT,decision TEXT,summary TEXT,updated_at TEXT NOT NULL);
     CREATE UNIQUE INDEX IF NOT EXISTS onboarding_open_request ON onboarding_requests(repository_id) WHERE state='pending';
     CREATE INDEX IF NOT EXISTS onboarding_request_state ON onboarding_requests(state,requested_at);
   `);
+  nullableRequestApplication(store);
+  if (!store.all('PRAGMA table_info(onboarding_requests)').some(column => column.name === 'summary'))
+    store.db.exec('ALTER TABLE onboarding_requests ADD COLUMN summary TEXT');
   // An item that was being applied when the control plane stopped did not finish: it failed and may be retried.
   store.run("UPDATE onboarding_receipts SET state='failed',error='onboarding_item_interrupted',updated_at=? WHERE state='running'", new Date().toISOString());
+}
+
+/** Direct start requests from the management assistant (#1133) need no onboarding_applications row: relax older NOT NULL schemas. */
+function nullableRequestApplication(store: Store): void {
+  const column = store.all('PRAGMA table_info(onboarding_requests)').find(r => r.name === 'application_id');
+  if (!column?.notnull) return;
+  const table = store.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='onboarding_requests'")!.sql as string;
+  const definition = /(\bapplication_id\s+TEXT)\s+NOT\s+NULL\b/i;
+  if (!definition.test(table)) throw new Error('onboarding_requests_migration_unrecognized');
+  const rebuilt = table.replace(definition, '$1').replace(/^CREATE TABLE\s+(?:"onboarding_requests"|onboarding_requests)\b/i, 'CREATE TABLE onboarding_requests_rebuild');
+  if (!rebuilt.startsWith('CREATE TABLE onboarding_requests_rebuild')) throw new Error('onboarding_requests_migration_unrecognized');
+  const dependents = store.all("SELECT type,name,sql FROM sqlite_master WHERE tbl_name='onboarding_requests' AND type IN ('index','trigger') AND sql IS NOT NULL");
+  const columns = store.all('PRAGMA table_info(onboarding_requests)').map(r => `"${String(r.name).replace(/"/g, '""')}"`).join(',');
+  store.db.exec('PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON');
+  try {
+    store.transaction(() => {
+      store.db.exec(rebuilt);
+      store.db.exec(`INSERT INTO onboarding_requests_rebuild(${columns}) SELECT ${columns} FROM onboarding_requests`);
+      store.db.exec('DROP TABLE onboarding_requests');
+      store.db.exec('ALTER TABLE onboarding_requests_rebuild RENAME TO onboarding_requests');
+      for (const item of dependents) store.db.exec(item.sql);
+    });
+  } finally { store.db.exec('PRAGMA legacy_alter_table=OFF;PRAGMA foreign_keys=ON'); }
 }
 
 /** Starting a project bills its onboarding usage so far to it (#930): those turns ran before the project existed. */

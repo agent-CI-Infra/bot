@@ -50,7 +50,7 @@ export async function provider(t, script) {
     const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
     if (state.gate) await state.gate;
     const context = JSON.parse(body.messages[1].content), steps = body.messages.filter(m => m.role === 'assistant').length;
-    const messages = script(context);
+    const messages = script(context, body);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ choices: [{ message: messages[Math.min(steps, messages.length - 1)] }], usage: { prompt_tokens: 20, completion_tokens: 5 } }));
   });

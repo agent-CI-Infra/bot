@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import { authorize, listEffectiveScopes, narrowActor, resolvePrincipalActor, resolveServiceActor, type ActorContext } from '../identity/authorization.js';
+import { authorize, createProjectServicePrincipal, listEffectiveScopes, narrowActor, resolvePrincipalActor, resolveServiceActor, type ActorContext } from '../identity/authorization.js';
 import { fail, HttpError, randomId, type Json } from '../core/security.js';
 import { installationExecutionDenied } from '../installations/archive.js';
 import type { ChannelService } from '../channels/service.js';
@@ -266,7 +266,20 @@ export class ScheduleService {
       if (operation === 'schedule.register' || operation === 'schedule.update') {
         const old = operation === 'schedule.update' ? this.schedule(project, args.id) : undefined;
         if (old) { this.owned(actor, old); if (old.state === 'deleted' || old.revision !== args.revision) fail(409, 'schedule_revision_conflict'); }
-        const { plan, grant, execution } = this.validatePlan(actor, project, args.plan, old), id = old?.id ?? randomId(), now = this.clock();
+        let inputPlan = args.plan;
+        if (!old && inputPlan && typeof inputPlan === 'object' && !Array.isArray(inputPlan)) {
+          const next = { ...inputPlan };
+          if (next.owner_id === 'self') next.owner_id = actor.principal_id;
+          if (next.maintainer_id === 'self') next.maintainer_id = actor.principal_id;
+          if (next.kind === 'personal' && next.actor_id === 'self') next.actor_id = actor.principal_id;
+          if (next.kind === 'project' && next.actor_id === 'auto') {
+            authorize(actor, 'config.write', { project_id: project });
+            next.actor_id = this.store.get("SELECT id FROM principals WHERE kind='service' AND active=1 AND project_id=? AND maintenance<>'' ORDER BY rowid LIMIT 1", project)?.id
+              ?? createProjectServicePrincipal(this.store, actor, project, '项目定时检查');
+          }
+          inputPlan = next;
+        }
+        const { plan, grant, execution } = this.validatePlan(actor, project, inputPlan, old), id = old?.id ?? randomId(), now = this.clock();
         if (old) this.store.run(`UPDATE schedules SET spec=?,maintainer_id=?,grant_snapshot=?,approver_id=?,authorization_revision=?,revision=revision+1,
           state=?,reason=NULL,next_at=?,updated_at=? WHERE id=?`, JSON.stringify(plan), plan.maintainer_id, JSON.stringify(grant), grant.approver_id, execution.authorization_revision,
           plan.enabled ? 'active' : 'paused', nextTime(plan, now), now, id);
@@ -381,7 +394,7 @@ export class ScheduleService {
         try { authorize(resolvePrincipalActor(this.store, p.id, tenant, project), 'schedules.manage', { project_id: project }); return canDelegate || p.id === actor.principal_id; } catch { return false; }
       });
       // can_manage_project: the caller sets up project plans here and may create the project's service identity (#851).
-      return { revision, destinations, services, maintainers, can_manage_project: canDelegate };
+      return { revision, principal_id: actor.principal_id, destinations, services, maintainers, can_manage_project: canDelegate };
     }
     if (operation === 'list_schedule_migrations') {
       // The migration report of this project's daily report plans (#1027): every plan, where it went, or why it did not.

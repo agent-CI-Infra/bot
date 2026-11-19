@@ -1,176 +1,219 @@
-// Repository onboarding, analysis before the start (#930): an administrator of an installed repository talks with the
-// management assistant, which only reads that repository, asks questions and saves plan drafts. GitHub and the model
-// provider are local fixtures.
+// Repository onboarding unified into the management assistant (#930, #1133): retired standalone onboarding routes answer
+// 410, and an administrator with zero started projects analyzes unstarted installed repositories directly in a standard
+// management assistant conversation (read-only GitHub inspection, personal assistant computer, and no writes before start).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
+import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
 import { settled } from '../../../fixtures/management-fixture.mjs';
-import { installed, readToken, repositoryRoutes, provider as scripted, call, person, say } from '../../../fixtures/onboarding-fixture.mjs';
-import { withDevelopmentLabels, planProblem } from '../../../../dist/management/onboarding.js';
+import { until } from '../../../fixtures/channel-fixture.mjs';
+import { installed, readToken, repositoryRoutes, provider as scripted, call, person, say, assistantModel } from '../../../fixtures/onboarding-fixture.mjs';
+import { TaskEngine } from '../../../../dist/agent/engine.js';
+import { invalidate } from '../../../../dist/identity/authorization.js';
+import { ownerId } from '../../../../dist/service-roles/assistant-computers.js';
+import { onboardingInstructions } from '../../../../dist/management/onboarding.js';
 import { onboardingItems } from '../../../../dist/management/onboarding-apply.js';
+import { developedLabel, developingIssueLabel } from '../../../../dist/review/labels.js';
 
-// The assistant reads the README and the labels and asks; a reply about the level gets a plan, first with a reserved label.
-const provider = t => scripted(t, context => {
-  const repository = context.onboarding?.repository.full_name;
-  const plan = labels => ({ profile: { summary: '命令行工具，Node.js。', sources: ['README.md', '/labels'] }, capability_ceiling: { value: 'comment', reason: '先只检视和打标签' },
-    events: { value: { 'actions.run_failed': true }, reason: '分析 Actions 失败' }, test_command: { value: 'npm test', reason: 'README 写明' },
-    labels: { items: labels, reason: '补齐分类标签' }, conventions: { label_usage: 'kind/ 前缀表示问题类型。' } });
-  return String(context.request).includes('先只检视') ? [
-    call(0, ['propose_onboarding_plan', plan([{ name: 'agent/triage', color: 'ededed', action: 'create' }])]),
-    call(1, ['propose_onboarding_plan', plan([{ name: 'kind/bug', color: 'd73a4a', description: '缺陷', action: 'create' }, { name: 'bug', color: 'd73a4a', action: 'keep' }])]),
-    { role: 'assistant', content: '方案草稿已保存。' },
-  ] : [
-    call(0, ['github_read', { repository, path: '/readme' }], ['github_read', { repository, path: '/labels' }]),
-    call(1, ['ask_onboarding_questions', { questions: [{ id: 'level', question: '要不要让 bot 自动开发简单问题？', options: [{ label: '先只检视和打标签' }, { label: '也开发简单问题' }],
-      recommended: '先只检视和打标签', reason: '仓库还没有检视习惯' }] }]),
-    { role: 'assistant', content: '这是一个命令行工具（来源：README.md、/labels）。请回答上面的问题。' },
-  ];
+test('standalone onboarding endpoints and legacy onboarding conversations return 410 repository_onboarding_merged (#1133)', async t => {
+  const f = await identityFixture(t, { github: true }), { h, state } = f;
+  installed(f, '103'); state.accessible = ['103'];
+  const repoAdmin = await person(f, 42, 'admin');
+
+  for (const [path, method] of [
+    ['/api/management/onboarding/103', 'GET'],
+    ['/api/management/onboarding/103', 'POST'],
+    ['/api/management/onboarding/103/confirm', 'POST'],
+    ['/api/management/onboarding/103/close', 'POST'],
+    ['/api/management/onboarding/103/request/withdraw', 'POST'],
+    ['/api/management/onboarding/103/items/labels/retry', 'POST'],
+  ]) {
+    const res = await repoAdmin(path, method, method === 'POST' ? {} : undefined);
+    assert.deepEqual([res.status, res.value.error], [410, 'repository_onboarding_merged'], `${method} ${path}`);
+  }
+
+  assert.deepEqual(
+    [(await repoAdmin('/api/management/conversations', 'POST', { scope: 'onboarding:103' })).status,
+     (await repoAdmin('/api/management/conversations', 'POST', { scope: 'onboarding:103' })).value.error],
+    [400, 'onboarding_scope_reserved'],
+  );
+
+  // Legacy onboarding conversations remain invisible in the list and answer 410 when read or addressed.
+  const legacyId = 'deadbeef00001133';
+  h.store.run("INSERT INTO management_conversations(id,principal_id,tenant_id,scope,created_at) VALUES(?,?,'github.com:10','onboarding:103',?)",
+    legacyId, repoAdmin.principal, new Date().toISOString());
+  assert.ok(!(await repoAdmin('/api/management/conversations')).value.conversations.some(row => row.id === legacyId));
+  assert.deepEqual([(await repoAdmin(`/api/management/conversations/${legacyId}/events`)).status, (await repoAdmin(`/api/management/conversations/${legacyId}/events`)).value.error],
+    [410, 'repository_onboarding_merged']);
+  assert.deepEqual([(await repoAdmin(`/api/management/conversations/${legacyId}/messages`, 'POST', { source_message: 'm1', content: 'hello' })).status,
+    (await repoAdmin(`/api/management/conversations/${legacyId}/messages`, 'POST', { source_message: 'm1', content: 'hello' })).value.error],
+    [410, 'repository_onboarding_merged']);
 });
 
-test('an administrator analyzes an installed repository before it is started, reading only; drafts are saved and nothing is written (#930)', async t => {
-  const f = await identityFixture(t, { github: true }), { h, admin, state } = f, model = await provider(t);
-  installed(f, '103'); state.accessible = ['101', '103']; repositoryRoutes(f);
-  const repoAdmin = await person(f, 42, 'admin'), writer = await person(f, 43, 'write'), otherAdmin = await person(f, 44, 'admin');
+test('an administrator with zero started projects analyzes an unstarted repository in the management assistant; reads only and blocks writes (#930, #1133)', async t => {
+  const f = await identityFixture(t, { github: true }), { h, admin, state } = f;
+  installed(f, '103');
+  // Neither person has access to started project 101: only unstarted installed repository 103 is in their GitHub list.
+  state.accessible = ['103'];
+  repositoryRoutes(f);
+  const model = await scripted(t, context => {
+    const text = String(context.request?.content ?? context.request ?? '');
+    if (text.includes('尝试写入标签')) {
+      return [
+        call(0, ['github_write', { repository: 'fixture/project-103', method: 'POST', path: '/labels', key: 'unstarted-label', body: { name: 'kind/bug', color: 'd73a4a' } }]),
+        { role: 'assistant', content: '仓库尚未启动，不能写入标签。' },
+      ];
+    }
+    return [
+      call(0, ['management_query', { operation: 'list_projects', target: {}, arguments: {} }],
+        ['github_read', { repository: 'fixture/project-103', path: '/readme' }],
+        ['github_read', { repository: 'fixture/project-103', path: '/labels' }]),
+      { role: 'assistant', content: '这是一个 Node.js 命令行工具（来源：README.md、/labels），确认后再为你启动。' },
+    ];
+  });
+  const repoAdmin = await person(f, 42, 'admin'), writer = await person(f, 43, 'write');
 
-  // A Write collaborator is no administrator: a clear code, and the session is not created.
-  for (const [path, method] of [['/api/management/onboarding/103', 'GET'], ['/api/management/onboarding/103', 'POST']])
-    assert.deepEqual([(await writer(path, method, method === 'POST' ? {} : undefined)).value.error], ['repository_admin_required']);
-  assert.equal((await repoAdmin('/api/management/onboarding/999', 'POST', {})).value.error, 'repository_not_installed');
+  // A Write collaborator on an unstarted repository has neither started projects nor pending repositories to administer.
+  assert.equal((await writer('/api/management/conversations', 'POST', { scope: 'tenant:github.com:10' })).status, 403);
+  const writerConv = (await writer('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
+  const writerTurn = await say(writer, writerConv, '请分析 fixture/project-103');
+  assert.match(writerTurn.history.events.find(e => e.type === 'reply').data.text, /没有可访问的项目|还没有你有权查看的项目/);
+  assert.equal(model.requests.length, 0);
 
-  // Without a shared model the page says so before anything is sent.
-  const empty = await repoAdmin('/api/management/onboarding/103');
-  assert.deepEqual([empty.status, empty.value.session, empty.value.repository.started, empty.value.model.available, empty.value.model.error], [200, null, false, false, 'service_role_model_not_configured']);
-  assert.match(empty.value.model.notice, /共享模型/);
+  // The repository administrator opens both platform and tenant conversations even with zero started projects.
+  const tenantConv = await repoAdmin('/api/management/conversations', 'POST', { scope: 'tenant:github.com:10' });
+  assert.equal(tenantConv.status, 201, JSON.stringify(tenantConv.value));
+  const conversation = (await repoAdmin('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
 
-  const opened = (await repoAdmin('/api/management/onboarding/103', 'POST', {})).value, conversation = opened.session.conversation_id;
-  // Another administrator opens the same session, and the generic conversation list and creation leave it alone.
-  assert.equal((await otherAdmin('/api/management/onboarding/103', 'POST', {})).value.session.id, opened.session.id);
-  assert.ok(!(await repoAdmin('/api/management/conversations')).value.conversations.some(row => row.id === conversation));
-  assert.equal((await repoAdmin('/api/management/conversations', 'POST', { scope: 'onboarding:103' })).value.error, 'onboarding_scope_reserved');
-  assert.equal((await writer(`/api/management/conversations/${conversation}/events`)).value.error, 'repository_admin_required');
+  // Without a shared model configured on management-assistant, the turn reports the service role configuration notice.
+  const unconfigured = await say(repoAdmin, conversation, '请分析 fixture/project-103');
+  assert.ok(unconfigured.history.events.some(e => e.type === 'error' && e.data.error === 'service_role_model_not_configured' && /共享模型/.test(e.data.notice)));
 
-  // The assistant's shared model; the first turn without one failed with the configuration notice.
-  const failed = await say(repoAdmin, conversation, '请分析这个仓库');
-  assert.ok(failed.history.events.some(e => e.type === 'error' && e.data.error === 'service_role_model_not_configured' && /共享模型/.test(e.data.notice)));
-  const shared = (await admin('/api/models', 'POST', { model_name: 'Assistant fixture', api_url: model.url, api_key: 'fixture-provider-key' })).value.model;
-  const role = (await admin('/api/service-roles')).value.service_roles.find(r => r.id === 'management-assistant');
-  await admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, model_id: shared.id });
-  assert.deepEqual((await repoAdmin('/api/management/onboarding/103')).value.model, { available: true, source: 'assistant', name: 'Assistant fixture' });
+  await assistantModel(admin, model);
 
-  const before = state.requests.length, first = await say(repoAdmin, conversation, '请分析这个仓库');
+  // Direct management query also returns pending_repositories alongside empty started projects.
+  const queryRes = await repoAdmin(`/api/management/conversations/${conversation}/messages`, 'POST',
+    { source_message: 'direct-list', query: { operation: 'list_projects', target: {}, arguments: {} } });
+  assert.equal(queryRes.status, 201);
+  const directHistory = await settled(repoAdmin, conversation, queryRes.value.id);
+  const directProjects = directHistory.events.find(e => e.message_id === queryRes.value.id && e.type === 'tool_result').data.result;
+  assert.deepEqual(directProjects.pending_repositories.map(r => r.id), ['103']);
+
+  const before = state.requests.length;
+  const first = await say(repoAdmin, conversation, '请分析 fixture/project-103');
+  assert.equal(first.history.events.at(-1).data.state, 'completed', JSON.stringify(first.history.events.at(-1)));
+
   const request = model.requests.at(-1);
-  assert.deepEqual(request.tools.map(tool => tool.function.name), ['read_tool_result', 'github_read', 'github_search', 'read_job_log', 'ask_onboarding_questions', 'propose_onboarding_plan', 'send_message']);
-  assert.match(request.messages[0].content, /onboarding of the GitHub repository fixture\/project-103/);
-  assert.match(request.messages[0].content, /# Repository onboarding/, 'the prompt of docs/prompts/onboarding.md');
-  assert.deepEqual(JSON.parse(request.messages[1].content).onboarding.repository, { id: '103', full_name: 'fixture/project-103', started: false, organization_trusted: false });
-  const results = first.history.events.filter(e => e.type === 'tool_result' && e.data.name === 'github_read').map(e => e.data.result);
-  assert.match(results[0].result.content, /command line tool/);
-  assert.deepEqual(results[1].result.map(label => label.name), ['bug']);
-  assert.equal(first.history.events.at(-1).data.state, 'completed');
+  const toolNames = request.tools.map(tool => tool.function.name);
+  for (const expected of ['management_query', 'management_command', 'github_read', 'github_search', 'read_job_log', 'github_write', 'start_repository', 'send_message', 'start_own_task'])
+    assert.ok(toolNames.includes(expected), `missing tool ${expected}`);
+  for (const retired of ['ask_onboarding_questions', 'propose_onboarding_plan'])
+    assert.ok(!toolNames.includes(retired), `unexpected retired tool ${retired}`);
+  assert.match(request.messages[0].content, /# Repository onboarding/);
+  assert.doesNotMatch(request.messages[0].content, /\.bot\b/);
 
-  // Only reads: one read-only token for repository 103 alone, revoked when the turn ended.
+  const listResult = first.history.events.find(e => e.type === 'tool_result' && e.data.name === 'management_query').data.result;
+  assert.deepEqual(listResult.projects, []);
+  assert.deepEqual(listResult.pending_repositories, [{ id: '103', full_name: 'fixture/project-103', started: false, self_start: false, tenant_id: 'github.com:10' }]);
+
+  const reads = first.history.events.filter(e => e.type === 'tool_result' && e.data.name === 'github_read').map(e => e.data.result);
+  assert.match(reads[0].result.content, /command line tool/);
+  assert.deepEqual(reads[1].result.map(label => label.name), ['bug']);
+
+  // One read-only token for repository 103 alone, revoked when the turn ended, and redacted everywhere.
   const github = state.requests.slice(before);
   const minted = github.filter(r => r.path === '/app/installations/77/access_tokens');
   assert.equal(minted.length, 1);
   assert.deepEqual(minted[0].body, { repository_ids: [103], permissions: { metadata: 'read', contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read', checks: 'read', statuses: 'read' } });
   assert.deepEqual(github.filter(r => r.method !== 'GET').map(r => [r.method, r.path]), [['POST', '/app/installations/77/access_tokens'], ['DELETE', '/installation/token']]);
   assert.equal(github.find(r => r.method === 'DELETE').authorization, 'Bearer ' + readToken);
-  // The token reaches neither the model provider nor the conversation's events and logs.
   assert.ok(!JSON.stringify(model.requests).includes(readToken));
   assert.ok(!JSON.stringify(h.store.all('SELECT data FROM management_events')).includes(readToken));
 
-  // The questions, with the recommended answer, are part of the session state.
-  let view = (await otherAdmin('/api/management/onboarding/103')).value;
-  assert.deepEqual(view.questions.questions.map(q => [q.id, q.recommended]), [['level', '先只检视和打标签']]);
-  assert.equal(view.plan, null);
+  // github_write is blocked on an unstarted repository without minting any write token.
+  const beforeWrite = state.requests.length;
+  const writeAttempt = await say(repoAdmin, conversation, '尝试写入标签');
+  const writeResult = writeAttempt.history.events.find(e => e.type === 'tool_result' && e.data.name === 'github_write').data.result;
+  assert.equal(writeResult.result.error, 'project_not_started');
+  assert.deepEqual(state.requests.slice(beforeWrite).filter(r => r.path.includes('/labels') && r.method === 'POST'), []);
 
-  // The answer: a plan with a reserved label goes back to the model with its field, the corrected one is saved.
-  const second = await say(otherAdmin, conversation, '先只检视，标签用 kind/ 前缀');
-  const plans = second.history.events.filter(e => e.type === 'tool_result' && e.data.name === 'propose_onboarding_plan').map(e => e.data.result);
-  assert.deepEqual(plans[0], { error: 'invalid_onboarding_plan', field: 'labels.items.0.name', reason: 'reserved_label' });
-  assert.equal(plans[1].saved, true); assert.equal(plans[1].version, 1);
-  view = (await repoAdmin('/api/management/onboarding/103')).value;
-  assert.deepEqual([view.plan.version, view.plan.plan.capability_ceiling.value, view.plan.plan.labels.items.map(l => l.name)], [1, 'comment', ['kind/bug', 'bug']]);
-  // Both people read the whole conversation.
-  const history = (await repoAdmin(`/api/management/conversations/${conversation}/events`)).value;
-  assert.equal(history.messages.length, 3);
-
-  // Words only, one turn at a time.
-  assert.equal((await repoAdmin(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'q', query: { operation: 'list_projects', target: {}, arguments: {} } })).value.error, 'onboarding_content_required');
-  const gate = Promise.withResolvers(); model.state.gate = gate.promise;
-  const running = (await repoAdmin(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'busy', content: '请分析这个仓库' })).value;
-  assert.equal((await otherAdmin(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'busy-2', content: '再看看' })).value.error, 'onboarding_turn_running');
-  model.state.gate = null; gate.resolve(); await settled(repoAdmin, conversation, running.id);
-
-  // Still not started, nothing written to GitHub, and the usage is the assistant's, kept with the session.
+  // Still unstarted, usage billed to management-assistant.
   assert.equal(h.store.get("SELECT 1 FROM repositories WHERE id='103'"), undefined);
-  assert.ok(!state.requests.some(r => r.method !== 'GET' && !['/app/installations/77/access_tokens', '/installation/token', '/login/oauth/access_token'].includes(r.path)));
   const usage = h.store.all('SELECT repository_id,service_role_id FROM model_requests WHERE conversation_id=?', conversation);
-  assert.ok(usage.length >= 6 && usage.every(row => row.repository_id === null && row.service_role_id === 'management-assistant'));
-  assert.equal((await repoAdmin('/api/management/onboarding/103')).value.usage.requests, usage.length);
-  // Starting the project bills that usage to it.
-  assert.equal((await admin('/api/installations/103/activate', 'POST', {})).status, 201);
-  assert.deepEqual([...new Set(h.store.all('SELECT repository_id FROM model_requests WHERE conversation_id=?', conversation).map(row => row.repository_id))], ['103']);
-
-  // Closing ends the session: no more messages there, and the next open starts another one.
-  assert.equal((await repoAdmin('/api/management/onboarding/103/close', 'POST', {})).value.session, null);
-  assert.equal((await repoAdmin(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'late', content: '还在吗' })).value.error, 'onboarding_session_closed');
-  assert.notEqual((await repoAdmin('/api/management/onboarding/103', 'POST', {})).value.session.id, opened.session.id);
+  assert.ok(usage.length >= 4 && usage.every(row => row.repository_id === null && row.service_role_id === 'management-assistant'));
 });
 
-test('a started project opens the same onboarding with its settings; the default model of a trusted organization runs it (#930)', async t => {
-  const f = await identityFixture(t, { github: true }), { h, admin, state } = f, model = await provider(t);
-  installed(f, '103'); state.accessible = ['101', '103']; repositoryRoutes(f);
-  const shared = (await admin('/api/models', 'POST', { model_name: 'Assistant fixture', api_url: model.url, api_key: 'fixture-provider-key' })).value.model;
-  const organization = (await admin('/api/models', 'POST', { model_name: 'Organization default', api_url: model.url, api_key: 'fixture-provider-key' })).value.model;
-  const role = (await admin('/api/service-roles')).value.service_roles.find(r => r.id === 'management-assistant');
-  await admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, model_id: shared.id });
+test('an administrator with zero started projects mounts their personal computer before start and keeps HOME across start (#457, #1133)', async t => {
+  const assistant = await assistantManager(t);
+  const manager = { call: (method, path, input, timeout) => path.startsWith('/v1/assistant-computers') ? assistant.manager.call(method, path, input, timeout)
+    : Promise.resolve(method === 'GET' ? { generation: 1, state: 'ready' } : { ok: true, result: {} }) };
+  let channels;
+  const f = await identityFixture(t, { github: true, onChannels: s => { channels = s; }, extra: store => ({ engine: new TaskEngine(store, manager), assistantHomes: assistant.homes }) });
+  const { h, admin, state } = f;
+  const service = channels.management.service.assistants;
+  await until(() => service.reconciled);
+  await service.close();
+
+  installed(f, '103');
+  state.accessible = ['103'];
+  repositoryRoutes(f);
+
+  const model = await scripted(t, context => {
+    const text = String(context.request?.content ?? context.request ?? '');
+    if (text.includes('读取笔记')) {
+      return [call(0, ['read_file', { path: '~/onboarding-note.txt' }]), { role: 'assistant', content: '已读取。' }];
+    }
+    return [
+      call(0, ['write_file', { path: '~/onboarding-note.txt', content: 'draft for 103' }]),
+      call(1, ['run_command', { command: 'cat ~/onboarding-note.txt' }]),
+      { role: 'assistant', content: '已写入个人电脑。' },
+    ];
+  });
+  await assistantModel(admin, model);
+
   const repoAdmin = await person(f, 42, 'admin');
+  const owner = ownerId({ kind: 'person', subject: repoAdmin.principal, tenant: '' });
+  const conversation = (await repoAdmin('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
 
-  // 101 is started: its administrator (config.write) runs it, and the model sees its current settings. The project only
-  // carries the usage: the assistant's shared model runs it even while that model is restricted to other projects.
-  h.store.run('UPDATE models SET restricted=1 WHERE id=?', shared.id); h.store.run('DELETE FROM model_projects WHERE model_id=?', shared.id);
-  const started = (await repoAdmin('/api/management/onboarding/101', 'POST', {})).value;
-  assert.equal(started.repository.started, true);
-  const checked = await say(repoAdmin, started.session.conversation_id, '请分析这个仓库');
-  assert.equal(checked.history.events.at(-1).data.state, 'completed', JSON.stringify(checked.history.events.at(-1)));
-  const settings = JSON.parse(model.requests.at(-1).messages[1].content).onboarding.current_settings;
-  assert.deepEqual(Object.keys(settings), ['enabled', 'capability_ceiling', 'events', 'test_command', 'review_language']);
-  assert.deepEqual([...new Set(h.store.all('SELECT repository_id FROM model_requests WHERE conversation_id=?', started.session.conversation_id).map(row => row.repository_id))], ['101']);
+  const first = await say(repoAdmin, conversation, '把分析草稿记到个人电脑');
+  assert.equal(first.history.events.at(-1).data.state, 'completed', JSON.stringify(first.history.events.at(-1)));
+  const cmdResult = first.history.events.find(e => e.type === 'tool_result' && e.data.name === 'run_command').data.result;
+  assert.equal(cmdResult.output, 'draft for 103');
+  assert.equal(readFileSync(join(assistant.homes, owner, 'home-1', 'onboarding-note.txt'), 'utf8'), 'draft for 103');
 
-  // A trusted organization with a default model: its repositories' onboarding uses that model.
-  assert.equal((await admin('/api/trusted-organizations/10', 'PUT', { model_id: organization.id })).status, 200);
-  const pending = (await repoAdmin('/api/management/onboarding/103', 'POST', {})).value;
-  assert.deepEqual(pending.model, { available: true, source: 'organization', name: 'Organization default' });
-  const turn = await say(repoAdmin, pending.session.conversation_id, '请分析这个仓库');
-  assert.equal(turn.history.events.at(-1).data.state, 'completed', JSON.stringify(turn.history.events.at(-1)));
-  assert.equal(model.requests.at(-1).model, 'Organization default');
-  assert.deepEqual([...new Set(h.store.all('SELECT model_id FROM model_requests WHERE conversation_id=?', pending.session.conversation_id).map(row => row.model_id))], [organization.id]);
-  // Without a default model the assistant's own shared model runs it again.
-  assert.equal((await admin('/api/trusted-organizations/10', 'PUT', {})).status, 200);
-  assert.deepEqual((await repoAdmin('/api/management/onboarding/103')).value.model.source, 'assistant');
+  // Starting repository 103 keeps the exact same repository set ['103']: HOME generation stays 1 and nothing is sealed.
+  assert.equal((await admin('/api/installations/103/activate', 'POST', {})).status, 201);
+  const second = await say(repoAdmin, conversation, '读取笔记');
+  const readResult = second.history.events.find(e => e.message_id === second.id && e.type === 'tool_result' && e.data.name === 'read_file').data.result;
+  assert.equal(readResult.content, 'draft for 103');
+  assert.equal(h.store.get('SELECT generation FROM assistant_homes WHERE owner=?', owner).generation, 1);
+  assert.deepEqual(h.store.all('SELECT * FROM assistant_home_sealed WHERE owner=?', owner), []);
+
+  // Losing repository 103 revokes authority: sweep removes the idle computer immediately.
+  h.store.run("UPDATE scoped_grants SET revoked_at=? WHERE principal_id=?", Date.now(), repoAdmin.principal);
+  invalidate(h.store, repoAdmin.principal, 'test_revoked');
+  await service.sweep();
+  await Promise.all([...assistant.computers.removing.values()]);
+  assert.ok(!assistant.computers.leases.has(owner));
 });
 
-test('a plan that lets the bot develop includes each development status label once, and never for a lower level (#1047)', () => {
-  const developing = { name: 'bot-developing', color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops', action: 'create' };
-  const develop = { profile: { summary: 's', sources: ['README.md'] }, capability_ceiling: { value: 'develop', reason: 'r' } };
-  const developed = { name: 'bot-developed', color: '0e8a16', description: 'The bot opened a pull request for this Issue', action: 'create' };
-  assert.deepEqual(withDevelopmentLabels(develop, 'bot-developing').labels.items, [developing, developed]);
-  const listed = { ...develop, labels: { items: [{ name: 'kind/bug', color: 'd73a4a', action: 'create' }], reason: 'r' } };
-  assert.deepEqual(withDevelopmentLabels(listed, 'wip').labels.items.map(item => item.name), ['kind/bug', 'wip', 'bot-developed']);
-  const kept = { ...develop, labels: { items: [{ name: 'Bot-Developing', color: '000000', action: 'keep' }, { ...developed, name: 'Bot-Developed', action: 'keep' }], reason: 'r' } };
-  assert.equal(withDevelopmentLabels(kept, 'bot-developing'), kept);
-  const comment = { ...develop, capability_ceiling: { value: 'comment', reason: 'r' } };
-  assert.equal(withDevelopmentLabels(comment, 'bot-developing'), comment);
-  assert.deepEqual(withDevelopmentLabels(develop, '').labels.items, [developed]);
-  assert.deepEqual(withDevelopmentLabels(develop, 'BOT-DEVELOPED').labels.items, [developed]);
-});
-
-test('the bot-scheduling recommendation is saved with the plan but is never one of the items applied (#1072)', () => {
-  const plan = { profile: { summary: 'Nightly 构建的库。', sources: ['.github/workflows/nightly.yml', '/actions/runs'] },
-    scheduled_dispatch: { workflows: [{ path: '.github/workflows/nightly.yml', cron: '0 16 * * *', delay: '最近 5 次平均晚 7 小时' }], reason: '定时运行经常晚几个小时。' } };
-  assert.equal(planProblem(plan), null);
-  assert.deepEqual(planProblem({ ...plan, scheduled_dispatch: { workflows: [], reason: '没有 workflow' } }), { error: 'invalid_onboarding_plan', field: 'scheduled_dispatch.workflows' });
-  assert.deepEqual(planProblem({ ...plan, scheduled_dispatch: { workflows: [{ path: 'nightly.yml' }], reason: '缺 cron' } }), { error: 'invalid_onboarding_plan', field: 'scheduled_dispatch.workflows.0.cron' });
+test('onboarding prompt and label helpers preserve development status labels (#1047) and scheduled dispatch guidance (#1072, #1133)', () => {
+  assert.deepEqual(developingIssueLabel('bot-developing'), {
+    name: 'bot-developing',
+    color: 'fbca04',
+    description: 'The bot is developing this Issue; removed when its pull request is opened or it stops',
+  });
+  assert.equal(developingIssueLabel(''), null);
+  assert.equal(developingIssueLabel('BOT-DEVELOPED'), null);
+  assert.deepEqual(developedLabel, {
+    name: 'bot-developed',
+    color: '0e8a16',
+    description: 'The bot opened a pull request for this Issue',
+  });
+  assert.match(onboardingInstructions, /bot-developing/);
+  assert.match(onboardingInstructions, /bot-developed/);
+  assert.match(onboardingInstructions, /on\.schedule/);
   assert.ok(!onboardingItems.includes('scheduled_dispatch'));
 });

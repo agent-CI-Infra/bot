@@ -67,10 +67,10 @@ export async function githubSignIn(identity, mode = 'login', session = '', brows
 
 export async function identityFixture(t, options = {}) {
   // github: the control plane's own GitHub API calls (installation tokens, repository reads) go to this fixture too.
-  const { wizardOnly = false, github = false, ...serverOptions } = options;
+  const { wizardOnly = false, github = false, extra, ...serverOptions } = options;
   const { state, base, server } = await githubIdentityServer(t);
   let identity, githubLogin;
-  const h = await harness(t, undefined, store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); githubLogin = wizardOnly ? new GitHubLogin(store, { apiUrl: base, webUrl: base }) : undefined; return { ...(githubLogin ? { githubLogin } : { githubIdentity: identity }), ...(github ? { githubUrl: base } : {}), ...serverOptions }; });
+  const h = await harness(t, undefined, store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); githubLogin = wizardOnly ? new GitHubLogin(store, { apiUrl: base, webUrl: base }) : undefined; return { ...(githubLogin ? { githubLogin } : { githubIdentity: identity }), ...(github ? { githubUrl: base } : {}), ...serverOptions, ...(extra?.(store) ?? {}) }; });
   identity.config.redirectUri = h.admin + '/auth/github/callback';
   const { admin, password } = await setup(h), a = await account(admin, { type: 'github_app', app_id: '123', token: undefined, private_key: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) }); await repository(admin, a.id, '101');
   // Another tenant has an enabled project. It is never in the user's App installation.

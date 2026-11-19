@@ -61,7 +61,7 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     expect(settings).toEqual(['飞书绑定', '身份与权限', '飞书会话']);
     const management = (await page.getByTestId('console-admin-group').locator('a .console-link-copy > span').allInnerTexts()).map(t => t.trim());
     expect(management).toEqual(['用量与成本', '外部执行端', '存储']);
-    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理助手', '全局设置', '接入向导', '安装档案', '机器人账号']) {
+    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理助手', '全局设置', '系统初始化', '安装档案', '机器人账号']) {
       expect([...settings, ...management]).not.toContain(duplicate);
     }
     await page.screenshot({ path: `${out}/more-member-1440.png`, fullPage: true });
@@ -86,7 +86,7 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     expect((await page.locator('.console-group').filter({ has: page.getByRole('heading', { name: '设置', exact: true }) }).locator('a .console-link-copy > span').allInnerTexts()).map(t => t.trim())).toEqual(['飞书绑定', '身份与权限', '飞书会话']);
     await expect(page.getByTestId('console-admin-group')).toBeVisible();
     await expect(page.locator('#console-page')).not.toContainText('全局设置');
-    await expect(page.locator('#console-page')).not.toContainText('接入向导');
+    await expect(page.locator('#console-page')).not.toContainText('系统初始化');
     await page.screenshot({ path: `${out}/nav-member-390.png`, fullPage: true });
 
   } finally { await h.stop(); }

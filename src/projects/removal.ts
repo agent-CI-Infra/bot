@@ -100,6 +100,13 @@ export class ProjectRemoval {
     }
     if (!registered) return this.store.transaction(() => {
       if (this.store.get('SELECT 1 FROM repositories WHERE id=?', id)) fail(409, 'repository_started');
+      for (const [table, sql] of [
+        ['onboarding_requests', 'DELETE FROM onboarding_requests WHERE repository_id=?'],
+        ['onboarding_receipts', 'DELETE FROM onboarding_receipts WHERE application_id IN (SELECT id FROM onboarding_applications WHERE repository_id=?)'],
+        ['onboarding_applications', 'DELETE FROM onboarding_applications WHERE repository_id=?'],
+        ['onboarding_plans', 'DELETE FROM onboarding_plans WHERE repository_id=?'],
+        ['onboarding_sessions', 'DELETE FROM onboarding_sessions WHERE repository_id=?'],
+      ] as const) if (this.store.hasTable(table)) this.store.run(sql, id);
       this.store.run('DELETE FROM installed_repositories WHERE repository_id=?', id); dropUninstalledIntegrations(this.store);
       // A grant made before the repository was enabled goes with it, as a project's grants go with the project.
       this.store.run('DELETE FROM project_admin_assignments WHERE repository_id=?', id);

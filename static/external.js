@@ -10,8 +10,8 @@ let externalAudience='',externalAudienceSource=null;
 // The audience can come from the super-admin setting or from the address the wizard verified;
 // saying which one it is stops a project administrator from hunting for a button they cannot have.
 function audienceCaption(audience=externalAudience,source=externalAudienceSource){
-  if(!audience)return '尚未配置，个人电脑客户端暂不能兑换；请超级管理员设置，或先在接入向导中验证公开地址。';
-  return source==='onboarding'?audience+'（来自接入向导已验证的公开地址；超级管理员可覆写）':audience;
+  if(!audience)return '尚未配置，个人电脑客户端暂不能兑换；请超级管理员设置，或先在系统初始化中验证公开地址。';
+  return source==='onboarding'?audience+'（来自系统初始化已验证的公开地址；超级管理员可覆写）':audience;
 }
 const externalKeyCommands='umask 077\nopenssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out bot-client.pem\nopenssl pkey -in bot-client.pem -pubout -out bot-client.pub.pem';
 const externalTokenPermissions='contents: read、issues: write、pull_requests: write';
@@ -114,7 +114,7 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=f
     exchangeCommand=element('div','','external-exchange');
     exchangeCommand.append(copyExchange,scriptDetails);
     exchangeStep.append(exchangeCommand);
-  }else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在接入向导中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
+  }else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在系统初始化中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
   const useStep=element('li','');
   useStep.append(element('strong','用 token 发起请求'),element('p','兑换脚本结束时会打印结果文件路径。在同一个 shell 里用 jq -r .token "$WORK_DIR/token-response.json" 读取 token，再用它调用 GitHub，或轮询绑定仓库的事件。用完后撤销，不要把 token 写入聊天、日志或提交。'),copyableCommand('Authorization: Bearer <token>\nGET '+eventsUrl,status,'复制轮询命令'),element('p','用完后向 '+revokeUrl+' 发送撤销请求。'));
   steps.append(keyStep,registerStep,exchangeStep,useStep);

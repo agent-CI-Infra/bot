@@ -2,8 +2,8 @@
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
-const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'task', 'not-found', 'repository-onboarding'];
-// #934: the onboarding of one repository, started or not (an unstarted one has no project page to live under).
+const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'task', 'not-found'];
+// #934, #1133: legacy #/onboarding/<id> links redirect to the management assistant and prefill its composer.
 const repositoryOnboardingAddress = /^#\/onboarding\/([1-9]\d*)$/;
 // #642: an address under #/ that names no page shows 找不到这个页面 instead of keeping (or silently loading) another page.
 // In-page anchors such as the skip link's #main-content are not console addresses and still keep the current page.
@@ -41,7 +41,7 @@ const legacyComputerAddress = /^#\/settings\/computers(?:\/([^/?#]+))?$/;
 function addressTab(hash) {
   if (taskRoute(hash)) return 'task';
   if (/^#\/new-task(?:\/[1-9]\d*)?$/.test(hash)) return 'new-task';
-  if (repositoryOnboardingAddress.test(hash)) return 'repository-onboarding';
+  if (repositoryOnboardingAddress.test(hash)) return 'management';
   const project = projectRoute(hash);
   if (project) return projectConsoleRoute(project) ? project.section : 'projects';
   if (hash === '#/projects') return 'projects';
@@ -79,6 +79,12 @@ async function route() {
   if (oldCreation) history.replaceState(null, '', `#/projects/${oldCreation[1]}/new-task`);
   const legacy = legacyOnboardingAddress.exec(location.hash);
   if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
+  const legacyRepoOnboarding = repositoryOnboardingAddress.exec(location.hash);
+  if (legacyRepoOnboarding) {
+    const id = legacyRepoOnboarding[1], matched = repositories.find(row => String(row.id) === id);
+    if (typeof queueRepositoryOnboarding === 'function') queueRepositoryOnboarding({ id, full_name: matched?.full_name || null, started: !!matched });
+    history.replaceState(null, '', matched ? `#/projects/${id}/management` : '#/management');
+  }
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
   const moved = /^#\/(accounts|users)$/.exec(location.hash); if (moved) history.replaceState(null, '', '#/settings/' + moved[1]);
   // #480: a single project's editor lives only in the project workspace. The legacy global address keeps working as a
@@ -108,7 +114,6 @@ async function route() {
   // Global and project computer views reuse DOM ids; discard the inactive view and its scheduled reads.
   if (!target && typeof leaveProjectPage === 'function') leaveProjectPage();
   if (tab !== 'task' && typeof leaveTaskDetailPage === 'function') leaveTaskDetailPage();
-  if (typeof leaveRepositoryOnboarding === 'function') leaveRepositoryOnboarding(location.hash);
   if (tab !== 'settings') $('settings-panel').replaceChildren();
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   const consolePage = consoleTabs.includes(tab);

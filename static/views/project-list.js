@@ -336,7 +336,7 @@ function gapHow(gap, row) {
   if (gap.kind === 'permission') return `GitHub App 管理员在 App 设置的 Permissions & events 中把 ${permissionNames[gap.name] || gap.name} 设为「${accessNames[gap.required] || gap.required}」并保存；新增权限要由安装所有者${owner}在 GitHub 的安装设置里接受。App 已经有这项权限时，只需接受安装上的待批准变更。`;
   if (gap.kind === 'event') return `GitHub App 管理员在 App 设置的 Permissions & events → Subscribe to events 勾选 ${eventNames[gap.name] || gap.name} 并保存。${eventPermissionNotes[gap.name] || ''}GitHub 只在新增权限时要求安装所有者批准；App 已经勾选但这里仍显示未订阅时，到安装设置接受待批准的变更。`;
   if (gap.kind === 'role') return '在仓库 Settings → Collaborators and teams 把机器人账号的角色改为 Write 或更高。';
-  return '这些功能只用 GitHub App 安装令牌。在「接入向导」创建 GitHub App 并安装到这个仓库，项目改用该 App 账号后才能使用。';
+  return '这些功能只用 GitHub App 安装令牌。在「系统初始化」创建 GitHub App 并安装到这个仓库，项目改用该 App 账号后才能使用。';
 }
 function gapImpact(gap, row) {
   const used = gap.features.map(feature => `${featureNames[feature] || feature}（${stateNames[featureState(row, feature)]}）`).join('、');

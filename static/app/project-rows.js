@@ -1,11 +1,14 @@
-// #934: an installed repository nobody has started is onboarded through the wizard (#/onboarding/<id>): the management
-// assistant reads it, asks and proposes a plan, and confirming the plan starts it. In a trusted organization (#848) its
-// administrator starts it then; otherwise the confirmation asks a super administrator (#933). Either way the row carries one
-// entry, 开始接入. (Super administrators never get this group: their project list is the installed list, where such a row
-// carries 开始接入 and 启动.)
+// #934, #1133: an installed repository nobody has started is onboarded in the management assistant (#/management): clicking
+// 开始接入 opens the assistant and prefills a repository-specific onboarding prompt.
 function onboardingEntry(repo, caption = '开始接入') {
-  const entry = element('a', caption, 'button-link btn-primary'); entry.href = '#/onboarding/' + encodeURIComponent(repo.id);
+  const entry = element('a', caption, 'button-link btn-primary');
+  entry.href = repo.started ? `#/projects/${encodeURIComponent(repo.id)}/management` : '#/management';
   entry.setAttribute('aria-label', `${caption} ${repo.full_name}`);
+  entry.addEventListener('click', event => {
+    if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || typeof openRepositoryOnboarding !== 'function') return;
+    event.preventDefault();
+    Promise.resolve(openRepositoryOnboarding(repo)).catch(error);
+  });
   return entry;
 }
 // #979: dozens of installed-but-not-started repositories used to spread over the whole page and bury the projects and
@@ -53,13 +56,13 @@ function pendingActivationGroup(pending) {
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
     line.dataset.name = repo.full_name; content.append(element('strong', repo.full_name));
     // #979: the group intro already says a super administrator starts these; only a row that differs carries its own note.
-    if (repo.self_start) { const note = element('p', '所属组织已受信任，确认方案后你可以直接启动。'); note.title = note.textContent; content.append(note); }
+    if (repo.self_start) { const note = element('p', '所属组织已受信任，在管理助手确认后可以直接启动。'); note.title = note.textContent; content.append(note); }
     status.append(repo.self_start ? element('span', '可自行启动', 'status status-info') : element('span', '启动需超级管理员同意', 'status status-warning'));
     actions.append(onboardingEntry(repo));
     line.append(content, status, actions); list.append(line);
   }
   section.append(element('h2', title, 'project-owner-title'),
-    element('p', '这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动' + (pending.every(repo => repo.self_start) ? '' : '，所属组织未受信任的由超级管理员同意后启动') + '。启动后它们出现在上面的项目列表里。', 'project-pending-intro muted'),
+    element('p', '这些仓库已装好 GitHub App。点「开始接入」打开管理助手并自动填入接入提示词：助手先只读分析仓库并提出关键选项，你确认后启动' + (pending.every(repo => repo.self_start) ? '' : '（所属组织未受信任的会提交启动申请，由超级管理员同意后启动）') + '。启动后它们出现在上面的项目列表里。', 'project-pending-intro muted'),
     foldPendingList(list, pending.length, 'projects'), consoleLink('#/identity', '查看身份与权限'));
   return section;
 }

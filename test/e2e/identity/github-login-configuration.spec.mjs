@@ -79,15 +79,15 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     expect((await f.admin('/api/auth/github/status')).value.enabled).toBe(false);
     await page.goto(f.h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.locator('#tabs').getByRole('button', { name: '接入向导', exact: true })).toHaveCount(0);
+    await expect(page.locator('#tabs').getByRole('button', { name: '系统初始化', exact: true })).toHaveCount(0);
     await page.getByRole('link', { name: '全局设置', exact: true }).click();
-    await page.locator('.project-nav').getByRole('link', { name: '接入向导', exact: true }).click();
+    await page.locator('.project-nav').getByRole('link', { name: '系统初始化', exact: true }).click();
     await page.getByRole('button', { name: '3. GitHub 登录', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);
     // Without a verified public address the callback stays on this console, and the page says it only suits local testing.
     await expect(page.locator('.github-login-callback')).toHaveText(f.h.admin + '/auth/github/callback');
     await expect(page.locator('#onboarding-panel')).toContainText('只适合在本机测试');
-    await expect(page.locator('.project-nav [aria-current=page]')).toHaveText('接入向导');
+    await expect(page.locator('.project-nav [aria-current=page]')).toHaveText('系统初始化');
     await page.getByLabel('启用 GitHub 账号登录', { exact: true }).check();
     await page.getByLabel('Client ID', { exact: true }).fill('fixture-client');
     await page.getByLabel('Client secret（只保存，不回读）', { exact: true }).fill('fixture-secret');

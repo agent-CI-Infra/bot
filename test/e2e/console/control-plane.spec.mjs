@@ -47,7 +47,7 @@ test('管理员完成初始化、登记账号，项目管理员只看到自己�
     await switchConsoleProject(page, '');
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.locator('#rows')).not.toContainText('fixture/project-202');
-    await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '接入向导', exact: true })).toBeHidden();
+    await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '系统初始化', exact: true })).toBeHidden();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/screenshots/project-mobile.png', fullPage: true });

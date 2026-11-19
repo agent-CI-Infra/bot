@@ -8,7 +8,7 @@ async function renderOnboarding(request,panel,feedback=''){
   if(request!==renderVersion||location.hash!==address)return;
   if(step!==onboardingStep)onboardingTunnel=null;onboardingStep=step;
   const progress=onboardingProgress(data),intro=element('div','','onboarding-intro'),layout=element('div','','onboarding-layout'),content=element('div','','onboarding-content');
-  intro.append(element('h2','接入向导'),note('配置会分别保存。可随时返回已完成步骤；浏览步骤不会自动启用项目或开始任务。'));
+  intro.append(element('h2','系统初始化'),note('配置会分别保存。可随时返回已完成步骤；浏览步骤不会自动启用项目或开始任务。'));
   panel.replaceChildren(intro,layout);$('count').textContent=`第 ${onboardingStep+1} / ${onboardingSteps.length} 步`;
   const nav=element('nav','','wizard-steps onboarding-progress');nav.setAttribute('aria-label','接入步骤');onboardingSteps.forEach((title,index)=>{const item=element('div','','onboarding-step'),b=button(`${index+1}. ${title}`,()=>wizardNext(index)),status=element('small',progress[index].text);item.dataset.ready=String(progress[index].ready);if(index===onboardingStep)b.setAttribute('aria-current','step');item.append(b,status);nav.append(item);});layout.append(nav,content);panel=content;
   if(data.installation_skipped||data.app&&installations===0)panel.append(element('p','尚未确认 App 安装。可以继续配置模型和规则；安装并启用项目之前，仓库检视不会开始。','wizard-notice'));

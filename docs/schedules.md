@@ -59,7 +59,7 @@ GitHub Actions 的 `schedule` 触发在 GitHub 负载高时会推迟，有时被
 
 workflow 这边建议同时改造，保留 `schedule` 兜底：加上 `workflow_dispatch`，`concurrency` 设 `cancel-in-progress: false`（定时运行等手动运行跑完，而不是取消它），第一个 job 检查到本次是 `schedule` 触发、并且上一个定时时点以来已经有成功的手动运行时，跳过后面所有 job。完整 YAML 示例在 [`docs/prompts/late-schedules.md`](prompts/late-schedules.md)。
 
-bot 在看 Actions 时（Actions 失败处理、CI 观察、项目定时任务、群聊助手和管理助手的问答）如果发现某个 workflow 的定时运行经常比 cron 晚很多（参考：经常晚 1 小时以上），会在 Issue 里推荐这个方案：先查重，同一个仓库只推荐一次，已经有相关 Issue 就在下面评论；没有 `github_write` 时写在结果或回复里。推荐什么、怎么判断都写在 [`docs/prompts/late-schedules.md`](prompts/late-schedules.md) 里，这份文本原样交给模型，是提示词，不是固定流程。仓库接入向导看到带 `on.schedule` 的 workflow 时也会把它列为推荐项，见[仓库接入指南](onboarding-guide.md)。
+bot 在看 Actions 时（Actions 失败处理、CI 观察、项目定时任务、群聊助手和管理助手的问答）如果发现某个 workflow 的定时运行经常比 cron 晚很多（参考：经常晚 1 小时以上），会在 Issue 里推荐这个方案：先查重，同一个仓库只推荐一次，已经有相关 Issue 就在下面评论；没有 `github_write` 时写在结果或回复里。推荐什么、怎么判断都写在 [`docs/prompts/late-schedules.md`](prompts/late-schedules.md) 里，这份文本原样交给模型，是提示词，不是固定流程。管理助手在接入仓库时看到带 `on.schedule` 的 workflow 也会在对话里提出这一建议，确认后可直接登记定时计划或生成待确认的 workflow 改造任务，见[仓库接入指南](onboarding-guide.md)。
 
 ## 升级：项目日报迁到会话定时任务（#1027）
 

@@ -27,14 +27,14 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     const memberPassword = testPassword();
     expect((await admin('/api/users', 'POST', { username: 'admin-area-member', password: memberPassword, repository_ids: ['101'] })).status).toBe(201);
 
-    // Super administrator: 管理 lists platform pages and opens 接入向导.
+    // Super administrator: 管理 lists platform pages and opens 系统初始化.
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, 'administrator', password);
     await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
     expect(await adminCaptions(page)).toEqual([
-      '用量与成本', '外部执行端', '存储', '接入向导', '安装档案', '机器人账号', '全局设置'
+      '用量与成本', '外部执行端', '存储', '系统初始化', '安装档案', '机器人账号', '全局设置'
     ]);
-    await page.getByTestId('console-admin-group').getByRole('link', { name: /^接入向导/ }).click();
+    await page.getByTestId('console-admin-group').getByRole('link', { name: /^系统初始化/ }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding/);
     await expect(page.locator('#onboarding-panel')).toBeVisible();
     await page.goto(h.admin + '/#/more');
@@ -43,7 +43,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
     await expect(page.getByTestId('console-admin-group')).toBeVisible();
-    expect(await adminCaptions(page)).toContain('接入向导');
+    expect(await adminCaptions(page)).toContain('系统初始化');
     expect(await adminCaptions(page)).toContain('机器人账号');
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
     await page.screenshot({ path: `${out}/admin-super-390.png`, fullPage: true });
@@ -58,7 +58,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
       }
       await expect(member.locator('#console-sidebar').getByRole('button', { name: '仓库事件', exact: true })).toHaveCount(0);
       expect(await adminCaptions(member)).toEqual(['用量与成本', '外部执行端', '存储']);
-      for (const name of ['接入向导', '安装档案', '机器人账号', '全局设置']) {
+      for (const name of ['系统初始化', '安装档案', '机器人账号', '全局设置']) {
         await expect(member.getByTestId('console-admin-group').getByRole('link', { name, exact: true })).toHaveCount(0);
         await expect(member.locator('#console-page')).not.toContainText(name);
       }
@@ -72,7 +72,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
       await member.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
       await expect(member.getByTestId('console-admin-group')).toBeVisible();
       expect(await adminCaptions(member)).toEqual(['用量与成本', '外部执行端', '存储']);
-      await expect(member.locator('#console-page')).not.toContainText('接入向导');
+      await expect(member.locator('#console-page')).not.toContainText('系统初始化');
       await expect(member.locator('#console-page')).not.toContainText('全局设置');
       await expect(member.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
       await member.screenshot({ path: `${out}/admin-member-390.png`, fullPage: true });

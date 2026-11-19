@@ -2,7 +2,8 @@
 // Commands still use durable, versioned management messages. History and reconnect only read events.
 async function renderManagement(panel, projectId = null, onActivity = () => {}, { signal } = {}) {
   const endpoint = '/api/management', user = me.id, requestedProject = projectId || consoleScope();
-  const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: requestedProject ? { project_id: requestedProject } : {}, arguments: { limit: 100 } }, { signal })).projects;
+  const directory = await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: requestedProject ? { project_id: requestedProject } : {}, arguments: { limit: 100 } }, { signal });
+  const projects = directory.projects || [], pendingRepositories = directory.pending_repositories || [];
   if (!panel.isConnected || me?.id !== user) return null;
   panel.replaceChildren(); panel.className = 'management-panel';
   let scope = requestedProject ? 'project:' + requestedProject : 'platform';
@@ -58,7 +59,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); main.append(input);
   let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null;
   let disposed = false, opening = false, submitting = false, historyReady = false, followOutput = true, unseenOutput = false, renderFrame = 0;
-  const pendingMarkdown = new Set();
+  const pendingMarkdown = new Set(), confirmButtons = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
   const showStatus = (text = status.textContent) => { if (disposed) return; status.classList.remove('view-error'); status.setAttribute('role', 'status'); status.textContent = text; };
@@ -115,6 +116,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     message.disabled = opening || !conversation;
     send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active;
     fresh.disabled = opening || submitting || !conversation; sessionToggle.disabled = opening || !conversation;
+    for (const sync of confirmButtons) sync();
     input.classList.toggle('is-running', !!active); onActivity(!!active);
   };
   // Receipt rollbacks use the same preview and explicit confirmation as other writes.
@@ -129,6 +131,43 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     });
     pendingPreview = close; slot.replaceChildren(drawn.box); drawn.box.scrollIntoView({ block: 'nearest' });
     return drawn;
+  }
+  function stagedConfirmationCard(parent, receipt, step, currentTurn) {
+    const sourceMessage = 'confirm:' + step.id, command = receipt.preview_command;
+    if ([...messages.values()].some(m => m.source_message === sourceMessage)) {
+      setStepState(step, 'succeeded'); paintTurn(currentTurn);
+      parent.append(note('这项修改 .github/workflows/ 的开发任务已在下方确认提交，执行结果见对应操作回执。'));
+      return;
+    }
+    const slot = element('div', '', 'management-workflow-confirm');
+    parent.append(slot);
+    let busy = false, removeSync = null;
+    const clearSync = () => { if (removeSync) { confirmButtons.delete(removeSync); removeSync = null; } };
+    const openCard = () => {
+      clearSync();
+      const projectName = scopeProject('project:' + command.target?.project_id)?.full_name || command.target?.project_id;
+      const drawn = managementPreview(command, { project: projectName });
+      const sync = () => { drawn.confirm.disabled = opening || !historyReady || submitting || !!active || busy; };
+      removeSync = sync; confirmButtons.add(sync); sync();
+      drawn.cancel.addEventListener('click', () => {
+        clearSync();
+        const paused = element('div', '', 'actions');
+        paused.append(note('已暂缓确认修改 .github/workflows/ 的开发任务。'), button('重新打开确认卡片', openCard, 'quiet'));
+        slot.replaceChildren(paused);
+      });
+      drawn.confirm.addEventListener('click', async () => {
+        busy = true; sync();
+        if (await submit({ command }, sourceMessage)) {
+          clearSync();
+          setStepState(step, 'succeeded'); paintTurn(currentTurn);
+          slot.replaceChildren(note('已确认提交，正在下方生成操作回执…'));
+        } else {
+          busy = false; sync();
+        }
+      });
+      slot.replaceChildren(drawn.box);
+    };
+    openCard();
   }
   const turn = id => {
     if (turns.has(id)) return turns.get(id);
@@ -152,8 +191,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   function paintTurn(value) {
     const running = ['pending', 'running'].includes(value.state);
     const uncertain = value.steps.some(step => ['unknown', 'executing'].includes(step.state));
-    value.badge.textContent = running ? value.stage : { completed: uncertain ? '结果待确认' : value.steps.some(step => step.state === 'failed' || step.state === 'rejected') ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
-    value.badge.dataset.state = running ? 'running' : uncertain ? 'unknown' : value.state;
+    const waitingConfirm = value.steps.some(step => step.state === 'awaiting_confirmation');
+    value.badge.textContent = running ? value.stage : { completed: uncertain ? '结果待确认' : waitingConfirm ? '待你在控制台确认' : value.steps.some(step => step.state === 'failed' || step.state === 'rejected') ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
+    value.badge.dataset.state = running ? 'running' : (uncertain || waitingConfirm) ? 'unknown' : value.state;
     const end = running ? Date.now() : Date.parse(value.finishedAt || value.startedAt), seconds = Math.max(0, Math.floor((end - Date.parse(value.startedAt)) / 1000));
     value.elapsed.textContent = seconds < 60 ? seconds + ' 秒' : Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒';
     const completed = value.steps.filter(step => step.state === 'succeeded').length;
@@ -182,14 +222,15 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   function setStepState(step, state) {
     step.state = state; step.box.dataset.state = state;
-    step.status.textContent = { running: '进行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', unknown: '待确认', executing: '执行中', interrupted: '结果未确认' }[state] ?? state;
+    step.status.textContent = { running: '进行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', unknown: '待确认', awaiting_confirmation: '待确认', executing: '执行中', interrupted: '结果未确认' }[state] ?? state;
   }
   function toolStep(value, data, sequence) {
     const box = element('details', '', 'management-step'), summary = element('summary', '', 'management-step-summary');
     // The assistant's own independent tasks (#312) are named by their title; the inner queries and commands show as their own steps.
     const own = { start_own_task: '独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务' }[data.name];
+    const toolLabel = { start_repository: '仓库启动与申请', start_requests: '处理启动申请', github_read: '读取仓库内容', github_search: '检索仓库内容', read_job_log: '读取 Actions 日志', github_write: '写入 GitHub', run_command: '在助手电脑运行命令', read_file: '读取助手电脑文件', write_file: '写入助手电脑文件' }[data.name];
     const operation = data.arguments?.operation, caption = own ? own + (data.arguments?.title ? '：' + data.arguments.title : '')
-      : managementOperationLabels[operation] ?? operation ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
+      : managementOperationLabels[operation] ?? operation ?? toolLabel ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
     const indicator = element('span', '', 'management-step-indicator'); indicator.setAttribute('aria-hidden', 'true');
     const state = element('span', '', 'management-step-status'), detail = element('div', '', 'management-step-detail');
     summary.append(indicator, element('span', caption, 'management-step-caption'), state); box.append(summary, detail); value.stepsBody.append(box);
@@ -262,7 +303,13 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
         if (task.error_code) box.append(element('p', (task.error_cause?.label ?? '等待原因') + ' · ' + task.error_code), element('p', task.error_detail ?? task.error_cause?.description ?? ''));
         box.append(button('查看任务', () => openTask(task.id), 'quiet'), ' · ', link(value.logs_url, '原始日志'), ' · ', link(value.runs_url, '执行记录'));
         if (value.allowed_next_steps?.length) box.append(note('允许的下一步：' + value.allowed_next_steps.map(op => ({ 'task.pause': '暂停', 'task.cancel': '取消', 'task.retry': '重试', 'task.instructions': '追加指令', 'task.contract': '修订目标与验收', 'task.adopt-config': '采用新配置' }[op] ?? op)).join('、')));
-      } else if (value.projects) for (const project of value.projects) box.append(element('p', project.full_name + ' · ' + (project.enabled ? '已启用' : '已停用') + (project.configuration_gaps.length ? ' · 待补：' + project.configuration_gaps.join('、') : '')));
+      } else if (value.projects) {
+        for (const project of value.projects) box.append(element('p', project.full_name + ' · ' + (project.enabled ? '已启用' : '已停用') + (project.configuration_gaps.length ? ' · 待补：' + project.configuration_gaps.join('、') : '')));
+        for (const repo of value.pending_repositories || []) box.append(element('p', repo.full_name + ' · 待接入（未启动' + (repo.self_start ? '，可自行启动' : '，启动需超级管理员同意') + '）'));
+      } else if (value.repository?.full_name && ['started', 'start_requested', 'withdrawn', 'already_started'].includes(value.state)) {
+        const startText = { started: '已启动（能力上限 ' + (value.capability_ceiling || 'comment') + '）', already_started: '已处于启动状态', start_requested: '已提交启动申请，等待超级管理员处理', withdrawn: '已撤回启动申请' }[value.state];
+        box.append(element('p', value.repository.full_name + ' · ' + startText));
+      }
       else if (value.tasks) for (const task of value.tasks) box.append(element('p', task.task.summary + ' · ' + (states[task.task.status]?.[0] ?? task.task.status)));
       else if (value.workflows) for (const workflow of value.workflows) box.append(element('p', workflow.name + ' · 生效来源：' + (layerNames[workflow.prompt.source] ?? workflow.prompt.source) + ' · 版本 ' + workflow.prompt.version.slice(0, 12)));
       const details = element('details', ''); details.append(element('summary', '原始事实与回执'), element('pre', JSON.stringify(value, null, 2))); box.append(details);
@@ -283,9 +330,21 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       const receipt = data.result;
       const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
       const ownStep = ['start_own_task', 'continue_own_task', 'list_own_tasks'].includes(step.name);
-      setStepState(step, receipt.operation ? receipt.state : ownStep && receipt.error ? 'failed' : 'succeeded');
-      if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
-      else output(step.detail, ownStep ? '独立任务结果' : '查询事实', receipt, true);
+      if (step.name === 'start_repository' && receipt?.state === 'started' && receipt.repository?.id) {
+        if (!projects.some(p => String(p.id) === String(receipt.repository.id))) projects.push({ id: String(receipt.repository.id), full_name: receipt.repository.full_name, enabled: true, configuration_gaps: [] });
+        api('/api/repositories').then(list => {
+          if (me?.id === user && Array.isArray(list?.repositories)) { repositories = list.repositories; if (typeof syncScopePicker === 'function') syncScopePicker(); }
+        }).catch(() => {});
+      }
+      if (receipt?.confirmation_required && receipt?.preview_command) {
+        setStepState(step, 'awaiting_confirmation');
+        output(step.detail, '待确认操作', receipt, true);
+        stagedConfirmationCard(replies, receipt, step, currentTurn);
+      } else {
+        setStepState(step, receipt.operation ? receipt.state : (ownStep || step.name === 'start_repository') && receipt.error ? 'failed' : receipt.state === 'failed' ? 'failed' : 'succeeded');
+        if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
+        else output(step.detail, ownStep ? '独立任务结果' : '查询事实', receipt, true);
+      }
       currentTurn.stage = '正在整理结果';
       onActivity(!!active, true);
     } else if (row.type === 'reply') {
@@ -366,9 +425,27 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       entry.append(choose); return entry;
     }));
   }
+  function applyQueuedOnboarding() {
+    const queued = typeof peekRepositoryOnboarding === 'function' ? peekRepositoryOnboarding() : null;
+    if (!queued || !conversation) return false;
+    const startedMatch = projects.find(p => String(p.id) === queued.id) || repositories.find(p => String(p.id) === queued.id);
+    const pendingMatch = pendingRepositories.find(p => String(p.id) === queued.id);
+    const started = !!(queued.started || startedMatch);
+    const fullName = queued.full_name || startedMatch?.full_name || pendingMatch?.full_name || null;
+    const expectedScope = started ? 'project:' + queued.id : 'platform';
+    if (scope !== expectedScope && available(expectedScope)) {
+      if (started && location.hash === '#/management') history.replaceState(null, '', `#/projects/${encodeURIComponent(queued.id)}/management`);
+      if (applyScope(expectedScope)) { void openConversation().catch(showAccessError); return true; }
+    }
+    clearRepositoryOnboarding();
+    const prompt = repositoryOnboardingPrompt({ id: queued.id, full_name: fullName, started });
+    message.value = prompt; drafts.set(conversation, prompt);
+    message.focus();
+    return true;
+  }
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
-    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
+    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; confirmButtons.clear(); updateBusy();
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
     // The list on screen is the previous scope's (or the previous pick) until the new one arrives: none of it is current now.
     for (const choose of conversations.querySelectorAll('[aria-current]')) choose.removeAttribute('aria-current');
@@ -377,7 +454,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope);
       if (!alive(generation)) return;
       if (create || !all.length) {
-        if (!projects.length) {
+        const canOpen = scope === 'platform' ? (projects.length || pendingRepositories.length || me?.role === 'super_admin') : !!scopeProject(scope);
+        if (!canOpen) {
           showAccessError(Object.assign(new Error(managementAccessHints.scope_forbidden), { code: 'scope_forbidden' }));
           return;
         }
@@ -385,18 +463,19 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
         conversation = result.conversation.id; all.unshift({ ...result.conversation, created_at: new Date().toISOString() });
       } else conversation = all.find(item => item.id === (selected || stored(conversationKey())))?.id ?? all[0].id;
       renderConversations(all); remember(conversationKey(), conversation); message.value = drafts.get(conversation) ?? '';
+      applyQueuedOnboarding();
       void read();
     } catch (err) {
       if (alive(generation)) showAccessError(err);
     } finally { if (alive(generation)) { opening = false; updateBusy(); } }
   }
-  async function submit(body) {
+  async function submit(body, sourceMessage = crypto.randomUUID()) {
     if (!conversation || opening || !historyReady || submitting || active) return false;
     const id = conversation, generation = scopeGeneration; submitting = true; updateBusy(); showStatus();
     try {
-      const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: crypto.randomUUID(), ...body });
+      const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: sourceMessage, ...body });
       if (!alive(generation) || conversation !== id) return true;
-      messages.set(result.id, { input: body, state: result.state, created_at: new Date().toISOString() }); turn(result.id); active = result.id;
+      messages.set(result.id, { source_message: sourceMessage, input: body, state: result.state, created_at: new Date().toISOString() }); turn(result.id); active = result.id;
       followOutput = true; setSessionsOpen(false); scrollOutput(true); showStatus('请求已发送 · 正在连接助手'); void read(); return true;
     } catch (err) { if (alive(generation)) showError(err); return false; }
     finally { if (alive(generation)) { submitting = false; updateBusy(); } }
@@ -421,6 +500,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
     async setScope(value) {
+      if (!available(value) && value.startsWith('project:')) {
+        const refreshed = await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: { project_id: value.slice(8) }, arguments: { limit: 1 } }).catch(() => null);
+        if (refreshed?.projects?.[0]) projects.push(refreshed.projects[0]);
+      }
       if (!available(value)) {
         scopeGeneration++; streamController?.abort(); send.disabled = true;
         showAccessError(Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' })); return;
@@ -429,8 +512,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       if (applyScope(value)) await openConversation().catch(showAccessError);
     },
     focus() { message.focus(); },
-    // Puts a prepared request in the composer for the person to read and send (#1072: the onboarding page's recommendation).
-    draft(text) { message.value = text; message.focus(); },
-    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
+    // Puts a prepared request in the composer for the person to read and send.
+    draft(text) { message.value = text; if (conversation) drafts.set(conversation, text); message.focus(); },
+    applyOnboarding() { return applyQueuedOnboarding(); },
+    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); confirmButtons.clear(); drafts.clear(); }
   };
 }

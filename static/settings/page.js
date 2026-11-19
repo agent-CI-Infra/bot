@@ -225,7 +225,7 @@ const settingsCards = {
     if (id) return accountDetail(request, id);
     const [onboarding, { accounts: registered }, limits] = await Promise.all([api('/api/onboarding'), api('/api/accounts'), api('/api/github/rate-limits').catch(() => null)]);
     const view = settingsView = { request, onboarding, accounts: registered, models: [], limits };
-    view.app = liveCard('接入向导使用的 GitHub App', redraw => appBody(view, redraw), 'h2');
+    view.app = liveCard('系统初始化使用的 GitHub App', redraw => appBody(view, redraw), 'h2');
     return [view.app.section, settingsList('已登记的账号', '账号提供访问 GitHub 的凭据和接收 webhook 的入口；仓库经账号同步出现。凭据只保存，不会从读取接口返回。',
       registered.map(accountProfileLine), '还没有登记账号。', '新增账号', 'accounts', 'h2'), liveCard('GitHub 请求额度', redraw => rateLimitBody(view, redraw), 'h2').section];
   },

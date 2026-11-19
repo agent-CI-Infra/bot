@@ -2,7 +2,7 @@
 // keeps its bare value below the sentence rather than being guessed at.
 // Why the assistant page or the floating chat could not open, in words a project administrator can act on.
 const managementAccessHints = {
-  scope_forbidden: '当前范围里没有已启动、且你有权管理的项目，所以还不能使用管理助手。请改选上面的项目，或先到项目列表、身份与权限查看项目是否已启动。',
+  scope_forbidden: '当前范围里没有已启动的可访问项目，也没有你可管理的待接入仓库，所以还不能使用管理助手。请改选上面的项目，或先到项目列表、身份与权限查看仓库授权与安装状态。',
   capability_forbidden: '当前账号没有使用管理助手所需的权限。请联系管理员，或到「身份与权限」查看授权。',
   tenant_forbidden: '当前身份不能在这个范围管理项目。请在「身份与权限」核对有效授权后再试。',
   project_scope_mismatch: '这个项目不在当前选定的范围内。请改选范围后再试。',

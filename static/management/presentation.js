@@ -47,7 +47,10 @@ function managementPreview(command, context = {}) {
   }
   const actions = element('div', '', 'actions'), confirm = button('确认执行', () => {}, ''), cancel = button('取消', () => {});
   actions.append(confirm, cancel);
-  box.append(element('h3', '执行前确认'), facts(rows),
+  const workflowNote = command.operation === 'task.create' && command.arguments?.workflow_changes === true
+    ? note('这项开发任务允许在 bot 分支与 PR 中修改 .github/workflows/（推送分支时申请 Workflows 权限），仍须人工检视合并，不会直接写入默认分支。')
+    : null;
+  box.append(element('h3', '执行前确认'), facts(rows), ...(workflowNote ? [workflowNote] : []),
     note('确认后立即提交并执行：控制台没有审批步骤，执行结果写在回执里。版本不一致或权限已变更时，服务端会拒绝这次操作。'), actions);
   return { box, confirm, cancel };
 }

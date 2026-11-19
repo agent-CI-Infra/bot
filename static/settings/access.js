@@ -49,7 +49,7 @@ function loginAccessCard(login) {
   section.append(note('改动登录配置的影响：换 OAuth App 或 Client ID 后，现有 GitHub 会话失效，用户要用新 App 重新登录；旧 App 的个人授权要到 GitHub 的 Authorized GitHub Apps 里撤销。仓库连接用的 GitHub App、安装和 webhook 都由「机器人账号」和上面的地址管理，不受登录配置影响。'));
   // Read-only on purpose: the wizard owns the editor, this page only states what is in force and what changing it means.
   const onlyRead = element('p', '这里只显示当前生效的登录配置，不在这里修改；改配置或换凭据请到 ', 'muted');
-  onlyRead.append(settingsLink('#/settings/onboarding/2', '接入向导第 3 步（GitHub 登录）'), '。');
+  onlyRead.append(settingsLink('#/settings/onboarding/2', '系统初始化第 3 步（GitHub 登录）'), '。');
   section.append(onlyRead);
   return section;
 }

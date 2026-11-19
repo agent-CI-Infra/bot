@@ -25,7 +25,7 @@ function modelActions(model, result, after = reloadWith) {
     if(projectRoles.length)body.push('以下项目角色的显式模型引用会保留为不可用，后续执行等待补充配置，不会换用其他模型：',projectRoles.map(roleName));
     if(serviceRoles.length)body.push('以下平台服务角色将变为未配置模型，之后的调用等待重新配置：',serviceRoles.map(roleName));
     if(!roles.length)body.push('当前没有已保存角色显式引用它。');
-    if(detail.onboarding_default)body.push('这也是接入向导的默认模型；删除后需要重新选择接入默认模型。');
+    if(detail.onboarding_default)body.push('这也是系统初始化的默认模型；删除后需要重新选择接入默认模型。');
     body.push('以上是本次读取的已保存配置引用，不包括历史运行快照。已有运行快照和成本记录不会被改写。');
     if (detail.repository_id === null) body.push('这是部署共享模型，删除后所有项目都不能再选它。');
     const deleted = await confirmDialog({ title: `删除模型 ${detail.model_name}？`, body, action: '删除', danger: true,

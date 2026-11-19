@@ -84,7 +84,7 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 | `BOT_COMMAND_TIMEOUT_MAX_SECONDS` | `600` | 模型命令显式超时的统一上限（秒，1–2147363）；超过时按上限执行并返回 `timeout_notice`，省略参数保留各入口默认值，见[执行运行时](agent-runtime.md) |
 | `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
-| `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | 独立 OAuth App 的 Client ID 部署默认值；也可在全局设置的接入向导配置 |
+| `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | 独立 OAuth App 的 Client ID 部署默认值；也可在全局设置的系统初始化配置 |
 | `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE` | `/run/secrets/github-oauth-client-secret`（Compose） | 使用环境变量启用 OAuth 时读取的只读 Client secret 文件；向导配置不需要此文件 |
 | `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中提到时一定再检视一次的 `@名字`，逗号分隔、忽略大小写；设置后替换默认值，`off` 关闭提到触发。不提到名字的评论是否触发，由项目「检视」里的更新开关决定 |
 | `BOT_OBSOLETE_FAILURE_DAYS` | `7` | 平台类或临时原因的失败（限流、GitHub 或模型不可用、上下文或响应超限、运行异常等）在这么多天里没有新动静后自动移出「待处理」，见[日常使用](admin.md#日常使用) |
@@ -172,7 +172,7 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
 
 ## GitHub 用户登录
 
-推荐由系统超级管理员进入「全局设置 → 接入向导 → GitHub 登录」，创建独立 OAuth App，登记 Bot Homepage URL 和登录 Callback URL，填写该 OAuth App 的 Client ID 和 Client secret，再启用保存。不要复用仓库 GitHub App 的凭据；仓库连接、执行和权限核验仍由仓库 App 负责。配置立即生效，SecretBox 加密存入数据库，不修改部署文件，Secret 不回显。向导配置优先于环境默认值，明确停用后重启也不会重新启用。升级前的仓库 App 登录继续运行到管理员保存新 OAuth 凭据；迁移后原 GitHub 会话需重新登录，按数字 GitHub ID 保留账号绑定。
+推荐由系统超级管理员进入「全局设置 → 系统初始化 → GitHub 登录」，创建独立 OAuth App，登记 Bot Homepage URL 和登录 Callback URL，填写该 OAuth App 的 Client ID 和 Client secret，再启用保存。不要复用仓库 GitHub App 的凭据；仓库连接、执行和权限核验仍由仓库 App 负责。配置立即生效，SecretBox 加密存入数据库，不修改部署文件，Secret 不回显。向导配置优先于环境默认值，明确停用后重启也不会重新启用。升级前的仓库 App 登录继续运行到管理员保存新 OAuth 凭据；迁移后原 GitHub 会话需重新登录，按数字 GitHub ID 保留账号绑定。
 
 登录不再单独填写控制台地址。用户授权 Callback URL 固定为 `<统一入口>/auth/github/callback`，统一入口依次取向导验证的公网地址和 `BOT_PUBLIC_ORIGIN`；两者都没有时，取保存登录配置时的控制台地址，只适合本机回环测试。同一入口下还有安装 Setup URL `<统一入口>/onboarding/github/setup`、只在向导创建 App 时使用一次的注册回调 `/onboarding/github/callback`（回到发起创建时的控制台地址，不写进 App 设置），以及 Webhook URL `<统一入口>/hooks/github/<account_id>/<endpoint_id>`。登录回调对应 OAuth App，其他地址对应仓库 GitHub App 的字段，不能互相替代。公网地址变化后，登录回调立即跟随新地址；GitHub 不提供修改 Callback URL 和 Setup URL 的接口，管理员需分别在 OAuth App 更新登录回调、在仓库 App 更新 Setup URL，Webhook URL 由「机器人账号」的「重新检查」写入。
 
@@ -195,6 +195,6 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
 3. 运行 `docker compose pull` 和 `docker compose up -d`（源码构建时叠加 `docker/compose.build.yaml`）。
 4. 在「全局设置 → 公网接入」确认统一入口已验证。新的检查只核对 HTTPS 和本实例的一次性凭证，不再因为入口提供管理页面而失败。
 5. 在独立 OAuth App 设置里：Authorization callback URL 改为 `<统一入口>/auth/github/callback`；仓库 GitHub App 的 Setup URL 改为 `<统一入口>/onboarding/github/setup`，点「Save changes」。Webhook URL 不在统一入口下时，到「机器人账号」点当前 App 的「重新检查」。确认没人再用旧地址后，再删除旧的 Callback URL。
-6. 打开「接入向导 → GitHub 登录」。为独立控制台地址保存过的配置会同时列出旧、新 Callback URL；完成第 5 步后点一次「保存登录配置」，提示消失。只在本机测试、没有公网入口、以 `http://127.0.0.1:8792` 保存过登录配置的部署，从 `http://127.0.0.1:8791` 打开这一步保存一次，并把 OAuth App 的 Authorization callback URL 改成页面显示的新地址。
+6. 打开「系统初始化 → GitHub 登录」。为独立控制台地址保存过的配置会同时列出旧、新 Callback URL；完成第 5 步后点一次「保存登录配置」，提示消失。只在本机测试、没有公网入口、以 `http://127.0.0.1:8792` 保存过登录配置的部署，从 `http://127.0.0.1:8791` 打开这一步保存一次，并把 OAuth App 的 Authorization callback URL 改成页面显示的新地址。
 
 迁移期间，升级前登录配置里保存的控制台地址仍是合法写 Origin，入口或证书尚未就绪时，可在原地址或本机 `http://127.0.0.1:8791` 登录修复。会话 Cookie 按域名保存，入口域名变化后用户要在新地址重新登录一次；GitHub 身份、授权和用户 token 不受影响。
