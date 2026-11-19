@@ -82,11 +82,19 @@ test('the Actions calendar shows run details and keeps the date a reader scrolle
     f.state.failRunBackfill = true;
     calendarRuns(f.state);
     await f.hook('run-calendar'); await f.boards.drain();
+    // An existing board can serve a schema 2 snapshot until its next collection.
+    const legacy = (await f.get('/boards/octo/hello/data/snapshot.json')).data;
+    legacy.schema_version = 2;
+    legacy.sections.ci.data.lanes = { zone: 'Asia/Shanghai', days: ['2026-01-01'], lanes: {}, order: [] };
+    await page.route('**/data/snapshot.json?*', route => route.fulfill({ json: legacy }), { times: 1 });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.webhook + '/boards/');
     await page.locator('a.card').click();
     await page.locator('[data-tab="ci"]').click();
     const calendar = page.getByRole('table', { name: '近 30 天运行记录' });
+    await expect(page.locator('#tab-ci')).toContainText('Workflow 健康');
+    await expect(calendar).toHaveCount(0);
+    await page.getByRole('button', { name: '刷新视图' }).click();
     await expect(calendar.getByRole('rowheader')).toHaveText(['PR', '合并队列', 'Daily', '版本', '主干', '其他']);
     const latestAttempt = calendar.getByRole('link', { name: /Build packages · pull_request/ });
     await expect(latestAttempt).toHaveText('45s');
