@@ -24,6 +24,8 @@ test('first setup keeps one-time initialization and local recovery across screen
     await expect(page.locator('#workspace')).toBeVisible();expect(h.store.get('SELECT COUNT(*) AS n FROM users').n).toBe(1);
     expect((await h.client()('/api/setup','POST',{username:'second',password})).status).toBe(409);
     // #481: below the phone breakpoint sign-out moves into the account menu.
+    // First setup routes to onboarding after showing the workspace. That route closes any open menu.
+    await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:settings');
     await page.locator('#console-account').click();await page.locator('#console-account-menu').getByRole('button',{name:'退出登录',exact:true}).click();await expect(page.getByRole('heading',{name:'登录',exact:true})).toBeVisible();
     await expect(page.locator('#access-password')).toHaveValue('');await expect(page.locator('#access-password')).toHaveAttribute('type','password');
     await fill(page,'first-administrator',password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('#workspace')).toBeVisible();
