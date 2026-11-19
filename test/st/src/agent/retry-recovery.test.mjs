@@ -134,6 +134,19 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
       if(kind.startsWith('development.')&&condition!=='base')h.store.run('INSERT INTO development_candidates VALUES(?,?)',h.taskId,JSON.stringify({base_branch:'main',base_sha:pull.head.sha,files:[]}));
     }
     const task=await h.run();
+    // A review whose accepted result is already publishing finishes that publication on the head it reviewed; the new head
+    // is an update for its next round, not a reason to abandon the accepted publication.
+    const publishOnReviewedHead=phase==='publish'&&condition==='head'&&kind==='review.pr';
+    if(publishOnReviewedHead){
+      // The accepted result finished on the old head and was published; the new head is already the update of round 2.
+      assert.equal(task.error_code,null);assert.deepEqual([task.phase,task.attempt,JSON.parse(task.input).round],['prepare',2,2]);
+      assert.equal(writes,1);assert.equal(h.operations.includes('workspace_agent_start'),false);assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,0);
+      const updates=h.store.all('SELECT data FROM review_updates WHERE task_id=?',h.taskId).map(row=>JSON.parse(row.data));
+      assert.deepEqual(updates.map(update=>[update.reason,update.previous_head,update.current_head]),[['pull_request_head_changed',pull.head.sha,object.head.sha]]);
+      h.due();await h.run();
+      assert.equal(h.store.get('SELECT head_sha FROM tasks WHERE id=?',h.taskId).head_sha,object.head.sha);
+      return;
+    }
     assert.deepEqual([task.status,task.error_code],[status,code]);
     assert.equal(task.retry_cycle_started_at,null);assert.equal(writes,0);
     assert.equal(h.operations.includes('workspace_agent_start'),false);assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,0);
@@ -200,32 +213,116 @@ test('a development stopped by a removed label goes to the Manager, and resumes 
   assert.ok(h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.taskId).some(row=>JSON.parse(row.content).type==='resumed'));
 });
 
-for(const [change,status,code] of [['closed','cancelled','object_closed_or_draft'],['draft','cancelled','object_closed_or_draft'],['head','queued','pull_request_head_changed']]){
-  test(`ReviewUpdated rechecks ${change} before continuing the model in the same run`,async t=>{
-    let h,inserted=false,resumeChecks=0;const object=structuredClone(pull);
-    h=await emptyRepositoryFixture(t,{github(path,send){
-      if(!path.endsWith('/pulls/1'))return false;
-      const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase,response=structuredClone(object);
-      if(inserted&&phase==='model')resumeChecks++;
-      if(!inserted&&phase==='publish'){
-        // The object read for the pending write is open, then new discussion invalidates that result. The object
-        // changes before ReviewUpdated returns to the model, so that entry must read it again before continue.
-        h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'before-publication',JSON.stringify({reason:'comment',actor:'alice'}));
-        inserted=true;
-        if(change==='closed')object.state='closed';
-        if(change==='draft')object.draft=true;
-        if(change==='head')object.head.sha='f'.repeat(40);
-      }
-      send(response);return true;
-    }});
-    const input={object:pull,context:{mode:'review'},files:[],coverage:[]};
-    h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=? WHERE id=?",pull.head.sha,JSON.stringify(input),h.taskId);
-    const task=await h.run();
-    assert.equal(inserted,true);assert.equal(resumeChecks,1);assert.deepEqual([task.status,task.error_code],[status,code]);
-    assert.equal(h.operations.filter(type=>type==='workspace_agent_start').length,1);
-    assert.equal(h.operations.includes('workspace_agent_continue'),false);assert.equal(h.comments.length,0);
-  });
-}
+// #1100: an update arriving just before the first write used to fence the publication, delete its effects and return to the
+// model without telling the Manager. The accepted result now publishes, and the update carries into the next round.
+test('an update arriving at the first publication write does not fence an accepted review',async t=>{
+  let inserted=false;
+  const h=await emptyRepositoryFixture(t,{github(path,send){
+    if(!path.endsWith('/pulls/1'))return false;
+    const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase;
+    if(!inserted&&phase==='publish'){
+      h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'before-publication',JSON.stringify({reason:'comment',actor:'alice',url:'https://github.invalid/c/1'}));
+      inserted=true;
+    }
+    send(structuredClone(pull));return true;
+  }});
+  const input={object:pull,context:{mode:'review'},files:[],coverage:[]};
+  h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=? WHERE id=?",pull.head.sha,JSON.stringify(input),h.taskId);
+  const task=await h.run();
+  assert.equal(inserted,true);
+  assert.equal(task.error_code,null,'the accepted result publishes; the update does not abort it');
+  assert.equal(h.comments.length,1);
+  assert.equal(h.store.get("SELECT count(*) n FROM github_effects WHERE task_id=? AND state<>'sent'",h.taskId).n,0);
+  // The update was not covered by the published result, so the same task starts its next round with that update.
+  const nextInput=JSON.parse(task.input);
+  assert.deepEqual([task.attempt,nextInput.round],[2,2]);
+  assert.deepEqual([nextInput.trigger.reason,nextInput.trigger.actor],['comment','alice']);
+  assert.deepEqual(nextInput.merged_updates,[]);
+  // Both the publication and the carry are on the timeline for read_publication_context.
+  const decisions=h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id",h.taskId).map(row=>JSON.parse(row.data));
+  assert.deepEqual(decisions.slice(0,2).map(decision=>decision.decision),['publish','next_round']);
+  assert.ok(decisions.slice(1).every(decision=>decision.decision==='next_round'));
+  assert.deepEqual([decisions[1].carried_updates,decisions[1].pending_updates],[1,1]);
+});
+
+test('an update delivered after the result still starts the next round instead of being swallowed by the cursor',async t=>{
+  let inserted=false,newer=0;
+  const h=await emptyRepositoryFixture(t,{github(path,send){
+    if(!path.endsWith('/pulls/1'))return false;
+    const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase;
+    if(!inserted&&phase==='publish'){
+      // A turn boundary delivers an update after this task's result was produced. The accepted result is nevertheless
+      // reused (as in #1094): its coverage mark stays on the two updates it actually saw.
+      h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'after-result',JSON.stringify({reason:'comment',actor:'alice',comment:{body:'Arrived after the result.'}}));
+      newer=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+      h.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',newer,h.taskId);
+      inserted=true;
+    }
+    send(structuredClone(pull));return true;
+  }});
+  for(const body of ['Covered first.','Covered second.'])h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'covered-'+body,JSON.stringify({reason:'comment',actor:'alice',comment:{body}}));
+  const covered=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  const input={object:pull,context:{mode:'review'},files:[],coverage:[],heads:[pull.head.sha]};
+  h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=?,review_update_cursor=?,review_covered_update=?,review_seen_update=? WHERE id=?",
+    pull.head.sha,JSON.stringify(input),covered,covered,covered,h.taskId);
+  const task=await h.run();
+  assert.equal(inserted,true);assert.equal(task.error_code,null);assert.equal(h.comments.length,1);
+  const nextInput=JSON.parse(task.input);
+  assert.deepEqual([task.attempt,nextInput.round],[2,2]);
+  assert.deepEqual([nextInput.trigger.reason,nextInput.trigger.actor,nextInput.comment.body],['comment','alice','Arrived after the result.']);
+  assert.deepEqual([task.review_covered_update,nextInput.round_update_cursor],[covered,newer]);
+  const decisions=h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id",h.taskId).map(row=>JSON.parse(row.data));
+  assert.equal(decisions[0].decision,'publish');
+  const carried=decisions.find(decision=>decision.decision==='next_round');
+  assert.deepEqual([carried.carried_updates,carried.pending_updates,carried.pending_update_ids],[1,1,[newer]]);
+});
+
+test('a late push of a head the review already read is answered, with no false next-round audit',async t=>{
+  let inserted=false;const head=pull.head.sha;
+  const h=await emptyRepositoryFixture(t,{github(path,send){
+    if(!path.endsWith('/pulls/1'))return false;
+    const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase;
+    if(!inserted&&phase==='publish'){
+      h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'late-read-head',JSON.stringify({reason:'pushed',before:head,after:head}));
+      inserted=true;
+    }
+    send(structuredClone(pull));return true;
+  }});
+  // One accepted result already covered an earlier update. The late push is of the head that result read.
+  h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'already-accepted',JSON.stringify({reason:'comment',actor:'alice',comment:{body:'Earlier update.'}}));
+  const covered=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  const input={object:pull,context:{mode:'review'},files:[],coverage:[],heads:[head]};
+  h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=?,review_update_cursor=?,review_covered_update=?,review_seen_update=? WHERE id=?",
+    head,JSON.stringify(input),covered,covered,covered,h.taskId);
+  const task=await h.run();
+  assert.equal(inserted,true);assert.equal(task.error_code,null);assert.equal(task.attempt,1);
+  assert.equal(Number(JSON.parse(task.input).round||1),1,'an answered push does not start another round');
+  // The publication decision is audited once; the answered push is not carried as a next round.
+  const decisions=h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id",h.taskId).map(row=>JSON.parse(row.data));
+  assert.deepEqual(decisions.map(decision=>decision.decision),['publish']);
+  const saved=h.store.get('SELECT review_update_cursor,review_covered_update FROM tasks WHERE id=?',h.taskId);
+  assert.deepEqual(Object.values(saved),[Number(h.store.get('SELECT max(id) m FROM review_updates').m),Number(h.store.get('SELECT max(id) m FROM review_updates').m)]);
+});
+
+for(const change of ['closed','draft'])test(`a review that becomes ${change} before its first publication write stops without a write`,async t=>{
+  let changed=false,writes=0;const object=structuredClone(pull);
+  const h=await emptyRepositoryFixture(t,{github(path,send,res){
+    if(res.req.method!=='GET')writes++;
+    if(!path.endsWith('/pulls/1'))return false;
+    if(!changed&&h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase==='publish'){
+      if(change==='closed')object.state='closed';else object.draft=true;
+      changed=true;
+    }
+    send(structuredClone(object));return true;
+  }});
+  const input={object:pull,context:{mode:'review'},files:[],coverage:[]};
+  h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=? WHERE id=?",pull.head.sha,JSON.stringify(input),h.taskId);
+  const task=await h.run();
+  assert.equal(changed,true,'the object changed before the first publication write');
+  assert.deepEqual([task.status,task.error_code],['cancelled','object_closed_or_draft']);
+  assert.equal(writes,0,'a closed or draft object is not written to');
+  assert.equal(h.comments.length,0);
+});
 
 test('different transient failures reset the consecutive count, and entering the cycle does not synchronize tasks',async t=>{
   let code=502;const h=await emptyRepositoryFixture(t,{github(path,send){if(path==='/user'){send({message:'Server Error'},code);return true;}}});

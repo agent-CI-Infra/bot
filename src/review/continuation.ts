@@ -2,7 +2,8 @@ import { type Store, type Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { traceEvent } from '../tasks/trace.js';
-import { pendingReviewUpdates, reviewUpdateLog } from './sessions.js';
+import { publicationDecision } from '../tasks/publication.js';
+import { nextRoundUpdates, reviewUpdateLog } from './sessions.js';
 
 /**
  * #770: a review that has published keeps the Issue or pull request. An update the Manager continues it with (or one that
@@ -14,13 +15,9 @@ const clip = (value: unknown, limit: number) => { const text = String(value ?? '
 // The update as its trigger: the event fields, without the GitHub objects the update row also carries.
 const triggerOf = (data: any) => { const { object: _object, comment: _comment, review: _review, ...trigger } = data || {}; return trigger; };
 
-/** The updates that give a finished review a next round: all pending ones except a push to a head the review already read. */
+/** The updates that give a finished review a next round: all unhandled ones except pushes of heads it already read. */
 export function continuationUpdates(store: Store, task: Row): { id: number; data: any }[] {
-  let heads: string[] = [];
-  try { const input = JSON.parse(task.input || '{}'); heads = Array.isArray(input.heads) ? input.heads.map(String) : []; } catch { heads = []; }
-  if (task.head_sha) heads.push(String(task.head_sha));
-  return pendingReviewUpdates(store, task).map(row => ({ id: Number(row.id), data: JSON.parse(row.data) }))
-    .filter(update => update.data?.reason !== 'pushed' || !heads.includes(String(update.data.after)));
+  return nextRoundUpdates(store, task);
 }
 
 /** What the next round is told about the previous one when its session does not hold it. */
@@ -57,10 +54,14 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
   return store.transaction(() => {
     // Checked on the hot columns first: a task's input can be large, and every finished review run asks.
     if (!store.get(`SELECT 1 FROM tasks t WHERE t.id=? AND t.kind LIKE 'review.%' AND t.status='succeeded' AND NOT EXISTS (SELECT 1 FROM task_claims c WHERE c.task_id=t.id)
-      AND EXISTS (SELECT 1 FROM review_updates u WHERE u.task_id=t.id AND u.id>t.review_update_cursor)`, taskId)) return false;
+      AND EXISTS (SELECT 1 FROM review_updates u WHERE u.task_id=t.id AND u.id>(CASE WHEN t.review_seen_update IS NOT NULL
+        THEN max(t.review_seen_update,coalesce(t.review_covered_update,0))
+        WHEN coalesce(t.review_covered_update,0)>0 THEN t.review_covered_update ELSE t.review_update_cursor END))`, taskId)) return false;
     const task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!, updates = continuationUpdates(store, task);
-    // Only pushes of heads the review already read: they are answered, and need no round.
-    if (!updates.length) { store.run('UPDATE tasks SET review_update_cursor=(SELECT max(id) FROM review_updates WHERE task_id=?) WHERE id=?', taskId, taskId); return false; }
+    // Only pushes/moves of heads the review already read: they are answered, and need no round. Mark them covered so
+    // Manager facts and a restart agree with the round decision.
+    if (!updates.length) { store.run(`UPDATE tasks SET review_update_cursor=max(coalesce(review_update_cursor,0),coalesce((SELECT max(id) FROM review_updates WHERE task_id=?),0)),
+      review_covered_update=max(coalesce(review_covered_update,0),coalesce((SELECT max(id) FROM review_updates WHERE task_id=?),0)) WHERE id=?`, taskId, taskId, taskId); return false; }
     const input = JSON.parse(task.input || '{}'), done = Number(input.round || 1), round = done + 1, now = new Date().toISOString();
     const configuration = store.get('SELECT revision FROM task_execution_configs WHERE task_id=?', taskId)?.revision ?? input.configuration_revision ?? 1;
     // The round is shaped like a review the updates would have created: the latest update a person made is its trigger (the
@@ -71,8 +72,9 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
     const next = { ...kept, round, previous_result: previousResult(task, done), ...(asked ? { trigger: triggerOf(asked) } : {}),
       ...(asked?.comment ? { comment: asked.comment } : {}), merged_updates: updates.filter((_, index) => index !== askedIndex).map(update => triggerOf(update.data)),
       configuration_revision: Number(configuration) + 1, round_update_cursor: Math.max(...updates.map(update => update.id)) };
-    // The round has taken these updates (they are its trigger and merged_updates): its turns and its publication fence look
-    // only at what joins later, whatever the runner reports at its boundaries, and a retry of the round starts there again.
+    // The round has taken these updates (they are its trigger and merged_updates): its turns look only at what joins later,
+    // whatever the runner reports at its boundaries, and a retry of the round starts there again. The accepted-result mark
+    // is separate: it keeps a retry from resurrecting updates an earlier accepted result already covered.
     store.run(`UPDATE tasks SET status='queued',phase='prepare',input=?,workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,
       review_update_cursor=?,error_code=NULL,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL,claim_token=NULL,next_run_at=0,attempt=attempt+1,updated_at=?
       WHERE id=? AND status='succeeded'`, JSON.stringify(next), next.round_update_cursor, now, taskId);
@@ -90,6 +92,8 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
       detail: `检视第 ${done} 轮已发布，之后收到 ${updates.length} 条更新；任务作为第 ${round} 轮继续，重新打开上一轮的 Pi 会话（会话文件已不在时带上一轮结果的摘要），改写同一条总结评论。` });
     for (const update of updates) logged(reviewUpdateLog(update.data));
     traceEvent(store, taskId, 'task_continued', { round, updates: updates.map(update => update.id), reasons }, null, 'framework');
+    publicationDecision(store, { ...task, status: 'succeeded' }, 'next_round', { round, reason: 'published_result_has_uncovered_updates',
+      pending_updates: updates.length, pending_update_ids: updates.map(update => update.id), carried_updates: updates.length });
     return true;
   });
 }
@@ -100,6 +104,8 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
  */
 export function resumeFinishedReviews(store: Store, recent = 500) {
   for (const row of store.all(`SELECT DISTINCT u.task_id FROM review_updates u JOIN tasks t ON t.id=u.task_id
-    WHERE u.id>(SELECT coalesce(max(id),0) FROM review_updates)-? AND u.id>t.review_update_cursor AND t.status='succeeded'`, recent))
+    WHERE u.id>(SELECT coalesce(max(id),0) FROM review_updates)-? AND u.id>(CASE WHEN t.review_seen_update IS NOT NULL
+      THEN max(t.review_seen_update,coalesce(t.review_covered_update,0))
+      WHEN coalesce(t.review_covered_update,0)>0 THEN t.review_covered_update ELSE t.review_update_cursor END) AND t.status='succeeded'`, recent))
     continueFinishedReview(store, String(row.task_id));
 }

@@ -1,10 +1,22 @@
 import type {Store,Row} from '../storage/database.js';
 import type {GitHub} from '../github/client.js';
 import {traceEvent} from './trace.js';
+import {nextRoundUpdates,reviewCoverageFrontier} from '../review/sessions.js';
 
 /** Observations describe publication facts, never a decision to replace, merge or block a task. */
 export function publicationFact(s:Store,task:Row,event:string,data:any){
  return traceEvent(s,task.id,'publication_state',{event,...data,observed_at:new Date().toISOString()},task.trace_run_id,'framework');
+}
+/** Audit a publish/defer/next-round choice on the task timeline: which updates the accepted result covered, and how many it carries on. */
+export function publicationDecision(s:Store,task:Row,decision:'publish'|'published'|'defer'|'next_round',data:any={}){
+ const pending=Array.isArray(data.pending_update_ids)?data.pending_update_ids.map(Number):nextRoundUpdates(s,task).map(row=>Number(row.id));
+ // A publish does not carry updates itself; a defer or a next round does.
+ const carried=Number.isSafeInteger(data.carried_updates)?data.carried_updates:['defer','next_round'].includes(decision)?pending.length:0;
+ return traceEvent(s,task.id,'publication_decision',{decision,reason:data.reason??null,...(data.round!=null?{round:Number(data.round)}:{}),
+  ...(data.manager_action?{manager_action:String(data.manager_action)}:{}),
+  pending_updates:Number.isSafeInteger(data.pending_updates)?data.pending_updates:pending.length,
+  pending_update_ids:pending.slice(0,100),carried_updates:carried,
+  covered_through:Number.isSafeInteger(data.covered_through)?data.covered_through:reviewCoverageFrontier(s,task.id),at:new Date().toISOString()},task.trace_run_id,'framework');
 }
 export async function publicationContext(s:Store,task:Row,args:any={},remote?:()=>Promise<GitHub>){
  const saved=s.get('SELECT data FROM development_candidates WHERE task_id=?',task.id),candidate=saved?JSON.parse(saved.data):null;
@@ -12,6 +24,8 @@ export async function publicationContext(s:Store,task:Row,args:any={},remote?:()
  if(before!==undefined&&(!Number.isSafeInteger(before)||before<1))return {error:'invalid_publication_cursor'};
  const rows=s.all("SELECT id,data,created_at FROM task_history WHERE task_id=? AND type='publication_state' AND id<? ORDER BY id DESC LIMIT 21",task.id,before??Number.MAX_SAFE_INTEGER);
  const attempts=rows.slice(0,20).map(r=>({ref:'task_history:'+r.id,...JSON.parse(r.data)}));
+ const decisionRows=s.all("SELECT id,data,created_at FROM task_history WHERE task_id=? AND type='publication_decision' AND id<? ORDER BY id DESC LIMIT 21",task.id,before??Number.MAX_SAFE_INTEGER);
+ const decisions=decisionRows.slice(0,20).reverse().map(r=>({ref:'task_history:'+r.id,created_at:r.created_at,...JSON.parse(r.data)}));
  const version=(purpose:string,commit:any,tree:any=null)=>commit?traceEvent(s,task.id,'version_reference',{purpose,commit_sha:commit,tree_sha:tree,local_availability:'unknown',repository_id:task.repository_id,attempt:task.attempt},task.trace_run_id):null;
  const refs={candidate_ref:version('candidate',candidate?.local_sha,candidate?.tree_sha),created_commit_ref:version('created_commit',candidate?.created_commit_sha,candidate?.created_tree_sha),expected_head_ref:version('publication_expected_head',candidate?.expected_sha)};
  let observation:any={availability:'not_requested'};
@@ -27,6 +41,6 @@ export async function publicationContext(s:Store,task:Row,args:any={},remote?:()
   return {ref:'github_effects:'+r.id,state:r.state,requested_sha:request.sha??null,receipt_sha:response?.object?.sha??null};
  });
  return {...refs,candidate:candidate?{local_sha:candidate.local_sha,tree_sha:candidate.tree_sha,branch:candidate.branch,expected_head:candidate.expected_sha??null,created_commit:candidate.created_commit_sha??null,legacy_remote_sha:candidate.created_commit_sha?null:candidate.remote_sha??null,branch_confirmation:candidate.branch_confirmed??null,pr_number:candidate.pr_number??candidate.published?.number??null}:null,
-  remote:observation,attempts,next_before:rows.length>20?rows[19]!.id:null,branch_effects:effects,
-  instruction:'Commit creation, branch confirmation and PR confirmation are separate facts. Legacy remote_sha alone is not proof of publication. Receipts belong to their exact request, not newer candidates. Remote observations are timestamped; unavailable means unknown. Read record refs for originals; choose retry, investigation, coordination, integration or help yourself.'};
+  remote:observation,attempts,decisions,latest_decision:decisions.at(-1)??null,next_before:rows.length>20?rows[19]!.id:null,branch_effects:effects,
+  instruction:'Commit creation, branch confirmation and PR confirmation are separate facts. Legacy remote_sha alone is not proof of publication. Receipts belong to their exact request, not newer candidates. Remote observations are timestamped; unavailable means unknown. Decisions record publish, defer and next-round choices with the updates they carried; they do not replace the task contract. Read record refs for originals; choose retry, investigation, coordination, integration or help yourself.'};
 }

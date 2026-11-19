@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {Store} from '../../../../dist/storage/database.js';
 import {Publisher} from '../../../../dist/github/publisher.js';
 import {TaskError,operationId} from '../../../../dist/agent/common.js';
-import {publicationContext} from '../../../../dist/tasks/publication.js';
+import {publicationContext,publicationDecision} from '../../../../dist/tasks/publication.js';
 import {traceSource} from '../../../../dist/tasks/trace.js';
+import {TaskRecords} from '../../../../dist/tasks/service.js';
 const sha=c=>c.repeat(40);
 function fixture(t){
  const s=new Store(':memory:',Buffer.alloc(32,3));t.after(()=>s.close());
@@ -29,6 +30,20 @@ test('new candidate with the same QA key updates the branch; exact retries reuse
  assert.ok(ctx.attempts.some(x=>x.event==='commit_created'));assert.ok(ctx.attempts.some(x=>x.event==='branch_confirmed'));
  assert.equal(traceSource(f.s,'t',ctx.branch_effects[0].ref).data.state,'sent');
 });
+test('publication decisions are audit facts with their carried updates, visible in read_publication_context',async t=>{
+ const f=fixture(t);
+ f.s.run("INSERT INTO review_updates(task_id,event_key,data) VALUES('t','u1',?)",JSON.stringify({reason:'comment',actor:'alice'}));
+ publicationDecision(f.s,f.task,'publish',{reason:'accepted_result_publishes_by_default'});
+ publicationDecision(f.s,f.task,'next_round',{reason:'updates_arrived_before_or_during_publication',carried_updates:1,pending_update_ids:[1]});
+ const ctx=await publicationContext(f.s,f.task);
+ assert.deepEqual(ctx.decisions.map(d=>[d.decision,d.reason,d.carried_updates]),[
+  ['publish','accepted_result_publishes_by_default',0],['next_round','updates_arrived_before_or_during_publication',1]]);
+ assert.equal(ctx.latest_decision.decision,'next_round');assert.equal(ctx.latest_decision.pending_update_ids[0],1);
+ assert.equal(traceSource(f.s,'t',ctx.latest_decision.ref).data.decision,'next_round');
+ const history=new TaskRecords(f.s).tool('t','read_task_history',{limit:10});
+ assert.deepEqual(history.observations.map(row=>row.type),['publication_decision','publication_decision']);
+});
+
 test('a lost update response retains created commit without claiming publication; retry confirms remote and sends no duplicate update',async t=>{
  const f=fixture(t),c=f.candidate(sha('c'));f.save(c);f.loseResponse();await assert.rejects(f.publisher.branch(c),{code:'github_response_unknown'});
  let saved=JSON.parse(f.s.get("SELECT data FROM development_candidates WHERE task_id='t'").data);assert.ok(saved.created_commit_sha);assert.equal(saved.remote_sha,undefined);assert.equal(saved.branch_confirmed,undefined);

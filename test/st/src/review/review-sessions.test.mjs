@@ -2,12 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {harness,setup,account,repository} from '../../../fixtures/helpers.mjs';
 import {enqueue,queueWebhook} from '../../../../dist/review/queue.js';
-import {ReviewUpdated,reviewObjectState,pendingReviewUpdates} from '../../../../dist/review/sessions.js';
+import {coverReviewUpdates,nextRoundUpdates,pendingReviewUpdates,recordReviewResultSeen,reviewCoveredUpdate,reviewObjectState,reviewUpdateFacts} from '../../../../dist/review/sessions.js';
 import {deleteProjectRecords} from '../../../../dist/projects/removal.js';
 import {continueFinishedReview,resumeFinishedReviews} from '../../../../dist/review/continuation.js';
-import {GitHub} from '../../../../dist/github/client.js';
-import {Publisher} from '../../../../dist/github/publisher.js';
-import {Redactor} from '../../../../dist/agent/common.js';
+import {publicationDecision} from '../../../../dist/tasks/publication.js';
 
 const user={id:5,login:'alice',type:'User'},issue={number:1,state:'open',user};
 async function fixture(t){
@@ -28,6 +26,19 @@ for(const status of ['queued','retry_wait','waiting_configuration','waiting_envi
   const count=h.store.get('SELECT count(*) n FROM review_updates').n;
   queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:27,body:'@bot done <!-- dept-bot:marker -->'}},'own-comment');
   assert.equal(h.store.get('SELECT count(*) n FROM review_updates').n,count);
+});
+
+test('a review Manager sees delivered and uncovered updates as facts, and publication is the default',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{});
+  h.store.run("INSERT INTO review_updates(task_id,event_key,data) VALUES(?,'m1',?)",id,JSON.stringify({reason:'comment',actor:'alice',url:'https://github.invalid/c/7',at:'2026-11-12T00:00:00Z',comment:{body:'Please also check the retry path.',html_url:'https://github.invalid/c/7',created_at:'2026-11-12T00:00:00Z'}}));
+  const {TaskRecords}=await import('../../../../dist/tasks/service.js'),facts=new TaskRecords(h.store).facts(id);
+  assert.equal(facts.review_updates.pending_count,1);
+  assert.equal(facts.review_updates.default_action,'publish');
+  assert.match(facts.review_updates.instruction,/publishes this review by default unless you act/);
+  const update=facts.review_updates.uncovered[0];
+  assert.deepEqual([update.actor,update.url,update.pushed],[ 'alice','https://github.invalid/c/7',false]);
+  assert.match(update.summary,/retry path/);
+  assert.ok(update.at);
 });
 
 test('parallel reviews receive updates on the most recently claimed task, which answers those after its publication in its next round',async t=>{
@@ -121,15 +132,158 @@ test('a new PR head joins the running review as an update, like discussion of an
 });
 
 
-test('the publication fence sees updates arriving during the final GitHub request guard',async t=>{
-  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{}),task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
-  const github=new GitHub(h.store,h.store.get("SELECT * FROM repositories WHERE id='101'"),new Redactor(),async()=>{
-    assert.equal(queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:99,body:'@bot before HTTP'}},'before-write'),0);
-  },'http://127.0.0.1:9');github.fullName='fixture/project-101';
-  const publisher=new Publisher(h.store,github,task,async()=>{},undefined,undefined,()=>{
-    assert.equal(pendingReviewUpdates(h.store,task).length,1);throw new ReviewUpdated();
-  });
-  await assert.rejects(publisher.discussion('discussion','Draft result'),ReviewUpdated);
-  assert.equal(h.store.get('SELECT state FROM github_effects WHERE task_id=?',id).state,'pending');
-  assert.equal(h.store.get('SELECT publication_started FROM tasks WHERE id=?',id).publication_started,0);
+test('an accepted result covers its updates, and an attempt cursor reset cannot make them pending again',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue}),task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
+  for(const [n,reason] of [[1,'commented'],[2,'issue_edited']])queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:n,body:'@bot update '+n}},'update-'+n);
+  const first=h.store.all('SELECT id FROM review_updates ORDER BY id').map(row=>Number(row.id));
+  assert.equal(pendingReviewUpdates(h.store,task).length,2);
+  h.store.run("UPDATE tasks SET status='running',review_update_cursor=? WHERE id=?",first.at(-1),id);
+  assert.equal(pendingReviewUpdates(h.store,task).length,0);
+  // Accepting the result marks how far the review actually looked; the cursor is only a delivery cursor and may be reset by a retry.
+  coverReviewUpdates(h.store,id);
+  assert.equal(reviewCoveredUpdate(h.store,id),first.at(-1));assert.equal(pendingReviewUpdates(h.store,task).length,0);
+  h.store.run('UPDATE tasks SET review_update_cursor=?,attempt=attempt+1 WHERE id=?',first[0],id);
+  assert.equal(reviewCoveredUpdate(h.store,id),first.at(-1));assert.equal(pendingReviewUpdates(h.store,task).length,0,'an attempt bump must not resurrect covered updates');
+  // An update that arrives after the result saw is not covered: it belongs to the next round.
+  queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:3,body:'@bot newer'}},'update-3');
+  const newer=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  const facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual([facts.covered_through,facts.total_count,facts.pending_count,facts.next_round_count],[first.at(-1),3,1,1]);
+  assert.deepEqual(facts.uncovered.map(update=>update.id),[newer]);
+  assert.equal(facts.updates.at(-1).summary.includes('newer'),true);
+  assert.deepEqual(facts.next_round.map(update=>update.id),[newer]);
+});
+
+
+test('a later round starts past the updates it took, so its own input is not delivered again',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue});
+  const add=(key,data)=>h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify(data));
+  add('first-1',{reason:'comment',actor:'alice',comment:{body:'First update.'}});
+  add('first-2',{reason:'issue_edited',actor:'alice',object:{body:'Second update.'}});
+  const accepted=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  h.store.run('UPDATE tasks SET status=\'succeeded\',phase=\'done\',result=?,review_update_cursor=? WHERE id=?',JSON.stringify({summary:'Reviewed.',findings:[]}),accepted,id);
+  recordReviewResultSeen(h.store,id);coverReviewUpdates(h.store,id);
+  add('round-2-trigger',{reason:'comment',actor:'alice',comment:{body:'A new trigger.'}});
+  assert.equal(continueFinishedReview(h.store,id),true);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',id),input=JSON.parse(task.input),trigger=Number(input.round_update_cursor);
+  assert.deepEqual([task.status,task.phase,task.attempt,input.round],[ 'queued','prepare',2,2]);
+  assert.deepEqual([task.review_covered_update,task.review_update_cursor],[accepted,trigger]);
+  // The trigger is this round's input: it is delivered, not covered by the previous result, and must not be delivered at a boundary again.
+  assert.equal(pendingReviewUpdates(h.store,task).length,0);
+  let facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual([facts.pending_count,facts.next_round_count,facts.next_round.map(update=>update.id)],[1,1,[trigger]]);
+  assert.deepEqual(facts.uncovered.map(update=>update.id),[trigger]);
+  // Once this round's result covers it, neither the next round nor the Manager facts carry it.
+  recordReviewResultSeen(h.store,id);coverReviewUpdates(h.store,id);
+  facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual([facts.pending_count,facts.next_round_count,facts.uncovered,facts.next_round],[0,0,[],[]]);
+  h.store.run("UPDATE tasks SET status='succeeded',phase='done' WHERE id=?",id);
+  assert.equal(continueFinishedReview(h.store,id),false);
+});
+
+test('an update delivered after the result was produced still starts the next round',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue});
+  const add=(key,data)=>h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify(data));
+  add('seen-1',{reason:'comment',actor:'alice',comment:{body:'Covered first.'}});
+  add('seen-2',{reason:'comment',actor:'alice',comment:{body:'Covered second.'}});
+  const covered=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  h.store.run("UPDATE tasks SET status='succeeded',phase='done',result=?,review_update_cursor=?,review_covered_update=?,review_seen_update=? WHERE id=?",
+    JSON.stringify({summary:'Reviewed.',findings:[]}),covered,covered,covered,id);
+  // A turn boundary delivers a newer update after the result was produced. The result is then reused and passes QA.
+  add('after-result',{reason:'comment',actor:'alice',comment:{body:'Arrived after the result.'}});
+  const afterResult=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  h.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',afterResult,id);
+  coverReviewUpdates(h.store,id);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',id),facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual([task.review_covered_update,task.review_update_cursor],[covered,afterResult]);
+  assert.equal(pendingReviewUpdates(h.store,task).length,0,'delivered updates are not delivered again');
+  assert.deepEqual(nextRoundUpdates(h.store,task).map(update=>update.id),[afterResult]);
+  assert.deepEqual([facts.pending_count,facts.next_round_count,facts.uncovered.map(update=>update.id),facts.next_round.map(update=>update.id)],[1,1,[afterResult],[afterResult]]);
+  // Publication closes with the uncovered update carried into the next round.
+  publicationDecision(h.store,task,'next_round',{reason:'updates_arrived_before_or_during_publication'});
+  const decision=JSON.parse(h.store.get("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id DESC LIMIT 1",id).data);
+  assert.deepEqual([decision.decision,decision.carried_updates,decision.pending_updates,decision.pending_update_ids],[ 'next_round',1,1,[afterResult]]);
+  assert.equal(continueFinishedReview(h.store,id),true);
+  const next=JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?',id).input);
+  assert.deepEqual([next.round,next.trigger.reason,next.trigger.actor,Number(next.round_update_cursor)],[2,'comment','alice',afterResult]);
+});
+
+test('a result that saw an update but is not accepted yet leaves a later delivery for the next round',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue});
+  const add=(key,data)=>h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify(data));
+  add('seen-1',{reason:'comment',actor:'alice',comment:{body:'Seen first.'}});
+  add('seen-2',{reason:'comment',actor:'alice',comment:{body:'Seen second.'}});
+  const seen=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  // The result records what its session read, then a turn boundary delivers another update before acceptance.
+  h.store.run("UPDATE tasks SET status='succeeded',phase='publish',result=?,review_update_cursor=?,review_seen_update=? WHERE id=?",
+    JSON.stringify({summary:'Reviewed.',findings:[]}),seen,seen,id);
+  add('after-result',{reason:'comment',actor:'alice',comment:{body:'Delivered after the result.'}});
+  const afterResult=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  h.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',afterResult,id);
+  let task=h.store.get('SELECT * FROM tasks WHERE id=?',id),facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual([task.review_covered_update,task.review_seen_update,task.review_update_cursor],[0,seen,afterResult]);
+  assert.equal(pendingReviewUpdates(h.store,task).length,0,'the delivered update is not delivered again');
+  assert.deepEqual(nextRoundUpdates(h.store,task).map(update=>update.id),[afterResult]);
+  assert.deepEqual([facts.covered_through,facts.pending_count,facts.next_round_count,facts.uncovered.map(update=>update.id)],[seen,1,1,[afterResult]]);
+  const later=facts.updates.find(update=>update.id===afterResult);
+  assert.deepEqual([later.covered,later.delivered],[false,true]);
+  // An attempt bump resets only the delivery cursor; the result still covers what it saw, so the newer update stays pending.
+  h.store.run('UPDATE tasks SET review_update_cursor=0,attempt=attempt+1 WHERE id=?',id);
+  task=h.store.get('SELECT * FROM tasks WHERE id=?',id);facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual(nextRoundUpdates(h.store,task).map(update=>update.id),[afterResult]);
+  assert.deepEqual([facts.pending_count,facts.uncovered.map(update=>update.id)],[1,[afterResult]]);
+  // The old result passing acceptance covers its own frontier only, and publication carries the newer update into round 2.
+  coverReviewUpdates(h.store,id);
+  task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
+  assert.deepEqual([task.review_covered_update,task.review_update_cursor],[seen,0]);
+  assert.deepEqual(nextRoundUpdates(h.store,task).map(update=>update.id),[afterResult]);
+  publicationDecision(h.store,task,'next_round',{reason:'updates_arrived_before_or_during_publication'});
+  const decision=JSON.parse(h.store.get("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id DESC LIMIT 1",id).data);
+  assert.deepEqual([decision.decision,decision.carried_updates,decision.pending_updates,decision.pending_update_ids],[ 'next_round',1,1,[afterResult]]);
+  assert.equal(continueFinishedReview(h.store,id),true);
+  const next=JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?',id).input);
+  assert.deepEqual([next.round,next.trigger.reason,next.trigger.actor,next.comment.body,Number(next.round_update_cursor)],[2,'comment','alice','Delivered after the result.',afterResult]);
+});
+
+test('a late push or head move to a head the review already read is answered, not a next round',async t=>{
+  const h=await fixture(t),head='a'.repeat(40),pr={...issue,draft:false,head:{sha:head}};
+  const id=enqueue(h.store,'101','review.pr',1,head,{pull_request:pr});
+  const add=(key,data)=>h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify(data));
+  add('accepted',{reason:'comment',actor:'alice',comment:{body:'Accepted update.'}});
+  const accepted=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  h.store.run("UPDATE tasks SET status='succeeded',phase='done',result=?,head_sha=?,input=json_set(input,'$.heads',json_array(?)),review_update_cursor=? WHERE id=?",
+    JSON.stringify({summary:'Reviewed.',reviewed_sha:head,findings:[]}),head,head,accepted,id);
+  recordReviewResultSeen(h.store,id);coverReviewUpdates(h.store,id);
+  add('late-push',{reason:'pushed',actor:'alice',before:head,after:head});
+  add('late-head-move',{reason:'pull_request_head_changed',previous_head:head,current_head:head});
+  const answered=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  assert.equal(continueFinishedReview(h.store,id),false);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',id),facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual([task.status,task.attempt,task.review_covered_update,task.review_update_cursor],[ 'succeeded',1,answered,answered]);
+  assert.deepEqual([facts.pending_count,facts.next_round_count,facts.uncovered,facts.next_round],[0,0,[],[]]);
+  // A restart sees nothing new to scan: the answered updates are covered now.
+  const decisions=h.store.get('SELECT count(*) n FROM task_history WHERE task_id=? AND type=\'publication_decision\'',id).n;
+  resumeFinishedReviews(h.store);
+  assert.deepEqual(Object.values(h.store.get('SELECT status,attempt FROM tasks WHERE id=?',id)),['succeeded',1]);
+  assert.equal(h.store.get('SELECT count(*) n FROM task_history WHERE task_id=? AND type=\'publication_decision\'',id).n,decisions);
+});
+
+test('an attempt bump reuses the frontier its accepted result saw, not the reset delivery cursor',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue});
+  const add=(key,data)=>h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify(data));
+  add('seen-1',{reason:'comment',actor:'alice',comment:{body:'Seen first.'}});
+  add('seen-2',{reason:'comment',actor:'alice',comment:{body:'Seen second.'}});
+  const seen=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  h.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',seen,id);
+  // The result is produced, then its attempt fails: the retry resets the cursor, but not what the result saw.
+  recordReviewResultSeen(h.store,id);
+  h.store.run('UPDATE tasks SET review_update_cursor=?,attempt=attempt+1 WHERE id=?',1,id);
+  coverReviewUpdates(h.store,id);
+  assert.equal(reviewCoveredUpdate(h.store,id),seen);
+  assert.equal(pendingReviewUpdates(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',id)).length,0);
+  add('after-seen',{reason:'comment',actor:'alice',comment:{body:'Arrived after the result.'}});
+  const newer=Number(h.store.get('SELECT max(id) m FROM review_updates').m);
+  const facts=reviewUpdateFacts(h.store,id);
+  assert.deepEqual(facts.next_round.map(update=>update.id),[newer]);
+  assert.deepEqual(nextRoundUpdates(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',id)).map(update=>update.id),[newer]);
 });
