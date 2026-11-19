@@ -135,6 +135,7 @@ test('an unmounted tool volume still renders the page, the deployment guidance a
     await expect(page.locator('.agent-tools-prune button[type="submit"]')).toBeDisabled();
     // The forms are still readable at the narrowest width while disabled.
     await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('#console-mobile-nav')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/agent-tools-page/unmounted-390.png', fullPage: true });
     expect(errors).toEqual([]);

@@ -117,9 +117,8 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     // Since #1068 an unconfigured role page opens on the role list of the defaults in force; its first link is 跨任务协调.
     await page.goto(h.admin + '/#/projects/101/roles');
     await expect(page.getByTestId('role-list-coordinator')).toBeVisible();
-    // Since #527 the signed-in header wraps the language switch onto a second row below 480px (108px), so the
-    // first role can start just under the bottom bar. Bring it into view the way a reader would, then check
-    // that the bar and the launcher leave it fully clear.
+    // The signed-in shell can wrap onto multiple rows below 480px, so the first role can start just under the bottom bar.
+    // Bring it into view the way a reader would, then check that the bar and the launcher leave it fully clear.
     await page.evaluate(() => {
       const adopt = document.querySelector('[data-testid=role-list-coordinator]');
       const bar = document.querySelector('.console-mobile-nav').getBoundingClientRect();

@@ -324,6 +324,7 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
     await page.screenshot({path: '.tmp/global-project-table/desktop.png', fullPage: true});
     for (const [label, width, height] of [['compact', 1024, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height});
+      if (width < 768) await expect(page.locator('#console-mobile-nav')).toBeVisible();
       await expect(row('101')).toBeVisible();
       await page.screenshot({path: `.tmp/global-project-table/${label}.png`, fullPage: true});
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);

@@ -206,8 +206,8 @@ function syncConsoleShell() {
     const globalHeader = $('console-project-header');
     globalHeader.hidden = true;
     globalHeader.querySelector('.project-head')?.remove(); globalHeader.querySelector('.workbench-tabs')?.remove();
-    const locationBox = $('console-location'), permission = $('console-permission');
-    if (permission.parentElement !== locationBox) locationBox.insertBefore(permission, locationBox.querySelector('.console-section-picker'));
+    $('console-location').hidden = true; $('console-section-region').hidden = true;
+    $('console-permission').replaceChildren();
     syncScopePicker(); return;
   }
   // The menu names the same person the header used to print beside the sign-out button.
@@ -246,19 +246,20 @@ function syncConsoleShell() {
     permission.replaceChildren(...(row?.access_gaps?.length ? [permissionBadge(row)] : []));
   }
   const locationBox = $('console-location'), overview = project?.section === 'overview', globalHeader = $('console-project-header');
-  const activeOverview = overview && String(current?.id) === String(project.id) && current.section === 'overview' && !!current.repository && !current.unavailable;
+  const activeProject = project && String(current?.id) === String(project.id) && current.section === project.section && !!current.repository && !current.unavailable;
+  const activeOverview = overview && activeProject;
   const existingHead = globalHeader.querySelector('.project-head');
-  const nextHead = activeOverview ? $('project-page').querySelector('.project-head') : null;
+  const nextHead = activeProject ? $('project-page').querySelector('.project-head') : null;
   if (nextHead && nextHead !== existingHead) { existingHead?.remove(); globalHeader.prepend(nextHead); }
-  else if (!nextHead && (!activeOverview || existingHead?.dataset.projectId !== String(project.id))) existingHead?.remove();
+  else if (!nextHead && (!activeProject || existingHead?.dataset.projectId !== String(project.id))) existingHead?.remove();
   const existingTabs = globalHeader.querySelector('.workbench-tabs');
   const tabs = activeOverview ? $('project-page').querySelector('.workbench-tabs') : null;
   if (tabs && tabs !== existingTabs) { existingTabs?.remove(); globalHeader.append(tabs); }
   else if (!tabs && (!activeOverview || existingTabs?.dataset.projectId !== String(project.id))) existingTabs?.remove();
-  if (activeOverview) globalHeader.append(permission);
-  else if (permission.parentElement !== locationBox) locationBox.insertBefore(permission, locationBox.querySelector('.console-section-picker'));
-  globalHeader.hidden = !activeOverview;
-  locationBox.hidden = !signedIn || activeOverview && !consoleMedia.matches;
+  globalHeader.append(permission);
+  globalHeader.hidden = false;
+  globalHeader.dataset.overview = String(activeOverview);
+  locationBox.hidden = activeOverview;
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
   const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
@@ -298,6 +299,7 @@ function syncConsoleShell() {
       if (child.matches?.('a')) (group || sectionPicker).append(new Option(child.textContent, child.getAttribute('href'), false, child.getAttribute('aria-current') === 'page'));
     }
   }
+  $('console-section-region').hidden = !sectionPicker.options.length;
   syncConsoleMobileCurrent();
   $('console-sidebar').classList.toggle('console-platform', platform);
 }
@@ -516,24 +518,30 @@ function consoleIconName(href) {
 }
 
 function initConsoleShell() {
-  const sidebar = $('console-sidebar');
+  const sidebar = $('console-sidebar'), header = document.querySelector('body > header');
+  new ResizeObserver(() => {
+    const height = `${Math.ceil(header.getBoundingClientRect().height)}px`;
+    document.documentElement.style.setProperty('--console-header', height);
+    document.body.style.setProperty('--console-header', height);
+  }).observe(header);
   initScopePicker();
+  const sidebarBrand = header.querySelector('.brand').cloneNode(true); sidebarBrand.classList.add('console-sidebar-brand');
   const scopeCaption = element('span', t('nav.switch_project')); scopeCaption.setAttribute('data-i18n', 'nav.switch_project');
   const scope = element('div', '', 'console-project-picker'); scope.append(scopeCaption, scopePickerButton('console-project'));
   const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
   settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', t('nav.settings_group'));
   settings.setAttribute('data-i18n', 'nav.settings_group'); settings.setAttribute('data-i18n-attr', 'aria-label');
-  tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
+  tabs.replaceChildren(primary, settings); sidebar.append(sidebarBrand, scope, tabs);
   const globalHeader = element('div', '', 'console-project-header'); globalHeader.id = 'console-project-header'; globalHeader.hidden = true;
-  document.querySelector('body > header').insertBefore(globalHeader, $('header-tools'));
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
-  locationBox.append(area, context, permission);
+  locationBox.append(area, context); globalHeader.append(locationBox, permission); header.insertBefore(globalHeader, $('header-tools'));
   const secondary = element('div', '', 'console-secondary-nav'); secondary.id = 'console-secondary-nav'; secondary.hidden = true;
+  const sectionRegion = element('div', '', 'console-section-region'); sectionRegion.id = 'console-section-region'; sectionRegion.hidden = true;
   const mobileScope = element('div', '', 'console-mobile-scope'); mobileScope.id = 'console-mobile-scope'; mobileScope.hidden = true;
   mobileScope.append(scopePickerButton('console-mobile-project'));
-  $('main-content').prepend(mobileScope, locationBox, secondary);
+  $('main-content').prepend(mobileScope, sectionRegion, secondary);
   // The fixed assistant page and the board's filter scroller share the space the mobile range bar consumes.
   new ResizeObserver(() => {
     const height = mobileScope.getBoundingClientRect().height;
@@ -542,7 +550,7 @@ function initConsoleShell() {
   const sectionCaption = element('span', t('nav.current_page')); sectionCaption.setAttribute('data-i18n', 'nav.current_page');
   const section = element('label', '', 'console-section-picker'); section.append(sectionCaption);
   const sectionPicker = document.createElement('select'); section.id = 'console-section-label'; sectionPicker.id = 'console-section'; sectionPicker.setAttribute('aria-label', t('nav.current_page')); sectionPicker.setAttribute('data-i18n', 'nav.current_page'); sectionPicker.setAttribute('data-i18n-attr', 'aria-label'); section.hidden = true;
-  sectionPicker.addEventListener('change', () => { location.hash = sectionPicker.value; }); section.append(sectionPicker); locationBox.append(section);
+  sectionPicker.addEventListener('change', () => { location.hash = sectionPicker.value; }); section.append(sectionPicker); sectionRegion.append(section);
   // #481: five destinations own the phone's navigation. Linear SVG icons (#554) are decorative; the link's text —
   // and its accessible name — is exactly its destination, and the badge stays decorative.
   const mobile = element('nav', '', 'console-mobile-nav'); mobile.id = 'console-mobile-nav'; mobile.hidden = true; mobile.setAttribute('aria-label', t('nav.mobile')); mobile.setAttribute('data-i18n', 'nav.mobile'); mobile.setAttribute('data-i18n-attr', 'aria-label');

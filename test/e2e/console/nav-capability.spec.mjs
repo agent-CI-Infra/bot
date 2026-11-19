@@ -44,8 +44,8 @@ test('the shared shell groups projects by organization and keeps the selected pr
     await page.route('**/api/installations?repository_id=102', async route => { await new Promise(resolve => setTimeout(resolve, 2500)); await route.continue(); });
     await page.evaluate(() => {
       const header = document.querySelector('#console-project-header'), transitions = [];
-      const observer = new MutationObserver(() => transitions.push(header.hidden));
-      observer.observe(header, { attributes: true, attributeFilter: ['hidden'] });
+      const observer = new MutationObserver(() => transitions.push(!!header.querySelector('.project-head')));
+      observer.observe(header, { childList: true, subtree: true });
       window.navCapabilityTransitions = { observer, transitions };
     });
     const read102 = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && new URL(response.url()).searchParams.get('repository_id') === '102');
@@ -54,7 +54,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     await expect(page.locator('#console-project-header .workbench-tabs')).toHaveAttribute('data-project-id', '102');
     expect(await page.locator('#console-project-header [data-permission]').count()).toBe(0);
     await read102;
-    expect(await page.evaluate(() => window.navCapabilityTransitions.transitions)).toContain(true);
+    expect(await page.evaluate(() => window.navCapabilityTransitions.transitions)).toContain(false);
     await page.evaluate(() => window.navCapabilityTransitions.observer.disconnect());
     await page.unroute('**/api/installations?repository_id=102');
     // Re-reading the installation list drops the snapshot the navigation cached earlier, so the badge on returning to

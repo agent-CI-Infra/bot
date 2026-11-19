@@ -121,9 +121,9 @@ test('390宽用分组下拉和纵向列表直接访问发版本，筛选结果�
     await expect(page.getByLabel('当前分组',{exact:true})).toBeVisible();await choose(page,'当前分组','release');
     await expect(work(page,'101/release/release-running','release')).toBeVisible();
     expect(await page.locator('#board-columns').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);await noPageScroll(page);
-    // The 390px header grows to 108px once the language switch wraps onto a second row (#527), and #482's view row adds
-    // one toolbar line, so the first column sits right under the toolbar instead of at a fixed offset that would encode
-    // today's toolbar height. The point stays the same: the filter fold is collapsed, nothing expanded sits in between.
+    // The 390px shell and #482's view row add toolbar lines, so the first column sits right under the toolbar instead of
+    // at a fixed offset that would encode today's toolbar height. The point stays the same: the filter fold is collapsed,
+    // nothing expanded sits in between.
     const groupRowBottom = await page.locator('.board-mobile-group').evaluate(el => el.getBoundingClientRect().bottom);
     const firstColumnY = (await page.locator('.board-mobile-selected').boundingBox()).y;
     expect(firstColumnY).toBeGreaterThanOrEqual(groupRowBottom - 1);

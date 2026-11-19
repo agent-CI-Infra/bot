@@ -21,7 +21,7 @@ test('project settings keep eight categories with one current item and share the
         if(width>=768) await categories.getByRole('link',{name:caption,exact:true}).click();
         else await picker.selectOption('#/projects/101/'+key);
         await expect(page).toHaveURL(new RegExp('#/projects/101/'+key+'$'));
-        await expect(page.locator('#project-page .project-head h1')).toHaveText(caption);
+        await expect(page.locator('#console-project-header .project-head h1')).toHaveText(caption);
         await expect(page.locator('#project-page .project-content > .console-state-loading')).toHaveCount(0);
         await expect(categories.getByRole('link',{includeHidden:true})).toHaveText(settings.map(([name])=>name));
         await expect(categories.locator('[aria-current=page]')).toHaveText(caption);
