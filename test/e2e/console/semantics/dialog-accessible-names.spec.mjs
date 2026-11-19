@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
+import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 
 // #756: both static dialogs had a visible `<h2>` but no `aria-labelledby`, so a screen reader announced only "对话框" and
 // the reader lost the one thing that says what the dialog is for. The name must come from that same heading — the title

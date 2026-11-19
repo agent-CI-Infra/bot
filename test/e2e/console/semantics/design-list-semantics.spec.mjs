@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { harness, setup, account } from '../../fixtures/helpers.mjs';
+import { harness, setup, account } from '../../../fixtures/helpers.mjs';
 
 // #883: axe reported `aria-required-parent` (critical) on the four sample rows of the design page — every
 // `div.row.has-actions[role=listitem]` sat in a `.rows` container that carried only a class, no `role=list`.
