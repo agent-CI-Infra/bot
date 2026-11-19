@@ -105,11 +105,20 @@ test('English 界面：安装档案列表不再出现中文', async ({ page }) =
     await widget.getByRole('button', { name: 'Check permissions and events', exact: true }).click();
     const result = widget.locator('.permission-result');
     await expect(result).toContainText('Actions: set to "Read and write" (currently "No access")');
-    await expect(result).toContainText('Subscribe to events: tick Issue comment, Pull request review (without it, comments, reviews and review replies do not trigger a review)');
-    await expect(result).toContainText('Workflows: set to "Read and write" (currently "No access"); Confirmed CI changes need it');
-    await expect(result).toContainText('Subscribe to events: tick Workflow run; Actions failure analysis need it. This is an event subscription, not the Workflows permission');
+    await expect(result).toContainText('Subscribe to events: tick Issue comment, Pull request review (without them, comments, reviews and review replies do not trigger a review)');
+    // A feature gap usually names one feature, so the sentence has to read as well for one as for many.
+    await expect(result).toContainText('Workflows: set to "Read and write" (currently "No access"); needed for Confirmed CI changes');
+    await expect(result).toContainText('Subscribe to events: tick Workflow run; needed for Actions failure analysis. This is an event subscription, not the Workflows permission');
     await expect(result).toContainText("Open the App's Permissions & events");
     expect(cjkWords(await result.innerText()), 'Chinese text left in the English permission report').toEqual([]);
+    // The report is the widest thing the card draws (a permission line, its value and the features it serves), so the
+    // widths have to be measured with it open, not with the card folded as it was on arrival.
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height });
+      await expect(result).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `horizontal overflow with the report open at ${width}px`).toBe(true);
+      expect(cjkWords(await panel(page).innerText()), `Chinese text left with the report open at ${width}px`).toEqual([]);
+    }
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -139,6 +148,37 @@ test('English 界面：安装档案详情不再出现中文', async ({ page }) =
     expect(cjkWords(await widget.locator('.permission-result').innerText()), 'Chinese text left in the English detail report').toEqual([]);
     await panel(page).getByRole('button', { name: 'Re-sync' }).click();
     await expect(panel(page)).toContainText('queued');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
+// The widget is drawn on four surfaces; this slice changed its words on all of them, so the account row is judged here
+// as well: same component, narrower column, its own status and action columns beside it.
+test('English 界面：账号行的权限检查报告不再出现中文', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await stubArchive(page);
+    await signIn(page, f, '/#/settings/accounts');
+    const row = page.locator('#settings-panel .row').filter({ has: page.locator('.permission-check') }).first();
+    await expect(row).toBeVisible();
+    await page.getByRole('button', { name: 'English' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    await expect(row.locator('.permission-check').getByRole('button', { name: 'Check permissions and events', exact: true })).toBeVisible();
+    await row.locator('.permission-check button').first().click();
+    const result = row.locator('.permission-result');
+    await expect(result).toContainText('Actions: set to "Read and write" (currently "No access")');
+    await expect(result).toContainText('Subscribe to events: tick Issue comment, Pull request review (without them, comments, reviews and review replies do not trigger a review)');
+    await expect(result).toContainText('needed for Confirmed CI changes');
+    await expect(result).toContainText('needed for Actions failure analysis');
+    await expect(result).toContainText("Open the App's Permissions & events");
+    expect(cjkWords(await result.innerText()), 'Chinese text left in the English account-row report').toEqual([]);
+    // The page around the row is another slice of #527 and is still Chinese; what is judged here is the report and the
+    // layout it has to fit in, with the report open at both widths.
+    for (const [width, height] of [[1440, 900], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      await expect(result).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `horizontal overflow on the account row at ${width}px`).toBe(true);
+    }
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
