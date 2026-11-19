@@ -1,17 +1,16 @@
 import { projectLabels } from '../rules/service.js';
 import { roleKind } from './catalog.js';
-import { projectCeiling } from '../work/ceiling.js';
+import { projectCeiling } from '../projects/ceiling.js';
 import { createHash } from 'node:crypto';
 import { pullRequestQaGate } from '../tasks/grants.js';
 import type { Store, Row } from '../storage/database.js';
 import { fail, type Json } from '../core/security.js';
 import { roleConfiguration } from './definition.js';
 import { harnesses } from './harness.js';
-import { stageAllows, type StageDefinition } from './stage-policy.js';
 import { concurrencyBounds, defaultConcurrency, repositoryConcurrency } from '../app/settings.js';
 import { waitForReviewSatisfied } from '../tasks/readiness.js';
 import { taskGroupSQL } from '../app/project-activity.js';
-import { attributeCapacityWaitingRole, attributeControllerQueuedRole, orderedStages } from './flow.js';
+import { attributeCapacityWaitingRole, attributeControllerQueuedRole } from './flow.js';
 
 // #228 / #952: read-only projection of per-role occupancy, configured capacity limits, and genuinely attributable queues
 // (default Manager controller entries, uniquely attributable stage-policy queues, and #283 role_capacity waits).
@@ -64,18 +63,10 @@ export function roleConcurrencyValue(store: Store, repositoryId: string, value: 
 
 export function policyView(store: Store, policy: Json | undefined, repositoryId: string): Json | undefined {
   if (!policy) return policy;
-  // The labels are project settings of their own (#935); the policies column of the same name is a pre-rules leftover.
-  // max_revisions is a retired column (#1104): the bot's pull requests are no longer revised against a budget.
-  const { max_revisions: _retired, ...kept } = policy as any;
+  // Retired policy columns (#935, #1104, #1122): max_revisions, work_settings, task_models, automation.
+  const { max_revisions: _retired, work_settings: _work, task_models: _models, automation: _auto, ...kept } = policy as any;
   return { ...kept, ...projectLabels(store, repositoryId), capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId),
     delivery_gates: { pull_request_qa: pullRequestQaGate(store, repositoryId, policy as any) } };
-}
-
-function nextStage(store: Store, taskId: string, order: StageDefinition[]): StageDefinition | null {
-  const row = store.get('SELECT MAX(plan_revision) AS revision FROM task_stage_results WHERE task_id=?', taskId);
-  if (row?.revision == null) return order[0] ?? null;
-  const done = new Set(store.all('SELECT stage_id FROM task_stage_results WHERE task_id=? AND plan_revision=?', taskId, row.revision).map(r => r.stage_id));
-  return order.find(stage => !done.has(stage.stage_id) && stage.depends_on.every(id => done.has(id))) ?? null;
 }
 
 function resolveModelNames(store: Store, repositoryId: string): { byId: Map<string, string>; fallback: string | null } {
@@ -83,11 +74,9 @@ function resolveModelNames(store: Store, repositoryId: string): { byId: Map<stri
     WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))))`,
     repositoryId, repositoryId);
   const byId = new Map<string, string>(rows.map(r => [String(r.id), String(r.model_name)]));
-  const policy = store.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId);
-  let taskModels: Record<string, any> = {};
-  try { taskModels = JSON.parse(String(policy?.task_models ?? '{}')) || {}; } catch {}
-  const devModelId = typeof taskModels['development.issue'] === 'string' ? taskModels['development.issue'] : typeof policy?.model_id === 'string' ? policy.model_id : null;
-  return { byId, fallback: devModelId ? (byId.get(devModelId) ?? null) : null };
+  const policy = store.get('SELECT model_id FROM policies WHERE repository_id=?', repositoryId);
+  const defaultModelId = typeof policy?.model_id === 'string' ? policy.model_id : null;
+  return { byId, fallback: defaultModelId ? (byId.get(defaultModelId) ?? null) : null };
 }
 
 export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
@@ -102,7 +91,6 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
 
   const config = roleConfiguration(store, repositoryId);
   const limits = roleConcurrency(store, repositoryId);
-  const stages = orderedStages(config.required_stages ?? []);
   const now = Date.now();
 
   const queued = store.all(
@@ -125,15 +113,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
   const attribution = new Map<string, string>();
   let unsupported: string[] = [];
   let unattributedQueued = 0;
-  if (stages.length > 0) {
-    const ambiguous = eligible.filter(task => {
-      const stage = nextStage(store, task.id, stages);
-      const candidates = stage ? config.roles.filter(role => role.enabled && stageAllows(stage, role)) : [];
-      if (candidates.length === 1) { attribution.set(task.id, candidates[0]!.role_id); return false; }
-      return true;
-    });
-    if (ambiguous.length) unsupported = ['role_queue'];
-  } else if (!config.enabled) {
+  if (!config.enabled) {
     unsupported = ['role_queue'];
   } else {
     for (const task of eligible) {
@@ -262,7 +242,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
   );
 
   const version = createHash('sha256')
-    .update(JSON.stringify({ revision: config.revision, updated_at: config.updated_at ?? null, stages: config.required_stages ?? [], limits }))
+    .update(JSON.stringify({ revision: config.revision, updated_at: config.updated_at ?? null, limits }))
     .digest('hex')
     .slice(0, 16);
   const enforced = config.roles.some(role => roleKind(role.role_id) !== 'observer' && (limits[role.role_id] ?? null) !== null);

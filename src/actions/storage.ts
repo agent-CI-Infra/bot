@@ -1,4 +1,4 @@
-import { workActive } from '../work/settings.js';
+import { covers, projectCeiling } from '../projects/ceiling.js';
 import type { Store } from '../storage/database.js';
 
 export function actionsStorage(store: Store) {
@@ -50,7 +50,8 @@ export function actionsWebhook(store: Store, id: string, event: string, payload:
   if (event !== 'workflow_run' || payload.action !== 'completed' || !actionsWorkflowOn(store, id)) return;
   recordActionsRun(store, id, payload.workflow_run);
 }
-// Actions failure handling runs while the project and its switch are on.
+// Actions failure handling runs while the project, its switch and its comment ceiling are on.
 export function actionsWorkflowOn(store: Store, id: string) {
-  return workActive(store, id, 'actions.failures');
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', id);
+  return !!policy?.enabled && !!policy.actions_failures_enabled && covers(projectCeiling(store, id, policy), 'comment');
 }

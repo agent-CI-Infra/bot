@@ -1,5 +1,5 @@
 import { identityProjection } from '../identity/storage.js';
-import { syncEventFilters } from '../work/settings.js';
+import { syncEventFilters } from '../dispatch/settings.js';
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { projectListPage } from './project-list.js';
 import { PERMISSIONS_FRESH_MS, permissionGap } from './installations.js';
@@ -9,14 +9,13 @@ import { createPrivateKey } from 'node:crypto';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
 import { fail, fields, hashPassword, password, randomId, text, type Json } from '../core/security.js';
-import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
 import { setDeliveryGates } from '../tasks/grants.js';
 import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
-import { isCeiling, legacySwitchCeiling, projectCeiling, setCeiling, type Ceiling } from '../work/ceiling.js';
+import { isCeiling, legacySwitchCeiling, projectCeiling, setCeiling, type Ceiling } from '../projects/ceiling.js';
 import { saveLabels, validLabel } from '../rules/service.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
@@ -314,7 +313,7 @@ export async function management(store: Store, user: Actor, method: string, url:
   if (path === '/api/repositories') {
     if (method === 'GET') {
       const filter = scope(user, 'r.id');
-      return { repositories: projectListPage(store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.capability_ceiling,p.enabled,p.automation,${projectActivityColumns} FROM repositories r
+      return { repositories: projectListPage(store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.capability_ceiling,p.enabled,${projectActivityColumns} FROM repositories r
         JOIN policies p ON p.repository_id=r.id ${projectActivityJoin} WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args), url) };
     }
   }
@@ -342,29 +341,14 @@ export async function management(store: Store, user: Actor, method: string, url:
       return updatePolicy(store,user,id,body);
     }
   }
-  if (path === '/api/automation') {
-    if (method !== 'GET') return undefined;
-    const filter = scope(user, 'r.id');
-    return {
-      runs: store.all(`SELECT a.* FROM automation_runs a JOIN repositories r ON r.id=a.repository_id
-        WHERE ${filter.sql} ORDER BY a.created_at DESC LIMIT 100`, ...filter.args),
-    };
-  }
   return undefined;
 }
 
-export function taskModelEntries(value:unknown):[string,string][] {
-  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>64)fail(400,'invalid_task_models');
-  const entries=Object.entries(value!);
-  if(entries.some(([kind,v])=>!/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/.test(kind)||kind.length>100||['constructor','prototype','__proto__'].includes(kind)||typeof v!=='string'||!v.trim()||v.length>200))fail(400,'invalid_task_models');
-  return entries as [string,string][];
-}
 /** Shared policy mutation used by console and management commands. */
 export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
-      // Review guidance is the Manager's review sections; the review, development and developing labels are settings of their own (#935, #1047).
-      fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','command_timeout_seconds','delivery_gates',
+      fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','base_branch',
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','role_concurrency','command_timeout_seconds','delivery_gates',
         'review_label','development_label','developing_label']);
       for (const key of ['review_label', 'development_label', 'developing_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
@@ -387,27 +371,6 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
       const grant = !!model && user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', model);
       if (model && !grant && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
         (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))))`, model, id, id)) fail(400, 'model_not_available');
-      // Replace the exact-profile map atomically; {} restores repository defaults for all profiles.
-      let taskModels: Record<string, string> | undefined;
-      const taskModelGrants: string[] = [];
-      if (body.task_models !== undefined) {
-        const entries=taskModelEntries(body.task_models);
-        taskModels = Object.create(null) as Record<string, string>;
-        for (const [kind, value] of entries) {
-          const chosen = value as string;
-          const shared = user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', chosen);
-          if (!shared && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
-            (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))))`, chosen, id, id)) fail(400, 'model_not_available');
-          taskModels[kind] = chosen;
-          if (shared) taskModelGrants.push(chosen);
-        }
-      }
-      let automation = previous.automation as string;
-      if (body.automation !== undefined) {
-        if (!body.automation || typeof body.automation !== 'object' || Array.isArray(body.automation)) fail(400, 'invalid_automation_config');
-        try { automation = JSON.stringify(parseAutomationConfig(body.automation, loadAutomationConfig(previous.automation).config)); }
-        catch { fail(400, 'invalid_automation_config'); }
-      }
       return store.transaction(() => {
         if (body.actions_failures_enabled !== undefined) {
           store.run('UPDATE policies SET actions_failures_enabled=? WHERE repository_id=?', Number(body.actions_failures_enabled), id);
@@ -418,10 +381,6 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         // Delivery gates are project policy (#814): independent QA before a PR is on unless the project turns it off.
         if (body.delivery_gates !== undefined) setDeliveryGates(store, id, body.delivery_gates, user.id);
         if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
-        if (taskModels !== undefined) {
-          for (const chosen of taskModelGrants) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', chosen, id);
-          store.run('UPDATE policies SET task_models=? WHERE repository_id=?', JSON.stringify(taskModels), id);
-        }
         const keep = (key: string, value: unknown) => body[key] === undefined ? previous[key] : value;
         store.run('UPDATE policies SET review_issues=?,review_pull_requests=?,review_pr_updates=?,review_issue_updates=?,review_pr_discussion=?,review_language=? WHERE repository_id=?',
           keep('review_issues', Number(body.review_issues)), keep('review_pull_requests', Number(body.review_pull_requests)), keep('review_pr_updates', Number(body.review_pr_updates)),
@@ -430,7 +389,7 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         // An explicit update switch of the Manager follows the review switch changed here.
         syncEventFilters(store, id, body);
         store.audit(user.id, 'policy.updated', id, id);
-        store.run('UPDATE policies SET test_command=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
+        store.run('UPDATE policies SET test_command=?,base_branch=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.base_branch===undefined?previous.base_branch:String(body.base_branch),id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
         if (commandTimeout !== undefined) store.run('UPDATE policies SET command_timeout_seconds=? WHERE repository_id=?', commandTimeout as number | null, id);
         if (body.review_label !== undefined || body.development_label !== undefined || body.developing_label !== undefined)

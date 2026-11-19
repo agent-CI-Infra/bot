@@ -232,6 +232,7 @@ async function renderIdentity() {
     return;
   }
   if (!current()) return;
+  const keepAdvancedOpen = Boolean(panel.querySelector('details.identity-advanced[open]'));
   $('count').textContent = '';
   const scopes = data.scopes.filter(g => !data.actor.tenant_id || !g.tenant_id || g.tenant_id === data.actor.tenant_id);
   const active = scopes.filter(g => g.state === 'active'), pending = scopes.filter(g => g.state !== 'active');
@@ -400,6 +401,7 @@ async function renderIdentity() {
     [t('identity.page_read_at'), identityTime(Date.now())]
   ]), note(active.length ? t('identity.diagnostic_note_active') : t('identity.overview_note_empty')));
   const advanced = element('details', '', 'fold identity-advanced');
+  advanced.open = keepAdvancedOpen;
   advanced.append(element('summary', t('identity.advanced')), diagnostic, selection, identities, permissions);
   const layout = element('div', '', 'identity-layout'); layout.append(overview, feishuSlot, advanced); panel.replaceChildren(layout);
   const loadProvider = async () => {

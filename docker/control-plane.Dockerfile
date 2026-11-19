@@ -35,7 +35,6 @@ COPY --from=build /app/public-board/dashboard/dist ./public-board/dashboard/dist
 COPY docs/external-token-api.md ./docs/external-token-api.md
 # The built-in rule files; dist/rules/service.js reads them at startup.
 COPY docs/prompts ./docs/prompts
-COPY config ./config
 COPY skills ./skills
 # Process Harness executes this worker in the control-plane container.
 COPY runner/role-worker.mjs ./runner/role-worker.mjs

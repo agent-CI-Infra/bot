@@ -4,7 +4,37 @@ import { tools, eventTools } from './model.js';
 import { repositoryTools, explorationInstructions } from './exploration.js';
 import { githubWriteInstructions } from '../github/write.js';
 import { startAgentTool, subagentSystem } from './runtime.js';
-import { workAccess, sections, type WorkPermissions } from '../work/catalog.js';
+import type { TaskPermissions } from '../tasks/configuration.js';
+
+export type WorkPermissions = TaskPermissions;
+
+const legacyRuleSections = [
+  { id: 'guide', rule: '.bot/guide.md' },
+  { id: 'review.issue', rule: '.bot/rules/issue-review.md' },
+  { id: 'review.pr', rule: '.bot/rules/pr-review.md' },
+  { id: 'development', rule: '.bot/rules/issue-development.md' },
+  { id: 'labels', rule: '.bot/rules/labels.md' },
+] as const;
+
+const fullGithubReads = ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'];
+function defaultProfilePermissions(kind: string): WorkPermissions {
+  if (kind === 'development.issue' || kind === 'development.pr') {
+    return { workspace: { read: true, write: true, shell: true, notes: true }, github: fullGithubReads, writes: ['code', 'pull_request'], agents: true };
+  }
+  if (kind === 'release.notes') {
+    return { workspace: { read: true, write: false, shell: false, notes: false }, github: ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'], writes: ['release_notes'], agents: true };
+  }
+  if (kind === 'release.observe') {
+    return { workspace: { read: true, write: false, shell: true, notes: true }, github: fullGithubReads, writes: [], agents: true };
+  }
+  if (kind === 'actions.failures') {
+    return { workspace: { read: true, write: false, shell: true, notes: true }, github: fullGithubReads, writes: ['issue', 'actions_rerun'], agents: true };
+  }
+  if (kind.startsWith('workflow.')) {
+    return { workspace: { read: true, write: false, shell: true, notes: true }, github: fullGithubReads, writes: ['reply'], agents: true };
+  }
+  return { workspace: { read: true, write: false, shell: true, notes: true }, github: fullGithubReads, writes: ['reply', 'labels'], agents: true };
+}
 
 /** Capabilities are trusted task configuration, never inferred from a tool name or model output. */
 export interface AgentCapabilities {
@@ -35,7 +65,7 @@ export interface WorkPrompt { id: string; name: string; prompt: string }
  */
 export function projectRules(rules: any, guideOnly = false): { section: string; title: string; source: string; content: string }[] {
   return (rules?.files ?? []).flatMap((row: any) => {
-    const entry = sections.find(section => section.rule === row.path && row.path !== '.bot/computer.yaml');
+    const entry = legacyRuleSections.find(section => section.rule === row.path);
     if (!entry || (guideOnly && entry.id !== 'guide')) return [];
     // A text a task froze before the upgrade still declares its label itself.
     const key = entry.id === 'labels' ? 'review_label' : entry.id === 'development' ? 'development_label' : null;
@@ -71,7 +101,7 @@ const eventModes: Record<string, 'observation' | 'notes' | 'analysis'> = { 'rele
 export const eventKinds = Object.keys(eventModes);
 
 /** Every work type composes the same runtime: its permissions (open reading, configured writes) choose the tools, its prompt follows the hard limits. */
-export function workspaceProfile(kind: string, context: any, permissions: WorkPermissions = workAccess(kind), workflow?: WorkPrompt): WorkspaceAgentProfile {
+export function workspaceProfile(kind: string, context: any, permissions: WorkPermissions = defaultProfilePermissions(kind), workflow?: WorkPrompt): WorkspaceAgentProfile {
   if (Object.hasOwn(eventModes, kind)) return eventProfile(kind, context, permissions);
   if (!Object.hasOwn(modes, kind)) throw new Error('workspace_profile_not_registered: ' + kind);
   const completion = modes[kind]!, development = completion === 'publication', reply = completion === 'reply';

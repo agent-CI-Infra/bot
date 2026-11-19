@@ -1,4 +1,4 @@
-import {pruneDispatchFailures} from '../dispatch/store.js';
+import {pruneDispatchFailures, pruneDispatchThreads} from '../dispatch/store.js';
 import { createHash } from 'node:crypto';
 import type { Row, Store } from './database.js';
 import type { Manager } from '../projects/service.js';
@@ -164,6 +164,8 @@ export class RetentionCleanup {
     const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days), evidence = await this.browserEvidence(settings);
     const dispatchFailures={count:0,failed:0};
     try{for(const row of this.store.all('SELECT id FROM repositories')){const days=trajectoryDays(settings,String(row.id));if(days===null)continue;const before=new Date(this.now()-days*day).toISOString();while(!this.stopped){const removed=pruneDispatchFailures(this.store,String(row.id),before);dispatchFailures.count+=removed;if(removed<500)break;await this.pause(this.options.pauseMs??20);}}}catch(error){dispatchFailures.failed=1;this.failure('dispatch_failures',error);}
+    const dispatchThreads={count:0,failed:0};
+    try{for(const row of this.store.all('SELECT id FROM repositories')){const days=trajectoryDays(settings,String(row.id));if(days===null)continue;const before=new Date(this.now()-days*day).toISOString();while(!this.stopped){const removed=pruneDispatchThreads(this.store,String(row.id),before);dispatchThreads.count+=removed;if(removed<500)break;await this.pause(this.options.pauseMs??20);}}}catch(error){dispatchThreads.failed=1;this.failure('dispatch_threads',error);}
     const commitChecks = { count: 0, failed: 0 };
     try {
       while (!this.stopped) {
@@ -174,7 +176,7 @@ export class RetentionCleanup {
       }
     } catch (error) { commitChecks.failed = 1; this.failure('commit_checks', error); }
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, commit_checks: commitChecks, dispatch_failures:dispatchFailures, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, commit_checks: commitChecks, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, manager_window: manager, last_error: this.lastError });
   }
 
   /** Tells the manager its window when it reports another; null when the manager did not answer. */

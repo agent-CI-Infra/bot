@@ -9,10 +9,9 @@ import { enabled, releaseRedactor, withGitHub } from './github.js';
 import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
 import { requestObservation } from './observe.js';
-import { managerSection, workActive } from '../work/settings.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
-// The Manager's release notes section; a repository skill still replaces it at preflight.
-const releaseNotesPrompt = (store: Store, id: string) => managerSection(store, id, 'release.notes') ?? null;
+// Release notes skill comes from the repository (.agents/skills/release-notes/SKILL.md) at preflight; otherwise built-in grouping applies.
+const releaseNotesPrompt = (_store: Store, _id: string): string | null => null;
 
 export class ReleaseService {
   readonly worker: ReleaseWorker;
@@ -133,8 +132,6 @@ export class ReleaseService {
     if (observation && method === 'POST') {
       fields(input, ['revision']); this.find(id, observation[1]!); enabled(this.store, id);
       if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
-      // CI observation can be switched off in the project configuration.
-      if (!workActive(this.store, id, 'release.observe')) return fail(409, 'work_disabled');
       // The Manager decides on the request; the release page shows the analysis once its task is done.
       const row = this.find(id, observation[1]!);
       if (row.revision !== input.revision) return fail(409, 'release_revision_conflict');

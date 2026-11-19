@@ -6,7 +6,7 @@ import { assertCurrent, authorize, holdsInTenant, resolvePrincipalActor, type Ac
 import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { installationApi } from '../app/installations.js';
 import { trustedOrganization } from '../app/trusted-organizations.js';
-import { projectCeiling } from '../work/ceiling.js';
+import { projectCeiling } from '../projects/ceiling.js';
 import { obj } from './catalog-base.js';
 import { OnboardingApply } from './onboarding-apply.js';
 import type { ManagementService } from './service.js';

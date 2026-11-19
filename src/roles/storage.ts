@@ -1,7 +1,6 @@
 import type { Store } from '../storage/database.js';
 import { roleStorageV2 } from './definition.js';
 import { roleRunStorage } from './role-run.js';
-import { stageStorage } from './schedule.js';
 export function cleanRoleMessages(messages:any[]):any[]{return messages.map(message=>Object.fromEntries(Object.entries(message).filter(([key])=>! /^(reasoning.*|thinking.*|analysis)$/i.test(key))));}
 export function roleStorage(s:Store){s.db.exec(`
  CREATE TABLE IF NOT EXISTS role_instances(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,role TEXT NOT NULL,definition TEXT NOT NULL,harness TEXT NOT NULL,session TEXT NOT NULL DEFAULT '[]',sequence INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,
@@ -29,6 +28,5 @@ export function roleStorage(s:Store){s.db.exec(`
  s.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS role_conversation_instance ON role_instances(conversation_id,project_id,role) WHERE conversation_id IS NOT NULL');
  roleStorageV2(s);
  roleRunStorage(s);
- stageStorage(s);
  s.db.exec("UPDATE role_assignments SET status='failed' WHERE status='running' AND EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status IN ('fault','interrupted','stopped')) AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status='running')");
 }

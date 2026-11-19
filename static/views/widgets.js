@@ -1,8 +1,11 @@
 // An event task has no Issue or PR: it names its summary instead (the release or the Actions run).
-function objectLabel(task) { return task.object_number == null ? String(task.summary || kindLabels[task.kind] || task.kind) : `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
+function isPrTask(task) {
+  return String(task.kind || '').endsWith('.pr') || task.target?.type === 'pr' || /^(?:PR|检视 PR|Review PR)\s*#\d+/i.test(String(task.summary || ''));
+}
+function objectLabel(task) { return task.object_number == null ? String(task.summary || kindLabels[task.kind] || task.kind) : `${isPrTask(task) ? 'PR' : 'Issue'} #${task.object_number}`; }
 function githubUrl(task) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(task.full_name || '') || !task.object_number) return null;
-  return `https://github.com/${task.full_name}/${task.kind.endsWith('.pr') ? 'pull' : 'issues'}/${task.object_number}`;
+  return `https://github.com/${task.full_name}/${isPrTask(task) ? 'pull' : 'issues'}/${task.object_number}`;
 }
 function link(url, text, className) {
   try {

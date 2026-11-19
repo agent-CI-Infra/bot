@@ -9,8 +9,9 @@ import { emptyRepositoryFixture } from '../../../fixtures/empty-repository-helpe
 import { Store } from '../../../../dist/storage/database.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { githubWrite } from '../../../../dist/github/write.js';
-import { projectCeiling } from '../../../../dist/work/ceiling.js';
-import { workActive, workPermissions } from '../../../../dist/work/settings.js';
+import { projectCeiling } from '../../../../dist/projects/ceiling.js';
+import { taskPermissions } from '../../../../dist/tasks/configuration.js';
+import { actionsWorkflowOn } from '../../../../dist/actions/storage.js';
 
 // One capability ceiling per project (#850): read, comment or develop bounds everything the bot may write there.
 
@@ -31,41 +32,32 @@ test('upgrading gives each project the narrowest level its switches and writes a
   assert.deepEqual(ceilings, { develop: 'develop', review: 'comment', actions: 'comment', reply: 'comment', quiet: 'read', 'develop-only': 'develop' });
   // The former switches now say what the ceiling says.
   assert.deepEqual(store.all("SELECT review_enabled r,development_enabled d FROM policies WHERE repository_id IN ('develop','quiet') ORDER BY repository_id").map(row => [row.r, row.d]), [[1, 1], [0, 0]]);
-  // A project that developed without reviewing keeps its reviews off: the ceiling alone would have turned them on.
-  const work = JSON.parse(store.get("SELECT work_settings FROM policies WHERE repository_id='develop-only'").work_settings);
-  assert.equal(work['review.issue'].enabled, false); assert.equal(work['review.pr'].enabled, false); assert.deepEqual(work['review.pr'].writes, ['reply']);
-  assert.equal(workActive(store, 'develop-only', 'review.issue'), false); assert.equal(workActive(store, 'develop-only', 'development.issue'), true);
-  assert.equal(workActive(store, 'review', 'review.issue'), true); assert.equal(workActive(store, 'review', 'development.issue'), false);
-  assert.equal(workActive(store, 'actions', 'actions.failures'), true); assert.equal(workActive(store, 'quiet', 'reply'), false);
-  // Ordinary tasks wrote nothing unless an administrator chose their writes; at develop they would now inherit code delivery.
-  assert.deepEqual(workPermissions(store, 'develop', 'task.request').writes, []); assert.deepEqual(workPermissions(store, 'develop', 'task.development').writes, ['code', 'pull_request']);
+  assert.equal(actionsWorkflowOn(store, 'actions'), true);
+  assert.equal(actionsWorkflowOn(store, 'quiet'), false);
+  // Generic tasks write nothing unless explicitly granted; legacy task.development inherits code+pull_request at develop.
+  assert.deepEqual(taskPermissions(store, { repository_id: 'develop', kind: 'task.request', input: '{}' }).writes, ['code']);
+  assert.deepEqual(taskPermissions(store, { repository_id: 'develop', kind: 'task.development', input: '{}' }).writes, ['code', 'pull_request']);
   assert.equal(store.get("SELECT count(*) n FROM audit WHERE action='policy.capability_ceiling_migrated'").n, 6);
   // It happens once.
   store.close(); store = new Store(database, key); t.after(() => store.close());
   assert.equal(store.get("SELECT count(*) n FROM audit WHERE action='policy.capability_ceiling_migrated'").n, 6);
 });
 
-test('the policy API sets the ceiling, older switches move it, and work types stay under it', async t => {
+test('the policy API sets the ceiling, older switches move it, and task permissions stay under it', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const policy = change => admin('/api/repositories/101/policy', 'PATCH', change);
-  const work = async () => Object.fromEntries((await admin('/api/repositories/101/manager')).value.manager.work.map(entry => [entry.id, entry]));
   // The test repository starts with reviews off. Its bot account cannot handle Actions failures, so that stays off (#851).
   assert.equal((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling, 'read');
   assert.equal((await admin('/api/repositories/101/policy')).value.policy.actions_failures_enabled, 0);
   let saved = await policy({ capability_ceiling: 'comment' });
   assert.equal(saved.status, 200); assert.equal(saved.value.policy.capability_ceiling, 'comment');
   assert.deepEqual([saved.value.policy.review_enabled, saved.value.policy.development_enabled], [1, 0]);
-  let types = await work();
-  assert.equal(types['review.issue'].active, true); assert.equal(types['development.issue'].active, false);
-  assert.deepEqual(types['development.issue'].ceiling, { needed: 'develop', covered: false });
-  // Ordinary tasks inherit the ceiling: no code delivery below develop. Writes a person confirms in the console stay.
-  assert.deepEqual(types['task.request'].writes, []); assert.deepEqual(types['release.notes'].writes, ['release_notes']);
-  assert.equal(types['task.request'].write_options.find(option => option.id === 'pull_request').needed, 'develop');
+  assert.deepEqual(taskPermissions(h.store, { repository_id: '101', kind: 'task.request', input: '{}' }).writes, []);
+  assert.deepEqual(taskPermissions(h.store, { repository_id: '101', kind: 'release.notes', input: '{}' }).writes, ['release_notes']);
   saved = await policy({ capability_ceiling: 'develop' });
   assert.deepEqual([saved.value.policy.review_enabled, saved.value.policy.development_enabled], [1, 1]);
-  types = await work();
-  assert.equal(types['development.issue'].active, true); assert.deepEqual(types['task.request'].writes, ['code', 'pull_request']);
-  assert.deepEqual(workPermissions(h.store, '101', 'task.development').writes, ['code', 'pull_request']);
+  assert.deepEqual(taskPermissions(h.store, { repository_id: '101', kind: 'task.request', input: '{}' }).writes, ['code']);
+  assert.deepEqual(taskPermissions(h.store, { repository_id: '101', kind: 'task.development', input: '{}' }).writes, ['code', 'pull_request']);
   // The former switches still work: development off keeps reviews, reviews off is read.
   assert.equal((await policy({ development_enabled: false })).value.policy.capability_ceiling, 'comment');
   assert.equal((await policy({ development_enabled: true })).value.policy.capability_ceiling, 'develop');

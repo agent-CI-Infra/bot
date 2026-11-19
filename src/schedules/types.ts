@@ -19,7 +19,7 @@ export interface SubscriptionSpec {
   timezone: string; quiet_start?: string; quiet_end?: string; enabled: boolean;
 }
 export interface ControlledTrigger {
-  occurrence_id: string; run_id: string; project_id: string; tenant_id: string; workflow: string;
+  schedule_id?: string; occurrence_id: string; run_id: string; project_id: string; tenant_id: string; workflow: string;
   parameters: Json; logical_at: number; source: string; authorization_revision: number; config: Json;
 }
 /** Dispatch is a short local transaction. A handler must persist its idempotent business run here.

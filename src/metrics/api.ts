@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, type Json } from '../core/security.js';
-import { workType, workTypes } from '../work/catalog.js';
+import { legacyKindName, legacyTaskCategories } from '../projects/legacy-kinds.js';
 
 function date(value: string): string {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(Date.parse(value+'T00:00:00Z'))||new Date(value+'T00:00:00Z').toISOString().slice(0,10)!==value)fail(400,'invalid_cost_date');
@@ -71,7 +71,7 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     WHERE ${taskClauses.join(' AND ')} GROUP BY date,t.repository_id,t.kind,workflow ORDER BY date,t.repository_id,t.kind,workflow`,Date.now(),...taskArgs);
   // Tasks are counted per work type (`workflow` keeps its name in the response): reply tasks of former custom workflows
   // count as reply work.
-  const workflowName=(row:Row)=>workType(String(row.workflow))?.name??String(row.kind);
+  const workflowName=(row:Row)=>legacyKindName(String(row.workflow))??String(row.kind);
   for(const row of taskRows)row.name=workflowName(row);
   const taskDays=taskRows.filter(r=>r.date!==null),undated=taskRows.filter(r=>r.date===null);
   const taskSummary=new Map<string,Row>();
@@ -81,8 +81,7 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     if(row.runtime_ms!==null)total.runtime_ms=(total.runtime_ms??0)+row.runtime_ms;
     taskSummary.set(row.workflow,total);
   }
-  // Work types first, in the catalog's order, then the others by name.
-  const order=(row:Row)=>{const at=workTypes.findIndex(w=>w.id===row.workflow);return at<0?workTypes.length:at;};
+  const order=(row:Row)=>{const at=legacyTaskCategories.findIndex(w=>w.id===row.workflow);return at<0?legacyTaskCategories.length:at;};
   const summaryRows=[...taskSummary.values()].sort((a,b)=>order(a)-order(b)||String(a.name).localeCompare(String(b.name)));
   return {from:start,to:end,currency,timezone,days:rows,tasks:{days:taskDays,summary:summaryRows,undated},
     prices,other_currencies:otherCurrencies,

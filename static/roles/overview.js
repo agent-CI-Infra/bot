@@ -42,7 +42,7 @@ function roleBackendAvailabilityCard(state) {
     const rt = backend.runtime_status;
     const conn = rt.connectivity;
     const connFailed = rt.ready && conn?.state === 'failed';
-    const srcLabels = { project: '项目默认', workflow: '工作类型', role: '角色指定' };
+    const srcLabels = { project: '项目默认', role: '角色指定' };
     let detailText;
     if (!rt.ready) {
       detailText = rt.reason || '尚未就绪';
@@ -100,5 +100,5 @@ function roleOverviewCards(state, redraw) {
     draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); markRoleDirty(state); redraw();
   }), note(rolePageText('requiredNote')(requiredNames)), error);
   const availability = roleBackendAvailabilityCard(state);
-  return [overview, ...(availability ? [availability] : []), roleSkillsCard(state, redraw), roleStagesCard(state, redraw), custom];
+  return [overview, ...(availability ? [availability] : []), roleSkillsCard(state, redraw), custom];
 }

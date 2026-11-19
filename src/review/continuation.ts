@@ -55,7 +55,8 @@ export function continuationContext(input: any, head: string, pr: boolean, resum
 export function continueFinishedReview(store: Store, taskId: string): boolean {
   return store.transaction(() => {
     // Checked on the hot columns first: a task's input can be large, and every finished review run asks.
-    if (!store.get(`SELECT 1 FROM tasks t WHERE t.id=? AND t.kind LIKE 'review.%' AND t.status='succeeded' AND NOT EXISTS (SELECT 1 FROM task_claims c WHERE c.task_id=t.id)
+    if (!store.get(`SELECT 1 FROM tasks t WHERE t.id=? AND (t.kind LIKE 'review.%' OR (t.kind='task.request' AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='review'))))
+      AND t.status='succeeded' AND NOT EXISTS (SELECT 1 FROM task_claims c WHERE c.task_id=t.id)
       AND EXISTS (SELECT 1 FROM review_updates u WHERE u.task_id=t.id AND u.id>t.review_update_cursor)`, taskId)) return false;
     const task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!, updates = continuationUpdates(store, task);
     // Only pushes of heads the review already read: they are answered, and need no round.
@@ -66,15 +67,16 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
     // summary comment answers that person; a push asks nobody's question) and the others are merged into it. What the
     // earlier round answered is in its reopened Pi session, or in previous_result.
     const askedIndex = updates.map(update => update.data?.reason !== 'pushed').lastIndexOf(true), asked = askedIndex < 0 ? null : updates[askedIndex]!.data;
-    const { comment: _comment, trigger: _trigger, merged_updates: _merged, wait_for_review: _wait, ...kept } = input;
-    const next = { ...kept, round, previous_result: previousResult(task, done), ...(asked ? { trigger: triggerOf(asked) } : {}),
+    const latestPushSha = [...updates].reverse().map(update => update.data?.after).find(sha => typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha)) ?? null;
+    const { comment: _comment, trigger: _trigger, merged_updates: _merged, wait_for_review: _wait, delivery: _delivery, ...kept } = input;
+    const next = { ...kept, ...(kept.generic ? { delivery: null } : {}), ...(kept.target && latestPushSha ? { target: { ...kept.target, ref: latestPushSha }, move_to_sha: latestPushSha } : {}), round, previous_result: previousResult(task, done), ...(asked ? { trigger: triggerOf(asked) } : {}),
       ...(asked?.comment ? { comment: asked.comment } : {}), merged_updates: updates.filter((_, index) => index !== askedIndex).map(update => triggerOf(update.data)),
       configuration_revision: Number(configuration) + 1, round_update_cursor: Math.max(...updates.map(update => update.id)) };
     // The round has taken these updates (they are its trigger and merged_updates): its turns are given only what joins later,
     // and a result of this round covers at least these (src/review/sessions.ts).
-    store.run(`UPDATE tasks SET status='queued',phase='prepare',input=?,workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,
+    store.run(`UPDATE tasks SET status='queued',phase='prepare',input=?,head_sha=coalesce(?,head_sha),workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,
       review_update_cursor=?,error_code=NULL,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL,claim_token=NULL,next_run_at=0,attempt=attempt+1,updated_at=?
-      WHERE id=? AND status='succeeded'`, JSON.stringify(next), next.round_update_cursor, now, taskId);
+      WHERE id=? AND status='succeeded'`, JSON.stringify(next), latestPushSha, next.round_update_cursor, now, taskId);
     // As when a person adopts the current configuration: the previous round's delivery stays in the task history, the new
     // round submits and is accepted on its own under the configuration captured now. A role instance's Pi session is kept
     // (#1040): its next run reopens it with this round's update, under the current rules and in the current checkout. Other

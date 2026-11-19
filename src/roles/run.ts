@@ -4,11 +4,10 @@ import { resultSpec, taskResultOwner } from '../agent/tool-results.js';
 import {TaskRecords} from '../tasks/service.js';
 import { taskRecordContext } from '../tasks/record-tools.js';
 import {observeLongExecution,decideLongExecution} from './long-execution.js';
-import { assertStageRun, assertStageStart, stageRunBinding, stagePolicyHash, artifactCandidate, deliveryType, stageForAssignment, stageBudgetExceeded, stageBudgetUsage, recordStageResult, latestRoleCandidate, candidateKey } from './schedule.js';
+import { artifactCandidate, deliveryType, latestRoleCandidate, candidateKey } from './schedule.js';
 import {executionBaseline} from '../agent/common.js';
 import { executionModel, taskConfiguration } from '../tasks/configuration.js';
 import { cleanRoleMessages } from './storage.js';
-import { workOf } from '../work/catalog.js';
 import { workflowChanges } from '../tasks/pull-request.js';
 import { runAgent,type AgentSpec } from '../agent/runtime.js';
 import { environmentProfiles } from './catalog.js';
@@ -43,9 +42,9 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
  let config=override??(fixed?roleConfig(s,task):undefined);
  if(!override&&config&&instance){const revision=Math.max(Number(instance.config_revision??0),Number(instance.pending_revision??0));
   if(revision>config.revision)config=configurationRevision(s,task.repository_id,revision)??config;}
- return resolveRole(s,task.repository_id,role,workOf(task as any),{harness,pinned,configuration:config,entryExecutor,ciChange:workflowChanges(task),
-  // 'workflow' names a work type's own model (task_models), as role snapshots always called it.
-  fallbackModel:fixed?()=>({model:model??executionModel(s,task,workOf(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),workOf(task as any))?'workflow':'project'}):undefined});
+ const workflow=String(task.kind??'task.request');
+ return resolveRole(s,task.repository_id,role,workflow,{harness,pinned,configuration:config,entryExecutor,ciChange:workflowChanges(task),
+  fallbackModel:fixed?()=>({model:model??executionModel(s,task),source:'project'}):undefined});
 }
 /** Entry points must resolve the selected role before requiring a project model; external backends own their model. */
 export const roleExecutionSystem = (s:Store,task:Row,role:string) => taskRole(s,task,role).system;
@@ -113,7 +112,7 @@ function rebind(s:Store,task:Row,instance:Row,resolved:Resolved,reason:'delegati
  * events, checkpoint and cancel work on a started handle; recover starts a new run of the same instance and assignment.
  */
 interface Bound { ctx:RunContext; token:string; token_id:string; run_id:string; epoch:number }
-interface Live { bound:Bound|null; exhausted:string|null;stage_exhausted:string|null; tools:number; onBound?:()=>void; timer?:ReturnType<typeof setTimeout>; stageTimer?:ReturnType<typeof setTimeout>; longTimer?:ReturnType<typeof setInterval>; longPending?:Set<Promise<void>>; heartbeat?:ReturnType<typeof setInterval> }
+interface Live { bound:Bound|null; exhausted:string|null; tools:number; onBound?:()=>void; timer?:ReturnType<typeof setTimeout>; longTimer?:ReturnType<typeof setInterval>; longPending?:Set<Promise<void>>; heartbeat?:ReturnType<typeof setInterval> }
 interface LoopState { resolved:Resolved; instance:Row; continuation:{ref:string;from_run:string|null}|null }
 export interface PreparedRun<T> {
  protocol:typeof roleRunProtocol.id; operation_id:string; role:string; assignment?:string; scope:string; spec:AgentSpec<T>; wrapped:AgentSpec<T>;
@@ -137,7 +136,7 @@ function assignmentScope(s:Store,task:Row,instance:Row,assignment?:string){
 const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={session_bound:['session_bound','progress'],message:['message','progress'],tool:['tool_call','observation'],artifact:['artifact','artifact'],permission:['permission','denied'],configuration:['configuration','progress'],turn:['turn','progress'],usage:['usage','budget']};
 
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
- const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=workOf(task as any),{resolved,continuation}=state;let instance=state.instance;
+ const s=spec.store,task=spec.task,workflow=String(task.kind??'task.request'),{resolved,continuation}=state;let instance=state.instance;
  const sourceFence=taskAuthorizationFence(s,task,role);
  let resultMounted=false;
  spec=resultSpec(spec,()=>taskResultOwner(task),()=>resultMounted);
@@ -145,7 +144,6 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
   s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
  }
- if(stage&&s.get('SELECT instance_id FROM role_assignments WHERE id=? AND task_id=?',assignment!,task.id)?.instance_id!==instance.id)stop('role_recovery_scope_mismatch','failed','阶段委派必须属于当前任务与角色实例。');
  const memoryView=memoryViewSnapshot(s,{...task,active_role:role}),visibleIds=new Set(memoryView.entries.map(item=>item.id));
  const knowledgeFence=JSON.stringify({scope:memoryView.scope,ids:[...visibleIds]});
  let previousView:{scope:string;ids:string[]}|null=null;
@@ -166,7 +164,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
  let released=false;const release=async()=>{if(released)return;released=true;await env.release?.();};
  try{
   // rebuildContext: the caller supplies the durable facts, so no stored conversation is restored (as for QA).
-  const rebuild=options.rebuildContext||stage?.role_constraints.independent;
+  const rebuild=options.rebuildContext;
   const stored=visibleMemorySnapshot(s,task.repository_id,cleanRoleMessages(JSON.parse(instance.session)),taskTraceAccess(s,{...task,active_role:role})),messages=rebuild||role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
   // A crash can leave an assistant tool batch partially answered. Mark absent receipts as
   // interrupted, never fabricate their observations; the role must query durable task facts.
@@ -180,12 +178,11 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    :persistence==='native_resume'?(env.pi?.resume||qaState.harness==='pi'&&qaState.sessionId?'native_resume':instance.sequence>0?'rebuilt_from_task_records':'new_session')
    :persistence==='checkpoint_transcript'?(messages.length?'checkpoint_transcript':'new_session'):instance.sequence>0?'rebuilt_from_task_records':'new_session';
   // Admission: what this kind and environment need against what the driver declares and the environment verified.
-  const kind=snapshot.kind,scope=assignmentScope(s,task,instance,assignment);let candidate=inputCandidate(s,task,role,kind);
-  if(stage&&kind==='observer'){const ref=latestRoleCandidate(s,task.id);if(ref){if(ref.kind==='code'&&candidate.ref?.kind==='code'&&candidateKey(ref)!==candidateKey(candidate.ref))stop('candidate_changed','retry_wait');candidate={ref,evidence:candidate.evidence};}}
+  const kind=snapshot.kind,scope=assignmentScope(s,task,instance,assignment);const candidate=inputCandidate(s,task,role,kind);
   const profile=environmentProfiles.find(e=>e.id===snapshot.environment.id);
   // A Pi entry executor submits through its workflow session's finish tools and completion check, not spec.finish.
   const admission=admitRun(s,{task,role,kind,harness:{id:driver.id,version:driver.version,capabilities:driver.capabilities},environment:profile?{id:profile.id}:null,
-   candidate,source_ref:sourceRef(s,task),required:stage?.role_constraints.capabilities,fresh:!messages.length&&!Object.keys(qaState).length,validated:!!(spec.finish||spec.validate||env.pi?.session),snapshot_id:resolved.id});
+   candidate,source_ref:sourceRef(s,task),fresh:!messages.length&&!Object.keys(qaState).length,validated:!!(spec.finish||spec.validate||env.pi?.session),snapshot_id:resolved.id});
   const budget=runBudget(snapshot);
   // A cumulative budget already used up by earlier runs of this assignment stops before anything starts; no other model.
   if(cumulativeBudget(snapshot)){const reached=budgetExceeded(budget,instanceUsage(s,instance.id));if(reached)stop('role_budget_exhausted','waiting_configuration',`${role}：本任务中这个角色的累计预算 ${reached} 已用尽；已有产物保留，提高预算后才能继续。`);}
@@ -213,7 +210,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const reservedBackend=['native','process','pi'].includes(harness),configuredTurns=bounded?.max_turns??spec.maxTurns,limitTurns=configuredTurns??32;
   const availableTurns=reservedBackend&&cumulative&&budget.max_model_requests!==null?Math.min(limitTurns,budget.max_model_requests-instanceUsage(s,instance.id).model_requests):limitTurns;
   if(spec.finish&&reservedBackend&&availableTurns<=finalizationReserve(availableTurns))stop('role_budget_exhausted','waiting_configuration',`${role}：剩余 ${availableTurns} 次请求不足以保留至少一轮工作和收尾，运行尚未启动。`);
-  const live:Live={bound:null,exhausted:null,stage_exhausted:null,tools:0};
+  const live:Live={bound:null,exhausted:null,tools:0};
   const operationId=`role-run:${instance.id}:${contentHash(scope).slice(0,16)}:${instance.sequence}`;
   // Budget exhaustion keeps what exists (a checkpoint with session, receipts and workspace) and stops this run only.
   const exhaust=(limit:string)=>{
@@ -222,8 +219,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',operation_id:'budget:'+limit,data:{limit,usage:instanceUsage(s,instance.id),budget}});revokeRunTokens(s,b.run_id,'budget_exhausted');}
    return stop('role_budget_exhausted','waiting_configuration',`${role}：本任务中这个角色的累计预算 ${limit} 已用尽；已取消本次运行并保留已有产物，不会换模型重开预算。`);
   };
-  const exhaustStage=(limit:string):never=>{live.stage_exhausted=limit;const b=live.bound;if(b&&leaseCurrent(s,b.run_id,b.epoch)){recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:instance.id,reason:'stage_budget_exhausted:'+limit});appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',data:{stage_id:stage?.stage_id,limit}});revokeRunTokens(s,b.run_id,'stage_budget_exhausted');}return stop('stage_budget_exhausted','paused',limit);};
-  const budgetGuard=(pendingTools=0)=>{assertStageRun(s,task.id,assignment,snapshot.kind);const stageLimit=stageBudgetExceeded(s,assignment);if(stageLimit)exhaustStage(stageLimit);if(!cumulative||!live.bound)return;const reached=budgetExceeded(budget,instanceUsage(s,instance.id),{tool_calls:pendingTools});if(reached)exhaust(reached);};
+  const budgetGuard=(pendingTools=0)=>{if(!cumulative||!live.bound)return;const reached=budgetExceeded(budget,instanceUsage(s,instance.id),{tool_calls:pendingTools});if(reached)exhaust(reached);};
   const access={get token(){return live.bound?.token??'';},check(presented:unknown,capability?:string){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{tenant_id:b.ctx.tenant_id,project_id:b.ctx.project_id,task_id:b.ctx.task_id!,run_id:b.run_id,lease_epoch:b.epoch,role},capability);}};
   let executionRun:string|undefined;
   resultMounted=(spec.harnessAccess?.commands ?? tools.some(t=>t.function.name==='run_command')) && !!(env.roleWorkspace ?? spec.roleWorkspace ?? env.pi?.workspace ?? spec.pi?.workspace ?? env.containerOptions?.manager ?? spec.containerOptions?.manager);
@@ -234,7 +230,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    onDenied:(name,reason)=>denied(name,reason),
    // A newer revision requested for this running instance ends the run here; the loop below continues it.
    checkpoint:async()=>{await spec.checkpoint?.();const pending=s.get('SELECT pending_revision FROM role_instances WHERE id=?',instance.id)?.pending_revision;if(pending&&pending>(instance.config_revision??0))stop('role_revision_checkpoint','retry_wait','角色在安全检查点结束，将带新 revision 续接。');},
-   repairInvalid:error=>spec.repairInvalid?.(error)??((error instanceof SyntaxError||/^role_(?:result|delivery|nomination)_/.test(String((error as any).code)))?'Read read_stage_schedule and delegate missing required stages when nomination is blocked. Correct the submission structure using the existing inspected evidence; do not repeat unchanged verification. Findings require description and evidence:string[], inspected_scope:string[], unknowns:string[]. Delivery nomination requires an exact offered latest dev result_ref. Preserve actual findings and uncertainty. '+String((error as any).detail??''):undefined),
+   repairInvalid:error=>spec.repairInvalid?.(error)??((error instanceof SyntaxError||/^role_(?:result|delivery|nomination)_/.test(String((error as any).code)))?'Correct the submission structure using the existing inspected evidence; do not repeat unchanged verification. Findings require description and evidence:string[], inspected_scope:string[], unknowns:string[]. Delivery nomination requires an exact offered latest dev result_ref. Preserve actual findings and uncertainty. '+String((error as any).detail??''):undefined),
    onRun:id=>{executionRun=id;bind(id);spec.onRun?.(id);},
    execute:async(name,args)=>{authority(name);if(cumulative&&bounded?.max_tool_calls)budgetGuard(1);
     const b=live.bound,op=b?'tool:'+(++live.tools):null;
@@ -314,8 +310,6 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    const lease=allocateLease(s,task.id,scope,runId,typeof task.claim_token==='string'?task.claim_token:null),previous=options.recover?.previous_run_id??lease.previous_run_id;
    const ctx=buildRunContext(s,{task,scope,run_id:runId,lease_epoch:lease.epoch,...(previous?{resume_from_run_id:previous}:{}),instance,role,snapshot,snapshot_id:resolved.id,candidate:candidate.ref});
    if(wrapped.harnessBinding){if(wrapped.harnessBinding.model_revision)ctx.model_revision=wrapped.harnessBinding.model_revision;ctx.harness_revision=wrapped.harnessBinding.harness_revision;}
-   const stageBinding=stageRunBinding(s,assignment);if(stageBinding)ctx.stage=stageBinding;
-   if(role==='qa'){const hash=stagePolicyHash(s,task.id);if(hash)ctx.stage_policy_hash=hash;}
    let mode:string|null=null,plan:ReturnType<typeof planRecovery>|null=null;
    if(previous){
     plan=planRecovery(s,{previous_run_id:previous,checkpoint_ref:options.recover?.checkpoint_ref,capabilities:driver.capabilities,model_revision:ctx.model_revision,role_revision:ctx.role_revision,session_kind:recover,resumable_session:recover==='native_resume'||recover==='checkpoint_transcript'});
@@ -338,8 +332,6 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    if(previous)traceEvent(s,task.id,'role_run_recovery',{protocol:roleRunProtocol.id,run_id:runId,resume_from_run_id:previous,lease_epoch:lease.epoch,previous_epoch:lease.previous_epoch??null,recovery_mode:mode??'pending_session_binding',planned:plan},runId,'framework',plan?.checkpoint_ref?[plan.checkpoint_ref]:[]);
    // Wall time is cumulative too; the timer interrupts the session even while a tool call runs.
    if(cumulative&&budget.max_wall_ms!==null){const left=budget.max_wall_ms-instanceUsage(s,instance.id).wall_ms;live.timer=setTimeout(()=>{try{exhaust('max_wall_ms');}catch(error){handles.get(operationId)?.controller.abort(error);}},Math.max(0,left));live.timer.unref?.();}
-   const stageWall=stageBudgetUsage(s,assignment)?.remaining_wall_ms;
-   if(stageWall!==undefined&&stageWall!==null){live.stageTimer=setTimeout(()=>{try{exhaustStage('max_wall_seconds');}catch(error){handles.get(operationId)?.controller.abort(error);}},Math.max(0,stageWall));live.stageTimer.unref?.();}
    // The token lives while this control plane still holds the run: a heartbeat extends it, a crash lets it expire.
    live.heartbeat=setInterval(()=>{try{touchRunToken(s,issued.id,tokenTtl);}catch{}},60_000);live.heartbeat.unref?.();
    live.onBound?.();
@@ -363,8 +355,6 @@ export async function startRoleRun<T>(prepared:PreparedRun<T>,operationId=prepar
  const s=prepared.spec.store;
  // After a restart the in-memory handle is gone: a recorded operation id gets a deterministic refusal, never a second run.
  if(s.get('SELECT 1 FROM task_runs WHERE operation_id=?',operationId)){await prepared.env.release?.();stop('role_run_operation_used','failed',`操作 ${operationId} 已经启动过运行，不会重复启动。`);}
- assertStageStart(s,prepared.spec.task.id,prepared.assignment,prepared.resolved.snapshot.kind);
- if(stageBudgetExceeded(s,prepared.assignment)){await prepared.env.release?.();stop('stage_budget_exhausted','paused');}
  const kind=prepared.resolved.snapshot.kind;
  const conflict=(kind==='writer'||kind==='observer')&&s.get("SELECT r.id FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot WHERE r.task_id=? AND r.status='running' AND (json_extract(p.snapshot,'$.kind')='writer' OR (?='writer' AND json_extract(p.snapshot,'$.kind')='observer'))",prepared.spec.task.id,kind);
  if(conflict){await prepared.env.release?.();stop('candidate_writer_busy','retry_wait');}
@@ -390,7 +380,7 @@ export async function startRoleRun<T>(prepared:PreparedRun<T>,operationId=prepar
   prepared.live.longPending!.add(work);void work.finally(()=>prepared.live.longPending!.delete(work));
  },1000);
  prepared.live.longTimer?.unref();
- handle.done=withTaskPermissions(s,prepared.spec.task,prepared.role,[prepared.resolved.snapshot.capability.permissions??prepared.resolved.definition.permissions],()=>runAgent(prepared.wrapped)).finally(async()=>{handle.settled=true;if(prepared.live.longTimer)clearInterval(prepared.live.longTimer);if(prepared.live.timer)clearTimeout(prepared.live.timer);if(prepared.live.stageTimer)clearTimeout(prepared.live.stageTimer);if(prepared.live.heartbeat)clearInterval(prepared.live.heartbeat);started();await Promise.allSettled(prepared.live.longPending??[]);if(prepared.live.bound)s.run("UPDATE long_execution_reports SET state='ended' WHERE run_id=? AND state IN ('pending','running')",prepared.live.bound.run_id);});
+ handle.done=withTaskPermissions(s,prepared.spec.task,prepared.role,[prepared.resolved.snapshot.capability.permissions??prepared.resolved.definition.permissions],()=>runAgent(prepared.wrapped)).finally(async()=>{handle.settled=true;if(prepared.live.longTimer)clearInterval(prepared.live.longTimer);if(prepared.live.timer)clearTimeout(prepared.live.timer);if(prepared.live.heartbeat)clearInterval(prepared.live.heartbeat);started();await Promise.allSettled(prepared.live.longPending??[]);if(prepared.live.bound)s.run("UPDATE long_execution_reports SET state='ended' WHERE run_id=? AND state IN ('pending','running')",prepared.live.bound.run_id);});
  handle.done.catch(()=>{});
  await bound;return handle;
 }
@@ -439,12 +429,11 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
   catch(error){
    const b=live.bound;
    if(b&&leaseCurrent(s,b.run_id,b.epoch)){
-    const code=live.stage_exhausted?'stage_budget_exhausted':live.exhausted?'role_budget_exhausted':(error as any).code??'runtime_error';
+    const code=live.exhausted?'role_budget_exhausted':(error as any).code??'runtime_error';
     if((error as any).code!=='role_revision_checkpoint'&&!live.exhausted)try{recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:p.instance.id,reason:'ended:'+code,workspace:await (p.spec.candidateSnapshot??p.env.snapshot)?.().catch(()=>null)??null});}catch{}
     appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:code==='role_revision_checkpoint'?'checkpoint':h.cancelled||(error as any).state==='cancelled'?'cancelled':'failed',data:{status:code==='role_revision_checkpoint'?'checkpoint_continuation':h.cancelled?'cancelled':'failed',code,reason:h.cancelled}});
    }
    if(b)revokeRunTokens(s,b.run_id,'ended');
-   if(live.stage_exhausted)throw new TaskError('stage_budget_exhausted','paused',live.stage_exhausted);
    if(live.exhausted&&!(error instanceof TaskError&&error.code==='role_budget_exhausted'))throw new TaskError('role_budget_exhausted','waiting_configuration',`${p.role}：本任务中这个角色的累计预算 ${live.exhausted} 已用尽；已取消本次运行并保留已有产物。`);
    throw error;
   }
@@ -456,7 +445,7 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
   if(b){
    if(!leaseCurrent(s,b.run_id,b.epoch)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'lease_epoch_stale'},b.run_id,'framework');stop('lease_epoch_stale','cancelled','运行的租约已被接管，迟到的结果不被接受。');}
    const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish',managedTaskOrigin(s,task.id)?.source_kind==='role');if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
-   if(p.resolved.snapshot.kind==='observer'&&b.ctx.candidate_ref){const now=stageForAssignment(s,p.assignment)?latestRoleCandidate(s,task.id):inputCandidate(s,task,p.role,'observer').ref;if(!now||candidateKey(now)!==candidateKey(b.ctx.candidate_ref)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'candidate_changed',started_with:b.ctx.candidate_ref,current:now},b.run_id,'framework');stop('candidate_changed','retry_wait','检视期间固定候选已变化；旧环境的结论不能认证新内容。');}}
+   if(p.resolved.snapshot.kind==='observer'&&b.ctx.candidate_ref){const now=inputCandidate(s,task,p.role,'observer').ref;if(!now||candidateKey(now)!==candidateKey(b.ctx.candidate_ref)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'candidate_changed',started_with:b.ctx.candidate_ref,current:now},b.run_id,'framework');stop('candidate_changed','retry_wait','检视期间固定候选已变化；旧环境的结论不能认证新内容。');}}
   }
   await p.env.release?.();
   const runId=(p as any).executionRun as string|undefined,assignment=p.assignment;
@@ -471,10 +460,8 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
   if(b){
    const source=JSON.parse(task.input??'{}'),mode=deliveryType(s,task.id);
    candidate=outputCandidate(p.resolved.snapshot.kind,snapshot?{...result as any,...snapshot,...(mode==='code'&&snapshot.tree_sha===source.snapshot_tree?{status:'no_changes'}:{})}:result,reference,b.ctx);
-   if(p.resolved.snapshot.kind==='writer'&&mode==='artifact'&&candidate.kind!=='no_changes'&&s.get('SELECT 1 FROM task_stage_plans WHERE task_id=?',task.id))candidate=artifactCandidate(result,snapshot?.tree_sha??null,b.ctx.contract_revision,reference,task.kind);
    validateCandidateRef(candidate);
    appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:'completed',operation_id:'collect:'+b.run_id,data:{status:'completed',result_ref:reference,result_hash:contentHash(p.spec.redactor.clean(result)),candidate_ref:candidate,source_snapshot:snapshot?{commit_sha:snapshot.local_sha,tree_hash:snapshot.tree_sha}:null,input_candidate_ref:b.ctx.candidate_ref,usage:instanceUsage(s,String(p.instance.id))}});
-   if(assignment)recordStageResult(s,assignment,b.run_id,b.epoch,{result_ref:reference,candidate_ref:candidate});
    if(assignment)s.run("UPDATE role_assignments SET status='completed',result_ref=? WHERE id=?",reference,assignment);
    revokeRunTokens(s,b.run_id,'collected');
   }

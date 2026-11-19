@@ -26,11 +26,8 @@ function modelAddress(model) {
   if (model.endpoints && !model.endpoints.has_v1) { const flag = badge('地址不含 /v1', 'warning'); flag.title = modelV1Warning; address.append(' ', flag); }
   return address;
 }
-// A work type's name inside a model row: the console's own work-type table first (the same names this page uses for the
-// same kinds), then the shared labels, then the id itself, so a kind nobody can name is never given another's name.
-// `workflow.*` is lazy configuration rather than a kind the engine resolves, so it keeps its id instead of borrowing
-// 通用回复: the model a work type runs on is looked up by work type id (`reply`, `manager`, …), not by a legacy prefix.
-const workTypeName = kind => { const id = String(kind); return builtInTasks.find(task => task.kind === id)?.title || kindLabels[id] || id; };
+// Historical task kind label helper.
+const workTypeName = kind => { const id = String(kind); return kindLabels[id] || id; };
 // A model inside its provider group: the name, and `extra` badges such as the wizard's default.
 function modelLabel(model, extra = []) {
   const label = element('span', model.model_name, 'model-address');
@@ -48,18 +45,8 @@ function modelConnectionFacts(model) {
   if(capabilities) box.append(element('span',`上下文 ${capabilities.context_window} · 最大输出 ${capabilities.max_output_tokens} · ${capabilities.reasoning?'推理模型':'非推理模型'}`));
   if(match) box.append(element('span',`${match.entry?.ref||({ambiguous:'目录匹配不唯一',disabled:'已取消目录匹配',unavailable:'目录不可用',missing:'指定目录条目已不存在'}[match.state]||'未匹配目录')} · ${match.fetched_at?timeText(match.fetched_at):'无快照'}${model.pricing_source==='catalog'?' · 目录 USD 参考价':model.pricing_source==='mixed'?' · 手填与目录计价':''}`));
   if (policy?.model_id === model.id) box.append(badge('项目默认', 'success'));
-  try {
-    // #230: name the work types, not just how many. Two models each holding one type both read "1 个工作类型显式使用",
-    // which tells nobody which setting to change; the id is printed for a kind the console has no name for.
-    const kinds = Object.entries(policy ? taskModelMap(policy) : {}).filter(([, id]) => id === model.id).map(([kind]) => workTypeName(kind));
-    // Only a page bound to a project holds that project's policy. The shared model list in global settings has no
-    // project policy in hand, so stating "nobody explicitly" there would name an absence the page cannot see.
-    if (policy) box.append(element('span', kinds.length ? `工作类型显式使用：${kinds.join('、')}（不继承项目默认）` : '没有被工作类型显式指定', 'muted'));
-  } catch { box.append(element('span', '工作类型模型配置未能解析', 'muted')); }
-  // The list projection covers project defaults and work types. Current role references are read separately
-  // before deletion; an empty project list must not imply that no saved role depends on this model.
   const used = model.used_by || [];
-  box.append(element('span', Array.isArray(model.used_by)?used.length ? `项目默认/工作类型引用：${used.map(repo => repo.full_name).join('、')}` : '无项目默认或工作类型引用':'项目配置引用尚未读取', 'model-usage'));
+  box.append(element('span', Array.isArray(model.used_by)?used.length ? `项目默认引用：${used.map(repo => repo.full_name).join('、')}` : '无项目默认引用':'项目配置引用尚未读取', 'model-usage'));
   return box;
 }
 function providerList(models, row, after = reloadWith, { editable = true } = {}) {

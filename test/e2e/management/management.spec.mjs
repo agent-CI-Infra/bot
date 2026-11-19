@@ -67,13 +67,13 @@ test('management UI, direct API and model tools agree on real persisted query, c
     const direct=(await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value;
     expect(direct.task.status).toBe('waiting_environment');expect(direct.task.error_code).toBe('environment_not_ready');
     await page.screenshot({path:'.tmp/management-164/query-desktop.png',fullPage:true});
-    // The model submits a versioned command; the page and the Manager API see the resulting Manager section.
+    // The model submits a versioned command; the page and the Manager API see the resulting Manager prompt.
     await message.fill('更新任务默认提示词');await page.getByRole('button',{name:'发送',exact:true}).click();
-    await expect(feed).toContainText('操作 更新工作配置 · 已执行');
+    await expect(feed).toContainText('操作 更新 Manager 配置 · 已执行');
     await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     const configured=(await query(admin,'get_effective_config',{project_id:'101'})).value;
-    expect(configured.workflows.find(w=>w.id==='review.issue').prompt.effective).toBe('Inspect evidence and cite the original logs.');
-    expect((await admin('/api/repositories/101/manager')).value.manager.sections.find(entry=>entry.id==='review.issue').content).toBe('Inspect evidence and cite the original logs.');
+    expect(configured.manager.prompt.effective).toBe('Inspect evidence and cite the original logs.');
+    expect((await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe('Inspect evidence and cite the original logs.');
     await page.screenshot({path:'.tmp/management-164/configuration-desktop.png',fullPage:true});
     // Pause from chat, then read the same state with direct and existing APIs.
     await message.fill('暂停这个任务');await page.getByRole('button',{name:'发送',exact:true}).click();
@@ -89,7 +89,7 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({path:'.tmp/management-164/task-mobile.png',fullPage:true});
     const audit=(await query(admin,'list_audit',{project_id:'101'})).value.audit;
-    writeFileSync('.tmp/management-164/evidence.json',JSON.stringify({scenario:'query/configuration/task management',query:{status:direct.task.status,reason:direct.task.error_code,logs:direct.logs_url,runs:direct.runs_url},prompt:configured.workflows.find(w=>w.id==='review.issue').prompt,commands:audit.map(r=>({id:r.id,operation:r.operation,state:r.state,channel:r.channel,principal_id:r.principal_id,expected_revision:r.expected_revision,before_revision:r.before_revision,after_revision:r.after_revision,result:r.result})),model_requests:h.store.all('SELECT id,request_id,state,input_tokens,output_tokens FROM model_requests'),page_errors:errors},null,2));
+    writeFileSync('.tmp/management-164/evidence.json',JSON.stringify({scenario:'query/configuration/task management',query:{status:direct.task.status,reason:direct.task.error_code,logs:direct.logs_url,runs:direct.runs_url},prompt:configured.manager.prompt,commands:audit.map(r=>({id:r.id,operation:r.operation,state:r.state,channel:r.channel,principal_id:r.principal_id,expected_revision:r.expected_revision,before_revision:r.before_revision,after_revision:r.after_revision,result:r.result})),model_requests:h.store.all('SELECT id,request_id,state,input_tokens,output_tokens FROM model_requests'),page_errors:errors},null,2));
     expect(errors).toEqual([]);expect(h.store.get('SELECT count(*) n FROM tasks').n).toBe(2);
   }finally{await f.close();rmSync(h.directory,{recursive:true,force:true});}
 });
@@ -307,8 +307,7 @@ test('a rollback previews the command it would send, and sends it only after it 
   test.setTimeout(60000);
   const f = await managementFixture(), { h, admin, password } = f;
   const commands = () => h.store.get('SELECT count(*) n FROM management_commands').n;
-  const prompt = async () => (await query(admin, 'get_effective_config', { project_id: '101' })).value.workflows
-    .find(w => w.id === 'review.issue').prompt.effective;
+  const prompt = async () => (await query(admin, 'get_effective_config', { project_id: '101' })).value.manager.prompt.content;
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(h.admin + '/#/management');
@@ -316,23 +315,23 @@ test('a rollback previews the command it would send, and sends it only after it 
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await switchConsoleProject(page, '101');
     const original = 'The original prompt that rollback must restore.', updated = 'A changed prompt that the rollback must replace.';
-    const seeded = await command(admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: original });
+    const seeded = await command(admin, 'manager.update', { project_id: '101' }, { prompt: original });
     expect(seeded.value.state).toBe('succeeded');
     const before = commands(); expect(await prompt()).toBe(original);
     expect(updated).not.toBe(original); f.modelState.configurationPrompt = updated;
     await page.getByLabel('管理消息', { exact: true }).fill('更新任务默认提示词');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     const feed = page.getByRole('log', { name: '管理会话记录' });
-    await expect(feed).toContainText('操作 更新工作配置 · 已执行');
+    await expect(feed).toContainText('操作 更新 Manager 配置 · 已执行');
     expect(commands()).toBe(before + 1); expect(await prompt()).toBe(updated);
-    const receipt = feed.locator('.management-receipt').filter({ hasText: '操作 更新工作配置' }).last();
+    const receipt = feed.locator('.management-receipt').filter({ hasText: '操作 更新 Manager 配置' }).last();
     const rollback = receipt.getByRole('button', { name: '按原值回滚', exact: true });
     const preview = receipt.getByRole('region', { name: '执行前确认', exact: true });
     // A rollback is a write too: it names the command it would send and leaves the receipt untouched until confirmed.
     await expect(preview).toBeHidden();
     await rollback.click();
     await expect(preview).toBeVisible();
-    await expect(preview).toContainText('更新工作配置');
+    await expect(preview).toContainText('更新 Manager 配置');
     await expect(preview).toContainText('项目 101');
     await expect(preview).toContainText('预计版本');
     await expect(preview).toContainText(original); await expect(preview).not.toContainText(updated);
@@ -367,7 +366,7 @@ test('a rollback previews the command it would send, and sends it only after it 
     // 确认执行 sends exactly one rollback and the restored value is readable from the API.
     await rollback.click();
     await preview.getByRole('button', { name: '确认执行', exact: true }).click();
-    await expect(feed).toContainText('操作 更新工作配置 · 已执行', { timeout: 15000 });
+    await expect(feed).toContainText('操作 更新 Manager 配置 · 已执行', { timeout: 15000 });
     await expect.poll(prompt).toBe(original);
     expect(commands()).toBe(before + 2);
   } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }

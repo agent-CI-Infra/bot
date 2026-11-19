@@ -517,20 +517,20 @@ test('revoking project access while a model is waiting blocks its command and re
 
 test('IM commands and revision conflicts retain the shared business outcome without any approval step; revoked access stops a later message', async t => {
   const f = await channelFixture(t), { h, admin, service, id, wire } = f;
-  const target = { project_id: '101', workflow_id: 'review.issue' }, revision = service.management.service.revision(target);
+  const target = { project_id: '101' }, revision = service.management.service.revision(target);
   const submit = async (expected = revision, actor = 'ou_alice', chat = 'oc_private') => {
-    scriptedModel(f, [['management_command', { operation: 'workflow.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: expected }], '已提交。']);
+    scriptedModel(f, [['management_command', { operation: 'manager.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: expected }], '已提交。']);
     const r = await post(h, id, envelope('修改 Issue 检视提示词', { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat } })); return finished(h, r.value.operation_id);
   };
   const wrong = await submit('obsolete-revision');
   assert.equal(h.store.get('SELECT state FROM management_messages WHERE id=?', wrong.message_id).state, 'failed');
-  const webConflict = await admin('/api/management/commands', 'POST', { operation: 'workflow.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: 'obsolete-revision', idempotency_key: 'web-conflict', source_conversation: 'web', source_message: 'web-conflict' });
+  const webConflict = await admin('/api/management/commands', 'POST', { operation: 'manager.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: 'obsolete-revision', idempotency_key: 'web-conflict', source_conversation: 'web', source_message: 'web-conflict' });
   assert.equal(webConflict.value.error, 'management_revision_conflict');
   // A policy left by an older version is no longer read: the private chat's command runs at once, with the console's receipt.
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
+  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"manager.update\"]')");
   const pending = await submit(), op = h.store.get("SELECT * FROM management_commands WHERE channel='im'");
   assert.equal(op.state, 'succeeded');
-  assert.equal((await managerSection(admin,'101','review.issue')), 'Approved future prompt.');
+  assert.equal((await managerSection(admin,'101')), 'Approved future prompt.');
   assert.equal((await admin('/api/management/commands/' + op.id)).value.source_conversation, pending.conversation_id);
   assert.ok(!JSON.stringify(wire.sent).includes('等待审批'));
   const member = await f.member('revoked-member', { repository_ids: ['101'] });

@@ -1,10 +1,8 @@
-import {assertRequestPullRequest} from '../tasks/pull-request.js';
-import {requestedTask} from '../work/catalog.js';
-import {resumeParentTasks} from '../tasks/children.js';
+import { assertRequestPullRequest, isRequestedTask } from '../tasks/pull-request.js';
+import { resumeParentTasks } from '../tasks/children.js';
 import { taskReadScopes } from '../tasks/management.js';
-import {claimQueuedTask} from '../tasks/priority.js';
+import { claimQueuedTask } from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
-import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {integratedPublication,applyIntegration} from '../tasks/integration.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
@@ -60,10 +58,8 @@ import { pendingReviewUpdates, resultCoverage, reviewObjectState, reviewUpdateLo
 import { continueFinishedReview, continuationContext, continuationUpdates, resumeFinishedReviews } from '../review/continuation.js';
 import { publicationFact } from '../tasks/publication.js';
 import { type GitCache } from './git-cache.js';
-import { workOf } from '../work/catalog.js';
-import { workEnabled } from '../work/settings.js';
-import { covers, projectCeiling, stopAboveCeiling, workLevel } from '../work/ceiling.js';
-import { eventWork } from '../work/events.js';
+import { covers, projectCeiling, stopAboveCeiling, taskRequiredCeiling } from '../projects/ceiling.js';
+import { eventAdapterId, eventWork } from '../tasks/event-adapters.js';
 import { Dispatcher } from '../dispatch/worker.js';
 import { managerDecision } from '../dispatch/manager.js';
 import { taskUsageBytes } from '../projects/workspace-cleanup.js';
@@ -175,7 +171,7 @@ export class TaskEngine {
         this.store.run('DELETE FROM task_claims WHERE task_id=? AND token=?',task.id,token);
         this.active.delete(task.id);this.finishing.delete(task.id);running.delete(task.id);if(!running.size&&this.running.get(repo)===running)this.running.delete(repo);
         // #770: updates that joined a review while it published (or just after) start its next round once its run has let go.
-        if(String(task.kind).startsWith('review.'))try{if(continueFinishedReview(this.store,task.id))queueMicrotask(()=>this.tick());}catch(error){console.error(`[engine] task ${task.id} next round: ${(error as Error)?.message}`);}
+        if(String(task.kind).startsWith('review.')||isRequestedTask(task))try{if(continueFinishedReview(this.store,task.id))queueMicrotask(()=>this.tick());}catch(error){console.error(`[engine] task ${task.id} next round: ${(error as Error)?.message}`);}
       });this.active.set(task.id,work);
     }
   }
@@ -237,7 +233,8 @@ export class TaskEngine {
     })().catch(error=>console.error(`[engine] issue progress sweep: ${(error as Error)?.message}`)).finally(()=>{this.progressSweep=undefined;});
   }
   async run(id:string,token:string){
-    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWork(task.kind);
+    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor();
+    const adapterId=eventAdapterId(task),event=adapterId?eventWork(adapterId):undefined,requestMode=isRequestedTask(task)&&!event;
     const policyHashFor=(artifacts:any[])=>sha(artifacts.some(a=>a.kind==='code')?String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||''):'');
     const log=(value:any)=>{
       const clean=redactor.clean(value);
@@ -263,7 +260,7 @@ export class TaskEngine {
       // Only this task's own claim counts; other tasks on the same computer hold their own.
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
-      if (requestedTask(task)) {
+      if (requestMode) {
         const execution = this.store.get('SELECT * FROM task_authorizations WHERE task_id=?', id);
         if (execution && this.store.get('SELECT source_kind FROM task_origins WHERE task_id=?',id)?.source_kind!=='role') {
           try { authorize(resolvePrincipalActor(this.store, execution.principal_id, execution.tenant_id, task.repository_id), execution.capability); }
@@ -273,22 +270,15 @@ export class TaskEngine {
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
       if(repositoryExecutionDenied(this.store,task.repository_id))
         stop(installationWait,'waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
-      const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
-      if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
+      const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number;input?:string});
+      const isDevTask=task.kind.startsWith('development.')||task.kind==='task.development'||(task.kind==='task.request'&&(()=>{try{return JSON.parse(task.input||'{}')?.intent==='development';}catch{return false;}})());
+      if(actionsIssue!==null&&(!policy?.actions_failures_enabled||isDevTask&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用。`);
       // A capability ceiling lowered below what this task needs (#850) stops it before its next tool call, with its work kept;
       // raising the ceiling again lets it be retried. It is never cancelled for this.
-      stopAboveCeiling(this.store,task.repository_id,workLevel(workOf(task as any)),'capability_ceiling_lowered',policy);
+      const neededCeiling=adapterId==='actions.failures'?'comment':taskRequiredCeiling(task);
+      stopAboveCeiling(this.store,task.repository_id,neededCeiling,'capability_ceiling_lowered',policy);
       if(task.kind==='task.development')assertRequestPullRequest(this.store,task);
-      // A work type that was switched off in the project configuration stops its tasks the same way.
-      if(!requestedTask(task)&&!workEnabled(this.store,task.repository_id,workOf(task as any)))stop('work_disabled','cancelled',`项目已关闭 ${workOf(task as any)} 这类工作。`);
-      // The guard runs on every poll, tool call and streamed reply of every task: read only the columns this check needs, and
-      // only in publication. Building the whole record here (assignments, coordination, relations) took most of the
-      // control plane's CPU with ten tasks running.
-      if(current?.phase==='publish'){
-        const delivery=this.store.get('SELECT candidate,pending,acceptance FROM task_records WHERE task_id=?',id);
-        if(delivery&&(delivery.pending||delivery.acceptance))assertRequiredStages(this.store,id,deliveryCandidate(delivery.candidate?JSON.parse(delivery.candidate):null,task.kind));
-      }
       // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
       if(event)event.validate(this.store,current!,JSON.parse(current!.input||'{}'));
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
@@ -312,14 +302,14 @@ export class TaskEngine {
     let workspace:Workspace|undefined;let attemptRun:Row|null=null;
     try{
       await guard();
-      const entry=task.kind.startsWith('development.')||task.kind==='task.development'?'development':task.kind.startsWith('review.')?'review':task.kind==='actions.failures'?'actions':requestedTask(task)?'request':null;
-      const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task,workOf(task as any));
+      const entry=task.kind.startsWith('development.')||task.kind==='task.development'?'development':task.kind.startsWith('review.')?'review':adapterId==='actions.failures'?'actions':requestMode?'request':null;
+      const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task);
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       // #713: older tasks of this same work that wait for a person are obsolete once a newer one runs.
       if(task.object_number!=null)this.obsolete.run({repository_id:String(task.repository_id),kind:String(task.kind),object_number:Number(task.object_number)});
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
-      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(requestedTask(task))return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(!['pi','codex','claude_code'].includes(resolved.snapshot.harness.id))return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);},async()=>{const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);const scopes=taskReadScopes(this.store,task);if(!scopes.includes('contents'))stop('github_read_token_not_allowed','waiting_permission');await reader.connect(false,undefined,{contents:'read',...(scopes.includes('pull_requests')?{pull_requests:'read'}:{})},false);return reader;});
+      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(requestMode)return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};if(event)return {event_adapter:adapterId,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(!['pi','codex','claude_code'].includes(resolved.snapshot.harness.id))return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);},async()=>{const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);const scopes=taskReadScopes(this.store,task);if(!scopes.includes('contents'))stop('github_read_token_not_allowed','waiting_permission');await reader.connect(false,undefined,{contents:'read',...(scopes.includes('pull_requests')?{pull_requests:'read'}:{})},false);return reader;});
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
       let environment:any=null;
@@ -333,7 +323,23 @@ export class TaskEngine {
         const disk=this.store.disk?.check(),used=taskUsageBytes(this.store,task.repository_id),floor=disk?floorBytes(disk.total_bytes,used):0,gib=(bytes:number)=>(bytes/2**30).toFixed(1)+' GiB';
         if(disk&&disk.free_bytes<floor)stop('disk_full','waiting_environment',`数据盘只剩 ${gib(disk.free_bytes)}，低于任务开始所需的 ${gib(floor)}${used?`（本项目最近单个任务在项目电脑上最多占用 ${gib(used)}）`:''}，任务等有空间后再准备工作区。`);
       }
-      if(requestedTask(task)){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
+      if(requestMode){
+        await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache,{
+          onReviewPublished:async(gh,publishedTask,publishedInput,publishedResult)=>{
+            const number=Number(publishedInput?.target?.number??publishedTask.object_number??0);
+            if(publishedInput?.target?.type!=='issue'||!Number.isSafeInteger(number)||number<1)return;
+            const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',publishedTask.repository_id);
+            if(!covers(projectCeiling(this.store,publishedTask.repository_id,policy),'develop'))return;
+            const issueTask={...publishedTask,kind:'review.issue',object_number:number};
+            let approved:DevelopmentOffer|null=await this.developmentApproved(gh,issueTask).catch(()=>null);
+            const issue=await gh.object('review.issue',number).catch(()=>null);
+            if(!approved&&issue)approved={label:null,labeled_by:null,assignees:assigneesOf(issue)};
+            if(approved){approved={...approved,claims:await issueClaims(gh,this.store,issue??{number},{comments:true})};}
+            this.queueDevelopment(gh,publishedTask,publishedInput,publishedResult,approved);
+          }
+        });
+        return;
+      }
       // The writes this task may ask for decide the platform tools; a task that may open a PR needs contents write.
       const writes=taskPermissions(this.store,task).writes,eventState:Record<string,any>={};
       // Event work reads Actions runs and logs; it writes only through its own tools.
@@ -983,7 +989,7 @@ export class TaskEngine {
       // A capacity wait never started a run, so it keeps its attempt and its workspace; everything else in the model phase
       // starts the next attempt on a new one.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        state!=='waiting_coordination'&&state!=='needs_help'&&!requestedTask(task)&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
+        state!=='waiting_coordination'&&state!=='needs_help'&&!requestMode&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
         // An operation left over from an interrupted run conflicts with the same key again, and a call the full work volume
         // refused would get the same answer again; a new attempt has new keys.
         (['execution_interrupted','tool_operation_conflict','operation_result_expired'].includes(failure.code)||failure instanceof VolumeFull)&&task.phase!=='publish')){

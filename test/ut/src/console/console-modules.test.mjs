@@ -28,7 +28,7 @@ test('split console pages still define their entry functions in source order', (
     'static/project.js': ['function renderProject', 'function projectTriggersSection', 'function membersSection', 'function schedulesSection'],
     'static/views.js': ['function openTask', 'function renderTimeline', 'function installedActions'],
     'static/channels.js': ['async function renderFeishuBindingsPage', 'async function channelSchedules', 'function channelLink'],
-    'static/roles.js': ['function rolesConsole', 'function stagePolicyGraph'],
+    'static/roles.js': ['function rolesConsole', 'function roleSettingsCard'],
     'static/settings.js': ['function settingsRoute', 'function renderSettings(', 'function retentionCard(', 'const settingsCards =', 'function installationDetail', 'function serviceRoleCreate'],
     'static/onboarding.js': ['function wizardForm', 'function githubLoginForm', 'async function renderOnboarding'],
     'static/app.js': ['async function api', 'async function route', 'async function render'],

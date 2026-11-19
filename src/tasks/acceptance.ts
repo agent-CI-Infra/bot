@@ -1,5 +1,4 @@
 import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
-import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { runRole, roleExecutionModel } from '../roles/run.js';
 import { roleBackendWorkspace } from '../roles/workspace.js';
@@ -69,6 +68,9 @@ export function shouldRunQa(store: Store, task: Row, candidate?: any): boolean {
   }
   if (genericTask(task) && !softwareRequest(task)) {
     const report = candidate?.artifacts?.find((a: any) => a?.kind === 'report')?.content as any;
+    if (report?.delivery === 'review') return true;
+    const isTestDiagnosis = (() => { try { return JSON.parse(String(task.input || '{}')).executor_role === 'test'; } catch { return false; } })();
+    if (isTestDiagnosis) return hasExternalTaskWrite(store, String(task.id));
     const hasFileDeliverable = Array.isArray(report?.artifacts) && report.artifacts.length > 0;
     return hasFileDeliverable || hasExternalTaskWrite(store, String(task.id));
   }
@@ -152,7 +154,6 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
 async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, shell = true): Promise<Verdict> {
   const records = new TaskRecords(store), record = records.get(task.id), candidate = record.candidate;
   if (!candidate) throw new Error('acceptance_candidate_required');
-  assertRequiredStages(store, task.id, deliveryCandidate(candidate, task.kind));
   const related = relatedDeliveries(store, task), relatedIndex = relatedDeliveryIndex(related);
   const parentContext = related.find(r => r.description.relationship === 'parent');
   const contextFiles = acceptanceContextFiles(JSON.parse(task.input || '{}'), parentContext ? JSON.parse(parentContext.row.input || '{}') : null);

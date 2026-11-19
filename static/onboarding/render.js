@@ -62,7 +62,7 @@ async function renderOnboarding(request,panel,feedback=''){
     // The built-in texts by the Manager section each one is (#935); the keys are the retired .bot/ names.
     const sectionNames={'.bot/guide.md':'行为指南 · guide','.bot/rules/labels.md':'标签规则 · labels','.bot/rules/issue-review.md':'检视 Issue · review.issue','.bot/rules/pr-review.md':'检视 PR · review.pr','.bot/rules/issue-development.md':'开发与跟进 bot PR · development'};
     for(const [path,content]of Object.entries(data.defaults))if(sectionNames[path])panel.append(collapsible(sectionNames[path]+' · 内置文本',content));
-    panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型和各工作类型的模型。「角色 → Manager」页编辑 Manager 分派提示词、规则章节和分派模型，并查看仓库 skill；「角色」页配置职责、权限和预算。项目「监听与触发」页配置能力上限、事件来源和标签触发。电脑规格在项目「机器配置」里修改。'));next();
+    panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型，「角色」页可按角色单独指定模型、职责、权限和预算；「角色 → Manager」页编辑 Manager 分派提示词、常设规则并查看仓库 skill。项目「监听与触发」页配置能力上限、事件来源和标签触发。电脑规格在项目「机器配置」里修改。'));next();
   }else{
     const summary=card('接入状态');summary.append(facts([['公网地址',data.public_address?.origin||'待验证'],['App',data.app?.slug||'待选择'],['安装',progress[3].text],['GitHub 登录',data.github_login?.enabled?'已启用':'使用本地账号'],['默认模型',progress[4].ready?models.find(m=>m.id===data.model_id)?.model_name||'已配置':'待配置'],['Agent','Pi 1.4.0 · 每仓库长期容器 · 模型请求经控制面代理']]));panel.append(summary);
     const missing=progress.slice(0,6).map((item,index)=>({...item,index})).filter(item=>!item.ready);

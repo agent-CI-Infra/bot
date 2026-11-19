@@ -1,11 +1,9 @@
 // The Manager role page: its prompt, standing rules, model, decisions and the repository's skills. Project listeners live in triggers.js.
 
 const managerErrors = {
-  invalid_standing_rules: '常设规则格式不对：每条要有唯一的 id、已知的 event 和 action，新建类规则要有 work，还要写 reason。', standing_rule_development: '常设规则不能启动开发：开发要 Manager 针对具体 Issue 写明依据。',
+  invalid_standing_rules: '常设规则格式不对：每条要有唯一的 id、已知的 event 和 action，新建类规则需要 role（或兼容的 work），还要写 reason。', standing_rule_development: '常设规则不能启动开发：开发要 Manager 针对具体 Issue 写明依据。',
   invalid_dispatch_filter: '分派筛选无效，请检查时间范围、状态或事件类型。', invalid_dispatch_cursor: '当前分页位置已失效，请重新读取分派。', dispatch_event_not_found: '未找到本项目中的这条分派记录。',
-  manager_revision_conflict: 'Manager 配置已被别人修改，请刷新页面后再保存。', unknown_manager_section: '章节 id 不认识：二级标题末尾反引号里的 id 要用下面列出的章节。',
-  duplicate_manager_section: '同一个章节出现了两次。',
-  invalid_work_writes: '写入不在这类工作可选的范围里，或开 PR 时没有同时允许修改代码。', invalid_event_filters: '事件开关或标签不合法（标签最长 50 个字符，最多 30 个）。'
+  manager_revision_conflict: 'Manager 配置已被别人修改，请刷新页面后再保存。', invalid_event_filters: '事件开关或标签不合法（标签最长 50 个字符，最多 30 个）。'
 };
 // api() reports "<status> · <code>"; a known code gets its explanation.
 const managerError = err => { const code = /· (\w+)$/.exec(err.message)?.[1] ?? err.message; return managerErrors[code] ? `${managerErrors[code]}（${code}）` : readErrorText(err); };
@@ -29,8 +27,8 @@ function managerSection(roles) {
 }
 function managerCards(manager, roles, refresh, notice) {
   const behavior = card('项目 Manager 设置');
-  behavior.append(note('新任务默认由 Manager 安排角色与执行方式，按任务需要委派工作。角色权限、预算、独立 QA 和发布检查继续生效。'), consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));
-  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerPromptCard(manager, refresh), standingRulesCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
+  behavior.append(note('每个 Issue 或独立 PR 维持单一持久 Manager 线程，按事件需要直接执行授权操作、新建通用任务（指派 reviewer / test / dev 等角色并授予写入权限）或续接已有任务。Manager 的模型与 Agent 后端在下方「Manager 设置」表单中配置。'), consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));
+  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerPromptCard(manager, refresh), standingRulesCard(manager, refresh),
     dispatchCard(), repositorySkillsCard(), ...(manager.migration ? [migrationCard(manager.migration)] : []), ...(current.rules?.imported?.imported_at ? [ruleImportCard(current.rules.imported)] : [])];
 }
 
@@ -67,12 +65,15 @@ function standingRulesCard(manager, refresh) {
   section.append(note(standing.source === 'builtin' ? '现在用内置规则：例行事件按规则分派，不调用 Manager 模型；规则没覆盖的事件（提到 bot、开发标签、检视发布等）仍交给 Manager。保存后改用项目自己的规则。'
     : `项目规则，随 Manager 配置第 ${standing.revision} 版保存。规则没覆盖的事件交给 Manager；规则从不启动开发，新建的工作和 Manager 新建的一样受控制面检查。`));
   const list = element('ul', '', 'history');
-  for (const rule of standing.rules) list.append(element('li', `${rule.enabled === false ? '（停用）' : ''}${dispatchEventNames[rule.event] || rule.event} → ${ruleActionNames[rule.action] || rule.action}${rule.work ? ' ' + rule.work : ''}${rule.when?.labels_any ? ' · 带标签 ' + rule.when.labels_any.join('、') : ''}${rule.when?.labels_none ? ' · 不带标签 ' + rule.when.labels_none.join('、') : ''} · ${rule.reason}`));
+  for (const rule of standing.rules) {
+    const targetDesc = rule.role ? `角色 ${rule.role}${rule.writes?.length ? `（写入：${rule.writes.join('、')}）` : ''}` : rule.work ? rule.work : '';
+    list.append(element('li', `${rule.enabled === false ? '（停用）' : ''}${dispatchEventNames[rule.event] || rule.event} → ${ruleActionNames[rule.action] || rule.action}${targetDesc ? ' · ' + targetDesc : ''}${rule.when?.labels_any ? ' · 带标签 ' + rule.when.labels_any.join('、') : ''}${rule.when?.labels_none ? ' · 不带标签 ' + rule.when.labels_none.join('、') : ''} · ${rule.reason}`));
+  }
   if (!standing.rules.length) list.append(element('li', '没有规则：所有事件都交给 Manager。'));
   const form = document.createElement('form'), editor = textarea('standing_rules', JSON.stringify(standing.rules, null, 2), { rows: 12, spellcheck: false });
   form.className = 'project-form'; editor.setAttribute('aria-label', '常设规则（JSON）');
   const submit = element('button', '保存常设规则'); submit.type = 'submit';
-  form.append(field('规则（JSON 数组：id、event、action、work、reason，可选 when.labels_any／labels_none、enabled）', editor), message, submit);
+  form.append(field('规则（JSON 数组：id、event、action、role、writes、reason，可选 when.labels_any／labels_none、enabled）', editor), message, submit);
   form.addEventListener('submit', async event => {
     event.preventDefault(); message.textContent = '';
     let rules; try { rules = JSON.parse(editor.value); } catch { message.textContent = '规则不是有效的 JSON。'; return; }
@@ -255,7 +256,7 @@ function repositorySkillsCard() {
   const draw = flash => {
     const skills = (current.rules?.files || []).filter(file => file.path.startsWith('.agents/skills/')), message = element('p', flash || '', flash ? 'view-success flash' : '');
     if (flash) message.setAttribute('role', 'status');
-    const nodes = [note('检视、开发、标签和行为指南的规则就是上面 Manager 提示词里的章节，检视和开发标签的名字在「项目设置 → 基本」里修改。每个任务读取默认分支 .agents/skills/ 下的 skill：skill 只指导本仓库的工作，不能放宽权限或改变平台规则。'), ruleSync(), ...(flash ? [message] : [])];
+    const nodes = [note('检视、开发等职责规则在各角色的提示词里维护，分派规则在上面 Manager 提示词里维护；检视和开发标签的名字在「项目设置 → 基本」里修改。每个任务读取默认分支 .agents/skills/ 下的 skill：skill 只指导本仓库的工作，不能放宽权限或改变平台规则。'), ruleSync(), ...(flash ? [message] : [])];
     if (current.rules?.retired_files?.length) nodes.push(retiredRulesNotice());
     if (!skills.length) nodes.push(note(!current.rules ? '暂时读不到仓库 skill。' : !current.rules.sha ? '尚未读取默认分支，还不知道有哪些 skill。' : '默认分支没有 .agents/skills/ 下的 skill。'));
     else {
@@ -288,8 +289,20 @@ function ruleImportCard(imported) {
 function migrationCard(migration) {
   const section = card('升级迁移记录'), report = migration.report || {};
   section.dataset.overviewAnchor = 'manager-migration';
-  section.append(note(`升级时（${timestamp(migration.migrated_at)}）原来的工作流配置迁入了 Manager 提示词第 ${report.manager_revision || 1} 版和项目配置；原工作流记录保存在迁移档案里。`),
-    facts([['保留的任务规则', (report.sections || []).join('、') || '无额外覆盖'], ['原自定义工作流', (report.custom_workflows || []).map(w => `${w.name}（${w.enabled ? '开' : '关'}）`).join('、') || '无']]));
+  if (report.issue === 1122) {
+    const mapped = Object.entries(report.mapped_models || {}).map(([roleId, m]) => `${roleId} ← ${m.from}`).join('、') || '无';
+    section.append(
+      note(`升级时（${timestamp(migration.migrated_at)}）已退役固定工作类型配置，并将原有的自定义规则与模型映射至对应角色配置；原始快照保存在迁移档案里。`),
+      facts([
+        ['已迁移规则章节', (report.migrated_sections || []).join('、') || '无额外自定义覆盖'],
+        ['已映射角色模型', mapped],
+        ['已归档工作类型开关', (report.retired_work_settings || []).join('、') || '无'],
+      ]),
+    );
+  } else {
+    section.append(note(`升级时（${timestamp(migration.migrated_at)}）原来的工作流配置迁入了 Manager 提示词第 ${report.manager_revision || 1} 版和项目配置；原工作流记录保存在迁移档案里。`),
+      facts([['保留的任务规则', (report.sections || []).join('、') || '无额外覆盖'], ['原自定义工作流', (report.custom_workflows || []).map(w => `${w.name}（${w.enabled ? '开' : '关'}）`).join('、') || '无']]));
+  }
   if (report.warnings?.length) { const list = element('ul', '', 'history'); for (const warning of report.warnings) list.append(element('li', warning)); section.append(element('h4', '需要留意'), list); }
   return section;
 }

@@ -2,27 +2,18 @@ import type { Store, Row } from '../storage/database.js';
 import type { Json } from '../core/security.js';
 import { roleKind } from './catalog.js';
 import { entryEnabled, roleConfiguration, type RoleConfiguration } from './definition.js';
-import { stageAllows, type StageDefinition } from './stage-policy.js';
 import { memoryAuthorize, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import { traceClean } from '../tasks/trace.js';
 
-/** Deterministic topological ordering of configured stages. */
-export function orderedStages(stages: StageDefinition[]): StageDefinition[] {
-  const done = new Set<string>(), order: StageDefinition[] = [];
-  while (order.length < stages.length) {
-    const next = stages.filter(stage => !done.has(stage.stage_id) && stage.depends_on.every(id => done.has(id)));
-    if (!next.length) break;
-    for (const stage of next) { done.add(stage.stage_id); order.push(stage); }
-  }
-  return order;
-}
-
-/** Attributes a due `queued` task under default controller/executor dispatch when `required_stages` is empty. */
+/** Attributes a due `queued` task under controller or direct executor-role dispatch. */
 export function attributeControllerQueuedRole(task: Row, config: RoleConfiguration, origin?: Row | null): string | null {
   const enabled = new Set(config.roles.filter(r => r.enabled).map(r => r.role_id));
   if (task.phase === 'acceptance') return enabled.has('qa') ? 'qa' : null;
-  if (origin?.source_kind === 'role' && typeof origin.executor_role === 'string' && enabled.has(origin.executor_role)) {
-    return origin.executor_role;
+  const explicitRole = typeof origin?.executor_role === 'string' && origin.executor_role
+    ? origin.executor_role
+    : (() => { const r = parseJson(task.input)?.executor_role; return typeof r === 'string' && r ? r : null; })();
+  if (explicitRole) {
+    return enabled.has(explicitRole) ? explicitRole : null;
   }
   const kind = String(task.kind ?? '');
   let target: string | null = null;
@@ -31,7 +22,7 @@ export function attributeControllerQueuedRole(task: Row, config: RoleConfigurati
   } else if (kind === 'task.request') {
     target = entryEnabled(config, 'request') ? config.controller.role : 'dev';
   } else if (kind === 'review.issue' || kind === 'review.pr') {
-    target = entryEnabled(config, 'review') ? config.controller.role : 'dev';
+    target = enabled.has('reviewer') ? 'reviewer' : entryEnabled(config, 'review') ? config.controller.role : 'dev';
   } else if (kind === 'actions.failures') {
     target = entryEnabled(config, 'actions') ? config.controller.role : 'dev';
   } else if (kind.startsWith('workflow.') || kind === 'release.observe' || kind === 'release.notes') {
@@ -304,7 +295,7 @@ function buildTaskFlow(
   if (status === 'queued' || (status === 'retry_wait' && task.error_code === 'role_capacity')) {
     const targetRole = status === 'retry_wait'
       ? attributeCapacityWaitingRole(store, String(task.id), config)
-      : (!config.required_stages?.length ? attributeControllerQueuedRole(task as Row, config, origin) : null);
+      : attributeControllerQueuedRole(task as Row, config, origin);
     if (targetRole) {
       const def = roleDefs.get(targetRole);
       stages.push({
@@ -326,33 +317,9 @@ function buildTaskFlow(
     }
   }
 
-  // Append configured required stages not yet run + mandatory independent QA gate for development tasks when still ahead
+  // Append mandatory independent QA gate for development tasks when still ahead
   const terminalCancel = ['cancelled', 'superseded', 'obsolete'].includes(status);
   if (!terminalCancel) {
-    const executedRoles = new Set(runs.map(r => String(r.role)));
-    for (const stage of orderedStages(config.required_stages ?? [])) {
-      const candidates = config.roles.filter(r => r.enabled && stageAllows(stage, r));
-      if (candidates.length === 1 && !executedRoles.has(candidates[0]!.role_id)) {
-        const r = candidates[0]!;
-        executedRoles.add(r.role_id);
-        stages.push({
-          parallel: false,
-          nodes: [{
-            key: `pending:${r.role_id}`,
-            run_id: null,
-            index_label: null,
-            role: r.role_id,
-            name: r.name || r.role_id,
-            full_name: r.name || r.role_id,
-            kind: r.kind,
-            state: 'pending',
-            badge: '',
-            findings_count: 0,
-            summary: null,
-          }],
-        });
-      }
-    }
     const isDevTask = ['development.issue', 'development.pr', 'task.development'].includes(String(task.kind ?? '')) || task.phase === 'acceptance';
     const qaRanPass = runs.some(r => String(r.role) === 'qa' && r.status === 'succeeded') && (!latestAcceptance || ['pass', 'pass_with_issues'].includes(String(latestAcceptance.outcome)));
     const alreadyQueuedQa = stages.some(s => s.nodes.some(n => n.role === 'qa'));

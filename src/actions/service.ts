@@ -9,8 +9,8 @@ import { classifyFailure, type Evidence, type FailureKind } from './classifier.j
 import { analysisDecision, analysisTask, classifiedEvidence, failedStepOutput, requestAnalysis, taskVerdicts, taskReports } from './analysis.js';
 import { checkReports, type CheckedReport } from './reports.js';
 import { publishReport, resumeReports } from './publisher.js';
-import { eventTaskActive } from '../work/events.js';
-import { workPermissions } from '../work/settings.js';
+import { eventTaskActive } from '../tasks/event-adapters.js';
+import { projectCeiling, withinCeiling } from '../projects/ceiling.js';
 import { assertManagedExecution } from '../tasks/management.js';
 import { taskPermissions } from '../tasks/configuration.js';
 import { actionsConfigurationError } from './safety.js';
@@ -172,9 +172,9 @@ export class ActionsFailures {
     let budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
     if (budget.head_sha && (budget.head_sha !== live.head_sha || budget.head_branch !== live.head_branch)) stop('actions_rerun_identity_changed');
     const activated = this.store.get('SELECT enabled_at FROM actions_failure_scans WHERE repository_id=?', id)!.enabled_at;
-    // The work type's writes: without actions_rerun nothing is rerun, without issue nothing is reported. A task the Manager
+    // Project ceiling writes: without actions_rerun nothing is rerun, without issue nothing is reported. A task the Manager
     // created with fewer writes keeps to those.
-    const projectWrites = workPermissions(this.store, id, 'actions.failures').writes;
+    const projectWrites = withinCeiling(projectCeiling(this.store, id), ['actions_rerun', 'issue']);
     let analyzing = false;
     for (const attempt of this.store.all("SELECT * FROM actions_failure_attempts WHERE repository_id=? AND run_id=? AND state='pending' ORDER BY attempt", id, runId)) {
       const run = attempt.attempt === live.run_attempt ? live : await github.request('GET', github.path(`/actions/runs/${runId}/attempts/${attempt.attempt}`));
@@ -206,7 +206,7 @@ export class ActionsFailures {
         if (task && eventTaskActive(task)) {
           analyzing = true;
           // A model that cannot be reached keeps the run waiting, as the failure status of the whole workflow.
-          if (/^model_|^task_models_invalid$/.test(String(task.error_code || ''))) stop(task.error_code, 'retry_wait', '等待模型恢复后继续分析。');
+          if (/^model_/.test(String(task.error_code || ''))) stop(task.error_code, 'retry_wait', '等待模型恢复后继续分析。');
           continue;
         }
         const jobs = await actionPages(github, github.path(`/actions/runs/${runId}/attempts/${run.run_attempt}/jobs`), 'jobs');
@@ -249,7 +249,8 @@ export class ActionsFailures {
               github.beforeWrite = () => {
                 previous?.();
                 if (task) assertManagedExecution(this.store, task);
-                if (!(task ? taskPermissions(this.store, task) : workPermissions(this.store, id, 'actions.failures')).writes.includes('actions_rerun')) stop('write_not_allowed');
+                const allowedWrites = task ? taskPermissions(this.store, task).writes : withinCeiling(projectCeiling(this.store, id), ['actions_rerun', 'issue']);
+                if (!allowedWrites.includes('actions_rerun')) stop('write_not_allowed');
               };
               await github.request('POST', github.path(`/actions/runs/${runId}/rerun`));
               this.store.run("UPDATE actions_failure_runs SET retry_state='sent' WHERE repository_id=? AND run_id=?", id, runId);

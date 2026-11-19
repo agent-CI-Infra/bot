@@ -33,7 +33,7 @@ export async function managementFixture(t,options={}) {
     const call=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:'call-'+calls.length,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
     let message;
     if(!calls.length)message=call('management_query',{operation:configuration?'get_effective_config':'get_task',target:configuration?{project_id:'101'}:{project_id:'101',task_id:'blocked'},arguments:{}});
-    else if((configuration||pause)&&calls.length===1)message=call('management_command',{operation:configuration?'workflow.update':'task.pause',target:configuration?{project_id:'101',workflow_id:'review.issue'}:{project_id:'101',task_id:'blocked'},arguments:configuration?{prompt:modelState.configurationPrompt??'Inspect evidence and cite the original logs.'}:{},expected_revision:observations[0].revision});
+    else if((configuration||pause)&&calls.length===1)message=call('management_command',{operation:configuration?'manager.update':'task.pause',target:configuration?{project_id:'101'}:{project_id:'101',task_id:'blocked'},arguments:configuration?{prompt:modelState.configurationPrompt??'Inspect evidence and cite the original logs.'}:{},expected_revision:observations[0].revision});
     else message={role:'assistant',content:configuration?'默认提示词已保存；只影响之后的新任务。':pause?'任务已暂停，状态可以回读。':'任务正在等待项目电脑；原因来自持久化状态，可检查原始日志。'};
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:12,completion_tokens:6}}));
   });

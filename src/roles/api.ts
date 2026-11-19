@@ -1,4 +1,3 @@
-import { stageTimeline } from './schedule.js';
 import { taskRoleTrace } from './flow.js';
 import {harnesses} from './harness.js';
 import {agentBackends,modelConnectivity,probeRepositoryModel,recommendedBackend} from './backends.js';
@@ -77,7 +76,7 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
   const snapshots=Object.fromEntries(ids.map(id=>[id,JSON.parse(s.get('SELECT snapshot FROM role_snapshots WHERE id=?',id)?.snapshot??'null')]));
   const includeTrace = after === 0 && url.searchParams.get('trace') === '1';
   const trace = includeTrace ? taskRoleTrace(s,{...taskRow!,result:taskRow!.result?JSON.parse(String(taskRow!.result)):null},user.context?{actor:user.context}:undefined) : {};
-  return {instances,assignments,runs,snapshots,...trace,stage_schedule:stageTimeline(s,task[1]!),next_after:more?assignments.at(-1)!.sequence:null};}
+  return {instances,assignments,runs,snapshots,...trace,next_after:more?assignments.at(-1)!.sequence:null};}
 }
 export async function roleProbeApi(s:Store,user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
  const match=/^\/api\/repositories\/([^/]+)\/roles\/probe-model$/.exec(url.pathname);

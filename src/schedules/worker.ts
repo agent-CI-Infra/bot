@@ -101,7 +101,7 @@ export class Scheduler {
         if (!scheduleGateOpen(this.store, row.project_id, plan.workflow)) fail(403, 'schedule_workflow_gate_closed');
         authorize(actor, handler.capability, { project_id: row.project_id });
         reserve(this.store, row, plan, this.service.clock(), 'runs');
-        const trigger: ControlledTrigger = { occurrence_id: row.id, run_id: row.run_id, project_id: row.project_id, tenant_id: row.tenant_id,
+        const trigger: ControlledTrigger = { schedule_id: String(row.schedule_id), occurrence_id: row.id, run_id: row.run_id, project_id: row.project_id, tenant_id: row.tenant_id,
           workflow: plan.workflow, parameters: plan.parameters, logical_at: row.logical_at, source: row.source,
           authorization_revision: actor.authorization_revision, config: snapshot.config };
         const dispatched = handler.dispatch(trigger, actor, guard);

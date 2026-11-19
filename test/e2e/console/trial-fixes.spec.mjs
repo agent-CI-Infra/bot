@@ -1,6 +1,6 @@
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 import { openModelCatalog } from '../helpers/open-model-folds.mjs';
-import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../../fixtures/helpers.mjs';import{RuleService}from'../../../dist/rules/service.js';import{managerPrompt,saveManager,withSection}from'../../../dist/work/settings.js';import{TaskEngine}from'../../../dist/agent/engine.js';import{Onboarding}from'../../../dist/onboarding/service.js';
+import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../../fixtures/helpers.mjs';import{RuleService}from'../../../dist/rules/service.js';import{managerPrompt,saveManager}from'../../../dist/dispatch/settings.js';import{TaskEngine}from'../../../dist/agent/engine.js';import{Onboarding}from'../../../dist/onboarding/service.js';
 
 test('项目保存、规则刷新、未启动仓库、任务过程及390px导航提供可核验反馈',async({page})=>{
  const computer={cpus:2,memory_mb:4096,pids:512,tmp_mb:128,egress:true,packages:[],env:{},setup_script:'',network_policy:'internet egress'};
@@ -12,7 +12,8 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   const model=(await admin('/api/models','POST',{repository_id:null,api_url:'https://model.invalid/a-long-but-visible-api-path/v1',api_key:testPassword(),model_name:'Visible model name'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true});
   // The review rule is the Manager's section and the label a project setting (#935); the repository's .bot/ files are names only.
-  const current=managerPrompt(h.store,'101');saveManager(h.store,'101',{expected_revision:current.revision,content:withSection(current.content,'review.issue','Console-only directive')},null,'test');
+  const current=managerPrompt(h.store,'101');saveManager(h.store,'101',{expected_revision:current.revision,prompt:current.content+'\n\nConsole-only directive'},null,'test');
+  h.store.run("UPDATE policies SET rule_overrides=? WHERE repository_id='101'",JSON.stringify({'.bot/rules/issue-review.md':'Console-only directive'}));
   await admin('/api/repositories/101/policy','PATCH',{review_label:'console-label'});
   const rules=new RuleService(h.store,manager);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'','.bot/rules/pr-review.md':'','.bot/computer.yaml':''});
   onboard.save('public',{origin:'https://hooks.invalid'});onboard.save('app',{slug:'fixture-app',account_id:a.id,installations:1});onboard.save('model',model.id);

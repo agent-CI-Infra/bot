@@ -1,11 +1,15 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Store, Row } from '../storage/database.js';
 import { stop } from '../agent/common.js';
 import { randomId } from '../core/security.js';
-import { eventTaskActive, registerEventWork } from '../work/events.js';
-import { sectionText } from '../work/settings.js';
+import { eventTaskActive, registerEventWork } from '../tasks/event-adapters.js';
+import { defaultManagerPrompt, effectiveManagerPrompt } from '../dispatch/settings.js';
 import { lateSchedules } from '../actions/late-schedules.js';
 import { recordEvent, registerDispatchHook } from '../dispatch/store.js';
 import { runSnapshot } from './actions.js';
+
+const releaseObserveBuiltin = readFileSync(resolve(import.meta.dirname, '../../docs/prompts/release-observe.md'), 'utf8');
 
 // CI observation is a task of the CI observation work type: it runs in the project computer, on a checkout of the release
 // commit, like every task. The release page asks for it; the request is an event the Manager decides on, and the finished
@@ -69,7 +73,7 @@ registerEventWork('release.observe', {
       contextFiles: [{ path: '../context/run.json', content: 'The release Actions run to observe, with its jobs and steps as GitHub reports them' }],
       context: { release: { version: row.version, target_sha: row.target_sha }, run: { id: snapshot.id, attempt: snapshot.attempt, url: snapshot.url },
         failed_jobs: failedJobs(snapshot).map((job: any) => ({ id: job.id, name: job.name, conclusion: job.conclusion })),
-        work_name: 'CI 观察', work_prompt: sectionText(store, task.repository_id, 'release.observe'), late_scheduled_runs: lateSchedules } };
+        work_name: 'CI 观察', work_prompt: (() => { const m = effectiveManagerPrompt(store, task.repository_id); return m.trim() !== defaultManagerPrompt.trim() ? `${releaseObserveBuiltin.trimEnd()}\n\n${m}` : releaseObserveBuiltin; })(), late_scheduled_runs: lateSchedules } };
   },
   validate(store, task, input) { bound(store, task, input); },
   checkResult(_store, _task, input, result) { submittedJobs(input, result); },

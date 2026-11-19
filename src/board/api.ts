@@ -3,7 +3,7 @@ import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { taskOriginsForDisplay } from '../tasks/origin-display.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
-import { workType } from '../work/catalog.js';
+import { legacyKindName } from '../projects/legacy-kinds.js';
 import { actionStatuses, actionStatusSQL, autoStoppedSQL, settledStatusSQL } from '../app/task-states.js';
 // Saved views and links from before #207 may name a custom workflow; its cards are reply cards now.
 const customWorkflowId = /^custom\.[a-f0-9]{12}$/;
@@ -124,8 +124,8 @@ function viewFor(store: Store, user: Actor, id: string): Json {
 }
 // The work types with cards, under their fixed names; `workflows` keeps its name in the API for older clients.
 function boardWorkflows(_store: Store, _user: Actor) {
-  const list = [...objectWorkflows, 'reply'].map(id => ({ id, name: workType(id)!.name }));
-  const name = (_repository: string, id: string) => id === 'task.request' ? '通用任务' : id === 'release' ? '发版本' : workType(categoryOf(id))?.name ?? '已删除的工作类型';
+  const list = [...objectWorkflows, 'reply'].map(id => ({ id, name: legacyKindName(id)! }));
+  const name = (_repository: string, id: string) => id === 'release' ? '发版本' : legacyKindName(categoryOf(id)) ?? '已删除的工作类型';
   return { list: [...list, { id: 'task.request', name: '通用任务' }, { id: 'release', name: '发版本' }], name };
 }
 function pagination(url: URL) {
@@ -183,7 +183,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
     // A request task has no object number to look back on, so a stopped one is 已停止 instead of claiming the bot is
     // still developing it, or of sitting in 未检视; its own record page carries the reason.
-    const requestedSql = `SELECT 'task' AS card_type,'task.request' AS card_category,t.repository_id,'task' AS object_type,NULL AS object_number,
+    const requestedSql = `SELECT 'task' AS card_type,'task.request' AS card_category,t.repository_id,'task' AS object_type,t.object_number AS object_number,
       t.summary AS title,NULL AS github_state,0 AS draft,${taskTime('t')} AS last_seen,repos.full_name,
       CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed'
         WHEN ${autoStoppedSQL('t.status')} THEN 'stopped'
@@ -253,11 +253,11 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     if (!store.get('SELECT 1 FROM board_objects WHERE repository_id=? AND object_type=? AND object_number=?',repo!,type!,number)) fail(404,'board_card_not_found');
     if (method === 'GET' && tasks) {
       const { limit, offset } = pagination(url), conditions = url.searchParams.has('filters') ? filters(parse(url.searchParams.get('filters')!),store,user) : [];
-      const clauses = ['repository_id=?','object_number=?','kind IN (?,?,?)'], args: (string | number)[] = [repo!,number,`review.${type}`,`development.${type}`,`workflow.${type}`];
+      const clauses = ['repository_id=?','object_number=?','kind IN (?,?,?,?)'], args: (string | number)[] = [repo!,number,`review.${type}`,`development.${type}`,`workflow.${type}`,'task.request'];
       for (const f of conditions) {
         const value = String(f.value);
         if (f.field === 'category' && families.includes(value)) { clauses.push('kind LIKE ?'); args.push(value + '.%'); }
-        if (f.field === 'category' && objectWorkflows.includes(value)) { clauses.push('kind=?'); args.push(value); }
+        if (f.field === 'category' && (objectWorkflows.includes(value) || value === 'task.request')) { clauses.push('kind=?'); args.push(value); }
         if (f.field === 'category' && categoryOf(value) === 'reply') { clauses.push("kind LIKE 'workflow.%'"); }
         if (f.field === 'execution_status') { clauses.push(`(${execution('status')})=?`); args.push(String(f.value)); }
       }

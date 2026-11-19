@@ -12,7 +12,7 @@ import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, person, say, assistantModel } from '../../../fixtures/onboarding-fixture.mjs';
 import { transport, connector, bindFixture, privateChat, until, post, envelope, finished, managementOutcome } from '../../../fixtures/channel-fixture.mjs';
 import { Store } from '../../../../dist/storage/database.js';
-import { projectCeiling } from '../../../../dist/work/ceiling.js';
+import { projectCeiling } from '../../../../dist/projects/ceiling.js';
 
 test('a direct start_repository request reaches super administrators, is checked, withdrawn, rejected with a reason, and approved (#933, #1133)', async t => {
   const wire = transport(); let channels;

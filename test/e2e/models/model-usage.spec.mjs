@@ -43,11 +43,11 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     await expect(unpricedRow.locator('.model-price')).toHaveText('未定价 · 不按 0 估算');
 
     // No project references either of the project's own models; that is stated rather than left blank.
-    await expect(pricedRow.locator('.model-usage')).toHaveText('无项目默认或工作类型引用');
-    await expect(unpricedRow.locator('.model-usage')).toHaveText('无项目默认或工作类型引用');
+    await expect(pricedRow.locator('.model-usage')).toHaveText('无项目默认引用');
+    await expect(unpricedRow.locator('.model-usage')).toHaveText('无项目默认引用');
     // The shared model is the default of two projects, so both full names appear, in project order.
     const sharedRow = card('部署共享模型').locator('li.model-entry').filter({ hasText: 'shared-model' });
-    await expect(sharedRow.locator('.model-usage')).toHaveText('项目默认/工作类型引用：fixture/project-101、fixture/project-202');
+    await expect(sharedRow.locator('.model-usage')).toHaveText('项目默认引用：fixture/project-101、fixture/project-202');
 
     // The usage line is part of the row on a phone too: it must not push the card wider than the screen.
     await page.setViewportSize({ width: 390, height: 844 });
@@ -63,7 +63,7 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     await openModelCatalog(page);
     const revoked = card('本项目专属模型').locator('.provider-group').first();
     await expect(revoked.locator('.provider-head')).toContainText('Key 已撤销');
-    await expect(revoked.locator('li.model-entry').filter({ hasText: 'deepseek-chat' }).locator('.model-usage')).toHaveText('无项目默认或工作类型引用');
+    await expect(revoked.locator('li.model-entry').filter({ hasText: 'deepseek-chat' }).locator('.model-usage')).toHaveText('无项目默认引用');
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

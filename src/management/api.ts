@@ -1,4 +1,3 @@
-import { taskModelEntries } from '../app/management.js';
 import type { ServerResponse } from 'node:http';
 import type { ActorContext } from '../identity/authorization.js';
 import { assertCurrent } from '../identity/authorization.js';
@@ -6,8 +5,8 @@ import { fail, fields, randomId, type Json } from '../core/security.js';
 import { ManagementService } from './service.js';
 import { ManagementAgent } from './agent.js';
 import { retiredApi } from '../app/retired.js';
-import { managerPrompt } from '../work/settings.js';
-import { managerView } from '../work/api.js';
+import { managerPrompt } from '../dispatch/settings.js';
+import { managerView } from '../dispatch/api.js';
 
 export class ManagementApi {
   readonly agent:ManagementAgent;
@@ -82,7 +81,6 @@ export class ManagementApi {
     const project=create?String(input.repository_id??''):role?role[1]!:policy?policy[1]!:String(task?.repository_id??'');
     this.service.scope(actor,project,role?'roles.edit':policy?'config.write':'tasks.write');
     const operation=role?'roles.update':policy?'project.update':create?'task.create':'task.'+match![2];
-    if(policy&&input.task_models!==undefined)taskModelEntries(input.task_models);
     let args={...input};delete args.repository_id;
     if(match?.[2]==='contract'){
       const current=this.service.store.get('SELECT revision FROM task_records WHERE task_id=?',match[1]!);

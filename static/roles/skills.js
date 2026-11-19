@@ -2,30 +2,21 @@ function roleSkillPicker(role, state) {
   return roleSelect(role.role_id + ' 技能包', role.skill_bundle_ref?.id || '', [['', '不绑定技能包'], ...state.draft.skills.map(bundle => [bundle.id, bundle.id])], id => { role.skill_bundle_ref = id ? { id } : null; markRoleDirty(state); });
 }
 function roleModelResolution(role, state, access) {
-  const region = element('section', '', 'role-model-resolution'); region.setAttribute('aria-label', '按工作类型检查已保存模型');
+  const region = element('section', '', 'role-model-resolution'); region.setAttribute('aria-label', '检查已保存模型');
   const repositoryId = current.id, saved = state.data.configuration.roles.find(entry => entry.role_id === role.role_id);
-  region.append(element('h5', '按工作类型检查已保存模型'), note('只读取已保存角色定义，未保存的选择不参与解析；不会启动任务或修改运行历史。具体任务使用的配置仍以任务详情中的运行快照为准。'));
+  region.append(element('h5', '检查已保存模型'), note('只读取已保存角色定义与项目默认模型，未保存的选择不参与解析；不会启动任务或修改运行历史。具体任务使用的配置仍以任务详情中的运行快照为准。'));
   if (role.role_id === 'dev' && state.data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') region.append(note('尚未显式变更开发角色的后端时，检视与 Actions 开发入口仍使用 Pi；这里读取的是角色定义本身。'));
-  const choices = new Map(builtInTasks.map(task => [task.kind, task.title]));
-  try { for (const kind of Object.keys(taskModelMap(current.policy))) if (!choices.has(kind)) choices.set(kind, kind); } catch { /* The server remains authoritative for an invalid saved policy. */ }
-  state.modelResolutionTypes ||= new Map();
-  const selected = state.modelResolutionTypes.get(role.role_id) || (role.role_id === 'manager' ? 'manager' : state.data.workflow || 'development.issue');
-  if (!choices.has(selected)) choices.set(selected, selected);
-  const result = element('div'), status = note('尚未读取此工作类型的已保存解析，当前结果未知。'); status.setAttribute('role', 'status');
+  const result = element('div'), status = note('尚未读取已保存的模型解析，当前结果未知。'); status.setAttribute('role', 'status');
   let request = 0;
   const version = state.data.configuration.revision, live = () => access.live() && region.isConnected && state.data.configuration.revision === version;
-  const selector = roleSelect('解析工作类型', selected, [...choices], value => {
-    state.modelResolutionTypes.set(role.role_id, value); request++; result.replaceChildren();
-    status.textContent = '尚未读取此工作类型的已保存解析，当前结果未知。'; read.disabled = false;
-  });
   const read = button('读取已保存模型解析', async () => {
-    const sequence = ++request, workflow = selector.value; read.disabled = true; result.replaceChildren(); status.textContent = '正在读取已保存配置的解析…';
+    const sequence = ++request; read.disabled = true; result.replaceChildren(); status.textContent = '正在读取已保存配置的解析…';
     try {
-      const value = await api(`/api/repositories/${repositoryId}/roles/resolve`, 'POST', { role: role.role_id, workflow, expected_revision: version });
+      const value = await api(`/api/repositories/${repositoryId}/roles/resolve`, 'POST', { role: role.role_id, expected_revision: version });
       if (!live() || sequence !== request) return;
       const snapshot = value.snapshot, model = snapshot.model, external = model.source === 'external_harness';
       const facts = element('dl');
-      for (const [caption, text] of [['工作类型', choices.get(workflow) || workflow], ['配置版本', snapshot.config_revision], ['角色版本', snapshot.role_revision],
+      for (const [caption, text] of [['配置版本', snapshot.config_revision], ['角色版本', snapshot.role_revision],
         ['Agent 后端', `${harnessName(snapshot.harness.id)} · ${snapshot.harness.version}`], ['模型来源', external ? '执行器自带模型' : own(modelSources, model.source) || model.source],
         ['模型名称', external ? '由执行器管理，不使用项目模型' : model.name], ['模型标识', external ? '不适用' : model.id], ['模型记录版本', external ? '不适用' : model.version]]) {
         facts.append(element('dt', caption), element('dd', String(text)));
@@ -36,13 +27,13 @@ function roleModelResolution(role, state, access) {
       if ([401, 403].includes(err.status)) { access.failed(err); return; }
       const reasons = { role_configuration_changed: '配置版本已变化，请读取最新角色配置并比较草稿后再检查。', role_disabled: '此角色已停用。',
         role_model_not_available: '显式选择的角色模型已删除、撤销或不可访问，不会换用其他模型。', role_model_profile_changed: '角色模型的地址或名称已变化，需要重新保存角色配置。',
-        model_unavailable: '继承的模型当前不可用，不会换用其他模型。', model_not_configured: '此工作类型没有可用的已配置模型。',
+        model_unavailable: '继承的模型当前不可用，不会换用其他模型。', model_not_configured: '项目尚未配置可用的默认模型，且此角色未单独指定模型。',
         subscription_mode_not_implemented: '供应商订阅模式未实现，任务不会静默回退到平台模型网关。',
         harness_model_profile_unsupported: '此执行器使用自带模型，不能指定项目模型。', harness_role_unsupported: '执行器不支持此角色类型。' };
       status.textContent = `解析失败，当前结果未知：${reasons[err.code] || readErrorText(err)}${err.field ? '（配置项：' + err.field + '）' : ''}`;
     } finally { if (live() && sequence === request) read.disabled = false; }
   });
-  region.append(field('解析工作类型', selector), read, status, result); return region;
+  region.append(read, status, result); return region;
 }
 function roleSettingsCard(role, state, redraw, access) {
   const section = card(roleConfigName(role) + rolePageText('formSuffix'));
@@ -64,7 +55,7 @@ function roleSettingsCard(role, state, redraw, access) {
   const runtimeBox = roleBackendRuntimeBox(role, state);
   agent.append(
     // What runs now: the saved configuration, or the defaults a project without one follows (#1068).
-    note((state.data.configured === false ? rolePageText('statusDefault') : '已保存') + ' · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))),
+    note((state.data.configured === false ? rolePageText('statusDefault') : '已保存') + ' · 模型：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))),
     note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'),
     field('Agent 后端', roleBackendPicker(role, state, redraw)),
     ...(runtimeBox ? [runtimeBox] : []),
@@ -122,10 +113,8 @@ function roleSettingsCard(role, state, redraw, access) {
     }
 
   }
-  if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) group('danger', '删除角色', advanced).append(button('删除这个角色', async () => {
-    const stages = state.draft.required_stages.filter(stage => stage.role_constraints.role_ids?.includes(role.role_id));
-    if (stages.length) { await askConfirm({ title: '先调整任务阶段', body: ['这些阶段仍指定了该角色：' + stages.map(stage => stage.stage_id).join('、') + '。请在概览中修改阶段角色或移除阶段，再删除角色。'], action: '知道了' }); return; }
-    if (!await askConfirm({ title: '删除角色 ' + roleConfigName(role) + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。阶段要求如引用此角色，需要一并调整。'], action: '删除角色' })) return;
+  if (!(state.data.required_roles || ['manager', 'qa']).includes(role.role_id)) group('danger', '删除角色', advanced).append(button('删除这个角色', async () => {
+    if (!await askConfirm({ title: '删除角色 ' + roleConfigName(role) + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。'], action: '删除角色' })) return;
     state.draft.roles = state.draft.roles.filter(entry => entry !== role);
     if (state.data.configuration.roles.some(entry => entry.role_id === role.role_id)) state.draft.deleted_roles = [...new Set([...(state.draft.deleted_roles || []), role.role_id])]; markRoleDirty(state); current.item = null; history.replaceState(null, '', `#/projects/${current.id}/roles`); redraw(); }, 'quiet destructive'));
   section.append(advanced);

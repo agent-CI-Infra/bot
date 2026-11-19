@@ -6,7 +6,6 @@ import { createControlPlane } from './server.js';
 import { ManagerClient, ProjectService } from './projects/service.js';
 import { NotesReclaimer } from './projects/reclaim.js';
 import { TaskEngine } from './agent/engine.js';
-import { loadRepositoryConfigs, repositoryConfigMap } from './automation/repository-config.js';
 import { InstallationSync } from './app/installations.js';
 import { ExternalService } from './external/service.js';
 import { Onboarding } from './onboarding/service.js';
@@ -56,10 +55,6 @@ const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
 const manager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8793',readFileSync(tokenFile));
 const projects = new ProjectService(store, manager);
-// A repository's YAML config is the base for its automation; a policy row saved through the API
-// still merges on top. A malformed file stops startup instead of running with a silent default.
-const repositoryConfigs = repositoryConfigMap(loadRepositoryConfigs(
-  process.env.BOT_REPOSITORY_CONFIG_DIR || resolve(import.meta.dirname, '../config/repositories')));
 // Repository mirrors live next to the database on the control plane's own volume.
 const gitCache = new GitCache(process.env.BOT_GIT_CACHE_DIR || resolve(dirname(databasePath), 'git-cache'));
 const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCache);engine.start();
@@ -109,7 +104,7 @@ const retention = new RetentionCleanup(store, manager);
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards'),
   homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes', tools: '/opt/agent-tools', machine: process.env.BOT_HOST_STORAGE_DIR }, vacuum, retention, workspaces);
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, releases, boards,
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, installations, external, onboarding, integrations, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
   // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
   notesReclaimer: reclaimer,

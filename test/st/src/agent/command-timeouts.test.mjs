@@ -20,7 +20,6 @@ import { agentLoop } from '../../../../dist/agent/loop.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { runRequest } from '../../../../dist/tasks/request.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
-import { planTask } from '../../../../dist/roles/schedule.js';
 
 const sdk = existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json');
 const skipPi = !sdk && process.env.BOT_REQUIRE_PI !== '1' ? 'Pi SDK not installed' : false;
@@ -140,17 +139,15 @@ for (const backend of ['native', 'process', 'pi']) {
     assert.equal(f.store.get("SELECT status FROM tasks WHERE id='t'").status, 'completed');
     assertCommands(f, 180);
   });
-  test(`stage observation forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
+  test(`observer delegation forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'review.issue', body => {
       if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
         const refs = receipts(body).filter(r => r.result_ref).map(r => r.result_ref);
-        return refs.length === 0 ? call('delegate_role', { role: 'dev', stage_id: 'dev', purpose: 'Inspect', refs: [] }) : refs.length === 1 ? call('delegate_role', { role: 'reviewer', stage_id: 'reviewer', purpose: 'Observe', refs }) : call('nominate_delivery', { result_ref: refs[0] });
+        return refs.length === 0 ? call('delegate_role', { role: 'dev', purpose: 'Inspect', refs: [] }) : refs.length === 1 ? call('delegate_role', { role: 'reviewer', purpose: 'Observe', refs }) : call('nominate_delivery', { result_ref: refs[0] });
       }
       if (body.tools.some(t => t.function.name === 'submit_role_result')) return nextCommand(body) ?? call('submit_role_result', findings);
       return call('finish_review', review);
     });
-    const stages = ['dev', 'reviewer'].map(role => ({ stage_id: role, depends_on: role === 'dev' ? [] : ['dev'], delivery_types: ['artifact'], role_constraints: { kinds: [role === 'dev' ? 'writer' : 'observer'], role_ids: [role], capabilities: ['raw_evidence', 'output_validation', ...(role === 'dev' ? [] : ['fresh_context', 'fixed_candidate_read'])], independent: role !== 'dev' }, required: false, completion: { evidence_types: [role === 'dev' ? 'role_result' : 'execution_evidence'], min_evidence: 1, no_findings: role !== 'dev' }, retry: { max_attempts: 3 }, budget: { max_tool_calls: 8 } }));
-    planTask(f.store, 't', f.records.get('t').revision, stages, 0);
     assert.equal((await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {})).summary, review.summary);
     assertCommands(f, 120);
   });

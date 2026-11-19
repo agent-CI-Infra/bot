@@ -6,7 +6,7 @@ import { tag, releases, releaseRedactor, withGitHub } from './github.js';
 import { actionPages, ambiguousBranch, matchesRun, runSnapshot } from './actions.js';
 import { sources } from './range.js';
 import { builtinGroups, checkGroups, notesUseModel, notesDecision, notesEventKey, renderNotes, requestNotes } from './notes.js';
-import { eventTaskActive } from '../work/events.js';
+import { eventTaskActive } from '../tasks/event-adapters.js';
 import { prerelease } from './version.js';
 
 export class ReleaseWorker {

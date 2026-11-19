@@ -9,7 +9,7 @@ import { ReleaseService } from '../../../../dist/releases/service.js';
 import { testPassword } from '../../../fixtures/helpers.mjs';
 import { runEventTasks } from '../../../fixtures/event-tasks.mjs';
 import { workspaceProfile } from '../../../../dist/agent/profiles.js';
-import { workPermissions as workflowPermissions } from '../../../../dist/work/settings.js';
+import { taskPermissions } from '../../../../dist/tasks/configuration.js';
 import { selectedModel } from '../../../../dist/agent/model.js';
 import { GitHub } from '../../../../dist/github/client.js';
 import { Redactor } from '../../../../dist/agent/common.js';
@@ -412,17 +412,17 @@ test('repository release-notes Skill is explicitly loaded at the target SHA into
   await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-model-release-key', model_name: 'notes-fixture' });
   const model = f.h.store.get('SELECT id FROM models WHERE repository_id=?', '101');
   const fallback = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-default-model-key', model_name: 'default-fixture' })).value.model;
-  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: fallback.id, task_models: {'release.notes': model.id} });
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
   let seen;
   const r = await toDraft(f, 'v1.2.3', ({ input, target: event }) => { seen = { input, event }; return { groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] }; });
   assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target); assert.match(r.body, /## Changes/);
   // The task works on a checkout of the release commit, with the verified sources and the Skill as context files.
-  const task = f.h.store.get("SELECT * FROM tasks WHERE kind='release.notes'");
+  const task = f.h.store.get("SELECT * FROM tasks WHERE kind='release.notes' OR (kind='task.request' AND json_extract(input,'$.event_adapter')='release.notes')");
   assert.deepEqual([task.status, task.head_sha, seen.event.sha], ['succeeded', target, target]);
   assert.equal(seen.event.files['release-notes-skill.md'], skill); assert.deepEqual(JSON.parse(seen.event.files['sources.json']).map(s => s.id), seen.input.sources.map(s => s.id));
-  assert.equal(selectedModel(f.h.store, '101', 'release.notes').model, 'notes-fixture');
+  assert.equal(selectedModel(f.h.store, '101').model, 'notes-fixture');
   // Like every workflow it may read GitHub and start agents; its only write is the notes it hands back.
-  const profile = workspaceProfile('release.notes', seen.event.context, workflowPermissions(f.h.store, '101', 'release.notes')), names = profile.tools.map(t => t.function.name);
+  const profile = workspaceProfile('release.notes', seen.event.context, taskPermissions(f.h.store, task)), names = profile.tools.map(t => t.function.name);
   for (const name of ['read_file', 'github_read_token', 'github_read', 'read_job_log', 'start_agent', 'finish_release_notes']) assert.ok(names.includes(name), name);
   for (const name of ['create_issue', 'create_pull_request', 'finish_review']) assert.ok(!names.includes(name), name);
   assert.ok(profile.system.includes(skill)); assert.deepEqual(profile.finishTools, ['finish_release_notes']);
@@ -511,7 +511,7 @@ test('read-only observation can finish without requesting logs and has no write 
   const done = (await f.admin(f.endpoint + '/' + r.id)).value.release;
   assert.equal(done.observation.run_id, 800); assert.equal(done.observation.advice, 'Inspect the Build step output'); assert.equal(done.observation_task, null); assert.equal(seen.input.run_attempt, 1);
   assert.equal(JSON.parse(seen.event.files['run.json']).jobs[0].id, 1); assert.equal(seen.event.sha, target);
-  const names = workspaceProfile('release.observe', seen.event.context, workflowPermissions(f.h.store, '101', 'release.observe')).tools.map(t => t.function.name);
+  const names = workspaceProfile('release.observe', seen.event.context, taskPermissions(f.h.store, { repository_id: '101', kind: 'release.observe', input: '{}' })).tools.map(t => t.function.name);
   for (const name of ['create_issue', 'create_pull_request', 'rerun_failed_run', 'report_failure']) assert.ok(!names.includes(name), name);
   assert.ok(f.state.tokens.slice(tokens).every(t => Object.values(t.permissions).every(p => p === 'read')));
   assert.deepEqual(writes(f.state).slice(before), []); assert.equal(f.state.releases.length, 0);
@@ -582,7 +582,7 @@ test('disabling a project during notes generation rejects the result before adva
   const f = await releaseFixture(t);
   f.state.files['.agents/skills/release-notes/SKILL.md'] = 'Group verified sources.';
   const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'notes-disable-key', model_name: 'notes-disable' })).value.model;
-  await f.admin('/api/repositories/101/policy', 'PATCH', { task_models: {'release.notes': model.id} });
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
   const result = await toDraft(f, 'v1.2.3', ({ input }) => {
     f.h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'");
     return { groups: [{ heading: 'Changes', source_ids: input.sources.map(source => source.id) }] };

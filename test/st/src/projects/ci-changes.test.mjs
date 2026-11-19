@@ -14,7 +14,8 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { GitHub } from '../../../../dist/github/client.js';
 import { githubWrite } from '../../../../dist/github/write.js';
 import { pullRequestPermissions } from '../../../../dist/tasks/pull-request.js';
-import { managerPrompt, parseSections } from '../../../../dist/work/settings.js';
+import { managerPrompt } from '../../../../dist/dispatch/settings.js';
+import { roleConfiguration } from '../../../../dist/roles/definition.js';
 
 // CI changes are bot pull requests that people review and merge (#931): only a development a project administrator
 // confirmed as a CI change pushes with the Workflows permission; github_write never has it.
@@ -163,14 +164,17 @@ test('upgrading ends unfinished gate onboarding tasks and drops its settings, se
   assert.deepEqual(store.all("SELECT id,status,error_code FROM tasks ORDER BY id").map(row => [row.id, row.status, row.error_code]),
     [['done', 'succeeded', null], ['open', 'cancelled', 'work_removed'], ['waiting', 'cancelled', 'work_removed']]);
   const policy = store.get("SELECT work_settings,task_models FROM policies WHERE repository_id='r'");
-  assert.ok(!('gate.onboarding' in JSON.parse(policy.work_settings))); assert.deepEqual(JSON.parse(policy.work_settings)['review.pr'], { enabled: true });
-  assert.deepEqual(JSON.parse(policy.task_models), { 'review.pr': 'm2' });
+  assert.deepEqual(JSON.parse(policy.work_settings), {});
+  assert.deepEqual(JSON.parse(policy.task_models), {});
   assert.ok(!store.hasTable('gate_onboarding_sessions') && !store.hasTable('quickstart_runs'));
-  // The section goes in a new revision; the older one is kept and still parses.
+  // Custom review.pr section migrates onto the reviewer role, while gate.onboarding is dropped.
   const prompt = managerPrompt(store, 'r');
-  assert.equal(prompt.revision, 2); assert.equal(prompt.source, 'upgrade'); assert.doesNotMatch(prompt.content, /gate\.onboarding|接入门禁/); assert.match(prompt.content, /Read the diff\./);
-  assert.deepEqual([...parseSections(store.get("SELECT content FROM manager_revisions WHERE repository_id='r' AND revision=1").content).sections.keys()], ['review.pr']);
+  assert.doesNotMatch(prompt.content, /gate\.onboarding|接入门禁/);
+  const reviewer = roleConfiguration(store, 'r').roles.find(r => r.role_id === 'reviewer');
+  assert.match(reviewer.persona_prompt, /Read the diff\./);
+  assert.doesNotMatch(reviewer.persona_prompt, /gate\.onboarding|接入门禁/);
   // Once.
+  const revBefore = roleConfiguration(store, 'r').revision;
   store.close(); store = new Store(database, key);
-  assert.equal(store.get("SELECT max(revision) n FROM manager_revisions WHERE repository_id='r'").n, 2);
+  assert.equal(roleConfiguration(store, 'r').revision, revBefore);
 });

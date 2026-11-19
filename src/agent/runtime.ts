@@ -7,7 +7,6 @@ import { insertTaskLog } from '../storage/payloads.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { randomId } from '../core/security.js';
-import { workOf } from '../work/catalog.js';
 import { requestModel, modelOutputTokens, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
 import type { PiRoleEnvironment } from './pi.js';
@@ -168,7 +167,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     return stop('agent_tools_invalid', 'waiting_configuration', 'Agent 工具配置无效或重复。');
   const allowed = new Map(tools.map(tool => [tool.function.name, tool]));
   if(spec.finish&&!allowed.has(spec.finish.name))return stop('agent_tools_invalid','waiting_configuration','提交工具未在本次执行中提供。');
-  const model = spec.model ?? executionModel(spec.store, spec.task, workOf(spec.task as any));
+  const model = spec.model ?? executionModel(spec.store, spec.task);
   spec = { ...spec, maxOutputTokens: modelOutputTokens(model,spec.maxOutputTokens) };
   spec.redactor.add(model.key);
   const previousRun=spec.task.trace_run_id;

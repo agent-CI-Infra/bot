@@ -148,9 +148,7 @@ async function loginAs(page, url, username, password) {
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
-const taskModels = async admin => JSON.parse((await admin('/api/repositories/101')).value.policy.task_models || '{}');
-
-test('Manager 规则页的「Manager 分派」不在统一保存栏里，仍能直接保存和恢复继承', async ({ page }) => {
+test('Manager 角色页通过统一保存栏按角色设置模型，不再展示独立的任务类型模型选择器', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
@@ -163,16 +161,14 @@ test('Manager 规则页的「Manager 分派」不在统一保存栏里，仍能�
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginAs(page, h.admin + '/#/projects/101/roles/manager', 'administrator', password);
     await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
-    const editor = page.locator('.task-model-editor');
-    await expect(editor).toHaveCount(1);
-    await editor.getByRole('combobox', { name: '任务模型', exact: true }).selectOption(other.id);
-    await editor.getByRole('button', { name: '保存模型', exact: true }).click();
-    await expect.poll(() => taskModels(admin)).toEqual({ manager: other.id });
-    await expect(page.locator('.task-model-editor')).toContainText('Dispatch · 此任务指定');
+    await expect(page.locator('.task-model-editor')).toHaveCount(0);
+    await page.getByLabel('manager 模型', { exact: true }).selectOption(other.id);
+    await consoleSave(page).click();
+    await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'manager')?.model_profile_ref?.model_id).toBe(other.id);
 
-    await page.locator('.task-model-editor').getByRole('button', { name: '恢复继承', exact: true }).click();
-    await expect.poll(() => taskModels(admin)).toEqual({});
-    await expect(page.locator('.task-model-editor')).toContainText('继承项目默认');
+    await page.getByLabel('manager 模型', { exact: true }).selectOption('');
+    await consoleSave(page).click();
+    await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'manager')?.model_profile_ref).toBeNull();
   } finally { await h.stop(); }
 });
 

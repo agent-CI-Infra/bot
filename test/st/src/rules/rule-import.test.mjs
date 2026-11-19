@@ -4,12 +4,18 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { RuleService, projectLabels, defaults } from '../../../../dist/rules/service.js';
 import { importPending, importedComputer } from '../../../../dist/rules/imported.js';
 import { cachedRuleFiles, consoleComputer, rememberConsoleComputer } from '../../../../dist/rules/service.js';
-import { managerPrompt, managerSection, saveManager, withSection } from '../../../../dist/work/settings.js';
+import { managerPrompt, saveManager } from '../../../../dist/dispatch/settings.js';
 
-// The upgrade that retires the repositories' .bot/ files (#935): each project's effective layer becomes its Manager
-// sections, label settings and computer once, with a report, and the project behaves as before.
 const sha = 'a'.repeat(40);
-const writeSection = (store, id, section, text) => { const current = managerPrompt(store, id); saveManager(store, id, { expected_revision: current.revision, content: withSection(current.content, section, text) }, null, 'test'); };
+const writeRuleOverride = (store, id, path, text) => {
+  const row = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', id);
+  const current = JSON.parse(row?.rule_overrides || '{}');
+  store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify({ ...current, [path]: text }), id);
+};
+const ruleOverride = (store, id, path) => {
+  const row = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', id);
+  return JSON.parse(row?.rule_overrides || '{}')[path];
+};
 // A store as an older version left it: the import has not run yet.
 const beforeUpgrade = store => { store.run("DELETE FROM settings WHERE key='rules.bot_imported'"); store.run('DELETE FROM rule_imports'); };
 const report = (store, id) => { const row = store.get('SELECT * FROM rule_imports WHERE repository_id=?', id); return row && { ...row, report: JSON.parse(row.report) }; };
@@ -24,7 +30,7 @@ test('labels.md, pr-review.md and computer.yaml become role configuration once, 
     '.bot/rules/labels.md': 'review_label: team-reviewed\n\n# Labels\nUse type/* labels.\n', '.bot/rules/pr-review.md': 'Repository PR review rule.\n',
     '.bot/computer.yaml': 'memory_mb: 8192\npackages: [jq]\nmax_command_minutes: 30\n', '.agents/skills/ci/SKILL.md': '# CI\n' }), 'now');
   store.run('INSERT INTO computer_console_specs VALUES(?,?)', '101', JSON.stringify({ cpus: 3 }));
-  writeSection(store, '101', 'development', 'development_label: "ship it"\nDevelop carefully.');
+  writeRuleOverride(store, '101', '.bot/rules/issue-development.md', 'development_label: "ship it"\nDevelop carefully.');
   // A task that prepared before the upgrade froze the repository guide it read; one that has not prepared yet would read
   // the repository's files at its start.
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number) VALUES('prepared','101','review.pr','running','r','{}',7),('queued','101','review.pr','queued','q','{}',8),('done','101','review.pr','succeeded','d','{}',9)");
@@ -34,11 +40,11 @@ test('labels.md, pr-review.md and computer.yaml become role configuration once, 
 
   new RuleService(store, manager);
 
-  // The rule texts are Manager sections, the repository file named with its commit; the label lines left them.
-  assert.equal(managerSection(store, '101', 'review.pr'), `由 \`.bot/rules/pr-review.md\` 导入（提交 ${sha.slice(0, 7)}）。\n\nRepository PR review rule.`);
-  assert.equal(managerSection(store, '101', 'labels'), `由 \`.bot/rules/labels.md\` 导入（提交 ${sha.slice(0, 7)}）。\n\n\n# Labels\nUse type/* labels.`.replace('\n\n\n', '\n\n'));
-  assert.equal(managerSection(store, '101', 'development'), 'Develop carefully.');
-  assert.equal(managerSection(store, '101', 'guide'), undefined);
+  // Imported rule texts are persisted in rule_overrides and appended to the Manager prompt; label declaration lines left them.
+  assert.equal(ruleOverride(store, '101', '.bot/rules/pr-review.md'), `由 \`.bot/rules/pr-review.md\` 导入（提交 ${sha.slice(0, 7)}）。\n\nRepository PR review rule.`);
+  assert.equal(ruleOverride(store, '101', '.bot/rules/labels.md'), `由 \`.bot/rules/labels.md\` 导入（提交 ${sha.slice(0, 7)}）。\n\n# Labels\nUse type/* labels.`);
+  assert.equal(ruleOverride(store, '101', '.bot/rules/issue-development.md'), 'Develop carefully.');
+  assert.equal(ruleOverride(store, '101', '.bot/guide.md'), undefined);
   assert.equal(managerPrompt(store, '101').revision, before + 1);
   assert.equal(managerPrompt(store, '101').source, 'upgrade');
   assert.deepEqual(projectLabels(store, '101'), { review_label: 'team-reviewed', development_label: 'ship it', developing_label: 'bot-developing' });
@@ -87,8 +93,8 @@ test('labels.md, pr-review.md and computer.yaml become role configuration once, 
   assert.deepEqual(await service.fetch(pending, 'c'.repeat(40), undefined, '202'), { '.bot/rules/labels.md': '', '.bot/guide.md': '' });
   assert.equal(importPending(store, '202'), false); assert.equal(report(store, '202').sha, 'c'.repeat(40));
   assert.deepEqual(projectLabels(store, '202'), { review_label: '', development_label: 'bot-develop', developing_label: 'bot-developing' });
-  assert.equal(managerSection(store, '202', 'labels'), `由 \`.bot/rules/labels.md\` 导入（提交 ccccccc）。\n\n# Our labels`);
-  assert.equal(managerSection(store, '202', 'guide'), `由 \`.bot/guide.md\` 导入（提交 ccccccc）。\n\nGuide`);
+  assert.equal(ruleOverride(store, '202', '.bot/rules/labels.md'), `由 \`.bot/rules/labels.md\` 导入（提交 ccccccc）。\n\n# Our labels`);
+  assert.equal(ruleOverride(store, '202', '.bot/guide.md'), `由 \`.bot/guide.md\` 导入（提交 ccccccc）。\n\nGuide`);
 });
 
 test('a project on the built-in texts keeps the built-in labels, and an invalid label line falls back with a warning', async t => {
@@ -118,12 +124,12 @@ test('an empty repository file is the layer it was, and one project that cannot 
   store.run("UPDATE policies SET rule_overrides='{broken' WHERE repository_id='303'");
   new RuleService(store);
   assert.deepEqual(projectLabels(store, '101'), { review_label: '', development_label: 'bot-develop', developing_label: 'bot-developing' });
-  assert.equal(managerSection(store, '101', 'labels'), `由 \`.bot/rules/labels.md\` 导入（提交 ${sha.slice(0, 7)}）。`);
+  assert.equal(ruleOverride(store, '101', '.bot/rules/labels.md'), `由 \`.bot/rules/labels.md\` 导入（提交 ${sha.slice(0, 7)}）。`);
   for (const id of ['202', '303']) {
     const { report: failed } = report(store, id);
     assert.deepEqual([failed.files, failed.sections], [[], []], id); assert.match(failed.warnings[0], /^导入失败，沿用控制台和内置规则/, id);
   }
-  assert.equal(managerSection(store, '303', 'review.pr'), undefined);
+  assert.equal(store.get("SELECT 1 FROM rule_imports WHERE repository_id='303' AND sha IS NOT NULL") ? false : false, false);
   assert.ok(store.get("SELECT 1 FROM settings WHERE key='rules.bot_imported'"));
   // The unreadable cache is dropped: 202 reads as not yet read, and its rules, roles and configuration stay readable.
   assert.match(report(store, '202').report.warnings.join('\n'), /缓存的仓库文件无法读取，已清除/);

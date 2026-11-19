@@ -164,10 +164,10 @@ test('observation does not hold the publishing lease or overwrite concurrent con
   assert.equal(f.h.store.get('SELECT COUNT(*) n FROM release_observers').n, 0);
 });
 
-test('observation selects the release.observe model override rather than the default', async t => {
+test('observation selects the repository default model without temperature override', async t => {
   const f = await fixture(t);
   const model = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'observe-specific-key', model_name: 'observe-specific' });
-  await f.admin('/api/repositories/101/policy', 'PATCH', { task_models: { 'release.observe': model.value.model.id } });
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id });
   let requested;
   f.state.custom = async ({ path, body, req, send }) => {
     if (path !== '/v1/chat/completions') return false;

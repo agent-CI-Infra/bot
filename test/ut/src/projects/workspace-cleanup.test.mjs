@@ -103,6 +103,31 @@ test("a pull request's workspaces stay while it is open and go at the next sweep
   assert.deepEqual(f.released(review.workspace).map(row => row.release_reason), ['pr_closed']);
 });
 
+test("#1122 generic task.request workspaces follow open/closed bot PR lifecycle for Issue developments, PR revisions, and PR reviews", async t => {
+  const f = fixture(t), long = 20 * day;
+  const grant = (taskId, writes) => f.store.run("INSERT INTO task_write_grants VALUES(?,?,1,?)", taskId, JSON.stringify(writes), iso(Date.now() - long));
+  // Generic Issue development that opened PR #17 for Issue #13, a generic PR revision on #17, a later generic Issue development on #13, and a generic PR review on #17.
+  const opened = f.task('pr_opened', { kind: 'task.request', number: 13, age: long, input: JSON.stringify({ target: { type: 'issue', number: 13 }, delivery: 'pull_request' }) });
+  grant(opened.id, ['pull_request']);
+  f.store.run("INSERT INTO bot_pull_requests VALUES('101',17,'pr17','99','101','bot/issue-13','sha',?,0)", opened.id);
+  const revision = f.task('pr_opened', { kind: 'task.request', number: 17, age: long, input: JSON.stringify({ target: { type: 'pr', number: 17 }, delivery: 'pull_request' }) });
+  grant(revision.id, ['pull_request']);
+  const laterIssueDev = f.task('failed', { kind: 'task.request', number: 13, age: long, input: JSON.stringify({ target: { type: 'issue', number: 13 } }) });
+  grant(laterIssueDev.id, ['pull_request']);
+  const prReview = f.task('succeeded', { kind: 'task.request', number: 17, age: 2 * hour, input: JSON.stringify({ target: { type: 'pr', number: 17 }, delivery: 'review' }) });
+  grant(prReview.id, ['review']);
+
+  await f.sweep();
+  assert.deepEqual(f.left(), sorted(opened.workspace, revision.workspace, laterIssueDev.workspace, prReview.workspace));
+
+  reviewObjectState(f.store, '101', 'review.pr', 17, true);
+  await f.sweep();
+  assert.deepEqual(f.left(), []);
+  for (const ws of [opened.workspace, revision.workspace, laterIssueDev.workspace, prReview.workspace]) {
+    assert.deepEqual(f.released(ws).map(row => row.release_reason), ['pr_closed']);
+  }
+});
+
 test('a workspace another task reuses, one used in the last half hour and one written since the listing stay', async t => {
   let touched = null, during = [];
   const f = fixture(t, request => {

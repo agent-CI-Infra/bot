@@ -41,18 +41,11 @@ function publicModel(store: Store, row: Row): Json {
 function usageByModel(store: Store, user: Actor, ids: string[]): Record<string, Json[]> {
   const usage: Record<string, Json[]> = {}, usedScope = scope(user, 'p.repository_id'), marks = ids.map(() => '?').join(',');
   if (!ids.length) return usage;
-  const wanted = new Set(ids);
-  const rows = store.all(`SELECT p.model_id,p.task_models,p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
-    WHERE (p.model_id IN (${marks}) OR EXISTS(SELECT 1 FROM json_each(p.task_models) WHERE value IN (${marks}))) AND ${usedScope.sql}
-    ORDER BY p.repository_id`, ...ids, ...ids, ...usedScope.args);
+  const rows = store.all(`SELECT p.model_id,p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
+    WHERE p.model_id IN (${marks}) AND ${usedScope.sql}
+    ORDER BY p.repository_id`, ...ids, ...usedScope.args);
   for (const row of rows) {
-    const used = new Set<string>();
-    if (row.model_id !== null && wanted.has(String(row.model_id))) used.add(String(row.model_id));
-    let overrides: unknown;
-    try { overrides = JSON.parse(String(row.task_models ?? '{}')); } catch { overrides = null; }
-    for (const value of overrides && typeof overrides === 'object' ? Object.values(overrides as Record<string, unknown>) : [])
-      if (wanted.has(String(value))) used.add(String(value));
-    for (const id of used) (usage[id] ??= []).push({ repository_id: row.repository_id, full_name: row.full_name });
+    if (row.model_id !== null) (usage[String(row.model_id)] ??= []).push({ repository_id: row.repository_id, full_name: row.full_name });
   }
   return usage;
 }
@@ -185,7 +178,7 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     if (user.role === 'super_admin' || row.repository_id && user.repositories.includes(row.repository_id)) {
       const usedScope = scope(user, 'p.repository_id');
       model.used_by = store.all(`SELECT p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
-        WHERE (p.model_id=? OR EXISTS(SELECT 1 FROM json_each(p.task_models) WHERE value=?)) AND ${usedScope.sql} ORDER BY p.repository_id`, id, id, ...usedScope.args);
+        WHERE p.model_id=? AND ${usedScope.sql} ORDER BY p.repository_id`, id, ...usedScope.args);
       model.role_used_by = rolesUsingModel(store, user, id);
       model.onboarding_default = user.role === 'super_admin' && row.repository_id === null
         && store.get("SELECT json_extract(value,'$') id FROM settings WHERE key='onboarding.model' AND json_valid(value)")?.id === id;

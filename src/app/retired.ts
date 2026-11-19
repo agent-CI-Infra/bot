@@ -11,6 +11,9 @@ const retired: { pattern: RegExp; code: string; detail: string }[] = [
   // Repository onboarding (#1133): merged into the management assistant (#/management and #/projects/<id>/management).
   { pattern: /^\/api\/management\/onboarding\/[1-9]\d*(?:\/.*)?$/, code: 'repository_onboarding_merged',
     detail: '独立「仓库接入」页面已合并到管理助手（#/management 或 #/projects/<id>/management）：直接在管理助手对话中分析仓库、启动或提交启动申请，并应用配置。' },
+  // Rule-table automation (#1122): routine events use Manager standing rules and custom logic runs as generic tasks.
+  { pattern: /^\/api\/automation(?:\/.*)?$/, code: 'automation_removed',
+    detail: '规则表自动化（/api/automation）已退役（#1122）。例行事件请使用项目 Manager 的常设规则（standing_rules），其它协作逻辑请通过 Manager 提示词或通用任务（POST /api/tasks）处理。' },
 ];
 
 export function retiredApi(url: URL): undefined {

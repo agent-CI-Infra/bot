@@ -144,7 +144,6 @@ docker compose up -d
 - [在角色配置里调整行为](rules.md)：规则、标签、机器配置在哪里改，`.bot/` 文件的一次性导入，仓库 skill 的边界
 - [部署细节](deployment.md)：镜像、从源码构建、版本发布与服务器部署、端口与环境变量、服务隔离、备份与恢复
 - [外部执行端](external-executors.md)：在个人电脑或 GitHub Actions 里检视，再以 Bot 身份回复
-- [仓库自动化规则](automation.md)：标签、门禁、合并队列和 CI 阶段
 - [架构与行为](architecture.md)：权限模型、虚拟电脑生命周期、检视与开发数据流、当前限制
 - [管理 API](api.md)
 - [开发与验证](development.md)：代码结构、测试命令、Docker 验收、CI 与合入

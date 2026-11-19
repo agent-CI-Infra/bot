@@ -28,7 +28,8 @@ test('the Docker model fixture serves checked Manager decisions and preserves ta
   queueWebhook(h.store, '101', 'issues', { action: 'opened', issue, sender }, 'fixture-opened');
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 0);
   await run();
-  const review = h.store.get('SELECT * FROM tasks'); assert.equal(review.kind, 'review.issue');
+  const review = h.store.get('SELECT * FROM tasks'); assert.equal(review.kind, 'task.request');
+  assert.equal(JSON.parse(review.input).executor_role, 'reviewer');
   const comment = (id, body) => queueWebhook(h.store, '101', 'issue_comment', { action: 'created', issue, sender, comment: { id, body, author_association: 'MEMBER' } }, 'fixture-comment-' + id);
   comment(31, 'Also explain numeric inputs.'); await run();
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
@@ -41,7 +42,7 @@ test('the Docker model fixture serves checked Manager decisions and preserves ta
     facts: { review: { recommendation: 'Ready for development.' }, development: { label: 'bot-develop', labeled_by: 'maintainer', assignees: [] } },
     options: [{ id: 'offered-development', work: 'development.issue', title: 'Develop', spec: { type: 'object', kind: 'development.issue', number: 1, head: null, input: { review: { implementation_goal: 'Fix addition' } }, delivery: 'fixture-published' } }] });
   await run();
-  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n, 1);
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='task.request' AND json_extract(input,'$.executor_role')='dev'").n, 1);
   recordEvent(h.store, { repositoryId: '101', key: 'fixture-no-code', type: 'review.published', source: 'review', summary: 'No requested change', object: { type: 'issue', number: 2 },
     facts: { review: { recommendation: 'No code change requested.' }, development: { assignees: [] } },
     options: [{ id: 'declined-development', work: 'development.issue', title: 'Develop', spec: { type: 'object', kind: 'development.issue', number: 2, head: null, input: {}, delivery: null } }] });

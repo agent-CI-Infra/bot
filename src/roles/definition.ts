@@ -9,7 +9,6 @@ import { harnesses } from './harness.js';
 import { defaultPermissions, migratePermissions, normalizePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
-import { validateStages, type StageDefinition } from './stage-policy.js';
 import { cachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
 import {roleSkills} from './skill-defaults.js';
@@ -38,8 +37,8 @@ export interface RoleConfiguration {
   // follows_default: the project has no configuration of its own and runs the current built-in defaults (#1068).
   schema: 2; revision: number; enabled: boolean; legacy?: boolean; follows_default?: boolean;
   controller: { role: string; entries: Record<Entry, boolean> };
-  required_stages?: StageDefinition[];
   roles: RoleDefinitionV2[];
+  deleted_roles?: string[];
   skills: (SkillBundleRef & { source: any; files: { path: string; sha256: string; bytes: number }[] })[];
   updated_at?: string; updated_by?: string;
 }
@@ -92,7 +91,7 @@ export function defaultRoles(): RoleDefinitionV2[] {
 const followsDefault = (value: any) => value?.schema === 2 && !Array.isArray(value.roles);
 function defaultConfiguration(marker: { revision?: number; updated_at?: string; updated_by?: string }): RoleConfiguration {
   return { schema: 2, revision: Number(marker.revision ?? 0), enabled: true, follows_default: true, controller: { role: 'manager', entries: managerEntries() },
-    required_stages: [], roles: defaultRoles(), skills: [], ...(marker.updated_at ? { updated_at: marker.updated_at, updated_by: marker.updated_by } : {}) };
+    roles: defaultRoles(), skills: [], ...(marker.updated_at ? { updated_at: marker.updated_at, updated_by: marker.updated_by } : {}) };
 }
 
 export function roleStorageV2(s: Store) {
@@ -388,11 +387,13 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
       const budgetEntry = budgetPolicies.find(b => b.id === definition.budget_policy_ref?.id);
       return { ...definition, kind, environment_profile_ref: migrateEnvironmentRef(definition.environment_profile_ref, kind), ...(budgetEntry ? { budget_policy_ref: { ...definition.budget_policy_ref, version: budgetEntry.version } } : {}), permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
     });
-    // A configuration saved before the coordinator existed runs the recommended one.
-    if (!roles.some((role: RoleDefinitionV2) => role.role_id === 'coordinator')) roles.push(defaultRoles().find(role => role.role_id === 'coordinator')!);
+    // A configuration saved before the coordinator existed runs the recommended one unless coordinator was explicitly deleted.
+    if (!roles.some((role: RoleDefinitionV2) => role.role_id === 'coordinator') && !(Array.isArray(value.deleted_roles) && value.deleted_roles.includes('coordinator'))) {
+      roles.push(defaultRoles().find(role => role.role_id === 'coordinator')!);
+    }
     // Stored roles are fixed, even in a copy of the defaults (a task's frozen configuration, or one saved as read): only a
     // record without roles follows the defaults.
-    const { follows_default, ...fixed } = value;
+    const { follows_default, required_stages: _retiredStages, ...fixed } = value;
     return { ...fixed, roles, skills: value.skills.map((bundle: any) => ({ ...bundle, source: skillSourceDescriptor(bundle.source, bundle) })) };
   }
   // Legacy: built-in prompts with appended project instructions, the per-role driver map, the native manager.
@@ -481,7 +482,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
  * revisions it adds. Nothing is written here.
  */
 export function normalizeConfiguration(s: Store, repositoryId: string, input: any, current: RoleConfiguration) {
-  if (Object.keys(input).some(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'required_stages', 'deleted_roles'].includes(k))) invalid('unknown_field', Object.keys(input).find(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'required_stages', 'deleted_roles'].includes(k))!);
+  if (Object.keys(input).some(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'deleted_roles'].includes(k))) invalid('unknown_field', Object.keys(input).find(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'deleted_roles'].includes(k))!);
   if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0) invalid('expected_revision_required', 'expected_revision');
   if (input.expected_revision !== current.revision) fail(409, 'role_configuration_conflict', 'expected_revision');
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') invalid('invalid_role_configuration', 'enabled');
@@ -519,8 +520,8 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     const [defaultName, defaultResponsibility] = names(id);
     const textField = (key: string, max: number, fallback: string) => { const value = given[key] ?? fallback; if (typeof value !== 'string' || value.length > max || value.includes('\0')) invalid('invalid_role_field', `${field}.${key}`); return value; };
     const enabled = given.enabled ?? true; if (typeof enabled !== 'boolean') invalid('invalid_role_field', `${field}.enabled`);
-    // The controller and QA are mandatory parts of the flow: they cannot be switched off, only configured.
-    if (!enabled && (kind === 'controller' || kind === 'evaluator')) invalid('role_required', `${field}.enabled`);
+    // Mandatory roles (manager, qa) cannot be switched off, only configured.
+    if (!enabled && requiredRoles.includes(id)) invalid('role_required', `${field}.enabled`);
     const pick = (key: string, list: { id: string; version: string }[], choices: string[], fallback: string, code: string) => {
       const ref = given[key] ?? { id: fallback }; if (!ref || typeof ref !== 'object' || typeof ref.id !== 'string') invalid('invalid_role_reference', `${field}.${key}`);
       if (!choices.includes(ref.id)) invalid(code, `${field}.${key}.id`);
@@ -606,7 +607,8 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   const entryInput = controllerInput.entries ?? current.controller.entries;
   if (!entryInput || typeof entryInput !== 'object' || Object.keys(entryInput).some(k => !entries.includes(k as Entry)) || Object.values(entryInput).some(v => typeof v !== 'boolean')) invalid('invalid_controller_entries', 'controller.entries');
   // Accept retired booleans from older clients, but they no longer opt work out of Manager execution.
-  const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: true, controller: { role: controllerRole, entries: managerEntries() }, roles, skills, required_stages: validateStages(input.required_stages ?? current.required_stages ?? [], roles) };
+  const deletedBuiltin = [...new Set([...(current.deleted_roles ?? []).filter(d => !ids.includes(d)), ...deleted.filter((d: string) => rolePool.some(r => r.id === d))])];
+  const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: true, controller: { role: controllerRole, entries: managerEntries() }, roles, ...(deletedBuiltin.length ? { deleted_roles: deletedBuiltin } : {}), skills };
   if (Buffer.byteLength(JSON.stringify(config)) > 512 * 1024) invalid('role_configuration_too_large', 'roles');
   return { config, added };
 }
@@ -712,10 +714,8 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   } else {
     try {
       const fallback = options.fallbackModel?.();
-      model = fallback?.model ?? selectedModel(s, repositoryId, workflow);
-      const policy = s.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId), overrides = JSON.parse(policy?.task_models || '{}');
-      // 'workflow' is the work type's own model in task_models (the name role snapshots have always used).
-      source = fallback?.source ?? (Object.hasOwn(overrides, workflow) ? 'workflow' : 'project');
+      model = fallback?.model ?? selectedModel(s, repositoryId);
+      source = fallback?.source ?? 'project';
       profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
     } catch (err) {
       if (hasConfigOverride && (err as any)?.code === 'model_not_configured') {

@@ -5,7 +5,7 @@ import { Store } from '../../../../dist/storage/database.js';
 import { roleConfiguration, saveConfiguration, resolveRole, roleAuthority } from '../../../../dist/roles/definition.js';
 import { roleConfig, controlled } from '../../../../dist/roles/run.js';
 import { captureTaskConfiguration, taskConfiguration } from '../../../../dist/tasks/configuration.js';
-import { eventFilters, saveManager } from '../../../../dist/work/settings.js';
+import { eventFilters, saveManager } from '../../../../dist/dispatch/settings.js';
 
 const entries = ['development', 'request', 'review', 'actions'];
 function fixture(t) {

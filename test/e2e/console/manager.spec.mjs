@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { openModelOverrides } from '../helpers/open-model-folds.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
@@ -75,10 +74,11 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
     await expect(decisions.locator(`[data-dispatch-event="${failed.id}"]`)).toContainText('等待或自动重试');
     expect(h.store.get('SELECT state FROM dispatch_events WHERE id=?', failed.id).state).toBe('pending');
 
-    // The models page lists every work type and the Manager's own dispatch model.
+    // The models page shows the project default model and links to Roles without per-work-type overrides.
     await page.evaluate(() => { location.hash = '#/projects/101/model'; });
-    await openModelOverrides(page);
-    for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
+    await expect(page.getByRole('heading', { name: '项目默认模型', exact: true })).toBeVisible();
+    await expect(page.getByTestId('model-overrides')).toHaveCount(0);
+    await expect(page.locator('[data-task-kind]')).toHaveCount(0);
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/roles/manager');

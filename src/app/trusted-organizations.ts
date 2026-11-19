@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, fields, type Json } from '../core/security.js';
 import { type Actor, superAdmin } from './auth.js';
-import { isCeiling, type Ceiling } from '../work/ceiling.js';
+import { isCeiling, type Ceiling } from '../projects/ceiling.js';
 
 // Trusted organizations (#848): a GitHub owner (organization or personal account) whose repository administrators start
 // their own repositories. Only super administrators trust or untrust one; trust only decides who may start a repository

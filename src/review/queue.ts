@@ -5,8 +5,8 @@ import { sha as digest } from '../agent/common.js';
 import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
 import { actionsDevelopmentAllowed } from '../actions/safety.js';
-import { recordEvent, recordFiltered, type CreateOption, type EventInput } from '../dispatch/store.js';
-import { eventFilters, labelDispatched, type EventFilters } from '../work/settings.js';
+import { findActiveObjectDevelopment, recordEvent, recordFiltered, type CreateOption, type EventInput } from '../dispatch/store.js';
+import { eventFilters, labelDispatched, type EventFilters } from '../dispatch/settings.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue. Whether the Issue should be developed
@@ -60,7 +60,7 @@ function botPullRequest(store: Store, repositoryId: string, pr: any, opening = f
   if (!actor || String(pr?.user?.id ?? '') !== String(actor) || String(pr?.head?.repo?.id ?? '') !== String(repositoryId) || typeof pr?.head?.ref !== 'string') return null;
   for (const match of String(pr?.body ?? '').matchAll(/<!-- dept-bot:([a-f0-9]{48}) -->/g)) {
     const effect = store.get(`SELECT e.task_id,e.request FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE e.id=? AND t.repository_id=? AND e.kind='pull_request'
-      AND t.kind LIKE 'development.%'`, match[1]!, repositoryId);
+      AND (t.kind LIKE 'development.%' OR t.kind='task.request')`, match[1]!, repositoryId);
     let request: any = null; try { request = JSON.parse(String(effect?.request ?? 'null')); } catch { request = null; }
     if (effect && request?.head === pr.head.ref) return { author_id: String(pr.user.id ?? ''), source_task_id: String(effect.task_id) };
   }
@@ -174,9 +174,8 @@ export function pullRequestNeeded(store: Store, repositoryId: string, event: str
   return filters['pull_request.updated'] && updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload))?.kind === 'review.pr';
 }
 
-const activeDevelopment = (store: Store, repositoryId: string, kind: string, number: number) => store.get(`SELECT id,status FROM tasks WHERE repository_id=? AND kind=? AND object_number=?
-  AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
-    'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, kind, number);
+const activeDevelopment = (store: Store, repositoryId: string, kind: string, number: number) =>
+  findActiveObjectDevelopment(store, repositoryId, kind.endsWith('.pr') ? 'pr' : 'issue', number);
 const enqueueKey = (repositoryId: string, kind: string, number: number, head: string | null, input: Json, commentId: string | null, updateId: string | null) => {
   // A revision that people or other bots asked for is keyed by those requests, so a revision of the same head that the bot's
   // own review started earlier does not stand in for it.
@@ -388,7 +387,7 @@ function labeledDevelopment(store: Store, repositoryId: string, payload: any, nu
   const facts = { label, labeled_by: String(payload.sender?.login || ''), assignees: offer.assignees, review: offer.review };
   // What the control plane did before #207 (for the rule decider in tests): the first development of an unassigned, reviewed Issue.
   return { facts, option: { ...offer.option, default: !!offer.review && !offer.assignees.length
-    && !store.get("SELECT 1 FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=? AND unique_key IS NOT NULL LIMIT 1", repositoryId, number) } };
+    && !store.get("SELECT 1 FROM tasks t WHERE t.repository_id=? AND t.object_number=? AND t.unique_key IS NOT NULL AND (t.kind='development.issue' OR (t.kind='task.request' AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request')))) LIMIT 1", repositoryId, number) } };
 }
 /**
  * Development of an open Issue, offered on its events (#815). Whether to start it is the Manager's decision, made on a basis
@@ -398,7 +397,7 @@ function labeledDevelopment(store: Store, repositoryId: string, payload: any, nu
  */
 function developmentOffer(store: Store, repositoryId: string, issue: any, number: number, delivery: string) {
   if (issue?.state !== 'open' || issue.pull_request) return null;
-  const review = store.get("SELECT id,result FROM tasks WHERE repository_id=? AND kind='review.issue' AND object_number=? AND status='succeeded' ORDER BY created_at DESC LIMIT 1", repositoryId, number);
+  const review = store.get("SELECT id,result FROM tasks WHERE repository_id=? AND object_number=? AND status='succeeded' AND (kind='review.issue' OR (kind='task.request' AND json_extract(input,'$.delivery')='review')) ORDER BY created_at DESC LIMIT 1", repositoryId, number);
   const result = review?.result ? JSON.parse(review.result) : null, assignees = assigneesOf(issue);
   if (!actionsDevelopmentAllowed(store, repositoryId, number)) return null;
   const option: CreateOption = { id: 'development', work: 'development.issue', title: `开发 Issue #${number}`,
@@ -417,11 +416,12 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   const number = Number(object?.number || payload.number), action = payload.action;
   if (object && Number.isSafeInteger(number) && number>0 && ['opened','reopened','closed'].includes(String(action))) reviewObjectState(store, repositoryId, event === 'issues' ? 'review.issue' : 'review.pr', number, action === 'closed');
   if (object && (action === 'closed' || action === 'converted_to_draft')) {
-    store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE repository_id=? AND object_number=? AND kind LIKE ? AND status NOT IN ('succeeded','pr_opened','completed')",
-      repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
+    const objType = event === 'issues' ? 'issue' : 'pr';
+    store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE repository_id=? AND object_number=? AND (kind LIKE ? OR (kind='task.request' AND json_extract(input,'$.target.type')=?)) AND status NOT IN ('succeeded','pr_opened','completed')",
+      repositoryId, number, event === 'issues' ? '%.issue' : '%.pr', objType);
     // Events of the object that the Manager has not decided yet would only start work on a closed object.
     store.run("UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','failed')",
-      '对象已关闭或转为草稿，事件不再分派。', new Date().toISOString(), repositoryId, event === 'issues' ? 'issue' : 'pr', number);
+      '对象已关闭或转为草稿，事件不再分派。', new Date().toISOString(), repositoryId, objType, number);
   }
   // An event a person caused that the filters stop is kept with the reason (#815), so the console can say why nothing happened.
   const filtered = (code: string, reason: string) => { const record = filteredEvent(repositoryId, event, payload, delivery); if (record) recordFiltered(store, { ...record, code, reason }); return 0; };

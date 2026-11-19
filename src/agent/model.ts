@@ -8,21 +8,21 @@ import { pricingFor } from '../metrics/accounting.js';
 import { githubWriteTool } from '../github/write.js';
 import { pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 import { reviewConclusions } from '../review/findings.js';
-// Exact task-profile overrides are trusted administrator configuration, never model/tool input.
-// Keep invalid/deleted overrides visible: falling back would silently change the user's chosen model.
-export function selectedModel(store: Store, repositoryId: string, taskKind?: string) {
-  const policy = store.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId);
-  let overrides: Record<string, string>;
-  try {
-    overrides = JSON.parse(policy?.task_models || '{}');
-    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error();
-  } catch { return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。'); }
-  // Work types (and 'manager', the dispatch call) name their model in task_models; anything else uses the project default.
-  const overridden = !!taskKind && Object.hasOwn(overrides, taskKind);
-  const modelId = overridden ? overrides[taskKind!] : policy?.model_id;
-  if (overridden && (typeof modelId !== 'string' || !modelId)) return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。');
+// Model resolution uses the project default model; role-specific overrides live on RoleDefinitionV2.model_profile_ref (#1122).
+export function selectedModel(store: Store, repositoryId: string, roleId?: string) {
+  let roleModelId: string | undefined;
+  if (roleId) {
+    try {
+      const saved = store.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId);
+      const roles = saved ? JSON.parse(String(saved.value))?.roles : null;
+      const found = Array.isArray(roles) ? roles.find((r: any) => r?.role_id === roleId) : null;
+      if (typeof found?.model_profile_ref?.model_id === 'string') roleModelId = found.model_profile_ref.model_id;
+    } catch { /* ignore */ }
+  }
+  const policy = store.get('SELECT model_id FROM policies WHERE repository_id=?', repositoryId);
+  const modelId = roleModelId ?? policy?.model_id;
   const row = modelId ? visibleModel(store, repositoryId, modelId) : undefined;
-  if (!row?.api_key) return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId}${overridden ? ' 的任务 ' + taskKind : ''} 未配置可用模型或模型凭据；不会自动切换到其他模型。`);
+  if (!row?.api_key) return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId} 未配置可用默认模型或模型凭据；不会自动切换到其他模型。`);
   return openModel(store, row);
 }
 /** A model this project may use: its own, or a shared one granted to it. Returns the row without opening its key. */

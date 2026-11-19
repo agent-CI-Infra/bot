@@ -100,28 +100,32 @@ test('角色看板与其他项目读取共享同一套项目权限', async t => 
   assert.equal((await policy(outsider, { role_concurrency: { dev: 2 } })).status, 403);
 });
 
-test('阶段可解析但归属不唯一时，队列同样标为 unsupported 而不是挑一个角色', async t => {
-  const { h, admin } = await fixture(t);
-  // A stage policy that resolves to exactly one stage for the queued task, but that stage names no role_ids: every
-  // enabled observer is eligible, so the queue cannot be attributed to one role. This is the second way into
-  // unsupported:["role_queue"] — the first is "no usable stage policy at all" (covered above).
-  const observer = { depends_on: [], delivery_types: ['code'], required: true, retry: { max_attempts: 2 }, budget: { max_tool_calls: 8 },
-    role_constraints: { kinds: ['observer'], capabilities: ['raw_evidence', 'fixed_candidate_read', 'fresh_context'], independent: true },
-    completion: { evidence_types: ['role_result'], min_evidence: 1, no_findings: true } };
-  const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [], required_stages: [{ stage_id: 'review', ...observer }] });
-  assert.equal(saved.status, 200, JSON.stringify(saved.value));
-  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at) VALUES('q1','101','review.pr','queued','pr',7,'2026-11-10T00:00:00Z')");
+test('执行角色已停用且无法归属时，排队任务计入 unattributed_queued 而不是挑一个角色', async t => {
+  const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  const initial = (await admin('/api/repositories/101/roles')).value;
+  // Disable reviewer and turn off controller review/request entries & dev so a legacy review.pr cannot be attributed to an enabled role.
+  const disabled = await admin('/api/repositories/101/roles', 'PUT', {
+    expected_revision: initial.revision,
+    enabled: true,
+    controller: { role: 'manager', entries: { development: true, review: false, request: false, actions: true } },
+    roles: [{ role_id: 'reviewer', enabled: false }, { role_id: 'dev', enabled: false }],
+  });
+  assert.equal(disabled.status, 200, JSON.stringify(disabled.value));
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,created_at) VALUES('q1','101','task.request','queued','pr',?,7,'2026-11-10T00:00:00Z')", JSON.stringify({ executor_role: 'reviewer' }));
   const ambiguous = (await board(admin)).value;
-  assert.deepEqual(ambiguous.unsupported, ['role_queue']);
+  assert.equal(ambiguous.project.unattributed_queued, 1);
   for (const role of ambiguous.roles) assert.deepEqual(role.ready, [], 'an unattributable task must not be assigned a role');
-  // Naming one role turns the very same queue into a real attribution: the difference is uniqueness, not the stage.
-  const one = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: saved.value.configuration.revision, enabled: true, roles: [],
-    required_stages: [{ stage_id: 'review', ...observer, role_constraints: { ...observer.role_constraints, role_ids: ['reviewer'] } }] });
+  // Enabling reviewer attributes the task directly to reviewer.
+  const one = await admin('/api/repositories/101/roles', 'PUT', {
+    expected_revision: disabled.value.configuration.revision,
+    enabled: true,
+    roles: [{ role_id: 'reviewer', enabled: true }, { role_id: 'dev', enabled: true }],
+  });
   assert.equal(one.status, 200, JSON.stringify(one.value));
   const resolved = (await board(admin)).value;
-  assert.deepEqual(resolved.unsupported, []);
+  assert.equal(resolved.project.unattributed_queued, undefined);
   assert.deepEqual(resolved.roles.find(role => role.role === 'reviewer').ready.map(entry => entry.task_id), ['q1']);
-  // Exactly one role sees the task, so no other role can claim the same capacity.
   assert.equal(resolved.roles.filter(role => role.ready.length).length, 1);
 });
 
@@ -152,7 +156,7 @@ test('角色看板只读取当前角色定义内的键，并允许名为 constru
   // The definition input takes the editable fields only; `revision` and `kind` are server-owned.
   const { revision, kind, ...editable } = reviewer;
   const custom = { ...editable, role_id: 'constructor', name: 'constructor' };
-  const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true, roles: [custom], required_stages: [] });
+  const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true, roles: [custom] });
   assert.equal(saved.status, 200, JSON.stringify(saved.value));
   const written = await policy(admin, { role_concurrency: { constructor: 1 } });
   assert.equal(written.status, 200, JSON.stringify(written.value));
@@ -163,7 +167,7 @@ test('删除角色会结束其限额生命周期，同名重建及重启后仍�
   const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
   const putRoles = body => admin('/api/repositories/101/roles', 'PUT', {
-    expected_revision: body.expected_revision, enabled: true, roles: body.roles ?? [], required_stages: [], ...(body.deleted_roles ? { deleted_roles: body.deleted_roles } : {}) });
+    expected_revision: body.expected_revision, enabled: true, roles: body.roles ?? [], ...(body.deleted_roles ? { deleted_roles: body.deleted_roles } : {}) });
   const initial = await putRoles({ expected_revision: 0 });
   assert.equal(initial.status, 200, JSON.stringify(initial.value));
   assert.equal((await policy(admin, { role_concurrency: { dev: 3, reviewer: 4 } })).status, 200);
@@ -201,11 +205,6 @@ test('删除角色会结束其限额生命周期，同名重建及重启后仍�
 
 test('ready 只包含已到期且 wait_for_review 依赖满足的任务', async t => {
   const { h, admin } = await fixture(t);
-  const stage = { stage_id: 'review', depends_on: [], delivery_types: ['code'], required: true, retry: { max_attempts: 2 }, budget: { max_tool_calls: 8 },
-    role_constraints: { kinds: ['observer'], role_ids: ['reviewer'], capabilities: ['raw_evidence', 'fixed_candidate_read', 'fresh_context'], independent: true },
-    completion: { evidence_types: ['role_result'], min_evidence: 1, no_findings: true } };
-  const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [], required_stages: [stage] });
-  assert.equal(saved.status, 200, JSON.stringify(saved.value));
   const insert = h.store.db.prepare('INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,input,next_run_at) VALUES(?,?,?,?,?,?,?,?,?)');
   const now = Date.now();
   insert.run('dependency', '101', 'review.pr', 'running', 'dependency', 90, '2026-11-10T00:00:00Z', '{}', 0);
@@ -231,11 +230,6 @@ test('ready 只包含已到期且 wait_for_review 依赖满足的任务', async 
 
 test('角色看板封顶扫描 500 个排队任务，截断时 ready_more 为 true', async t => {
   const { h, admin } = await fixture(t);
-  // One observer stage naming exactly one role, so every queued task is attributable and the ready lists fill up.
-  const stage = { stage_id: 'review', depends_on: [], delivery_types: ['code'], required: true, retry: { max_attempts: 2 }, budget: { max_tool_calls: 8 },
-    role_constraints: { kinds: ['observer'], role_ids: ['reviewer'], capabilities: ['raw_evidence', 'fixed_candidate_read', 'fresh_context'], independent: true },
-    completion: { evidence_types: ['role_result'], min_evidence: 1, no_findings: true } };
-  assert.equal((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [], required_stages: [stage] })).status, 200);
   const insert = h.store.db.prepare("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at) VALUES(?,?,?,?,?,?,?)");
   h.store.transaction(() => { for (let index = 1; index <= 501; index++) insert.run('bulk-' + String(index).padStart(3, '0'), '101', 'review.pr', 'queued', 'pr', index, '2026-11-10T00:00:00Z'); });
   const view = (await board(admin)).value;

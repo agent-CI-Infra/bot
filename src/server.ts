@@ -15,7 +15,6 @@ import { costsApi } from './metrics/api.js';
 import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
-import type { AutomationConfig } from './automation/config.js';
 import { ExternalService } from './external/service.js';
 import { type InstallationSync, installationApi } from './app/installations.js';
 import { githubAppInstallUrl } from './identity/github-status.js';
@@ -24,7 +23,7 @@ import { type IntegrationChecker } from './projects/integrations.js';
 import { integrationsApi } from './app/integrations.js';
 import { retiredApi } from './app/retired.js';
 import { RuleService } from './rules/service.js';
-import { managerApi } from './work/api.js';
+import { managerApi } from './dispatch/api.js';
 import { settingsApi } from './app/settings.js';
 import { agentToolsApi } from './app/agent-tools.js';
 import { AgentToolManager, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tools.js';
@@ -62,7 +61,7 @@ import { AssistantComputerService, assistantComputersApi } from './service-roles
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
   publicOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
+  installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; boards?: PublicBoards;
@@ -222,7 +221,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
     if (method === 'POST' && match) {
       const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
-      const result = await ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs, options.githubUrl);
+      const result = await ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.githubUrl);
       respond(res, result.status, result.response);
       // Installation changes are already recorded; a full listing follows outside the delivery path.
       if (result.status === 200 && 'sync' in result && result.sync) options.installations?.schedule(match[1]!);

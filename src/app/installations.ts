@@ -15,7 +15,7 @@ import { identityProjection } from '../identity/storage.js';
 import { requestedCeiling, trustCeiling, trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { adoptOnboardingUsage } from '../management/storage.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
-import { covers, projectCeiling, setCeiling } from '../work/ceiling.js';
+import { covers, projectCeiling, setCeiling } from '../projects/ceiling.js';
 import { activateActions } from '../actions/storage.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or

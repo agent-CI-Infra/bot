@@ -50,7 +50,7 @@ function showActionsFailureStatus(message, status, read, policy = actionsPolicyN
     : status.error === 'actions_permission_missing'
     ? '配置错误：此仓库使用的 App 安装没有 Actions 权限，GitHub 也不会向它投递「Workflow run」事件，Actions 失败分析已停止。'
       + '请 App 管理员在 Permissions & events 把 Actions 设为「Read and write」（读取运行只需只读，重跑失败的作业需要写），再由安装所有者接受新权限。不需要 Workflows 权限。'
-    : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「模型」页为 Actions 失败处理选择可用的模型，或检查项目默认模型。`
+    : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「模型」页检查项目默认模型，或在「角色」页检查对应角色的模型设置。`
     : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
     : status ? actionsPolicySentence : '等待检查 App 事件订阅。';
   const result = read ? `读取失败，${read.at

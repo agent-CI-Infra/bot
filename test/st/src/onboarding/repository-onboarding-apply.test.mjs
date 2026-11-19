@@ -9,9 +9,9 @@ import { settled } from '../../../fixtures/management-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, person, say, assistantModel } from '../../../fixtures/onboarding-fixture.mjs';
 import { testPassword } from '../../../fixtures/helpers.mjs';
 import { dispatchPrompt } from '../../../../dist/dispatch/manager.js';
-import { managerPrompt } from '../../../../dist/work/settings.js';
+import { managerPrompt } from '../../../../dist/dispatch/settings.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
-import { projectCeiling } from '../../../../dist/work/ceiling.js';
+import { projectCeiling } from '../../../../dist/projects/ceiling.js';
 import { defaultLimits } from '../../../../dist/schedules/types.js';
 
 const roleKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];

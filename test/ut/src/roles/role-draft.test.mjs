@@ -5,7 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { readConsoleScriptSync } from '../../../../dist/console/modules.js';
 const merge = runInNewContext(readConsoleScriptSync(fileURLToPath(new URL('../../../../static/roles.js', import.meta.url))) + ';mergeRoleDraft', { structuredClone });
 const plain = value => JSON.parse(JSON.stringify(value));
-const base = () => ({ enabled: true, controller: { entries: { development: true } }, roles: [{ role_id: 'dev', name: 'Dev', persona_prompt: 'base', permissions: { computer: 'allow' } }], skills: [], required_stages: [] });
+const base = () => ({ enabled: true, controller: { entries: { development: true } }, roles: [{ role_id: 'dev', name: 'Dev', persona_prompt: 'base', permissions: { computer: 'allow' } }], skills: [] });
 
 test('role draft merges independent edits and preserves newer permissions without mutating its inputs', () => {
   const before = base(), local = structuredClone(before), remote = structuredClone(before);
@@ -34,13 +34,6 @@ test('independent added roles survive in server order, while a remotely deleted 
   const before = base(), local = base(), remote = base(); local.roles.push({ role_id: 'observer', name: 'Local' }); remote.roles = [{ role_id: 'remote', name: 'Remote' }];
   const result = merge(before, local, remote);
   assert.equal(result.conflicts.length, 0); assert.deepEqual(plain(result.draft.roles.map(row => row.role_id)), ['remote', 'observer']);
-});
-test('ordered stage constraints stay atomic while other stage fields merge independently', () => {
-  const before = base(); before.required_stages = [{ stage_id: 'qa', depends_on: ['dev'], title: 'QA' }];
-  const local = structuredClone(before), remote = structuredClone(before); local.required_stages[0].depends_on.push('review'); remote.required_stages[0].depends_on = ['security']; remote.required_stages[0].title = 'Independent QA';
-  const result = merge(before, local, remote);
-  assert.deepEqual(plain(result.conflicts[0].path), ['required_stages', 'qa', 'depends_on']);
-  assert.equal(result.draft.required_stages[0].title, 'Independent QA');
 });
 test('independent skill edits are merged by stable id and conflicting additions need a choice', () => {
   const before = base(), local = base(), remote = base(); local.skills = [{ id: 'a/b', source: { type: 'inline', files: [] } }]; remote.skills = [{ id: 'a/b', source: { type: 'repository', commit: 'a'.repeat(40), paths: ['.agents/skills/review/SKILL.md'] } }];
