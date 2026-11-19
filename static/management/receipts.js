@@ -94,12 +94,13 @@ async function renderManagementReceiptPage(id) {
   // success it did not have when the reader asked silently replaces the failure. Leaving the page clears the id and a
   // reload is a new document, so a person who asks again still reads.
   catch (err) {
-    if (page.hidden) return;
+    if (page.hidden || nav.firstChild !== back) return;
     receiptShownId = id;
     content.replaceChildren(element('p', '读不到这条回执：' + readErrorText(err), 'view-error'));
     return;
   }
-  if (page.hidden) return;
+  // Only the render that still owns the loading navigation paints the shared response.
+  if (page.hidden || nav.firstChild !== back) return;
   back.href = consolePageAddress('management', receipt.project_id || null);
   if (receipt.project_id) {
     const roles = element('a', '项目配置'); roles.href = '#/projects/' + receipt.project_id + '/roles';
