@@ -81,8 +81,14 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const findings=result.findings.filter(actionableFinding);
     if(!findings.length)return;
     const goal=source?developmentGoal(JSON.parse(source.input)):'';
+    // A review that only other review bots started still counts for the loop guard (queue.ts otherBotLoop): two bots must not
+    // keep a review → revision cycle going through it either. Any person among the triggers lifts that.
+    const triggers=[input.trigger,...(input.merged_updates||[])].filter((t:any)=>t?.source&&t.reason!=='pushed');
+    const botOnly=triggers.length>0&&triggers.every((t:any)=>t.actor_type==='Bot');
+    const triggered=botOnly?triggers.map((t:any)=>({type:String(t.source.type),id:String(t.source.id),author:String(t.actor||''),author_id:String(t.actor_id||''),author_type:'Bot',url:String(t.url||''),body:''})):[];
     event('pr',`bot PR 检视已发布，发现可执行问题：#${number}`,{id:'development',work:'development.pr',title:`跟进 bot PR #${number}`,default:true,
-      spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review'}},delivery:task.source_delivery_id,source_task:task.id}});
+      spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review',...(triggered.length?{triggered_by:triggered}:{})}},
+        delivery:task.source_delivery_id,source_task:task.id,...(triggered.length?{requests:triggered}:{})}});
   }
 }
 
@@ -113,6 +119,24 @@ export function developmentStopped(store:Store,task:Row,detail:string){
     options:[{id:'review',work:'review.issue',title:`检视 Issue #${number}（回应开发停下）`,
       spec:{type:'object',kind:'review.issue',number,head:null,input:{trigger},delivery:task.source_delivery_id??null,update_id:`stopped-${stopped}`}}],
     merge:{key:`${task.repository_id}:development.stopped:${task.id}:${stopped}`,data:trigger,trigger,head:null,kinds:['review.issue']}});
+}
+/**
+ * Requests that reached a revision after it prepared (a comment continued into it, #1104) are not in what it carried out. When it
+ * ends, they go back to the Manager as an update of the pull request offering another revision, so none is silently dropped.
+ */
+export function carryRevisionRequests(store:Store,task:Row,covered:any[],head:string|null){
+  if(task.kind!=='development.pr'||!/^[a-f0-9]{40}$/.test(String(head||'')))return;
+  const key=(r:any)=>`${r.type}:${r.id}`,done=new Set(covered.map(key));
+  const stored=JSON.parse(store.get('SELECT input FROM tasks WHERE id=?',task.id)?.input||'{}');
+  const open=((stored.revision?.requests||[]) as any[]).filter(r=>!done.has(key(r)));
+  if(!open.length)return;
+  const number=Number(task.object_number);
+  recordEvent(store,{repositoryId:task.repository_id,key:`${task.repository_id}:revision.carried:${task.id}`,type:'pull_request.updated',source:'control_plane',
+    summary:`bot PR #${number} 修订进行中收到的意见`,object:{type:'pr',number},delivery:task.source_delivery_id??null,
+    facts:{bot_pull_request:true,carried_from:String(task.id),requests:open,
+      reason:'These comments arrived while the previous revision was already working; it did not carry them out.'},
+    options:[{id:'development',work:'development.pr',title:`修订 bot PR #${number}`,default:false,
+      spec:{type:'object',kind:'development.pr',number,head,input:{revision:{source:'request',requests:open}},delivery:null,requests:open}}]});
 }
 export const developmentGoal=(input:any)=>String(input?.review?.implementation_goal||input?.manager?.brief?.goal||'');
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;

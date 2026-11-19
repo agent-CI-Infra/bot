@@ -40,7 +40,7 @@ import { assigneesOf, developmentReady } from '../review/queue.js';
 import { issueClaims } from '../review/claims.js';
 import { dueProgress, milestoneToolName, reportMilestone, settleProgress, startProgress } from '../review/progress.js';
 import { taskBasis } from '../dispatch/basis.js';
-import { actionableFinding, developmentGoal, developmentApproved,
+import { actionableFinding, developmentGoal, developmentApproved, carryRevisionRequests,
   ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, type DevelopmentOffer, type GoAhead } from '../review/development.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
@@ -534,6 +534,8 @@ export class TaskEngine {
         const asked=requestedBy();
         if(task.kind!=='development.issue')await publisher.discussion('development-result',`${asked?`Revised as requested by ${asked}.\n\n`:''}Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
         update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
+        // Requests continued into this revision after it prepared go back to the Manager (#1104).
+        carryRevisionRequests(this.store,task,input.revision?.requests||[],commit);
         await issueProgress();
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
@@ -795,6 +797,7 @@ export class TaskEngine {
             if(development&&task.kind==='development.pr'&&requestedBy())await new Publisher(this.store,github,task,validate,undefined,log)
               .discussion('development-result',`Answering ${requestedBy()}: no code change.\n\n${String(args.summary||'')}`);
             if(development)update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
+            if(development)carryRevisionRequests(this.store,task,input.revision?.requests||[],task.head_sha);
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }
           await validate();
