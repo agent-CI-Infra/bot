@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
 import { settled } from '../../../fixtures/management-fixture.mjs';
 import { installed, readToken, repositoryRoutes, provider as scripted, call, person, say } from '../../../fixtures/onboarding-fixture.mjs';
-import { withDevelopingLabel, planProblem } from '../../../../dist/management/onboarding.js';
+import { withDevelopmentLabels, planProblem } from '../../../../dist/management/onboarding.js';
 import { onboardingItems } from '../../../../dist/management/onboarding-apply.js';
 
 // The assistant reads the README and the labels and asks; a reply about the level gets a plan, first with a reserved label.
@@ -151,17 +151,19 @@ test('a started project opens the same onboarding with its settings; the default
   assert.deepEqual((await repoAdmin('/api/management/onboarding/103')).value.model.source, 'assistant');
 });
 
-test('a plan that lets the bot develop also creates the developing label, once, and never for a lower level (#1047)', () => {
+test('a plan that lets the bot develop includes each development status label once, and never for a lower level (#1047)', () => {
   const developing = { name: 'bot-developing', color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops', action: 'create' };
   const develop = { profile: { summary: 's', sources: ['README.md'] }, capability_ceiling: { value: 'develop', reason: 'r' } };
-  assert.deepEqual(withDevelopingLabel(develop, 'bot-developing').labels, { items: [developing], reason: 'bot 开发 Issue 期间给它加这个标签，开出 PR 或停下时去掉。' });
+  const developed = { name: 'bot-developed', color: '0e8a16', description: 'The bot opened a pull request for this Issue', action: 'create' };
+  assert.deepEqual(withDevelopmentLabels(develop, 'bot-developing').labels.items, [developing, developed]);
   const listed = { ...develop, labels: { items: [{ name: 'kind/bug', color: 'd73a4a', action: 'create' }], reason: 'r' } };
-  assert.deepEqual(withDevelopingLabel(listed, 'wip').labels.items.map(item => item.name), ['kind/bug', 'wip']);
-  const kept = { ...develop, labels: { items: [{ name: 'Bot-Developing', color: '000000', action: 'keep' }], reason: 'r' } };
-  assert.equal(withDevelopingLabel(kept, 'bot-developing'), kept);
+  assert.deepEqual(withDevelopmentLabels(listed, 'wip').labels.items.map(item => item.name), ['kind/bug', 'wip', 'bot-developed']);
+  const kept = { ...develop, labels: { items: [{ name: 'Bot-Developing', color: '000000', action: 'keep' }, { ...developed, name: 'Bot-Developed', action: 'keep' }], reason: 'r' } };
+  assert.equal(withDevelopmentLabels(kept, 'bot-developing'), kept);
   const comment = { ...develop, capability_ceiling: { value: 'comment', reason: 'r' } };
-  assert.equal(withDevelopingLabel(comment, 'bot-developing'), comment);
-  assert.equal(withDevelopingLabel(develop, ''), develop, 'a project that keeps no developing label');
+  assert.equal(withDevelopmentLabels(comment, 'bot-developing'), comment);
+  assert.deepEqual(withDevelopmentLabels(develop, '').labels.items, [developed]);
+  assert.deepEqual(withDevelopmentLabels(develop, 'BOT-DEVELOPED').labels.items, [developed]);
 });
 
 test('the bot-scheduling recommendation is saved with the plan but is never one of the items applied (#1072)', () => {

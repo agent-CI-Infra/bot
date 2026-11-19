@@ -399,6 +399,9 @@ test('an Issue development shows on the Issue: the developing label while it wor
   assert.ok(state.createdLabels.some(label => label.name === 'bot-developing' && label.color === 'fbca04' && /removed when its pull request is opened/.test(label.description)));
   assert.ok(state.labels.some(entry => entry.number === 1 && entry.labels.includes('bot-developing')));
   assert.ok(state.unlabels.some(entry => entry.number === 1 && entry.label === 'bot-developing'));
+  // The fixture also retains earlier developments of Issue #1. Check this run from its in-progress label onward.
+  const labelWrites = state.labels.slice(state.labels.findLastIndex(entry => entry.number === 1 && entry.labels.includes('bot-developing')));
+  assert.deepEqual(labelWrites.map(entry => [entry.number, entry.labels]), [[1, ['bot-developing']], [1, ['bot-developed']]]);
   // One comment for this development, created once and edited: the plan, then the pull request with its key changes and tests.
   const marker = `<!-- dept-bot:development-status:${d.task.id} -->`, mine = state.comments.filter(comment => comment.body.includes(marker));
   assert.equal(mine.length, 1); assert.equal(String(mine[0].id), row.comment_id);
