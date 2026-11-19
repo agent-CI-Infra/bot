@@ -324,20 +324,19 @@ export function budgetExceeded(budget: Budget, usage: ReturnType<typeof scopeUsa
 }
 
 // ---------------------------------------------------------------- admission
-export interface EnvironmentFacts { id: string; isolation: 'run_container' | 'none'; verified: boolean; evidence: string | null; detail?: unknown }
+export interface EnvironmentFacts { id: string; isolation: 'none'; verified: boolean; evidence: string | null; detail?: unknown }
 /** What each role kind and environment needs before a formal run may start. */
-export function requiredCapabilities(kind: string, environment: { isolation?: string } | null): CapabilityName[] {
+export function requiredCapabilities(kind: string, _environment?: { id?: string } | null): CapabilityName[] {
   const required: CapabilityName[] = ['cancel', 'version_binding', 'output_validation'];
   if (kind !== 'controller') required.push('raw_evidence');
   if (kind === 'observer' || kind === 'evaluator') required.push('fixed_candidate_read');
   if (kind === 'evaluator') required.push('fresh_context');
-  if (environment?.isolation === 'run_container') required.push('run_isolation');
   return required;
 }
 /**
  * Admission compares what a run needs with what its harness declares and what its environment actually verified for this
  * run. A missing capability stops the run before it starts with unsupported_capability; nothing is downgraded silently.
- * run_isolation and fixed_candidate_read are never satisfied by a declaration alone.
+ * fixed_candidate_read is never satisfied by a declaration alone.
  */
 export class UnsupportedCapabilityError extends TaskError {
   constructor(detail:string,readonly observation:{started:false;role:string;harness:string;environment:string|null;required:string[];missing:string[];available:string[];provided:Record<string,{ok:boolean;basis:string;evidence?:string|null}>;admission_ref:string|null}) {
@@ -345,19 +344,18 @@ export class UnsupportedCapabilityError extends TaskError {
   }
 }
 
-export function admitRun(s: Store, input: { task: Row; role: string; kind: string; harness: { id: string; version: string; capabilities?: HarnessCapabilities }; environment: { id: string; isolation?: string } | null;
+export function admitRun(s: Store, input: { task: Row; role: string; kind: string; harness: { id: string; version: string; capabilities?: HarnessCapabilities }; environment: { id: string } | null;
   environmentFacts?: EnvironmentFacts | null; candidate: { ref: CandidateRef | null; evidence: string | null }; source_ref: string; fresh: boolean; validated: boolean; snapshot_id: string; record?: boolean; required?: CapabilityName[] }) {
   const c = input.harness.capabilities ?? {}, provided: Record<string, { ok: boolean; basis: string; evidence?: string | null }> = {};
   provided.cancel = { ok: c.cancel === 'abort_signal' || c.cancel === 'protocol_then_kill', basis: `harness:${c.cancel ?? 'undeclared'}` };
   provided.version_binding = { ok: c.version_binding === true && /^[a-f0-9]{64}$/.test(input.snapshot_id), basis: 'role_snapshots:' + input.snapshot_id };
   provided.output_validation = { ok: c.output_validation === true && input.validated, basis: input.validated ? 'framework_validator' : 'no_validator' };
   provided.raw_evidence = { ok: c.raw_evidence === 'control_plane_tools' || c.raw_evidence === 'task_tools', basis: `harness:${c.raw_evidence ?? 'undeclared'}` };
+  provided.run_isolation = { ok: false, basis: 'shared_project_computer' };
   provided.fresh_context = { ok: c.fresh_context === true && input.fresh, basis: input.fresh ? 'empty_session' : 'session_present' };
   const ref = input.candidate.ref;
-  // A code candidate counts as fixed only with the checkout evidence that its tree was verified; other kinds are immutable records.
+  // A code candidate counts as fixed only with the candidate record evidence; other kinds are immutable records.
   provided.fixed_candidate_read = ref?.kind === 'code' ? { ok: !!input.candidate.evidence, basis: 'checkout_tree:' + ref.tree_hash, evidence: input.candidate.evidence } : { ok: true, basis: ref ? `${ref.kind}:${ref.ref}` : input.source_ref };
-  const facts = input.environmentFacts;
-  provided.run_isolation = { ok: c.isolation === 'run_environment' && !!facts?.verified && facts.isolation === 'run_container', basis: `harness:${c.isolation ?? 'undeclared'};environment:${facts ? (facts.verified ? 'verified' : 'unverified') : 'none'}`, evidence: facts?.evidence ?? null };
   const required = [...new Set([...requiredCapabilities(input.kind, input.environment), ...(input.required ?? [])])], missing = required.filter(name => !provided[name]?.ok);
   // A project that configured a per-role limit gets it read here. A project that did not set one still reads the policy
   // and settings rows to find that out, but counts no run rows, and its admission record stays exactly the shape it had

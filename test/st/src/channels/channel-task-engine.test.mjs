@@ -93,8 +93,8 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
     }
     assert.ifError(modelError);
     assert.equal(ended.status,software?'pr_opened':'completed',JSON.stringify(f.h.store.all('SELECT content FROM task_logs WHERE task_id=?',origin.task_id)));
-    assert.equal(new TaskRecords(f.h.store).get(origin.task_id).acceptance.outcome,'pass');assert.equal(qaReads,changed?2:1);
-    assert.deepEqual(f.h.store.all('SELECT role FROM role_instances WHERE task_id=? ORDER BY role',origin.task_id).map(r=>r.role),[role,'qa'].sort());
+    assert.equal(new TaskRecords(f.h.store).get(origin.task_id).acceptance.outcome,'pass');assert.equal(qaReads,!software?0:changed?2:1);
+    assert.deepEqual(f.h.store.all('SELECT role FROM role_instances WHERE task_id=? ORDER BY role',origin.task_id).map(r=>r.role),(software?[role,'qa']:[role]).sort());
     assert.equal(f.h.store.get('SELECT count(*) n FROM task_runs WHERE task_id=? AND role=?',origin.task_id,role).n,1);
     assert.equal(f.h.store.get('SELECT count(*) n FROM external_identities WHERE external_actor=?','ou_bob').n,0);
     await until(()=>f.wire.sent.find(s=>JSON.stringify(s.content).includes('Verified '+(software?'software':'report')+' delivered from the group')),v=>!!v,120000);

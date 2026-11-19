@@ -1,5 +1,5 @@
 import type { Store } from '../storage/database.js';
-import { retireAcpTaskExecutionConfigs } from '../roles/definition.js';
+import { retireAcpTaskExecutionConfigs, retireIsolatedEnvironmentProfiles } from '../roles/definition.js';
 
 export function managementStorage(store: Store): void {
   store.db.exec(`
@@ -28,6 +28,7 @@ export function managementStorage(store: Store): void {
       revision INTEGER NOT NULL,snapshot TEXT NOT NULL,created_at TEXT NOT NULL);
   `);
   retireAcpTaskExecutionConfigs(store);
+  retireIsolatedEnvironmentProfiles(store);
   onboardingStorage(store);
   // A command still waiting for approval from before the approval flow was retired never runs: it ends as failed.
   const waiting = store.all("SELECT id,principal_id,project_id FROM management_commands WHERE state='awaiting_approval'");

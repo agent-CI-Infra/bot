@@ -24,7 +24,7 @@ import { restoreCheckpoint,checkpoint } from '../tasks/checkpoint.js';
 import { runRequest } from '../tasks/request.js';
 import { assertManagedExecution } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
-import { evaluateDelivery } from '../tasks/acceptance.js';
+import { evaluateDelivery, shouldRunQa, skipQa } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
 import { blobValue, insertTaskLog, logContent, storedInput } from '../storage/payloads.js';
 import { diskFull, floorBytes } from '../storage/disk.js';
@@ -473,7 +473,9 @@ export class TaskEngine {
         const savedDecision=records.get(id);const existing=savedDecision.pending||savedDecision.acceptance;
         if(existing?.policy_hash===policyHash&&existing?.candidate_id===candidate.id&&['pass','pass_with_issues'].includes(existing.outcome))return {ok:true};
         const access=taskPermissions(this.store,task);
-        const verdict=await this.evaluate(this.store,task,workspace!,redactor,guard,access.workspace.shell);
+        const verdict=this.evaluate===evaluateDelivery&&!shouldRunQa(this.store,task,candidate)
+          ?skipQa(this.store,task,candidate)
+          :await this.evaluate(this.store,task,workspace!,redactor,guard,access.workspace.shell);
         await validate();
         if(policyHash!==policyHashFor(artifacts))stop('acceptance_context_changed','retry_wait','验收期间必需验证策略变化，将重新验收。');
         if(['pass','pass_with_issues'].includes(verdict.outcome)){records.stage(id,candidate.id,candidate.revision,verdict,token,{policy_hash:policyHash});return {ok:true};}

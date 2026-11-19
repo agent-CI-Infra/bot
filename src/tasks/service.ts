@@ -1,4 +1,5 @@
 import {traceClean} from './trace.js';
+import {historyData,unreadable} from '../storage/payloads.js';
 import {childTaskContext} from './children.js';
 import {captureTaskConfiguration} from './configuration.js';
 import {followupDecision,followupTarget,followupRefusal,recordFollowupRelation,coordinateFollowup,completedFollowupTarget} from './followups.js';
@@ -19,23 +20,53 @@ export interface Evidence { source: string; version: string; verified: boolean; 
 export interface Candidate { id: string; revision: number; artifacts: Artifact[]; evidence: Evidence[]; claims: unknown; created_at: string; coordination_version?: string }
 export type Outcome = 'pass' | 'pass_with_issues' | 'return' | 'insufficient_evidence' | 'needs_human';
 export interface Residual { key: string; description: string; evidence: string; impact: string; nonblocking_reason: string; goal: string; criteria: string[]; conditions?:string; workaround?:string; delivery_impact?:string }
-export interface Verdict { coordination?: CoordinationRequest; outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
+export interface Verdict { pass?: boolean; issues?: string[]; coordination?: CoordinationRequest; outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
 const hash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 const outcomes = new Set(['pass','pass_with_issues','return','insufficient_evidence','needs_human']);
 export function validateVerdict(value: any): Verdict {
-  if (!value || !outcomes.has(value.outcome) || typeof value.reason !== 'string' || !value.reason.trim() || !Array.isArray(value.gaps) || value.gaps.some((x: unknown)=>typeof x!=='string') ||
-    !Array.isArray(value.residuals) || ['core_complete','required_evidence_complete','acceptable_risk'].some(k=>typeof value[k]!=='boolean')) throw new Error('invalid_acceptance_result');
-  if(value.coordination!==undefined&&(!validCoordination(value.coordination)||value.outcome!=='needs_human'))throw new Error('invalid_acceptance_coordination');
+  if (value && typeof value === 'object' && typeof value.pass === 'boolean' && value.outcome === undefined) {
+    if (!Array.isArray(value.issues) || value.issues.some((x: unknown) => typeof x !== 'string' || !x.trim())) throw new Error('invalid_acceptance_result');
+    if (value.pass && value.issues.length) throw new Error('acceptance_core_incomplete');
+    if (!value.pass && !value.issues.length) throw new Error('invalid_acceptance_result');
+    return {
+      pass: value.pass,
+      issues: value.issues,
+      outcome: value.pass ? 'pass' : 'return',
+      reason: typeof value.reason === 'string' && value.reason.trim() ? value.reason : (value.pass ? 'Lightweight gatekeeper QA passed.' : value.issues.join('; ')),
+      gaps: value.pass ? [] : value.issues,
+      residuals: [],
+      core_complete: value.pass,
+      required_evidence_complete: value.pass,
+      acceptable_risk: true,
+    };
+  }
+  if (!value || !outcomes.has(value.outcome) || typeof value.reason !== 'string' || !value.reason.trim() || !Array.isArray(value.gaps) || value.gaps.some((x: unknown)=>typeof x!=='string')) throw new Error('invalid_acceptance_result');
+  const residuals = value.residuals === undefined ? [] : value.residuals;
+  if (!Array.isArray(residuals)) throw new Error('invalid_acceptance_result');
   const passing = ['pass','pass_with_issues'].includes(value.outcome);
-  if (passing && (!value.core_complete || !value.required_evidence_complete || !value.acceptable_risk || value.gaps.length)) throw new Error('acceptance_core_incomplete');
-  if (!passing && !value.gaps.length) throw new Error('acceptance_gap_required');
-  if (value.outcome === 'pass_with_issues' ? !value.residuals.length : value.residuals.length) throw new Error('acceptance_residual_mismatch');
+  const coreComplete = value.core_complete ?? passing, evidenceComplete = value.required_evidence_complete ?? passing, acceptableRisk = value.acceptable_risk ?? true;
+  if ([coreComplete, evidenceComplete, acceptableRisk].some(v => typeof v !== 'boolean')) throw new Error('invalid_acceptance_result');
+  if (value.coordination!==undefined&&(!validCoordination(value.coordination)||value.outcome!=='needs_human')) throw new Error('invalid_acceptance_coordination');
+  if (passing && (!coreComplete || !evidenceComplete || !acceptableRisk || value.gaps.length)) throw new Error('acceptance_core_incomplete');
+  if (!passing && !value.gaps.length && !value.coordination) throw new Error('acceptance_gap_required');
+  if (value.outcome === 'pass_with_issues' ? !residuals.length : residuals.length) throw new Error('acceptance_residual_mismatch');
   const keys = new Set();
-  for (const r of value.residuals) {
-    if (!r || ['key','description','evidence','impact','nonblocking_reason','goal'].some(k=>typeof r[k]!=='string'||!r[k].trim()) || !Array.isArray(r.criteria)||!r.criteria.length||r.criteria.some((x:unknown)=>typeof x!=='string'||!x.trim())||keys.has(r.key)) throw new Error('invalid_acceptance_residual');
+  for (const r of residuals) {
+    if (!r || ['key','description','evidence','impact','nonblocking_reason','goal'].some(k=>typeof r[k]!=='string'||!r[k].trim()) || !Array.isArray(r.criteria) || !r.criteria.length || r.criteria.some((c: unknown)=>typeof c!=='string'||!c.trim()) || ['conditions','workaround','delivery_impact'].some(k=>r[k]!==undefined&&(typeof r[k]!=='string'||!r[k].trim())) || keys.has(r.key)) throw new Error('invalid_acceptance_residual');
     keys.add(r.key);
   }
-  return value;
+  return {
+    pass: passing,
+    issues: value.gaps,
+    outcome: value.outcome,
+    reason: value.reason,
+    gaps: value.gaps,
+    residuals,
+    core_complete: coreComplete,
+    required_evidence_complete: evidenceComplete,
+    acceptable_risk: acceptableRisk,
+    ...(value.coordination ? { coordination: value.coordination } : {}),
+  };
 }
 export class TaskRecords {
   constructor(readonly store: Store) {}
@@ -130,10 +161,11 @@ export class TaskRecords {
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page',received:{offset,limit},range:{offset_min:0,limit_min:1,limit_max:20},discovery:{tool:'read_task_history',arguments:{offset:0,limit:10}}};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('long_execution_report','long_execution_decision','long_execution_notification_fault','child_task_created','parent_task_linked','children_waiting','children_resumed','submission_rejected','submission_retry_report','retry_failure','retry_report','retry_decision','retry_resolved','retry_evidence','retry_notification_fault','priority_changed','priority_assessed','priority_defaulted','queue_entered','queue_claimed','followup_plan','followup_plan_deferred','followup_refused','followup_linked','followup_coordination','task_related','coordination_manager_report','coordination_fault','coordination_decision','coordination_objection','coordination_withdrawn','coordination_resumed','coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result','acceptance_evaluated','repository_evolved','publication','publication_state','merge_requested','merge_version_context','merge_queue','version_reference','integration_result','integration_requested','integration_decision','supplemental_instruction','manager_recovery_queued')";
+      const filter="task_id=? AND type IN ('tool_observation','long_execution_report','long_execution_decision','long_execution_notification_fault','child_task_created','parent_task_linked','children_waiting','children_resumed','submission_rejected','submission_retry_report','retry_failure','retry_report','retry_decision','retry_resolved','retry_evidence','retry_notification_fault','priority_changed','priority_assessed','priority_defaulted','queue_entered','queue_claimed','followup_plan','followup_plan_deferred','followup_refused','followup_linked','followup_coordination','task_related','coordination_manager_report','coordination_fault','coordination_decision','coordination_objection','coordination_withdrawn','coordination_resumed','coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result','acceptance_evaluated','repository_evolved','publication','publication_state','merge_requested','merge_version_context','merge_queue','version_reference','integration_result','integration_requested','integration_decision','supplemental_instruction','manager_recovery_queued')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
-      const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
-      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(taskControllerReads(this.store,id,access)?traceClean(JSON.parse(row.data)):visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
+      const rows=this.store.all('SELECT id,type,data,run_id,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
+      const readRow=(row:Record<string,any>)=>{try{return JSON.parse(historyData(this.store,row));}catch(error){return unreadable(error);}};
+      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(taskControllerReads(this.store,id,access)?traceClean(readRow(row)):visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,readRow(row),access))}))};
     }
     if(name==='record_progress'){if(!Array.isArray(args?.completed)||args.completed.some((x:unknown)=>typeof x!=='string')||typeof args?.next_action!=='string')return {error:'invalid_task_progress'};this.progress(id,args.completed,args.next_action);return {ok:true};}
     return {error:'tool_not_allowed'};

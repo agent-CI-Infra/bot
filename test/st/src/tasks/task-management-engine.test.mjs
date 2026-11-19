@@ -58,10 +58,10 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
   await engine.run(id, 'claim');
   const task = store.get('SELECT * FROM tasks WHERE id=?', id);
   assert.equal(task.status, 'completed', JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?', id)));
-  assert.deepEqual(store.all('SELECT DISTINCT role FROM role_instances WHERE task_id=? ORDER BY role', id).map(r => r.role), ['qa', 'reviewer']);
+  assert.deepEqual(store.all('SELECT DISTINCT role FROM role_instances WHERE task_id=? ORDER BY role', id).map(r => r.role), ['reviewer']);
   assert.equal(store.get('SELECT count(*) n FROM task_runs WHERE task_id=? AND role=?', id, 'reviewer').n, 1);
   assert.equal(store.get('SELECT executor_role FROM task_origins WHERE task_id=?', id).executor_role, 'reviewer');
-  assert.ok(requests.length >= 2);
+  assert.ok(requests.length >= 1);
   assert.ok(requests.every(body => !body.tools.some(t => ['delegate_role', 'delegate_roles', 'run_command', 'create_issue', 'create_pull_request'].includes(t.function.name))));
   assert.equal(store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n, 0);
   }

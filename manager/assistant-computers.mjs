@@ -17,7 +17,7 @@ import { logFailure, resourceBounds, validResource, validateCall as validateProj
  * - idle for idle_minutes, idle past max_lifetime, a changed fence or an explicit removal: removed at once (SIGKILL).
  * Capacity is max_containers: an idle container used longest ago gives way, otherwise new owners wait in arrival order.
  *
- * Hardening follows run-environments.mjs: uid 10001, read-only root, every capability dropped, no-new-privileges, init,
+ * Hardening: uid 10001, read-only root, every capability dropped, no-new-privileges, init,
  * no network at all, private IPC, CPU/memory (no swap)/PID limits, tmpfs workspace and /tmp, Docker's default runtime.
  * The only persistent mount is the owner's current HOME generation, a subpath of the shared HOME volume, never its parent.
  */

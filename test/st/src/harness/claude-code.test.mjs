@@ -421,7 +421,7 @@ test('Claude Code protocol fixture: revoke a live lease and the driver stops wit
   await assert.rejects(roleRuns.collect(h), e => ['run_token_revoked', 'claude_authentication_failed'].includes(e.code));
 });
 
-test('Claude Code rejects invalid config, accepts isolated-workspace profile, and reserves subscription mode explicitly', async t => {
+test('Claude Code rejects invalid config, downgrades legacy isolated-workspace profile safely, and reserves subscription mode explicitly', async t => {
   const f = await claudeFixture(t);
   for (const change of [{ version: 'latest' }, { model: 'sonnet' }, { gatewayUrl: 'https://api.anthropic.com' }]) {
     writeFileSync(f.file, JSON.stringify({ ...f.config, ...change }));
@@ -436,7 +436,7 @@ test('Claude Code rejects invalid config, accepts isolated-workspace profile, an
     enabled: true,
     roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, environment_profile_ref: { id: 'isolated-workspace' } }],
   });
-  assert.equal(savedIsolated.configuration.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'isolated-workspace');
+  assert.equal(savedIsolated.configuration.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'task-workspace');
 
   // Subscription mode is reserved (#705): saving model_source: 'subscription' succeeds and fails closed at prepare/run with subscription_mode_not_implemented.
   const savedSub = roleApi(f.s, admin, 'PUT', url, {

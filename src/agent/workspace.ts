@@ -2,7 +2,7 @@ import { commandResult, ResultSession, projectResultOwner } from './tool-results
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub, repositoryTree } from '../github/client.js';
-import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha, TaskError } from './common.js';
+import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha, TaskError, workspaceToolPath } from './common.js';
 import { HttpError, randomId } from '../core/security.js';
 import { eventHistory, historyOrder } from '../roles/role-run.js';
 import { traceEvent } from '../tasks/trace.js';
@@ -46,8 +46,8 @@ function volumeFull(request:any,result:any):void{
 // What works before the task has a worktree (#769): the task context, its agent's mailbox and session, the project notes, the
 // computer's git store, and making, taking or inspecting worktrees. Everything else runs in the checkout.
 const aside=(request:any)=>/^(workspace_agent_|workspace_harness_|git_)/.test(request.type)
-  ||['workspace_context','workspace_init','workspace_checkout','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_acceptance'].includes(request.type)
-  ||['workspace_read','workspace_write'].includes(request.type)&&!request.sha&&typeof request.path==='string'&&(request.path.startsWith('../notes/')||request.type==='workspace_read'&&request.path.startsWith('../context/'));
+  ||['workspace_context','workspace_init','workspace_checkout','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect'].includes(request.type)
+  ||['workspace_read','workspace_write'].includes(request.type)&&!request.sha&&!request.snapshot&&typeof request.path==='string'&&(request.path.startsWith('../')||request.path.startsWith('/tmp/')||request.path.startsWith('/workspace/'));
 // One binding or choice at a time per task workspace in this process, whichever Workspace object asks: a read that binds
 // the system's choice and the agent's own choice in the same turn must not both take a worktree.
 const queues=new Map<string,Promise<unknown>>();
@@ -96,7 +96,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import'].includes(request.type)?0:request.type==='workspace_browser'? (Number(request.timeout_ms)>0?Number(request.timeout_ms)+120000:180000) :request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import'].includes(request.type)?0:request.type==='workspace_browser'? (Number(request.timeout_ms)>0?Number(request.timeout_ms)+120000:180000) :request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
     operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
@@ -163,7 +163,8 @@ export class Workspace {
       request:{type:'reap',workspace_id:this.task.workspace_id,...(idle?{idle:true}:{})}}).catch(()=>{});
   }
   async write(key:string,path:string,data:Buffer,mode='100644',snapshot=false,hash?:string){
-    safePath(path);if(this.redactor.contains(data))stop('credential_in_repository',undefined,`Credential found in repository file: ${path}`);
+    snapshot?safePath(path):workspaceToolPath(path);
+    if(this.redactor.contains(data))stop('credential_in_repository',undefined,`Credential found in repository file: ${path}`);
     for(let offset=0;offset<data.length||offset===0;offset+=30000){
       const result=await this.call(key+':'+offset,{type:'workspace_write',path,base64:data.subarray(offset,offset+30000).toString('base64'),offset,
         final:offset+30000>=data.length,mode,snapshot,...(hash?{sha:hash}:{})});

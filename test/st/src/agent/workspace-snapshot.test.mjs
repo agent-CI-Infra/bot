@@ -172,7 +172,9 @@ test('runner writes and reads a large file in chunks, finalizes over 2000 files 
   for(let offset=0;offset<data.length;offset+=30000){const part=await run({type:'workspace_blob',sha:file.sha,offset});assert.equal(part.size,data.length);hash.update(Buffer.from(part.base64,'base64'));}
   assert.equal(hash.digest('hex'),file.sha);
   assert.equal(readFileSync(join(root,id,'blob-'+file.sha)).length,data.length);
-  await assert.rejects(run({type:'workspace_write',path:'../outside',base64:'',offset:0,final:true,mode:'100644'}),/invalid_path/);
+  await run({type:'workspace_write',path:'../outside',base64:Buffer.from('shared').toString('base64'),offset:0,final:true,mode:'100644'});
+  assert.equal((await run({type:'workspace_read',path:'../outside'})).content,'shared');
+  await assert.rejects(run({type:'workspace_write',path:'../../../outside',base64:'',offset:0,final:true,mode:'100644'}),/invalid_path/);
   renameSync(repo,repo+'-saved');symlinkSync(repo+'-saved',repo);
   await assert.rejects(run({type:'workspace_finalize'}),/workspace_replaced/);
 });

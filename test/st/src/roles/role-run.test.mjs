@@ -16,7 +16,6 @@ import { ProjectMemory } from '../../../../dist/memory/project.js';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../../../../dist/roles/protocol.js';
 import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, instanceUsage, recordCheckpoint } from '../../../../dist/roles/role-run.js';
-import { verifyRunEnvironment } from '../../../../dist/projects/run-environment.js';
 import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
@@ -156,10 +155,10 @@ test('capability tokens are bound to tenant, project, task, run and epoch; reuse
   f.s.run("UPDATE tasks SET claim_token='claim-3' WHERE id='t'"); assert.equal(leaseCurrent(f.s, d.id, lease.epoch), false);
 });
 
-test('the gateway expands only this run\'s permitted references: other tasks, other role instances and guessed ids read as missing', async t => {
+test('the gateway fences other tasks and guessed ids while sharing same-task role observations and memories (#1121)', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const memory = new ProjectMemory(f.s, { actor: authorizeKnowledgeTask(f.s) });
-  memory.save('r', 'role.reviewer.private-note', { body: 'REVIEWER_ONLY_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: { role: 'reviewer' } }, 0, 'user:owner', 'fixture');
+  memory.save('r', 'role.reviewer.shared-note', { body: 'REVIEWER_SHARED_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: { role: 'reviewer' } }, 0, 'user:owner', 'fixture');
   const shared = memory.save('r', 'shared-note', { body: 'SHARED_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: {} }, 0, 'user:owner', 'fixture');
   f.s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('dev-i','t','dev','{}','native','now'),('rev-i','t','reviewer','{}','native','now')");
   const dev = bound(f.s, { instance: 'dev-i' }), reviewer = bound(f.s, { role: 'reviewer', scope: 'assign-r', instance: 'rev-i' });
@@ -170,16 +169,20 @@ test('the gateway expands only this run\'s permitted references: other tasks, ot
   const otherTask = traceEvent(f.s, 'o', 'role_result', { result: 'OTHER_PROJECT_RESULT' });
   const reviewerInput = traceEvent(f.s, 't', 'role_input', { instance_id: 'rev-i', input: 'REVIEWER_PROMPT' }, reviewer.run.id);
   const ownFinding = traceEvent(f.s, 't', 'role_result', { role: 'reviewer', result: 'FINDING_FOR_DEV' }, reviewer.run.id);
-  f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,request_snapshot) VALUES('mr-rev','t','r','x','m','fixture','now',?,'{\"secret\":\"REVIEWER_CONVERSATION\"}')", reviewer.run.id);
+  f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_name,requested_at,run_id,request_snapshot,model_id) VALUES('mr-rev','t','r','x','fixture','now',?,'{\"note\":\"REVIEWER_EXCHANGE\"}','m')", reviewer.run.id);
+  f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_name,requested_at,run_id,request_snapshot,model_id) VALUES('mr-other','o','other','y','fixture','now',NULL,'{\"note\":\"FOREIGN_EXCHANGE\"}','m')");
   const served = await read('task:t');
   assert.equal(served.content.includes('implement fixture'), true); assert.match(served.version, /^[a-f0-9]{64}$/);
   assert.equal((await read(ownFinding)).content.includes('FINDING_FOR_DEV'), true, 'shared results stay readable by reference');
-  for (const ref of [otherTask, reviewerInput, 'model_requests:mr-rev:request', 'task_history:999999', `task_runs:${reviewer.run.id}:context`, 'contract:revision:7'])
+  assert.equal((await read(reviewerInput)).content.includes('REVIEWER_PROMPT'), true, 'same-task sibling role observations are readable');
+  assert.equal((await read('model_requests:mr-rev:request')).content.includes('REVIEWER_EXCHANGE'), true);
+  assert.equal((await read(`task_runs:${reviewer.run.id}:context`)).error, undefined);
+  for (const ref of [otherTask, 'model_requests:mr-other:request', 'task_history:999999', 'task_runs:foreign-run:context', 'contract:revision:7'])
     assert.equal((await read(ref)).error, 'task_record_not_found', ref);
   const list = await g.call(token, { tool: 'list_task_records', arguments: { limit: 50 } });
-  assert.ok(list.records.some(r => r.ref === ownFinding)); assert.ok(!list.records.some(r => r.ref === reviewerInput));
-  const reviewerMemory = f.s.get("SELECT id FROM project_memories WHERE fact_key='role.reviewer.private-note'").id;
-  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: reviewerMemory } })).error, 'knowledge_not_found');
+  assert.ok(list.records.some(r => r.ref === ownFinding)); assert.ok(list.records.some(r => r.ref === reviewerInput));
+  const reviewerMemory = f.s.get("SELECT id FROM project_memories WHERE fact_key='role.reviewer.shared-note'").id;
+  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: reviewerMemory } })).body, 'REVIEWER_SHARED_NOTE');
   assert.ok((await read(`project_memories:${shared.id}:1`)).content.includes('SHARED_NOTE'));
   assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: shared.id, revision: 1 } })).body, 'SHARED_NOTE');
   memory.save('r', shared.key, { catalog: { audience: 'role:reviewer' } }, 1, 'user:owner', 'withdraw Dev view');
@@ -190,7 +193,7 @@ test('the gateway expands only this run\'s permitted references: other tasks, ot
   for (const name of ['create_pull_request', 'merge_pull_request', 'update_role_configuration', 'sql', 'run_command'])
     assert.equal((await g.call(token, { tool: name, arguments: {} })).error, 'tool_not_allowed', name);
   // An experience candidate needs evidence the role can see, is unverified, and is not written twice for one request id.
-  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: [reviewerInput] } })).error, 'experience_evidence_invalid');
+  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: [otherTask] } })).error, 'experience_evidence_invalid');
   const first = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding] } });
   const again = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding] } });
   assert.equal(first.receipt.verification === 'unverified' || first.receipt.verification?.state === 'unverified' || !!first.receipt.id, true);
@@ -236,31 +239,16 @@ test('admission fails closed: undeclared adapters, built-in drivers on isolated 
   assert.equal(ran, 0); assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE harness='undeclared-169'").n, 0);
   const admission = JSON.parse(f.s.get("SELECT data FROM task_history WHERE type='role_run_admission' ORDER BY id DESC LIMIT 1").data);
   assert.deepEqual(admission.missing, ['cancel', 'version_binding', 'output_validation', 'raw_evidence']);
-  // Native and Process are registered as compatibility drivers without run isolation; the profile is refused for them, and
-  // no environment is provisioned.
-  // Saving an isolated profile for them is refused at the field; a run that overrides the driver is refused before any
-  // environment is provisioned.
-  for (const id of ['native', 'process', 'pi'])
-    assert.throws(() => f.put({ roles: [{ role_id: 'reviewer', harness_ref: { id }, environment_profile_ref: { id: 'isolated-candidate' } }] }), e => e.code === 'unsupported_capability' && e.field === 'roles.reviewer.environment_profile_ref.id');
-  const seen = [];
-  registerRoleHarness({ id: 'isolated-fixture-169', version: '1', session: 'task_records', events: 'run_events', kinds: ['writer', 'observer', 'evaluator'],
-    capabilities: { raw_evidence: 'control_plane_tools', cancel: 'protocol_then_kill', isolation: 'run_environment', version_binding: true, output_validation: true, fresh_context: true, recovery: ['rebuilt_from_task_records'] } },
-  spec => async () => { seen.push(spec.runEnvironment); return spec.finish.validate({ summary: 'inspected in its own environment', findings: [], inspected_scope: ['x'], unknowns: [] }); });
-  f.put({ roles: [{ role_id: 'reviewer', harness_ref: { id: 'isolated-fixture-169' }, environment_profile_ref: { id: 'isolated-candidate' } }] });
-  let provisioned = 0;
-  for (const harness of ['native', 'process'])
-    await assert.rejects(runRole(f.spec, 'reviewer', undefined, harness, { prepare: async () => { provisioned++; } }), e => e.code === 'unsupported_capability' && /run_isolation/.test(e.detail));
-  assert.equal(provisioned, 0);
-  // A driver that declares the contract and runs inside the environment is admitted only with a verified environment.
+  // A driver that declares the shared-project-computer contract is admitted cleanly; registration rejects unknown capability vocabulary.
+  registerRoleHarness({ id: 'shared-fixture-169', version: '1', session: 'task_records', events: 'run_events', kinds: ['writer', 'observer', 'evaluator'],
+    capabilities: { raw_evidence: 'control_plane_tools', cancel: 'protocol_then_kill', isolation: 'none', version_binding: true, output_validation: true, fresh_context: true, recovery: ['rebuilt_from_task_records'] } },
+  spec => async () => spec.finish.validate({ summary: 'inspected in shared workspace', findings: [], inspected_scope: ['x'], unknowns: [] }));
+  f.put({ roles: [{ role_id: 'reviewer', harness_ref: { id: 'shared-fixture-169' } }] });
   const reviewerSpec = { ...f.spec, finish: { name: 'finish', validate: v => v } };
-  const unverified = { id: 'run:x', isolation: 'run_container', verified: false, evidence: null };
-  await assert.rejects(runRole(reviewerSpec, 'reviewer', undefined, undefined, { prepare: async () => ({ environment: { facts: unverified, handle: null } }) }), e => /run_isolation/.test(e.detail));
-  const verified = { id: 'run:y', isolation: 'run_container', verified: true, evidence: 'run_environments:y' };
-  const result = await runRole(reviewerSpec, 'reviewer', undefined, undefined, { prepare: async () => ({ environment: { facts: verified, handle: { run_id: 'y' } } }) });
-  assert.equal(result.result.summary, 'inspected in its own environment'); assert.deepEqual(seen, [{ run_id: 'y' }]);
-  const passed = JSON.parse(f.s.get("SELECT admission FROM task_runs WHERE harness='isolated-fixture-169'").admission);
-  assert.deepEqual([passed.admitted, passed.provided.run_isolation.evidence], [true, 'run_environments:y']);
-  // Registration itself only accepts the protocol vocabulary.
+  const result = await runRole(reviewerSpec, 'reviewer');
+  assert.equal(result.result.summary, 'inspected in shared workspace');
+  const passed = JSON.parse(f.s.get("SELECT admission FROM task_runs WHERE harness='shared-fixture-169'").admission);
+  assert.equal(passed.admitted, true);
   assert.throws(() => registerRoleHarness({ id: 'bad-caps-169', version: '1', session: 'task_records', events: 'x', capabilities: { isolation: 'verified' } }, () => async () => ({})), /capabilities/);
 });
 
@@ -483,19 +471,33 @@ test('observers bind to the fixed candidate: a changed candidate refuses the old
   assert.deepEqual([ctx.candidate_ref.kind, ctx.candidate_ref.tree_hash], ['code', sha('0')]);
 });
 
-test('run environment facts are verified by the control plane; any shared mount, socket, network or privilege is a named violation', () => {
-  const good = { run_id: 'a'.repeat(48), state: 'ready', container: { running: true, user: '10001:10001', readonly_rootfs: true, privileged: false, cap_drop: ['ALL'], cap_add: [], security_opt: ['no-new-privileges:true'],
-    network_mode: 'none', networks: ['none'], mounts: [], binds: [], tmpfs: { '/workspace': 'rw,size=1024', '/tmp': 'rw,size=512' }, memory: 1, memory_swap: 1, nano_cpus: 1, pids_limit: 64, ipc_mode: 'private', pid_mode: '', userns_mode: '', env_names: ['HOME', 'LANG', 'PATH', 'NODE_VERSION'] } };
-  assert.deepEqual(verifyRunEnvironment(good, { run_id: 'a'.repeat(48), network: 'none' }), { verified: true, violations: [] });
-  const bad = change => verifyRunEnvironment({ ...good, container: { ...good.container, ...change } }, { run_id: 'a'.repeat(48), network: 'none' }).violations;
-  assert.deepEqual(bad({ user: '0:0' }), ['user_not_unprivileged']);
-  assert.deepEqual(bad({ binds: ['/var/run/docker.sock:/var/run/docker.sock'] }), ['external_mount', 'docker_socket']);
-  assert.deepEqual(bad({ mounts: [{ type: 'volume', source: 'dbot-x-101-g1-work', destination: '/workspace', rw: true }] }), ['external_mount']);
-  assert.deepEqual(bad({ network_mode: 'dbot-x-101-g1-net' }), ['network_identity_shared']);
-  assert.deepEqual(bad({ pid_mode: 'host' }), ['process_namespace_shared']);
-  assert.deepEqual(bad({ env_names: ['HOME', 'GITHUB_TOKEN'] }), ['credential_environment:GITHUB_TOKEN']);
-  assert.deepEqual(bad({ cap_add: ['SYS_ADMIN'] }), ['capabilities_not_dropped']);
-  assert.deepEqual(bad({ readonly_rootfs: false, memory_swap: 0 }), ['root_filesystem_writable', 'resource_limits_missing']);
+test('#1121 retired isolated environment profiles in settings and frozen task_execution_configs downgrade safely to shared profiles', async t => {
+  const { retireIsolatedEnvironmentProfiles, roleConfiguration } = await import('../../../../dist/roles/definition.js');
+  const f = await fixture(t, () => call('finish', {}));
+  const current = roleConfiguration(f.s, 'r');
+  const legacySaved = {
+    ...current,
+    revision: 3,
+    roles: current.roles.map(r =>
+      r.role_id === 'dev'
+        ? { ...r, environment_profile_ref: { id: 'isolated-workspace', version: 'legacy' } }
+        : r.role_id === 'reviewer' || r.role_id === 'qa'
+          ? { ...r, environment_profile_ref: { id: 'isolated-candidate', version: 'legacy' } }
+          : r,
+    ),
+  };
+  f.s.run("INSERT INTO settings VALUES('roles:r',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(legacySaved));
+  f.s.run("DELETE FROM settings WHERE key='migration:1121:retire-isolated-profiles'");
+  f.s.run('INSERT INTO task_execution_configs(task_id,revision,snapshot,created_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET snapshot=excluded.snapshot', 't', 1, JSON.stringify({ roles: legacySaved }), 'now');
+  retireIsolatedEnvironmentProfiles(f.s);
+  const migrated = roleConfiguration(f.s, 'r');
+  assert.equal(migrated.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'task-workspace');
+  assert.equal(migrated.roles.find(r => r.role_id === 'reviewer').environment_profile_ref.id, 'candidate-checkout');
+  assert.equal(migrated.roles.find(r => r.role_id === 'qa').environment_profile_ref.id, 'evaluation-checkout');
+  const frozen = JSON.parse(f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot).roles;
+  assert.equal(frozen.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'task-workspace');
+  assert.equal(frozen.roles.find(r => r.role_id === 'reviewer').environment_profile_ref.id, 'candidate-checkout');
+  assert.equal(frozen.roles.find(r => r.role_id === 'qa').environment_profile_ref.id, 'evaluation-checkout');
 });
 
 test('a run started under the task claim ends when the task is claimed again; a run outside the task claim (a coordinator) does not', async t => {
@@ -522,9 +524,10 @@ test('a save keeps the coordination defaults of #190/#192 next to the validated 
   assert.deepEqual([role('coordinator').permissions.project_tasks, role('coordinator').output_schema_ref.id, role('coordinator').environment_profile_ref.id], ['write', 'coordination-result', 'control-session']);
   assert.deepEqual([role('manager').permissions.delegation, role('manager').environment_profile_ref.id], ['allow', 'control-session']);
   assert.deepEqual([role('reviewer').environment_profile_ref.id, role('qa').environment_profile_ref.id], ['candidate-checkout', 'evaluation-checkout']);
-  // The environment reference is the validated one: an unknown or another kind's profile is refused at its field.
+  // Mismatched role kind profile is refused; retired isolated-* profiles safely downgrade for matching kinds (#1121).
   assert.throws(() => f.put({ roles: [{ role_id: 'dev', environment_profile_ref: { id: 'isolated-candidate' } }] }), e => e.code === 'environment_profile_not_allowed' && e.field === 'roles.dev.environment_profile_ref.id');
-  assert.throws(() => f.put({ roles: [{ role_id: 'dev', environment_profile_ref: { id: 'isolated-workspace' } }] }), e => e.code === 'unsupported_capability' && e.field === 'roles.dev.environment_profile_ref.id');
+  const downgraded = f.put({ roles: [{ role_id: 'dev', environment_profile_ref: { id: 'isolated-workspace', version: 'legacy' } }, { role_id: 'reviewer', environment_profile_ref: { id: 'isolated-candidate', version: 'legacy' } }] });
+  assert.deepEqual([downgraded.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, downgraded.roles.find(r => r.role_id === 'reviewer').environment_profile_ref.id], ['task-workspace', 'candidate-checkout']);
 });
 
 test('rebuildContext starts from the caller\'s durable facts: no stored conversation, rebuilt_from_task_records on the same instance; QA stays a fresh evaluation', async t => {

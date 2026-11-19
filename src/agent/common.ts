@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 // retryAfterMs: how long GitHub asked to wait, when it said; bucket: the rate-limit window that refused the request.
 export class TaskError extends Error {
   constructor(readonly code: string, readonly state = 'failed', readonly detail?: string, readonly retryAfterMs?: number, readonly bucket?: string) { super(code); }
@@ -78,6 +79,24 @@ export const clip = (value: unknown, limit = 8000): string => {
 };
 export function safePath(path: unknown): string {
   if (typeof path !== 'string' || !path || path.length > 1024 || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(p => !p || p === '..' || p === '.' || p.toLowerCase() === '.git')) return stop('unsafe_repository_path',undefined,`Unsafe repository path: ${JSON.stringify(path)}`);
+  return path;
+}
+
+/**
+ * Validates paths used by agent file tools (`read_file` / `write_file` / `export_related_artifact`) on the shared project
+ * computer (#1121): permits repository-relative paths as well as `/workspace/...`, `/tmp/...` and `../...` sibling paths
+ * inside `/workspace`, while rejecting `.git`, `.runner-journal`, `/workspace/store` and escapes to container rootfs (`/etc`, `/opt`, ...).
+ */
+export function validWorkspaceToolPath(path: unknown): path is string {
+  if (typeof path !== 'string' || !path || path.length > 2048 || path.includes('\\') || path.includes('\0')) return false;
+  const parts = path.split('/');
+  if (parts.some(p => p.toLowerCase() === '.git' || p === '.runner-journal')) return false;
+  const virtual = path.startsWith('/') ? posix.normalize(path) : posix.normalize('/workspace/tasks/000000000000000000000000000000000000000000000000/repo/' + path);
+  if (virtual === '/workspace/store' || virtual.startsWith('/workspace/store/')) return false;
+  return (virtual.startsWith('/workspace/') && virtual.length > '/workspace/'.length) || (virtual.startsWith('/tmp/') && virtual.length > '/tmp/'.length);
+}
+export function workspaceToolPath(path: unknown): string {
+  if (!validWorkspaceToolPath(path)) return stop('unsafe_repository_path', undefined, `Unsafe workspace path: ${JSON.stringify(path)}`);
   return path;
 }
 

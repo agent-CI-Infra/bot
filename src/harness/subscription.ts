@@ -10,8 +10,8 @@ import type { AgentToolCli } from './agent-tools.js';
  *
  * In `'subscription'` mode (reserved for a future release), the CLI would connect directly to vendor domains
  * allowlisted for the container, using sealed subscription credentials staged into the run's CLI state directory
- * only for the duration of the run (strongly recommended inside isolated `RunEnvironments`), with CLI session
- * transcripts collected when the run ends. First release reserves configuration and interfaces only.
+ * only for the duration of the run, with CLI session transcripts collected when the run ends.
+ * First release reserves configuration and interfaces only.
  */
 export type HarnessModelSource = 'gateway' | 'subscription';
 
@@ -31,7 +31,7 @@ export interface SubscriptionCredentialBundle {
   harness: AgentToolCli;
   principal_id: string;
   owner_confirmed_tos: boolean;
-  recommended_isolation: 'run_environment';
+  recommended_isolation: 'project_computer';
   allowlisted_domains: readonly string[];
   staged_files: Record<string, string>;
   expires_at: string | null;
@@ -41,7 +41,7 @@ export interface SubscriptionStatusView {
   supported: boolean;
   implemented: false;
   configured: false;
-  recommended_isolation: 'run_environment';
+  recommended_isolation: 'project_computer';
   allowlisted_domains: readonly string[];
   notice: string;
 }
@@ -52,7 +52,7 @@ export interface SubscriptionCredentialStore {
     runId: string;
     projectId: string;
     harness: AgentToolCli;
-    isolation: 'none' | 'run_environment';
+    isolation: 'none';
   }): Promise<SubscriptionCredentialBundle>;
   cleanupRun(runId: string): Promise<void>;
   collectSessionTranscript(input: {
@@ -68,7 +68,7 @@ export function subscriptionStatusView(harness: AgentToolCli): SubscriptionStatu
     supported: true,
     implemented: false,
     configured: false,
-    recommended_isolation: 'run_environment',
+    recommended_isolation: 'project_computer',
     allowlisted_domains: SUBSCRIPTION_PROVIDER_DOMAINS[harness],
     notice: SUBSCRIPTION_NOT_IMPLEMENTED_MESSAGE,
   };

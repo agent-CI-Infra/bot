@@ -53,7 +53,7 @@ test('task commands carry their workspace id and run in their own repository dir
   assert.equal((await command('printf "[%s]" "$BOT_WORKSPACE_ID"', root, 5000, { workspaceId: '../escape' })).output, '[]');
 });
 
-test('one task writes only inside its own workspace, never into another task’s', async t => {
+test('repo-relative writes stay in each task checkout, sibling volume paths work, and escapes outside the volume reject', async t => {
   const root = mkdtempSync(join(tmpdir(), 'task-workspaces-'));
   const previous = { HOME: environment.HOME, TMPDIR: environment.TMPDIR }; Object.assign(environment, { HOME: root, TMPDIR: root });
   t.after(() => { Object.assign(environment, previous); rmSync(root, { recursive: true, force: true }); });
@@ -62,7 +62,10 @@ test('one task writes only inside its own workspace, never into another task’s
   for (const workspaceId of [first, second]) await run(workspaceId, { type: 'workspace_init' });
   await write(first, 'shared.txt', 'first'); await write(second, 'shared.txt', 'second');
   assert.equal(readFileSync(join(root, first, 'repo', 'shared.txt'), 'utf8'), 'first'); assert.equal(readFileSync(join(root, second, 'repo', 'shared.txt'), 'utf8'), 'second');
-  await assert.rejects(write(first, `../../${second}/repo/shared.txt`, 'x'), /invalid_path/);
+  await write(first, '../shared-cache.txt', 'cache');
+  assert.equal((await run(second, { type: 'workspace_read', path: `../../${first}/shared-cache.txt` })).content, 'cache');
+  await assert.rejects(write(first, '../../../outside.txt', 'x'), /invalid_path/);
+  await assert.rejects(write(first, '/etc/hosts', 'x'), /invalid_path/);
   // A directory link inside the first workspace that points into the second one is not followed.
   symlinkSync(join(root, second, 'repo'), join(root, first, 'repo', 'other'));
   await assert.rejects(write(first, 'other/shared.txt', 'x'), /invalid_parent/);

@@ -400,10 +400,11 @@ test('a task checks out a git worktree with the history; the computer store rece
   const third = git(u.work, 'rev-parse', 'HEAD'); git(u.work, 'push', '-q', u.bare, `${third}:refs/heads/main`);
   const next = await u.cache.open('101', { url: u.url, token, commits: [third] }), c = computerTask(u.root); await c.workspace.bind(c.github, third, next, [], 'write');
   assert.ok(c.snapshot().pack_bytes > 0 && c.snapshot().pack_bytes < a.snapshot().pack_bytes, String(c.snapshot().pack_bytes));
-  // Task context sits next to the checkout and is read as ../context/<path>; it cannot reach the repository from there.
+  // Task context sits next to the checkout and is read as ../context/<path>; paths inside /workspace are shared while container rootfs escapes fail (#1121).
   await a.workspace.context({ 'object.json': '{"title":"Fix"}', 'skills/ci/SKILL.md': '# CI\nRun the checks.\n' });
   assert.equal((await a.run({ type: 'workspace_read', path: '../context/skills/ci/SKILL.md' })).content, '# CI\nRun the checks.\n');
-  assert.equal((await a.run({ type: 'workspace_read', path: '../context/../repo/README.md' })).error, 'runner_operation_failed');
+  assert.equal((await a.run({ type: 'workspace_read', path: '../context/../repo/README.md' })).content, 'second\n');
+  assert.equal((await a.run({ type: 'workspace_read', path: '../../../../../../etc/passwd' })).error, 'runner_operation_failed');
   // A context file of a normal pull request is far larger than one chunk; it arrives whole.
   const files = JSON.stringify(Array.from({ length: 400 }, (_, i) => ({ filename: `src/file-${i}.js`, patch: '@@ -1 +1 @@\n-old\n+new line ' + 'x'.repeat(200) })));
   await a.workspace.context({ 'files.json': files }); assert.ok(files.length > 100000);
@@ -459,40 +460,38 @@ test('#769 a reader takes a free, unchanged worktree of its commit; writers and 
     ['task-' + a.id, 'task-' + c.id, 'task-' + e.id, 'task-' + f.id].sort());
 });
 
-test('#769 observers and QA read the candidate in a worktree of its commit, not a clone of the writer; a reader that finished hands it on', async t => {
+test('#769/#1121 same-task roles share the task workspace in-place, while explicit candidateCheckout allocates on-demand read worktrees', async t => {
   const { roleWorkspaces, candidateCheckout } = await import('../../../../dist/roles/workspace.js');
   const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second] });
   const a = plannedTask(u.root, 'development.issue'); await a.plan(u.second, mirror);
   await a.workspace.call('context', { type: 'workspace_context', path: 'issue.json', base64: Buffer.from('{"number":7}').toString('base64'), offset: 0 });
   await a.workspace.write('edit', 'README.md', Buffer.from('changed by dev\n'));
+  writeFileSync(join(u.root, 'tasks', a.id, 'repo', 'build-cache.tmp'), 'cached-artifact\n');
   const writerBinding = () => ({ ...a.store.get("SELECT worktree_id,released_at FROM worktree_bindings WHERE task_id=? AND workspace_id=? AND mode='write'", 'task-' + a.id, a.id) });
   const writer = writerBinding().worktree_id;
-  // The reviewer's checkout is a task directory of its own whose repo is a worktree read at the candidate's commit.
+  // Same-task reviewer/test share the task workspace directly in-place (preserving node_modules and build caches, zero extra worktree/clone).
   const spaces = roleWorkspaces(a.workspace), done = await spaces.prepare('reviewer'), reviewer = spaces.current;
+  assert.equal(done, undefined);
   const candidate = a.history('role_candidate').at(-1), observed = join(u.root, 'tasks', reviewer.task.workspace_id);
-  assert.notEqual(reviewer.task.workspace_id, a.id); assert.equal(candidate.workspace_id, reviewer.task.workspace_id);
-  assert.notEqual(candidate.worktree_id, writer);
-  assert.equal(realpathSync(join(observed, 'repo')), realpathSync(join(u.root, 'worktrees', candidate.worktree_id)));
-  assert.equal(git(join(observed, 'repo'), 'rev-parse', 'HEAD'), candidate.sha); assert.equal(git(join(observed, 'repo'), 'rev-parse', 'HEAD^{tree}'), candidate.version);
+  assert.equal(reviewer.task.workspace_id, a.id); assert.equal(candidate.workspace_id, a.id);
+  assert.equal(candidate.worktree_id, writer);
   assert.equal(readFileSync(join(observed, 'repo', 'README.md'), 'utf8'), 'changed by dev\n');
+  assert.equal(readFileSync(join(observed, 'repo', 'build-cache.tmp'), 'utf8'), 'cached-artifact\n');
   assert.equal(readFileSync(join(observed, 'context', 'issue.json'), 'utf8'), '{"number":7}');
-  assert.ok(!a.calls.includes('workspace_acceptance')); assert.equal(a.calls.filter(type => type === 'workspace_worktree_create').length, 2);
-  assert.deepEqual(a.store.all('SELECT kind FROM task_workspaces WHERE workspace_id=?', reviewer.task.workspace_id).map(row => row.kind), ['checkout']);
-  // QA checks the same candidate while the reviewer still reads: readers the system places do not share a worktree.
+  assert.equal(a.calls.filter(type => type === 'workspace_worktree_create').length, 1);
+  // Explicit on-demand candidateCheckout allocates an independent read worktree from repo.git and hands it on when released.
   const qa = await candidateCheckout(a.workspace, candidate.sha, candidate.version, 'qa');
-  assert.notEqual(qa.worktree_id, candidate.worktree_id);
-  // The writer keeps its own worktree throughout, and what it changes next is not in what the readers see.
+  assert.notEqual(qa.worktree_id, writer);
   await a.workspace.write('later', 'README.md', Buffer.from('changed again\n'));
   assert.deepEqual(writerBinding(), { worktree_id: writer, released_at: null });
-  assert.equal(readFileSync(join(observed, 'repo', 'README.md'), 'utf8'), 'changed by dev\n');
-  // The reviewer's run ends: its processes are ended, the binding is released, and the next reader takes its worktree.
-  await done(); assert.ok(a.calls.includes('reap'));
-  assert.equal(a.store.get('SELECT release_reason FROM worktree_bindings WHERE workspace_id=?', reviewer.task.workspace_id).release_reason, 'reader_finished');
+  assert.equal(readFileSync(join(u.root, 'tasks', qa.space.task.workspace_id, 'repo', 'README.md'), 'utf8'), 'changed by dev\n');
+  await qa.release();
+  assert.equal(a.store.get('SELECT release_reason FROM worktree_bindings WHERE workspace_id=?', qa.space.task.workspace_id).release_reason, 'reader_finished');
   const next = await candidateCheckout(a.workspace, candidate.sha, candidate.version, 'qa-again');
-  assert.equal(next.worktree_id, candidate.worktree_id);
+  assert.equal(next.worktree_id, qa.worktree_id);
   assert.equal(a.history('workspace_bound').at(-1).reused, true); assert.equal(a.history('workspace_bound').at(-1).mode, 'read');
   assert.equal(readFileSync(join(u.root, 'tasks', next.space.task.workspace_id, 'context', 'issue.json'), 'utf8'), '{"number":7}');
-  for (const one of [qa, next]) await one.release();
+  await next.release();
   assert.deepEqual(writerBinding(), { worktree_id: writer, released_at: null });
 });
 

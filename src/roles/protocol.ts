@@ -49,8 +49,7 @@ export function protocolRecovery(mode: string | null | undefined): RecoveryMode 
 }
 /**
  * Capabilities an admission can require. A harness declares what its protocol does; an environment reports what it
- * actually provided (inspected container settings, checked tree hash). A declaration alone never satisfies run_isolation
- * or fixed_candidate_read: those need the environment's verification of this very run.
+ * actually provided (checked tree hash). A declaration alone never satisfies fixed_candidate_read.
  */
 export const capabilityNames = ['fixed_candidate_read', 'raw_evidence', 'run_isolation', 'cancel', 'version_binding', 'output_validation', 'fresh_context'] as const;
 export type CapabilityName = typeof capabilityNames[number];
@@ -60,8 +59,8 @@ export interface HarnessCapabilities {
   raw_evidence?: 'control_plane_tools' | 'task_tools' | 'none';
   /** How a run is interrupted: in-process abort, or protocol cancel then a bounded wait and process-group kill. */
   cancel?: 'abort_signal' | 'protocol_then_kill' | 'none';
-  /** The agent executes inside the run environment the framework provisions (not on the control plane). */
-  isolation?: 'run_environment' | 'none';
+  /** Roles execute on the shared project computer without per-run container isolation. */
+  isolation?: 'none';
   /** Runs pin the harness version, model and snapshot they started with. */
   version_binding?: boolean;
   /** Results arrive through a schema-checked submission tool, never as free text claims. */

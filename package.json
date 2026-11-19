@@ -19,7 +19,6 @@
     "test:agent": "npm run build && node test/docker/agent/review-dev-docker.mjs",
     "test:external:docker": "node test/docker/external/external-docker.mjs",
     "test:pi:docker": "npm run build && node test/docker/agent/pi-controller-docker.mjs",
-    "test:isolation:docker": "npm run build && node test/docker/manager/role-run-docker.mjs",
     "test:assistant:docker": "node test/docker/manager/assistant-computers-docker.mjs",
     "test:deploy:docker": "node test/docker/deploy/deploy-recovery-docker.mjs"
   },

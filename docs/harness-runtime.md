@@ -43,7 +43,7 @@ Claude Code 的完整说明见 [Claude Code harness](claude-code.md)；下文说
       "role_id": "dev",
       "harness_ref": { "id": "codex" },
       "model_profile_ref": { "model_id": "<model id>" },
-      "environment_profile_ref": { "id": "isolated-workspace" }
+      "environment_profile_ref": { "id": "task-workspace" }
     }
   ]
 }

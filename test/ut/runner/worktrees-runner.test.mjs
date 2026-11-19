@@ -81,13 +81,17 @@ test('#769 a link anywhere else is a replaced workspace; a file copy or own chec
   assert.equal(lstatSync(c.repo(other)).isSymbolicLink(),false);assert.equal(c.git(c.wt(id),['rev-parse','HEAD']),c.base.sha,'the shared worktree did not move');
 });
 
-test('#769 evaluators, restores and moves work from a task whose checkout is a linked worktree',async t=>{
-  const c=computer(t),writer=randomWorkspaceId(),evaluator=randomWorkspaceId(),id=randomWorkspaceId();
+test('#769/#1121 restores, moves and cross-directory workspace tools work from a task whose checkout is a linked worktree',async t=>{
+  const c=computer(t),writer=randomWorkspaceId(),id=randomWorkspaceId();
   await c.run(writer,{type:'workspace_worktree_create',worktree_id:id,sha:c.base.sha,tree_sha:c.base.tree});
   writeFileSync(join(c.wt(id),'added.txt'),'added\n');
   const candidate=await c.run(writer,{type:'workspace_finalize'});
-  const copied=await c.run(evaluator,{type:'workspace_acceptance',source_workspace_id:writer,sha:candidate.local_sha,tree_sha:candidate.tree_sha});
-  assert.equal(copied.tree_sha,candidate.tree_sha);assert.equal(readFileSync(join(c.repo(evaluator),'added.txt'),'utf8'),'added\n');
+  // Cross-directory project computer paths (../notes/, ../logs/, sibling task dirs) work while container rootfs escapes are rejected.
+  await c.run(writer,{type:'workspace_write',path:'../notes/shared.md',base64:Buffer.from('team note\n').toString('base64'),offset:0,final:true,mode:'100644'});
+  assert.equal((await c.run(writer,{type:'workspace_read',path:'../notes/shared.md'})).content,'team note\n');
+  await c.run(writer,{type:'workspace_write',path:'../logs/check.log',base64:Buffer.from('ok\n').toString('base64'),offset:0,final:true,mode:'100644'});
+  assert.equal((await c.run(writer,{type:'workspace_read',path:'../logs/check.log'})).content,'ok\n');
+  await assert.rejects(c.run(writer,{type:'workspace_read',path:'/etc/passwd'}),/invalid_path/);
   const restored=randomWorkspaceId(),other=randomWorkspaceId();
   await c.run(restored,{type:'workspace_worktree_create',worktree_id:other,sha:c.base.sha,tree_sha:c.base.tree});
   assert.equal((await c.run(restored,{type:'workspace_restore',source_workspace_id:writer,sha:candidate.local_sha,tree_sha:candidate.tree_sha})).restored,true);

@@ -202,3 +202,34 @@ for (const backend of ['native', 'pi']) test(`role development offers the dev ro
   assert.deepEqual(reported, [{ milestone: 'plan', conclusion: 'The value is cut at its second "=".', changes: ['Split at the first "="'] }]);
   assert.ok(f.bodies.some(body => body.tools.some(tool => tool.function.name === 'report_development_milestone')));
 });
+
+test('#1121 configurable project and role command_timeout_seconds budgets override default 180s/120s and raise the timeout ceiling', async t => {
+  const { management } = await import('../../../../dist/app/management.js');
+  const f = await fixture(t, 'native', 'development.issue', body => {
+    if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
+      const done = receipts(body).filter(r => r.result_ref || r.findings_ref || r.observation_ref);
+      const deliveryRef = receipts(body).find(r => r.result_ref)?.result_ref;
+      return done.length === 0
+        ? call('delegate_role', { role: 'dev', purpose: 'Run heavy build', refs: [] })
+        : done.length === 1
+          ? call('delegate_role', { role: 'reviewer', purpose: 'Run heavy verification', refs: [deliveryRef] })
+          : call('nominate_delivery', { result_ref: deliveryRef });
+    }
+    const ran = body.messages.some(m => m.role === 'assistant' && m.tool_calls?.some(c => c.function.name === 'run_command'));
+    if (!ran) return call('run_command', { command: 'printf heavy' });
+    return body.tools.some(t => t.function.name === 'submit_role_result')
+      ? call('submit_role_result', findings)
+      : call('submit_delivery', { summary: 'Heavy build verified', test_command: 'printf heavy' });
+  });
+  const actor = { id: 'owner', role: 'project_admin', repositories: ['101'] };
+  await management(f.store, actor, 'PATCH', new URL('http://local/api/repositories/101/policy'), { command_timeout_seconds: 900 });
+  const currentRoles = roleApi(f.store, actor, 'GET', new URL('http://local/api/repositories/101/roles'), {}).configuration;
+  roleApi(f.store, actor, 'PUT', new URL('http://local/api/repositories/101/roles'), {
+    expected_revision: currentRoles.revision,
+    roles: [{ role_id: 'reviewer', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', command_timeout_seconds: 1200 } }],
+  });
+  const result = await developmentTeam(f.workspace, 'Implement', '{}', async () => ({ pr: { number: 1 } }), { read: true, write: true, shell: true });
+  assert.equal(result.pr.number, 1);
+  const heavy = f.commands.filter(c => c.command === 'printf heavy');
+  assert.deepEqual(heavy.map(c => c.timeout_ms), [900_000, 1_200_000]);
+});
