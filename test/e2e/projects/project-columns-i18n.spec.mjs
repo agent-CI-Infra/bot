@@ -107,3 +107,81 @@ test('zh-CN 界面：九个列头与稳定单元格 token 不变，切换回来�
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
+
+// The same slice also names the columns of the global settings project table (#/settings/projects/list.0), and the
+// hidden-repository table (hidden.0) draws only 项目 and 操作. Both are the same keys and the same header/caption split:
+// at >=1280 the table prints the header words, below 1280 it hides the header and each cell prints its own caption.
+const prepareSettings = async (page, h) => {
+  const { admin, password } = await setup(h), a = await account(admin);
+  for (const [id, owner, name] of [['101', '20', 'alpha/one'], ['202', '10', 'beta/two']]) {
+    await repository(admin, a.id, id);
+    h.store.run('UPDATE repositories SET full_name=?,owner_id=? WHERE id=?', name, owner, id);
+    h.store.run('UPDATE installed_repositories SET full_name=?,owner_id=?,owner_login=?,permissions_at=? WHERE repository_id=?', name, owner, 'org-' + owner, new Date().toISOString(), id);
+  }
+  // One hidden repository for the second table; hidden rows are excluded from the normal list and listed on its own page.
+  h.store.run("INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,installed,hidden,synced_at) VALUES(?,'401','fixture/hidden','10','fixture',1,1,?)", a.id, new Date().toISOString());
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(h.admin + '/#/settings/projects/list.0');
+  await page.getByLabel('用户名', { exact: true }).fill('administrator');
+  await page.getByLabel('密码', { exact: true }).fill(password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+};
+
+test('English 界面：全局设置的项目表（普通与已隐藏）列头也用英文，窄屏 caption 不溢出', async ({ page }) => {
+  const h = await harness(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await prepareSettings(page, h);
+    const table = page.locator('.global-project-table').first();
+    const row = table.locator('.global-project-row[data-key="101"]');
+    await expect(table.locator('.global-project-row')).toHaveCount(2);
+    // The default language keeps the table exactly as it was: same words, same cell token.
+    await expect(table.locator('.project-table-head .project-cell')).toHaveText(chinese);
+    await expect(row.locator(':scope > .project-cell').first()).toHaveAttribute('data-col-label', '项目');
+
+    await page.getByRole('button', { name: 'English' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    await expect(table.locator('.global-project-row')).toHaveCount(2);
+    const head = table.locator('.project-table-head');
+    await expect(head.locator('.project-cell')).toHaveText(english);
+    await expect(row.locator(':scope > .project-cell').first()).toHaveAttribute('data-col-label', 'Project');
+
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height });
+      await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `horizontal overflow at ${width}px`).toBe(true);
+      if (width >= 1280) {
+        await expect(head).toBeVisible();
+        await expect(head.locator('.project-cell')).toHaveText(english);
+      } else {
+        await expect(head).toBeHidden();
+        const printed = (await cellCaptions(row)).filter(Boolean);
+        expect(printed, `settings captions at ${width}px`).toEqual(captionedEnglish);
+        expect(printed.join(' ')).not.toMatch(han);
+        expect(await row.evaluate(line => [...line.querySelectorAll(':scope > .project-cell')].every(cell => cell.scrollWidth <= cell.clientWidth + 1)), `a settings caption overflows its cell at ${width}px`).toBe(true);
+      }
+    }
+
+    // The hidden-repository table: two columns, the same dictionary, both the header and the narrow caption.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole('link', { name: '管理已隐藏仓库', exact: false }).click();
+    const hidden = page.locator('.global-project-table.is-hidden');
+    await expect(hidden.locator('.global-project-row')).toHaveCount(1);
+    const hiddenRow = hidden.locator('.global-project-row[data-key="401"]'), hiddenHead = hidden.locator('.project-table-head');
+    await expect(hiddenHead.locator('.project-cell')).toHaveText(['Project', 'Actions']);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(hiddenHead).toBeHidden();
+    expect(await cellCaptions(hiddenRow)).toEqual(['', 'Actions']);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'hidden table overflow at 390px').toBe(true);
+
+    // Switching back restores the Chinese words on both tables and never shows a raw key.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole('button', { name: '中文' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+    await expect(hiddenHead.locator('.project-cell')).toHaveText(['项目', '操作']);
+    await page.getByRole('link', { name: '返回项目管理', exact: false }).click();
+    await expect(table.locator('.project-table-head .project-cell')).toHaveText(chinese);
+    expect(await page.locator('#settings-panel').innerText()).not.toContain('projects.columns.');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
