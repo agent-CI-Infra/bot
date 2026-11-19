@@ -340,7 +340,16 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
   const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify({ ...merge.data, at: event.created_at ?? new Date().toISOString() }));
   if (inserted.changes) {
     const input = JSON.parse(task.input || '{}');
-    store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
+    // A comment on the bot's pull request continued into its revision becomes one of the revision's requests (#1104). A
+    // revision that has already prepared does not see it; it hands the requests it did not cover back to the Manager when it
+    // ends (review/development.ts carryRevisionRequests).
+    const request = task.kind === 'development.pr' ? merge.data?.revision_request : null, known = (input.revision?.requests || []) as any[];
+    const revision = request && !known.some(r => r.type === request.type && String(r.id) === String(request.id))
+      ? { revision: { ...(input.revision || {}), source: input.revision?.source || 'request', requests: [...known, request] } } : {};
+    store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, ...revision, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
+    if (request) store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
+      DO UPDATE SET state='done',task_id=excluded.task_id`, task.repository_id, task.object_number, request.type, request.id, request.author, request.author_id,
+      request.author_type, request.url, 'done', taskId, new Date().toISOString());
   }
   log(store, taskId, { type: 'dispatch', relation: 'continued', event_id: event.id, event_type: event.type, reason: decision.reason, detail: `Manager 把事件「${event.summary}」续接到这个任务：${decision.reason}` });
   if (task.status === 'succeeded') continueFinishedReview(store, taskId);

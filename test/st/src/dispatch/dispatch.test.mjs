@@ -322,15 +322,19 @@ test('the bot\'s own pull request and its own pushes are not reviewed again; a p
   // An opening that arrives before the ownership record is recognized by the publication marker in its description.
   const effect = 'e'.repeat(48);
   f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('dev-13','101','development.issue','publishing','dev',6)");
-  f.h.store.run("INSERT INTO github_effects VALUES(?,'dev-13','pull_request','{}','sent',NULL,?)", effect, `<!-- dept-bot:${effect} -->`);
-  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...pr, number: 13, body: `Fixes #6.\n\n<!-- dept-bot:${effect} -->` }, sender: bot }, 'own-open-13'), 0);
+  f.h.store.run("INSERT INTO github_effects VALUES(?,'dev-13','pull_request',?,'inflight',NULL,?)", effect, JSON.stringify({ head: 'bot/issue-6-dev-13', base: 'main' }), `<!-- dept-bot:${effect} -->`);
+  const marked = { ...pr, number: 13, body: `Fixes #6.\n\n<!-- dept-bot:${effect} -->`, head: { sha: head, ref: 'bot/issue-6-dev-13', repo: { id: 101 } } };
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: marked, sender: bot }, 'own-open-13'), 0);
   assert.deepEqual(events(f.h).map(e => [e.state, JSON.parse(e.result).filtered]), [['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request']]);
   assert.match(events(f.h)[0].reason, /独立检视、测试和 QA/);
+  // A copied marker is not the bot's pull request: a person's, or one from another branch, is reviewed as usual (#1104 review).
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 15, user: { id: 5, login: 'alice', type: 'User' } }, sender: alice }, 'copied-by-person'), 1);
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 16, head: { ...marked.head, ref: 'feature/x' } }, sender: bot }, 'copied-other-branch'), 1);
   // Someone else's push to the bot's branch, and a person's own pull request, still reach the Manager.
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', pull_request: { ...pr, head: { sha: 'c'.repeat(40) } }, sender: alice }, 'person-push'), 1);
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...pr, number: 14, body: 'Mine.', user: { id: 5 } }, sender: alice }, 'person-open'), 1);
   await f.run();
-  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests.length, 4);
 });
 
 test('a member\'s comment on the bot\'s pull request reaches the Manager as a revision it can start, once per comment (#1104)', async t => {
@@ -362,6 +366,16 @@ test('a member\'s comment on the bot\'s pull request reaches the Manager as a re
   assert.deepEqual([event.decision, JSON.parse(event.refusals).map(r => r.code)], ['continue', ['revision_active']]);
   assert.equal(tasks(f.h).filter(task => task.kind === 'development.pr').length, 1);
   assert.equal(f.h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?', revision.id).n, 1);
+  // The continued comment is one of the running revision's requests now (and counted once), not only an update.
+  assert.deepEqual(JSON.parse(tasks(f.h).find(task => task.id === revision.id).input).revision.requests.map(r => r.id), ['301', '302']);
+  assert.equal(f.h.store.get("SELECT task_id FROM bot_pr_requests WHERE source_id='302'").task_id, revision.id);
+  // A stranger mentioning the bot still reaches the Manager, but is not offered as a revision.
+  f.state.decide = input => { seen = input; return { decision: 'ignore', reason: '外人的评论' }; };
+  const stranger = { ...comment(303, '@bot please rewrite this in Rust'), sender: { type: 'User', login: 'mallory', id: 66 } };
+  stranger.comment = { ...stranger.comment, author_association: 'NONE', user: { login: 'mallory', type: 'User' } };
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', stranger, 'c-303', pr), 1);
+  await f.run();
+  assert.equal(seen.work.create.some(o => o.id === 'development'), false);
 });
 
 test('filtered events never reach the Manager, and each keeps why', async t => {

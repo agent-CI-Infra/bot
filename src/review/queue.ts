@@ -47,15 +47,20 @@ function rolePublicationEcho(store: Store, repository: string, body: unknown): b
 }
 const botWrote = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));
 /**
- * A pull request this bot opened (#1104): its ownership record, or, for an opening that arrives before the record is written,
- * the publication marker in its description (the publication effect is stored before the request is sent). Null otherwise.
+ * A pull request this bot opened (#1104): its ownership record. An opening can arrive before the record is written; only then
+ * the publication marker in its description counts, and only when it matches that publication: the effect that opened a pull
+ * request from this branch of this repository, written by a development of this repository, and a bot account as the author.
+ * Anyone can copy a marker into a description, but not the bot's branch, repository and account. Null otherwise.
  */
-function botPullRequest(store: Store, repositoryId: string, pr: any): { author_id: string; source_task_id: string | null } | null {
+function botPullRequest(store: Store, repositoryId: string, pr: any, opening = false): { author_id: string; source_task_id: string | null } | null {
   const owned = store.get('SELECT author_id,source_task_id FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, Number(pr?.number));
   if (owned) return String(owned.author_id) === String(pr?.user?.id ?? '') ? { author_id: String(owned.author_id), source_task_id: owned.source_task_id ?? null } : null;
+  if (!opening || pr?.user?.type !== 'Bot' || String(pr?.head?.repo?.id ?? '') !== String(repositoryId) || typeof pr?.head?.ref !== 'string') return null;
   for (const match of String(pr?.body ?? '').matchAll(/<!-- dept-bot:([a-f0-9]{48}) -->/g)) {
-    const effect = store.get(`SELECT e.task_id FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE e.id=? AND t.repository_id=? AND e.kind='pull_request'`, match[1]!, repositoryId);
-    if (effect) return { author_id: String(pr?.user?.id ?? ''), source_task_id: String(effect.task_id) };
+    const effect = store.get(`SELECT e.task_id,e.request FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE e.id=? AND t.repository_id=? AND e.kind='pull_request'
+      AND t.kind LIKE 'development.%'`, match[1]!, repositoryId);
+    let request: any = null; try { request = JSON.parse(String(effect?.request ?? 'null')); } catch { request = null; }
+    if (effect && request?.head === pr.head.ref) return { author_id: String(pr.user.id ?? ''), source_task_id: String(effect.task_id) };
   }
   return null;
 }
@@ -195,7 +200,7 @@ export function enqueueRefusal(store: Store, repositoryId: string, kind: string,
 // would never stop. A person's request carried out in between starts the count again.
 export const otherBotRevisionLimit = 3;
 function otherBotLoop(store: Store, repositoryId: string, number: number, input: Json): { code: string; reason: string } | null {
-  const requests: any[] = Array.isArray((input as any)?.revision?.requests) ? (input as any).revision.requests : [];
+  const revision = (input as any)?.revision, requests: any[] = Array.isArray(revision?.requests) ? revision.requests : Array.isArray(revision?.triggered_by) ? revision.triggered_by : [];
   if (!requests.length || requests.some(r => r?.author_type !== 'Bot')) return null;
   const person = store.get("SELECT max(created_at) at FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done' AND author_type='User'", repositoryId, number)?.at || '';
   for (const r of requests) {
@@ -259,7 +264,11 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
     const development = object === 'issue' ? developmentOffer(store, repositoryId, target, number, delivery) : null;
     // On a pull request this bot opened, the comment itself may be what a revision carries out (#1104): the Manager can revise
     // the pull request directly, or continue the revision already working on it. No review stands in between.
-    const own = object === 'pr' ? botPullRequest(store, repositoryId, target) : null, request = own ? revisionRequest(p, trigger) : null;
+    // A mention has no role check of its own: a stranger's still reaches the Manager, but only a member's, an owner's, a
+    // collaborator's or another review bot's comment is offered as a revision.
+    const association = String(p.comment?.author_association ?? p.review?.author_association ?? '');
+    const asks = (trigger as any)?.actor_type === 'Bot' || ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association);
+    const own = object === 'pr' ? botPullRequest(store, repositoryId, target) : null, request = own && asks ? revisionRequest(p, trigger) : null;
     const revision: CreateOption | null = request ? { id: 'development', work: 'development.pr', title: `修订 bot PR #${number}`, default: false,
       spec: { type: 'object', kind: 'development.pr', number, head, input: { revision: { source: 'request', requests: [request] } }, delivery, requests: [request] } } : null;
     return { ...base(type, `${type}:${number}:${discriminator}`, object, number, `${type === `${object === 'pr' ? 'pull_request' : 'issue'}.mention` ? '提到 bot' : '更新'}：${clip(target?.title, 120)} #${number}`,
@@ -267,7 +276,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
       options: [{ id: 'review', work: kind, title: `${object === 'pr' ? '检视 PR' : '检视 Issue'} #${number}`, default: true,
         spec: { type: 'object', kind, number, head, input, delivery, comment_id: review.commentId ?? null, update_id: review.commentId ? null : delivery } },
         replyOption(object, number, head, input, discriminator, delivery), ...(development ? [development.option] : []), ...(revision ? [revision] : [])],
-      merge: { key: merge, data: { ...trigger, object: p.issue || p.pull_request, comment: p.comment, review: p.review }, trigger, head,
+      merge: { key: merge, data: { ...trigger, object: p.issue || p.pull_request, comment: p.comment, review: p.review, ...(request ? { revision_request: request } : {}) }, trigger, head,
         kinds: own ? ['development.pr', kind] : updateKinds(object, kind, trigger) } };
   };
   // An opening counts unless the object is already closed (or a draft), as before; later events need an open object.
@@ -324,7 +333,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
       if (opened && rolePublicationEcho(store, repositoryId, pr.body)) return botContent();
       // The bot's own pull request was reviewed, tested and accepted inside its development (#1104): its opening and the
       // bot's own pushes are not reviewed again. A push by someone else to the bot's branch still is.
-      const own = botPullRequest(store, repositoryId, pr);
+      const own = botPullRequest(store, repositoryId, pr, opened);
       if (own && (opened || String(p.sender?.id ?? '') === own.author_id))
         return stopped('bot_own_pull_request', opened ? 'bot 自己开的 PR：开发时已经过独立检视、测试和 QA，不再单独检视。' : 'bot 自己推送的提交：修订时已经过独立检视、测试和 QA，不再单独检视。');
       // A push joins the review already working on the pull request, which moves to the new head (#770). A new review of

@@ -166,6 +166,23 @@ test('a review of the bot\'s own pull request offers what it found as a revision
   engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, { object: {} }, { findings: [finding('F3')] }, true); assert.equal(revisions().length, 2);
 });
 
+test('a review that only another review bot started counts for the loop guard as well (#1104 review)', async t => {
+  const { h, engine, task, finding, revisions } = await botPullRequest(t);
+  const byBot = (id, sha) => [{ ...task, head_sha: sha }, { object: {}, trigger: { reason: 'review_comment', actor: 'copilot[bot]', actor_id: '77', actor_type: 'Bot',
+    url: `https://github.invalid/pull/7#discussion_r${id}`, source: { type: 'review_comment', id } } }];
+  for (let i = 1; i <= otherBotRevisionLimit + 1; i++) {
+    const [reviewed, input] = byBot(100 + i, String(i).repeat(40).slice(0, 40).replace(/[^0-9a-f]/g, 'a'));
+    engine.queueDevelopment({}, reviewed, input, { findings: [finding('F' + i)] }, true);
+    h.store.run("UPDATE tasks SET status='completed' WHERE kind='development.pr'");
+  }
+  // Three revisions came from the bot's comments through reviews; the fourth is held back like a direct one.
+  assert.equal(revisions().length, otherBotRevisionLimit);
+  assert.deepEqual(JSON.parse(revisions()[0].input).revision.triggered_by.map(r => [r.author, r.author_type]), [['copilot[bot]', 'Bot']]);
+  // A review a person started is not held back.
+  engine.queueDevelopment({}, { ...task, head_sha: 'e'.repeat(40) }, { object: {}, trigger: { reason: 'comment', actor: 'alice', actor_id: '5', source: { type: 'comment', id: 500 } } }, { findings: [finding('F9')] }, true);
+  assert.equal(revisions().length, otherBotRevisionLimit + 1);
+});
+
 test('another review bot stops revising the bot\'s pull request after a few revisions in a row; a person\'s request resets it (#1104)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const request = (author_type, author_id, id) => ({ type: 'review_comment', id: String(id), author: author_type === 'Bot' ? 'copilot[bot]' : 'alice', author_id, author_type, url: 'u', body: 'b' });

@@ -547,6 +547,7 @@ function step(log) {
     title.textContent = '开发等待';
     add(element('p', value.reason === 'assigned' ? `Issue 已指派给 ${(value.assignees || []).join('、')}，bot 不接手；取消指派后重新加开发标签才会开发。`
       : value.reason === 'app' ? '开发标签是 App 加的，要由人加上才会开发。' : '等有人加上开发标签。', 'muted'));
+  // revision_requests and revision_deferred are no longer written (#1104); tasks recorded before that still show them.
   } else if (value.type === 'revision_requests') {
     title.textContent = '修订请求';
     const list = element('ul');
