@@ -294,8 +294,8 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
       if (publishing && (spec.comment_id || spec.update_id)) input = { ...input, wait_for_review: publishing.id };
     }
     const id = enqueue(store, repo, spec.kind, spec.number, spec.head, input, spec.delivery, spec.source_task ?? null, spec.comment_id ?? null, spec.update_id ?? null);
-    // The requests a bot pull request revision carries (#1104): each comment revises once, and another review bot's count
-    // feeds the loop guard (queue.ts otherBotLoop).
+    // The requests a bot pull request revision carries (#1104): each comment revises once, and the counts become facts for the
+    // Manager on the next comment (queue.ts revisionFacts).
     if (id && spec.kind === 'development.pr' && spec.requests?.length) {
       const now = new Date().toISOString();
       for (const r of spec.requests as any[]) store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
