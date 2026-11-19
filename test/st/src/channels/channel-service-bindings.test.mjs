@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { channelFixture, inGroup, post, until, bindFixture, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
+import { channelFixture, envelope, inGroup, post, until, bindFixture, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
 import { repository } from '../../../fixtures/helpers.mjs';
 import { knowledgeActor } from '../../../fixtures/knowledge-fixture.mjs';
 import { authorize, invalidate, resolvePrincipalActor, revision } from '../../../../dist/identity/authorization.js';
@@ -30,6 +30,9 @@ async function github(t) {
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/installation$/.exec(path))) return send({ id: 55, account: { id: match[1].endsWith('201') ? 20 : 10, login: 'agent-test-zone' },
       permissions: { contents: 'read', issues: 'write', pull_requests: 'read', actions: 'write', checks: 'read', statuses: 'read', metadata: 'read' } });
     if (path === '/app/installations/55/access_tokens') return send({ token: 'fixture-read-token-' + state.requests.length, expires_at: new Date(Date.now() + 3600000).toISOString(), permissions: body.permissions }, 201);
+    const issuePath = '/repos/agent-test-zone/admin-fixture-101/issues/12';
+    if (path === issuePath && req.method === 'GET') return send({ number: 12, user: { login: 'outside-author' }, state: 'open' });
+    if (req.method === 'POST' && [issuePath + '/labels', issuePath + '/assignees'].includes(path)) return send(body);
     if (path === '/installation/token') return send({});
     if ((match = /^\/repositories\/(\d+)$/.exec(path))) return send({ id: Number(match[1]), full_name: 'agent-test-zone/admin-fixture-' + match[1], owner: { id: match[1] === '201' ? 20 : 10 }, default_branch: 'main' });
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/pulls$/.exec(path))) return send(state.pulls[match[1]] ?? []);
@@ -279,7 +282,7 @@ test('other roles\' tasks follow the binding\'s items: read lists progress, writ
   await f.setLevel({ project_tasks: 'read' });
   script = (body, res, seen) => !seen.length ? call(res, 'list_project_tasks', { repository: repo(101) }) : seen.length === 1 ? call(res, 'read_project_task', { repository: repo(101), task_id: 'blocked' }) : say(res, '任务在等待项目电脑。');
   assert.equal((await done(f, await post(f.h, f.id, groupMessage('blocked 任务进展如何？')))).state, 'completed');
-  assert.ok(tools.includes('list_project_tasks') && tools.includes('read_project_task') && !tools.includes('manage_project_task'));
+  assert.ok(tools.includes('list_project_tasks') && tools.includes('read_project_task') && !tools.includes('create_project_task') && !tools.includes('manage_project_task'));
   const [listed, detail] = observations(f.requests.at(-1));
   const task = listed.tasks.find(item => item.task_id === 'blocked'); assert.equal(task.status, 'waiting_environment'); assert.ok(task.revision);
   assert.ok(!listed.tasks.some(item => item.task_id === 'foreign'), 'another organization\'s task is not listed');
@@ -428,7 +431,7 @@ test('the dispatch level hands work to a project only through its Manager: creat
   assert.ok(!f.h.store.get('SELECT executor_role FROM task_origins WHERE task_id=?', task.id).executor_role);
   assert.deepEqual({ ...f.h.store.get('SELECT binding_id,chat_id,source_message FROM channel_service_tasks WHERE task_id=?', task.id) },
     { binding_id: binding.id, chat_id: f.chat.id, source_message: created.value.operation_id });
-  // Change the task as a whole: an instruction and a new contract, through the same revision check as the console.
+  // A dispatch group can add an instruction and cancel this task, but only write can change its contract.
   script = (body, res, seen) => !seen.length ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
     : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'instructions', instruction: '优先修手机端', expected_revision: seen[0].revision }) : say(res, '已补充说明。');
   await done(f, await post(f.h, f.id, groupMessage('补充：优先修手机端')));
@@ -438,10 +441,10 @@ test('the dispatch level hands work to a project only through its Manager: creat
     : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'contract', contract: { ...contract, criteria: ['链接在桌面和手机上都能打开', '有回归测试'] }, expected_revision: seen[0].revision })
     : seen.length === 2 ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
     : seen.length === 3 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'cancel', expected_revision: seen[2].revision })
-    : say(res, '已修改验收条件并取消。');
+    : say(res, '已取消。');
   await done(f, await post(f.h, f.id, groupMessage('加上回归测试的要求，然后取消吧')));
   const [, changed, , cancelled] = observations(f.requests.at(-1));
-  assert.equal(changed.state, 'succeeded', JSON.stringify(changed)); assert.equal(changed.operation, 'task.contract');
+  assert.equal(changed.error, 'operation_not_allowed');
   assert.equal(cancelled.state, 'succeeded', JSON.stringify(cancelled)); assert.equal(cancelled.operation, 'task.cancel');
   assert.equal(f.h.store.get('SELECT status FROM tasks WHERE id=?', task.id).status, 'cancelled');
   // The finished task reports back to the group that created it, and that report joins only this binding's context.
@@ -574,6 +577,101 @@ test('a group timer hands work to the Manager like a message would; the task is 
     idempotency_key: 'cancel-scheduled-task', source_conversation: 'web', source_message: 'cancel-scheduled-task' });
   assert.equal(cancel.value.state, 'succeeded', JSON.stringify(cancel.value));
   await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('已取消') && JSON.stringify(s.content).includes(repo(101))));
+});
+
+test('an existing dispatch or mixed binding keeps its original task scope until a new tier is selected', async t => {
+  const f = await fixture(t);
+  const bound = await f.bind({ level: 'dispatch' });
+  const table = f.service.serviceBindings, current = () => table.get(f.chat.id);
+  const view = async () => (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === f.chat.id);
+  for (const [project_tasks, delegation, mode] of [['write', 'allow', 'write'], ['write', 'deny', 'custom'], ['read', 'allow', 'custom']]) {
+    const previous = { ...bound.value.permissions, project_tasks, delegation };
+    f.h.store.run('UPDATE channel_service_bindings SET permissions=? WHERE chat_id=?', JSON.stringify(previous), f.chat.id);
+    const shown = await view();
+    assert.equal(shown.task_mode, mode);
+    assert.deepEqual((await f.setLevel(shown.permissions)).permissions, previous, 'round-tripping the old grant is lossless');
+    if (delegation === 'deny') assert.throws(() => table.checkOperation(current(), 'task.create', true), { code: 'operation_not_allowed' });
+    else assert.doesNotThrow(() => table.checkOperation(current(), 'task.create', true));
+    if (project_tasks === 'read') assert.throws(() => table.checkOperation(current(), 'task.cancel', true, 'blocked'), { code: 'operation_not_allowed' });
+  }
+  assert.equal((await f.setLevel({ project_tasks: 'none' })).task_mode, 'none');
+  assert.throws(() => table.checkOperation(current(), 'task.create', true), { code: 'operation_not_allowed' });
+});
+
+test('four groups in one project enforce task scope in both tool interfaces and on command replay', async t => {
+  const f = await fixture(t), repoName = repo(101), scope = { kind: 'repositories', repositories: ['101'] };
+  const groups = {};
+  for (const mode of ['none', 'read', 'create', 'write']) {
+    const chat = 'oc_' + mode, arrival = groupMessage('discovery', 'ou_alice', chat);
+    arrival.event.message.mentions = []; await post(f.h, f.id, arrival);
+    const local = f.h.store.get('SELECT id FROM channel_chats WHERE chat_id=?', chat).id;
+    const bound = await f.bind({ scope, permissions: { project_tasks: mode } }, local);
+    assert.equal(bound.value.task_mode, mode);
+    groups[mode] = { chat, binding: f.service.serviceBindings.get(local) };
+  }
+  async function invoke(mode, name, args) {
+    let tools;
+    f.modelState.respond = async (body, res) => {
+      tools = body.tools.map(tool => tool.function.name);
+      return observations(body).length ? say(res, '已核对。') : call(res, name, args);
+    };
+    const row = await done(f, await post(f.h, f.id, groupMessage(name, 'ou_bob', groups[mode].chat)));
+    assert.equal(row.state, 'completed', row.error);
+    return { result: observations(f.requests.at(-1))[0], tools };
+  }
+  const fresh = { repository: repoName, request: '核对项目文档', contract };
+  for (const mode of ['none', 'read']) {
+    const { result, tools } = await invoke(mode, 'create_project_task', fresh);
+    assert.equal(result.error, 'tool_not_allowed');
+    assert.equal(tools.includes('list_project_tasks'), mode === 'read');
+    assert.equal(tools.includes('read_project_task'), mode === 'read');
+    assert.ok(!tools.includes('manage_project_task'));
+  }
+  const created = await invoke('write', 'create_project_task', fresh);
+  assert.equal(created.result.state, 'succeeded');
+  const foreign = created.result.result.id;
+  for (const task_id of ['blocked', foreign]) {
+    const detail = await invoke('create', 'read_project_task', { repository: repoName, task_id });
+    const expected_revision = detail.result.revision;
+    const dedicated = await invoke('create', 'manage_project_task', { repository: repoName, task_id, operation: 'cancel', expected_revision });
+    assert.equal(dedicated.result.error, 'channel_service_task_not_owned');
+    const generic = await invoke('create', 'management_command', { operation: 'task.instructions', target: { project_id: '101', task_id },
+      arguments: { instruction: '修改验收' }, expected_revision });
+    assert.equal(generic.result.error, 'channel_service_task_not_owned');
+    const binding = groups.create.binding;
+    assert.throws(() => f.service.serviceBindings.guardCommand(binding, { source_conversation: binding.chat_id, project_id: '101',
+      operation: 'task.cancel', target: JSON.stringify({ project_id: '101', task_id }) }), { code: 'channel_service_task_not_owned' });
+  }
+  for (const operation of ['contract', 'pause', 'retry', 'cancel']) {
+    const task_id = 'blocked';
+    const { result: detail } = await invoke('write', 'read_project_task', { repository: repoName, task_id });
+    const changed = await invoke('write', 'manage_project_task', { repository: repoName, task_id, operation,
+      ...(operation === 'contract' ? { contract } : {}), expected_revision: detail.revision });
+    assert.equal(changed.result.state, 'succeeded', JSON.stringify(changed.result));
+  }
+});
+
+test('explicit group and private requests change another author’s Issue metadata with an audited source', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.bind({ level: 'comment' })).status, 200);
+  f.h.store.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='101'");
+  for (const [kind, issueEvent] of [['service', groupMessage], ['management', envelope]]) {
+    let system;
+    f.modelState.respond = async (body, res) => {
+      system = body.messages[0].content;
+      const count = observations(body).length;
+      const action = ['labels', 'assignees'][count];
+      return action ? call(res, 'github_write', { repository: repo(101), method: 'POST', path: '/issues/12/' + action,
+        body: { [action]: [count === 0 ? 'bug' : 'alice'] }, key: action }) : say(res, '已更新 #12。');
+    };
+    const row = await done(f, await post(f.h, f.id, issueEvent('给 #12 加 bug 标签，指派给 alice')));
+    assert.equal(row.state, 'completed', row.error);
+    assert.match(system, /explicit request in this (group|Feishu private chat or console conversation)/i);
+    const writes = f.h.store.all("SELECT path,actor FROM github_writes WHERE state='sent' ORDER BY path")
+      .filter(w => JSON.parse(w.actor).kind === kind);
+    assert.deepEqual(writes.map(w => w.path), ['/issues/12/assignees', '/issues/12/labels']);
+    for (const w of writes) assert.ok(JSON.parse(w.actor).source_message);
+  }
 });
 
 test('a group whose level writes Issues files one in a repository in scope with github_write; with read the tool is not offered and a forced call is refused (#381)', async t => {

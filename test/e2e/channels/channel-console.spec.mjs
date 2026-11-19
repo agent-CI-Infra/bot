@@ -123,7 +123,7 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
 test('project tasks, independent conclusions and private assistant answers remain reachable from the conversation', async ({ page }) => {
   const f = await channelFixture();
   try {
-    await repositoryAssistant(f, { project_tasks: 'read', delegation: 'allow' });
+    await repositoryAssistant(f, { project_tasks: 'create' });
     const chat = await boundGroup(f);
     f.modelState.respond = async (body, res) => {
       let message;

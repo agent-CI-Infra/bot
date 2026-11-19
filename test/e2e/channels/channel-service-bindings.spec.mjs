@@ -22,6 +22,9 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
     await expect(page.getByLabel('助手角色', { exact: true })).toHaveValue('repository-assistant');
     // A new group starts at read; the page says that everyone in the group, external members included, acts with the level (#849).
+    const tasks = page.getByRole('group', { name: '项目任务权限', exact: true });
+    await expect(tasks.getByLabel('不可访问', { exact: true })).toBeChecked();
+    await expect(tasks.getByRole('radio')).toHaveCount(4);
     await expect(page.getByLabel('只读问答', { exact: true })).toBeChecked();
     await expect(page.locator('#feishu-group-editor')).toContainText('包括没有平台账号的人和其他企业的外部成员');
     await expect(page.getByLabel('Contents', { exact: true })).toBeHidden();
@@ -39,24 +42,27 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.getByRole('checkbox', { name: 'fixture/project-101', exact: true })).toBeChecked();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-102', exact: true })).toBeChecked();
     // #1072: from comment up, a group may also start workflows ("跑一下 Nightly").
-    await expect(page.locator('.feishu-level-choices')).toContainText('并触发 Actions 工作流（例如「跑一下 Nightly」）');
+    await expect(page.getByRole('group', { name: '本群权限档位', exact: true })).toContainText('并触发 Actions 工作流（例如「跑一下 Nightly」）');
     mkdirSync('.tmp/channel-service-bindings-1072', { recursive: true });
-    await page.locator('.feishu-level-choices').evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
+    await tasks.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
     await page.screenshot({ path: `.tmp/channel-service-bindings-1072/levels-${width}.png` });
     await page.getByLabel('可派活', { exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding.getByText('权限档位：可派活', { exact: true })).toBeVisible();
-    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'write', github_issues: 'write', github_actions: 'write', github_contents: 'read' });
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'create', github_issues: 'write', github_actions: 'write', github_contents: 'read' });
     // Merging from the group (Contents write) is only an individual item, starting from the level chosen before.
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
     await expect(page.getByLabel('可派活', { exact: true })).toBeChecked();
     await page.getByLabel('高级：逐项设置', { exact: true }).check();
-    await expect(page.getByLabel('指派其他角色', { exact: true })).toHaveValue('allow');
+    await expect(tasks.getByLabel('只读 + 可新增', { exact: true })).toBeChecked();
+    await tasks.getByLabel('完全可读写', { exact: true }).check();
     await page.getByLabel('Contents', { exact: true }).selectOption('write');
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding.getByText(/^权限档位：高级：.*Contents 读写/)).toBeVisible();
-    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', github_contents: 'write' });
+    await expect(binding.getByText(/^项目任务权限：完全可读写/)).toBeVisible();
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ project_tasks: 'write', github_contents: 'write' });
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
+    await expect(tasks.getByLabel('完全可读写', { exact: true })).toBeChecked();
     await expect(page.getByLabel('高级：逐项设置', { exact: true })).toBeChecked(); await expect(page.getByLabel('Contents', { exact: true })).toHaveValue('write');
     await page.locator('#feishu-group-editor').getByRole('button', { name: '收起配置', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeHidden();

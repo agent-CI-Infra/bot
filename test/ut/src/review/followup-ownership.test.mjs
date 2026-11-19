@@ -146,7 +146,9 @@ test('plan validation requires needs and a well-formed target',t=>{
 });
 
 test('the base system prompt every role receives carries the rule',()=>{
- assert.match(systemInstructions,/Change one someone else opened \(title, body, labels, assignees, state, anything\) only when its author or a maintainer explicitly asked for that change in its body or a comment on it; a label is never such a request\./);
+ assert.match(systemInstructions,/explicit request from its author or a maintainer in its body or comments/);
+ assert.match(systemInstructions,/title, labels, assignees or open\/closed state.*write-authorized Feishu group.*Feishu private chat or console user/);
+ assert.match(systemInstructions,/cite the requesting thread or conversation/);
  assert.match(systemInstructions,/Never push to, rebase or force-push someone else's branch, including a fork's\. Do not plan or delegate work that breaks this\./);
  assert.match(systemInstructions,/Report problems in someone else's work through comments and review findings/);
 });

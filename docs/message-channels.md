@@ -157,7 +157,11 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 | --- | --- | --- |
 | 只读问答 | `read` | GitHub 各资源只读、本群会话记录；不写 GitHub，不建任务 |
 | 可评论和打标签 | `comment` | 另有 Issue、Pull Request 和 Actions 读写：用 `github_write` 评论、加删标签、指派人、新建 Issue，触发声明了 `workflow_dispatch` 的工作流（在群里说「跑一下 Nightly」，#1072）；Pull Request 读写同时允许开 PR、发检视（包括批准和要求修改）、请求检视人和更新 PR 分支。不含 Contents 写，所以不能提交文件或合并。群内任何成员还可以让助手管理本群的定时任务（`conversation_schedules`，#851），见「会话定时任务」 |
-| 可派活 | `dispatch` | 另有 `delegation: allow` 和 `project_tasks: write`：经 Manager 新建任务，查看、追加说明、修改约定、暂停、重试和取消范围内的任务 |
+| 可派活 | `dispatch` | 项目任务默认 `create`，经 Manager 新建任务，可给本群创建的任务追加说明或取消。可在同一表单选择完全可读写 |
+
+创建和编辑表单均可单独选择项目任务权限。只读问答和可评论预设默认选 `none`，可派活默认选 `create`。已有群保留保存时的权限，旧可派活群显示「完全可读写」。旧配置若把创建和管理分开授权，列表和编辑器显示「保留旧权限」及原有能力，改选四档之一后才替换。每个群的列表摘要分别显示项目范围和任务权限。
+
+有对应仓库与 GitHub 资源写权限时，群内明确指令即可更改他人 Issue 或 PR 的标题、标签、指派人和开关状态。私聊和控制台使用当前用户在该仓库的写权限。报告操作时注明请求来自哪条群消息、私聊、控制台会话或 GitHub 线程。GitHub 线程里的请求仍须来自原作者或维护者，所有写操作仍受控制面上限约束。
 
 高级模式（`custom`）逐项设置统一权限目录（见 [共用角色权限](role-pool.md#shared-role-permissions)）里的每一项，例如打开虚拟电脑、项目知识或 Contents 读写。Contents 写（提交文件、推送分支、在群里合并 PR）只在高级模式里出现，三个档位都不含。逐项设置正好等于某一档时，绑定显示为那一档。保存时只能给档位或逐项设置之一；都不给时保持原档位，新绑定从只读问答开始。项目管理员（对范围有 `config.write`）自己就能为本项目的群选择任意档位，不需要超级管理员，同一项目的不同群可以各自不同。
 
@@ -188,25 +192,24 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 - 当前会话（默认可用）：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
 - GitHub 各资源的读取权限：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
 - GitHub 资源的读写权限（`comment` 及以上，或高级模式）：`github_write`，同样带 `repository` 参数（#381）。只写绑定范围内、且配置绑定的人当前仍能写任务（`tasks.write`）的仓库，每次调用前后都重新核对；只读时不提供这个工具，模型硬调也被拒绝。key 在本轮回答内去重，写入以服务角色和本群会话记审计，细节见[共享 Agent 后端](agent-runtime.md#github-写入github_write)；
-- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和对账恢复时都重新核对绑定、来源消息、绑定的档位和授权者权限；
-- `delegation: allow`（派活，`dispatch` 档）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）。其他角色的任务访问和修改由 `project_tasks` 控制；升级前旧派活配置附带的任务控制保留为待迁移的原操作集合。见下文「派活」；
+- 项目任务权限控制查询、创建及管理工具，具体操作见下表。任务命令经 `ManagementService` 检查版本、幂等和审计，执行及恢复时重新核对来源、当前绑定和授权者权限；
 - 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)；
 - 阶段消息：`send_message`，每轮最多 10 条，每并入一条新消息再多 1 条，不受权限项控制，见下文「阶段消息与停止回答」。
 
 #### 派活
 
-群只能经项目的 Manager 间接派活：新建的任务与控制台创建的任务相同，交给项目团队、由 Manager 规划和分派，用目标项目自己的模型和设置执行；不能指定执行角色，也不能直接操作某个角色的运行。群里提交的任务命令按操作检查绑定的权限项（`dispatch` 档包含下表全部）：
+群只能经项目的 Manager 间接派活：新建的任务与控制台创建的任务相同，交给项目团队、由 Manager 规划和分派，用目标项目自己的模型和设置执行；不能指定执行角色，也不能直接操作某个角色的运行。每个群在绑定的项目范围内按下表执行。
 
-| 操作 | 需要 |
-| --- | --- |
-| 新建任务 `task.create` | `delegation: allow` |
-| 修改其他任务的约定 `task.contract` | `project_tasks: write`（旧派活附带控制保留为待迁移） |
-| 追加说明 `task.instructions`、取消 `task.cancel` | `project_tasks: write`（旧派活附带控制保留为待迁移） |
-| 暂停 `task.pause`、重试 `task.retry` | `project_tasks: write` |
+| 项目任务权限 | 查询 | 创建 | 可执行的任务变更 |
+| --- | --- | --- | --- |
+| 不可访问 `none` | 否 | 否 | 无 |
+| 只读 `read` | 列表、详情 | 否 | 无 |
+| 只读 + 可新增 `create` | 列表、详情 | 可以 | 仅对本绑定创建的任务追加说明、取消。专用工具和通用管理命令都核对 `channel_service_tasks.binding_id` |
+| 完全可读写 `write` | 列表、详情 | 可以 | 可暂停、重试、取消、追加说明或修改范围内任意任务的约定 |
 
 新建任务经 `ManagementService.submit('task.create')` 以绑定的 principal 提交：服务端读取当前项目版本作为 `expected_revision`，幂等键由群、来源消息和工具调用生成；授权者对该仓库须仍有 `config.write` 和 `tasks.write`；审计和回执与控制台一致。任务创建时记入 `channel_service_tasks`，关联到这条绑定和来源消息。任务完成、提交 PR、取消或失败时，结果发回原群；入队和发送前复核绑定仍启用、授权者仍能读该仓库以及任务的来源权限。结果消息记在本绑定的范围内，并带上当时的群围栏，之后的回答可以引用它；绑定或权限变化后不再进入上下文。
 
-任务执行期间，任务引擎每次复核来源时也检查这条绑定：绑定仍是该群当前且启用的绑定、绑定的档位仍是 `delegation: allow`、授权者对该仓库仍有 `config.write` 和 `tasks.write`；任一不满足就停止后续步骤（`channel_service_delegation_revoked` 或 `channel_service_scope_paused`）。群里建的任务还以绑定的权限项为来源上限：例如任务里的 `github_write` 要求绑定对相应资源也有写权限。
+任务执行期间，任务引擎每次复核来源时也检查这条绑定：绑定仍是该群当前且启用的绑定、绑定仍允许创建项目任务、授权者对该仓库仍有 `config.write` 和 `tasks.write`；任一不满足就停止后续步骤（`channel_service_delegation_revoked` 或 `channel_service_scope_paused`）。群里建的任务还以绑定的权限项为来源上限：例如任务里的 `github_write` 要求绑定对相应资源也有写权限。
 
 群里没有审批或人工确认：群助手在绑定的档位、绑定范围和授权者权限之内的操作直接执行，与控制台和私聊一致，见[统一管理服务与管理助手](management-agent.md#会话停止和执行)。
 

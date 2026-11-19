@@ -83,7 +83,7 @@ test('role prompts replace the whole template while common framework principles 
   assert.ok(qa.endsWith('Role instructions:\nPreserve these project-specific QA instructions.'));
   assert.ok(qa.includes("Keep work proportional to the user's requested outcome."));
   assert.ok(qa.includes('Recording nonblocking observations does not authorize another task;'));
-  assert.ok(qa.includes('Change one someone else opened (title, body, labels, assignees, state, anything) only when its author or a maintainer explicitly asked'));
+  assert.ok(qa.includes('an explicit request from its author or a maintainer in its body or comments is valid'));
 });
 
 test('editable project rules, language and work prompts survive removal of fixed entry duties', async t => {

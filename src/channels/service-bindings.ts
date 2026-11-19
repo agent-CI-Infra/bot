@@ -1,8 +1,8 @@
 import type { Store, Row } from '../storage/database.js';
 import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
-import { managementAssistant, modelGaps, repositoryAssistant, serviceItems, serviceRole } from '../service-roles/roles.js';
-import { normalizePermissions, permissionItems, permitsManagement, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
+import { managementAssistant, modelGaps, repositoryAssistant, serviceRole } from '../service-roles/roles.js';
+import { groupPermissionItems, groupTaskModes, normalizePermissions, permissionItems, permitsManagement, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
@@ -27,7 +27,7 @@ const terminal = (error: unknown) => error instanceof HttpError && error.status 
  * The three permission levels a binding offers (#849), as items of the shared permission catalog. Each level adds to the
  * previous one: read is GitHub reads plus the conversation tools every group has; comment adds github_write on Issues and
  * pull requests (comments, labels, assignees, new Issues) and on Actions (starting a workflow, #1072); dispatch adds
- * creating and managing project tasks through the Manager. Contents write, and so merging from the group, is only available
+ * creating tasks through the Manager and updating or cancelling this group's tasks. Contents write, and so merging from the group, is only available
  * as an individual item (custom).
  */
 export const bindingLevels = ['read', 'comment', 'dispatch'] as const;
@@ -35,7 +35,7 @@ export type BindingLevel = typeof bindingLevels[number] | 'custom';
 export function levelPermissions(level: typeof bindingLevels[number]): RolePermissions {
   const p = normalizePermissions({ github: 'read' }, true);
   if (level !== 'read') { p.github_issues = 'write'; p.github_pull_requests = 'write'; p.github_actions = 'write'; }
-  if (level === 'dispatch') { p.delegation = 'allow'; p.project_tasks = 'write'; }
+  if (level === 'dispatch') { p.delegation = 'allow'; p.project_tasks = 'create'; }
   return p;
 }
 /** The level a set of items equals exactly, or custom: a binding never reads as a level wider or narrower than it is. */
@@ -46,13 +46,12 @@ export function bindingLevel(value: RolePermissions): BindingLevel {
 }
 /** The stored form: normalized like a service role's items, so a migrated binding keeps the authorization fence it had. */
 const stored = (p: RolePermissions) => JSON.stringify(normalizePermissions(p, true));
-/**
- * Which management commands a group may submit. Delegation hands work to a project only through its Manager: creating a task,
- * changing its contract, adding an instruction or cancelling it, never choosing or steering a role. project_tasks write keeps
- * its own controls over other roles' tasks (pause, retry, cancel, instructions).
- */
-export function serviceCommandAllowed(permissions: RolePermissions, operation: string): boolean {
-  return permitsManagement(permissions,operation,true);
+/** Older advanced bindings could grant task creation (delegation) independently of task visibility and control.
+ * Keep those exact grants until the owner explicitly selects one of the four task modes. */
+function bindingTaskMode(p: RolePermissions) {
+  const mode = p.project_tasks;
+  if (mode === 'custom' || (p.delegation === 'allow') !== (mode === 'create' || mode === 'write')) return 'custom';
+  return mode;
 }
 
 export function serviceBindingStorage(store: Store): void {
@@ -263,6 +262,18 @@ export class ChannelServiceBindings {
     for (const capability of capabilities) authorize(scoped, capability, { project_id: project });
     return scoped;
   }
+  /** Shared by both tool interfaces and by the execution fence of persisted commands. */
+  checkOperation(binding: Row, operation: string, write: boolean, taskId?: unknown, denied = 'operation_not_allowed'): void {
+    const permissions = this.permissions(binding);
+    if (permissions.project_tasks === 'create') {
+      if (['list_tasks', 'get_task', 'task.create'].includes(operation)) return;
+      if (['task.instructions', 'task.cancel'].includes(operation)) {
+        if (typeof taskId === 'string' && this.store.get('SELECT 1 FROM channel_service_tasks WHERE task_id=? AND binding_id=?', taskId, binding.id)) return;
+        return fail(403, 'channel_service_task_not_owned');
+      }
+    }
+    if (!permitsManagement(permissions, operation, write)) fail(403, denied);
+  }
   /** A management command submitted from a group: binding, source chat, the binding's level and grantor authority must still hold. */
   guardCommand(binding: Row, command: Row, event?: ChannelEvent): void {
     const current = this.assertUsable(binding);
@@ -271,7 +282,7 @@ export class ChannelServiceBindings {
       : this.store.get('SELECT * FROM channel_chats WHERE id=?', command.source_conversation);
     if (!chat || chat.id !== current.chat_id || command.source_conversation !== chat.id) fail(403, 'channel_service_source_mismatch');
     if (event) this.employees.currentMessage(chat!, event);
-    if (!serviceCommandAllowed(this.permissions(current), command.operation)) fail(403, 'channel_service_permission_revoked');
+    this.checkOperation(current, command.operation, true, JSON.parse(command.target).task_id, 'channel_service_permission_revoked');
     const capability = commands[command.operation]?.capability ?? 'tasks.write';
     if (!this.reachable(current, command.project_id, ['tasks.read', capability])) fail(403, 'channel_service_scope_paused');
   }
@@ -407,9 +418,17 @@ export class ChannelServiceBindings {
     const base = previous ? this.permissions(previous) : levelPermissions('read');
     if (input.permissions === undefined) return base;
     const given = object(input.permissions);
-    for (const [key, mode] of Object.entries(given))
+    for (const [key, mode] of Object.entries(given)) {
+      if (key === 'project_tasks' && groupTaskModes.some(value => value === mode)) continue;
       if (!key.startsWith('legacy_') && !permissionItems.some(item => item.id === key) || !validPermissionInput(key, mode, base)) fail(400, 'channel_service_permission_invalid', 'permissions.' + key);
-    return updatePermissions(base, given as RolePermissions, true);
+    }
+    const next = updatePermissions(base, given as RolePermissions, true);
+    // Selecting a tier sets its creation grant too. Old clients that only change delegation retain their exact subset.
+    const echo = previous && given.project_tasks === base.project_tasks && given.delegation === base.delegation;
+    if (!echo && groupTaskModes.some(value => value === given.project_tasks))
+      next.delegation = given.project_tasks === 'create' || given.project_tasks === 'write' ? 'allow' : 'deny';
+    if (next.project_tasks === 'create' && next.delegation !== 'allow') next.project_tasks = 'read';
+    return next;
   }
   /**
    * Bind (or rebind) a group. The editor holds config.write over the whole new scope. The first configurer becomes the owner
@@ -482,6 +501,7 @@ export class ChannelServiceBindings {
     const role = serviceRole(this.store, binding.service_role_id), grants = this.grants(binding);
     let state = binding.enabled ? 'active' : 'disabled', error: string | null = null;
     if (binding.enabled) try { this.assertUsable(binding); } catch (e) { if (!terminal(e)) throw e; state = 'paused'; error = (e as HttpError).code; }
+    const permissions = this.permissions(binding);
     const reach = binding.enabled ? this.reach(binding) : { projects: [], paused: [] };
     if (state === 'active' && !reach.projects.length) { state = 'paused'; error = 'channel_service_scope_paused'; }
     // A model no longer authorized to a project in scope stops the group's answers until someone changes the model or scope.
@@ -494,7 +514,7 @@ export class ChannelServiceBindings {
       model_gaps: gaps,
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,
         repositories: grants.filter(g => g.scope === 'project').map(g => ({ id: g.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id })) },
-      level: bindingLevel(this.permissions(binding)), permissions: this.permissions(binding),
+      level: bindingLevel(permissions), task_mode: bindingTaskMode(permissions), permissions,
       participation: binding.participation, enabled: !!binding.enabled, revision: binding.revision, migrated: binding.migrated_from === 'channel_employee',
       owner: username(binding.owner_id), configured_by: username(binding.configured_by),
       state, error, reachable: reach.projects.map(p => p.full_name), reachable_projects: reach.projects.map(p => ({ id: p.id, full_name: p.full_name })), paused: reach.paused.map(p => p.full_name), created_at: binding.created_at, updated_at: binding.updated_at };
@@ -522,7 +542,7 @@ export class ChannelServiceBindings {
       }).map(t => ({ id: t.id, name: tenantName(this.store, t.id) })),
       projects: projects
         .map(p => ({ id: p.id, full_name: p.full_name, organization: this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', p.id)?.tenant_id ?? null })),
-      permission_items: serviceItems.map(item => ({ id: item.id, name: item.name, modes: item.modes, group: item.group, detail: item.detail })), legacy_employees: this.employees.legacy(actor) };
+      permission_items: groupPermissionItems.map(item => ({ id: item.id, name: item.name, modes: item.modes, group: item.group, detail: item.detail })), legacy_employees: this.employees.legacy(actor) };
   }
 }
 /** Only an authorization refusal means "no"; a changed authorization or a server fault still propagates. */
