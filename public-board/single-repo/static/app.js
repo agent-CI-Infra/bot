@@ -103,7 +103,7 @@
   // Branch lines: CI shows one long-lived branch at a time. PR runs
   // belong to the branch they target; sections hold the default line.
   const currentLine = (snap) => { const lines = snap?.lines || []; return lines.find((l) => l.key === STATE.line) || lines[0] || { key: '', ref: snap?.repository?.default_branch, default: true }; };
-  const lineSection = (snap, name) => { const line = currentLine(snap); return line.default ? snap.sections[name] : snap.line_sections?.[line.key]?.[name]; };
+  const lineSection = (snap, name) => { const line = currentLine(snap); return line.default ? snap?.sections[name] : snap.line_sections?.[line.key]?.[name]; };
   const lineBar = (snap) => {
     const lines = snap.lines || [], line = currentLine(snap);
     if (lines.length < 2) return '';
