@@ -60,18 +60,18 @@ test('the table names the permission state and keeps the gate, permission and bo
   await page.run('render()');
   const line = id => page.$('rows').querySelectorAll('.project-list-row').find(row => row.dataset.repositoryId === id);
   const cell = (id, label) => [...line(id).children].find(child => child.dataset.label === label);
-  const permission = id => cell(id, '权限').querySelector('[data-permission]');
+  const permission = id => cell(id, 'access').querySelector('[data-permission]');
 
   // Every row says what was checked: a read with no gap is 正常, an unread or stale one is 未检查 — never a blank column.
   assert.equal(permission('101').textContent, '正常');
   assert.equal(permission('102').textContent, '未检查');
   assert.equal(permission('103').textContent, '未检查');
   // The gate cell keeps the shared chip, so the first background check can replace it in place.
-  const gateChip = cell('101', '门禁').querySelector('[data-integration]');
+  const gateChip = cell('101', 'gates').querySelector('[data-integration]');
   assert.ok(gateChip, 'the gate cell carries data-integration even before a check runs');
   assert.equal(gateChip.textContent, '发布检查未完成');
   page.run("updateIntegrationChips([{repository_id:'101',gate_state:'live'}])");
-  assert.equal(cell('101', '门禁').querySelector('[data-integration]').textContent, '门禁已生效');
+  assert.equal(cell('101', 'gates').querySelector('[data-integration]').textContent, '门禁已生效');
   // A permission read replaces the same cell.
   rows = rows.map(row => row.id === '102' ? { ...row, access_gaps: [] } : row);
   page.run('updatePermissionBadges(' + JSON.stringify(rows) + ')');
@@ -79,7 +79,7 @@ test('the table names the permission state and keeps the gate, permission and bo
   // The board chip follows a backend change without a manual reload: the same poll that refreshes the task count.
   rows = rows.map(row => row.id === '101' ? { ...row, board_enabled: true, board_state: 'published' } : row);
   await page.run('refreshProjectActivity()');
-  assert.equal(cell('101', '看板').querySelector('[data-board-status]').textContent, '查看看板');
+  assert.equal(cell('101', 'board').querySelector('[data-board-status]').textContent, '查看看板');
 });
 
 // #869: the permission check runs in the background and used to swallow its failure. The column keeps the reading it
@@ -207,7 +207,7 @@ test('the project-admin list does not call an omitted permission reading 未检�
   await page.run('render()');
   await new Promise(r => setTimeout(r, 20));
   const line = page.$('rows').querySelector('.project-list-row');
-  const cell = [...line.children].find(child => child.dataset.label === '权限');
+  const cell = [...line.children].find(child => child.dataset.label === 'access');
   const chip = cell.querySelector('[data-permission]');
   assert.equal(chip.textContent, '—');
   assert.equal(chip.getAttribute('aria-label'), '仓库安装权限由管理员在安装列表中核对');
