@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
-import { seedInstallation } from '../../fixtures/identity-fixture.mjs';
+import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
+import { seedInstallation } from '../../../fixtures/identity-fixture.mjs';
 
 // #1039: axe is not a dependency of this repository, so these assertions are the two axe rules that found the defect,
 // written as structure: page-has-heading-one (exactly one visible h1 starts the page) and heading-order (no level is

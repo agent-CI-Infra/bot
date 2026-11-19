@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
-import { channelFixture, privateChat, registerDestination } from '../../fixtures/channel-fixture.mjs';
+import { channelFixture, privateChat, registerDestination } from '../../../fixtures/channel-fixture.mjs';
 
 // #886: both preview boxes are named with aria-label but carried no role, so they map to `generic`, where an author name
 // is prohibited — axe reports `aria-prohibited-attr` (serious) and a reader may never hear "计划预览" or
