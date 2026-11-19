@@ -2,6 +2,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { traceEvent } from '../tasks/trace.js';
+import { publicationDecision } from '../tasks/publication.js';
 import { reviewUpdateCursor, reviewUpdateLog, roundUpdatesAfter } from './sessions.js';
 
 /**
@@ -88,7 +89,9 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
     logged({ type: 'continued', round, updates: updates.length, reasons,
       detail: `检视第 ${done} 轮已发布，之后收到 ${updates.length} 条更新；任务作为第 ${round} 轮继续，重新打开上一轮的 Pi 会话（会话文件已不在时带上一轮结果的摘要），改写同一条总结评论。` });
     for (const update of updates) logged(reviewUpdateLog(update.data));
-    traceEvent(store, taskId, 'task_continued', { round, updates: updates.map(update => update.id), reasons }, null, 'framework');
+    const continued = traceEvent(store, taskId, 'task_continued', { round, updates: updates.map(update => update.id), reasons }, null, 'framework');
+    publicationDecision(store, task, 'next_round', { reason: 'published_result_has_uncovered_updates', round, covered_through: Number(task.review_update_cursor || 0),
+      pending_updates: updates.length, pending_update_ids: updates.map(update => update.id), carried_updates: updates.length, reasons, caused_by: [continued] });
     return true;
   });
 }

@@ -73,7 +73,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 压缩由 Pi 自己按它的设置进行，控制面不另做预压缩，也从不压缩空会话。发往模型的单次请求仍须同时满足 2 MiB 和所选模型的上下文上限（包含输出预留），压缩费用记在本次任务。超限的请求由 runner 按上下文溢出回给 Pi，Pi 压缩一次再重试（见 [agent-runtime.md](agent-runtime.md)）；重试后仍放不下时本次以 `agent_context_too_large` 失败，绑定随之清掉，再试时新开会话；压缩本身失败（例如生成摘要的模型请求出错）以 `agent_compaction_failed` 等待自动重试，重试时续接同一会话。两种故障的说明都带 Pi 给出的原因。
 
 检视结果记下它覆盖到哪条更新（#1100）：`finish_review` 交来的结果带 `updates_through`，即产出它的会话或角色结束时已经拿到的最后一条更新（任务的 `review_update_cursor`，在会话开始和回合之间前移），由平台填写，模型交来的值被替换。覆盖范围至少到这一轮开始时取走的更新（`round_update_cursor`），所以一轮的触发更新不会再开下一轮；别的任务的结果和 #1100 之前的结果没有这个值，就按这一轮开始时取走的更新算。之后决定什么都看结果的覆盖范围，不看游标：
-- 通过验收的检视照常发布，不因覆盖范围之后才到的更新退回模型阶段；必需阶段、验收、head 检查和写入上限照旧把关。第一次 GitHub 写入时记下发布决定：时间线一条「发布检视」，`read_publication_context` 和任务历史里一条 `publication_state`（`review_publication`），都写明结果覆盖到哪条、哪些更新留给下一轮。发布完成后游标改成结果的覆盖范围，执行释放认领后，其后的更新开始下一轮（#770，见下文「检视的下一轮」），改写同一条总结评论。
+- 通过验收的检视照常发布，不因覆盖范围之后才到的更新退回模型阶段；必需阶段、验收、head 检查和写入上限照旧把关。第一次 GitHub 写入时记下发布决定：时间线一条「发布检视」，`read_publication_context` 和任务历史里一条 `publication_state`（`review_publication`），以及一条统一的 `publication_decision`（`decision=publish`），都写明结果覆盖到哪条、哪些更新留给下一轮。Manager 的推迟（`manager_disposition` 的 continue/wait）和下一轮续接（`task_continued`）也各写一条 `publication_decision`（`decision=defer`／`next_round`），`read_publication_context` 用 `decisions` 和 `latest_decision` 统一返回这些可审计决定。发布完成后游标改成结果的覆盖范围，执行释放认领后，其后的更新开始下一轮（#770，见下文「检视的下一轮」），改写同一条总结评论。
 - 换一次尝试（自动或手动重试）不动游标：之前尝试做出的结果被再次提名时，它已经覆盖的更新不会重新算作未处理；新的会话开始时照常重读最新讨论。
 - Manager 主控的检视里，Manager 每次运行（提名、验收退回之后、发布之前）都在 `review_updates` 里收到最新 Dev 结果没覆盖的更新：编号、作者、时间、链接、摘要和是否是推送，并被明确告知不处理平台也会发布、这些更新进入下一轮；它委派的 Dev 运行返回时同样附上这份事实。要不要先让 Dev 修订由 Manager 决定。
 

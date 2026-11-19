@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {Store} from '../../../../dist/storage/database.js';
 import {Publisher} from '../../../../dist/github/publisher.js';
 import {TaskError,operationId} from '../../../../dist/agent/common.js';
-import {publicationContext} from '../../../../dist/tasks/publication.js';
+import {publicationContext,publicationDecision} from '../../../../dist/tasks/publication.js';
 import {traceSource} from '../../../../dist/tasks/trace.js';
+import {TaskRecords} from '../../../../dist/tasks/service.js';
 const sha=c=>c.repeat(40);
 function fixture(t){
  const s=new Store(':memory:',Buffer.alloc(32,3));t.after(()=>s.close());
@@ -45,4 +46,35 @@ test('external branch change provides facts and returns control instead of super
  await assert.rejects(f.publisher.branch(c),{code:'branch_head_changed',state:'needs_replan'});assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
  const ctx=await publicationContext(f.s,f.task,{},async()=>f.github);assert.equal(ctx.remote.observed_sha,sha('f'));assert.ok(ctx.remote.ref);assert.equal(ctx.candidate.branch_confirmation.sha,c.created_commit_sha);
  await assert.rejects(f.publisher.effect('mismatch','branch',{sha:'new'},async()=>({}),async()=>null,true).then(async()=>f.publisher.effect('mismatch','branch',{sha:'other'},async()=>assert.fail(),async()=>null,true)),{code:'publication_receipt_mismatch'});
+});
+
+test('publish, defer and next-round decisions stay auditable with coverage, carried updates and safe paging',async t=>{
+ const f=fixture(t);
+ f.s.run("UPDATE tasks SET kind='review.issue' WHERE id='t'");
+ const add=data=>Number(f.s.run("INSERT INTO review_updates(task_id,event_key,data) VALUES('t',?,?)",'fixture:'+Math.random(),JSON.stringify(data)).lastInsertRowid);
+ const covered=add({reason:'comment',actor:'maintainer',url:'https://github.invalid/1'}),carriedA=add({reason:'comment',actor:'maintainer',url:'https://github.invalid/2'}),carriedB=add({reason:'pushed',after:sha('e')});
+ f.s.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',covered,'t');
+ const task=f.s.get("SELECT * FROM tasks WHERE id='t'");
+ publicationDecision(f.s,task,'publish',{reason:'accepted_result_publishes_by_default',covered_through:covered,carried:[carriedA,carriedB],reasons:['comment','pushed']});
+ publicationDecision(f.s,task,'defer',{reason:'Manager wants a design answer first',manager_action:'wait',covered_through:covered,pending_update_ids:[carriedA,carriedB]});
+ publicationDecision(f.s,task,'next_round',{reason:'published_result_has_uncovered_updates',round:2,covered_through:covered,pending_update_ids:[carriedA,carriedB]});
+ const history=f.s.all("SELECT id,data FROM task_history WHERE task_id='t' AND type='publication_decision' ORDER BY id").map(row=>({id:Number(row.id),...JSON.parse(row.data)}));
+ assert.deepEqual(history.map(value=>[value.decision,value.covered_through,value.carried,value.carried_updates]),[
+  ['publish',covered,[carriedA,carriedB],2],['defer',covered,[carriedA,carriedB],2],['next_round',covered,[carriedA,carriedB],2]]);
+ assert.deepEqual([history[1].manager_action,history[1].reason,history[2].round],['wait','Manager wants a design answer first',2]);
+ assert.ok(history.every(value=>value.at));
+ // publicationContext used to return only publication_state attempts; decisions make all three choices visible without changing attempts.
+ const context=await publicationContext(f.s,task);
+ assert.deepEqual(context.attempts,[]);
+ assert.deepEqual(context.decisions.map(value=>value.decision),['publish','defer','next_round']);
+ assert.equal(context.latest_decision.decision,'next_round');
+ assert.deepEqual(context.decisions.map(value=>value.ref),history.map(value=>'task_history:'+value.id));
+ // read_task_history exposes the same decisions on the ordinary task timeline.
+ const timeline=new TaskRecords(f.s).tool('t','read_task_history',{limit:20});
+ assert.deepEqual(timeline.observations.filter(value=>value.type==='publication_decision').map(value=>value.data.decision),['publish','defer','next_round']);
+ // The existing before cursor safely pages the decisions too.
+ const older=await publicationContext(f.s,task,{before:history[1].id});
+ assert.deepEqual(older.decisions.map(value=>value.decision),['publish']);
+ assert.equal(older.latest_decision.decision,'publish');
+ assert.equal((await publicationContext(f.s,task,{before:0})).error,'invalid_publication_cursor');
 });
