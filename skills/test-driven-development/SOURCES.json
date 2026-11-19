@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/obra/superpowers",
+  "revision": "22f0b463e7a5e579904dd6211a520321035526f7",
+  "license": "MIT",
+  "references": [
+    "skills/test-driven-development/SKILL.md"
+  ],
+  "adaptation": "Concise Bot-specific adaptation of the referenced Superpowers skill. The procedure is unchanged from the experimental version; the upstream link is pinned."
+}
