@@ -1,17 +1,20 @@
 import { test, expect } from '@playwright/test';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 
-// #527 slice: global settings → installation archive (list and detail). The page is a dictionary consumer now, so an
-// English console names the archive in English. Every case reads the same route at each width and counts the CJK words
-// that survive the switch: one Chinese label left behind is the defect this spec guards, and the width loop keeps a
-// reading taken at the default 1280x720 from standing in for the narrow layout.
+// #527 slice: global settings → installation archive (list and detail), together with the App permission check those
+// pages draw once the App that owns an installation is registered with credentials. The archive and the widget both read
+// static/i18n.js now, so an English console names them in English. Every case reads the same route at each width and
+// counts the CJK words that survive the switch: one Chinese label left behind is the defect this spec guards, and the
+// width loop keeps a reading taken at the default 1280x720 from standing in for the narrow layout.
 const viewports = [[1440, 900], [768, 1024], [390, 844]];
 const at = '2026-11-19T09:00:00Z';
-// App 999 is deliberately not a registered account, so the archive shows its own dictionary text and not a shared
-// permission-check widget that belongs to another page.
+// App 123 is the account identityFixture registers with a private key, so the archive draws the shared App permission
+// check widget (static/onboarding/permissions.js) on the list card and in the detail's App section. The widget is part of
+// this slice: its button, its report and the feature names inside it are the words an English console must not leave in
+// Chinese.
 const archive = {
   target: { login: 'fixture-org', id: 77, type: 'Organization' },
-  installation: { github_host: 'github.com', app_id: 999, installation_id: 77 },
+  installation: { github_host: 'github.com', app_id: 123, installation_id: 77 },
   permissions: { contents: 'read' },
   status: 'active', repository_selection: 'selected', completeness: 'complete', last_success_at: at,
   projection_version: 4, scope_version: 2, permissions_version: 1,
@@ -19,15 +22,30 @@ const archive = {
     requester: { login: 'fixture-requester', id: 6 }, approval: { label: 'fixture-approver' }, history_missing: false }
 };
 const detail = {
-  target: { login: 'fixture-org' }, installation: { installation_id: 77, app_id: 999 },
+  target: { login: 'fixture-org' }, installation: { installation_id: 77, app_id: 123 },
   status: 'active', repository_selection: 'selected', completeness: 'complete', last_success_at: at, execution_blocked: false,
   projection_version: 4, scope_version: 2, permissions_version: 1, permissions: { contents: 'read' },
   evidence: { sender: { login: 'fixture-sender', id: 5 }, requester: { login: 'fixture-requester', id: 6 },
     approval: { label: 'fixture-approver' }, history_missing: false }
 };
+// The App check reads the App definition from GitHub, so the fixture answers with a report that exercises every branch:
+// two missing baseline permissions, two missing events, one permission and one event that only some features need.
+const report = {
+  ok: false,
+  app: {
+    slug: 'fixture-app', owner: 'fixture',
+    missing: [{ permission: 'actions', required: 'write', current: null }, { permission: 'statuses', required: 'write', current: 'read' }],
+    missing_events: ['issue_comment', 'pull_request_review'],
+    feature_gaps: [{ kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
+      { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }],
+    settings_url: 'https://github.com/organizations/fixture/settings/apps/fixture-app/permissions'
+  }
+};
 // The archive endpoints answer from this fixture: the list, one snapshot, its repositories and its deliveries. A sync
-// request is accepted without a GitHub call, so the button's own text is what the case reads.
+// request is accepted without a GitHub call, so the button's own text is what the case reads. The permission check is
+// answered by `report` for the same reason: the widget's words, not GitHub's, are under test.
 async function stubArchive(page) {
+  await page.route('**/api/accounts/*/permissions', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(report) }));
   await page.route('**/api/installations/archive**', route => {
     const url = new URL(route.request().url()), path = url.pathname, send = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     if (route.request().method() === 'POST') return send({ ok: true });
@@ -81,6 +99,17 @@ test('English 界面：安装档案列表不再出现中文', async ({ page }) =
     await expect(secondary).toContainText('Installations');
     await expect(secondary).toContainText('Connections and channels');
     await expect(secondary).not.toContainText('安装档案');
+    // The App permission check drawn on the card is the same widget the account page uses: its button and the report it
+    // opens are English, including the permission, event and feature names GitHub does not translate itself.
+    const widget = panel(page).locator('.permission-check').first();
+    await widget.getByRole('button', { name: 'Check permissions and events', exact: true }).click();
+    const result = widget.locator('.permission-result');
+    await expect(result).toContainText('Actions: set to "Read and write" (currently "No access")');
+    await expect(result).toContainText('Subscribe to events: tick Issue comment, Pull request review (without it, comments, reviews and review replies do not trigger a review)');
+    await expect(result).toContainText('Workflows: set to "Read and write" (currently "No access"); Confirmed CI changes need it');
+    await expect(result).toContainText('Subscribe to events: tick Workflow run; Actions failure analysis need it. This is an event subscription, not the Workflows permission');
+    await expect(result).toContainText("Open the App's Permissions & events");
+    expect(cjkWords(await result.innerText()), 'Chinese text left in the English permission report').toEqual([]);
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -89,7 +118,7 @@ test('English 界面：安装档案详情不再出现中文', async ({ page }) =
   page.on('pageerror', error => errors.push(error.message));
   try {
     await stubArchive(page);
-    await signIn(page, f, '/#/settings/installations/github.com/999/77');
+    await signIn(page, f, '/#/settings/installations/github.com/123/77');
     await expect(panel(page).locator('table.rule-table')).toHaveCount(2);
     await switchToEnglish(page, 'Installation archive detail');
     await expect(panel(page).locator('table.rule-table')).toHaveCount(2);
@@ -103,7 +132,11 @@ test('English 界面：安装档案详情不再出现中文', async ({ page }) =
     for (const word of ['Status', 'Scope', 'Completeness', 'Last successful sync', 'Execution', 'Repository', 'Private', 'Re-sync']) {
       await expect(panel(page)).toContainText(word);
     }
-    // The control keeps working in English: the queued notice is translated too.
+    // The App section's check opens an English report here too, and the control that queues a re-sync still works.
+    const widget = panel(page).locator('.permission-check').first();
+    await widget.getByRole('button', { name: 'Check permissions and events', exact: true }).click();
+    await expect(widget.locator('.permission-result')).toContainText('Actions: set to "Read and write" (currently "No access")');
+    expect(cjkWords(await widget.locator('.permission-result').innerText()), 'Chinese text left in the English detail report').toEqual([]);
     await panel(page).getByRole('button', { name: 'Re-sync' }).click();
     await expect(panel(page)).toContainText('queued');
     expect(errors).toEqual([]);
@@ -123,10 +156,22 @@ test('中文界面：安装档案的原文与今天逐字相同', async ({ page 
       }
       expect(await panel(page).innerText(), `a raw dictionary key is visible at ${width}px`).not.toContain('settings.installations.');
     }
+    // The Chinese widget keeps its own words, byte for byte, including the punctuation of the report.
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(f.h.admin + '/#/settings/installations/github.com/999/77');
+    const widget = panel(page).locator('.permission-check').first();
+    await widget.getByRole('button', { name: '检查权限和事件订阅', exact: true }).click();
+    const result = widget.locator('.permission-result');
+    await expect(result).toContainText('Actions：改为「Read and write」（当前「No access」）');
+    await expect(result).toContainText('Subscribe to events：勾选 Issue comment、Pull request review（缺少时评论、检视或检视回复不会触发检视）');
+    await expect(result).toContainText('App 所有者打开 Permissions & events，把下列各项改好，然后点一次「Save changes」。');
+    await expect(result).toContainText('Workflows：改为「Read and write」（当前「No access」），经确认的 CI 改动需要');
+    await expect(result).toContainText('Subscribe to events：勾选 Workflow run，Actions 失败分析需要。这是事件订阅，不是 Workflows 权限');
+    await expect(result).toContainText('打开 App 的 Permissions & events');
+    await expect(result).toContainText('改完后点「重新检查」。');
+    await page.goto(f.h.admin + '/#/settings/installations/github.com/123/77');
     await expect(panel(page).locator('table.rule-table')).toHaveCount(2);
     for (const word of ['安装档案详情', '状态', '重新同步', '最近安装事件']) await expect(panel(page)).toContainText(word);
+    await expect(panel(page).getByRole('button', { name: '检查权限和事件订阅', exact: true })).toBeVisible();
     expect(await panel(page).innerText()).not.toContain('settings.installations.');
     expect(errors).toEqual([]);
   } finally { await f.close(); }
