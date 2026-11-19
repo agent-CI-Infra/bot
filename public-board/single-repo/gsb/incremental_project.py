@@ -7,7 +7,8 @@ from collections import Counter
 from datetime import timedelta
 
 from .board import BoardStore
-from .collectors import Context, collect_ci, summarize_issues, summarize_prs, days_between
+from .ci_lanes import ZONE, build_lanes, is_scheduled
+from .collectors import parse_ts, Context, collect_ci, summarize_issues, summarize_prs, days_between
 from .history import read_json, encode
 from .lines import PR_EVENTS, canonical_branch, configured_lines, line_of, target_of
 from .work_trend import daily_trend
@@ -16,7 +17,8 @@ from .sync import stamp
 
 
 # 2: before #938 (lanes, gates, tests and coverage). 3: generic sections only. 4: scheduled runs and their results.
-SCHEMA_VERSION = 4
+# 5: calendar of Actions runs, grouped by trigger.
+SCHEMA_VERSION = 5
 
 
 def _stored_ci(history, index):
@@ -48,13 +50,12 @@ def _failing_jobs(history, rows, limit=100):
     return {"top_failed_jobs": [{"name": name, "count": count} for name, count in failed.most_common(3)], "jobs_inspected": inspected}
 
 
-def _scheduled(history, rows, limit=60):
+def _scheduled(history, rows, scheduled_workflows, limit=60):
     """Each scheduled workflow with the latest runs it made on schedule or by hand, oldest first, and what each
     run reported (results.py): the metrics the board charts. Metric names are listed newest run first."""
-    scheduled = {row.get("workflow_id") for row in rows if row.get("event") == "schedule"}
     by_workflow = {}
     for row in rows:
-        if row.get("workflow_id") in scheduled and row.get("event") in ("schedule", "workflow_dispatch") and row.get("status") == "completed":
+        if is_scheduled(row, scheduled_workflows) and row.get("status") == "completed":
             by_workflow.setdefault(row["workflow_id"], []).append(row)
     out = []
     for workflow, chosen in by_workflow.items():
@@ -88,8 +89,10 @@ def build_snapshot(sync):
     lines = configured_lines(sync.settings, meta["default_branch"])
     # A successful poll with no changed records does not manufacture a new snapshot. Daily aging and
     # health metadata still get a regular refresh, and an older layout is rebuilt once.
+    generated = parse_ts(old.get("generated_at"))
     if (not history.changed and old.get("schema_version") == SCHEMA_VERSION and old.get("lines") == lines
-            and old.get("sync") == progress and old.get("generated_at", "")[:10] == stamp(midnight)[:10]):
+            and old.get("sync") == progress and generated and generated.date() == midnight.date()
+            and generated.astimezone(ZONE).date() == sync.now.astimezone(ZONE).date()):
         return old
     cfg = sync.cfg
     cfg.stale_days = int(sync.settings.get("stale_days", 30))
@@ -154,16 +157,23 @@ def build_snapshot(sync):
         supplements = {"day": day, "ops": supplements["ops"]}
         state["supplements_changed"] = True
         history.changed[".sync/supplements.json"] = encode(supplements)
+    # A finished backfill covers the repository from its creation. While it is still
+    # paging backwards, earlier days are unknown, including when no run has arrived.
+    collected_since = (meta["created_at"] if progress["backfill"].get("runs", {}).get("complete")
+                       else min((row["created_at"] for row in index.values() if row.get("created_at")), default=None))
     views = {}
     for line in lines:
         key = line["key"]
         line_meta = {**meta, "default_branch": line["ref"]}
         line_index = {ident: project_run(row) for ident, row in index.items() if run_line[ident] == key}
         ci = collect_ci(Context(_stored_ci(history, line_index), cfg, midnight, line_meta))
+        rows = line_index.values()
+        scheduled_workflows = {r["workflow_id"] for r in rows if r.get("event") == "schedule" and r.get("workflow_id") is not None}
+        ci["lanes"] = build_lanes(rows, meta["default_branch"], scheduled_workflows, sync.now, collected_since)
         for workflow in ci["workflows"]:
             workflow.update(_failing_jobs(history, [row for row in line_index.values() if row.get("workflow_id") == workflow["id"]]))
         runs = [project_run(row) for row in history.select("runs", lambda r, key=key: run_line.get(r["id"]) == key and r["attempt"] == index[r["id"]]["attempt"], limit=100)]
-        views[key] = {"ci": wrap(ci), "runs": runs, "scheduled": wrap({"workflows": _scheduled(history, list(line_index.values()))})}
+        views[key] = {"ci": wrap(ci), "runs": runs, "scheduled": wrap({"workflows": _scheduled(history, rows, scheduled_workflows)})}
     main = views[lines[0]["key"]]
     runs = main["runs"]
     releases = history.select("releases", limit=30)

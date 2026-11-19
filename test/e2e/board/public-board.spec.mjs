@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { publicBoardFixture, scheduledNightly } from '../../fixtures/public-board-fixtures.mjs';
+import { calendarRuns, publicBoardFixture, scheduledNightly } from '../../fixtures/public-board-fixtures.mjs';
 import { mkdirSync } from 'node:fs';
 
 test.use({ locale: 'zh-CN' });
@@ -59,7 +59,6 @@ test('public dashboard and repository board show generic data without console lo
     // Each workflow's duration spread and the job that fails most often.
     const nightlyRow = page.locator('#tab-ci tr', { hasText: 'Nightly' }).first();
     await expect(nightlyRow).toContainText('unit ×1');
-    await expect(page.locator('#tab-ci')).not.toContainText('分层历史');
     await expect(page.locator('#tab-ci')).not.toContainText('质量门禁');
     // The scheduled workflow's runs: the first reported metric over the runs, a ring for the failed one, the runs below.
     const scheduled = page.locator('#tab-ci .card', { has: page.locator('[data-sched-chart]') });
@@ -74,6 +73,53 @@ test('public dashboard and repository board show generic data without console lo
     await capture('board-ci', page.locator('#tab-ci [data-sched-chart]'));
     await capture('board-ci-workflows', page.locator('#tab-ci h2', { hasText: 'Workflow 健康' }));
     expect(errors).toEqual([]);
+  } finally { for (const fn of cleanup.reverse()) await fn(); }
+});
+
+test('the Actions calendar shows run details and keeps the date a reader scrolled to', async ({ page }, testInfo) => {
+  const cleanup = [], f = await publicBoardFixture({ after: fn => cleanup.push(fn) });
+  try {
+    f.state.failRunBackfill = true;
+    calendarRuns(f.state);
+    await f.hook('run-calendar'); await f.boards.drain();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.webhook + '/boards/');
+    await page.locator('a.card').click();
+    await page.locator('[data-tab="ci"]').click();
+    const calendar = page.getByRole('table', { name: '近 30 天运行记录' });
+    await expect(calendar.getByRole('rowheader')).toHaveText(['PR', '合并队列', 'Daily', '版本', '主干', '其他']);
+    const latestAttempt = calendar.getByRole('link', { name: /Build packages · pull_request/ });
+    await expect(latestAttempt).toHaveText('45s');
+    await expect(latestAttempt).toHaveClass(/success/);
+    await latestAttempt.hover();
+    await expect(page.locator('#tooltip')).toContainText('分支 topic · bcdef01');
+    await latestAttempt.focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(latestAttempt).toBeFocused();
+    await expect(page.locator('#tooltip')).toContainText('23:59:00（Asia/Shanghai）');
+    await expect(calendar.locator('.ci-run.failure').first()).toBeVisible();
+    await expect(calendar.locator('td.uncollected').first()).toBeVisible();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.locator('.ci-calendar').scrollIntoViewIfNeeded();
+      await page.mouse.move(1, 1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`calendar-${width}.png`) });
+      await latestAttempt.hover();
+      await expect(page.locator('#tooltip')).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath(`calendar-detail-${width}.png`) });
+    }
+    const scroll = page.locator('.ci-lanes-scroll');
+    await expect.poll(() => scroll.evaluate(el => el.scrollWidth > el.clientWidth && el.scrollLeft === 0)).toBe(true);
+    await scroll.hover();
+    await page.mouse.wheel(-200, 0);
+    await expect.poll(() => scroll.evaluate(el => el.scrollLeft)).toBeLessThan(-50);
+    const away = await scroll.evaluate(el => el.scrollLeft);
+    const oldTable = await calendar.elementHandle();
+    await page.getByRole('button', { name: '刷新视图' }).click();
+    await expect.poll(() => oldTable.evaluate(el => el.isConnected)).toBe(false);
+    expect(await scroll.evaluate(el => el.scrollLeft)).toBeCloseTo(away, 0);
   } finally { for (const fn of cleanup.reverse()) await fn(); }
 });
 

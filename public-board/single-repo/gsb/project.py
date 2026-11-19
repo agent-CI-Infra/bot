@@ -34,7 +34,7 @@ def slim_run(run, rules):
             "check_suite_id": run.get("check_suite_id")}
 
 
-def _seconds(start, end):
+def duration_seconds(start, end):
     try:
         return max(0, int((datetime.fromisoformat(end.replace("Z", "+00:00")) - datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()))
     except (AttributeError, ValueError):
@@ -47,7 +47,7 @@ def run_details(gh, cfg, run):
     try:
         jobs = gh.paginate(base + f"/attempts/{run['attempt']}/jobs", key="jobs", max_pages=2)
         run["jobs"] = [{"name": j.get("name"), "status": j.get("status"), "conclusion": j.get("conclusion"),
-                        "url": j.get("html_url"), "duration_s": _seconds(j.get("started_at"), j.get("completed_at")),
+                        "url": j.get("html_url"), "duration_s": duration_seconds(j.get("started_at"), j.get("completed_at")),
                         "failed_steps": [s["name"] for s in j.get("steps", []) if s.get("conclusion") == "failure"]}
                        for j in jobs]
         run["jobs_status"] = "available"
