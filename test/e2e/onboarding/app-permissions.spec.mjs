@@ -6,6 +6,10 @@ import { generateKeyPairSync } from 'node:crypto';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { InstallationSync } from '../../../dist/app/installations.js';
 
+// #527: an English console must leave no Chinese word in the permission report, so the case counts the CJK words that
+// survive the language switch instead of trusting one or two labels.
+const cjkWords = text => text.match(/[^\s]*[\u4e00-\u9fff][^\s]*/g) || [];
+
 test('App 定义只在机器人账号检查，各功能的安装权限和事件缺口在项目行、缺口对话框与同步结论中显示', async ({ page }) => {
   const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
   const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
@@ -149,6 +153,23 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     failInstallations = true; await sync.click();
     await expect(message).toContainText('部分账号同步失败：Department App（github_http_503）');
     await expect(message).toContainText('因此还不能判断全部安装的权限和事件订阅是否正常。');
+    // #527: the same widget is drawn on the account row and in the wizard. Its words come from static/i18n.js now, so an
+    // English console reads the button, the report I/O and the feature names in English — the App definition is put back
+    // to the gap state so the report keeps exercising its branches.
+    app.permissions = { ...full, statuses: 'read', actions: undefined }; app.events = ['issues', 'pull_request'];
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(h.admin + '/#/settings/accounts');
+    await page.getByRole('button', { name: 'English' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    const englishRow = page.locator('.row', { hasText: 'Department App' });
+    await englishRow.getByRole('button', { name: 'Check permissions and events', exact: true }).click();
+    const englishResult = englishRow.locator('.permission-result');
+    await expect(englishResult).toContainText('Actions: set to "Read and write" (currently "No access")');
+    await expect(englishResult).toContainText('Subscribe to events: tick Issue comment, Pull request review, Pull request review comment');
+    await expect(englishResult).toContainText('Workflows: set to "Read and write" (currently "No access"); Confirmed CI changes need it');
+    await expect(englishResult).toContainText('This is an event subscription, not the Workflows permission');
+    await expect(englishResult).toContainText("Open the App's Permissions & events");
+    expect(cjkWords(await englishResult.innerText()), 'Chinese text left in the English permission report').toEqual([]);
     expect(errors).toEqual([]);
   } finally { await h.stop(); await new Promise(resolve => github.close(resolve)); }
 });
