@@ -234,6 +234,7 @@ test('keyboard users reach the directory, the file, its history and restore in o
         if(!current){await focusEntry(start,scope);continue;}out.push(current);}
       return out;};
     // Tab from the workspace's first control reaches the directory entry, and Enter opens that directory.
+    await expect(page.locator('.knowledge-tree').getByRole('button',{name:'目录 手册',exact:true})).toBeVisible();
     await tabTo('全部文件','目录 手册');
     await page.keyboard.press('Enter');
     await expect(panel(page).getByRole('button',{name:'笔记.md',exact:true})).toBeVisible();
