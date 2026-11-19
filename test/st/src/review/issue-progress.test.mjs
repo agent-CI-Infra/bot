@@ -140,6 +140,24 @@ test('an existing bot PR marks its source Issue even with no in-progress label; 
   assert.equal(f.row(task.id).final, 1);
 });
 
+test('a failing comment edit does not delay the completion label or make retries add it again', async t => {
+  const f = await fixture(t), task = f.task();
+  startProgress(f.h.store, task, f.issue);
+  await settleProgress(f.h.store, task.id, f.github);
+  f.set(task.id, { status: 'pr_opened', result: JSON.stringify({ pr_number: 12, pr_url: 'https://github.invalid/pull/12' }) });
+  const request = f.github.request.bind(f.github);
+  f.github.request = async (method, ...args) => {
+    if (method === 'PATCH') throw new TaskError('github_http_403');
+    return request(method, ...args);
+  };
+  assert.equal(await settleProgress(f.h.store, task.id, f.github), false);
+  assert.deepEqual(f.state.labels, ['bot-developed']);
+  const at = f.state.requests.length;
+  f.github.request = request;
+  assert.equal(await settleProgress(f.h.store, task.id, f.github), true);
+  assert.deepEqual(f.state.requests.slice(at), [`PATCH /repos/fixture/project-101/issues/comments/${f.row(task.id).comment_id}`]);
+});
+
 test('a retry after a lost answer finds the comment it made instead of creating a second one, and failures wait longer each time', async t => {
   const f = await fixture(t), task = f.task();
   startProgress(f.h.store, task, f.issue); f.state.repositoryLabels.push('bot-developing');

@@ -207,17 +207,25 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
   const row = store.get('SELECT * FROM issue_development_progress WHERE task_id=?', taskId), task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
   if (!row || !task) return true;
   const now = state(task), body = renderProgress(row, task), digest = sha(body), number = Number(row.number);
-  const developing = developingIssueLabel(String(row.label ?? ''));
-  const wanted = !!developing && !now.pr && !now.stopped;
-  const markDeveloped = !!now.pr && (row.pending || row.settled_status !== now.status);
+  const wanted = !now.pr && !now.stopped ? developingIssueLabel(String(row.label ?? '')) : null;
+  const changeDeveloping = !!wanted !== !!row.label_on;
+  const markDeveloped = !!now.pr && row.settled_status !== now.status;
   const update = (fields: Record<string, unknown>) => store.run(`UPDATE issue_development_progress SET ${Object.keys(fields).map(key => key + '=?').join(',')},updated_at=? WHERE task_id=?`,
     ...Object.values(fields) as any[], new Date().toISOString(), taskId);
   try {
-    const github = wanted !== !!row.label_on || digest !== row.body_sha || markDeveloped ? typeof client === 'function' ? await client() : client : null;
-    if (github && wanted !== !!row.label_on) {
-      if (wanted && developing) await addIssueLabel(github, number, developing);
+    const github = changeDeveloping || digest !== row.body_sha || markDeveloped ? typeof client === 'function' ? await client() : client : null;
+    if (github && changeDeveloping) {
+      if (wanted) await addIssueLabel(github, number, wanted);
       else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(row.label)}`), undefined, true);
       update({ label_on: wanted ? 1 : 0 });
+    }
+    // The PR label and the linked comment can succeed independently. Keep the row pending until both are on GitHub.
+    let labelError: unknown;
+    if (github && markDeveloped) {
+      try {
+        await addIssueLabel(github, number, developedLabel);
+        update({ settled_status: now.status, pending: 1 });
+      } catch (error) { labelError = error; }
     }
     if (github && digest !== row.body_sha) {
       const marker = `<!-- dept-bot:development-status:${taskId} -->`;
@@ -233,8 +241,7 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
         update({ comment_id: String(created.id), posting: 0, body_sha: digest });
       }
     }
-    // A failed label write leaves the PR and its linked comment intact. The sweep retries the additive GitHub call.
-    if (github && markDeveloped) await addIssueLabel(github, number, developedLabel);
+    if (labelError) throw labelError;
     update({ settled_status: now.status, pending: 0, final: now.ended ? 1 : 0, failures: 0, next_at: 0, error: null });
     return true;
   } catch (error) {
