@@ -53,7 +53,8 @@ test('notes are shared by task workspaces, commands keep their checkout cwd, and
     assert.equal((await run(task,{type:'workspace_read',path:'../notes/docs/nested.txt'})).content,'nested bytes');
     await run(task, { type: 'workspace_context', path: 'nested/object.json', base64: 'eA==', offset: 0 });
     assert.equal((await run(task, { type: 'workspace_read', path: '../context/nested/object.json' })).content, 'x');
-    await assert.rejects(run(task, { type: 'workspace_read', path: '../context/../notes/repository.md' }), /invalid_path/);
+    assert.equal((await run(task, { type: 'workspace_read', path: '../context/../notes/repository.md' })).content, mode);
+    await assert.rejects(run(task, { type: 'workspace_read', path: '../../../../etc/passwd' }), /invalid_path/);
   }
 });
 

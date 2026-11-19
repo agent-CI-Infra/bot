@@ -14,24 +14,21 @@ export const builtinKinds: Record<string, RoleKind> = { coordinator:'controller'
 export const roleKind = (id: string): RoleKind => Object.hasOwn(builtinKinds, id) ? builtinKinds[id]! : 'observer';
 
 /**
- * Environment profiles describe where a role run executes. The first four share the project computer (directories of one
- * container, one uid). The isolated profiles provision a container for each run (see src/projects/run-environment.ts);
- * admission requires a harness that executes inside it and the manager's inspection of that container.
+ * Environment profiles describe where a role run executes on the project computer. Roles within the same task share the
+ * task workspace by default; concurrent tasks and explicit branch switches use on-demand git worktrees.
  */
 const environments = [
   { id: 'control-session', kinds: ['controller'], workspace: 'empty', repository: false, description: 'Dedicated controller session; native tools follow the role execution permissions.' },
-  { id: 'task-workspace', kinds: ['writer'], workspace: 'task', repository: true, description: 'The task workspace that holds the candidate.' },
-  { id: 'candidate-checkout', kinds: ['observer'], workspace: 'disposable', repository: true, description: 'A disposable checkout of the fixed candidate snapshot.' },
-  { id: 'evaluation-checkout', kinds: ['evaluator'], workspace: 'disposable', repository: true, description: 'A fresh checkout of the exact candidate for independent acceptance.' },
-  { id: 'isolated-workspace', kinds: ['writer'], workspace: 'run', repository: true, isolation: 'run_container', description: 'A container of its own for each run: own HOME, processes, tmp, caches and network identity; writes only its own tmpfs workspace, seeded from the fixed source.' },
-  { id: 'isolated-candidate', kinds: ['observer', 'evaluator'], workspace: 'run', repository: true, isolation: 'run_container', description: 'A container of its own for each run, built from the fixed candidate; no developer volume is mounted.' }
+  { id: 'task-workspace', kinds: ['writer'], workspace: 'task', repository: true, description: 'The shared task workspace that holds the candidate.' },
+  { id: 'candidate-checkout', kinds: ['observer'], workspace: 'task', repository: true, description: 'Shared task workspace (or on-demand git worktree) of the candidate.' },
+  { id: 'evaluation-checkout', kinds: ['evaluator'], workspace: 'task', repository: true, description: 'Shared task workspace for lightweight gatekeeper QA.' }
 ] as const;
 export const environmentProfiles = environments.map(e => ({ ...e, version: version(e) }));
 
 /** Configured per-run limits replace entry defaults; cumulative limits use their own units. */
 const budgets = [
-  { id: 'entry-default', description: 'The entry point\'s trusted turn and output limits.' },
-  { id: 'bounded', description: 'Explicit per-run max_turns (4-256) and max_output_tokens (256-32768); omitted values use entry defaults.' },
+  { id: 'entry-default', description: 'The entry point\'s trusted turn, output and command timeout limits.' },
+  { id: 'bounded', description: 'Explicit per-run max_turns (4-256), max_output_tokens (256-32768) and command_timeout_seconds (10-7200); omitted values use entry/project defaults.' },
   // Cumulative over every run of the role in its task (recoveries, attempts, delegations, sub-agents); see src/roles/role-run.ts.
   { id: 'metered', description: 'bounded limits plus cumulative max_total_tokens, max_model_requests, max_tool_calls, max_wall_seconds for the role within its task. Unknown usage is never counted as zero.' }
 ] as const;

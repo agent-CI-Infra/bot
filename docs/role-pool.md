@@ -118,7 +118,7 @@ A registered driver can declare `session: task_records` when it cannot continue 
 
 Role observations tolerate an evidence string by wrapping the unchanged text in a one-element evidence array, with a normalization event. Other submission-format errors get corrections within the existing run/resource budget in either harness; every third same-kind rejection is retained for Manager review, with no fixed correction-count stop, reusing existing observations. No acceptance verdict or completion boolean is weakened. Failed/interrupted assignments are marked accordingly; a resumed role is offered its prior failed submission source so it can repair packaging without repeating unchanged checks.
 
-See [Harness Runtime](harness-runtime.md) for session lifecycle and container CLI executors, and [RoleRun protocol](role-run.md) for per-run protocol, admission, isolated environment profiles (`isolated-workspace`, `isolated-candidate`) and the cumulative `metered` budget. Native, Process, Pi, Claude Code and Codex are supported, and independent QA still evaluates role results.
+See [Harness Runtime](harness-runtime.md) for session lifecycle and container CLI executors, and [RoleRun protocol](role-run.md) for per-run protocol, admission, shared project-computer workspaces (with on-demand `git worktree` isolation for concurrent tasks) and the cumulative `metered` budget. Native, Process, Pi, Claude Code and Codex are supported, and lightweight gatekeeper QA checks external deliveries in place.
 
 ### Parallel integration and durable merge requests (#183)
 

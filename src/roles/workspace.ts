@@ -1,4 +1,3 @@
-import { computerResultOwner } from '../../runner/result-owner.mjs';
 import { latestRoleCandidate } from './schedule.js';
 import { eventHistory, historyOrder } from './role-run.js';
 import {AsyncLocalStorage} from 'node:async_hooks';
@@ -8,34 +7,7 @@ import {traceEvent} from '../tasks/trace.js';
 import {stop} from '../agent/common.js';
 import type {Row} from '../storage/database.js';
 import type {RoleRunOptions} from './run.js';
-import {environmentProfiles} from './catalog.js';
-import {RunEnvironmentClient,provisionRunEnvironment,copyCommit} from '../projects/run-environment.js';
-/**
- * A container of its own for one run of a role whose environment profile requires run isolation. It is seeded with the
- * fixed snapshot of the task workspace by copying that commit's objects, never by mounting the workspace, and its tree is
- * verified. The adapter receives {client, run_id}; the manager's inspection decides run_isolation in admission.
- */
-export function isolatedRunEnvironment(workspace:Workspace,given?:RunEnvironmentClient):NonNullable<RoleRunOptions['prepare']>{
- return async(instance,resolved)=>{
-  const profile=environmentProfiles.find(e=>e.id===resolved.snapshot.environment.id) as {isolation?:string}|undefined;
-  if(profile?.isolation!=='run_container')return;
-  // Built only when a profile needs it: most runs never touch the run-environment API.
-  const client=given??new RunEnvironmentClient(workspace.manager,String(workspace.task.repository_id));
-  const id=randomId(),kind=resolved.snapshot.kind;
-  workspace.store.trajectories.results.directory(computerResultOwner('run',id));
-  const env=await provisionRunEnvironment(client,{run_id:id,task_id:String(workspace.task.id),lease_epoch:0,profile:kind==='writer'?'writer':'observer',network:'none'});
-  traceEvent(workspace.store,workspace.task.id,'role_run_environment',{role:instance.role,instance_id:instance.id,environment_id:id,verified:env.facts.verified,violations:(env.facts.detail as any)?.violations??[],container:(env.facts.detail as any)?.container??null,limits:(env.facts.detail as any)?.limits??null},workspace.task.trace_run_id);
-  if(!env.facts.verified)return {environment:{facts:env.facts,handle:null}};
-  try{
-   const snapshot=kind==='writer'?await workspace.artifact('role-source:'+randomId()):await observerSnapshot(workspace);
-   const seeded=await copyCommit({call:request=>workspace.deliver(request)},client,id,snapshot.local_sha,snapshot.tree_sha);
-   traceEvent(workspace.store,workspace.task.id,'role_candidate',{role:instance.role,version:seeded.tree_hash,sha:seeded.commit_sha,workspace_id:id,environment:'run:'+id},workspace.task.trace_run_id);
-  }catch(error){await env.release();throw error;}
-  // Only a writer's environment produces a candidate snapshot; copy its commit back to the task workspace before release.
-  const snapshot=kind==='writer'?async()=>{const s=await client.call(id,{type:'workspace_finalize'});if(!s?.tree_sha||!s?.local_sha)return null;await copyCommit({call:request=>client.call(id,request)},{call:(_run:string,request:Record<string,unknown>)=>workspace.deliver(request)} as any,String(workspace.task.workspace_id),s.local_sha,s.tree_sha);return {tree_sha:s.tree_sha,local_sha:s.local_sha};}:undefined;
-  return {environment:{facts:env.facts,handle:{client,run_id:id},...(snapshot?{snapshot}:{})},containerOptions:{manager:workspace.manager,egress:false},release:env.release};
- };
-}
+
 async function observerSnapshot(workspace:Workspace) {
  const pinned=latestRoleCandidate(workspace.store,workspace.task.id);
  if(workspace.store.get('SELECT 1 FROM task_stage_plans WHERE task_id=?',workspace.task.id)){
@@ -46,21 +18,43 @@ async function observerSnapshot(workspace:Workspace) {
  return workspace.artifact('role-source:'+randomId());
 }
 /**
- * A checkout of the fixed candidate for an observer role or the acceptance check, in a new task directory of its own: a
- * worktree made for reading at the candidate's commit when the task's workspace holds a worktree (#769), else a clone of the
- * task's checkout (a file copy). Returns the directory and what ends its use; null when neither could be made (the
- * directory's processes are ended then too).
+ * On-demand read-only git worktree checkout of a commit when multiple readers need independent working trees from the
+ * project computer's shared git store (`repo.git`). Never copies or clones a task directory.
  */
-export async function candidateCheckout(source:Pick<Workspace,'store'|'manager'|'task'|'redactor'|'guard'|'log'>,sha:string,tree:string,key:string){
+export async function candidateCheckout(source:Pick<Workspace,'store'|'manager'|'task'|'redactor'|'guard'|'log'>,sha:string,tree:string,_key?:string){
  const space=new Workspace(source.store,source.manager,{...source.task,workspace_id:randomId()},source.redactor,source.guard,source.log);
  const worktree=await space.observe(source.task,sha,tree);
- if(!worktree){const copied=await space.call(key,{type:'workspace_acceptance',source_workspace_id:source.task.workspace_id,sha,tree_sha:tree});if(copied.error){await space.release(false);return null;}}
- // The run's processes end first; then another reader may take the worktree.
- return {space,worktree_id:worktree?.id??null,release:async()=>{await space.release(false);space.releaseWorktree('reader_finished');}};
+ if(!worktree){await space.release(false);return null;}
+ return {space,worktree_id:worktree.id,release:async()=>{await space.release(false);space.releaseWorktree('reader_finished');}};
 }
-/** One writer; observers get checkouts of their own bound to the writer's snapshot. */
-export function roleWorkspaces(workspace:Workspace){const context=new AsyncLocalStorage<{space:Workspace;role:string;run_id?:string;observer?:{local_sha:string;tree_sha:string}}>();let fallback=workspace;const setActive=(space:Workspace)=>{const current=context.getStore();if(current)current.space=space;else fallback=space;};return {get runId(){return context.getStore()?.run_id??workspace.task.trace_run_id;},bindRun:(id:string)=>{const current=context.getStore();if(current)current.run_id=id;},get current(){return context.getStore()?.space??fallback;},get role(){return context.getStore()?.role??workspace.task.active_role;},withObservers:async<R>(work:()=>Promise<R>)=>{const observer=await observerSnapshot(workspace);return context.run({space:workspace,role:'manager',observer},work);},withRole:<R>(role:string,work:()=>Promise<R>)=>context.run({space:workspace,role,observer:context.getStore()?.observer},work),snapshot:async()=>workspace.artifact('role-output:'+randomId()),async prepare(role:string){setActive(workspace);const snapshot=role==='dev'?await workspace.artifact('role-source:'+randomId()):(context.getStore()?.observer??await observerSnapshot(workspace));if(role==='dev'){traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:workspace.task.workspace_id},workspace.task.trace_run_id);return;}const checkout=await candidateCheckout(workspace,snapshot.local_sha,snapshot.tree_sha,'role-checkout:'+randomId());if(!checkout)return stop('role_snapshot_unavailable','waiting_environment');traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:checkout.space.task.workspace_id,...(checkout.worktree_id?{worktree_id:checkout.worktree_id}:{})},workspace.task.trace_run_id);setActive(checkout.space);return async()=>{setActive(workspace);await checkout.release();};},
- controller:roleBackendWorkspace(workspace),worker:roleBackendWorkspace(()=>context.getStore()?.space??fallback),isolated:isolatedRunEnvironment(workspace)};}
+/**
+ * Roles within the same task share `workspace` directly in place so dependencies (`node_modules`), build caches and test
+ * artifacts produced by `dev` remain available to `test`, `reviewer`, `ux` and `qa` without re-cloning.
+ */
+export function roleWorkspaces(workspace:Workspace){
+ const context=new AsyncLocalStorage<{space:Workspace;role:string;run_id?:string;observer?:{local_sha:string;tree_sha:string}}>();
+ let fallback=workspace;
+ const setActive=(space:Workspace)=>{const current=context.getStore();if(current)current.space=space;else fallback=space;};
+ const activeWorktree=()=>workspace.store.hasTable('worktree_bindings')?workspace.store.get('SELECT worktree_id FROM worktree_bindings WHERE task_id=? AND workspace_id=? AND released_at IS NULL',workspace.task.id,workspace.task.workspace_id)?.worktree_id??null:null;
+ return {
+  get runId(){return context.getStore()?.run_id??workspace.task.trace_run_id;},
+  bindRun:(id:string)=>{const current=context.getStore();if(current)current.run_id=id;},
+  get current(){return context.getStore()?.space??fallback;},
+  get role(){return context.getStore()?.role??workspace.task.active_role;},
+  withObservers:async<R>(work:()=>Promise<R>)=>{const observer=await observerSnapshot(workspace);return context.run({space:workspace,role:'manager',observer},work);},
+  withRole:<R>(role:string,work:()=>Promise<R>)=>context.run({space:workspace,role,observer:context.getStore()?.observer},work),
+  snapshot:async()=>workspace.artifact('role-output:'+randomId()),
+  async prepare(role:string){
+   setActive(workspace);
+   const snapshot=role==='dev'?await workspace.artifact('role-source:'+randomId()):(context.getStore()?.observer??await observerSnapshot(workspace));
+   const worktreeId=activeWorktree();
+   traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:workspace.task.workspace_id,...(worktreeId?{worktree_id:worktreeId}:{})},workspace.task.trace_run_id);
+   return undefined;
+  },
+  controller:roleBackendWorkspace(workspace),
+  worker:roleBackendWorkspace(()=>context.getStore()?.space??fallback),
+ };
+}
 
 /** The runner's view of a Pi session in one workspace; null when that workspace or session no longer exists. */
 async function piState(space:Workspace){try{const state=await space.call('pi:probe:'+randomId(),{type:'workspace_agent_poll',offset:0});return state.error?null:state;}catch{return null;}}

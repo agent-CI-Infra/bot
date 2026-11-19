@@ -1,4 +1,5 @@
 import {submissionFeedback} from './submission-feedback.js';
+import {resolveCommandTimeout} from '../agent/command.js';
 import {checkHarnessAccess} from '../harness/access.js';
 import {computeAllowedGithubScopes,persistentCliStateWorkspaceId} from '../harness/container-session.js';
 import {useWorkspace} from '../projects/workspace-cleanup.js';
@@ -65,22 +66,22 @@ export const completeTranscript=(messages:any[])=>{const last=messages.findLastI
  * run, the model APIs it speaks, whether it needs tool calls and which structured submissions it supports. A combination
  * outside the matrix is a configuration error; no other model, provider or driver is substituted.
  */
-export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;kinds?:RoleKind[];model_api?:string[];tool_calls?:boolean;structured_output?:string[];environment?:'control_plane'|'workspace'|'run_environment';runtime?:{package:string;version:string}|null;
+export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;kinds?:RoleKind[];model_api?:string[];tool_calls?:boolean;structured_output?:string[];environment?:'control_plane'|'workspace';runtime?:{package:string;version:string}|null;
  /** The driver brings its own model (ACP agents): no project model is resolved, called or accounted for it. */
  externalModel?:boolean;
  /** What the driver's protocol does, checked by RoleRun admission (see protocol.ts). Undeclared means unsupported. */
  capabilities?:HarnessCapabilities}
 const openai=['openai-chat-completions'];
 const containerRelayApis=['openai-chat-completions','openai-responses','anthropic-messages'];
-// Built-in drivers (Native, Process, Pi) run on the control plane or shared project computer and declare isolation: 'none'.
-// Container CLI drivers (Claude Code, Codex) execute inside the project computer or per-run isolated containers (RunEnvironments),
-// communicating with the control plane exclusively through the task mailbox (model relay, stdio MCP `bot`, read-only GitHub token helpers).
+// All project roles execute on the control plane or shared project computer (`isolation: 'none'`).
+// Container CLI drivers (Claude Code, Codex) execute inside the shared project computer workspace,
+// communicating with the control plane through the task mailbox (model relay, stdio MCP `bot`, read-only GitHub token helpers).
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
  {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},externalModel:false,
-  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'run_environment',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:false,
-  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'run_environment',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
@@ -96,7 +97,7 @@ export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:Adapter
  adapters.set(metadata.id,factory);harnesses.push({kinds:['writer','observer','evaluator'],model_api:metadata.externalModel?[]:openai,tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:false,...metadata,capabilities:metadata.capabilities??{}});
 }
 // Capability declarations use the protocol vocabulary only; anything else is a registration error, not a silent default.
-const capabilityValues:Record<string,readonly unknown[]>={raw_evidence:['control_plane_tools','task_tools','none'],cancel:['abort_signal','protocol_then_kill','none'],isolation:['run_environment','none'],version_binding:[true,false],output_validation:[true,false],fresh_context:[true,false]};
+const capabilityValues:Record<string,readonly unknown[]>={raw_evidence:['control_plane_tools','task_tools','none'],cancel:['abort_signal','protocol_then_kill','none'],isolation:['none'],version_binding:[true,false],output_validation:[true,false],fresh_context:[true,false]};
 function validCapabilities(value:any){
  if(!value||typeof value!=='object'||Array.isArray(value))return false;
  return Object.entries(value).every(([key,v])=>key==='recovery'?Array.isArray(v)&&v.every(m=>['native_resume','checkpoint_restore','rebuilt_from_task_records','unsupported'].includes(m)):capabilityValues[key]?.includes(v));
@@ -117,7 +118,9 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  const sessionStore=spec.roleRun?.instance_id?persistentCliStateWorkspaceId(spec.roleRun.instance_id):undefined;
  if(sessionStore)useWorkspace(spec.store,{...env.workspace.task,workspace_id:sessionStore},'workspace_harness_start');
  const bound=spec.harnessState?.value?.harness==='pi'&&typeof spec.harnessState.value.sessionId==='string'?spec.harnessState.value:undefined;
+ const cmdBudget=resolveCommandTimeout(spec.store,spec.task,spec.roleRun?.role,base?.config?.command_timeout?.default_seconds??null);
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
+  command_timeout:{default_seconds:cmdBudget.defaultSeconds,max_seconds:cmdBudget.maxSeconds},
   model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,resources:spec.harnessResources,tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
   ...(bound?{native_session:{id:bound.sessionId,file:bound.transcript}}:{}),...(sessionStore?{session_store:sessionStore}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
  return async(services:AgentServices):Promise<T>=>{

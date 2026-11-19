@@ -78,8 +78,6 @@ export interface AgentSpec<T> {
   harnessSessionKey?:string;
   /** Public harness events of the session (session_bound, message, tool, ...), mirrored into the RoleRun event stream. */
   onHarnessEvent?: (event: { type: string; [key: string]: unknown }) => void;
-  /** A per-run environment the framework provisioned and verified for this run (run_isolation profiles). */
-  runEnvironment?: unknown;
   resultSession?: ResultSession;
   /** Workspace checkout assigned to this role run when driving a container CLI (`claude_code` / `codex`). */
   roleWorkspace?: import('./workspace.js').Workspace;

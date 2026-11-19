@@ -11,6 +11,7 @@ import { resolve, join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { ProjectMemory, memoryTools, memoryTool } from '../../../../dist/memory/project.js';
 import { runRole } from '../../../../dist/roles/run.js';
+import { saveConfiguration } from '../../../../dist/roles/definition.js';
 import { runAgent } from '../../../../dist/agent/runtime.js';
 import { piAdapter } from '../../../../dist/agent/pi.js';
 import { Redactor } from '../../../../dist/agent/common.js';
@@ -39,6 +40,7 @@ test('real Pi mailbox and container Codex stdio MCP use the same authorized memo
     const message=actions[step++]();res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));});
   model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
   s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',s.secrets.seal({value:'knowledge-fixture-key'},'model:m'),'now');s.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
+  saveConfiguration(s,'101',{expected_revision:0,roles:[{role_id:'reviewer',permissions:{project_memory:'read'}}]},'owner');
   const task={...s.get("SELECT * FROM tasks WHERE id='t'"),active_role:'dev'},redactor=new Redactor(),guard=async()=>{},workspace=new Workspace(s,manager,task,redactor,guard,()=>{});
   await workspace.call('knowledge:init',{type:'workspace_init'});
   const tools=[...memoryTools,finish],execute=(name,args)=>memoryTool(s,task,name,args);

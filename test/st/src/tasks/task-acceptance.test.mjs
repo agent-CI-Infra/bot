@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
-import { evaluateDelivery, acceptanceContextFiles } from '../../../../dist/tasks/acceptance.js';
+import { evaluateDelivery, acceptanceContextFiles, shouldRunQa } from '../../../../dist/tasks/acceptance.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 const pass={outcome:'pass',reason:'Raw artifact meets the requested contract',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
@@ -117,11 +117,12 @@ test('project context API persists sourced facts, rejects lost updates and check
 
 test('failed verifier preparation is released and leaves no passing decision',async t=>{
  const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
- f.task.workspace_id='a'.repeat(48);f.task.generation=1;
- f.records.submit(f.task.id,[{kind:'code',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40)}}],[],{summary:'claim'});
- const calls=[],workspace={manager:{call:async(_m,_p,input)=>{calls.push(input.request);return {ok:false,error:'injected snapshot failure'};}},log:()=>{}};
- await assert.rejects(evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{}),{code:'acceptance_snapshot_unavailable'});
- assert.equal(calls.filter(r=>r.type==='reap').length,1);assert.equal(f.records.get(f.task.id).acceptance,null);
+ f.h.store.run("UPDATE tasks SET workspace_id=?,generation=1,input=? WHERE id=?",'a'.repeat(48),JSON.stringify({snapshot_tree:'b'.repeat(40)}),f.task.id);
+ const task=f.h.store.get('SELECT * FROM tasks WHERE id=?',f.task.id);
+ f.records.submit(f.task.id,[{kind:'report',reference:'candidate',version:'v1',content:'claim'}],[],{summary:'claim'});
+ const workspace={task,call:async()=>({error:'injected snapshot failure'}),log:()=>{}};
+ await assert.rejects(evaluateDelivery(f.h.store,task,workspace,new Redactor(),async()=>{}),{code:'acceptance_snapshot_unavailable'});
+ assert.equal(f.records.get(f.task.id).acceptance,null);
 });
 
 test('only a trusted runtime budget can raise provider output tokens; model request fields remain bounded',async t=>{
@@ -136,29 +137,30 @@ test('a missing current policy proof runs deterministic verification and returns
  const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
  f.h.store.run("UPDATE policies SET test_command='required-check' WHERE repository_id='101'");f.task.workspace_id='a'.repeat(48);f.task.generation=1;
  f.records.submit(f.task.id,[{kind:'code',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40)}}],[],{});
- const calls=[],workspace={manager:{call:async(_m,_p,input)=>{calls.push(input.request);return {ok:true,result:input.request.type==='workspace_command'?{exit_code:1,output:'A real mandatory check failed'}:{tree_sha:'b'.repeat(40)}};}},log:()=>{}};
+ const calls=[],workspace={task:f.task,call:async(_k,request)=>{calls.push(request);return request.type==='workspace_command'?{exit_code:1,output:'A real mandatory check failed'}:{tree_sha:'b'.repeat(40)};},log:()=>{}};
  const result=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{});
- assert.equal(result.outcome,'return');assert.ok(result.gaps[0].includes('mandatory check failed'));assert.equal(f.requests.length,0);assert.ok(calls.some(r=>r.command==='required-check'));
+ assert.equal(result.outcome,'return');assert.equal(result.pass,false);assert.ok(result.gaps[0].includes('mandatory check failed'));assert.equal(f.requests.length,0);assert.ok(calls.some(r=>r.command==='required-check'));
  const c=f.records.get(f.task.id).candidate;f.records.decide(f.task.id,c.id,c.revision,result);const final=f.h.store.get("SELECT run_id,caused_by FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id DESC LIMIT 1",f.task.id);const verification=f.h.store.get("SELECT id FROM task_runs WHERE task_id=? AND kind='verification' ORDER BY rowid DESC LIMIT 1",f.task.id);assert.equal(final.run_id,verification.id);assert.equal(JSON.parse(final.caused_by).length,1);
 });
 
-test('verification commands reject copied executor paths and recover in the pinned candidate checkout',async t=>{
+test('lightweight QA runs verification commands in-place inside the shared task workspace without executor_workspace_reference',async t=>{
  const source='a'.repeat(48),calls=[];
- const f=await fixture(t,(_body,n)=>n<3?{role:'assistant',content:null,tool_calls:[{id:'command'+n,type:'function',function:{name:'run_command',arguments:JSON.stringify({command:n===1?'cat /tasks/'+source+'/repo/report.md':'cat report.md'})}}]}:{role:'assistant',content:JSON.stringify(pass)});
+ const f=await fixture(t,(_body,n)=>n===1?{role:'assistant',content:null,tool_calls:[{id:'command1',type:'function',function:{name:'run_command',arguments:JSON.stringify({command:'cat /workspace/tasks/'+source+'/repo/report.md'})}}]}:{role:'assistant',content:null,tool_calls:[{id:'done',type:'function',function:{name:'submit_acceptance',arguments:JSON.stringify({pass:true,issues:[]})}}]});
  f.task.workspace_id=source;f.task.generation=1;
  f.records.submit(f.task.id,[{kind:'files',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40)}}],[],{});
- const workspace={manager:{call:async(_m,_p,input)=>{calls.push(input.request);return {ok:true,result:input.request.type==='workspace_command'?{exit_code:0,output:'pinned report'}:{tree_sha:'b'.repeat(40)}};}},log:()=>{}};
- assert.equal((await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{})).outcome,'pass');
- const commands=calls.filter(r=>r.type==='workspace_command');assert.equal(commands.length,1);assert.equal(commands[0].command,'cat report.md');assert.notEqual(commands[0].workspace_id,source);
- assert.ok(JSON.stringify(f.requests[1].messages).includes('executor_workspace_reference'));
+ const workspace={task:f.task,store:f.h.store,call:async(_k,request)=>{calls.push({...request,workspace_id:source});return request.type==='workspace_command'?{exit_code:0,output:'shared report'}:{tree_sha:'b'.repeat(40)};},log:()=>{}};
+ const verdict=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{});
+ assert.equal(verdict.outcome,'pass');assert.equal(verdict.pass,true);
+ const commands=calls.filter(r=>r.type==='workspace_command');assert.equal(commands.length,1);assert.equal(commands[0].workspace_id,source);
+ assert.ok(!JSON.stringify(f.requests.at(-1).messages).includes('executor_workspace_reference'));
 });
 
 test('verdict format repair keeps fresh inspection evidence and does not rerun successful reads',async t=>{
  const f=await fixture(t,(body,n)=>{
   if(n===1)return {role:'assistant',content:null,tool_calls:[{id:'inspect',type:'function',function:{name:'read_file',arguments:JSON.stringify({path:'report.md'})}}]};
-  if(n===2)return {role:'assistant',content:JSON.stringify({outcome:'pass',reason:'Read the artifact but omitted fields'})};
-  assert.ok(body.messages.at(-1).content.includes('do not repeat verification'));
-  return {role:'assistant',content:JSON.stringify(pass)};
+  if(n===2)return {role:'assistant',content:JSON.stringify({pass:true})};
+  assert.ok(body.messages.at(-1).content.includes('submit_acceptance'));
+  return {role:'assistant',content:JSON.stringify({pass:true,issues:[]})};
  });
  let reads=0;const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>{reads++;return {content:'Actual report'};}},new Redactor(),async()=>{});
  assert.equal(result.outcome,'pass');assert.equal(reads,1);assert.equal(f.requests.length,3);
@@ -167,14 +169,14 @@ test('verdict format repair keeps fresh inspection evidence and does not rerun s
  assert.equal(f.records.get(f.task.id).acceptance,null,'format repair cannot finalize delivery');
 });
 test('format feedback can correct an invalid pass into a truthful return instead of relaxing core conditions',async t=>{
- const f=await fixture(t,(_body,n)=>({role:'assistant',content:JSON.stringify(n===1?{...pass,core_complete:false}:{...pass,outcome:'return',core_complete:false,gaps:['A required behavior is absent']})}));
+ const f=await fixture(t,(_body,n)=>({role:'assistant',content:JSON.stringify(n===1?{pass:true,issues:['Missing test']}:{pass:false,issues:['A required behavior is absent']})}));
  const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{});
- assert.equal(result.outcome,'return');assert.equal(result.core_complete,false);assert.equal(f.requests.length,2);assert.equal(f.records.get(f.task.id).acceptance,null);
+ assert.equal(result.outcome,'return');assert.equal(result.pass,false);assert.deepEqual(result.issues,['A required behavior is absent']);assert.equal(f.requests.length,2);assert.equal(f.records.get(f.task.id).acceptance,null);
 });
-test('text without a structured verdict exhausts each QA turn budget and reports repeated faults',async t=>{
+test('text without a structured verdict exhausts each lightweight QA 6-turn budget and reports repeated faults',async t=>{
  const f=await fixture(t,()=>({role:'assistant',content:'{}'}));
  for(let i=0;i<3;i++)await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:i===2?'acceptance_unavailable':'acceptance_output_invalid'});
- assert.equal(f.requests.length,96);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
+ assert.equal(f.requests.length,18);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
 });
 
 test('typed acceptance submission repairs schema errors while preserving a real core gap',async t=>{
@@ -207,14 +209,29 @@ test('an unfinished evaluation is an infrastructure fault, never evidence insuff
  assert.equal(f.requests.length,3);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
  assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_fault'").n,3);
 });
-test('#769 QA of a report pins the report\'s source first, also while the task holds no worktree yet',async t=>{
- const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
+test('#769/#1121 QA of a report pins the report\'s source in place without cloning workspace_acceptance',async t=>{
+ const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify({pass:true,issues:[]})}));
  f.h.store.run("UPDATE tasks SET workspace_id=?,input=? WHERE id='delivery'",'c'.repeat(48),JSON.stringify({snapshot_tree:'b'.repeat(40)}));
  const task=f.h.store.get("SELECT * FROM tasks WHERE id='delivery'"),calls=[];
- const manager={call:async(_method,_path,body)=>{calls.push(['verifier',body.request.type]);return {ok:true,result:{tree_sha:'b'.repeat(40),sha:'a'.repeat(40)}};}};
- const workspace=state=>({task,manager,store:f.h.store,plannedWorktree:()=>({state}),log:()=>{},call:async(_key,request)=>{calls.push([state,request.type]);return request.type==='workspace_source'?{local_sha:'a'.repeat(40),tree_sha:'b'.repeat(40)}:{tree_sha:'b'.repeat(40)};}});
+ const workspace=state=>({task,store:f.h.store,plannedWorktree:()=>({state}),log:()=>{},call:async(_key,request)=>{calls.push([state,request.type]);return request.type==='workspace_source'?{local_sha:'a'.repeat(40),tree_sha:'b'.repeat(40)}:{tree_sha:'b'.repeat(40)};}});
  assert.equal((await evaluateDelivery(f.h.store,task,workspace('planned'),new Redactor(),async()=>{},false)).outcome,'pass');
- assert.deepEqual(calls.slice(0,2),[['planned','workspace_source'],['verifier','workspace_acceptance']]);
+ assert.deepEqual(calls,[['planned','workspace_source']]);
+});
+
+test('#1121 deterministic preflight rejects .env files, merge conflict markers and leaked credentials with zero model calls, and shouldRunQa skips pure Q&A',async t=>{
+ const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify({pass:true,issues:[]})}));
+ const redactor=new Redactor();redactor.add('ghp_SECRETTOKEN12345678901234567890');
+ f.records.submit(f.task.id,[{kind:'code',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),snapshot_files:[{path:'src/a.js',sha:'1'.repeat(40)}],files:[{path:'.env.production',sha:'2'.repeat(40),size:20},{path:'src/a.js',sha:'3'.repeat(40),size:60}]}}],[],{summary:'clean summary'});
+ const workspace={task:f.task,store:f.h.store,call:async(_k,req)=>req.path==='src/a.js'?{content:'<<<<<<< HEAD\nconst a=1;\n=======\nconst a=2;\n>>>>>>> branch\n'}:{content:'API=1'},log:()=>{}};
+ const preflight=await evaluateDelivery(f.h.store,f.task,workspace,redactor,async()=>{},false);
+ assert.equal(preflight.pass,false);assert.equal(preflight.outcome,'return');assert.equal(f.requests.length,0,'deterministic preflight uses zero model calls');
+ assert.ok(preflight.issues.some(i=>i.includes('.env.production')));
+ assert.ok(preflight.issues.some(i=>i.includes('conflict markers')));
+ // Tiered trigger: pure Q&A skips QA; PRs and formal reviews run QA.
+ assert.equal(shouldRunQa(f.h.store,{id:f.task.id,kind:'task.request',repository_id:'101',input:JSON.stringify({generic:true,delivery:'report'})},{artifacts:[{kind:'report',reference:'r',version:'v1'}]}),false);
+ assert.equal(shouldRunQa(f.h.store,{id:f.task.id,kind:'workflow.issue_reply',repository_id:'101',input:'{}'},{artifacts:[{kind:'report',reference:'r',version:'v1'}]}),false);
+ assert.equal(shouldRunQa(f.h.store,{id:f.task.id,kind:'review.pr',repository_id:'101',input:'{}'},{artifacts:[{kind:'report',reference:'r',version:'v1'}]}),true);
+ assert.equal(shouldRunQa(f.h.store,{id:f.task.id,kind:'development.issue',repository_id:'101',input:'{}'},preflight),true);
 });
 test('QA receives compact related indexes rather than repeated repository manifests',async t=>{
  const f=await fixture(t,body=>{

@@ -30,7 +30,7 @@ export interface RoleDefinitionV2 {
   model_profile_ref: ModelProfileRef | null; skill_bundle_ref: SkillBundleRef | null; harness_ref: Ref & { model_source?: HarnessModelSource }; permissions: RolePermissions;
   /** Server-owned opt-in: old V2 review/Actions dev assignments used the entry's Pi executor. */
   entry_harness_source?: 'role';
-  environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number }; output_schema_ref: Ref;
+  environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; command_timeout_seconds?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number }; output_schema_ref: Ref;
 }
 export type Entry = 'development' | 'request' | 'review' | 'actions';
 export interface RoleConfiguration {
@@ -59,6 +59,14 @@ const builtinNames: Record<string, [string, string]> = {
 // Own properties only: a custom role may be called "constructor".
 const names = (id: string): [string, string] => Object.hasOwn(builtinNames, id) ? builtinNames[id]! : [id, 'Project observer role: inspects the fixed candidate and reports findings.'];
 const catalogRef = (list: { id: string; version: string }[], id: string) => { const entry = list.find(e => e.id === id)!; return { id: entry.id, version: entry.version }; };
+function migrateEnvironmentRef(ref: any, kind: RoleKind): Ref {
+  const fallback = allowedFor(kind).environment[0]!;
+  if (!ref || typeof ref !== 'object' || typeof ref.id !== 'string') return catalogRef(environmentProfiles, fallback);
+  if (ref.id === 'isolated-workspace' && kind === 'writer') return catalogRef(environmentProfiles, 'task-workspace');
+  if (ref.id === 'isolated-candidate' && (kind === 'observer' || kind === 'evaluator')) return catalogRef(environmentProfiles, fallback);
+  const entry = environmentProfiles.find(e => e.id === ref.id);
+  return entry ? { id: entry.id, version: entry.version } : catalogRef(environmentProfiles, fallback);
+}
 const defaultHarness = () => recommendedBackend;
 const harnessRef = (id: string) => ({ id, version: harnesses.find(h => h.id === id)?.version ?? 'unregistered' });
 const definitionHash = ({ revision, ...rest }: RoleDefinitionV2) => short(rest);
@@ -99,6 +107,7 @@ export function roleStorageV2(s: Store) {
   followBuiltinDefaults(s);
   retireAcpRoleBindings(s);
   retireAcpTaskExecutionConfigs(s);
+  retireIsolatedEnvironmentProfiles(s);
 }
 
 const canonical = (value: Record<string, unknown>) => JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1)));
@@ -259,6 +268,48 @@ export function retireAcpTaskExecutionConfigs(s: Store) {
 }
 
 /**
+ * One-time migration (#1121): per-run isolated container profiles (`isolated-workspace`, `isolated-candidate`) are retired;
+ * saved project configurations and frozen `task_execution_configs` downgrade safely to shared project-computer profiles.
+ */
+export function retireIsolatedEnvironmentProfiles(s: Store) {
+  const marker = 'migration:1121:retire-isolated-profiles';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  if (!s.hasTable('task_execution_configs')) return;
+  const retired = new Set(['isolated-workspace', 'isolated-candidate']);
+  s.transaction(() => {
+    for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%' AND value LIKE '%isolated-%'")) {
+      let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+      if (stored?.schema !== 2 || !Array.isArray(stored.roles)) continue;
+      if (!stored.roles.some((r: any) => retired.has(r?.environment_profile_ref?.id))) continue;
+      const repositoryId = String(row.key).slice('roles:'.length), current = roleConfiguration(s, repositoryId, stored);
+      const now = new Date().toISOString(), { updated_at, updated_by, ...config } = {
+        ...current,
+        roles: current.roles.map((r: RoleDefinitionV2, idx: number) => retired.has(stored.roles[idx]?.environment_profile_ref?.id) ? { ...r, revision: r.revision + 1 } : r),
+        revision: current.revision + 1,
+      };
+      const saved = { ...config, updated_at: now, updated_by: 'migration:1121' };
+      s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:1121', now);
+      s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
+    }
+    if (s.hasTable('task_execution_configs')) {
+      for (const row of s.all("SELECT task_id,snapshot FROM task_execution_configs WHERE snapshot LIKE '%isolated-%'")) {
+        let snap: any; try { snap = JSON.parse(String(row.snapshot)); } catch { continue; }
+        if (snap?.roles?.schema !== 2 || !Array.isArray(snap.roles.roles)) continue;
+        let changed = false;
+        const roles = snap.roles.roles.map((role: any) => {
+          if (!retired.has(role?.environment_profile_ref?.id)) return role;
+          changed = true;
+          const kind: RoleKind = role.kind ?? roleKind(String(role.role_id ?? ''));
+          return { ...role, environment_profile_ref: migrateEnvironmentRef(role.environment_profile_ref, kind), revision: Number(role.revision ?? 0) + 1 };
+        });
+        if (changed) s.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify({ ...snap, roles: { ...snap.roles, roles, revision: Number(snap.roles.revision ?? 0) + 1 } }), row.task_id);
+      }
+    }
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+  });
+}
+
+/**
  * One-time reset (#381): saved built-in roles take the new default permissions (only the Manager writes to GitHub; every
  * other role reads). Model, harness, prompt and other settings stay; custom roles keep their permissions. Each changed
  * project gets a new configuration revision by 'migration:381', so running role runs keep the snapshot they started with.
@@ -333,7 +384,9 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
   if (value.schema === 2) {
     const roles = value.roles.map((role: any) => {
       const { capability_policy_ref, ...definition } = role;
-      return { ...definition, permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
+      const kind: RoleKind = definition.kind ?? roleKind(String(definition.role_id ?? ''));
+      const budgetEntry = budgetPolicies.find(b => b.id === definition.budget_policy_ref?.id);
+      return { ...definition, kind, environment_profile_ref: migrateEnvironmentRef(definition.environment_profile_ref, kind), ...(budgetEntry ? { budget_policy_ref: { ...definition.budget_policy_ref, version: budgetEntry.version } } : {}), permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
     });
     // A configuration saved before the coordinator existed runs the recommended one.
     if (!roles.some((role: RoleDefinitionV2) => role.role_id === 'coordinator')) roles.push(defaultRoles().find(role => role.role_id === 'coordinator')!);
@@ -513,7 +566,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     if (budget.id === 'bounded' || budget.id === 'metered') {
       const b = given.budget_policy_ref, bfield = `${field}.budget_policy_ref`;
       // Integer limits and their bounds; metered adds the cumulative ones.
-      const limits: Record<string, [number, number]> = { max_turns: [4, 256], max_output_tokens: [256, 32768], ...(budget.id === 'metered' ? { max_total_tokens: [1000, 100_000_000], max_model_requests: [1, 10000], max_tool_calls: [1, 10000], max_wall_seconds: [60, 86400] } : {}) };
+      const limits: Record<string, [number, number]> = { max_turns: [4, 256], max_output_tokens: [256, 32768], command_timeout_seconds: [10, 7200], ...(budget.id === 'metered' ? { max_total_tokens: [1000, 100_000_000], max_model_requests: [1, 10000], max_tool_calls: [1, 10000], max_wall_seconds: [60, 86400] } : {}) };
       // Legacy max_cost is accepted on read/save but never copied into the normalized resource limits.
       const budgetFields = ['id', 'version', ...Object.keys(limits), ...(budget.id === 'metered' ? ['max_cost'] : [])];
       const unknown = Object.keys(b).find(k => !budgetFields.includes(k)); if (unknown) invalid('unknown_field', `${bfield}.${unknown}`);
@@ -521,10 +574,11 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       for (const [key, [min, max]] of Object.entries(limits)) if (b[key] !== undefined && (!Number.isSafeInteger(b[key]) || b[key] < min || b[key] > max)) invalid('invalid_budget_policy', `${bfield}.${key}`);
       Object.assign(budget, Object.fromEntries(Object.keys(limits).filter(k => b[k] !== undefined).map(k => [k, b[k]])));
     }
+    if (given.environment_profile_ref && typeof given.environment_profile_ref === 'object') {
+      if (given.environment_profile_ref.id === 'isolated-workspace' && kind === 'writer') given.environment_profile_ref = { id: 'task-workspace' };
+      else if (given.environment_profile_ref.id === 'isolated-candidate' && (kind === 'observer' || kind === 'evaluator')) given.environment_profile_ref = { id: allowed.environment[0]! };
+    }
     const environmentRef = pick('environment_profile_ref', environmentProfiles, allowed.environment, allowed.environment[0]!, 'environment_profile_not_allowed');
-    // A per-run container profile needs a driver that runs inside it; built-in drivers do not, so they are refused here and
-    // again by run admission (unsupported_capability), never silently run on the shared computer.
-    if ((environmentProfiles.find(e => e.id === environmentRef.id) as { isolation?: string } | undefined)?.isolation === 'run_container' && harness!.capabilities?.isolation !== 'run_environment') invalid('unsupported_capability', `${field}.environment_profile_ref.id`);
     const permissionInput = given.permissions ?? previous?.permissions ?? defaultPermissions(id, kind);
     if (!permissionInput || typeof permissionInput !== 'object' || Array.isArray(permissionInput)) invalid('invalid_role_permissions', `${field}.permissions`);
     for (const [key, value] of Object.entries(permissionInput)) {
@@ -688,7 +742,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     skills,
     harness: { id: harness.id, version: harness.version, session: harness.session, events: harness.events, environment: harness.environment, runtime: harness.runtime, source: harnessOverride ? (options.pinned ? 'legacy' : 'entry_executor') : config.legacy ? 'legacy' : 'role' },
     capability: permission,
-    environment: { id: environment.id, version: environment.version, workspace: environment.workspace, repository: environment.repository, ...('isolation' in environment ? { isolation: environment.isolation } : {}) },
+    environment: { id: environment.id, version: environment.version, workspace: environment.workspace, repository: environment.repository },
     budget: definition.budget_policy_ref, output_schema: { id: schema.id, version: schema.version, tool: schema.tool } };
   const id = sha256(JSON.stringify(snapshot));
   if (options.persist !== false) s.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING', id, repositoryId, roleId, config.revision, definition.revision, JSON.stringify(snapshot), new Date().toISOString());

@@ -1,6 +1,6 @@
 import { readToolResult } from './tool-results.js';
 import {submissionFeedback} from '../roles/submission-feedback.js';
-import { commandTimeoutLimit, commandTool, runCommand } from './command.js';
+import { commandTimeoutLimit, commandTool, resolveCommandTimeout, runCommand } from './command.js';
 import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { taskConfiguration, taskPermissions } from '../tasks/configuration.js';
@@ -59,7 +59,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       return result;
     };
   }
-  for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});};}
+  for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},workspace);};}
   // An Issue's development reports its milestones on the Issue's status comment (#1047): the engine offers the handler.
   if (platform[milestoneToolName]) profile.tools.push(milestoneTool as any);
   if (browserPolicyOf(task)) {
@@ -76,12 +76,13 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
   if(!profile.tools.some(t=>t.function.name==='read_tool_result'))profile.tools.push(readToolResult);
-  const config = { command_timeout: { default_seconds: null, max_seconds: commandTimeoutLimit() }, system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
+  const entryBudget = resolveCommandTimeout(store, task, 'dev', null);
+  const config = { command_timeout: { default_seconds: entryBudget.defaultSeconds, max_seconds: entryBudget.maxSeconds }, system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   const repairInvalid = (error: unknown) => error instanceof TaskError && ['model_review_invalid','model_finding_invalid','release_notes_invalid','release_observation_invalid','actions_classification_invalid'].includes(error.code)
     ? `Correct the submission and call the finish tool again using the evidence already available. ${error.code}: ${error.detail ?? ''}` : undefined;
-  if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),platform[milestoneToolName]&&(args=>platform[milestoneToolName]!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined);
+  if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),platform[milestoneToolName]&&(args=>platform[milestoneToolName]!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined,explorer??undefined);
   // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
   const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest, ensureWorkspace: async () => workspace.ensure?.() ?? {},
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
@@ -119,8 +120,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     const { repository, token, complete } = session, round = randomId(), spaces=roleWorkspaces(workspace);
     const staged=!!records.get(task.id).stage_schedule.plan_revision||!!(taskConfiguration(store,task)?.roles?.required_stages?.length);
     const execute = async (name: string, args: any) => {
-      if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return name==='run_command'?runCommand(spaces.current,'stage-observation:'+randomId(),args,120):spaces.current.call('stage-observation:'+randomId(),{type:'workspace_read',path:args?.path});
-      if(staged&&spaces.role!=='dev'&&memoryTools.some(tool=>tool.function.name===name))return memoryTool(store,{...task,active_role:spaces.role,trace_run_id:spaces.runId},name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('stage-memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});
+      if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return name==='run_command'?runCommand(spaces.current,'stage-observation:'+randomId(),args,120,spaces.role):spaces.current.call('stage-observation:'+randomId(),{type:'workspace_read',path:args?.path});
+      if(staged&&spaces.role!=='dev'&&memoryTools.some(tool=>tool.function.name===name))return memoryTool(store,{...task,active_role:spaces.role,trace_run_id:spaces.runId},name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('stage-memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},spaces.current);
       if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
       if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
       if (name === 'github_read_token') {
@@ -140,20 +141,21 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
           base64: Buffer.from(args?.content ?? '').toString('base64'), offset: 0, final: true, mode: '100644' });
         await workspace.write(key, args?.path, Buffer.from(args?.content ?? '')); return { written: true };
       }
-      if (name === 'run_command') return runCommand(workspace, key, args, null);
+      if (name === 'run_command') return runCommand(workspace, key, args, null, spaces.role);
       if (name === 'create_pull_request' && createPullRequest) return createPullRequest(randomId(), args);
       return { error: 'tool_not_allowed' };
     };
     const finish = profile.finishTools[0];
+    const observerBudget = resolveCommandTimeout(store, task, undefined, 120);
     return runTeam({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, repairInvalid, prompt: config.prompt, tools: profile.tools, model: conversation?.model,
       execute: async (name, args) => {
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
-      { entry, workspace, ...(staged?{observerTools:profile.tools.map(t=>t.function.name==='run_command'?commandTool(120):t)}:{}), prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
+      { entry, workspace, ...(staged?{observerTools:profile.tools.map(t=>t.function.name==='run_command'?commandTool(observerBudget.defaultSeconds, undefined, observerBudget.maxSeconds):t)}:{}), prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot}:{workers:['dev']}),
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
-          : await spaces.isolated(instance, resolved) ?? await spaces.worker(instance, resolved) } });
+          : spaces.worker(instance, resolved) } });
   }
   // Legacy single-executor entries use the same role policy as team runs. A broad runner profile cannot bypass it.
   const allowed=()=>profile.tools.filter(tool=>taskRolePolicies(store,task).every(p=>permissionTools(p).includes(tool.function.name))&&taskToolAllowed(store,task,'dev',tool.function.name));

@@ -9,7 +9,6 @@ import type { RuntimeModel } from '../agent/model.js';
 import { ReadTokens } from '../agent/read-token.js';
 import type { Workspace } from '../agent/workspace.js';
 import { useWorkspace } from '../projects/workspace-cleanup.js';
-import type { RunEnvironmentClient } from '../projects/run-environment.js';
 import { createTaskToolDispatcher, handleMailboxToolRequest, type TaskToolDispatcher } from '../roles/task-tools.js';
 import { recordConversationCliVersion, recordRunCliVersion } from '../roles/role-run.js';
 import { githubReadScopes, githubResources } from '../roles/permissions.js';
@@ -104,7 +103,7 @@ export interface RunningContainerHarness<T> {
 }
 
 interface RunnerTransport {
-  kind: 'run_environment' | 'workspace' | 'local';
+  kind: 'workspace' | 'local';
   workspaceId: string;
   stateWorkspaceId: string;
   egress: boolean;
@@ -156,26 +155,6 @@ function createDirectLocalRunner(root: string) {
 }
 
 function resolveRunnerTransport<T>(spec: AgentSpec<T>, launch: ContainerHarnessLaunch): RunnerTransport {
-  const envHandle = spec.runEnvironment as { client?: RunEnvironmentClient; run_id?: string } | null | undefined;
-  if (envHandle && envHandle.client && typeof envHandle.run_id === 'string' && /^[a-f0-9]{48}$/.test(envHandle.run_id)) {
-    const runId = envHandle.run_id;
-    const client = envHandle.client;
-    return {
-      kind: 'run_environment',
-      workspaceId: runId,
-      stateWorkspaceId: runId,
-      egress: launch.egress ?? spec.containerOptions?.egress ?? false,
-      deliver: request => client.call(runId, request, 90_000),
-      deliverCleanup: request => client.call(runId, request, 15_000),
-      reap: async (instanceId, superseded) => {
-        if (superseded) return;
-        const intRes = await client.call(runId, { type: 'workspace_harness_interrupt', mode: 'kill', instance_id: instanceId }, 15_000).catch(() => null);
-        if (intRes?.stale_instance) return;
-        await client.call(runId, { type: 'reap' }, 15_000).catch(() => {});
-      },
-    };
-  }
-
   const space: Workspace | undefined = spec.roleWorkspace ?? spec.pi?.workspace;
   if (space && typeof space.task?.workspace_id === 'string' && /^[a-f0-9]{48}$/.test(space.task.workspace_id)) {
     const workspaceId = String(space.task.workspace_id);
@@ -396,9 +375,6 @@ export async function withContainerHarnessSession<T, R>(
   const configBytes = Buffer.from(JSON.stringify(harnessConfig), 'utf8');
   if (configBytes.length > 2 * 1024 * 1024) {
     stop('agent_context_too_large', 'waiting_configuration', `容器 Harness 启动配置大小 ${configBytes.length} 字节，超过 2 MiB 上限。`);
-  }
-  if (transport.kind === 'run_environment') {
-    await transport.deliver({ type: 'workspace_init' });
   }
   for (let offset = 0; offset < configBytes.length || offset === 0; offset += 30_000) {
     const saved = await transport.deliver({

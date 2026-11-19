@@ -1,4 +1,4 @@
-import { commandTool, runCommand } from '../agent/command.js';
+import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
 import {versionTools,versionTool} from './versions.js';
 import {applyIntegration} from './integration.js';
 import { blobValue, storedInput } from '../storage/payloads.js';
@@ -30,11 +30,11 @@ import type { Manager } from '../projects/service.js';
 import type { GitCache } from '../agent/git-cache.js';
 import { GitHub } from '../github/client.js';
 import { Workspace } from '../agent/workspace.js';
-import { Redactor, stop, sha, safePath, TaskError, blobSha } from '../agent/common.js';
+import { Redactor, stop, sha, validWorkspaceToolPath, TaskError, blobSha } from '../agent/common.js';
 import { runAgent } from '../agent/runtime.js';
 import { taskTools, taskRecordInstructions } from './record-tools.js';
 import { TaskRecords, type Verdict } from './service.js';
-import { evaluateDelivery } from './acceptance.js';
+import { evaluateDelivery, shouldRunQa, skipQa } from './acceptance.js';
 import { randomId } from '../core/security.js';
 import { covers, projectCeiling } from '../work/ceiling.js';
 import { browserPolicyOf } from '../browser/policy.js';
@@ -56,8 +56,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
   // A generic task's earlier PR choice binds only while that candidate is being accepted or published.
   if(software()&&(!generic||['acceptance','publish'].includes(String(task.phase))))assertRequestPullRequest(store,task);
   const executeAgent:typeof runAgent=ownRole&&origin.source_kind!=='operator'?async(spec)=>spaces.withRole(ownRole,async()=>{
-    // This is the task's executor workspace. Independent inspection stages still use disposable fixed candidates.
-    return (await runRole(spec,ownRole,undefined,undefined,{prepare:async(i,r)=>await spaces.isolated(i,r)??await spaces.worker(i,r)})).result;
+    return (await runRole(spec,ownRole,undefined,undefined,{prepare:spaces.worker})).result;
   }):controlled(store,task,entry)?async(spec)=>runTeam(spec,{...spaces,entry,workspace}):runAgent;
   // github_write (#381): role runs keep it only for roles whose GitHub permissions allow a write; a plain agent gets it only
   // when the policies over this task allow one. Every call is checked again against the acting role.
@@ -126,9 +125,10 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
       // A crash between candidate submission and verdict resumes acceptance without rerunning execution.
       if(task.phase!=='acceptance'){
         update({phase:'model'});
-        const read={type:'function',function:{name:'read_file',description:'Read repository or artifact text',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}};
-        const command=commandTool(180,'Run bounded implementation/verification commands in this task workspace. Never publish, push, merge, use host credentials or access other tasks.');
-        const write={type:'function',function:{name:'write_file',description:'Write a text artifact or source file within the task checkout',parameters:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content'],additionalProperties:false}}};
+        const read={type:'function',function:{name:'read_file',description:'Read repository, ../notes, ../context, or /tmp text',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}};
+        const cmdBudget=resolveCommandTimeout(store,task,ownRole??'dev',180);
+        const command=commandTool(cmdBudget.defaultSeconds,'Run bounded implementation/verification commands in this shared task workspace. Never publish, push, merge or use host credentials.',cmdBudget.maxSeconds);
+        const write={type:'function',function:{name:'write_file',description:'Write a text artifact, ../notes entry, /tmp file or source file within the shared project workspace',parameters:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content'],additionalProperties:false}}};
         const submit={type:'function',function:{name:'submit_delivery',description:'Submit the completed bounded report/artifact for independent acceptance now. This ends execution; the framework decides pass or remediation. Do not keep probing unrelated unknowns after the report is ready.',parameters:{type:'object',properties:{summary:{type:'string'},artifacts:{type:'array',items:{type:'object',properties:{path:{type:'string'},description:{type:'string'}},required:['path','description'],additionalProperties:false}},evidence:{type:'array',items:{type:'object',properties:{source:{type:'string'},result:{type:'string'}},required:['source','result'],additionalProperties:false}},unknowns:{type:'array',items:{type:'string'}}},required:['summary','artifacts'],additionalProperties:false}}};
         // A software delivery's summary is the public pull request description, as in the development team path (#1106).
         const pullRequestFields={summary:{type:'string',description:'The public pull request description on GitHub, read by the repository\'s maintainers as written. '+pullRequestSummaryRules},change_title:{type:'string'},labels:pullRequestLabelsSchema,test_command:{type:'string'}};
@@ -170,12 +170,12 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
               const result=generic?await grantedWrite(name,args):await githubWrite(args);
               records.history(task.id,'execution_evidence',{execution,name,version:null,arguments:redactor.clean(args),result:redactor.clean(result)},spaces.runId);return result;}
             const actorTask={...task,active_role:spaces.role,trace_run_id:spaces.runId};
-            if(memoryTools.some(t=>t.function.name===name)){const observed=await memoryTool(store,actorTask,name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});records.history(task.id,'execution_evidence',{execution,name,version:observed.revision?`memory:${observed.id}:${observed.revision}`:sha(JSON.stringify(observed)),arguments:redactor.clean(args),result:redactor.clean(observed)},spaces.runId);return redactor.clean(observed);}
+            if(memoryTools.some(t=>t.function.name===name)){const observed=await memoryTool(store,actorTask,name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},spaces.current);records.history(task.id,'execution_evidence',{execution,name,version:observed.revision?`memory:${observed.id}:${observed.revision}`:sha(JSON.stringify(observed)),arguments:redactor.clean(args),result:redactor.clean(observed)},spaces.runId);return redactor.clean(observed);}
             if(name==='read_related_artifact'){const result=await readRelatedArtifact(store,actorTask,spaces.current,args);records.history(task.id,'execution_evidence',{execution,name,version:(result as any).blob_sha||'unknown',arguments:redactor.clean(args),result:redactor.clean(result)},spaces.runId);return result;}
             if(browserToolNames.includes(name))return runBrowserTool(store,task,args,{guard,workspace});
             if(taskTools.some(t=>t.function.name===name)){const result=records.tool(task.id,name,redactor.clean(args),taskTraceAccess(store,actorTask));if(!('error' in result)&&name==='record_progress'&&writable)await checkpoint(store,task,workspace);return result;}
             if(name==='write_file'){
-              try{safePath(args?.path);}catch(error){if(error instanceof TaskError&&error.code==='unsafe_repository_path')return {error:'invalid_artifact_path',message:'Use a repository-relative path such as docs/phase1/report.md. Absolute paths and parent traversal are not allowed.'};throw error;}
+              if(!validWorkspaceToolPath(args?.path))return {error:'invalid_artifact_path',message:'Use a repository-relative path, ../notes/<file>, /workspace/... or /tmp/...'};
               if(typeof args?.content!=='string')return {error:'invalid_artifact_content'};
             }
             if(name==='run_command'&&(typeof args?.command!=='string'||!args.command.trim()))return {error:'invalid_command'};
@@ -183,7 +183,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
             const beforeCommand=name==='run_command'?await spaces.current.artifact(key+':source'):null;
             const result=name==='read_file'?await spaces.current.call(key,{type:'workspace_read',path:args?.path})
               :name==='write_file'?(await spaces.current.write(key,args?.path,Buffer.from(args?.content||'')),{ok:true})
-              :await runCommand(spaces.current,key,args,180);
+              :await runCommand(spaces.current,key,args,180,spaces.role);
             records.history(task.id,'execution_evidence',{execution,name,version:beforeCommand?.tree_sha||(typeof result.content==='string'?blobSha(Buffer.from(result.content)):name==='write_file'?blobSha(Buffer.from(args.content)):null),arguments:redactor.clean(args),result:redactor.clean(result)},spaces.runId);return result;
           },validate:content=>{
             try {return validateReport(JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g,'')));}
@@ -224,8 +224,12 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
       }
       const current=records.get(task.id),candidate=current.candidate!;
       const evaluatedPolicy=software()?requestPolicyHash(store,task):null;
-      // The PR gate is project policy (#814): on by default, a project may publish a tested candidate without independent QA.
-      const verdict=generic&&software()&&!pullRequestQaRequired(store,task.repository_id)?withoutQa(store,task,candidate):await evaluateDelivery(store,task,workspace,redactor,guard);
+      // The PR gate is project policy (#814); pure Q&A / internal status reports skip QA altogether (#1121).
+      const verdict=generic&&software()&&!pullRequestQaRequired(store,task.repository_id)
+        ?withoutQa(store,task,candidate)
+        :!shouldRunQa(store,task,candidate)
+          ?skipQa(store,task,candidate,'read_only_report_no_qa')
+          :await evaluateDelivery(store,task,workspace,redactor,guard);
       if(software()&&evaluatedPolicy!==requestPolicyHash(store,task))stop('acceptance_context_changed','retry_wait','独立 QA 期间项目验证策略已变化，候选将重新验收。');
       if(software()&&['pass','pass_with_issues'].includes(verdict.outcome)){
         await guard();assertRequestPullRequest(store,task);

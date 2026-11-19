@@ -18,7 +18,7 @@ import { sourcePolicies } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTools,taskRecordInstructions } from '../tasks/record-tools.js';
 import { runRole,roleConfig,roleInstance,type RoleRunOptions } from './run.js';
-import { findingsSchema,nominationSchema,environmentProfiles } from './catalog.js';
+import { findingsSchema,nominationSchema } from './catalog.js';
 import { UnsupportedCapabilityError } from './role-run.js';
 import type { Workspace } from '../agent/workspace.js';
 import { controllerWorkspaceInstructions,workspaceContext,workspaceTool,workspaceToolNames,workspaceTools } from '../agent/workspace-tools.js';
@@ -45,8 +45,6 @@ export interface TeamEnvironment {
  executor?:{harness?:string;round:string;prepare:RoleRunOptions['prepare']};
  /** The entry point recorded with this coordination (development, request, review, actions). */
  entry?:string;
- /** A container of its own per run for roles whose environment profile requires run isolation. */
- isolated?:RoleRunOptions['prepare'];
  /** The task's workspace (#769). While it holds no worktree, the controller chooses one for the task, or none. */
  workspace?:Workspace;
 }
@@ -152,9 +150,7 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
   if(typeof args.purpose!=='string'||!args.purpose.trim()||args.purpose.length>2000||!Array.isArray(args.refs)||args.refs.length>20||args.refs.some((ref:any)=>typeof ref!=='string'||ref.length>200))return {error:'invalid_role_assignment',limits:{purpose_max_chars:2000,refs_max_items:20,ref_max_chars:200},received:{purpose_chars:typeof args?.purpose==='string'?args.purpose.length:null,refs_count:Array.isArray(args?.refs)?args.refs.length:null},task_ref:'task:'+task.id,contract_ref:'contract:revision:'+records.get(task.id).revision,instruction:'The worker receives the contract. Use a short purpose and persistent refs for details, or choose another arrangement.'};
   if(environment.executor&&args.role==='dev'&&executed)return {result_ref:executed,reused:true,...devReturn(executed),instruction:'This entry runs its executor once per call. Read this result and nominate it.',...(reviewUpdates?{review_updates:reviewUpdates()}:{})};
   for(const ref of args.refs){try{resolveHandoff(String(ref));}catch{return {error:'invalid_task_reference',ref,task_ref:'task:'+task.id,instruction:'Use record refs owned by this task, or an authorized parent/child task: ref. For another task original, use read_managed_task(task_id, source).'};}}
-  // A role with an isolated environment profile gets its own run container instead of a checkout on the shared computer.
-  const isolatedRole=(environmentProfiles.find(e=>e.id===pool.find(r=>r.role_id===args.role)?.environment_profile_ref.id) as {isolation?:string}|undefined)?.isolation==='run_container';
-  const revision=records.get(task.id).revision,context=isolatedRole?undefined:await environment.prepare(args.role);
+  const revision=records.get(task.id).revision,context=await environment.prepare(args.role);
   try{
    const sourceVersion=s.get("SELECT json_extract(data,'$.version') version FROM task_history WHERE task_id=? AND type='role_candidate' AND json_extract(data,'$.role')=? ORDER BY id DESC LIMIT 1",task.id,args.role)?.version??null;
    const inputKey=sha(JSON.stringify({role:args.role,purpose:args.purpose,refs:args.refs,revision,attempt:config.required_stages?.length?undefined:task.attempt,candidate_key:args.role==='dev'?undefined:candidateKey(latestRoleCandidate(s,task.id)),plan_revision:reconcileAssignments(s,task.id).plan_revision,stage_id:args.stage_id??null,...(args.role==='dev'?environment.executor?{round:environment.executor.round}:{}:{candidate_version:sourceVersion})}));
@@ -164,17 +160,18 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
    const assignment=existing?.id??randomId();
    const handoff=existing?null:traceEvent(s,task.id,'role_handoff',{assignment_id:assignment,role:args.role,purpose:args.purpose,refs:args.refs,revision},task.trace_run_id,'role:manager',args.refs);
    const role=args.role,dev=role==='dev';
-   // github_write reaches every worker the entry offers it to; runRole keeps it only for roles whose GitHub permissions write (#381).
-   // A generic task's deliveries (#814) belong to its executor: observers inspect, they never get a granted GitHub write.
-   const narrow=dev?spec.tools??[]:(environment.observerTools??spec.tools??[]).filter(t=>['read_file','run_command','read_task_history','search_project_memory','read_project_memory','read_related_artifact',...(generic?[]:['github_write'])].includes(t.function.name));
-   const roleSpec:AgentSpec<any>={...spec,candidateSnapshot:dev?(environment.writerSnapshot??environment.snapshot??spec.candidateSnapshot):undefined,onRun:id=>{environment.bindRun?.(id);spec.onRun?.(id);},adapter:undefined,pi:undefined,tools:[...narrow,readRecord,...(dev?[]:[findings])],system:dev?spec.system:'Inspect only this fixed candidate. Commands run in a separate disposable checkout; do not change source or claim unexecuted checks.',prompt:JSON.stringify({task_id:task.id,contract:records.get(task.id).contract,purpose:args.purpose,refs:args.refs,handoff_ref:handoff,previous_acceptance:records.get(task.id).acceptance,source_context:dev?spec.prompt:undefined}),execute:commonExecute,finish:dev?spec.finish:{name:'submit_role_result',validate:validateFindings},finalizationTools:dev?spec.finalizationTools:['submit_role_result'],validate:dev?spec.validate:content=>validateFindings(JSON.parse(content))};
+   // Worker roles share the entry's inspection, GitHub read, memory and command tools; only executor delivery/finishing tools stay exclusive to dev.
+   // runRole filters offered tools again against the role's own permissionSnapshot (#381, #1121).
+   const devExclusive=new Set(['submit_delivery','submit_report','open_pull_request','post_review','create_pull_request','report_development_milestone','rerun_failed_run','report_failure',...(generic?['github_write']:[])]);
+   const narrow=dev?spec.tools??[]:(environment.observerTools??spec.tools??[]).filter(t=>!devExclusive.has(t.function.name)&&!t.function.name.startsWith('finish_'));
+   const roleSpec:AgentSpec<any>={...spec,candidateSnapshot:dev?(environment.writerSnapshot??environment.snapshot??spec.candidateSnapshot):undefined,onRun:id=>{environment.bindRun?.(id);spec.onRun?.(id);},adapter:undefined,pi:undefined,tools:[...narrow,readRecord,...(dev?[]:[findings])],system:dev?spec.system:'Inspect the candidate in the shared task workspace (reusing existing dependencies, build caches and test artifacts when present). Do not modify tracked source files or claim unexecuted checks.',prompt:JSON.stringify({task_id:task.id,contract:records.get(task.id).contract,purpose:args.purpose,refs:args.refs,handoff_ref:handoff,previous_acceptance:records.get(task.id).acceptance,source_context:dev?spec.prompt:undefined}),execute:commonExecute,finish:dev?spec.finish:{name:'submit_role_result',validate:validateFindings},finalizationTools:dev?spec.finalizationTools:['submit_role_result'],validate:dev?spec.validate:content=>validateFindings(JSON.parse(content))};
    // Create the persistent instance before linking the assignment. runRole reuses it.
    const executor=dev?environment.executor:undefined,instance=roleInstance(s,task,role,executor?.harness,!!executor);
    if(!existing)s.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,?)',assignment,task.id,instance.id,revision,sourceVersion,'pending',inputKey,null);
    try{bindStageAssignment(s,task.id,assignment,role,args.stage_id);}catch(error){if(error instanceof TaskError&&error.state!=='retry_wait')throw error;return {error:(error as any).code??(error as Error).message,schedule:reconcileAssignments(s,task.id)};}
    const attemptReport=stageAttemptReport(s,task.id,assignment,args.attempt_report_ref,task.trace_run_id);if(attemptReport)return {...attemptReport,role,assignment_id:assignment};
    s.run("UPDATE role_assignments SET status='running' WHERE id=?",assignment);
-   try{const result=await runRole({...roleSpec,task:dev?task:{...task},prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{entryExecutor:!!executor,prepare:executor?.prepare??(isolatedRole?environment.isolated:environment.worker),...(dev?{snapshot:environment.snapshot}:{rebuildContext:!!(config.required_stages?.length)})});
+   try{const result=await runRole({...roleSpec,task:dev?task:{...task},prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{entryExecutor:!!executor,prepare:executor?.prepare??environment.worker,...(dev?{snapshot:environment.snapshot}:{rebuildContext:!!(config.required_stages?.length)})});
    s.run("UPDATE role_assignments SET status='completed',result_ref=? WHERE id=?",result.reference,assignment);if(executor)executed=result.reference;
    return {result_ref:result.reference,instance_id:result.instance_id,...(dev?devReturn(result.reference):{}),...(dev&&reviewUpdates?{review_updates:reviewUpdates()}:{})};}catch(error){
     // A run whose lease was taken over no longer owns the assignment: the current run decides its status.
@@ -184,7 +181,7 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
     throw error;}
   }finally{await context?.();}
  }};
- const result=(await runRole(managerSpec,controller,undefined,undefined,{prepare:async(i,r)=>await environment.isolated?.(i,r)??await environment.controller?.(i,r)})).result;
+ const result=(await runRole(managerSpec,controller,undefined,undefined,{prepare:environment.controller})).result;
  const dispositionResult=(result as any)?.manager_disposition;if(dispositionResult)return stop(dispositionResult.action==='needs_help'?'manager_needs_help':'manager_deferred',dispositionResult.action==='needs_help'?'needs_help':'retry_wait',JSON.stringify(dispositionResult),dispositionResult.delay_seconds*1000);
  return result;
 }

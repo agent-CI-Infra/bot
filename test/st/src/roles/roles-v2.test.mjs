@@ -722,9 +722,9 @@ test('backend selection is independent of role; container CLIs use gateway relay
   assert.equal(view.harnesses.find(h => h.id === 'acp'), undefined);
   const pi = view.harnesses.find(h => h.id === 'pi');
   assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller', 'writer', 'observer', 'evaluator'], 'native_resume', false]);
-  // Codex and Claude Code run worker roles inside project/run containers through the platform model relay.
+  // Codex and Claude Code run worker roles inside the shared project computer through the platform model relay.
   const codex = view.harnesses.find(h => h.id === 'codex');
-  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'run_environment']);
+  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'none']);
   const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' } }] }).configuration;
   assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'codex');
   assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'pi']);

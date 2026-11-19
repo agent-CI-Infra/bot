@@ -364,10 +364,12 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       // Review guidance is the Manager's review sections; the review, development and developing labels are settings of their own (#935, #1047).
       fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','delivery_gates',
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','command_timeout_seconds','delivery_gates',
         'review_label','development_label','developing_label']);
       for (const key of ['review_label', 'development_label', 'developing_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
+      const commandTimeout = body.command_timeout_seconds === undefined || body.command_timeout_seconds === null ? body.command_timeout_seconds
+        : (Number.isSafeInteger(body.command_timeout_seconds) && (body.command_timeout_seconds as number) >= 10 && (body.command_timeout_seconds as number) <= 7200 ? body.command_timeout_seconds as number : fail(400, 'invalid_command_timeout', 'command_timeout_seconds'));
       // Per-role limits are an inner limit inside the project concurrency, never a replacement for it; null unsets one role.
       const roleConcurrencyLimits = body.role_concurrency === undefined ? undefined : roleConcurrencyValue(store, id, body.role_concurrency);
       for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates', 'review_issue_updates', 'review_pr_discussion']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
@@ -430,6 +432,7 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
+        if (commandTimeout !== undefined) store.run('UPDATE policies SET command_timeout_seconds=? WHERE repository_id=?', commandTimeout as number | null, id);
         if (body.review_label !== undefined || body.development_label !== undefined || body.developing_label !== undefined)
           saveLabels(store, id, { review_label: body.review_label as string | undefined, development_label: body.development_label as string | undefined, developing_label: body.developing_label as string | undefined });
         // A PATCH changes the limits it names and leaves every other role alone: the body is a delta, not the whole map.

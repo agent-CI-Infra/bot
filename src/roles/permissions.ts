@@ -272,8 +272,9 @@ export function defaultPermissions(id: string, kind: RoleKind): RolePermissions 
   for (const resource of githubResources) p[keyOf(resource)] = id === 'manager' && (githubWriteResources as readonly string[]).includes(resource) ? 'write' : 'read';
   p.github_actions = p.github_issues === 'write' ? 'write' : p.github_actions!;
   p.computer = 'allow';
+  p.project_memory = 'write';
   if (kind === 'controller') { p.project_tasks = 'write'; if (id !== 'coordinator') p.delegation = 'allow'; }
-  else { p.computer = 'allow'; p.browser = 'allow'; p.project_memory = kind === 'writer' ? 'write' : 'read'; }
+  else { p.browser = 'allow'; }
   return p;
 }
 export function migratePermissions(role: { role_id: string; kind: RoleKind; permissions?: RolePermissions; capability_policy_ref?: { id: string } }): RolePermissions {

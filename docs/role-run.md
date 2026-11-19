@@ -1,6 +1,6 @@
-# RoleRun 协议、隔离环境与能力/预算
+# RoleRun 协议、共享工作区与能力/预算
 
-RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是新的任务系统。协议在 [Harness Runtime](harness-runtime.md) 的公共会话（`roleHarness(id).createSession`）之上增加版本化的输入、事件、检查点、取消、收集和恢复语义；Native、Process、Pi、Claude Code、Codex 统一走同一协议入口。代码在 `src/roles/protocol.ts`（schema）、`src/roles/role-run.ts`（租约、令牌、事件、预算、准入、检查点）、`src/roles/run.ts`（`runRole` 与 `roleRuns`）、`src/roles/gateway.ts`（TaskToolGateway）、`manager/run-environments.mjs` 与 `src/projects/run-environment.ts`（每次运行的容器）。
+RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是新的任务系统。协议在 [Harness Runtime](harness-runtime.md) 的公共会话（`roleHarness(id).createSession`）之上增加版本化的输入、事件、检查点、取消、收集和恢复语义；Native、Process、Pi、Claude Code、Codex 统一走同一协议入口。代码在 `src/roles/protocol.ts`（schema）、`src/roles/role-run.ts`（租约、令牌、事件、预算、准入、检查点）、`src/roles/run.ts`（`runRole` 与 `roleRuns`）、`src/roles/gateway.ts`（TaskToolGateway）与 `src/roles/workspace.ts`（同任务共享工作区与按需 `git worktree`）。
 
 ## 协议 `bot.role-run/1`
 
@@ -62,10 +62,10 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 | --- | --- | --- |
 | `read_task_record` | `read_task_record` | 按引用分页展开本任务记录，返回内容与 `version`（sha256），并记 `role_record_read` |
 | `list_task_records` | `read_task_history` | 只列引用与类型，不带正文 |
-| `search_knowledge` / `read_knowledge` | `search_project_memory` / `read_project_memory` | 复用 ProjectMemory；其他角色的作用域记忆读作不存在 |
-| `propose_experience` | `remember_project_memory` | 带本角色可见的证据引用，写入未验证经验；同一 `request_id` 在整个委派内不重复写入 |
+| `search_knowledge` / `read_knowledge` | `search_project_memory` / `read_project_memory` | 复用统一的团队共享 ProjectMemory 与 `../notes/` 知识文件 |
+| `propose_experience` | `remember_project_memory` | 带本角色可见的证据引用，写入团队共享经验；同一 `request_id` 在整个委派内不重复写入 |
 
-引用不是读取全部内容的通行证：其他任务、其他 role instance 的模型交换（`model_requests:`）、run 快照（`task_runs:`）和角色输入、其他角色的作用域记忆，与猜测的 ID 一样返回 `task_record_not_found`/`knowledge_not_found`，不泄露是否存在。网关没有 SQL、shell、发布、合并或配置工具；调用、拒绝（`capability_denied`，`transport: gateway`）和实际读取版本进入 trace（`gateway_call`）。现有驱动都通过网关展开 `read_task_record`：Native 在进程内调用，Process 经 JSON-line RPC，Claude Code 与 Codex 在容器内经 stdio MCP 桥与文件邮箱调用，Pi 经项目电脑 mailbox；`gateway.mcp(token, message)` 提供同一组工具的 MCP JSON-RPC 处理。GitHub 写入仍只由控制面受控 `github_write` 与 Publisher 执行。
+引用仅允许展开本任务与本项目已授权数据：其他任务与跨项目的模型交换（`model_requests:`）、run 快照（`task_runs:`）及记忆与猜测的 ID 一样返回 `task_record_not_found`/`knowledge_not_found`，不泄露是否存在；同一项目任务内各协作角色透明共享前序角色的运行观测、命令输出与项目知识。网关没有 SQL、shell、发布、合并或配置工具；调用、拒绝（`capability_denied`，`transport: gateway`）和实际读取版本进入 trace（`gateway_call`）。现有驱动都通过网关展开 `read_task_record`：Native 在进程内调用，Process 经 JSON-line RPC，Claude Code 与 Codex 在容器内经 stdio MCP 桥与文件邮箱调用，Pi 经项目电脑 mailbox；`gateway.mcp(token, message)` 提供同一组工具的 MCP JSON-RPC 处理。GitHub 写入仍只由控制面受控 `github_write` 与 Publisher 执行。
 
 ## 准入
 
@@ -75,27 +75,14 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 | --- | --- | --- |
 | `cancel`、`version_binding`、`output_validation` | 所有角色 | 驱动声明，且快照固定、存在框架校验器 |
 | `raw_evidence` | 非主控 | 驱动声明 `control_plane_tools` 或 `task_tools` |
-| `fixed_candidate_read` | 观察者、QA | 代码候选须有树哈希校验过的检出证据（`role_candidate` 或 `acceptance_started`）；其他候选为不可变记录 |
+| `fixed_candidate_read` | 观察者、QA | 代码候选须有树哈希记录证据（`role_candidate` 或 `acceptance_started`）；其他候选为不可变记录 |
 | `fresh_context` | QA | 驱动声明，且本次没有会话与外部状态 |
-| `run_isolation` | 选了隔离环境 profile 的角色 | 驱动声明 `isolation: run_environment`，且控制面复核了这个容器的检查结果 |
 
-内置驱动的声明见 `src/roles/harness.ts`：Native/Pi/Process 声明 `control_plane_tools` 且 `isolation: none`（选隔离环境 profile 时在创建任何环境之前即被准入拒绝）；Claude Code 与 Codex 在容器内执行，均声明 `task_tools` 以及 `isolation: run_environment`，同时支持项目容器与每运行隔离容器（`isolated-workspace`、`isolated-candidate`）。`registerRoleHarness` 只接受协议词汇的 `capabilities`，未声明即不支持，因此未声明的扩展驱动不能用于任何正式阶段。
+内置驱动的声明见 `src/roles/harness.ts`：Native/Pi/Process 声明 `control_plane_tools` 且 `isolation: none`；Claude Code 与 Codex 在共享项目电脑容器内执行，声明 `task_tools` 且 `isolation: none`。`registerRoleHarness` 只接受协议词汇的 `capabilities`，未声明即不支持，因此未声明的扩展驱动不能用于任何正式阶段。
 
-## 每次运行的隔离环境
+## 同任务共享工作区与按需 `git worktree`
 
-角色配置可选两个新的环境 profile：写者 `isolated-workspace`，观察者与 QA `isolated-candidate`。选中后，控制面经 manager 为这次运行创建一个容器（`POST /v1/projects/:id/runs`，`GET`/`DELETE …/runs/:run`，`POST …/runs/:run/execute`）：
-
-- 复用项目电脑的批准镜像和加固：uid 10001、只读根、丢弃全部 capability、`no-new-privileges`、init。
-- 整个 `/workspace`（含 HOME、git store、检出、缓存）和 `/tmp` 都是该容器自己的限额 tmpfs，显式使用 `exec,nosuid,nodev`，允许直接执行编译产物和临时测试二进制，随容器销毁；不挂开发者工作区、项目笔记、宿主 HOME、Docker socket 或其他项目可写状态（没有共享的可写依赖缓存）；仅在宿主机存在已审批的 `agent-tools` 卷时，以只读方式（`:ro`）挂载 `/opt/agent-tools` 供容器内 Claude Code 与 Codex 二进制运行。
-- 网络默认 `none`（只有回环）；需要外网时是该 run 自己的 bridge 网络，不与项目电脑或其他 run 共享网络身份。
-- 限制 CPU、内存（不允许额外 swap）、进程数、tmpfs 大小和运行时限；命令不能超过时限，到期由 manager 删除，manager 重启时删除所有遗留的 run 容器。项目配置的环境变量不传入。
-- 操作只允许 allowlist 中的类型，且只能指向本 run 自己的 workspace id。
-
-固定候选通过 `git_export`（只含该提交的树与 blob）复制进 run 容器再检出并核对树哈希，而不是挂载开发者卷；开发者之后修改原工作区不会改变检视输入。写者在 `isolated-workspace` 中完成提交时，收集快照阶段在释放 run 容器前同样经 `git_export`／`git_import` 将候选提交写回任务工作区，供后续观察者、独立 QA 与发布流程读取。观察者收集结果时若固定候选已变化，结果以 `candidate_changed` 拒绝，旧环境不能认证新内容。控制面用 `verifyRunEnvironment` 自行核对 manager 报告的检查结果（用户、只读根、capability、挂载、socket、网络、PID/IPC 命名空间、资源限制、凭据形状的环境变量名），任一不符即视为未验证并立即释放。
-
-镜像的环境变量名按 `TOKEN`、`SECRET`、`PASSWORD`、`KEY`、`CREDENTIALS` 等完整片段检查，而非仅凭 `GH_`、`AWS_`、`BOT_` 等前缀拒绝；`SSH_AUTH_SOCK`、`XAUTHORITY`、`DOCKER_VERSION` 可用。真实凭据名称（如 `GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`）仍拒绝，违规详情以 `credential_environment:<变量名>` 指出命中项，不包含变量值。
-
-这不是绝对安全保证：内核、Docker 守护进程和镜像本身仍在信任边界内；本地 `LocalManager` 没有容器，不提供 run 环境。
+同一任务内的协作角色（`dev`、`test`、`reviewer`、`ux`、轻量守门员 `qa`）默认直接复用同一个任务工作目录（共享 `node_modules`、构建缓存与测试产物，不再每次委派或验收都克隆目录或新建单次运行容器）；历史配置中的 `isolated-workspace` / `isolated-candidate` 自动安全降级为 `task-workspace` / `candidate-checkout` / `evaluation-checkout`。当同一项目电脑并发执行多个开发任务或需要跨分支对比时，继续通过 `src/projects/worktrees.ts` 与 `src/agent/workspace-tools.ts` 分配各自独立的 `git worktree` 目录，防止 Git 索引与工作树互相踩踏。不同项目 Project Computer 之间以及对外群聊/私聊 Assistant Computer 的容器与网络隔离保持不变。
 
 ## 恢复
 
@@ -103,7 +90,7 @@ recover 只返回四种模式：`native_resume`、`checkpoint_restore`（Native/
 
 ## 预算与用量
 
-`entry-default` 保持入口自身的单次运行上限；`bounded` 配置的 `max_turns`（4–256）和 `max_output_tokens`（256–32768）直接作为单次运行上限，可以提高或降低入口缺省值。未配置的字段沿用入口缺省值，角色对话也遵守这一规则。`metered` 的轮次与输出限制同样只管单次运行，累计请求数单独由 `max_model_requests` 控制，不从 `max_turns` 扣减。其他累计用量按角色实例（任务里的这个角色）汇总其全部运行：恢复、检查点续接、引擎自动重启的新尝试、人工「重试」、后续委派和子代理都算，所以自动重启和重试都不会重开累计预算。RunContext 的 `budget.accounting` 写明 `per_run` 或 `role_instance`。预算只作用于角色运行，主控不接管的入口仍按入口自身上限执行：
+`entry-default` 保持入口自身的单次运行上限；`bounded` 配置的 `max_turns`（4–256）、`max_output_tokens`（256–32768）和 `command_timeout_seconds`（10–7200，可覆盖项目策略 `policies.command_timeout_seconds` 或入口缺省命令超时）直接作为单次运行上限，可以提高或降低入口缺省值。未配置的字段沿用入口缺省值，角色对话也遵守这一规则。`metered` 的轮次与输出限制同样只管单次运行，累计请求数单独由 `max_model_requests` 控制，不从 `max_turns` 扣减。其他累计用量按角色实例（任务里的这个角色）汇总其全部运行：恢复、检查点续接、引擎自动重启的新尝试、人工「重试」、后续委派和子代理都算，所以自动重启和重试都不会重开累计预算。RunContext 的 `budget.accounting` 写明 `per_run` 或 `role_instance`。预算只作用于角色运行，主控不接管的入口仍按入口自身上限执行：
 
 - `metered` 可设 `max_turns`、`max_output_tokens`、`max_total_tokens`、`max_model_requests`、`max_tool_calls`、`max_wall_seconds`。
 - 用量来自模型请求账本，加上 Codex 这类自带模型的执行器上报的用量（每条 `usage` 增量算一次请求；能够匹配单价时记入已知费用；已开始却没有任何上报的 turn，在它结束或所在运行结束后算 unknown）：缺少 token 数的请求计入 `unknown_requests`，此时已知用量只是下限（`semantics: lower_bound`），不记为 0；缓存输入是输入的一部分，不重复相加；金额按币种统计，不参与资源上限判定；历史 `max_cost` 读取时忽略，重新保存后剔除。
@@ -120,7 +107,7 @@ SELECT type, data FROM task_history WHERE task_id = '<task>'
 ORDER BY id;
 ```
 
-验证命令：`npm test`（`test/st/src/roles/role-run.test.mjs`、`test/st/src/projects/run-environments.test.mjs`）与真实 Docker 隔离验收 `npm run test:isolation:docker`（验收记录在 Issue #169）。
+验证命令：`npm test`（`test/st/src/roles/role-run.test.mjs`、`test/st/src/roles/shared-workspace-qa.test.mjs`）。
 
 正式 task 与主会话使用同一外部模型账本。容器内 Claude Code 与 Codex 通过控制面多格式模型网关记录每次上游模型请求与真实 token 明细，并与协议事件（Claude Code 的 `result.usage` 对账及 Codex 的 `thread/tokenUsage/updated` 增量）配合：未取得完整 token 计数的中断请求记入 `unknown_requests`（`lower_bound`），明确 4xx 拒绝记为已知零 token，任务预算不重复叠加同一回执的投影账单。
 

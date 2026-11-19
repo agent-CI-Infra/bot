@@ -56,7 +56,7 @@ export class ResultSession {
     return this.run(async()=>{await (active.getStore()??this).guard();const raw=await (name==='read_tool_result'&&interceptRead?this.read(args):execute()); const redactor=new Redactor(); for(const secret of this.secrets)redactor.add(secret); const value=redactor.clean(raw);await (active.getStore()??this).guard(); return boundedResult(value, batchBytes, value => this.preserve(value, name));},true);
   }
 }
-export function resultSpec<T>(spec: AgentSpec<T>, owner: () => string = () => taskResultOwner(spec.task, spec.runEnvironment), mounted?: () => boolean): AgentSpec<T> {
+export function resultSpec<T>(spec: AgentSpec<T>, owner: () => string = () => taskResultOwner(spec.task), mounted?: () => boolean): AgentSpec<T> {
   const scope = resultScope(spec.store,spec.task);
   const session = new ResultSession(spec.store, scope, owner, spec.guard,spec.redactor.values, mounted ?? (() => (spec.harnessAccess?.commands ?? !!spec.tools?.some(t=>t.function.name==='run_command')) && !!(spec.roleWorkspace || spec.pi?.workspace || spec.containerOptions?.manager))), execute = spec.execute;
   return { ...spec, resultSession: session, tools: [...(spec.tools ?? []).filter(t => t.function.name !== 'read_tool_result'), readToolResult],
@@ -93,8 +93,8 @@ export function resultScope(store:Store,task:Record<string,any>):TrajectoryScope
 
 export const projectResultOwner = (repository: unknown) => computerResultOwner('project', repository);
 export const assistantResultOwner = (id: string) => computerResultOwner('assistant', id);
-export function taskResultOwner(task: Record<string, any>, environment?: any) {
-  return environment?.run_id ? computerResultOwner('run', environment.run_id) : projectResultOwner(task.repository_id);
+export function taskResultOwner(task: Record<string, any>) {
+  return projectResultOwner(task.repository_id);
 }
 
 export function preserveToolResult(value: unknown, name?: string) { return active.getStore()?.preserve(value,name) ?? {error:'tool_result_storage_unavailable'}; }

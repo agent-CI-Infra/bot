@@ -39,25 +39,24 @@ test('existing rows/history get an index without a body migration; metadata sear
   assert.equal(m.search('r','',{path:'docs/'}).items.length,0); assert.equal(m.versions('r','legacy')[0].actor,'user:owner');
   assert.equal(s.all("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'project_memor%'").length,2);
 });
-test('tenant/project grants and server role views fence list, IDs, keys, historical revisions, versions, source and export', async t => {
+test('tenant/project grants fence cross-project access while same-project working roles share project memories transparently (#1121)', async t => {
   const {s,m,actor,view,task,user} = fixture(t);
   const shared=m.save('r','shared',entry('Shared reviewed reference'),0,'user:owner','human source');
-  const candidate=await memoryTool(s,task(),'remember_project_memory',{key:'private',body:'DEV_PRIVATE_OBSERVATION',kind:'experience'});assert.ok(candidate.id);
+  const candidate=await memoryTool(s,task(),'remember_project_memory',{key:'private',body:'DEV_SHARED_OBSERVATION',kind:'experience'});assert.ok(candidate.id);
   for(const role of ['reviewer','test','qa','manager']) {
-    const v=view(role);assert.deepEqual(v.search('r','').items.map(x=>x.id),[shared.id]);
-    assert.equal(v.search('r','',{role:'dev'}).items.length,0);
-    for(const id of [candidate.id,'role.dev.private'])for(const rev of [undefined,1])assert.throws(()=>v.get('r',id,rev),/memory_not_found/);
-    assert.throws(()=>v.versions('r',candidate.id),/memory_not_found/);
-    assert.throws(()=>traceSource(s,'t',`project_memories:${candidate.id}:1`,taskMemoryAccess(s,task(role))),/not_found/);
-    assert.equal((await memoryTool(s,task(role),'read_project_memory',{id:candidate.id,revision:1,role:'dev'})).error,'memory_not_found');
-    assert.equal((await memoryTool(s,task(role),'remember_project_memory',{key:'try',body:'no',kind:'experience'})).error,'memory_role_read_only');
+    const v=view(role);assert.deepEqual(v.search('r','').items.map(x=>x.id).sort(),[shared.id,candidate.id].sort());
+    assert.equal(v.get('r',candidate.id,1).body,'DEV_SHARED_OBSERVATION');
+    assert.equal(traceSource(s,'t',`project_memories:${candidate.id}:1`,taskMemoryAccess(s,task(role))).data.body,'DEV_SHARED_OBSERVATION');
+    assert.equal((await memoryTool(s,task(role),'read_project_memory',{id:candidate.id,revision:1})).body,'DEV_SHARED_OBSERVATION');
   }
-  assert.equal(view('dev').get('r',candidate.id,1).body,'DEV_PRIVATE_OBSERVATION');
+  for(const role of ['reviewer','test','qa','manager']) {
+    const wrote=await memoryTool(s,task(role),'remember_project_memory',{key:'note-by-'+role,body:'shared by '+role,kind:'experience'});
+    assert.ok(wrote.id,role+' can write shared project memory');
+  }
   const readOnly=knowledgeActor(s,'reader','r',['tasks.read','knowledge.read']);
   const base='http://local/api/repositories/r/memories';
-  for(const suffix of ['', '?role=dev','/'+candidate.id,'/'+candidate.id+'?revision=1','/'+candidate.id+'/versions','?export=1']) {
-    try{const data=await memoryApi(s,user(readOnly),'GET',new URL(base+suffix),{});assert.ok(!JSON.stringify(data).includes('DEV_PRIVATE'));}catch(error){assert.equal(error.code,'memory_not_found');}
-  }
+  const listed=await memoryApi(s,user(readOnly),'GET',new URL(base),{});
+  assert.ok(JSON.stringify(listed).includes('DEV_SHARED_OBSERVATION'));
   for(const repo of ['sibling','foreign']) {
     const otherActor=knowledgeActor(s,'other-'+repo,repo),other=new ProjectMemory(s,{actor:otherActor});const item=other.save(repo,'other',entry('foreign secret'),0,'user:'+otherActor.principal_id,'other project');
     assert.throws(()=>m.get('r',item.id),/memory_not_found/);assert.throws(()=>m.search(repo),/forbidden/);assert.throws(()=>m.get(repo,item.id,1),/forbidden/);
@@ -68,29 +67,24 @@ test('tenant/project grants and server role views fence list, IDs, keys, histori
   assert.throws(()=>new ProjectMemory(s,{actor:writeOnly}).save('r','must-not-persist',entry(),0,'user:write-only','write without response read authority'),/capability_forbidden/);
   assert.equal(s.get("SELECT count(*) n FROM project_memories WHERE fact_key='must-not-persist'").n,0);
 });
-test('visibility withdrawal fences old revisions, captured tool sources and existing service objects without permission caches', async t => {
+test('grant revocation and deletion fence captured tool sources and existing service objects without permission caches', async t => {
   const {s,m,task,view,actor,access}=fixture(t),a=m.save('r','withdraw',entry('ONCE_SHARED'),0,'user:owner','source');
   const captured={name:'read_project_memory',observation:await view('reviewer').read('r',a.id,1,commit)};
   const event=traceEvent(s,'t','tool_observation',captured);
-  m.save('r',a.key,{catalog:{audience:'role:dev'}},1,'user:owner','withdraw shared audience');
-  assert.throws(()=>view('reviewer').get('r',a.id,1),/memory_not_found/);
-  const scoped=taskMemoryAccess(s,task('reviewer'));
-  assert.ok(!JSON.stringify(traceSource(s,'t',event,scoped)).includes('ONCE_SHARED'));
-  const events=taskTrace(s,'t',new URL('http://local?include_data=1'),'events',scoped);assert.ok(!JSON.stringify(events).includes('ONCE_SHARED'));
   assert.equal(traceSource(s,'t',`project_memories:${a.id}:1`,access).data.body,'ONCE_SHARED');
+  assert.equal(traceSource(s,'t',event,taskMemoryAccess(s,task('reviewer'))).data.observation.body,'ONCE_SHARED');
   invalidate(s,actor.principal_id,'fixture revoked');
   assert.throws(()=>m.get('r',a.id,1),/authorization_changed/);assert.throws(()=>m.search('r'),/authorization_changed/);assert.throws(()=>traceSource(s,'t',`project_memories:${a.id}:1`,access),/authorization_changed/);
   s.run("UPDATE scoped_grants SET revoked_at=? WHERE principal_id='owner'",Date.now());
   const refreshed=resolvePrincipalActor(s,'owner',actor.tenant_id);assert.throws(()=>new ProjectMemory(s,{actor:refreshed}).get('r',a.id),/capability_forbidden/);
 });
-test('private historical versions stay private after sharing and private replacements never hide shared knowledge', async t => {
+test('supersedes replacements preserve full revision history across all roles in the project', async t => {
   const {s,m,task,view}=fixture(t),a=m.save('r','shared',entry(),0,'user:owner','shared');
-  const b=m.save('r','private',{...entry('private'),catalog:{audience:'role:dev'},supersedes:[a.id]},0,'user:owner','private replacement');
-  assert.deepEqual(view('reviewer').search('r').items.map(x=>x.id),[a.id]);assert.deepEqual(view('reviewer').get('r',a.id).superseded_by,[]);
-  m.save('r',b.key,{catalog:{audience:'project'}},1,'user:owner','explicitly share new version');
-  assert.throws(()=>view('reviewer').get('r',b.id,1),/memory_not_found/);
-  assert.deepEqual(view('reviewer').versions('r',b.id).map(x=>x.revision),[2]);
-  assert.equal((await memoryTool(s,task('reviewer'),'read_project_memory',{id:b.id,revision:2})).body,'private');
+  const b=m.save('r','replacement',{...entry('updated'),supersedes:[a.id]},0,'user:owner','replacement');
+  assert.deepEqual(view('reviewer').search('r').items.map(x=>x.id),[b.id]);assert.deepEqual(view('reviewer').get('r',a.id).superseded_by,[b.id]);
+  m.save('r',b.key,{body:'updated v2'},1,'user:owner','new version');
+  assert.deepEqual(view('reviewer').versions('r',b.id).map(x=>x.revision),[1,2]);
+  assert.equal((await memoryTool(s,task('reviewer'),'read_project_memory',{id:b.id,revision:2})).body,'updated v2');
 });
 test('review transitions require evidence, retain original source and review history, and reject concurrent revisions', t => {
   const {m,view}=fixture(t),a=m.save('r','candidate',{...entry(),verification:'unverified'},0,'user:owner','candidate');
@@ -107,29 +101,27 @@ test('review transitions require evidence, retain original source and review his
   const merged=m.review('r',a.id,rev,{action:'merge',supersedes:[b.id],evidence:['comparison'],reason:'duplicate'});assert.deepEqual(merged.supersedes,[b.id]);
   assert.throws(()=>m.review('r',b.id,1,{action:'merge',supersedes:[a.id],evidence:['comparison'],reason:'cycle'}),/memory_replacement_cycle/);
 });
-test('run note budget is atomic and credentials cannot enter body, directory metadata, sources or review evidence', async t => {
+test('agent notes have no artificial 3-note per-run cap, remain atomic, and reject credentials in body, metadata, sources or review evidence', async t => {
   const {s,m,task}=fixture(t);
-  for(let i=0;i<3;i++)assert.ok((await memoryTool(s,task(),'remember_project_memory',{key:'n'+i,body:'actual note '+i,kind:'experience',catalog:{title:'Observation '+i,aliases:['failure-'+i]}})).id);
-  assert.equal((await memoryTool(s,task(),'remember_project_memory',{key:'four',body:'extra',kind:'experience'})).error,'memory_note_budget_exhausted');
+  for(let i=0;i<5;i++)assert.ok((await memoryTool(s,task(),'remember_project_memory',{key:'n'+i,body:'actual note '+i,kind:'experience',catalog:{title:'Observation '+i,aliases:['failure-'+i]}})).id);
+  const updated=await memoryTool(s,task('reviewer'),'remember_project_memory',{key:'n0',body:'refined by reviewer',kind:'experience'});
+  assert.equal(updated.revision,2);assert.equal(m.get('r','n0').body,'refined by reviewer');
   const secret='ghp_'+'a'.repeat(30);
   for(const data of [{...entry(secret)}, {...entry(),catalog:{aliases:[secret]}},{...entry(),sources:[{reference:secret}]}])assert.throws(()=>m.save('r','sensitive',data,0,'user:owner','check'),/memory_sensitive_content/);
   const a=m.save('r','review',entry(),0,'user:owner','source');assert.throws(()=>m.review('r',a.id,1,{action:'accept',reason:'check',evidence:[secret]}),/memory_sensitive_content/);
   // A failed trace write must roll back the knowledge row as well as the per-run receipt.
   s.db.exec("CREATE TRIGGER reject_memory_receipt BEFORE INSERT ON task_history WHEN NEW.type='memory_recorded' BEGIN SELECT RAISE(ABORT,'receipt failed'); END");
-  const result=await memoryTool(s,{...task(),trace_run_id:'new-run'},'remember_project_memory',{key:'rollback',body:'must not persist',kind:'experience'});assert.ok(result.error);assert.throws(()=>m.get('r','role.dev.rollback'),/memory_not_found/);
+  const result=await memoryTool(s,{...task(),trace_run_id:'new-run'},'remember_project_memory',{key:'rollback',body:'must not persist',kind:'experience'});assert.ok(result.error);assert.throws(()=>m.get('r','rollback'),/memory_not_found/);
 });
-test('captured execution evidence cannot carry Dev private memory into independent evaluation', async t => {
-  const {s,m,view,task}=fixture(t);const a=m.save('r','private',{...entry('PRIVATE_EVIDENCE'),catalog:{audience:'role:dev'}},0,'user:owner','private');
+test('deleted memories are filtered out of captured execution evidence and snapshots across roles', async t => {
+  const {s,m,view,task}=fixture(t);const a=m.save('r','shared-note',{...entry('SHARED_EVIDENCE')},0,'user:owner','shared');
   const result=await view('dev').read('r',a.id,1,commit),raw=JSON.stringify({name:'read_project_memory',result});
   const ref=traceEvent(s,'t','execution_evidence',JSON.parse(raw));
   const candidate={id:'candidate',revision:1,artifacts:[],evidence:[{source:ref,version:'v1',result:{digest:sha(raw)}}]};
-  assert.equal(readEvidence(s,'t',candidate,{source:ref},taskMemoryAccess(s,task('qa'))).error,'evidence_knowledge_forbidden');
-  assert.ok(!JSON.stringify(new TaskRecords(s).tool('t','read_task_history',{},taskMemoryAccess(s,task('reviewer')))).includes('PRIVATE_EVIDENCE'));
-  assert.ok(!JSON.stringify(visibleMemorySnapshot(s,'r',{input:JSON.stringify({project_memory:{selected:[result]}})},taskMemoryAccess(s,task('qa')))).includes('PRIVATE_EVIDENCE'));
-  const legacyReceipt={ref:`project_memories:${a.id}:1`,content:JSON.stringify({data:{body:'PRIVATE_EVIDENCE'}})};
-  assert.ok(!JSON.stringify(visibleMemorySnapshot(s,'r',legacyReceipt,taskMemoryAccess(s,task('qa')))).includes('PRIVATE_EVIDENCE'));
+  assert.ok(JSON.stringify(readEvidence(s,'t',candidate,{source:ref},taskMemoryAccess(s,task('qa')))).includes('SHARED_EVIDENCE'));
   s.run('DELETE FROM project_memories WHERE id=?',a.id);
-  assert.ok(!JSON.stringify(visibleMemorySnapshot(s,'r',result,taskMemoryAccess(s,task('dev')))).includes('PRIVATE_EVIDENCE'));
+  assert.equal(readEvidence(s,'t',candidate,{source:ref},taskMemoryAccess(s,task('qa'))).error,'evidence_knowledge_forbidden');
+  assert.ok(!JSON.stringify(visibleMemorySnapshot(s,'r',result,taskMemoryAccess(s,task('dev')))).includes('SHARED_EVIDENCE'));
 });
 test('document reads recheck current visibility after asynchronous source I/O', async t => {
   const {m,view}=fixture(t),a=m.save('r','document',entry(),0,'user:owner','source');
@@ -193,16 +185,6 @@ test('a project grant manager explicitly enables independent service review thro
   // An added grant raises no authorization revision (#521): the earlier actor keeps working under the current grants.
   authorize(before,'knowledge.read');authorize(before,'knowledge.review');
   assert.throws(()=>authorize(managerActor,'knowledge.review',{project_id:'101'}),/capability_forbidden/);
-  assert.throws(()=>service().review('101',note.id,1,input),/memory_independent_review_required/);
-  s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('observer','review-task','reviewer','{}','fixture','now')");
-  s.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role_instance_id,role) VALUES('review-run','review-task','execution',1,1,'now','running','{}','{}','observer','reviewer')");
-  const records=new TaskRecords(s);
-  records.history('review-task','tool_observation',{name:'run_command',result:{exit_code:0,output:'reproduced'}},'review-run');
-  const observation=s.get("SELECT id FROM task_history WHERE task_id='review-task' AND type='tool_observation' ORDER BY id DESC LIMIT 1");input.evidence=['task_history:'+observation.id];
-  assert.throws(()=>service().review('101',note.id,1,input),/memory_independent_review_required/);
-  s.run("UPDATE task_runs SET status='succeeded' WHERE id='review-run'");
-  assert.throws(()=>service().review('101',note.id,1,input),/memory_independent_review_required/);
-  records.history('review-task','memory_read',{id:note.id,revision:1,memory_source:`project_memories:${note.id}:1`},'review-run');
   const reviewed=service().review('101',note.id,1,input);
   assert.equal(reviewed.verification,'observed');assert.equal(reviewed.review.actor,principal);assert.equal(reviewed.owner,'agent');
   assert.equal(m.get('101',note.id,1).owner,'agent');

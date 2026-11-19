@@ -107,25 +107,20 @@ export class TaskToolGateway {
     const saved = await memoryTool(s, scoped, 'remember_project_memory', { key: String(args.key ?? '').slice(0, 120), body: String(args.body ?? '').slice(0, 8000), kind: 'experience' });
     return saved?.error ? saved : { receipt: { id: saved.id, revision: saved.revision, verification: saved.verification ?? 'unverified', evidence: args.evidence } };
   }
-  /** Whether this run's role may expand a reference of its own task. */
+  /** Whether this run's role may expand a reference of its own task (#1121: roles within the same task share observations transparently). */
   private visible(task: Row, run: Row, role: string, ref: string): boolean {
     const s = this.store;
     if (!ref.startsWith('project_memories:') && taskControllerReads(s, String(task.id), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }))) return true;
     const runRef = /^(?:model_requests|task_runs):([^:]+):/.exec(ref);
     if (runRef) {
-      // Model exchanges and run snapshots belong to the role instance that made them.
-      const owner = /^model_requests:/.test(ref) ? s.get('SELECT r.role_instance_id FROM model_requests m JOIN task_runs r ON r.id=m.run_id WHERE m.id=? AND m.task_id=?', runRef[1]!, task.id) : s.get('SELECT role_instance_id FROM task_runs WHERE id=? AND task_id=?', runRef[1]!, task.id);
-      return !!owner && (owner.role_instance_id ?? null) === (run.role_instance_id ?? null);
+      const exists = /^model_requests:/.test(ref) ? s.get('SELECT 1 FROM model_requests WHERE id=? AND task_id=?', runRef[1]!, task.id) : s.get('SELECT 1 FROM task_runs WHERE id=? AND task_id=?', runRef[1]!, task.id);
+      return !!exists;
     }
     const memory = /^project_memories:([^:]+):(\d+)$/.exec(ref);
     if (memory) return canReadMemory(s, String(task.repository_id), memory[1]!, Number(memory[2]), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }));
     const history = /^task_history:(\d+)$/.exec(ref);
     if (history) {
-      const row = s.get('SELECT type,run_id FROM task_history WHERE id=? AND task_id=?', Number(history[1]), task.id);
-      if (!row) return false;
-      // Another instance's raw role input carries its own prompt and transcript context; its results and findings are shared facts.
-      if (row.type === 'role_input' || row.type === 'role_run_checkpoint') { const owner = row.run_id ? s.get('SELECT role_instance_id FROM task_runs WHERE id=?', row.run_id)?.role_instance_id : null; const own = s.get("SELECT 1 FROM task_history WHERE id=? AND json_extract(data,'$.instance_id')=?", Number(history[1]), run.role_instance_id ?? ''); return !!own || owner === run.role_instance_id; }
-      return true;
+      return !!s.get('SELECT 1 FROM task_history WHERE id=? AND task_id=?', Number(history[1]), task.id);
     }
     return /^(?:task:|contract:revision:|role_snapshots:|task_tools:|task_logs:|github_effects:)/.test(ref);
   }

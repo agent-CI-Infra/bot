@@ -63,9 +63,9 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
   } finally { await h.stop(); }
 });
 
-// #285: main already covers four edit paths plus the save/discard flow. These close the remaining gaps: the three
-// detail-page selects that the overview cannot reach, the never-saved project, and the two controls whose default
-// catalog has a single option (`模型 API`, `输出结果`) so no interaction can switch them.
+// #285: main already covers four edit paths plus the save/discard flow. These close the remaining gaps: the detail-page
+// controls that the overview cannot reach, the never-saved project, and the controls whose default catalog has a single
+// option (`模型 API`, `运行环境`, `输出结果`) so no interaction can switch them.
 async function prepared(page) {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
@@ -96,8 +96,11 @@ async function other(select) {
   await select.selectOption(value);
 }
 for (const [name, act] of [
-  ['结构化输出方式', async page => other(page.getByLabel('结构化输出方式', { exact: true }))],
-  ['运行环境', async page => other(page.getByLabel('运行环境', { exact: true }))],
+  ['结构化输出方式', async page => {
+    const envOptions = await page.getByLabel('运行环境', { exact: true }).locator('option').evaluateAll(entries => entries.map(entry => entry.value));
+    expect(envOptions).toEqual(['task-workspace']);
+    await other(page.getByLabel('结构化输出方式', { exact: true }));
+  }],
   ['任务累计工具调用', async page => page.getByLabel('任务累计工具调用', { exact: true }).fill('9')],
 ]) test(`详情页的「${name}」改一下，回到列表就标记为草稿，放弃后回到已生效`, async ({ page }) => {
   test.setTimeout(90000);
@@ -132,7 +135,7 @@ test('跟随默认配置的项目显示「正在使用默认配置」，勾选�
     await expect(status).not.toContainText('配置版本 0');
   } finally { await h.stop(); }
 });
-// `模型 API` and `输出结果` have exactly one option in the default catalog, so no test can switch them. Pin the structure
+// `模型 API`, `运行环境` and `输出结果` have a single option per kind in the default catalog, so no test can switch them. Pin the structure
 // that keeps both honest instead: every one of those controls records its edit through markRoleDirty, and `state.dirty`
 // is written in exactly one place — inside that function. Counting call sites would go red the moment someone adds a
 // control, so this asserts the single write site and its location, not how many callers exist.

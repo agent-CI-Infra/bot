@@ -25,8 +25,6 @@ import {
   selectCompatibleCliVersion,
 } from '../../../../dist/harness/agent-tools.js';
 import { Projects } from '../../../../manager/projects.mjs';
-import { RunEnvironments } from '../../../../manager/run-environments.mjs';
-import { verifyRunEnvironment } from '../../../../dist/projects/run-environment.js';
 import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 
 import { buildTarGz, hashes, startMockToolUpstream } from '../../../fixtures/agent-tools-fixture.mjs';
@@ -309,7 +307,7 @@ test('records selected CLI version on task_runs and serves super-admin /api/agen
   assert.equal(probeRun.cli_version, '0.167.0');
 });
 
-test('project computer recreates once to mount /opt/agent-tools read-only and RunEnvironments enforce read-only /opt/agent-tools isolation', async t => {
+test('project computer recreates once to mount /opt/agent-tools read-only and manager rejects invalid agent-tools volumes', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'mgr-tools-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -340,58 +338,7 @@ test('project computer recreates once to mount /opt/agent-tools read-only and Ru
   await projects.operate('101', 'start', { operation_id: hex48(), generation: 1 });
   assert.equal(docker.created, createdBefore + 1);
 
-  // 4. Isolated RunEnvironments mount /opt/agent-tools strictly read-only and pass control-plane verification;
-  //    writable /opt/agent-tools or mounts elsewhere are rejected with external_mount.
-  const runs = new RunEnvironments(projects);
-  const runId = hex48();
-  const described = await runs.create('101', { run_id: runId, task_id: 't1', lease_epoch: 1, profile: 'writer' });
-  assert.deepEqual(described.container.mounts, [
-    {
-      type: 'volume',
-      name: 'fixture-agent-tools',
-      source: 'fixture-agent-tools',
-      destination: '/opt/agent-tools',
-      rw: false,
-      labels: { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' },
-    },
-  ]);
-  assert.deepEqual(verifyRunEnvironment(described, { run_id: runId, network: 'none' }), { verified: true, violations: [] });
-
-  // Compose-prefixed agent-tools volume with Compose label passes verification.
-  const composePrefixedGood = {
-    ...described,
-    container: {
-      ...described.container,
-      mounts: [{
-        type: 'volume',
-        name: 'myproject_agent-tools',
-        source: 'myproject_agent-tools',
-        destination: '/opt/agent-tools',
-        rw: false,
-        labels: { 'com.docker.compose.project': 'myproject', 'com.docker.compose.volume': 'agent-tools' },
-      }],
-    },
-  };
-  assert.deepEqual(verifyRunEnvironment(composePrefixedGood, { run_id: runId, network: 'none' }), { verified: true, violations: [] });
-
-  // Writable /opt/agent-tools mount is refused!
-  const writableTools = {
-    ...described,
-    container: {
-      ...described.container,
-      mounts: [{
-        type: 'volume',
-        name: 'fixture-agent-tools',
-        source: 'fixture-agent-tools',
-        destination: '/opt/agent-tools',
-        rw: true,
-        labels: { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' },
-      }],
-    },
-  };
-  assert.deepEqual(verifyRunEnvironment(writableTools, { run_id: runId, network: 'none' }).violations, ['external_mount']);
-
-  // Every other deployment/project volume (including Compose underscore-prefixed ones and unlabeled agent-tools) is refused by both verifier and manager!
+  // 4. Every other deployment/project volume (including Compose underscore-prefixed ones and unlabeled agent-tools) is refused by manager!
   for (const badMount of [
     { name: 'dbot-fixture-101-notes', labels: { 'department.bot.kind': 'notes' } },
     { name: 'dbot-fixture-101-g1-work', labels: { 'department.bot.kind': 'volume' } },
@@ -403,15 +350,6 @@ test('project computer recreates once to mount /opt/agent-tools read-only and Ru
     { name: 'myproject_tunnel-keys', labels: { 'com.docker.compose.volume': 'tunnel-keys' } },
     { name: 'myproject_agent-tools', labels: {} },
   ]) {
-    const candidate = {
-      ...described,
-      container: {
-        ...described.container,
-        mounts: [{ type: 'volume', name: badMount.name, source: badMount.name, destination: '/opt/agent-tools', rw: false, labels: badMount.labels }],
-      },
-    };
-    assert.deepEqual(verifyRunEnvironment(candidate, { run_id: runId, network: 'none' }).violations, ['external_mount'], `verifier must reject ${badMount.name}`);
-
     docker.toolsVolumeName = badMount.name;
     docker.toolsVolumeLabels = badMount.labels;
     await assert.rejects(() => projects.agentToolsVolume(), /agent_tools_volume_invalid/, `manager must reject ${badMount.name}`);

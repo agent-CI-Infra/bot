@@ -59,12 +59,26 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   const notes=new Notes(notesRoot),linkNotes=async()=>{
     try{await symlink(notesRoot,root+'/notes');}catch(error){if(error.code!=='EEXIST'||await readlink(root+'/notes')!==notesRoot)throw new Error('invalid_notes_link');}
   };
-  // The checkout's real directory, read once per call: file tools stay inside it, through the link too.
+  // The checkout's real directory, read once per call: repo-relative file tools stay inside it, through the link too.
   let checkout=null;const base=async()=>checkout??=await checkoutDirectory(repo,worktreeRoot);
   const path=async(value,create=false)=>{
     const target=resolve(repo,safe(value)),inside=await base();
     if(create)await mkdir(dirname(target),{recursive:true});
     const parent=await realpath(dirname(target));if(parent!==inside&&!parent.startsWith(inside+sep))throw new Error('invalid_parent');return target;
+  };
+  const outsideRepo=value=>typeof value==='string'&&(value.startsWith('/')||value.startsWith('../')||value.includes('/../'));
+  const computerPath=async(value,create=false)=>{
+    if(typeof value!=='string'||!value||value.length>2048||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>p.toLowerCase()==='.git'||p==='.runner-journal'))throw new Error('invalid_path');
+    const volumeRoot=resolve(workspaceRoot).endsWith(sep+'tasks')?dirname(resolve(workspaceRoot)):resolve(workspaceRoot);
+    const rawRoots=[volumeRoot,resolve(notesRoot),resolve(worktreeRoot),resolve(environment.TMPDIR||'/tmp')];
+    const allowed=[...new Set([...rawRoots,...await Promise.all(rawRoots.map(r=>realpath(r).catch(()=>r)))])];
+    const stores=[...new Set([resolve(gitRoot),await realpath(gitRoot).catch(()=>resolve(gitRoot))])];
+    const target=value.startsWith('/')?resolve(value):resolve(repo,value);
+    if(!allowed.some(r=>target.startsWith(r+sep))||stores.some(g=>target===g||target.startsWith(g+sep)))throw new Error('invalid_path');
+    if(create)await mkdir(dirname(target),{recursive:true});
+    const parent=await realpath(dirname(target));
+    if(!allowed.some(r=>parent===r||parent.startsWith(r+sep))||stores.some(g=>parent===g||parent.startsWith(g+sep)))throw new Error('invalid_parent');
+    return target;
   };
   // Removes what the task directory has as its checkout: a link goes alone, a directory of its own with its worktree
   // registration in the store.
@@ -102,21 +116,6 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(busy)throw new Error(`git_worktree_busy: ${busy.locks.join(', ')} ${busy.pids.length?'held by running git process '+busy.pids.join(', '):`created less than ${lockGraceMs/1000} seconds ago`}; retry later`);
     return removed.length?{stale_git_locks_removed:removed}:{};
   };
-  // An evaluator gets a distinct checkout of the submitted Git object, never the executor's dirty tree/session.
-  if(input.type==='workspace_acceptance'){
-    if(!id48.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_acceptance_snapshot');
-    const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
-    await checkoutDirectory(source,worktreeRoot).catch(()=>{throw new Error('invalid_acceptance_source');});
-    await mkdir(root,{recursive:true});await dropCheckout();
-    await storeGit(['clone','--shared','--no-checkout','--',source,repo],{cwd:root});
-    await git(['checkout','--detach',input.sha]);
-    const tree=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
-    if(tree!==input.tree_sha)throw new Error('acceptance_snapshot_mismatch');
-    await linkNotes();
-    const originalContext=`${workspaceRoot}/${input.source_workspace_id}/context`;
-    if(await stat(originalContext).then(s=>s.isDirectory(),()=>false))await cp(originalContext,context,{recursive:true,dereference:false});
-    return {tree_sha:tree,sha:input.sha};
-  }
   if(input.type==='workspace_init'){
     // A file copy is the task's own: a link to a shared worktree an earlier preparation left there goes first.
     if(await lstat(repo).then(info=>info.isSymbolicLink(),()=>false))await unlink(repo);
@@ -231,15 +230,53 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     return {written:true};
   }
   if(input.type.startsWith('workspace_agent_')||input.type.startsWith('workspace_harness_'))return agentOperation(input,root);
-  const aside=typeof input.path==='string'&&!input.sha&&(input.path.startsWith('../notes/')||input.type==='workspace_read'&&input.path.startsWith('../context/'));
-  if(aside&&input.type==='workspace_write'){
-    if(input.offset!==0||input.final!==true||input.mode!=='100644'||input.snapshot||typeof input.base64!=='string')throw new Error('invalid_note_write');
-    return notes.write(input.path.slice(9),Buffer.from(input.base64,'base64').toString('utf8'));
+  const noteTarget=(value)=>{
+    if(typeof value!=='string')return null;
+    if(value.startsWith('../notes/'))return value.slice(9);
+    const resolvedNotes=resolve(notesRoot);
+    if(value.startsWith('/')){const full=resolve(value);if(full.startsWith(resolvedNotes+sep))return full.slice(resolvedNotes.length+1);}
+    return null;
+  };
+  const notePath=!input.sha&&!input.snapshot?noteTarget(input.path):null;
+  if(notePath!==null&&input.type==='workspace_write'){
+    if(input.mode!=='100644'||typeof input.base64!=='string'||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_note_write');
+    const chunk=Buffer.from(input.base64,'base64');
+    if(input.offset===0&&input.final===true)return notes.write(notePath,chunk.toString('utf8'));
+    await mkdir(root,{recursive:true});
+    const stage=root+'/.note-stage-'+createHash('sha256').update(notePath).digest('hex').slice(0,24);
+    const handle=await open(stage,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
+    try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(chunk,0,chunk.length,input.offset);}finally{await handle.close();}
+    if(!input.final)return {written:true};
+    try{return await notes.write(notePath,await readFile(stage,'utf8'));}finally{await unlink(stage).catch(()=>{});}
   }
-  if(aside&&input.type==='workspace_read'){
-    if(input.path.startsWith('../notes/'))return notes.read(input.path.slice(9));
-    const handle=await open(await contextPath(input.path.slice(11)),constants.O_RDONLY|constants.O_NOFOLLOW);
-    try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
+  if(notePath!==null&&input.type==='workspace_read')return notes.read(notePath);
+  if(!input.sha&&!input.snapshot&&outsideRepo(input.path)&&(input.type==='workspace_read'||input.type==='workspace_write'||input.type==='workspace_export')){
+    if(input.type==='workspace_read'){
+      const target=await computerPath(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
+      try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
+    }
+    if(input.type==='workspace_write'){
+      if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
+      if(input.final&&!['100644','100755'].includes(input.mode))throw new Error('invalid_mode');
+      const data=Buffer.from(input.base64,'base64'),target=await computerPath(input.path,true);
+      const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
+      try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);await handle.sync();}finally{await handle.close();}
+      return {written:true};
+    }
+    const target=await computerPath(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
+    let data;
+    try{
+      const info=await handle.stat(),max=30*1024*1024;
+      if(!info.isFile())throw new Error('artifact_regular_file_required');
+      if(info.size<1||info.size>max)throw new Error('artifact_size_limit');
+      const buffer=Buffer.alloc(info.size+1);let size=0;
+      while(size<buffer.length){const part=await handle.read(buffer,size,buffer.length-size,size);if(!part.bytesRead)break;size+=part.bytesRead;}
+      if(size!==info.size)throw new Error('artifact_changed');data=buffer.subarray(0,size);
+    }finally{await handle.close();}
+    await mkdir(root,{recursive:true});
+    const sha=createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex'),cache=root+'/blob-'+sha;
+    try{await writeFile(cache,data,{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}
+    return {sha,size:data.length};
   }
   await base();
   if(input.type==='workspace_write'){

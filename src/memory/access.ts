@@ -30,7 +30,6 @@ export function memoryAuthorize(access: MemoryAccess | undefined, repo: string, 
   if (!access?.actor) return fail(403, 'memory_actor_required');
   if (access.actor.project_id && access.actor.project_id !== repo) fail(403, 'project_scope_mismatch');
   authorize(access.actor, write ? 'knowledge.write' : 'knowledge.read', { project_id: repo });
-  if (write && access.role && access.role !== 'dev') fail(403, 'memory_role_read_only');
   return access;
 }
 
@@ -77,13 +76,13 @@ export function canReadMemory(store: Store, repo: string, id: string, revision: 
   return !!current && !!old && memoryVisible(access!, repo, JSON.parse(current.data)) && memoryVisible(access!, repo, JSON.parse(old.data));
 }
 export function memoryAudience(data: any): string {
-  return data.catalog?.audience ?? (data.scope?.role ? 'role:' + data.scope.role : data.owner === 'agent' ? 'role:dev' : 'project');
+  if (data?.owner === 'agent') return 'project';
+  return data?.catalog?.audience ?? 'project';
 }
 export function memoryVisible(access: MemoryAccess, repo: string, data: any): boolean {
   memoryAuthorize(access, repo);
   const audience = memoryAudience(data);
-  if (audience === 'project' || access.role && audience === 'role:' + access.role) return true;
-  // Administrators may manage role knowledge; a task never inherits its creator's administrative view.
+  if (audience === 'project' || (access.role && audience === 'role:' + access.role)) return true;
   if (access.role) return false;
   try { authorize(access.actor, 'knowledge.write', { project_id: repo }); return true; } catch { return false; }
 }

@@ -690,7 +690,7 @@ test('A session refused before its binding counts a restated usage increment onc
   assert.equal(f.state().usage.total, 330);
 });
 
-test('Codex roles keep separate threads; QA always starts a new one; isolated-workspace and subscription reservation work', async t => {
+test('Codex roles keep separate threads; QA always starts a new one; legacy isolated profiles downgrade safely and subscription reservation works', async t => {
   const f = fixture(t);
   await runRole(f.spec, 'dev', undefined, 'codex');
   await runRole(f.spec, 'reviewer', undefined, 'codex');
@@ -702,7 +702,7 @@ test('Codex roles keep separate threads; QA always starts a new one; isolated-wo
   assert.notEqual(f.state('qa').sessionId, first);
   assert.equal(f.lines('requests.jsonl').filter(r => r.method === 'thread/resume').length, 0, "no role resumed another role's thread");
   assert.deepEqual(roleHarness('codex').capabilities.recovery, ['native_resume', 'rebuilt_from_task_records']);
-  assert.equal(roleHarness('codex').capabilities.isolation, 'run_environment');
+  assert.equal(roleHarness('codex').capabilities.isolation, 'none');
 
   const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] };
   const url = new URL('http://local/api/repositories/r/roles');
@@ -714,8 +714,8 @@ test('Codex roles keep separate threads; QA always starts a new one; isolated-wo
       { role_id: 'reviewer', harness_ref: { id: 'codex' }, environment_profile_ref: { id: 'isolated-candidate' } },
     ],
   });
-  assert.equal(savedIso.configuration.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'isolated-workspace');
-  assert.equal(savedIso.configuration.roles.find(r => r.role_id === 'reviewer').environment_profile_ref.id, 'isolated-candidate');
+  assert.equal(savedIso.configuration.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'task-workspace');
+  assert.equal(savedIso.configuration.roles.find(r => r.role_id === 'reviewer').environment_profile_ref.id, 'candidate-checkout');
 
   roleApi(f.s, admin, 'PUT', url, {
     expected_revision: savedIso.configuration.revision,
