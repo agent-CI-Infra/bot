@@ -32,20 +32,6 @@ test('a project receipt retains the navigation scope and both back links reopen 
  }finally{await f.close();}
 });
 
-test('floating the assistant returns to the exact task, overview mode and inbox page unless its scope changes',async({page})=>{
- const f=await managementFixture();try{
-  await login(page,f.h,f.password,'#/tasks/blocked');await expect(page.locator('#task-title')).toBeVisible();
-  for(const address of ['#/tasks/blocked','#/projects/101/overview/tasks','#/projects/101/inbox/50']) {
-   await page.goto(f.h.admin+'/'+address);
-   if(address.includes('/tasks/blocked'))await expect(page.locator('#task-title')).toBeVisible();else if(address.includes('/overview/'))await expect(page.locator('.workspace-overview')).toBeVisible();else await expect(page.locator('.console-inbox')).toBeVisible();
-   await page.locator('#tabs').getByRole('link',{name:'管理助手',exact:true}).click();await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope','project:101');
-   await page.getByRole('button',{name:'切换为悬浮窗口',exact:true}).click();await expect(page).toHaveURL(f.h.admin+'/'+address);await expect(page.locator('#management-chat')).toBeVisible();await page.getByRole('button',{name:'收起管理助手',exact:true}).click();
-  }
-  await page.locator('#tabs').getByRole('link',{name:'管理助手',exact:true}).click();await expect(page.getByRole('button',{name:'发送',exact:true})).toBeEnabled();await switchConsoleProject(page,'102');await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope','project:102');
-  await page.getByRole('button',{name:'切换为悬浮窗口',exact:true}).click();await expect(page).toHaveURL(/#\/projects\/102\/inbox$/);
- }finally{await f.close();}
-});
-
 test('revoking a retained project clears neutral navigation and memory while its explicit address still explains denial',async({page})=>{
  const {h,admin,password}=await fixture(),memberPassword=testPassword();const member=(await admin('/api/users','POST',{username:'revoked-scope',password:memberPassword,repository_ids:['101','202']})).value.user;
  try{

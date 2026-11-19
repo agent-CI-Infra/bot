@@ -1,4 +1,3 @@
-import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { openScheduleTimeRules } from '../helpers/open-schedule-folds.mjs';
 import { channelFixture, privateChat, registerDestination } from '../../fixtures/channel-fixture.mjs';
@@ -11,11 +10,9 @@ async function environment() {
   await f.service.tick(); return f;
 }
 async function login(page, f) {
-  await page.goto(f.h.admin + '/#/management');
+  await page.goto(f.h.admin + '/#/projects/101/schedules');
   await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await switchConsoleProject(page, '101');
-  await page.getByRole('button', { name: '快捷操作', exact: true }).click();
   await expect(page.getByRole('button', { name: '预览触发时间', exact: true })).toBeVisible();
 }
 

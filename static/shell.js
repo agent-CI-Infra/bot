@@ -320,8 +320,7 @@ function setAccountMenu(open) {
   menu.hidden = !open; account.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) menu.querySelector('a, button')?.focus();
 }
-// The bar carries the live assistant state the floating launcher carries on wide screens: a turn in progress survives the
-// chat being closed, and a reply that arrived while it was closed stays unread until the bar opens it again.
+// The mobile bar carries the live assistant state while another console page is open.
 function updateConsoleAssistant() {
   const link = $('console-mobile-nav').querySelector('a[data-page="assistant"]'); if (!link) return;
   const chat = typeof managementChatState === 'function' ? managementChatState() : null;
@@ -558,10 +557,9 @@ function initConsoleShell() {
     const mobileLabel = [...a.querySelectorAll('span')].find(s => !s.classList.contains('console-nav-badge'));
     if (mobileLabel) mobileLabel.setAttribute('data-i18n', captionKey);
     const badge = element('span', '', 'console-nav-badge'); badge.setAttribute('aria-hidden', 'true'); a.append(badge);
-    // 助手 opens the assistant in place: it is a destination of the shell, not an address the reader leaves the page for.
     if (key === 'assistant') a.addEventListener('click', event => {
       event.preventDefault();
-      if (typeof openManagementChat === 'function') Promise.resolve(openManagementChat()).catch(error);
+      if (typeof openManagementPage === 'function') Promise.resolve(openManagementPage()).catch(error);
     });
     mobile.append(a);
   }

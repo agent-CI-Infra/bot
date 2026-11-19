@@ -205,26 +205,24 @@ test('已保存仓库条件在全部项目下可移除，单项目忽略，保�
   } finally { await h.stop(); }
 });
 
-test('管理助手三种范围的会话独立，悬浮窗口跟随地址且不出现组织范围', async ({ page }) => {
+test('管理助手三种范围的会话独立，整页跟随地址且不出现组织范围', async ({ page }) => {
   const { h, password } = await fixture();
   try {
     await login(page, h, password, '#/management'); await ready(page, 'management', '');
-    const ids = {};
+    const ids = {}, current = page.locator('.management-conversation[aria-current=true]');
     for (const scope of ['', '101', '202', '101', '']) {
       if (scope) await switchConsoleProject(page, scope); else if ((await trigger(page).getAttribute('data-project-id')) !== '') await switchConsoleProject(page, '');
       await ready(page, 'management', scope);
-      await expect(page.getByLabel('持久会话', { exact: true })).not.toHaveValue('');
-      const id = await page.getByLabel('持久会话', { exact: true }).inputValue();
+      await expect(current).toHaveAttribute('data-conversation-id', /./);
+      const id = await current.getAttribute('data-conversation-id');
       if (ids[scope]) expect(id).toBe(ids[scope]); else ids[scope] = id;
     }
     expect(new Set(Object.values(ids)).size).toBe(3);
-    await page.locator('#management-chat').getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
-    await page.locator('#management-chat').getByRole('button', { name: '收起管理助手', exact: true }).click();
     await page.evaluate(() => { location.hash = '#/projects/202/board'; }); await ready(page, 'board', '202');
-    await page.locator('#management-launcher').click();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click(); await ready(page, 'management', '202');
     await expect(page.locator('.management-scope-name')).toHaveText('fixture/project-202');
     await expect(page.getByLabel('当前管理作用域', { exact: true })).toHaveCount(0);
-    await expect(page.getByLabel('持久会话', { exact: true })).toHaveValue(ids['202']);
+    await expect(current).toHaveAttribute('data-conversation-id', ids['202']);
   } finally { await page.goto('about:blank'); await h.stop(); }
 });
 
@@ -272,9 +270,9 @@ test('助手连接完成较晚时使用最新地址范围', async ({ page }) => 
     await switchConsoleProject(page, '202');
     await expect(page).toHaveURL(/#\/projects\/202\/management$/);
     release(); await ready(page, 'management', '202');
-    await expect(page.getByLabel('持久会话', { exact: true })).not.toHaveValue('');
+    await expect(page.locator('.management-conversation[aria-current=true]')).toHaveAttribute('data-conversation-id', /./);
     await switchConsoleProject(page, ''); await ready(page, 'management', '');
-    await expect(page.getByLabel('持久会话', { exact: true })).not.toHaveValue('');
+    await expect(page.locator('.management-conversation[aria-current=true]')).toHaveAttribute('data-conversation-id', /./);
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); await page.goto('about:blank'); await h.stop(); }
 });
 

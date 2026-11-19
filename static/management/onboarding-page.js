@@ -337,7 +337,7 @@ function mountRepositoryOnboarding(page, id, initial) {
     if (view.repository.started) {
       const workflows = recommended.workflows.map(w => `${w.path}（${w.cron}）`).join('、');
       const ask = `请为 ${view.repository.full_name} 开启 Bot 定时触发：${workflows}。先核对这些 workflow 有没有声明 workflow_dispatch，再建项目定时任务按时触发（触发前先查看有没有排队或正在运行的运行，有就不触发）；没有声明的，提一个 Issue 推荐：加 workflow_dispatch、保留 schedule 兜底、concurrency 设 cancel-in-progress: false、第一个 job 在 schedule 触发且已有成功的手动运行时跳过。`;
-      actions.append(button('交给管理助手', () => void openManagementChat().then(() => managementChat?.client?.draft?.(ask)).catch(error), 'btn-secondary'),
+      actions.append(button('交给管理助手', () => void openManagementPage().then(() => managementChat?.client?.draft?.(ask)).catch(error), 'btn-secondary'),
         consoleLink(`#/projects/${id}/schedules`, '去定时任务页', '使用「定时触发 workflow」模板'));
     } else actions.append(note('项目启动后可以交给管理助手处理，或在项目的「定时任务与通知」页添加。'));
     box.append(actions);

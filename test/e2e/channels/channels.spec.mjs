@@ -23,13 +23,11 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('已执行')));
     await page.getByRole('link', { name: '管理助手', exact: true }).click();
     await switchConsoleProject(page, '');
-    await page.getByText('会话记录', { exact: true }).click();
-    await page.getByLabel('持久会话').selectOption(result.conversation_id);
+    await page.locator(`.management-conversation[data-conversation-id="${result.conversation_id}"]`).click();
     const feed = page.getByRole('log', { name: '管理会话记录' });
     await expect(feed).toContainText(operation.id); await expect(feed).toContainText('操作 更新工作配置 · 已执行');
-    await switchConsoleProject(page, '101');
-    await page.getByRole('button', { name: '快捷操作', exact: true }).click();
-    await expect(page.getByLabel('默认提示词', { exact: true })).toHaveValue('Inspect evidence and cite the original logs.');
+    const configured = (await admin('/api/management/query', 'POST', { operation: 'get_effective_config', target: { project_id: '101' }, arguments: {} })).value;
+    expect(configured.workflows.find(w => w.id === 'review.issue').prompt.effective).toBe('Inspect evidence and cite the original logs.');
     await page.screenshot({ path: '.tmp/channels-165/shared-operation-desktop.png', fullPage: true });
     const grantsBefore = h.store.get('SELECT count(*) n FROM scoped_grants').n;
     const unproved = await post(h, id, envelope('确认绑定 forwarded-or-unverified-token'));

@@ -1,34 +1,28 @@
-body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
-.management-launcher { position: fixed; right: 24px; bottom: 24px; z-index: 45; display: flex; align-items: center; gap: 10px; padding: 11px 18px 11px 11px; border: 1px solid #286b73; border-radius: 30px; background: #163f50; color: #fff; box-shadow: 0 6px 24px #123d4e30; text-align: left; }
-.management-launcher-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #ffffff18; color: #f4cc82; font-size: 23px; }
-.management-launcher-label { display: grid; gap: 2px; }
-.management-launcher-label strong { font-size: var(--font-size-2); }
-.management-launcher-label small { font-size: var(--font-size-micro); color: var(--color-brand-weak); font-weight: 400; }
-.management-launcher.has-update .management-launcher-icon { background: #f4cc82; color: #163f50; }
-.management-window { position: fixed; right: 24px; bottom: 24px; z-index: 46; display: flex; flex-direction: column; width: min(480px, calc(100vw - 32px)); height: min(740px, calc(100dvh - 96px)); min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #cbd9de; border-radius: 18px; background: var(--color-surface); color: var(--color-text); box-shadow: 0 18px 70px #123d4e40; }
-.management-window-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 16px 20px; border-bottom: 1px solid #e8edef; background: var(--color-surface); }
-.management-window-title { min-width: 0; }
-.management-window-title h2 { margin: 0; font-size: var(--font-size-touch); letter-spacing: .03em; }
-.management-window-title p { margin: 5px 0 0; color: var(--color-text-muted); font-size: var(--font-size-1); }
-.management-window-head > .actions { flex-shrink: 0; }
-.management-window-head button { border-color: #dae3e7; font-size: var(--font-size-1); }
-.management-window:not(.management-page):not(.management-fullscreen) .management-window-head { padding-left: 28px; }
-.management-size-handle { position: absolute; left: 1px; top: 1px; z-index: 1; width: 20px; height: 20px; min-height: 0; padding: 0; border: 0; border-radius: 10px 0 0; background: transparent; color: #78949e; cursor: nwse-resize; touch-action: none; font-size: 17px; line-height: 20px; }
-.management-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
-.management-scope { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 12px 18px 8px; flex-shrink: 0; }
-/* The header names the same address scope as the shared project switcher. */
-.management-scope-name { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
-.management-scope button { flex-shrink: 0; min-height: 34px; padding: 6px 10px; font-size: var(--font-size-1); }
-.management-scope .management-new-conversation { color: var(--color-brand); }
-.management-sessions { padding: 4px 18px 10px; flex-shrink: 0; border-bottom: 1px solid #e8edef; color: var(--color-text-muted); font-size: var(--font-size-1); }
-.management-sessions > summary { width: fit-content; cursor: pointer; }
-.management-session-controls { display: flex; align-items: end; gap: 8px; padding-top: 10px; }
-.management-session-controls label { flex: 1; min-width: 0; gap: 4px; font-size: var(--font-size-1); }
-.management-session-controls select { width: 100%; min-width: 0; font-size: var(--font-size-1); }
+body.management-page-mode { overflow: hidden; }
+.management-window { position: fixed; inset: var(--management-header-height,64px) 0 0; z-index: 2; display: flex; min-width: 0; min-height: 0; overflow: hidden; background: var(--color-surface); color: var(--color-text); }
+.management-window[hidden], .management-window [hidden] { display: none !important; }
+.management-page { width: auto; height: auto; max-width: none; max-height: none; }
+.management-panel { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.management-layout { display: grid; grid-template-columns: 248px minmax(0,1fr); flex: 1; min-width: 0; min-height: 0; }
+.management-sidebar { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; min-height: 0; padding: var(--space-5) var(--space-4); border-right: 1px solid var(--color-border); background: var(--color-surface); }
+.management-sidebar[hidden] { display: none; }
+.management-sidebar[hidden] + .management-main { grid-column: 1 / -1; }
+.management-sidebar-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.management-sidebar-head h2 { margin: 0; font-size: var(--font-size-3); }
+.management-session-close { display: none; }
+.management-new-conversation { flex: none; justify-content: center; width: 100%; color: var(--color-brand); }
+.management-scope { display: grid; gap: var(--space-1); padding: 0 var(--space-2); font-size: var(--font-size-1); }
+.management-scope-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-text); font-size: var(--font-size-2); }
+.management-conversation-list { display: flex; flex: 1; flex-direction: column; gap: var(--space-1); min-height: 0; margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; }
+.management-conversation-list li { min-width: 0; }
+.management-conversation { display: grid; gap: var(--space-1); width: 100%; min-height: 58px; padding: 10px 12px; border-color: transparent; text-align: left; }
+.management-conversation strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-2); font-weight: 550; }
+.management-conversation small { color: var(--color-text-muted); font-size: var(--font-size-1); }
+.management-conversation[aria-current=true] { border-color: var(--color-border); background: var(--color-brand-weak); color: var(--color-brand); }
+.management-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; height: 100%; }
+.management-conversation-toolbar { display: none; flex: none; padding: var(--space-2) var(--space-4) 0; }
 .management-feed-wrap { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
 .management-feed { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; padding: 28px 20px 32px; background: #fcfdfd; scroll-padding-top: 24px; }
-/* #616: the failed-open card is a page state, so it is laid out beside the feed instead of scrolling inside it; on a
-   phone the whole card (reason, retry, both recovery links) fits the first screen without an inner scroll. */
 .management-access-state { display: flex; flex: 1; min-height: 0; min-width: 0; justify-content: center; align-items: flex-start; overflow: auto; padding: 28px 20px 32px; background: #fcfdfd; }
 .management-access-state .console-state { width: min(100%, 560px); margin: 0; padding: var(--space-6) var(--space-5); gap: var(--space-3); }
 .management-latest { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); padding: 7px 14px; border-radius: 20px; box-shadow: 0 3px 15px #123d4e18; white-space: nowrap; font-size: var(--font-size-1); }
@@ -37,10 +31,6 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-eyebrow { margin: 0 0 8px; color: var(--color-text-muted); font-size: var(--font-size-1); letter-spacing: .12em; }
 .management-welcome h3 { margin: 0 0 12px; color: var(--color-text); font-size: var(--font-size-hero); font-weight: 650; letter-spacing: -.03em; }
 .management-welcome > .muted { max-width: 400px; margin: 0; line-height: 1.8; font-size: var(--font-size-label); }
-.management-suggestions { display: grid; grid-template-columns: 1fr; gap: 8px; width: 100%; margin-top: 28px; }
-.management-suggestions button { display: grid; gap: 8px; padding: 14px; border-color: #dde7e8; border-radius: 12px; background: #fff; text-align: left; font-size: var(--font-size-1); }
-.management-suggestions strong { font-size: var(--font-size-label); font-weight: 600; }
-.management-suggestions span { color: #778a94; font-weight: 400; line-height: 1.5; }
 .management-turn + .management-turn { margin-top: 34px; }
 .management-user { width: fit-content; max-width: 88%; margin: 0 0 24px auto; padding: 12px 16px; border: 1px solid #deebea; border-radius: 16px 16px 4px 16px; background: #edf4f2; font-size: var(--font-size-2); overflow-wrap: anywhere; }
 .management-user strong { color: var(--color-text-muted); font-size: var(--font-size-1); }
@@ -115,20 +105,6 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-markdown hr { margin: 22px 0; border: 0; border-top: 1px solid #e2e9eb; }
 .management-markdown input[type=checkbox] { width: auto; margin-right: 6px; accent-color: #478879; }
 .management-run-notice { margin: 4px 0; padding: 10px 12px; border: 1px solid #ecdfbf; border-radius: 8px; background: #fcf8ed; color: #80662b; font-size: var(--font-size-1); line-height: 1.7; overflow-wrap: anywhere; }
-.management-tools { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 18px; background: #f8fafb; }
-.management-tools > h3 { margin: 0 0 6px; font-size: var(--font-size-row); }
-.management-tools > p { line-height: 1.6; }
-.management-queries { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; margin: 12px 0; }
-.management-queries button { font-size: var(--font-size-1); }
-.management-forms { display: grid; grid-template-columns: minmax(0,1fr); gap: 14px; }
-.management-forms > :is(form,section) { min-width: 0; padding: 12px; border: 1px solid #dfe9ec; border-radius: 8px; background: #fff; }
-.management-forms h3 { margin: 0 0 10px; font-size: var(--font-size-2); }
-.management-forms label { min-width: 0; gap: 4px; margin-bottom: 8px; font-size: var(--font-size-1); }
-.management-forms :is(select,textarea,input) { min-width: 0; width: 100%; font-size: var(--font-size-1); }
-.management-forms button { margin: 3px 4px 3px 0; font-size: var(--font-size-1); }
-.management-forms p { overflow-wrap: anywhere; line-height: 1.6; }
-/* A write is confirmed before it is sent (#355): the preview repeats the tool-section frame, so the pending command reads
-   as one more step of 快捷操作, and long arguments wrap instead of widening the panel. */
 .management-command-preview-slot:empty { display: none; }
 .management-command-preview { display: grid; gap: 6px; padding: 12px; border: 1px solid #e2c98f; border-radius: 8px; background: #fffdf6; scroll-margin-top: 24px; }
 .management-command-preview h3 { margin: 0 0 4px; font-size: var(--font-size-2); }
@@ -147,40 +123,29 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-input-footer .muted { color: var(--color-text-muted); font-size: var(--font-size-1); }
 .management-input-footer .actions { margin: 0; }
 .management-input-footer button { min-height: 34px; padding: 6px 16px; border-radius: 8px; font-size: var(--font-size-1); }
-body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
-.management-page { inset: var(--management-header-height,48px) 0 0; width: auto; height: auto; max-width: none; max-height: none; border: 0; border-radius: 0; box-shadow: none; z-index: 2; }
-.management-fullscreen { inset: 0; width: auto; height: 100dvh; max-width: none; max-height: none; border: 0; border-radius: 0; z-index: 60; }
-:is(.management-page,.management-fullscreen) .management-window-head { padding: 18px max(24px,calc((100% - 960px)/2)); }
-:is(.management-page,.management-fullscreen) :is(.management-scope,.management-sessions,.management-status-bar,.management-input) { width: min(100%,960px); align-self: center; }
-:is(.management-page,.management-fullscreen) :is(.management-turn,.management-welcome) { max-width: 872px; margin-left: auto; margin-right: auto; }
-:is(.management-page,.management-fullscreen) .management-feed { padding: 36px 24px; }
-:is(.management-page,.management-fullscreen) .management-welcome { padding-top: min(8vh,80px); }
-:is(.management-page,.management-fullscreen) .management-suggestions { grid-template-columns: repeat(3,minmax(0,1fr)); max-width: 740px; }
-:is(.management-page,.management-fullscreen) .management-tools { padding: 18px max(18px,calc((100% - 924px)/2)); }
+.management-page :is(.management-status-bar,.management-input) { width: min(100%,960px); align-self: center; }
+.management-page :is(.management-turn,.management-welcome) { max-width: 872px; margin-left: auto; margin-right: auto; }
+.management-page .management-feed { padding: 36px 24px; }
+.management-page .management-welcome { padding-top: min(8vh,80px); }
 @keyframes management-pulse { 50% { opacity: .3; } }
 @keyframes management-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .management-window *, .management-window *::before, .management-window *::after { animation: none !important; } }
-@media (max-width: 600px) {
-  body.management-page-mode #tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 2px; }
-  body.management-page-mode #tabs button { flex-shrink: 0; white-space: nowrap; padding: 8px 12px; }
-  .management-launcher { right: 12px; bottom: max(12px,env(safe-area-inset-bottom)); padding: 8px 14px 8px 8px; gap: 8px; }
-  .management-launcher-icon { width: 32px; height: 32px; }
-  .management-window { border-radius: 12px; }
-  .management-window-head, :is(.management-page,.management-fullscreen) .management-window-head { padding: 12px 14px; }
-  .management-window-title p { font-size: var(--font-size-1); }
-  .management-scope { flex-wrap: wrap; padding: 10px 12px 8px; gap: 6px; }
-  /* The scope sentence shares the row with the actions instead of taking a row of its own: on a phone that row is the
-     difference between the feed above seeing a full confirmation heading and clipping it. */
-  .management-scope button { padding: 5px 10px; min-height: 30px; }
-  .management-sessions { padding-left: 12px; padding-right: 12px; }
-  .management-feed, :is(.management-page,.management-fullscreen) .management-feed { padding: 20px 12px; }
-  .management-access-state { padding: 4px 12px 4px; }
+@media (min-width:768px) and (max-width:1023px) { .management-layout { grid-template-columns: 208px minmax(0,1fr); } }
+.management-window[data-compact] .management-input textarea { min-height: 48px; height: 60px; }
+.management-window[data-compact] .management-status-bar { padding-top: 3px; padding-bottom: 3px; }
+@media (max-width: 767px) {
+  .management-layout { position: relative; display: block; }
+  .management-sidebar { position: absolute; inset: 0 auto 0 0; z-index: 6; width: min(320px,calc(100% - 40px)); box-shadow: 12px 0 32px #182d4b24; }
+  .management-layout:not(.sessions-open) .management-sidebar { display: none; }
+  .management-session-close { display: inline-flex; }
+  .management-conversation-toolbar { display: flex; }
+  .management-session-toggle { padding: 6px 12px; }
+  .management-feed, .management-page .management-feed { padding: 20px 12px; }
+  .management-access-state { padding: 4px 12px; }
   .management-access-state .console-state { padding: 14px 12px; gap: 6px; }
-  .management-welcome, :is(.management-page,.management-fullscreen) .management-welcome { padding-top: 16px; }
+  .management-welcome, .management-page .management-welcome { padding-top: 16px; }
   .management-welcome h3 { font-size: var(--font-size-display); }
   .management-welcome-icon { width: 42px; height: 42px; margin-bottom: 12px; }
-  :is(.management-page,.management-fullscreen) .management-suggestions { grid-template-columns: 1fr; margin-top: 18px; }
-  .management-suggestions button { gap: 4px; padding: 12px; }
   .management-assistant { gap: 8px; }
   .management-avatar { width: 24px; height: 24px; font-size: 17px; }
   .management-assistant-meta { gap: 6px; }
@@ -190,48 +155,14 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-input { padding: 0 12px max(12px,env(safe-area-inset-bottom)); }
   .management-input textarea { min-height: 64px; max-height: 120px; padding: 10px 12px; font-size: var(--font-size-touch); }
   .management-input-footer .muted { max-width: 164px; }
-  .management-input-footer button { padding: 6px 12px; }
-  .management-window:not(.management-page):not(.management-fullscreen) { inset: auto 10px 10px auto; }
-  .management-page { inset: var(--management-header-height,48px) 0 0; }
-  .management-fullscreen { inset: 0; }
-}
-.management-window[data-compact] .management-window-head, :is(.management-page,.management-fullscreen) .management-window-head { padding: 8px 12px; }
-  /* #641: a short viewport keeps the floating panel under the top bar, so its box is shorter than the content used to
-     need; these lines keep the scope row and the composer inside that box instead of overflowing it. */
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-window-head { padding: 4px 10px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) { overflow-y: auto; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-scope { padding: 4px 10px 2px; gap: 4px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-input textarea { min-height: 40px; height: 52px; }
-  /* At this height the panel is only a few hundred pixels tall, so the scope sentence gives its room to the rest; the
-     conversation itself is what gives way, by scrolling inside its own box, and the session fold stays reachable. */
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-sessions { padding: 2px 10px 4px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-feed { padding: 12px 12px 14px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-input { padding-bottom: 8px; }
-.management-window[data-compact] .management-window-title p { display: none; }
-.management-window[data-compact] .management-input textarea { min-height: 48px; height: 60px; }
-.management-window[data-compact] .management-status-bar { padding-top: 3px; padding-bottom: 3px; }
-@media (max-width: 600px) {
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-scope { padding: 2px 10px 1px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-scope button { min-height: 36px; padding: 4px 8px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-window-head { padding: 0 10px; }
-  /* The status bar stays: it is the only surface that reports a send, stop, form or clipboard failure and it carries
-     `重新连接` when the event stream drops (#641 review). It gets one compact line instead of being removed; the room
-     comes from the conversation, which scrolls inside its own box. */
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-status-bar { padding: 0 10px; gap: 6px; align-items: center; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-status { line-height: 1.4; font-size: var(--font-size-micro); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-status-bar button { flex: 0 0 auto; min-height: 44px; padding: 0 10px; font-size: var(--font-size-micro); white-space: nowrap; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-window-title h2 { font-size: var(--font-size-2); }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-sessions { padding: 0 10px; font-size: var(--font-size-micro); }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-sessions > summary { padding: 0; line-height: 1.3; }
-  /* The fold keeps a 36px row here instead of the 44px the wide layout uses: it is a disclosure, and the room goes to the
-     conversation, which is the part this panel exists for. */
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-sessions > summary { min-height: 36px; display: flex; align-items: center; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-feed { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 10px 4px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-input { padding-bottom: 2px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-input-footer { margin-top: 2px; }
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-input textarea { min-height: 36px; height: 36px; }
-  /* The composer loses height elsewhere, not on the send button: 44px is the touch target this console keeps for it. */
-  .management-window[data-compact]:not(.management-page):not(.management-fullscreen) .management-input-footer button { min-height: 44px; padding: 6px 12px; }
+  .management-input-footer button { min-height: 44px; padding: 6px 12px; }
+  .management-window[data-compact] .management-status-bar { padding: 0 10px; gap: 6px; }
+  .management-window[data-compact] .management-status { line-height: 1.4; font-size: var(--font-size-micro); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .management-window[data-compact] .management-status-bar button { min-height: 44px; padding: 0 10px; font-size: var(--font-size-micro); white-space: nowrap; }
+  .management-window[data-compact] .management-feed { padding: 2px 10px 4px; }
+  .management-window[data-compact] .management-input { padding-bottom: 2px; }
+  .management-window[data-compact] .management-input-footer { margin-top: 2px; }
+  .management-window[data-compact] .management-input textarea { min-height: 36px; height: 36px; }
 }
 
 /* A command receipt as a page of its own (#235): the project page shell, with the state beside the title. */

@@ -1,4 +1,3 @@
-import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { openScheduleTimeRules, openScheduleIdentity } from '../helpers/open-schedule-folds.mjs';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,11 +17,9 @@ async function environment() {
   await f.service.tick(); return f;
 }
 async function login(page, f, username = 'administrator', password = f.password) {
-  await page.goto(f.h.admin + '/#/management');
+  await page.goto(f.h.admin + '/#/projects/101/schedules');
   await page.getByLabel('用户名', { exact: true }).fill(username); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await switchConsoleProject(page, '101');
-  await page.getByRole('button', { name: '快捷操作', exact: true }).click();
   await expect(page.getByRole('button', { name: '预览触发时间', exact: true })).toBeVisible();
 }
 const read = async (f, operation) => (await f.admin('/api/management/query', 'POST', { operation, target: { project_id: '101' }, arguments: {} })).value;
@@ -177,7 +174,7 @@ test('a failed initial schedule read reports unknown state and recovers without 
  const f=await environment();let fail=true;
  try{
   await page.route('**/api/management/query',async route=>{if(fail&&route.request().postDataJSON().operation==='list_schedules')await route.fulfill({status:503,json:{error:'fixture_schedule_read_down'}});else await route.continue();});
-  await page.goto(f.h.admin+'/#/management');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();await switchConsoleProject(page, '101');await page.getByRole('button',{name:'快捷操作',exact:true}).click();
+  await page.goto(f.h.admin+'/#/projects/101/schedules');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();
   await expect(page.getByRole('status').filter({hasText:'数量及状态未知'})).toBeVisible();await expect(page.getByRole('button',{name:'保存计划',exact:true})).toHaveCount(0);fail=false;await page.getByRole('button',{name:'重新读取计划上下文',exact:true}).click();await expect(page.getByRole('button',{name:'保存计划',exact:true})).toBeVisible();expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
  }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
 });

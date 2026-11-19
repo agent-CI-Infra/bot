@@ -172,7 +172,7 @@ const measure = selector => {
   return { selector, color: style.color, background: bg, fontSize: parseFloat(style.fontSize), contrast: ratio(style.color, bg) };
 };
 
-test('#885 管理助手启动器小字与健康状态错误态至少 4.5:1', async ({ page }) => {
+test('#885 健康状态错误态文字至少 4.5:1', async ({ page }) => {
   test.setTimeout(120000);
   const h = await harness();
   const read = selector => page.evaluate(measure, selector);
@@ -186,16 +186,6 @@ test('#885 管理助手启动器小字与健康状态错误态至少 4.5:1', asy
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
-
-    await expect(page.locator('#management-launcher')).toBeVisible();
-    const hint = await read('.management-launcher-label small');
-    expect(hint.fontSize).toBe(11);
-    expect(hint.contrast, `启动器小字 ${hint.color} on ${hint.background}`).toBeGreaterThanOrEqual(4.5);
-    await page.locator('#management-launcher').hover();
-    const hovered = await read('.management-launcher-label small');
-    expect(hovered.contrast, `悬停时 ${hovered.color} on ${hovered.background}`).toBeGreaterThanOrEqual(4.5);
-    await page.mouse.move(0, 0);
-    await page.screenshot({ path: `${out}/launcher-885-after-1440.png`, fullPage: true });
 
     const fail = route => route.fulfill({ status: 500, json: { error: 'unavailable' } });
     await page.route('**/api/environments/101', fail);

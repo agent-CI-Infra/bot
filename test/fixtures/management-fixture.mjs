@@ -21,7 +21,7 @@ export async function managementFixture(t,options={}) {
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,error_code,created_at,updated_at) VALUES(?,?,'task.request','waiting_environment','prepare','Inspect task facts','environment_not_ready',?,?)",id,project,time,time);
     h.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)','log-'+id,id,JSON.stringify({type:'fault',code:'environment_not_ready',detail:'Project computer is stopped'}),time);
   }
-  const requests=[],modelState={gate:null,failure:0};
+  const requests=[],modelState={gate:null,failure:0,configurationPrompt:null};
   const provider=createServer(async(req,res)=>{
     // Whole-body decoding: a multibyte character may be split across chunks.
     const chunks=[];for await(const b of req)chunks.push(b);const body=JSON.parse(Buffer.concat(chunks).toString());requests.push(body);
@@ -33,7 +33,7 @@ export async function managementFixture(t,options={}) {
     const call=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:'call-'+calls.length,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
     let message;
     if(!calls.length)message=call('management_query',{operation:configuration?'get_effective_config':'get_task',target:configuration?{project_id:'101'}:{project_id:'101',task_id:'blocked'},arguments:{}});
-    else if((configuration||pause)&&calls.length===1)message=call('management_command',{operation:configuration?'workflow.update':'task.pause',target:configuration?{project_id:'101',workflow_id:'review.issue'}:{project_id:'101',task_id:'blocked'},arguments:configuration?{prompt:'Inspect evidence and cite the original logs.'}:{},expected_revision:observations[0].revision});
+    else if((configuration||pause)&&calls.length===1)message=call('management_command',{operation:configuration?'workflow.update':'task.pause',target:configuration?{project_id:'101',workflow_id:'review.issue'}:{project_id:'101',task_id:'blocked'},arguments:configuration?{prompt:modelState.configurationPrompt??'Inspect evidence and cite the original logs.'}:{},expected_revision:observations[0].revision});
     else message={role:'assistant',content:configuration?'默认提示词已保存；只影响之后的新任务。':pause?'任务已暂停，状态可以回读。':'任务正在等待项目电脑；原因来自持久化状态，可检查原始日志。'};
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:12,completion_tokens:6}}));
   });

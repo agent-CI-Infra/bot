@@ -5,8 +5,8 @@ import { managementFixture } from '../../fixtures/management-fixture.mjs';
 
 const out = '.tmp/ui-874';
 
-// #641: a connect that never returns must end in a stated failure with a working retry, and the floating panel must stay
-// inside the viewport at every width without covering the top bar. #616 covers what happens after a failure exists.
+// #641: a connect that never returns must end in a stated failure with a working retry, and the page must stay
+// inside the available viewport at every width without covering the shell header or mobile navigation.
 async function signIn(page, h, password) {
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(password);
@@ -33,7 +33,7 @@ test('#641 连接请求一直没有返回时 10 秒内进入失败态，「重�
       }
       await route.continue();
     });
-    await page.locator('#management-launcher').click();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click();
     const panel = page.locator('#management-chat .management-panel');
     await expect(panel.getByText('正在连接管理助手…')).toBeVisible();
     // After three seconds the loading state says it is still connecting and offers a way out.
@@ -67,7 +67,7 @@ test('#641 长视口与短视口（含 768×432 的 250% 缩放）下面板四�
     await page.setViewportSize({ width: 768, height: 900 });
     await page.goto(f.h.admin + '/#/projects');
     await signIn(page, f.h, f.password);
-    await page.locator('#management-launcher').click();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click();
     await expect(page.locator('#management-chat .management-scope-name')).toBeVisible();
     const measure = () => page.evaluate(() => {
       const box = node => {
@@ -124,28 +124,24 @@ test('#641 长视口与短视口（含 768×432 的 250% 缩放）下面板四�
       });
       expect(hit.inside).toBe(true);
     }
-    // The corner glyph is the resize grip, not decoration: it keeps a stated name at every width.
-    await expect(page.locator('#management-chat .management-size-handle')).toHaveAccessibleName('调整管理助手窗口大小');
   } finally { await f.close(); }
 });
 
-test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都留在框内', async ({ page }) => {
+test('#641 手机从底栏打开管理助手：390×500 下页面与输入区都留在可用区域内', async ({ page }) => {
   test.setTimeout(120000);
   const f = await managementFixture();
   try {
-    // The bottom bar only exists on a phone, and it takes room from the panel: this is the case where the old 460px floor
-    // and, after that, the touch-sized scope row pushed the send button past the panel's bottom edge.
     await page.setViewportSize({ width: 390, height: 500 });
     await page.goto(f.h.admin + '/#/projects');
     await signIn(page, f.h, f.password);
     const bar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(bar).toBeVisible(); await bar.click();
     const panel = page.locator('#management-chat');
-    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 15000 });
+    await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeEnabled({ timeout: 15000 });
     const measure = () => page.evaluate(() => {
       const rect = node => { const r = node.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; };
       const win = document.getElementById('management-chat');
-      return { viewport: { width: innerWidth, height: innerHeight }, win: rect(win), header: rect(document.querySelector('body > header')), scope: rect(document.getElementById('console-mobile-scope')),
+      return { viewport: { width: innerWidth, height: innerHeight }, win: rect(win), header: rect(document.querySelector('body > header')), scope: rect(document.getElementById('console-mobile-scope')), nav: rect(document.getElementById('console-mobile-nav')),
         field: rect(win.querySelector('textarea')),
         send: rect([...win.querySelectorAll('button')].find(node => node.textContent.trim() === '发送')) };
     });
@@ -156,19 +152,15 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     }, { timeout: 8000 }).toBe(true);
     const m = await measure();
     expect(m.win.top).toBeGreaterThanOrEqual(m.header.bottom - 0.5);
-    expect(m.win.bottom).toBeLessThanOrEqual(m.viewport.height + 0.5);
+    expect(m.win.top).toBeGreaterThanOrEqual(m.scope.bottom);
+    expect(m.win.bottom).toBeLessThanOrEqual(m.nav.top + 0.5);
     expect(m.field.height).toBeGreaterThanOrEqual(30);
     expect(m.field.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
-    expect(m.send.height).toBeGreaterThanOrEqual(30);
-    expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
-    // The bottom bar is hidden; the floating assistant fills the remaining room below the reachable scope bar.
-    expect(Math.abs(m.win.height - (m.viewport.height - m.scope.bottom - 20))).toBeLessThanOrEqual(1);
-    expect(Math.abs(m.win.top - (m.scope.bottom + 10))).toBeLessThanOrEqual(1);
-    await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeVisible();
-    // Review fix: the send button keeps the 44px touch target even here; the conversation is what gives up room, by
-    // scrolling inside its own box, and the session fold stays reachable instead of being removed at this height.
     expect(m.send.height).toBeGreaterThanOrEqual(44);
-    await expect(panel.getByText('会话记录', { exact: true })).toBeVisible();
+    expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
+    await expect(bar).toBeVisible();
+    await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+    await expect(panel.getByRole('button', { name: '会话记录', exact: true })).toBeVisible();
     const feed = await page.evaluate(() => {
       const node = document.querySelector('#management-chat .management-feed'), box = node.getBoundingClientRect();
       return { overflowY: getComputedStyle(node).overflowY, top: box.top, bottom: box.bottom };
@@ -188,7 +180,7 @@ test('#641 短手机（390×500）连接后状态栏可见且是单行（有文�
     const navBar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(navBar).toBeVisible(); await navBar.click();
     const panel = page.locator('#management-chat');
-    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 15000 });
+    await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeEnabled({ timeout: 15000 });
     // The bar is not only the failure exit: it carries the normal progress text too (正在读取会话… / 就绪 / 处理中),
     // so at this height it has to stay on screen as one compact line rather than be removed (#641 review).
     const status = panel.locator('.management-status');
@@ -223,7 +215,7 @@ test('#641 短手机（390×500）断流后错误文案与「重新连接」可�
     const navBar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(navBar).toBeVisible(); await navBar.click();
     const panel = page.locator('#management-chat');
-    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 15000 });
+    await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeEnabled({ timeout: 15000 });
     const message = page.getByLabel('管理消息', { exact: true });
     await message.fill('检查任务进展'); await panel.getByRole('button', { name: '发送', exact: true }).click();
     const statusBar = panel.locator('.management-status-bar'), status = statusBar.locator('.management-status');
@@ -253,59 +245,28 @@ test('#641 短手机（390×500）断流后错误文案与「重新连接」可�
   } finally { await f.close(); }
 });
 
-test('#641 桌面 1440 打开对话页时不套紧凑布局：标题说明仍在，窗口不带 data-compact', async ({ page }) => {
+test('the desktop assistant keeps only the shell header and has no compact tag at 1440×900', async ({ page }) => {
   test.setTimeout(90000);
   const f = await managementFixture();
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.admin + '/#/management');
-    // The deep link opens the conversation page itself, so the console shell (#workspace) stays hidden here.
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 15000 });
     const panel = page.locator('#management-chat');
-    // The compact rules hide the title sentence and shrink the composer; they belong to the short floating panel only.
     expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
-    await expect(panel.locator('.management-window-title p')).toBeVisible();
+    await expect(panel.locator('.management-window-head')).toHaveCount(0);
+    await expect(panel.getByText('从了解情况，到推进下一步', { exact: true })).toHaveCount(0);
+    await expect(page.locator('body > header')).toBeVisible(); await expect(panel.locator('.management-sidebar')).toBeVisible();
   } finally { await f.close(); }
 });
 
-test('#641 离开悬浮面板时不继承短盒紧凑布局：全屏与对话页都清掉 data-compact', async ({ page }) => {
+test('the 1440×600 assistant page keeps its normal composer without a secondary header', async ({ page }) => {
   test.setTimeout(90000);
   const f = await managementFixture();
   try {
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(f.h.admin + '/#/projects');
-    await signIn(page, f.h, f.password);
-    await page.locator('#management-launcher').click();
-    const panel = page.locator('#management-chat');
-    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 20000 });
-    // Shrink the floating panel below 520px with its own resize grip: that is the state whose tag must not survive.
-    const grip = panel.locator('.management-size-handle');
-    await grip.focus();
-    for (let i = 0; i < 4; i++) await page.keyboard.press('Shift+ArrowDown');
-    await expect.poll(() => panel.evaluate(node => Math.round(node.getBoundingClientRect().height))).toBeLessThan(520);
-    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(true);
-    // 全屏 inherits nothing: the wide layout comes back with its title sentence.
-    await panel.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
-    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
-    await expect(panel.locator('.management-window-title p')).toBeVisible();
-    // Back to the short floating box (tag on again), then the conversation page from inside the app.
-    await panel.getByRole('button', { name: '退出管理助手全屏', exact: true }).click();
-    await expect.poll(() => panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(true);
-    await page.evaluate(() => { location.hash = '#/management'; });
-    await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 20000 });
-    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
-    await expect(panel.locator('.management-window-title p')).toBeVisible();
-  } finally { await f.close(); }
-});
-
-test('#641 1440×600 直接打开对话页：浮窗夹到 <520 也不把页面视图带进紧凑布局', async ({ page }) => {
-  test.setTimeout(90000);
-  const f = await managementFixture();
-  try {
-    // The viewport the reviewer named: the floating clamp leaves a box under 520px, while the page view itself is taller.
     await page.setViewportSize({ width: 1440, height: 600 });
     await page.goto(f.h.admin + '/#/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -314,10 +275,7 @@ test('#641 1440×600 直接打开对话页：浮窗夹到 <520 也不把页面�
     await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 20000 });
     const panel = page.locator('#management-chat');
     expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
-    const title = panel.locator('.management-window-title p');
-    await expect(title).toBeVisible();
-    await expect(title).toHaveText('从了解情况，到推进下一步');
-    // The compact composer is 60px tall; the page view keeps its own height.
+    await expect(panel.locator('.management-window-head')).toHaveCount(0);
     expect(await panel.locator('textarea').evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(60);
   } finally { await f.close(); }
 });

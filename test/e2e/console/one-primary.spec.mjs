@@ -18,11 +18,11 @@ async function login(page, h, password) {
 async function enabledPrimaries(page) {
   return page.evaluate(() => [...document.querySelectorAll('button, a.button-link, a.btn-primary')].filter(el => {
     if (el.disabled || el.hidden) return false;
-    if (el.id === 'logout' || el.id === 'management-launcher') return false;
-    if (el.closest('#management-launcher, header, #console-sidebar, .console-mobile-nav, dialog:not([open])')) return false;
+    if (el.id === 'logout') return false;
+    if (el.closest('header, #console-sidebar, .console-mobile-nav, dialog:not([open])')) return false;
     const fold = el.closest('details');
     if (fold && !fold.open) return false;
-    if (el.classList.contains('quiet') || el.classList.contains('btn-secondary') || el.classList.contains('btn-text') || el.classList.contains('btn-danger') || el.classList.contains('status') || el.classList.contains('management-size-handle')) return false;
+    if (el.classList.contains('quiet') || el.classList.contains('btn-secondary') || el.classList.contains('btn-text') || el.classList.contains('btn-danger') || el.classList.contains('status')) return false;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return false;
     for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
@@ -79,11 +79,13 @@ test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛
       await page.screenshot({ path: resolve(out, `identity-after-${width}.png`), fullPage: true });
 
       await page.goto(h.admin + '/#/management');
-      await expect(page.getByRole('heading', { name: '管理助手' }).first()).toBeVisible({ timeout: 15000 });
-      await expect(page.getByRole('button', { name: '全屏显示管理助手' })).toBeVisible();
+      await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 15000 });
+      await expect(page.getByRole('button', { name: '全屏显示管理助手' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '快捷操作', exact: true })).toHaveCount(0);
       await expect(page.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+      if (width === 390) await page.getByRole('button', { name: '会话记录', exact: true }).click();
       await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible();
-      // 全屏 / 收起 / 新建会话 stay visible as quiet secondary controls so 收起 is never hidden.
+      if (width === 390) await page.getByRole('button', { name: '关闭会话列表', exact: true }).click();
       // The shell appears before its conversation has opened and enabled the composer.
       await expect.poll(() => enabledPrimaries(page)).toEqual(['发送']);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
