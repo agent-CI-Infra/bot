@@ -14,17 +14,25 @@ async function fixture(t){
 for(const status of ['queued','retry_wait','waiting_configuration','waiting_environment','running'])test(`26 updates including mentions stay on one ${status} review without truncation`,async t=>{
   const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue});
   h.store.run('UPDATE tasks SET status=?,phase=? WHERE id=?',status,status==='running'?'prepare':'model',id);
-  enqueue(h.store,'101','development.issue',1,null,{review:{}});
   for(let n=0;n<26;n++)assert.equal(queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:n+1,body:n%2?'plain '+n:'@bot update '+n}},'update-'+n),0);
   const task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
   assert.equal(task.status,status);assert.equal(JSON.parse(task.input).merged_updates.length,26);
   assert.equal(pendingReviewUpdates(h.store,task).length,26);
   assert.match(JSON.parse(pendingReviewUpdates(h.store,task).at(-1).data).comment.body,/25/);
   assert.equal(h.store.all("SELECT * FROM tasks WHERE kind LIKE 'review.%'").length,1);
-  assert.equal(h.store.get("SELECT status FROM tasks WHERE kind='development.issue'").status,'queued');
   const count=h.store.get('SELECT count(*) n FROM review_updates').n;
   queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:27,body:'@bot done <!-- dept-bot:marker -->'}},'own-comment');
   assert.equal(h.store.get('SELECT count(*) n FROM review_updates').n,count);
+});
+
+test('Issue updates join the Issue\'s active development before its review, all of them (#1104)',async t=>{
+  const h=await fixture(t),review=enqueue(h.store,'101','review.issue',1,null,{issue}),development=enqueue(h.store,'101','development.issue',1,null,{review:{}});
+  h.store.run("UPDATE tasks SET status='running',phase='model' WHERE id=?",development);
+  for(let n=0;n<26;n++)assert.equal(queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:n+1,body:n%2?'plain '+n:'@bot update '+n}},'update-'+n),0);
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',development).n,26);
+  assert.equal(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?',development).input).merged_updates.length,26);
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',review).n,0);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,2);
 });
 
 test('parallel reviews receive updates on the most recently claimed task, which answers those after its publication in its next round',async t=>{
