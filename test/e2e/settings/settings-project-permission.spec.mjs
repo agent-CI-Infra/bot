@@ -20,7 +20,7 @@ const rows = [
 const expects = { 101: '未检查', 202: '正常', 303: '权限不足' };
 // Each row's 权限 cell text, keyed by repository id; both pages draw that cell as the row's own direct child.
 const permissionTexts = (page, rowSelector) => page.evaluate(selector => Object.fromEntries([...document.querySelectorAll(selector)].map(row => {
-  const cell = [...row.children].find(child => child.dataset.label === '权限');
+  const cell = [...row.children].find(child => child.dataset.label === 'access');
   return [row.dataset.repositoryId, cell ? cell.innerText.trim() : '(missing)'];
 })), rowSelector);
 
@@ -57,9 +57,9 @@ test('#977 设置页项目管理的权限列写出三种状态，并与项目列
       expect(projects).toEqual(expects);
       expect(settings).toEqual(expects);
       // Every cell keeps the [data-permission] node the background check replaces in place.
-      await expect(page.locator('.global-project-row [data-label="权限"] [data-permission]')).toHaveCount(3);
+      await expect(page.locator('.global-project-row [data-label="access"] [data-permission]')).toHaveCount(3);
       // The shape axe reported at 390: a labelled generic cell with nothing readable inside it.
-      expect(await page.evaluate(() => [...document.querySelectorAll('.global-project-row [data-label="权限"]')]
+      expect(await page.evaluate(() => [...document.querySelectorAll('.global-project-row [data-label="access"]')]
         .filter(cell => !cell.innerText.trim()).map(cell => cell.closest('[data-repository-id]').dataset.repositoryId))).toEqual([]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     }

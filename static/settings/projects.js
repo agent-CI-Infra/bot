@@ -26,19 +26,19 @@ function globalProjectActions(row, actions) {
 function globalProjectRow(row, hidden) {
   const item = element('article', '', 'row project-list-row global-project-row');
   item.setAttribute('role', 'listitem'); item.dataset.key = row.id; item.dataset.repositoryId = row.id;
-  const content = element('div', '', 'row-content project-cell'); content.dataset.label = '项目'; content.setAttribute('aria-labelledby', projectColumnId('项目'));
+  const content = element('div', '', 'row-content project-cell'); content.dataset.label = 'project'; content.dataset.colLabel = projectColumnText('project'); content.setAttribute('aria-labelledby', projectColumnId('project'));
   const heading = element('strong', row.full_name, 'row-title'); heading.title = row.full_name; content.append(heading);
   if (hidden) {
-    item.append(content, projectCell('操作', button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet')));
+    item.append(content, projectCell('actions', button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet')));
     return item;
   }
   if (row.registered) content.append(consoleLink('#/projects/' + row.id + '/basic', '项目设置', '策略、模型、角色和成员'));
   const detail = element('p', installedDetail(row)); detail.title = detail.textContent; content.append(detail);
-  const cells = projectRowCells(row, null, true), board = cells.find(cell => cell.dataset.label === '看板'), permission = cells.find(cell => cell.dataset.label === '权限');
+  const cells = projectRowCells(row, null, true), board = cells.find(cell => cell.dataset.label === 'board'), permission = cells.find(cell => cell.dataset.label === 'access');
   permission.replaceChildren(permissionCell(row));
   board.replaceChildren(boardChip(row), projectListControls(row, { showStatus: false, showTasks: false }));
   const actions = installedActions(row, () => route(), { includeSettings: false });
-  item.append(content, ...cells, projectCell('操作', row.registered ? globalProjectActions(row, actions) : actions));
+  item.append(content, ...cells, projectCell('actions', row.registered ? globalProjectActions(row, actions) : actions));
   return item;
 }
 async function globalProjectSettings(request, id) {
@@ -64,7 +64,7 @@ async function globalProjectSettings(request, id) {
   if (installed.length) {
     const table = element('div', '', 'global-project-table' + (hidden ? ' is-hidden' : ''));
     table.setAttribute('role', 'list'); table.setAttribute('aria-label', hidden ? '已隐藏仓库' : '全局项目列表');
-    table.append(projectTableHead(hidden ? ['项目', '操作'] : projectColumnLabels));
+    table.append(projectTableHead(hidden ? ['project', 'actions'] : projectColumnLabels));
     for (const row of installed) table.append(globalProjectRow(row, hidden));
     selection.append(table);
   } else selection.append(consoleState(hidden ? '没有已隐藏的仓库' : '还没有项目', hidden ? '当前没有从项目列表隐藏的仓库。' : '安装 GitHub App 后，仓库会出现在这里。'));

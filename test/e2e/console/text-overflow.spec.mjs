@@ -33,7 +33,7 @@ const longName = 'fixture/an-extraordinarily-long-repository-name-used-to-verify
 async function assertOperationSeparated(page, expected, minCol = 44) {
   const actionHit = await page.evaluate((title) => {
     const row = [...document.querySelectorAll('.project-list-row')].find(r => r.querySelector('.row-title')?.textContent === title);
-    const cell = row.querySelector('.project-cell[data-label="操作"]');
+    const cell = row.querySelector('.project-cell[data-label="actions"]');
     const controls = [...(cell?.querySelectorAll('button, a') || [])].filter(el => el.getClientRects().length);
     const setting = controls.find(el => el.textContent.trim() === '设置');
     const control = setting || controls.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0];
@@ -103,8 +103,8 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     const list = await page.evaluate((expected) => {
       const row = [...document.querySelectorAll('.project-list-row')].find(r => r.querySelector('.row-title')?.textContent === expected);
       const title = row.querySelector('.row-title');
-      const actions = row.querySelector('.project-cell[data-label="操作"]') || row.querySelector(':scope > .actions');
-      const chips = [...row.querySelectorAll(':scope > .project-cell')].filter(c => !['项目', '操作'].includes(c.dataset.label));
+      const actions = row.querySelector('.project-cell[data-label="actions"]') || row.querySelector(':scope > .actions');
+      const chips = [...row.querySelectorAll(':scope > .project-cell')].filter(c => !['project', 'actions'].includes(c.dataset.label));
       const setting = [...(actions?.querySelectorAll('button') || [])].find(b => b.textContent.trim() === '设置');
       const ts = getComputedStyle(title);
       const ab = actions.getBoundingClientRect();
@@ -189,7 +189,7 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await page.evaluate(() => document.fonts.ready);
     const desktop = await page.evaluate(() => {
       const medium = [...document.querySelectorAll('.row-title')].find(el => el.textContent.trim() === 'fixture/project-101');
-      const cell = medium.closest('.project-cell[data-label="项目"]');
+      const cell = medium.closest('.project-cell[data-label="project"]');
       const link = cell?.querySelector(':scope > a');
       const note = link?.querySelector('small');
       const role = document.querySelector('.current-user-role');

@@ -131,9 +131,9 @@ async function render(quiet = false) {
     if (tab === 'projects' && !hiddenView) {
       const registered = row.registered !== false;
       line.classList.add('project-list-row'); line.dataset.repositoryId = row.id;
-      content.classList.add('project-cell'); content.dataset.label = '项目'; content.setAttribute('aria-labelledby', projectColumnId('项目'));
+      content.classList.add('project-cell'); content.dataset.label = 'project'; content.dataset.colLabel = projectColumnText('project'); content.setAttribute('aria-labelledby', projectColumnId('project'));
       const cells = projectRowCells(row, installedView ? integrationMap.get(row.id) : null, installedView);
-      const actions = element('div', '', 'actions project-cell'); actions.dataset.label = '操作'; actions.setAttribute('aria-labelledby', projectColumnId('操作'));
+      const actions = element('div', '', 'actions project-cell'); actions.dataset.label = 'actions'; actions.dataset.colLabel = projectColumnText('actions'); actions.setAttribute('aria-labelledby', projectColumnId('actions'));
       if (installedView) {
         if (registered) actions.append(button('设置', () => openProject(row.id), 'quiet'));
         else if (row.installed) actions.append(button('启动', () => openActivation(row, () => start()).catch(error), 'quiet'));

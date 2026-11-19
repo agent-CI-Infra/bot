@@ -191,10 +191,10 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
     const listText = await page.locator('#rows').innerText();
     expect(listText).not.toMatch(/仓库 ID|安装 \d+/);
     await expect(row('101')).toContainText('alpha/one');
-    await expect(row('101').locator('.project-cell[data-label="启用"]')).toContainText('已启用');
+    await expect(row('101').locator('.project-cell[data-label="enabled"]')).toContainText('已启用');
 
     // #544: the task cell stays the drill-down into the project's activity, as it was before the table.
-    const drill = row('101').locator('.project-cell[data-label="任务"] .project-task-preview');
+    const drill = row('101').locator('.project-cell[data-label="tasks"] .project-task-preview');
     await expect(drill).toHaveAttribute('href', '#/projects/101/activity');
     await drill.click();
     await expect(page).toHaveURL(/#\/projects\/101\/activity/);
@@ -203,16 +203,16 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
 
     // #544 review: the permission column names its state instead of staying blank, and the gate cell keeps the shared
     // chip so a background check can replace it where it stands.
-    const permissionCell = key => row(key).locator('.project-cell[data-label="权限"]');
+    const permissionCell = key => row(key).locator('.project-cell[data-label="access"]');
     // This fixture has no GitHub permission read, so the honest state is 未检查 — not an empty column. The 正常 state is
     // covered by the unit test that renders a row whose gaps were read and are empty.
     await expect(permissionCell('101')).toHaveText('未检查');
     for (const key of ['101', '202', '303', '404']) await expect(permissionCell(key)).toHaveText(/正常|未检查/);
-    const gateChip = row('101').locator('.project-cell[data-label="门禁"] [data-integration]');
+    const gateChip = row('101').locator('.project-cell[data-label="gates"] [data-integration]');
     await expect(gateChip).toHaveText(/发布检查未完成|门禁/);
 
     // A board change on the backend reaches the table without a manual reload: the same poll refreshes the board cell.
-    const boardCell = row('101').locator('.project-cell[data-label="看板"]');
+    const boardCell = row('101').locator('.project-cell[data-label="board"]');
     await expect(boardCell).toHaveText('看板已关闭');
     await admin('/api/installations/101/board', 'PATCH', { enabled: true });
     await expect(boardCell).toHaveText(/看板采集中|查看看板/, { timeout: 15000 });
@@ -244,7 +244,7 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
     for (const [label, width, height] of [['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height});
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-      await expect(row('101').locator('.project-cell[data-label="门禁"]')).toBeVisible();
+      await expect(row('101').locator('.project-cell[data-label="gates"]')).toBeVisible();
       expect(await row('101').evaluate(line => line.scrollWidth <= line.clientWidth)).toBe(true);
       await page.screenshot({path: `.tmp/ui-project-table/${label}.png`, fullPage: true});
     }
@@ -262,7 +262,7 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
       expect(await member.locator('#rows').innerText()).not.toMatch(/仓库 ID|安装 \d+/);
       await expect(member.locator('#rows .project-owner-group h2 button')).toHaveAttribute('aria-expanded', 'true');
       // #823: /api/repositories omits access_gaps, so the permission column is an explained placeholder, not 未检查.
-      const memberPermission = member.locator('#rows .project-list-row .project-cell[data-label="权限"] [data-permission]');
+      const memberPermission = member.locator('#rows .project-list-row .project-cell[data-label="access"] [data-permission]');
       await expect(memberPermission).toHaveText(['—', '—']);
       await expect(memberPermission.first()).toHaveAttribute('title', '仓库安装权限由管理员在安装列表中核对');
       await expect(memberPermission.first()).toHaveAttribute('aria-label', '仓库安装权限由管理员在安装列表中核对');
@@ -302,7 +302,7 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
     await expect(row('501').getByRole('link', {name: /项目设置/})).toHaveCount(0);
     await page.setViewportSize({width: 1440, height: 900});
     expect(await lefts('202')).toEqual(await lefts('101'));
-    const directButtons = row('501').locator('.project-cell[data-label="操作"] button');
+    const directButtons = row('501').locator('.project-cell[data-label="actions"] button');
     expect(await directButtons.evaluateAll(buttons => new Set(buttons.map(button => Math.round(button.getBoundingClientRect().top))).size), 'unstarted actions stay on one desktop row').toBe(1);
     const rowHeights = await page.locator('.global-project-row').evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height));
     expect(new Set(rowHeights.map(Math.round)).size, `all project rows have equal desktop height: ${rowHeights.join(', ')}`).toBe(1);
@@ -328,7 +328,7 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
       await page.screenshot({path: `.tmp/global-project-table/${label}.png`, fullPage: true});
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       expect(await page.locator('.global-project-row').evaluateAll(rows => rows.every(line => line.scrollWidth <= line.clientWidth + 1))).toBe(true);
-      await expect(row('101').locator('.project-cell[data-label="权限"]')).toBeVisible();
+      await expect(row('101').locator('.project-cell[data-label="access"]')).toBeVisible();
       if (label === 'mobile') {
         await toggle.click();
         const panel = await actions.locator('.project-actions-panel').boundingBox();
