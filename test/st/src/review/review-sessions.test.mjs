@@ -2,12 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {harness,setup,account,repository} from '../../../fixtures/helpers.mjs';
 import {enqueue,queueWebhook} from '../../../../dist/review/queue.js';
-import {ReviewUpdated,reviewObjectState,pendingReviewUpdates} from '../../../../dist/review/sessions.js';
+import {reviewObjectState,pendingReviewUpdates,resultCoverage,reviewUpdateFacts} from '../../../../dist/review/sessions.js';
 import {deleteProjectRecords} from '../../../../dist/projects/removal.js';
-import {continueFinishedReview,resumeFinishedReviews} from '../../../../dist/review/continuation.js';
-import {GitHub} from '../../../../dist/github/client.js';
-import {Publisher} from '../../../../dist/github/publisher.js';
-import {Redactor} from '../../../../dist/agent/common.js';
+import {continueFinishedReview,continuationUpdates,resumeFinishedReviews} from '../../../../dist/review/continuation.js';
 
 const user={id:5,login:'alice',type:'User'},issue={number:1,state:'open',user};
 async function fixture(t){
@@ -121,15 +118,48 @@ test('a new PR head joins the running review as an update, like discussion of an
 });
 
 
-test('the publication fence sees updates arriving during the final GitHub request guard',async t=>{
-  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{}),task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
-  const github=new GitHub(h.store,h.store.get("SELECT * FROM repositories WHERE id='101'"),new Redactor(),async()=>{
-    assert.equal(queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:99,body:'@bot before HTTP'}},'before-write'),0);
-  },'http://127.0.0.1:9');github.fullName='fixture/project-101';
-  const publisher=new Publisher(h.store,github,task,async()=>{},undefined,undefined,()=>{
-    assert.equal(pendingReviewUpdates(h.store,task).length,1);throw new ReviewUpdated();
-  });
-  await assert.rejects(publisher.discussion('discussion','Draft result'),ReviewUpdated);
-  assert.equal(h.store.get('SELECT state FROM github_effects WHERE task_id=?',id).state,'pending');
-  assert.equal(h.store.get('SELECT publication_started FROM tasks WHERE id=?',id).publication_started,0);
+// #1100: what a review result covers is stamped on it; the Manager reads every update after the result it would nominate.
+test('a review result covers what its session was given and at least its round\'s start; the Manager reads each update after it',async t=>{
+  const h=await fixture(t),head='a'.repeat(40),id=enqueue(h.store,'101','review.pr',1,head,{pull_request:{...issue,draft:false,head:{sha:head}}});
+  const add=(key,data)=>Number(h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify(data)).lastInsertRowid);
+  const comment=add('comment',{reason:'comment',actor:'alice',url:'https://github.invalid/c/1',source:{type:'comment',id:1},at:'2026-11-19T03:11:00Z',comment:{body:'Please check the error path. '+'x'.repeat(700)}});
+  const push=add('push',{reason:'pushed',actor:'alice',before:head,after:'b'.repeat(40),at:'2026-11-19T03:20:00Z'});
+  const moved=add('moved',{reason:'pull_request_head_changed',previous_head:head,current_head:'b'.repeat(40)});
+  // An update from before #1100 has no `at`: its review's own time stands in.
+  const older=add('review',{reason:'review_submitted',actor:'bob',review:{body:'Looks fine.',submitted_at:'2026-11-19T03:30:00Z',html_url:'https://github.invalid/r/2'}});
+  let task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
+  // The stamp counts; without one, or below it, the round's start does (round 1 starts at 0).
+  assert.deepEqual([resultCoverage(task,{updates_through:push}),resultCoverage(task,{}),resultCoverage(task,null)],[push,0,0]);
+  h.store.run("UPDATE tasks SET input=json_set(input,'$.round_update_cursor',?) WHERE id=?",comment,id);task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
+  assert.deepEqual([resultCoverage(task,{updates_through:0}),resultCoverage(task,{updates_through:moved}),resultCoverage(task,{})],[comment,moved,comment]);
+  // No Dev result yet: everything after the round's start is listed. Then the latest Dev result's stamp decides.
+  assert.deepEqual(reviewUpdateFacts(h.store,task).uncovered.map(u=>u.id),[push,moved,older]);
+  h.store.run("INSERT INTO task_history(task_id,type,data,created_at) VALUES(?,'role_result',?,'now')",id,JSON.stringify({role:'dev',result:{summary:'Reviewed.',findings:[],updates_through:push}}));
+  const facts=reviewUpdateFacts(h.store,task);
+  assert.equal(facts.covered_through,push);assert.equal(facts.uncovered_count,2);assert.match(facts.instruction,/Unless you act, the platform publishes/);
+  assert.deepEqual(facts.uncovered,[{id:moved,reason:'pull_request_head_changed',push:true,actor:null,at:null,url:null,excerpt:null,before:head,after:'b'.repeat(40)},
+    {id:older,reason:'review_submitted',push:false,actor:'bob',at:'2026-11-19T03:30:00Z',url:'https://github.invalid/r/2',excerpt:'Looks fine.'}]);
+  h.store.run("INSERT INTO task_history(task_id,type,data,created_at) VALUES(?,'role_result',?,'now')",id,JSON.stringify({role:'dev',result:{summary:'Reviewed.',findings:[],updates_through:older}}));
+  assert.deepEqual([reviewUpdateFacts(h.store,task).uncovered,reviewUpdateFacts(h.store,task).instruction],[[],'No update came after what the latest Dev result covers.']);
+  // A comment is excerpted; a push carries its heads.
+  h.store.run("DELETE FROM task_history WHERE task_id=? AND type='role_result'",id);h.store.run("UPDATE tasks SET input=json_remove(input,'$.round_update_cursor') WHERE id=?",id);
+  const first=reviewUpdateFacts(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',id)).uncovered;
+  assert.equal(first[0].excerpt.length,601);assert.deepEqual([first[0].at,first[0].push],['2026-11-19T03:11:00Z',false]);
+  assert.deepEqual([first[1].push,first[1].before,first[1].after],[true,head,'b'.repeat(40)]);
+  // What a publication carries to the next round: the updates after the coverage, but not a push of a head it read.
+  // The Manager is told the same set, so it never hears of an update the next round would skip.
+  h.store.run("UPDATE tasks SET head_sha=? WHERE id=?",'b'.repeat(40),id);
+  const atB=h.store.get('SELECT * FROM tasks WHERE id=?',id);
+  assert.deepEqual(continuationUpdates(h.store,atB,comment).map(u=>u.id),[moved,older]);
+  assert.deepEqual(reviewUpdateFacts(h.store,atB).uncovered.map(u=>u.id),[comment,moved,older]);
+});
+
+// #1100: a retry, automatic or a person's, keeps the update cursor: a result an earlier attempt made keeps what it covered.
+test('a person\'s retry of a review keeps its update cursor',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue,round_update_cursor:1});
+  for(const key of ['a','b','c'])h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,key,JSON.stringify({reason:'comment'}));
+  h.store.run("UPDATE tasks SET status='failed',phase='model',error_code='model_unavailable',review_update_cursor=3,attempt=2 WHERE id=?",id);
+  assert.equal((await h.admin(`/api/tasks/${id}/retry`,'POST',{})).status,201);
+  assert.deepEqual(Object.values(h.store.get('SELECT status,phase,attempt,review_update_cursor FROM tasks WHERE id=?',id)),['queued','prepare',3,3]);
+  assert.equal(pendingReviewUpdates(h.store,{id}).length,0);
 });

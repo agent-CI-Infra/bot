@@ -2,7 +2,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { traceEvent } from '../tasks/trace.js';
-import { pendingReviewUpdates, reviewUpdateLog } from './sessions.js';
+import { reviewUpdateCursor, reviewUpdateLog, roundUpdatesAfter } from './sessions.js';
 
 /**
  * #770: a review that has published keeps the Issue or pull request. An update the Manager continues it with (or one that
@@ -11,16 +11,15 @@ import { pendingReviewUpdates, reviewUpdateLog } from './sessions.js';
  */
 
 const clip = (value: unknown, limit: number) => { const text = String(value ?? ''); return text.length > limit ? text.slice(0, limit) + '…' : text; };
-// The update as its trigger: the event fields, without the GitHub objects the update row also carries.
-const triggerOf = (data: any) => { const { object: _object, comment: _comment, review: _review, ...trigger } = data || {}; return trigger; };
+// The update as its trigger: the event fields, without the GitHub objects and the time it joined (`at`) the row also carries.
+const triggerOf = (data: any) => { const { object: _object, comment: _comment, review: _review, at: _at, ...trigger } = data || {}; return trigger; };
 
-/** The updates that give a finished review a next round: all pending ones except a push to a head the review already read. */
-export function continuationUpdates(store: Store, task: Row): { id: number; data: any }[] {
-  let heads: string[] = [];
-  try { const input = JSON.parse(task.input || '{}'); heads = Array.isArray(input.heads) ? input.heads.map(String) : []; } catch { heads = []; }
-  if (task.head_sha) heads.push(String(task.head_sha));
-  return pendingReviewUpdates(store, task).map(row => ({ id: Number(row.id), data: JSON.parse(row.data) }))
-    .filter(update => update.data?.reason !== 'pushed' || !heads.includes(String(update.data.after)));
+/**
+ * The updates that give a review a next round: those after what it covers (its update cursor once it has published, which
+ * is what its result covered), except a push to a head the review already read.
+ */
+export function continuationUpdates(store: Store, task: Row, through = reviewUpdateCursor(store, String(task.id))): { id: number; data: any }[] {
+  return roundUpdatesAfter(store, task, through);
 }
 
 /** What the next round is told about the previous one when its session does not hold it. */
@@ -71,8 +70,8 @@ export function continueFinishedReview(store: Store, taskId: string): boolean {
     const next = { ...kept, round, previous_result: previousResult(task, done), ...(asked ? { trigger: triggerOf(asked) } : {}),
       ...(asked?.comment ? { comment: asked.comment } : {}), merged_updates: updates.filter((_, index) => index !== askedIndex).map(update => triggerOf(update.data)),
       configuration_revision: Number(configuration) + 1, round_update_cursor: Math.max(...updates.map(update => update.id)) };
-    // The round has taken these updates (they are its trigger and merged_updates): its turns and its publication fence look
-    // only at what joins later, whatever the runner reports at its boundaries, and a retry of the round starts there again.
+    // The round has taken these updates (they are its trigger and merged_updates): its turns are given only what joins later,
+    // and a result of this round covers at least these (src/review/sessions.ts).
     store.run(`UPDATE tasks SET status='queued',phase='prepare',input=?,workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,
       review_update_cursor=?,error_code=NULL,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL,claim_token=NULL,next_run_at=0,attempt=attempt+1,updated_at=?
       WHERE id=? AND status='succeeded'`, JSON.stringify(next), next.round_update_cursor, now, taskId);

@@ -170,6 +170,11 @@ function summarizeLogStep(log, index) {
   } else if (value.type === 'prepared') {
     caption = `工作区就绪 · 固定基线 ${String(value.sha || '').slice(0, 12)}`;
     for (const line of value.coverage || []) bodyNodes.push(element('p', line, 'muted'));
+  } else if (value.type === 'publication_decision') {
+    // #1100: why a review publishes now, and which updates its next round answers.
+    caption = decisionCaption(value);
+    badgeNode = badge('发布决定', 'info');
+    if (value.detail) bodyNodes.push(element('p', value.detail, 'say'));
   } else if (value.type === 'published') {
     caption = '已发布结果至 GitHub';
     badgeNode = badge('已发布', 'success');
@@ -471,6 +476,11 @@ function toolCaption(call) {
 }
 
 const shortSha = sha => String(sha || '').slice(0, 7);
+function decisionCaption(value) {
+  const carried = Array.isArray(value.carried) ? value.carried.length : 0;
+  return carried ? `发布检视 · ${carried} 条更新留给下一轮` : '发布检视 · 结果已覆盖收到的更新';
+}
+
 function updateCaption(value) {
   if (value.reason === 'pull_request_head_changed') return `新提交：工作区从 ${shortSha(value.previous_head)} 移到 ${shortSha(value.current_head)}`;
   return ({ comment: '的评论', mention: '提到 bot 的评论', issue_edited: '修改了 Issue', pull_request_edited: '修改了 PR', review_submitted: '的检视',
@@ -552,6 +562,7 @@ function step(log) {
     add(line);
   } else if (value.type === 'workspace_chosen') { title.textContent = '工作区'; meta.prepend(badge(value.decided_by === 'system' ? '系统选择' : '自选', 'info')); add(element('p', value.detail || '', 'say')); }
   else if (value.type === 'head_moved') { title.textContent = 'PR 有新提交'; add(element('p', value.detail || `${shortSha(value.previous_head)} → ${shortSha(value.current_head)}`, 'say')); }
+  else if (value.type === 'publication_decision') { title.textContent = decisionCaption(value); meta.prepend(badge('发布决定', 'info')); add(element('p', value.detail || '', 'say')); }
   else if (value.type === 'continued') { title.textContent = `第 ${value.round} 轮`; meta.prepend(badge('续接', 'info')); add(element('p', value.detail || '', 'say')); }
   else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); if (value.where) add(collapsible('出错位置', value.where)); }
   else if (value.type === 'agent_failure') { title.textContent = '执行进程失败'; add(element('p', value.detail || '执行进程没有给出原因。', 'say')); if (value.error) add(element('p', '错误码 ' + value.error, 'muted')); }

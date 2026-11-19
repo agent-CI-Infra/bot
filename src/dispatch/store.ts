@@ -338,7 +338,8 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
  */
 function join(store: Store, event: Row, taskId: string, decision: Decision) {
   const merge = JSON.parse(event.merge), task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!;
-  const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify(merge.data));
+  // `at`: when the event came, which the Manager of a review reads with the update (#1100).
+  const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify({ ...merge.data, at: event.created_at ?? new Date().toISOString() }));
   if (inserted.changes) {
     const input = JSON.parse(task.input || '{}');
     store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);

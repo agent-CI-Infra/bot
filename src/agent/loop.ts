@@ -19,6 +19,7 @@ import { runAgent, type AgentSpec } from './runtime.js';
 import { type Redactor, stop, blobSha, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
 import { validateReview, validateReply } from '../review/findings.js';
+import { reviewUpdateCursor } from '../review/sessions.js';
 import { workType } from '../work/catalog.js';
 import { sectionText } from '../work/settings.js';
 import { randomId } from '../core/security.js';
@@ -103,7 +104,9 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     complete: (state, publication) => {
       const result = state.result;
       limits.validateSubmission?.(result);
-      if (profile.completion === 'review') return validateReview(result);
+      // A review result names the last update it covers (#1100): what its session or role had been given when it finished.
+      // The platform sets it; a value the model submits is replaced.
+      if (profile.completion === 'review') return String(task.kind).startsWith('review.') ? { ...validateReview(result), updates_through: reviewUpdateCursor(store, task.id) } : validateReview(result);
       if (profile.completion === 'reply') return validateReply(result);
       // An event workflow's result is checked by its own module; the log windows the agent read go with it.
       if (profile.completion !== 'publication') return { ...result, read_logs: redactor.clean(explorer?.logs ?? []) };
