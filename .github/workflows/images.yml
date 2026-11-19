@@ -93,11 +93,14 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
           cache-from: type=gha,scope=${{ matrix.name }}
           # #1115: only a run that publishes, or the Nightly run that calls this workflow, may write the cache. A pull
-          # request or merge queue run has no cache write scope, and then buildx fails the whole build after the image
-          # is built ("failed to reserve cache: cache write denied"); such a run reads main's cache instead, which is
-          # the same rule checks.yml states for the test cache. The Nightly run is event workflow_call and PUBLISH is
-          # false there, so the event name has to be part of the condition.
-          cache-to: ${{ (env.PUBLISH == 'true' || github.event_name == 'workflow_call') && format('type=gha,scope={0}', matrix.name) || '' }}
+          # request or merge queue run falls to the empty string below. Some PR runs hold a read-only token there and
+          # buildx fails the whole build after the image is built ("failed to reserve cache: cache write denied"); a
+          # writable one just fills a cache entry per PR that nothing reads, squeezing the quota. Both read main's
+          # cache instead, the rule checks.yml states for the test cache. A called workflow sees the caller's event,
+          # so Nightly arrives as schedule or workflow_dispatch with PUBLISH false: both names belong in the condition,
+          # as in checks.yml. images.yml has no workflow_dispatch trigger of its own -- a manual run dispatches
+          # nightly.yml -- so a dispatch here is that caller's event, and merge_group is meant to fall empty too.
+          cache-to: ${{ (env.PUBLISH == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('type=gha,scope={0}', matrix.name) || '' }}
 
       # Start the preinstalled browser as the runtime user in the compose sandbox (read-only root,
       # tmpfs /tmp, no capabilities). This is what catches a missing writable HOME; a build-only job would not.
