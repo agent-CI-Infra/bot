@@ -566,7 +566,8 @@
       { label: `${trunk}中位耗时`, value: dur(d.main.median_duration_s) },
       { label: '采样 run', value: n(d.runs_sampled), sub: `job 明细取最近 ${d.job_history_runs} 次${trunk} run` },
     ]);
-    if (d.lanes) html += runCalendar(d.lanes);
+    // Schema 2 also had a lanes object, but only the current calendar has rows.
+    if (Array.isArray(d.lanes?.rows)) html += runCalendar(d.lanes);
     html += `<div class="grid wide" style="margin-top:12px">
       ${card(`最近一次${trunk} run`, d.latest_main ? `${kv([
         ['Run', `${link(d.latest_main.run.url, esc(d.latest_main.run.title))} ${conclusionBadge(d.latest_main.run.conclusion)}`],
