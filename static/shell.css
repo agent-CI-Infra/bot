@@ -31,7 +31,7 @@
 .skip-link { position: fixed; top: 8px; left: 12px; z-index: 150; padding: 12px; background: var(--color-surface); color: var(--color-text); transform: translateY(-150%); border-radius: var(--radius-3); }
 .skip-link:focus { transform: none; }
 body { background: var(--color-bg); color: var(--color-text); }
-body > header { position: relative; min-height: var(--console-header); height: auto; padding: 0 24px; gap: 20px; background: var(--color-surface); color: var(--color-text); border-bottom: 1px solid var(--color-border); }
+body > header { position: relative; min-height: 64px; height: auto; padding: 0 24px; gap: 20px; background: var(--color-surface); color: var(--color-text); border-bottom: 1px solid var(--color-border); }
 header .brand { min-width: 180px; }
 header .brand strong { font-size: var(--font-size-brand); letter-spacing: -.5px; }
 header .sub, .current-user-role { color: var(--color-text-muted); }
@@ -414,7 +414,7 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
   body.console-ready > header #console-project-header { gap: 8px; }
   .console-ready #console-project-header .project-head { flex-basis: 100%; }
   .console-ready #console-project-header .project-head .actions { flex: none; }
-  body.console-ready:has(#console-project-header:not([hidden])) #console-location > :is(#console-area, #console-context) { display: none; }
+  body.console-ready:has(#console-project-header[data-overview="true"]) #console-location > :is(#console-area, #console-context) { display: none; }
 }
 @media (min-width: 380px) and (max-width: 480px) {
   body.console-ready:has(#console-project-header:not([hidden])) #header-tools { flex: 0 0 auto; width: auto; margin-left: auto; }
@@ -472,3 +472,37 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
 .session-expired-banner > span { min-width: 0; overflow-wrap: anywhere; }
 .session-expired .current-user-role, .session-expired .console-account-role { color: var(--color-warning); }
 @media (max-width: 480px) { .session-expired-banner > button { flex: 1 1 100%; } }
+
+body > header { position: sticky; top: 0; z-index: 40; }
+#console-sidebar > .console-sidebar-brand { min-width: 0; margin: 0 8px 20px; }
+#console-project-header .console-location { flex: 1 1 220px; margin: 0; }
+#console-project-header > .console-permission { flex: none; margin: 0; }
+.console-section-region { display: none; }
+@media (min-width: 768px) {
+  body.console-ready { display: grid; grid-template-columns: var(--console-rail) minmax(0, 1fr); align-content: start; }
+  body.console-ready > header { grid-column: 2; }
+  body.console-ready > header > .brand { display: none; }
+  body.console-ready main, body.console-ready.board-mode main { grid-column: 2; width: auto; margin: 0; }
+  #console-sidebar { top: 0; bottom: 0; overflow-y: auto; overscroll-behavior: contain; }
+}
+@media (max-width: 1100px) {
+  body.console-ready > header #console-project-header { order: 3; flex-basis: 100%; }
+}
+@media (max-width: 767px) {
+  .console-section-region { display: block; margin-bottom: var(--space-4); }
+  #console-project-header .console-location { flex-wrap: wrap; }
+}
+
+html { scroll-padding-top: var(--console-header); }
+.console-ready .console-save-bar { top: var(--console-header); }
+.console-ready .schedule-panel .schedule-time-preview { top: calc(var(--console-header) + 12px); }
+@media (min-width: 768px) and (max-height: 560px) {
+  body.console-ready { --console-header: 64px; }
+  body.console-ready > header { flex-wrap: nowrap; padding-block: 0; }
+  body.console-ready > header #console-project-header { order: 0; flex-basis: auto; flex-wrap: nowrap; }
+  body.console-ready #console-project-header .console-location { display: none; }
+  body.console-ready #who .current-user-copy { display: none; }
+}
+@media (max-width: 767px) and (max-height: 600px) {
+  body.management-page-mode .console-mobile-scope { display: none; }
+}

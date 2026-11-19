@@ -105,7 +105,7 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
 });
 
 
-test('an overview permission change removes the old global project header', async ({ page }) => {
+test('an overview permission change replaces the old project header with the shared location', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -125,8 +125,10 @@ test('an overview permission change removes the old global project header', asyn
       await page.route('**/api/repositories/101/role-board', route => route.fulfill({ status: 403, json: { error: 'repository_forbidden' } }));
       await page.getByRole('button', { name: '刷新总览', exact: true }).click();
       await expect(page.getByRole('heading', { name: '项目访问已变化', exact: true })).toBeVisible();
-      await expect(page.locator('#console-project-header')).toBeHidden();
+      await expect(page.locator('#console-project-header')).toBeVisible();
+      await expect(page.locator('#console-project-header .project-head')).toHaveCount(0);
       await expect(tabs).toHaveCount(0);
+      await expect(page.locator('#console-location')).toBeVisible();
       await expect(page.locator('#console-context')).toBeVisible(); await expect(page.locator('#console-context')).toHaveText('无法打开项目');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: `.tmp/project-unavailable/revoked-${width}.png`, fullPage: true });

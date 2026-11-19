@@ -20,11 +20,11 @@ test('overview owns the project heading and GitHub action; work and settings pag
       expect(offset).toBeLessThanOrEqual(1);
       await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
       await expect(page.locator('#console-project-header')).toBeVisible();
-      if(width>=768) await expect(page.locator('#console-location')).toBeHidden();
+      await expect(page.locator('#console-location')).toBeHidden();
+      if(width>=768) await expect(page.locator('#console-section-region')).toBeHidden();
       else {
-        await expect(page.locator('#console-location')).toBeVisible();
-        await expect(page.locator('#console-area')).toBeHidden();
-        await expect(page.locator('#console-context')).toBeHidden();
+        await expect(page.locator('#console-section-region')).toBeVisible();
+        await expect(page.getByLabel('当前页面',{exact:true})).toBeVisible();
       }
       await expect(page.locator('.workbench-top .workbench-tabs')).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -39,7 +39,11 @@ test('overview owns the project heading and GitHub action; work and settings pag
         await expect(page.locator('.project-head a')).toHaveCount(0);
         await expect(page.locator('#console-context')).toHaveText('fixture / project-101 / '+caption);
         await expect(page.locator('#console-project-header .workbench-tabs')).toHaveCount(0);
-        await expect(page.locator('#console-project-header')).toBeHidden();
+        await expect(page.locator('#console-project-header')).toBeVisible();
+        await expect(page.locator('#console-project-header .project-head h1')).toHaveText(caption);
+        await expect(page.locator('#console-project-header #console-context')).toHaveText('fixture / project-101 / '+caption);
+        await expect(page.locator('#project-page > .project-head')).toHaveCount(0);
+        await expect(page.locator('#console-location')).toBeVisible();
       }
       await expect(page.locator('#main-content')).not.toContainText('← 全部项目');
       await expect(page.getByText('项目入口',{exact:false})).toHaveCount(0);

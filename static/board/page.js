@@ -80,7 +80,7 @@ function boardShell() {
   // #482: a board rendered on the desktop keeps its filters open; narrowing the window to the phone layout folds them, so
   // the toolbar the reader sees matches the width they are at instead of the width the page was built on.
   const syncFilterOpen=()=>{filters.open=boardMedia.matches?boardState.filterOpen===true:true;};
-  syncFilterOpen();filters.addEventListener('toggle',()=>{if(filters.isConnected)boardState.filterOpen=filters.open;});
+  syncFilterOpen();filters.addEventListener('toggle',()=>{if(filters.isConnected&&boardMedia.matches)boardState.filterOpen=filters.open;});
   const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
   const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};

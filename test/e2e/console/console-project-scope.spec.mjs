@@ -28,6 +28,7 @@ function queries(page, pathname, scope) {
 }
 const boardScope = url => JSON.parse(url.searchParams.get('filters') || '[]').filter(row => row.field === 'repository_id').map(row => String(row.value)).join(',');
 async function ready(page, name, id) {
+  await expect(page.locator('#console-sidebar')).toBeVisible({ visible: page.viewportSize().width > 767 });
   await expect(page.locator(page.viewportSize().width <= 767 ? '#console-project' : '#console-mobile-project')).toBeHidden();
   await expect(trigger(page)).toHaveAttribute('data-project-id', id);
   if (name === 'board') {

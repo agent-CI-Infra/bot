@@ -66,7 +66,7 @@ for(const role of ['super','member']) test(`${role}: sidebar, phone destinations
       for(const [key,caption] of [['release','发版本'],['knowledge','项目知识'],['activity','运行状态']]) {
         if(width>=768)await page.locator('#tabs').getByRole('link',{name:caption,exact:true}).click();
         else await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/'+key);
-        await expect(page.locator('#project-page .project-head h1')).toHaveText(caption);
+        await expect(page.locator('#console-project-header .project-head h1')).toHaveText(caption);
         await expect(page.locator('#project-page .project-content > .console-state-loading')).toHaveCount(0);
         await page.screenshot({path:`${out}/${role}-${key}-${width}.png`});
       }
