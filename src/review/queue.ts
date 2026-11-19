@@ -66,6 +66,13 @@ function botPullRequest(store: Store, repositoryId: string, pr: any, opening = f
   }
   return null;
 }
+// How often the bot's pull request was revised for requests so far, and how often for this author's (#1104): with no limit of
+// its own, the control plane gives the Manager the facts to tell a useful revision from two bots answering each other.
+function revisionFacts(store: Store, repositoryId: string, number: number, author: unknown) {
+  const count = (extra: string, ...args: string[]) => Number(store.get(`SELECT count(DISTINCT task_id) n FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done'${extra}`,
+    repositoryId, number, ...args)?.n || 0);
+  return { for_requests: count(''), for_this_author: author ? count(' AND author_id=?', String(author)) : 0 };
+}
 // A person's or another review bot's comment, review or inline comment on a pull request this bot opened, quoted as a request
 // a revision carries out (#1104). The webhook already limited who counts (members, the author, other review bots).
 function revisionRequest(payload: any, trigger: any) {
@@ -149,7 +156,8 @@ function updateCheck(event: string, payload: Json, otherBot: boolean): UpdateTri
 }
 // Another review bot's conversation comment, review or inline comment on a pull request this bot opened. The pull request's
 // author is this bot's account, so a different bot account is someone else; the bot's own writing never counts. The Manager
-// judges it like a member's request; a loop guard stops revisions after several in a row from the same bot (#1104).
+// judges it like a member's request, with no limit of the control plane's own (#1104): the event tells it how often the pull
+// request was already revised, and by whose request.
 export function otherBotOnBotPullRequest(store: Store, repositoryId: string, event: string, payload: Json): boolean {
   const p = payload as any, object = event === 'issue_comment' ? (p.issue?.pull_request ? p.issue : null) : p.pull_request;
   if (!['issue_comment', 'pull_request_review_comment', 'pull_request_review'].includes(event) || !object || p.sender?.type !== 'Bot') return false;
@@ -192,25 +200,8 @@ export function enqueueRefusal(store: Store, repositoryId: string, kind: string,
   // The Manager hears this and can continue the running one with the event instead (#1104).
   if (active) return { code: kind === 'development.issue' ? 'development_active' : 'revision_active', task_id: String(active.id),
     reason: `${kind === 'development.issue' ? '这个 Issue 已有' : '这个 PR 已有'}未结束的${kind === 'development.issue' ? '开发' : '修订'}任务（${active.status}），可以把这次的事件续接给它。` };
-  const loop = kind === 'development.pr' ? otherBotLoop(store, repositoryId, number, input) : null;
-  if (loop) return loop;
   const existing = store.get('SELECT id FROM tasks WHERE unique_key=?', enqueueKey(repositoryId, kind, number, head, input, commentId, updateId));
   if (existing) return { code: 'task_already_created', task_id: String(existing.id), reason: '这个事件要建的任务已经建过了。' };
-  return null;
-}
-// Another review bot keeps revising the bot's pull request only a few times in a row (#1104): two bots answering each other
-// would never stop. A person's request carried out in between starts the count again.
-export const otherBotRevisionLimit = 3;
-function otherBotLoop(store: Store, repositoryId: string, number: number, input: Json): { code: string; reason: string } | null {
-  const revision = (input as any)?.revision, requests: any[] = Array.isArray(revision?.requests) ? revision.requests : Array.isArray(revision?.triggered_by) ? revision.triggered_by : [];
-  if (!requests.length || requests.some(r => r?.author_type !== 'Bot')) return null;
-  const person = store.get("SELECT max(created_at) at FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done' AND author_type='User'", repositoryId, number)?.at || '';
-  for (const r of requests) {
-    const n = Number(store.get(`SELECT count(DISTINCT task_id) n FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done' AND author_type='Bot'
-      AND author_id=? AND created_at>?`, repositoryId, number, String(r.author_id), person)?.n || 0);
-    if (n >= otherBotRevisionLimit) return { code: 'other_bot_revision_limit',
-      reason: `检视机器人 ${r.author} 已经连续促成这个 PR 的 ${n} 次修订；为防止机器人之间互相触发，不再按它的意见修订。需要的话请人在 PR 上提出。` };
-  }
   return null;
 }
 // `commentId` keys a mention review to its comment; `updateId` keys an update review to its delivery record.
@@ -274,7 +265,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
     const revision: CreateOption | null = request ? { id: 'development', work: 'development.pr', title: `修订 bot PR #${number}`, default: false,
       spec: { type: 'object', kind: 'development.pr', number, head, input: { revision: { source: 'request', requests: [request] } }, delivery, requests: [request] } } : null;
     return { ...base(type, `${type}:${number}:${discriminator}`, object, number, `${type === `${object === 'pr' ? 'pull_request' : 'issue'}.mention` ? '提到 bot' : '更新'}：${clip(target?.title, 120)} #${number}`,
-      { object: objectFacts(target), trigger, ...(development ? { development: developmentFacts(development) } : {}), ...(own ? { bot_pull_request: true } : {}), ...extra }),
+      { object: objectFacts(target), trigger, ...(development ? { development: developmentFacts(development) } : {}), ...(own ? { bot_pull_request: true, revisions: revisionFacts(store, repositoryId, number, (trigger as any)?.actor_id) } : {}), ...extra }),
       options: [{ id: 'review', work: kind, title: `${object === 'pr' ? '检视 PR' : '检视 Issue'} #${number}`, default: true,
         spec: { type: 'object', kind, number, head, input, delivery, comment_id: review.commentId ?? null, update_id: review.commentId ? null : delivery } },
         replyOption(object, number, head, input, discriminator, delivery), ...(development ? [development.option] : []), ...(revision ? [revision] : [])],

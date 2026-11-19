@@ -81,14 +81,8 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const findings=result.findings.filter(actionableFinding);
     if(!findings.length)return;
     const goal=source?developmentGoal(JSON.parse(source.input)):'';
-    // A review that only other review bots started still counts for the loop guard (queue.ts otherBotLoop): two bots must not
-    // keep a review → revision cycle going through it either. Any person among the triggers lifts that.
-    const triggers=[input.trigger,...(input.merged_updates||[])].filter((t:any)=>t?.source&&t.reason!=='pushed');
-    const botOnly=triggers.length>0&&triggers.every((t:any)=>t.actor_type==='Bot');
-    const triggered=botOnly?triggers.map((t:any)=>({type:String(t.source.type),id:String(t.source.id),author:String(t.actor||''),author_id:String(t.actor_id||''),author_type:'Bot',url:String(t.url||''),body:''})):[];
     event('pr',`bot PR 检视已发布，发现可执行问题：#${number}`,{id:'development',work:'development.pr',title:`跟进 bot PR #${number}`,default:true,
-      spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review',...(triggered.length?{triggered_by:triggered}:{})}},
-        delivery:task.source_delivery_id,source_task:task.id,...(triggered.length?{requests:triggered}:{})}});
+      spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review'}},delivery:task.source_delivery_id,source_task:task.id}});
   }
 }
 
