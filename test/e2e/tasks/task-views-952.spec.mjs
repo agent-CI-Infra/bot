@@ -34,14 +34,14 @@ async function build952Fixture() {
   const { admin, password } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
 
-  // Configure model + per-role concurrency limit on `dev` = 1 (#283)
+  // Configure model + project concurrency plus per-role limits on `dev` = 1 and `reviewer` = 2 (#283, #1090)
   const model = (await admin('/api/models', 'POST', {
     repository_id: '101',
     model_name: 'gpt-5.4',
     api_url: 'http://127.0.0.1:9/v1',
     api_key: testPassword(),
   })).value.model;
-  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, role_concurrency: { dev: 1 } });
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, task_concurrency: 3, role_concurrency: { dev: 1, reviewer: 2 } });
 
   const records = new TaskRecords(h.store);
 
@@ -136,6 +136,23 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await expect(devRow).toContainText('#952');
     await expect(devRow).toContainText('#944');
     await expect(devRow).toContainText('等槽位');
+
+    // #1090: a role without its own limit but idle still shows the shared project concurrency as the denominator.
+    const testRow = page.locator('[data-role-row="test"]');
+    await expect(testRow).toContainText('空闲 0/3');
+    // A role with its own limit keeps that limit instead of the project concurrency.
+    const reviewerRow = page.locator('[data-role-row="reviewer"]');
+    await expect(reviewerRow).toContainText('空闲 0/2');
+
+    // Changing the project concurrency must repaint the role rows, not only the top bar.
+    const patched = await f.admin('/api/repositories/101/policy', 'PATCH', { task_concurrency: 4 });
+    expect(patched.status).toBe(200);
+    await expect(page.locator('.workbench-live-stats')).toContainText(/项目并发槽位：\d+ \/ 4/, { timeout: 15000 });
+    await expect(testRow).toContainText('空闲 0/4', { timeout: 15000 });
+    await expect(testRow).not.toContainText('空闲 0/3');
+    await expect(reviewerRow).toContainText('空闲 0/2');
+    // Restore the tighter budget so the retry below does not race the engine into an unrelated admission result.
+    expect((await f.admin('/api/repositories/101/policy', 'PATCH', { task_concurrency: 1 })).status).toBe(200);
 
     // Manager delegated active task to Dev, so Manager is not double-counted as actively executing #952, while showing queued #940
     const mgrRow = page.locator('[data-role-row="manager"]');
