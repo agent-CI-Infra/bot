@@ -2,13 +2,14 @@ import type { Store, Row } from '../storage/database.js';
 import type { GitHub } from '../github/client.js';
 import { sha, TaskError } from '../agent/common.js';
 import { taskBasis } from '../dispatch/basis.js';
+import { developedLabel, developingIssueLabel } from './labels.js';
 import { developingLabel } from '../rules/service.js';
 import { reviewLanguage, testEvidence } from '../github/text.js';
 
 /**
  * What an Issue development shows on the Issue while it runs (#1047): the project's developing label (default
  * `bot-developing`) and one status comment. The label is on while the development works and comes off once its pull request
- * exists or it stops without one; the comment is created when the development starts and only edited afterwards.
+ * exists or it stops without one. An Issue with a published pull request keeps bot-developed. The comment is only edited after creation.
  *
  * The comment holds milestones only: why the development started (the Manager's basis and brief), the analysis and plan and
  * the result, which the development agent submits with report_development_milestone, and how it ended (its pull request,
@@ -179,8 +180,15 @@ export function renderProgress(row: Row, task: Row): string {
   return parts.join('\n\n');
 }
 
-/** How the developing label looks when the bot creates it (here, or in an onboarding plan). */
-export const developingColor = 'fbca04', developingDescription = 'The bot is developing this Issue; removed when its pull request is opened or it stops';
+async function addIssueLabel(github: GitHub, number: number, label: typeof developedLabel) {
+  if (!await github.request('GET', github.path('/labels/' + encodeURIComponent(label.name)), undefined, true)) {
+    await github.request('POST', github.path('/labels'), label).catch(error => {
+      // A concurrent development may have created the label after our GET.
+      if (!(error instanceof TaskError && error.code === 'github_http_422')) throw error;
+    });
+  }
+  await github.request('POST', github.path(`/issues/${number}/labels`), { labels: [label.name] });
+}
 // Settling is serialized per development: a run and the sweep never write the same comment at once.
 const locks = new Map<string, Promise<unknown>>();
 const maxFailures = 12;
@@ -199,20 +207,16 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
   const row = store.get('SELECT * FROM issue_development_progress WHERE task_id=?', taskId), task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
   if (!row || !task) return true;
   const now = state(task), body = renderProgress(row, task), digest = sha(body), number = Number(row.number);
-  const wanted = !!row.label && !now.pr && !now.stopped;
+  const developing = developingIssueLabel(String(row.label ?? ''));
+  const wanted = !!developing && !now.pr && !now.stopped;
+  const markDeveloped = !!now.pr && (row.pending || row.settled_status !== now.status);
   const update = (fields: Record<string, unknown>) => store.run(`UPDATE issue_development_progress SET ${Object.keys(fields).map(key => key + '=?').join(',')},updated_at=? WHERE task_id=?`,
     ...Object.values(fields) as any[], new Date().toISOString(), taskId);
   try {
-    const github = wanted !== !!row.label_on || digest !== row.body_sha ? typeof client === 'function' ? await client() : client : null;
+    const github = wanted !== !!row.label_on || digest !== row.body_sha || markDeveloped ? typeof client === 'function' ? await client() : client : null;
     if (github && wanted !== !!row.label_on) {
-      const label = String(row.label);
-      if (wanted) {
-        // A repository without the label gets it first, with its color and what it means.
-        if (!await github.request('GET', github.path('/labels/' + encodeURIComponent(label)), undefined, true))
-          await github.request('POST', github.path('/labels'), { name: label, color: developingColor, description: developingDescription })
-            .catch(error => { if (!(error instanceof TaskError && error.code === 'github_http_422')) throw error; });
-        await github.request('POST', github.path(`/issues/${number}/labels`), { labels: [label] });
-      } else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(label)}`), undefined, true);
+      if (wanted && developing) await addIssueLabel(github, number, developing);
+      else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(row.label)}`), undefined, true);
       update({ label_on: wanted ? 1 : 0 });
     }
     if (github && digest !== row.body_sha) {
@@ -229,6 +233,8 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
         update({ comment_id: String(created.id), posting: 0, body_sha: digest });
       }
     }
+    // A failed label write leaves the PR and its linked comment intact. The sweep retries the additive GitHub call.
+    if (github && markDeveloped) await addIssueLabel(github, number, developedLabel);
     update({ settled_status: now.status, pending: 0, final: now.ended ? 1 : 0, failures: 0, next_at: 0, error: null });
     return true;
   } catch (error) {

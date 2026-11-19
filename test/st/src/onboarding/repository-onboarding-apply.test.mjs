@@ -80,8 +80,9 @@ test('confirming a started project\'s plan applies each item through its channel
   // Labels: the new one is created; one that exists keeps its colour and description. A plan at develop also creates the label
   // the bot keeps on an Issue while it develops it (#1047).
   assert.deepEqual(github.created.map(c => [c.path, c.body]), [['/repos/fixture/project-101/labels', { name: 'kind/bug', color: 'd73a4a', description: '缺陷' }],
-    ['/repos/fixture/project-101/labels', { name: 'bot-developing', color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops' }]]);
-  assert.deepEqual(receipt('labels').detail.labels, [{ name: 'kind/bug', state: 'created' }, { name: 'docs', state: 'exists' }, { name: 'bot-developing', state: 'created' }]);
+    ['/repos/fixture/project-101/labels', { name: 'bot-developing', color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops' }],
+    ['/repos/fixture/project-101/labels', { name: 'bot-developed', color: '0e8a16', description: 'The bot opened a pull request for this Issue' }]]);
+  assert.deepEqual(receipt('labels').detail.labels, [{ name: 'kind/bug', state: 'created' }, { name: 'docs', state: 'exists' }, { name: 'bot-developing', state: 'created' }, { name: 'bot-developed', state: 'created' }]);
   // The Manager checks are project scheduled tasks: no Feishu destination to choose, their results stay in the project (#1027).
   const scheduled = receipt('schedules');
   assert.deepEqual([scheduled.state, scheduled.detail.schedules, scheduled.detail.service_principal_created], ['succeeded', ['每日巡检'], true]);
@@ -101,7 +102,7 @@ test('confirming a started project\'s plan applies each item through its channel
   assert.equal((await confirm({ items: ['test_command'] })).status, 201);
   assert.equal((await repoAdmin('/api/management/onboarding/101/items/labels/retry', 'POST', {})).value.error, 'onboarding_item_not_failed');
   assert.equal(h.store.get("SELECT count(*) AS n FROM management_commands WHERE idempotency_key LIKE 'onboarding:%'").n, commands.length);
-  assert.equal(github.created.length, 2);
+  assert.equal(github.created.length, 3);
   // A retry names nothing more than the item: the old destination field is refused.
   assert.equal((await repoAdmin('/api/management/onboarding/101/items/schedules/retry', 'POST', { schedule_destination_id: 'x' })).status, 400);
 

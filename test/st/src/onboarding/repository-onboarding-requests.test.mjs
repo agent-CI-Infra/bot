@@ -43,7 +43,7 @@ test('a start request reaches the super administrators, is withdrawn, rejected w
   assert.deepEqual(receipts(view), { start: ['pending', 'start_approval_pending'], capability_ceiling: ['pending', 'project_not_started'], test_command: ['pending', 'project_not_started'],
     conventions: ['pending', 'project_not_started'], labels: ['pending', 'project_not_started'] });
   const first = view.request;
-  assert.deepEqual([first.state, first.repository.full_name, first.requested_by.principal_id, first.summary.capability_ceiling, first.summary.labels], ['pending', 'fixture/project-103', requesterPrincipal, 'develop', ['kind/bug', 'bot-developing']]);
+  assert.deepEqual([first.state, first.repository.full_name, first.requested_by.principal_id, first.summary.capability_ceiling, first.summary.labels], ['pending', 'fixture/project-103', requesterPrincipal, 'develop', ['kind/bug', 'bot-developing', 'bot-developed']]);
   assert.equal(view.application.receipts[0].detail.request_id, first.id);
   // The console names a GitHub requester by their login, not the internal username (#934).
   assert.equal(first.requested_by.github_login, 'user-42');

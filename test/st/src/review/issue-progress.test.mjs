@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { GitHub } from '../../../../dist/github/client.js';
-import { Redactor } from '../../../../dist/agent/common.js';
+import { Redactor, TaskError } from '../../../../dist/agent/common.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { dueProgress, renderProgress, reportMilestone, settleProgress, startProgress } from '../../../../dist/review/progress.js';
 import { recordBasis } from '../../../../dist/dispatch/basis.js';
@@ -92,9 +92,12 @@ test('a development puts the developing label on, creating it first, and keeps o
   // The completed milestone waits for the pull request; once it exists the label comes off and the comment shows it.
   reportMilestone(f.h.store, task.id, { milestone: 'completed', changes: ['Values keep every "="'], tests: ['npm test: 9 passed'] });
   await settleProgress(f.h.store, task.id, f.github); assert.equal(patches(f.state), 1);
+  assert.deepEqual(f.state.labels, ['bot-developing']);
+  f.state.labels.push('bug');
   f.set(task.id, { status: 'pr_opened', result: JSON.stringify({ summary: 'Keep "=".', pr_number: 12, pr_url: 'https://github.invalid/pull/12', validation: { source: 'agent', command: 'npm test' }, test_command: 'npm test' }) });
   assert.equal(await settleProgress(f.h.store, task.id, f.github), true);
-  assert.deepEqual(f.state.labels, []); assert.equal(posts(f.state), 1);
+  assert.deepEqual(f.state.labels, ['bug', 'bot-developed']); assert.equal(posts(f.state), 1);
+  assert.equal(await settleProgress(f.h.store, task.id, () => assert.fail('already settled')), true);
   const done = f.state.comments[0].body;
   assert.match(done, /\*\*Status\*\*: Pull request #12 opened/); assert.match(done, /\[#12\]\(https:\/\/github\.invalid\/pull\/12\)/);
   assert.match(done, /- Values keep every "="/); assert.match(done, /- npm test: 9 passed/);
@@ -102,7 +105,39 @@ test('a development puts the developing label on, creating it first, and keeps o
   assert.equal(dueProgress(f.h.store).length, 0);
   // A label the repository already has is not created again.
   const second = f.task(); startProgress(f.h.store, second, f.issue); await settleProgress(f.h.store, second.id, f.github);
-  assert.equal(f.state.created.length, 1); assert.deepEqual(f.state.labels, ['bot-developing']);
+  assert.deepEqual(f.state.created.map(label => label.name), ['bot-developing', 'bot-developed']);
+  assert.deepEqual(f.state.labels, ['bug', 'bot-developed', 'bot-developing']);
+  f.set(second.id, { status: 'cancelled', error_code: 'user_cancel' });
+  await settleProgress(f.h.store, second.id, f.github);
+  assert.deepEqual(f.state.labels, ['bug', 'bot-developed']);
+});
+
+test('an existing bot PR marks its source Issue even with no in-progress label; a lost label response retries only the label', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { developing_label: '' });
+  f.state.repositoryLabels.push('bot-developed');
+  const task = f.task();
+  startProgress(f.h.store, task, f.issue);
+  await settleProgress(f.h.store, task.id, f.github);
+  f.set(task.id, { status: 'completed', result: JSON.stringify({ pr_number: 12, pr_url: 'https://github.invalid/pull/12' }) });
+
+  const request = f.github.request.bind(f.github);
+  f.github.request = async (method, path, body, ...rest) => {
+    const result = await request(method, path, body, ...rest);
+    if (method === 'POST' && body?.labels?.includes('bot-developed')) throw new TaskError('github_response_unknown');
+    return result;
+  };
+  assert.equal(await settleProgress(f.h.store, task.id, f.github), false);
+  const row = f.row(task.id);
+  assert.deepEqual(dueProgress(f.h.store, row.next_at).map(r => r.task_id), [task.id]);
+  assert.deepEqual(f.state.labels, ['bot-developed']);
+  assert.match(f.state.comments[0].body, /Pull request #12 updated/);
+  f.github.request = request;
+  assert.equal(await settleProgress(f.h.store, task.id, f.github), true);
+  assert.deepEqual(f.state.labels, ['bot-developed']);
+  assert.deepEqual(f.state.created, []);
+  assert.equal(posts(f.state), 1); assert.equal(patches(f.state), 1);
+  assert.equal(f.row(task.id).final, 1);
 });
 
 test('a retry after a lost answer finds the comment it made instead of creating a second one, and failures wait longer each time', async t => {

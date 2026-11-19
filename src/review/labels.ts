@@ -4,6 +4,13 @@
 const names = (labels: unknown): string[] => (Array.isArray(labels) ? labels : [])
   .map(label => typeof label === 'string' ? label : (label as any)?.name).filter((name): name is string => typeof name === 'string' && !!name);
 const axis = (name: string) => name.includes('/') ? name.slice(0, name.indexOf('/')).toLowerCase() : null;
+export const developedLabel = { name: 'bot-developed', color: '0e8a16', description: 'The bot opened a pull request for this Issue' };
+export function developingIssueLabel(name: string) {
+  // A project may already use the completion marker as its custom in-progress label.
+  if (!name || name.toLowerCase() === developedLabel.name) return null;
+  return { name, color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops' };
+}
+
 // Opt-in, veto, hold and gate labels are human or automation decisions.
 export const reservedLabel = (name: string) => /^(agent|pr|gate)\//i.test(name) || /^(blocker|priority\/critical)$/i.test(name);
 
@@ -13,7 +20,7 @@ export const reservedLabel = (name: string) => /^(agent|pr|gate)\//i.test(name) 
  * of the accepted names (at most 8, like classification) and every refused name with why, so the agent can correct its call.
  */
 export function pullRequestLabels(requested: unknown, available: unknown, own: string[]): { labels: string[]; refused: { name: string; reason: 'not_in_repository' | 'reserved' | 'too_many' }[] } {
-  const existing = new Map(names(available).map(name => [name.toLowerCase(), name])), ownNames = own.filter(Boolean).map(name => name.toLowerCase());
+  const existing = new Map(names(available).map(name => [name.toLowerCase(), name])), ownNames = [developedLabel.name, ...own.filter(Boolean).map(name => name.toLowerCase())];
   const labels: string[] = [], refused: { name: string; reason: 'not_in_repository' | 'reserved' | 'too_many' }[] = [];
   for (const raw of Array.isArray(requested) ? requested : []) {
     const wanted = String(raw).trim(), name = existing.get(wanted.toLowerCase());
@@ -32,7 +39,7 @@ export function repositoryLabels(rows: unknown): { name: string; description: st
 
 export function classificationLabels(suggested: unknown, available: unknown, current: unknown, own: string[]): string[] {
   const existing = new Map(names(available).map(name => [name.toLowerCase(), name])), have = names(current).map(name => name.toLowerCase());
-  const ownNames = own.filter(Boolean).map(name => name.toLowerCase()), taken = new Set(have.map(axis).filter(Boolean));
+  const ownNames = [developedLabel.name, ...own.filter(Boolean).map(name => name.toLowerCase())], taken = new Set(have.map(axis).filter(Boolean));
   const chosen: string[] = [];
   for (const raw of Array.isArray(suggested) ? suggested : []) {
     const name = existing.get(String(raw).trim().toLowerCase());

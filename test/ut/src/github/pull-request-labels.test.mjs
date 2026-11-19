@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pullRequestLabels } from '../../../../dist/review/labels.js';
+import { classificationLabels, pullRequestLabels } from '../../../../dist/review/labels.js';
 import { applyPullRequestLabels, checkPullRequestLabels } from '../../../../dist/github/pull-request-labels.js';
 import { TaskError } from '../../../../dist/agent/common.js';
 import { tools } from '../../../../dist/agent/model.js';
@@ -24,6 +24,9 @@ test('pull request labels must exist in the repository and be neither reserved n
   assert.deepEqual(pullRequestLabels(['release:made-up', 'agent/ok', 'priority/critical', 'blocker', 'bot-develop'], available, ['bot-develop']).refused,
     [{ name: 'release:made-up', reason: 'not_in_repository' }, { name: 'agent/ok', reason: 'reserved' }, { name: 'priority/critical', reason: 'reserved' },
       { name: 'blocker', reason: 'reserved' }, { name: 'bot-develop', reason: 'reserved' }]);
+  const statusLabel = [{ name: 'Bot-Developed' }];
+  assert.deepEqual(pullRequestLabels(['bot-developed'], statusLabel, []).refused, [{ name: 'Bot-Developed', reason: 'reserved' }]);
+  assert.deepEqual(classificationLabels(['bot-developed'], statusLabel, [], []), []);
   const many = Array.from({ length: 10 }, (_, i) => ({ name: 'area/' + i }));
   assert.deepEqual(pullRequestLabels(many.map(l => l.name), many, []).refused.map(r => r.reason), ['too_many', 'too_many']);
 });
