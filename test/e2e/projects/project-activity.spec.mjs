@@ -37,9 +37,20 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
     await expect(card('最近任务').getByRole('button')).toHaveCount(8); // Four completed plus four active/queued tasks.
     mkdirSync('.tmp/project-activity', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    const workBox = await card('正在执行 1／1').boundingBox(), queueBox = await card('排队任务 3').boundingBox(), historyBox = await card('最近任务').boundingBox();
-    expect(queueBox.x).toBeGreaterThan(workBox.x + workBox.width); expect(historyBox.width).toBeGreaterThan(workBox.width * 1.9);
-    expect(historyBox.y).toBeGreaterThan(queueBox.y + queueBox.height);
+    // #1124: the activity cards are rebuilt by replaceChildren() every 5 s, so a locator can be replaced between
+    // the three measurements and boundingBox() returns null. Measure and assert as one retryable step, and name
+    // a missing card instead of exposing the re-render as a TypeError.
+    const titles = ['正在执行 1／1', '排队任务 3', '最近任务'];
+    for (const title of titles)
+      await expect(card(title), `等待 10 秒仍未见 ${title}`).toBeVisible({ timeout: 10000 });
+    await expect(async () => {
+      const boxes = await Promise.all(titles.map(title => card(title).boundingBox()));
+      const missing = titles.filter((_, i) => !boxes[i]);
+      if (missing.length) throw new Error(`等待 10 秒仍未见 ${missing.join('、')}`);
+      const [workBox, queueBox, historyBox] = boxes;
+      expect(queueBox.x).toBeGreaterThan(workBox.x + workBox.width); expect(historyBox.width).toBeGreaterThan(workBox.width * 1.9);
+      expect(historyBox.y).toBeGreaterThan(queueBox.y + queueBox.height);
+    }).toPass({ timeout: 10000 });
     await page.screenshot({ path: '.tmp/project-activity/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByLabel('当前页面', { exact: true })).toBeInViewport();
