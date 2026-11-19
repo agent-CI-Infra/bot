@@ -165,6 +165,14 @@ body.management-page-mode { overflow: hidden; }
   .management-window[data-compact] .management-input textarea { min-height: 36px; height: 36px; }
 }
 
+/* #616: on a very short phone the failure card is a few pixels taller than the slot that holds it, so the slot
+   scrolled and clipped the card's own bottom padding. Short screens tighten the card instead; taller ones keep the
+   roomy spacing. The recovery links stay above the fold in both cases. */
+@media (max-height: 600px) {
+  .management-access-state { padding: 2px 10px; }
+  .management-panel .management-access-state .console-state { padding: 8px 10px; gap: 2px; }
+}
+
 /* A command receipt as a page of its own (#235): the project page shell, with the state beside the title. */
 .management-receipt-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .management-receipt-head h1 { margin: 0; font-size: var(--font-size-title); }
