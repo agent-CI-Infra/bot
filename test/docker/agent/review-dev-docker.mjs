@@ -95,7 +95,7 @@ try{
   const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
   const coding=(await api('/api/models','POST',{repository_id:'101',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'coding-model'})).model;
   const manager=(await api('/api/models','POST',{repository_id:'101',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'manager-model'})).model;
-  await api('/api/repositories/101/policy','PATCH',{model_id:null,task_models:{manager:manager.id,'review.issue':model.id,'review.pr':model.id,'development.issue':coding.id,'development.pr':coding.id},review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});
+  await api('/api/repositories/101/policy','PATCH',{model_id:null,task_models:{manager:manager.id,'review.issue':model.id,'review.pr':model.id,'development.issue':coding.id,'development.pr':coding.id},review_enabled:true,development_enabled:true,test_command:'node --test'});
   const disabled=await hook('202',2);assert.equal(disabled.tasks_created,0);passed('review-disabled repository only archives');
   // The account sees three repositories; 303 is installed but not started, so its events only archive until an administrator starts it.
   const listed=(await api('/api/installations/sync','POST',{})).repositories;

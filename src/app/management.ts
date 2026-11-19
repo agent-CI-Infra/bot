@@ -363,7 +363,7 @@ export function taskModelEntries(value:unknown):[string,string][] {
 export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       // Review guidance is the Manager's review sections; the review, development and developing labels are settings of their own (#935, #1047).
-      fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
+      fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','base_branch','automation',
         'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','delivery_gates',
         'review_label','development_label','developing_label']);
       for (const key of ['review_label', 'development_label', 'developing_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
@@ -380,7 +380,6 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
       const ceiling = body.capability_ceiling !== undefined ? body.capability_ceiling as Ceiling : legacySwitchCeiling(projectCeiling(store, id, previous), body.review_enabled, body.development_enabled);
       if(body.test_command!==undefined&&(typeof body.test_command!=='string'||body.test_command.length>2048))fail(400,'invalid_test_command');
       if(body.base_branch!==undefined&&(typeof body.base_branch!=='string'||body.base_branch.length>256||body.base_branch.includes('\0')))fail(400,'invalid_base_branch');
-      if(body.max_revisions!==undefined&&(!Number.isSafeInteger(body.max_revisions)||Number(body.max_revisions)<0||Number(body.max_revisions)>10))fail(400,'invalid_revision_budget');
       const model = body.model_id === undefined ? previous.model_id : body.model_id === null ? null : text(body.model_id);
       // A super administrator choosing a deployment-shared model also makes it available to this repository.
       const grant = !!model && user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', model);
@@ -429,7 +428,7 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         // An explicit update switch of the Manager follows the review switch changed here.
         syncEventFilters(store, id, body);
         store.audit(user.id, 'policy.updated', id, id);
-        store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
+        store.run('UPDATE policies SET test_command=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
         if (body.review_label !== undefined || body.development_label !== undefined || body.developing_label !== undefined)
           saveLabels(store, id, { review_label: body.review_label as string | undefined, development_label: body.development_label as string | undefined, developing_label: body.developing_label as string | undefined });

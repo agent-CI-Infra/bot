@@ -112,31 +112,13 @@ read-only token. Use all of them to help the review converge:
 3. **Unchanged lines.** Report a new finding there only if it is `critical` or `high`, or a
    `must-fix` that earlier rounds missed. Mark anything else there as a `suggestion`.
 
-## Requests on this bot's own pull requests
+## The bot's own pull requests
 
-When the pull request's author is `bot_login`, people and other review bots may ask the bot to
-change it. `discussion_requests` lists the conversation comments, reviews and inline comments this
-review answers (type, id, author); the discussion files hold their text. Entries marked `pending`
-are earlier requests that waited while another revision ran: take them on if the reviewed head
-does not carry them out yet. For each of them:
-
-- **A person** (anyone but `bot_login` and other bots): decide whether the comment asks for a
-  change or only asks a question or remarks. A change you will make becomes a finding with
-  `actionable`, `within_goal` set to true, `requires_human_decision` set to false, and
-  `requested_in` naming the comment: `type` is `comment` (comments.json), `review` (reviews.json)
-  or `review_comment` (review_comments.json), `id` its GitHub id, as `discussion_requests` gives
-  them. Set it also when the finding keeps an earlier inline comment through `comment_id`: that
-  only says where it was reported, `requested_in` says who asked for it. Only entries of
-  `discussion_requests` count; the control plane then revises the pull request, and a person's
-  requests have no revision limit. Answer a question in the summary or a discussion finding, without
-  `requested_in`. A request that is unclear, contradicts the linked Issue or needs a product
-  decision gets `requires_human_decision` and `human_action` instead.
-- **Another review bot** (`user.type` is `Bot`, not `bot_login`): judge each comment on its merits
-  against the code, as you would a finding of your own. Give `requested_in` only to the ones that
-  are right and worth changing, and say briefly in the summary why you decline the others. Each
-  other bot leads to at most one revision of the pull request.
-
-Never give `requested_in` to a request the reviewed head already carries out; report it as done.
+When the pull request's author is `bot_login`, its development already reviewed, tested and
+accepted it, and requests people or other review bots make on it go to the Manager, which revises
+the pull request. You review it only when someone asked: review it like any other pull request,
+answer the question you were asked in the summary or a discussion finding, and record what the bot
+should change as actionable findings.
 
 ## Relevance
 

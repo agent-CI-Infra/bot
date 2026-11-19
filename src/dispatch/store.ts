@@ -202,9 +202,9 @@ export function optionRefusal(store: Store, context: DispatchContext, id: string
 }
 /**
  * Outcomes the creation itself handles without refusing the Manager: a task the event already created (a decision taken
- * again after a restart) and a bot pull request revision that waits for the running one (its requests are kept pending).
+ * again after a restart). A revision that finds another one running is refused, so the Manager can continue that one (#1104).
  */
-export const deferredRefusals = ['task_already_created', 'revision_active'];
+export const deferredRefusals = ['task_already_created'];
 /** A refusal the Manager hears at create_task and the event keeps (#815); null also for deferred outcomes. */
 export const managerRefusal = (store: Store, context: DispatchContext, id: string) => {
   const refusal = optionRefusal(store, context, id);
@@ -294,14 +294,12 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
       if (publishing && (spec.comment_id || spec.update_id)) input = { ...input, wait_for_review: publishing.id };
     }
     const id = enqueue(store, repo, spec.kind, spec.number, spec.head, input, spec.delivery, spec.source_task ?? null, spec.comment_id ?? null, spec.update_id ?? null);
-    // Requests a bot pull request revision carries are done once it is queued; otherwise later reviews list them again.
-    if (spec.kind === 'development.pr' && spec.requests?.length) {
+    // The requests a bot pull request revision carries (#1104): each comment revises once, and another review bot's count
+    // feeds the loop guard (queue.ts otherBotLoop).
+    if (id && spec.kind === 'development.pr' && spec.requests?.length) {
       const now = new Date().toISOString();
-      // A request another revision already carried stays done.
       for (const r of spec.requests as any[]) store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
-        DO UPDATE SET state=CASE WHEN bot_pr_requests.state='done' THEN 'done' ELSE excluded.state END,task_id=CASE WHEN bot_pr_requests.state='done' THEN bot_pr_requests.task_id ELSE excluded.task_id END`,
-        repo, spec.number, r.type, r.id, r.author, r.author_id, r.author_type, r.url, id ? 'done' : 'pending', id, now);
-      if (!id && spec.source_task) log(store, spec.source_task, { type: 'revision_deferred', detail: `PR #${spec.number} 已有排队或执行中的修订；这次的修改请求先记下，之后对这个 PR 的检视会再列出它们。` });
+        DO UPDATE SET state='done',task_id=excluded.task_id`, repo, spec.number, r.type, r.id, r.author, r.author_id, r.author_type, r.url, 'done', id, now);
     }
     return id;
   }

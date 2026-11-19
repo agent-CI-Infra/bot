@@ -205,10 +205,6 @@ test('the summary comment speaks the review language; findings validate their ne
   assert.doesNotThrow(() => validateReview({ ...valid, resolved_comments: [12], findings: [{ ...decision, human_action: 'Decide' }] }));
   assert.throws(() => validateReview({ ...valid, resolved_comments: ['12'] }), /model_review_invalid/);
   assert.throws(() => validateReview({ ...valid, findings: [{ ...decision, human_action: 3 }] }), /model_finding_invalid/);
-  // A finding may name the comment that asked for it; anything else in that field is refused.
-  assert.doesNotThrow(() => validateReview({ ...valid, findings: [{ ...decision, requested_in: { type: 'review_comment', id: 21 } }] }));
-  for (const requested_in of [{ type: 'issue', id: 1 }, { type: 'comment', id: '21' }, { type: 'comment', id: 0 }, null])
-    assert.throws(() => validateReview({ ...valid, findings: [{ ...decision, requested_in }] }), /model_finding_invalid/, JSON.stringify(requested_in));
   // An Issue review's conclusion (#1026) is one of four values, and optional.
   for (const conclusion of ['ready_for_development', 'needs_information', 'human_decision_required', 'no_code_change'])
     assert.equal(validateReview({ ...valid, conclusion }).conclusion, conclusion);

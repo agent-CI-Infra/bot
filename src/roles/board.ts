@@ -65,7 +65,9 @@ export function roleConcurrencyValue(store: Store, repositoryId: string, value: 
 export function policyView(store: Store, policy: Json | undefined, repositoryId: string): Json | undefined {
   if (!policy) return policy;
   // The labels are project settings of their own (#935); the policies column of the same name is a pre-rules leftover.
-  return { ...policy, ...projectLabels(store, repositoryId), capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId),
+  // max_revisions is a retired column (#1104): the bot's pull requests are no longer revised against a budget.
+  const { max_revisions: _retired, ...kept } = policy as any;
+  return { ...kept, ...projectLabels(store, repositoryId), capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId),
     delivery_gates: { pull_request_qa: pullRequestQaGate(store, repositoryId, policy as any) } };
 }
 

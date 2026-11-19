@@ -9,8 +9,8 @@ import { applyPullRequestLabels } from './pull-request-labels.js';
 import { assertTaskExternalEffect } from '../tasks/management.js';
 
 /**
- * A bot pull request now at `sha`. Only a confirmed head and its refreshed description count, once across retries. The revision
- * budget limits what the bot starts from its own reviews, so a revision people or other review bots asked for does not use it.
+ * A bot pull request now at `sha`. Only a confirmed head and its refreshed description count, once across retries. `revisions`
+ * counts the revisions not asked for by a request; it is informational since the revision budget was retired (#1104).
  */
 export function recordRevision(store:Store,task:Row,number:number,sha:string){
   const requested=JSON.parse(task.input||'{}').revision?.source==='request';
