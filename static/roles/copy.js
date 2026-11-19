@@ -1,30 +1,9 @@
-/** Role-config names and duties in Chinese or English (#568). Not full-site i18n (#527). */
+/** Role settings and built-in duties in Chinese or English (#568). Not full-site i18n (#527). */
 function consoleLocale() {
   if (typeof globalThis !== 'undefined' && globalThis.__consoleLocale) return globalThis.__consoleLocale;
   const lang = (typeof document !== 'undefined' && document.documentElement && document.documentElement.lang) || '';
   return String(lang).toLowerCase().startsWith('en') ? 'en' : 'zh';
 }
-
-const roleCatalogNames = {
-  zh: {
-    coordinator: '跨任务协调',
-    manager: '项目管理者',
-    dev: '开发',
-    test: '测试',
-    reviewer: '检视',
-    ux: '体验检视',
-    qa: '独立验收',
-  },
-  en: {
-    coordinator: 'Task coordinator',
-    manager: 'Project controller',
-    dev: 'Developer',
-    test: 'Tester',
-    reviewer: 'Reviewer',
-    ux: 'UX reviewer',
-    qa: 'Independent QA',
-  }
-};
 
 const roleCatalogDuties = {
   zh: {
@@ -47,28 +26,15 @@ const roleCatalogDuties = {
   }
 };
 
-// Historic short labels and both-locale catalog values count as "not a custom name".
-const historicRoleNames = ['Manager', 'Dev', 'Test', 'Reviewer', 'UX', '独立 QA', 'Task Coordinator', 'Independent QA', 'Project controller', 'UX reviewer'];
-const allCatalogNames = new Set([...historicRoleNames, ...Object.values(roleCatalogNames.zh), ...Object.values(roleCatalogNames.en)]);
 const allCatalogDuties = new Set([...Object.values(roleCatalogDuties.zh), ...Object.values(roleCatalogDuties.en)]);
 
-function isCatalogRoleName(id, name) {
-  if (!name || name === id) return true;
-  return allCatalogNames.has(name);
-}
 function isCatalogRoleDuty(id, duty) {
   if (!duty) return true;
   return allCatalogDuties.has(duty);
 }
 
-/** Display name on the role list and form: locale catalog when the stored value is a built-in default. */
-function roleConfigName(id, name) {
-  const catalog = roleCatalogNames[consoleLocale()] || roleCatalogNames.zh;
-  if (Object.hasOwn(catalog, id) && isCatalogRoleName(id, name)) return catalog[id];
-  return name || catalog[id] || id;
-}
+const roleConfigName = role => roleLabel(role.role_id, role.name);
 
-/** Display duty on the role list and form: same rule as the name. */
 function roleConfigDuty(id, duty) {
   const catalog = roleCatalogDuties[consoleLocale()] || roleCatalogDuties.zh;
   if (Object.hasOwn(catalog, id) && isCatalogRoleDuty(id, duty)) return catalog[id];
@@ -93,8 +59,8 @@ const rolePageCopy = {
     formSuffix: ' 设置',
     promptNote: '这份提示词会发给模型，包含角色完整的职责与行为要求，可以全部修改或清空；系统不会再追加固定职责。推荐配置使用英文模板（模型常用英文指令），可以改成中文或自行撰写。',
     systemNote: '所有角色共用的系统背景、环境说明和基本行为准则。角色职责与任务记录规则在下面的提示词中直接修改。',
-    requiredNote: '新增角色默认使用可编辑的检视模板。项目管理者、跨任务协调和独立验收是必需角色，其余角色都可以删除。',
-    requiredEnable: '{name}是必需角色，不能关闭。',
+    requiredNote: names => `新增角色默认使用可编辑的检视模板。${names}是必需角色，其余角色都可以删除。`,
+    requiredEnable: name => `${name}是必需角色，不能关闭。`,
     enableList: '启用',
     statusEnabled: '已启用',
     statusDisabled: '已关闭',
@@ -128,8 +94,8 @@ const rolePageCopy = {
     formSuffix: ' settings',
     promptNote: 'This prompt is sent to the model. It is the full duty and behaviour for the role; you may edit or clear it, and the system will not append a fixed duty. The recommended template is in English, which models commonly follow.',
     systemNote: 'Shared system background, environment and basic behaviour for every role. Role duties and task-record rules are edited in the prompt below.',
-    requiredNote: 'A new role starts from the editable review template. The Project controller, Task coordinator and Independent QA are required; every other role can be removed.',
-    requiredEnable: '{name} is required and cannot be turned off.',
+    requiredNote: names => `A new role starts from the editable review template. ${names} are required. Every other role can be removed.`,
+    requiredEnable: name => `${name} is required and cannot be turned off.`,
     enableList: 'Enabled',
     statusEnabled: 'Enabled',
     statusDisabled: 'Disabled',

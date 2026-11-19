@@ -41,6 +41,11 @@ test('role_flow groups parallel observers, ingests check_run/status via signed w
   const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
 
+  const configured = await admin('/api/repositories/101/roles', 'PUT', {
+    expected_revision: 0, roles: [{ role_id: 'test', name: 'Build verification' }, { role_id: 'qa', name: '交付验收' }],
+  });
+  assert.equal(configured.status, 200);
+
   const sha = 'a'.repeat(40);
   h.store.run(
     "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,result,created_at,updated_at) VALUES('t-952','101','development.issue','running','P1','重构任务流转详情页',952,'model',?,'2026-11-16T08:00:00Z','2026-11-16T08:10:00Z')",
@@ -121,10 +126,12 @@ test('role_flow groups parallel observers, ingests check_run/status via signed w
   assert.equal(role_flow.stages[0].nodes[0].state, 'delegated');
   assert.equal(role_flow.stages[1].nodes[0].state, 'completed');
   assert.equal(role_flow.stages[2].parallel, true);
+  assert.deepEqual(role_flow.stages[2].nodes.map(node => node.name), ['Reviewer', 'Build verification']);
   assert.deepEqual(role_flow.stages[2].nodes.map(n => [n.index_label, n.state, n.findings_count]), [['3a', 'returned', 1], ['3b', 'completed', 0]]);
   assert.equal(role_flow.stages[3].nodes[0].state, 'running');
   assert.equal(role_flow.stages[3].nodes[0].badge, '返工中');
   assert.equal(role_flow.stages[4].nodes[0].role, 'qa');
+  assert.equal(role_flow.stages[4].nodes[0].name, '交付验收');
   assert.equal(role_flow.stages[4].nodes[0].state, 'pending');
 
   // Role runs default_open: only r4 (currently running) is default_open=true!

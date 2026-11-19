@@ -393,7 +393,7 @@ function workspaceOverview() {
       roleStatus.setAttribute('role', 'status');
       newTaskBtn.hidden = board.can_write_tasks === false;
 
-      const visibleRoles = (board.roles || []).filter(r => r.enabled && (r.role !== 'coordinator' || r.running?.length || r.ready?.length));
+      const visibleRoles = (board.roles || []).filter(r => r.enabled);
       roleCountBadge.textContent = String(visibleRoles.length);
 
       const activeRoleCount = visibleRoles.filter(r => (r.running || []).some(run => !run.delegated_active)).length;

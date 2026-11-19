@@ -54,10 +54,10 @@ test('under the controller the next step names the role at work, its executor an
     runs: [{ role: 'manager', status: 'running' }, { role: 'qa', status: 'completed' }], snapshots: { 's-m': { legacy: false } } };
   const handoffs = [{ data: { assignment_id: 'a1', purpose: 'Implement the redirect fix' } }, { data: { assignment_id: 'a2', purpose: 'Check the redirect against the criteria' } }];
   const view = taskPage(t, task, roles, handoffs); await view.open();
-  assert.equal(view.next(), 'Reviewer（Codex）正在做主控交给它的工作：Check the redirect against the criteria');
+  assert.equal(view.next(), 'reviewer（Codex）正在做主控交给它的工作：Check the redirect against the criteria');
   const side = view.side();
-  assert.match(side, /角色协调：主控 Manager（Pi）按需委派工作/); assert.match(side, /独立 QA\n运行过 1 次，每次都是新的上下文/);
-  assert.match(side, /委派记录\nDev\nNative\n已交回\nImplement the redirect fix/); assert.match(side, /Reviewer\nCodex\n进行中\nCheck the redirect against the criteria\n看的是候选版本 tree98765432/);
+  assert.match(side, /角色协调：主控 manager（Pi）按需委派工作/); assert.match(side, /独立 QA\n运行过 1 次，每次都是新的上下文/);
+  assert.match(side, /委派记录\ndev\nNative\n已交回\nImplement the redirect fix/); assert.match(side, /reviewer\nCodex\n进行中\nCheck the redirect against the criteria\n看的是候选版本 tree98765432/);
   // The delegation list is a record, not a plan or a grant.
   assert.match(side, /这不是预设流程，也不授予权限/);
   assert.match(side, /候选\n当前\n编号\ncand12345678/); assert.match(side, /项目测试命令\n已核验/); assert.match(side, /任务记录 #41\n未核验/); assert.match(side, /1\/2 已核验/);
@@ -90,8 +90,8 @@ test('when a page cursor stops moving the records are marked unread, and the con
 test('a controller from an old configuration is shown as the old configuration still in use', async t => {
   const task = { id: 't3', repository_id: '101', kind: 'task.request', object_number: null, summary: 'Weekly report', status: 'running', phase: 'model', attempt: 1, structured: record() };
   const view = taskPage(t, task, { instances: [{ id: 'i-m', role: 'manager', harness: 'native', snapshot_id: 's-m' }], assignments: [], runs: [], snapshots: { 's-m': { legacy: true } } }); await view.open();
-  assert.match(view.next(), /^主控 Manager 正在读任务记录，决定下一步委派谁；它记下的下一步：Run the auth tests$/);
-  assert.match(view.side(), /主控 Manager（Native，旧配置沿用）/); assert.match(view.side(), /主控还没有委派工作/);
+  assert.match(view.next(), /^主控 manager 正在读任务记录，决定下一步委派谁；它记下的下一步：Run the auth tests$/);
+  assert.match(view.side(), /主控 manager（Native，旧配置沿用）/); assert.match(view.side(), /主控还没有委派工作/);
 });
 
 test('the next step is one sentence for waiting, accepting, finished and unreadable cases', () => {
@@ -170,7 +170,7 @@ test('role overview is a list of name, enabled, duty and status, without inline 
   assert.equal(view.table.querySelectorAll('select').length, 0);
   assert.doesNotMatch(text(view.cards[0]), /编辑权限/);
   assert.doesNotMatch(text(view.cards[0]), /policy@|配置（JSON）|修改配置/);
-  const link = [...view.table.querySelectorAll('a')].find(a => a.textContent === '开发');
+  const link = [...view.table.querySelectorAll('a')].find(a => a.textContent === 'dev');
   assert.equal(link && link.href, '#/projects/101/roles/dev');
   assert.match(text(view.table.querySelector('tr[data-role=dev]')), /已启用/);
   const status=view.cards[0].querySelector('[data-role-version]');
@@ -327,19 +327,19 @@ test('delegations are read to the last page: the 1001st, running, is the one the
   const view = await p.page.run('taskRoleView("long")'), detail = (await p.admin('/api/tasks/long')).value.task;
   assert.equal(view.assignments.length, 1001);
   const purposes = await p.page.run(`rolePurposes('long', roleRecords(${JSON.stringify(view)}))`);
-  assert.equal(p.page.run(`taskNextStep(${JSON.stringify(detail)}, null, roleRecords(${JSON.stringify(view)}), ${JSON.stringify(purposes)})`), 'Test（Process）正在做主控交给它的工作：Purpose 1001');
+  assert.equal(p.page.run(`taskNextStep(${JSON.stringify(detail)}, null, roleRecords(${JSON.stringify(view)}), ${JSON.stringify(purposes)})`), 'test（Process）正在做主控交给它的工作：Purpose 1001');
   p.page.run('handoffPurposes = { task: null }');
   const opened = p.page.requests.length; await p.open('long');
-  assert.equal(p.next(), 'Test（Process）正在做主控交给它的工作：Purpose 1001');
+  assert.equal(p.next(), 'test（Process）正在做主控交给它的工作：Purpose 1001');
   const items = p.page.$('task-side').querySelectorAll('.role-work > li');
-  assert.equal(items.length, 1001); assert.match(text(items.at(-1)), /^Test\nProcess\n进行中\nPurpose 1001$/);
+  assert.equal(items.length, 1001); assert.match(text(items.at(-1)), /^test\nProcess\n进行中\nPurpose 1001$/);
   assert.equal(p.page.requests.slice(opened).filter(request => request.includes('/roles?')).length, 11);
   // Later refreshes read only the handoff events after the last one read.
   p.h.store.run("INSERT INTO role_assignments VALUES('a-1002','long','long-test',1,NULL,'running','input-1002',NULL)");
   p.h.store.run("INSERT INTO task_history(task_id,type,data,created_at,actor) VALUES('long','role_handoff',?,?,'role:manager')", JSON.stringify({ assignment_id: 'a-1002', role: 'test', purpose: 'Purpose 1002', refs: [], revision: 1 }), p.now);
   const before = p.page.requests.length; await p.page.run('(async () => { await refreshTask(); clearTimeout(taskTimer); })()');
   const handoffs = p.page.requests.slice(before).filter(request => request.includes('type=role_handoff'));
-  assert.equal(handoffs.length, 1); assert.doesNotMatch(handoffs[0], /after=0$/); assert.equal(p.next(), 'Test（Process）正在做主控交给它的工作：Purpose 1002');
+  assert.equal(handoffs.length, 1); assert.doesNotMatch(handoffs[0], /after=0$/); assert.equal(p.next(), 'test（Process）正在做主控交给它的工作：Purpose 1002');
 });
 
 test('with a delegation running on the pages read and records left unread, the next step names nobody', async t => {
@@ -355,17 +355,17 @@ test('with a delegation running on the pages read and records left unread, the n
   }
   p.h.store.db.exec('COMMIT');
   // Read to the end, the newest running delegation is the one at work.
-  await p.open('mixed'); assert.equal(p.next(), 'Reviewer（Codex）正在做主控交给它的工作：Latest running review');
+  await p.open('mixed'); assert.equal(p.next(), 'reviewer（Codex）正在做主控交给它的工作：Latest running review');
   p.page.run('taskView.close()'); stall = true; await p.open('mixed');
   const next = p.next();
   assert.equal(next, '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
-  assert.doesNotMatch(next, /Test|Reviewer|主控|执行器/);
+  assert.doesNotMatch(next, /test|reviewer|主控|执行器/i);
   // What was read is still listed, under the warning that says it is not all.
   const card = p.page.$('task-side').querySelector('.task-execution'), parts = card.children.map(child => child.className || child.tagName);
   assert.ok(parts.indexOf('endpoint-warning') >= 0 && parts.indexOf('endpoint-warning') < parts.indexOf('role-work'), JSON.stringify(parts));
   assert.match(text(card), /委派记录没有读完：服务端的分页游标没有前进，下面只列出已读到的 100 条，看不出现在是谁在处理。/);
   const items = card.querySelectorAll('.role-work > li');
-  assert.equal(items.length, 100); assert.match(text(items[0]), /^Test\nProcess\n进行中\nEarlier running test$/);
+  assert.equal(items.length, 100); assert.match(text(items[0]), /^test\nProcess\n进行中\nEarlier running test$/);
   // In the acceptance phase with no QA run read, unread records still mean nobody is named, QA included.
   p.h.store.run("UPDATE tasks SET phase='acceptance' WHERE id='mixed'");
   assert.equal((await p.admin('/api/tasks/mixed/roles?limit=100&after=0')).value.runs.filter(run => run.role === 'qa' && run.status === 'running').length, 0);
@@ -373,7 +373,7 @@ test('with a delegation running on the pages read and records left unread, the n
   assert.equal(p.next(), '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
   // Read to the end, the running delegation is named, not QA.
   p.page.run('taskView.close()'); stall = false; await p.open('mixed');
-  assert.equal(p.next(), 'Reviewer（Codex）正在做主控交给它的工作：Latest running review');
+  assert.equal(p.next(), 'reviewer（Codex）正在做主控交给它的工作：Latest running review');
 });
 
 test('a past delegation shows the harness its runs used, not the one its role instance was rebound to later', async t => {
@@ -389,9 +389,9 @@ test('a past delegation shows the harness its runs used, not the one its role in
   assert.deepEqual(roles.instances.find(i => i.id === 'h-reviewer').harness, 'codex');
   await p.open('historical');
   const items = p.page.$('task-side').querySelectorAll('.role-work > li').map(text);
-  assert.equal(items[0], 'Reviewer\nNative\n已交回');
-  assert.equal(items[1], 'Reviewer\nNative → Codex\n进行中\n执行了 2 次：第 1 次 Native，中止（换到新 revision）；第 2 次 Codex，从检查点续接，进行中。');
-  assert.equal(p.next(), 'Reviewer（Codex）正在做主控交给它的工作。');
+  assert.equal(items[0], 'reviewer\nNative\n已交回');
+  assert.equal(items[1], 'reviewer\nNative → Codex\n进行中\n执行了 2 次：第 1 次 Native，中止（换到新 revision）；第 2 次 Codex，从检查点续接，进行中。');
+  assert.equal(p.next(), 'reviewer（Codex）正在做主控交给它的工作。');
 });
 
 test('review and Actions summaries offer only Dev on its backend in the entry; development offers every enabled worker', async t => {
@@ -400,18 +400,18 @@ test('review and Actions summaries offer only Dev on its backend in the entry; d
   assert.equal(saved.status, 200);
   const config=saved.value.configuration;
   const execution=(configuration, id)=>p.page.run(`entryDevText(${JSON.stringify(configuration)})`);
-  assert.equal(p.page.run(`workerNames(entryWorkers(${JSON.stringify(config)},'development'))`),'Dev、Test、Reviewer');
-  assert.equal(execution(config,'review.issue'),'只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi');
+  assert.equal(p.page.run(`workerNames(entryWorkers(${JSON.stringify(config)},'development'))`),'Developer、Tester、Reviewer');
+  assert.equal(execution(config,'review.issue'),'只委派 Developer，使用这个入口的工具和工作区，后端 Pi');
   // Dev's own backend applies once chosen; an older V2 configuration keeps Pi in these entries until Dev's choice changes.
   const devTo = async (harness, revision) => (await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: true, actions: true } }, roles: [{ role_id: 'ux', enabled: false }, { role_id: 'dev', harness_ref: { id: harness } }] })).value.configuration;
   const processDev = await devTo('process', 1);
   assert.equal(execution(processDev, 'review.issue'),
-    '只委派 Dev，Dev 用这个入口的工具和工作区，后端 Process');
+    '只委派 Developer，使用这个入口的工具和工作区，后端 Process');
   const older = JSON.parse(p.h.store.get("SELECT value FROM settings WHERE key='roles:101'").value), dev = older.roles.find(r => r.role_id === 'dev');
   delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
   const kept = (await p.admin('/api/repositories/101/roles')).value.configuration;
   assert.equal(execution(kept, 'actions.failures'),
-    '只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，Dev 的后端选择改变后才换）');
+    '只委派 Developer，使用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，该角色的后端选择改变后才换）');
 });
 
 test('a custom role called constructor shows its own name and responsibility on the 角色 page and in a task', async t => {

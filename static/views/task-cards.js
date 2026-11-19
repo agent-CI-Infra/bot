@@ -50,10 +50,10 @@ function taskExecutionCard(task, record, roles, purposes) {
   const section = card('谁在执行'), controller = controllerOf(roles), qaRuns = roles?.runs.filter(run => run.role === 'qa').length || 0;
   section.classList.add('task-execution');
   if (!roles) section.append(mutedLine('读不到这个任务的角色记录。'));
-  else if (task.origin?.source_kind === 'role' && task.origin.executor_role) section.append(element('p', `任务执行角色：${task.origin.executor_role}。实际运行与独立 QA 记录将在下方显示。`));
+  else if (task.origin?.source_kind === 'role' && task.origin.executor_role) section.append(element('p', `任务执行角色：${task.origin.executor_role_name || task.origin.executor_role}。实际运行与独立 QA 记录将在下方显示。`));
   else if (controller) {
-    const legacy = roles.snapshot(controller.snapshot_id)?.legacy;
-    section.append(element('p', `角色协调：主控 Manager（${harnessName(controller.harness)}${legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
+    const definition = roles.snapshot(controller.snapshot_id);
+    section.append(element('p', `角色协调：主控 ${roleLabel(controller.role, definition?.name)}（${harnessName(controller.harness)}${definition?.legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
   } else section.append(element('p', '没有读取到主控记录；实际 Agent 和模型以运行记录为准。'));
   if (roles) section.append(facts([['独立 QA', qaRuns ? `运行过 ${qaRuns} 次，每次都是新的上下文` : record?.candidate ? '等待验收' : '有候选后验收']]));
   // The delegations in the order they were recorded, each with the harness of every run that executed it. A stage
@@ -67,10 +67,9 @@ function taskExecutionCard(task, record, roles, purposes) {
       const item = element('li', ''), head = element('div', '', 'role-work-head'), [caption, tone] = own({ running: ['进行中', 'info'], completed: ['已交回', 'success'], failed: ['失败', 'danger'] }, a.status) || [a.status, ''];
       head.append(element('strong', roleLabel(a.role, a.name)), element('span', a.harnesses.map(harnessName).join(' → ') || '—', 'muted'), badge(caption, tone));
       item.append(head);
-      // A project's own role says what it is for; the built-in roles are explained on the 角色 page. Their names on this
-      // page never come from a snapshot, so only a project's own role can lose its historical definition.
-      if (!own(builtinRoleNames, a.role) && a.definitionMissing) item.append(element('p', '历史定义不可用：这次运行没有留下可读的角色快照，名称和职责不按现在的定义补写。', 'muted role-work-duty'));
-      else if (!own(builtinRoleNames, a.role) && a.responsibility) item.append(element('p', '职责：' + a.responsibility, 'muted role-work-duty'));
+      // A project's own role says what it is for; the built-in roles are explained on the 角色 page. Historical names come from the run's snapshot.
+      if (!builtinRoleIds.has(a.role) && a.definitionMissing) item.append(element('p', '历史定义不可用：这次运行没有留下可读的角色快照，名称和职责不按现在的定义补写。', 'muted role-work-duty'));
+      else if (!builtinRoleIds.has(a.role) && a.responsibility) item.append(element('p', '职责：' + a.responsibility, 'muted role-work-duty'));
       if (purposes[a.id]) item.append(element('p', purposes[a.id]));
       if (a.candidate_version) item.append(element('p', '看的是候选版本 ' + shortId(a.candidate_version), 'muted'));
       // A delegation that ran more than once (recovery, a new revision) shows each run, oldest first.

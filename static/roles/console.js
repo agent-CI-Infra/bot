@@ -37,7 +37,7 @@ function rolesConsole() {
       back.dataset.testid = 'role-list-link';
       nav.append(back);
       if (current.item) {
-        const here = element('a', role ? roleConfigName(role.role_id, role.name) : current.item);
+        const here = element('a', role ? roleConfigName(role) : current.item);
         here.href = `#/projects/${id}/roles/${current.item}`;
         here.setAttribute('aria-current', 'page');
         nav.append(here);

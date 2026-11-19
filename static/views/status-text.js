@@ -4,15 +4,11 @@ const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', '
   'workflow.issue': '通用回复 Issue', 'workflow.pr': '通用回复 PR', 'task.request': '普通任务', 'task.development': '开发任务' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', acceptance: '独立验收', publish: '发布', done: '完成' };
-// Role coordination words shared by the task view and the 「Manager 与角色」 page. A harness is how a role runs;
-// the built-in roles keep their short names (Manager delegates Dev, Test, Reviewer and UX; QA stays independent).
-// Role ids are chosen by the project (a custom observer may be called "constructor"), so lookups by id read own
-// properties only and fall back to the role's own name.
 const own = (map, key) => Object.hasOwn(map, key) ? map[key] : undefined;
 const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP', claude_code: 'Claude Code', codex: 'Codex' };
 const harnessName = id => own(harnessNames, id) || id || '—';
-const builtinRoleNames = { manager: 'Manager', dev: 'Dev', test: 'Test', reviewer: 'Reviewer', ux: 'UX', qa: '独立 QA', coordinator: '跨任务协调' };
-const roleLabel = (id, name) => own(builtinRoleNames, id) || name || id;
+const builtinRoleIds = new Set(['manager', 'dev', 'test', 'reviewer', 'ux', 'qa', 'coordinator']);
+const roleLabel = (id, name) => name || id;
 const acceptanceLabels = { pass: '通过', pass_with_issues: '带问题通过', return: '退回修改', insufficient_evidence: '证据不足', needs_human: '需要人决定' };
 const shortId = value => value ? String(value).slice(0, 12) : '—';
 const mutedLine = text => element('p', text, 'muted');

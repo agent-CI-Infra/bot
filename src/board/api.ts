@@ -1,6 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
+import { taskOriginsForDisplay } from '../tasks/origin-display.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { workType } from '../work/catalog.js';
 import { actionStatuses, actionStatusSQL, autoStoppedSQL, settledStatusSQL } from '../app/task-states.js';
@@ -234,11 +235,12 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const stopped = [...new Set(page.filter(row => row.task_status === 'cancelled').map(row => row.task_id).filter(Boolean).map(String))];
     const stopReasons = new Map(stopped.length ? store.all(`SELECT id,error_code FROM tasks WHERE id IN (${stopped.map(() => '?').join(',')})`, ...stopped)
       .map(row => [String(row.id), row.error_code ?? null]) : []);
+    const origins = taskOriginsForDisplay(store, page.map(row => row.task_id).filter(Boolean));
     return { cards: page.map(row => ({ ...row,
       task_error_code: row.task_status === 'cancelled' ? stopReasons.get(String(row.task_id)) ?? null : null,
       development_pr_number: row.development_task_id ? prNumbers.get(String(row.development_task_id)) ?? null : null,
       card_category_name: name(String(row.repository_id), String(row.card_category)),
-      origin:row.task_id?store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message FROM task_origins WHERE task_id=?',row.task_id)??null:null })), has_more: rows.length>limit, limit, offset,
+      origin: origins.get(row.task_id) ?? null })), has_more: rows.length>limit, limit, offset,
       counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 }, release_count: Number(counts.releases || 0),
       work_count: Number(counts.n), column_counts: columnCounts };
   }

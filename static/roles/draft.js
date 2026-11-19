@@ -30,9 +30,7 @@ function roleBound(control, change, state) {
 }
 function roleText(label, object, key, state, { multiline = false, ...attributes } = {}) {
   const raw = object[key];
-  const shown = key === 'name' ? roleConfigName(object.role_id, raw)
-    : key === 'responsibility' ? roleConfigDuty(object.role_id, raw)
-    : raw;
+  const shown = key === 'responsibility' ? roleConfigDuty(object.role_id, raw) : raw;
   return field(label, roleBound((multiline ? textarea : input)(key, shown, attributes), value => { object[key] = value; }, state));
 }
 function requiredRoleLocked(role) {
@@ -40,7 +38,7 @@ function requiredRoleLocked(role) {
 }
 function requiredEnableReason(role) {
   if (!requiredRoleLocked(role)) return '';
-  return rolePageText('requiredEnable').replace('{name}', roleConfigName(role.role_id, role.name));
+  return rolePageText('requiredEnable')(roleConfigName(role));
 }
 // `reason` explains a locked required-role control (#569); `redraw` refreshes per-row list status on change (d016f0ed).
 function roleCheck(label, object, key, state, disabled = false, { reason = '', redraw = null } = {}) {
