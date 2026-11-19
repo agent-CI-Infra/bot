@@ -2,6 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { publicText, actionsRedactor } from '../actions/safety.js';
 import { Redactor, TaskError } from '../agent/common.js';
+import { githubTokens } from '../core/redaction.js';
 import { digest, randomId } from '../core/security.js';
 import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
 
@@ -147,7 +148,7 @@ export function writeRoute(method: string, path: string): (Route & { number?: nu
 
 // Known secrets shapes that are never legitimate repository content: private keys and GitHub tokens.
 const secretShapes = (text: string) => text.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]+-----|$)/g, '[REDACTED]')
-  .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}/g, '[REDACTED]');
+  .replace(githubTokens(), '[REDACTED]');
 // A body that cannot be sent as given: binary content holding a credential, or human text that redaction would empty.
 class Unsendable extends Error { constructor(readonly code: string, readonly detail: string) { super(code); } }
 /**

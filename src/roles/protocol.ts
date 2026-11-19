@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { TaskError } from '../agent/common.js';
+import { githubTokenSource } from '../core/redaction.js';
 /**
  * RoleRun backend protocol, version 1. One RoleRun is one execution attempt (a task_runs row) of an existing role
  * assignment; it is not a task system of its own. Every adapter is driven through the same seven operations:
@@ -122,12 +123,13 @@ export function validateRunContext(value: any): RunContext {
 }
 // Secret-shaped keys and values. Budget fields such as max_total_tokens are counts, not credentials.
 const secretKey = /^(?:api_?key|authorization|credentials?|password|private_key|secret|.*_secret|token|access_token|refresh_token|claim_token|cookie)$/i;
-const secretValue = /-----BEGIN [^-]*PRIVATE KEY-----|\b(?:sk-[\w-]{12,}|gh[pousr]_\w{15,}|rrt_[\w.-]{20,})|Bearer\s+[\w.\/-]{8,}|https?:\/\/[^\s\/@]+:[^\s\/@]+@/i;
+const secretValue = /-----BEGIN [^-]*PRIVATE KEY-----|\b(?:sk-[\w-]{12,}|rrt_[\w.-]{20,})|Bearer\s+[\w.\/-]{8,}|https?:\/\/[^\s\/@]+:[^\s\/@]+@/i;
+const githubToken = new RegExp(githubTokenSource);
 /** Throws when a value carries a credential. RunContext, events and checkpoints pass through this before they persist. */
 export function assertSecretFree(value: unknown, path = 'run_context', known: Iterable<string> = []): void {
   const values = [...known].filter(v => typeof v === 'string' && v.length >= 8);
   const walk = (v: unknown, at: string): void => {
-    if (typeof v === 'string') { if (secretValue.test(v) || values.some(s => v.includes(s))) throw new TaskError('role_run_secret_rejected', 'failed', at); return; }
+    if (typeof v === 'string') { if (secretValue.test(v) || githubToken.test(v) || values.some(s => v.includes(s))) throw new TaskError('role_run_secret_rejected', 'failed', at); return; }
     if (Array.isArray(v)) { v.forEach((x, i) => walk(x, `${at}[${i}]`)); return; }
     if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { if (secretKey.test(k)) throw new TaskError('role_run_secret_rejected', 'failed', `${at}.${k}`); walk(x, `${at}.${k}`); }
   };

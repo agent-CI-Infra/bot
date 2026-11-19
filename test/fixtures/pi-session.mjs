@@ -2,6 +2,7 @@
 import {workspace as run} from '../../runner/workspace.mjs';
 export {notSelected} from '../../runner/workspace.mjs';
 import {environment} from '../../runner/command.mjs';
+import {appendFileSync} from 'node:fs';
 
 Object.assign(environment,{HOME:process.env.BOT_RUNNER_TEST_ROOT,TMPDIR:process.env.BOT_RUNNER_TEST_ROOT});
 export const workspace=request=>run(request,process.env.BOT_RUNNER_TEST_ROOT,undefined,process.env.BOT_RUNNER_TEST_ROOT+'/project-notes');
@@ -15,7 +16,8 @@ export const SessionManager={inMemory:()=>fixtureSession(undefined),create:(_cwd
 export const SettingsManager={create:()=>({})};
 // A prompt is a JSON list of tool calls. Any other prompt (the runner asking the session to continue) runs the next list in
 // BOT_FIXTURE_CONTINUE, or nothing. BOT_FIXTURE_LAST_TEXT replaces the last answer text. An entry {event} is a session event
-// Pi would emit (a failed model reply, the end of a compaction) and is passed to the runner as it is.
+// Pi would emit (a failed model reply, the end of a compaction) and is passed to the runner as it is. BOT_FIXTURE_RESULTS names
+// a file that receives each tool result as the session would hand it to the model.
 const continuations=JSON.parse(process.env.BOT_FIXTURE_CONTINUE||'[]');
 export async function createAgentSession({customTools}){
   let subscriber;const messages=[];
@@ -27,7 +29,8 @@ export async function createAgentSession({customTools}){
       for(const [index,call] of calls.entries()){
         if(call.event){subscriber(call.event);continue;}
         subscriber({type:'message_end',message:{role:'assistant',content:[{type:'toolCall',id:String(index),name:call.name,arguments:call.args}]}});
-        await customTools.find(tool=>tool.name===call.name).execute(String(index),call.args);
+        const result=await customTools.find(tool=>tool.name===call.name).execute(String(index),call.args);
+        if(process.env.BOT_FIXTURE_RESULTS)appendFileSync(process.env.BOT_FIXTURE_RESULTS,JSON.stringify({name:call.name,result})+'\n');
       }
     }
   }};

@@ -4,6 +4,7 @@ import { digest } from '../core/security.js';
 import { appBucket, blockedUntil, bucketName, installationBucket, observe, refused, userBucket, utcTime, type Bucket } from './rate-limits.js';
 import { errorBody, networkReason, Redactor, safePath, stop, TaskError } from '../agent/common.js';
 import { installationExecutionDenied } from '../installations/archive.js';
+import { githubTokens } from '../core/redaction.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
 const treeCache=new WeakMap<object,Map<string,Promise<SnapshotTree>>>();
@@ -13,7 +14,7 @@ function errorDetail(message:unknown,redactor:Redactor,token:string,status:numbe
   return redactor.text(detail)
     .replace(/authorization[^\r\n]*/gi,'[REDACTED]')
     .replace(/\b(?:Bearer|Basic)\s+\S+/gi,'[REDACTED]')
-    .replace(/\b(?:github_pat_|gh[pousr]_)[a-zA-Z0-9_]+/g,'[REDACTED]')
+    .replace(githubTokens(),'[REDACTED]')
     .replace(/\b(?:access_token|token|api_key)\s*[:=]\s*[^\s,;]+/gi,'[REDACTED]')
     .replace(/\s+/g,' ').trim().slice(0,320)||`GitHub HTTP ${status}`;
 }

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { ToolResultFiles, toolResultStorage } from './tool-results.js';
+import { redactCredentials } from '../core/redaction.js';
 
 // Trajectories keep the bodies of agent work (model requests and responses, tool calls and results, large logs) in
 // append-only JSONL files, one per run, instead of in SQLite rows. SQLite keeps one entry per file, inserted when the
@@ -164,17 +165,23 @@ export class Trajectories {
   /**
    * A model request, as the messages added since the previous request in the same file. The previous request's
    * messages must be a prefix of this one's; otherwise (compaction, another conversation) the line holds them all.
+   * Credentials are redacted by their form in what the line holds, so each message is inspected once (#1087).
    */
   appendModelRequest(scope: TrajectoryScope, id: string, body: Record<string, any>): string {
     const handle = this.handle(scope), hasMessages = Array.isArray(body.messages), messages: any[] = hasMessages ? body.messages : [];
     const hashes = hasMessages ? messages.map(message => sha256(JSON.stringify(message))) : [], last = handle.lastRequest;
     const delta = hasMessages && !!last && last.depth < maxRequestDepth && last.hashes.length <= hashes.length && last.hashes.every((hash, i) => hash === hashes[i]);
-    const data = delta ? { previous: last!.ref, from: last!.hashes.length, body: { ...body, messages: messages.slice(last!.hashes.length) } } : { body };
+    const data = delta ? { previous: last!.ref, from: last!.hashes.length, body: redactCredentials({ ...body, messages: messages.slice(last!.hashes.length) }) } : { body: redactCredentials(body) };
     const ref = this.append(scope, 'model_request', id, data);
     // append() may have replaced a broken handle; the chain state belongs to the file the line went to.
     const target = this.handles.get(parseRef(ref).file);
     if (target) target.lastRequest = hasMessages ? { ref, hashes, depth: delta && target === handle ? last!.depth + 1 : 0 } : undefined;
     return ref;
+  }
+
+  /** A model response, redacted like its request: the model can repeat what a tool printed. */
+  appendModelResponse(scope: TrajectoryScope, id: string, value: unknown): string {
+    return this.append(scope, 'model_response', id, redactCredentials(value));
   }
 
   /** The full body of a model request written by appendModelRequest. */

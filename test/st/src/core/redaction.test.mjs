@@ -34,6 +34,14 @@ test('real credential shapes and registered values remain redacted', () => {
   const redactor = new Redactor();redactor.add('registered-private-value');
   assert.equal(publicText('value: registered-private-value',redactor),'value: [REDACTED]');
 });
+// #1087: trajectories (traceClean) and public text used to stop at the first `.` of a <prefix><id>_<JWT> token.
+test('trace events and public text redact the whole installation token gh auth status prints', () => {
+  const jwt = ['{"alg":"RS256","typ":"JWT"}', '{"iss":"fixture-app","installation_id":424242}'].map(part => Buffer.from(part).toString('base64url')).join('.');
+  const status = `  - Token: ghs_424242_${jwt}.fixture_${'*'.repeat(36)}\n`, expected = '  - Token: [REDACTED]\n';
+  assert.deepEqual(traceClean({ type: 'tool_observation', observation: { output: status } }), { type: 'tool_observation', observation: { output: expected } });
+  assert.equal(publicText(status, new Redactor()), expected);
+});
+
 test('public diagnostics redact encoded credentials and preserve unrelated Base64 and hashes', () => {
   const redactor = new Redactor(), secret = 'synthetic\u{1F512}\u{1FFFF}fixture';
   redactor.add(secret);

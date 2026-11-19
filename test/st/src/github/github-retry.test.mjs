@@ -21,7 +21,9 @@ async function withBusyComputer(h,check){
 }
 
 test('GitHub distinguishes rate limits from permissions and retains only a short, redacted message',async t=>{
-  let reply;const token='ghs_fixture_secret_token',otherToken='github_pat_other_secret',redactor=new Redactor();redactor.add('fixture-model-key');
+  let reply;const token='ghs_fixture_secret_token',otherToken='github_pat_11OTHER0'+'q'.repeat(12)+'_'+'Secret9'.repeat(8),redactor=new Redactor();
+  // #1087: an installation token as gh prints it, <prefix><id>_<JWT> with a masked tail; GitHub can echo either form.
+  const printed='ghs_424242_'+Buffer.from('{"alg":"RS256"}').toString('base64url')+'.'+Buffer.from('{"iss":"other-app"}').toString('base64url')+'.sig_'+'*'.repeat(30);redactor.add('fixture-model-key');
   const server=createServer((_req,res)=>{res.writeHead(reply.status,{'Content-Type':'application/json',...reply.headers});res.end(JSON.stringify(reply.body));});
   server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
   const github=new GitHub(null,{},redactor,async()=>{},'http://127.0.0.1:'+server.address().port);github.token=token;
@@ -41,10 +43,10 @@ test('GitHub distinguishes rate limits from permissions and retains only a short
   for(const item of cases){reply=item;await assert.rejects(github.snapshotBlob('a'.repeat(40)),error=>{
     assert.equal(error.code,item.code);assert.equal(error.state,item.code==='github_rate_limited'?'retry_wait':'waiting_permission');assert.ok(error.detail.includes(item.body.message));assert.equal(error.retryAfterMs,item.delay);return true;
   });}
-  reply={status:403,body:{message:`Resource not accessible by integration ${token} ${otherToken} fixture-model-key\nAuthorization: Bearer unexpected-secret`,extra:'whole-response-must-not-be-logged'}};
+  reply={status:403,body:{message:`Resource not accessible by integration ${token} ${otherToken} ${printed}. fixture-model-key\nAuthorization: Bearer unexpected-secret`,extra:'whole-response-must-not-be-logged'}};
   await assert.rejects(github.snapshotBlob('a'.repeat(40)),error=>{
     assert.ok(error.detail.includes('Resource not accessible by integration'));
-    for(const secret of [token,otherToken,'fixture-model-key','Authorization','unexpected-secret','whole-response-must-not-be-logged'])assert.ok(!error.detail.includes(secret),secret);
+    for(const secret of [token,otherToken,printed.split('.')[0],printed.split('.')[1],'fixture-model-key','Authorization','unexpected-secret','whole-response-must-not-be-logged'])assert.ok(!error.detail.includes(secret),secret);
     // The request line is ours; only GitHub's message is capped.
     const prefix=`GitHub 请求 GET /repos//git/blobs/${'a'.repeat(40)} 返回 HTTP 403：`;
     assert.ok(error.detail.startsWith(prefix));assert.ok(error.detail.length-prefix.length<=320);return true;
