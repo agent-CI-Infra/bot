@@ -6,37 +6,6 @@ import { stageAllows, type StageDefinition } from './stage-policy.js';
 import { memoryAuthorize, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import { traceClean } from '../tasks/trace.js';
 
-const roleShortNames: Record<string, string> = {
-  manager: 'Manager',
-  dev: 'Dev',
-  reviewer: 'Reviewer',
-  test: 'Tester',
-  ux: 'UX',
-  qa: 'QA',
-  coordinator: 'Coordinator',
-};
-
-const roleFullNames: Record<string, string> = {
-  manager: 'Manager 主控',
-  dev: 'Dev 开发',
-  reviewer: 'Reviewer 检视',
-  test: 'Tester 测试',
-  ux: 'UX 体验',
-  qa: 'QA 独立验收',
-  coordinator: 'Coordinator 协调',
-};
-
-export function shortRoleLabel(roleId: string, configuredName?: string | null): string {
-  if (roleShortNames[roleId]) return roleShortNames[roleId]!;
-  if (configuredName && configuredName.trim()) return configuredName.trim().split(/\s+/)[0]!;
-  return roleId;
-}
-
-export function fullRoleLabel(roleId: string, configuredName?: string | null): string {
-  if (configuredName && configuredName.trim()) return configuredName.trim();
-  return roleFullNames[roleId] ?? roleId;
-}
-
 /** Deterministic topological ordering of configured stages. */
 export function orderedStages(stages: StageDefinition[]): StageDefinition[] {
   const done = new Set<string>(), order: StageDefinition[] = [];
@@ -187,8 +156,7 @@ function buildTaskFlow(
       const kind = def?.kind ?? roleKind(role);
       const snap = run.role_snapshot ? snapshots.get(String(run.role_snapshot)) : null;
       const indexLabel = isParallel ? `${stageNum}${String.fromCharCode(97 + subIdx)}` : `${stageNum}`;
-      const shortName = shortRoleLabel(role, snap?.name ?? def?.name);
-      const fullName = fullRoleLabel(role, snap?.name ?? def?.name);
+      const name = (snap?.name ?? def?.name) || role;
       if (role === 'dev') devSeq++;
       const currentDevRound = role === 'dev' ? devSeq : 0;
 
@@ -268,7 +236,7 @@ function buildTaskFlow(
         if (nominatedRuns.has(runId)) summary = '已完成各棒审查并提名候选进入独立 QA 验收';
         else if (disp?.reason) summary = clipText(disp.reason);
         else if (handoffs.length) {
-          const rolesList = [...new Set(handoffs.map((h: any) => shortRoleLabel(String(h.role))))].join(' → ');
+          const rolesList = [...new Set(handoffs.map((h: any) => roleDefs.get(h.role)?.name || h.role))].join(' → ');
           const firstPurpose = clipText(handoffs.at(-1)?.purpose, 90);
           summary = `已派发 ${rolesList}${firstPurpose ? '：' + firstPurpose : ''}`;
         } else {
@@ -293,8 +261,8 @@ function buildTaskFlow(
         run_id: runId,
         index_label: indexLabel,
         role,
-        name: role === 'dev' && currentDevRound > 1 ? `${shortName} (v${currentDevRound})` : shortName,
-        full_name: role === 'dev' && currentDevRound > 1 ? `${fullName}（返工修复 v${currentDevRound}）` : fullName,
+        name: role === 'dev' && currentDevRound > 1 ? `${name} (v${currentDevRound})` : name,
+        full_name: role === 'dev' && currentDevRound > 1 ? `${name}（返工修复 v${currentDevRound}）` : name,
         kind,
         state,
         badge,
@@ -310,7 +278,7 @@ function buildTaskFlow(
         parallel_group: isParallel ? stageNum : null,
         role,
         name: node.full_name,
-        short_name: shortName,
+        short_name: name,
         kind,
         state,
         verdict_badge: verdictBadge,
@@ -346,8 +314,8 @@ function buildTaskFlow(
           run_id: null,
           index_label: null,
           role: targetRole,
-          name: shortRoleLabel(targetRole, def?.name),
-          full_name: fullRoleLabel(targetRole, def?.name),
+          name: def?.name || targetRole,
+          full_name: def?.name || targetRole,
           kind: def?.kind ?? roleKind(targetRole),
           state: 'queued',
           badge: status === 'retry_wait' ? '等槽位' : '排队中',
@@ -374,8 +342,8 @@ function buildTaskFlow(
             run_id: null,
             index_label: null,
             role: r.role_id,
-            name: shortRoleLabel(r.role_id, r.name),
-            full_name: fullRoleLabel(r.role_id, r.name),
+            name: r.name || r.role_id,
+            full_name: r.name || r.role_id,
             kind: r.kind,
             state: 'pending',
             badge: '',
@@ -397,8 +365,8 @@ function buildTaskFlow(
           run_id: null,
           index_label: null,
           role: 'qa',
-          name: 'QA',
-          full_name: fullRoleLabel('qa', qaDef?.name),
+          name: qaDef?.name || 'qa',
+          full_name: qaDef?.name || 'qa',
           kind: 'evaluator',
           state: 'pending',
           badge: '验收',

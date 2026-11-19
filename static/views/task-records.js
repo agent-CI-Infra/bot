@@ -80,7 +80,8 @@ function taskNextStep(task, record, roles, purposes = {}) {
   if (!roles) return `正在执行（${phaseLabels[task.phase] || task.phase || '阶段未知'}）；读不到角色记录，说不清现在是谁在处理。`;
   // All records read, the acceptance phase, and no QA run going on: QA has not started yet or has already returned.
   if (task.phase === 'acceptance') return '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。';
-  if (task.origin?.source_kind === 'role' && task.origin.executor_role) return `角色 ${task.origin.executor_role} 正在处理` + (next ? `：${next}` : '。');
-  if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
+  if (task.origin?.source_kind === 'role' && task.origin.executor_role) return `角色 ${task.origin.executor_role_name || task.origin.executor_role} 正在处理` + (next ? `：${next}` : '。');
+  const controller = controllerOf(roles);
+  if (controller) return `主控 ${roleLabel(controller.role, roles.snapshot?.(controller.snapshot_id)?.name)} 正在读任务记录，决定下一步委派谁` + (next ? `；它记下的下一步：${next}` : '。');
   return '执行器正在处理' + (next ? `：${next}` : '。');
 }

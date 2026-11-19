@@ -1,12 +1,12 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
+import { consoleSave } from '../helpers/console-save.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
 
 const out = '.tmp/role-names-568';
-const chineseNames = ['项目管理者', '开发', '测试', '检视', '体验检视', '独立验收', '跨任务协调'];
-const englishNames = ['Project controller', 'Developer', 'Tester', 'Reviewer', 'UX reviewer', 'Independent QA', 'Task coordinator'];
+const storedNames = ['Project controller', 'Developer', 'Tester', 'Reviewer', 'UX reviewer', 'Independent QA', 'Task Coordinator'];
 
 async function login(page, url, password) {
   await page.goto(url);
@@ -15,8 +15,15 @@ async function login(page, url, password) {
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
 
+async function checkOverview(page) {
+  const board = page.getByTestId('project-role-board');
+  await expect(board.locator('[data-role-row]')).toHaveCount(storedNames.length);
+  for (const name of storedNames) await expect(board.getByText(name, { exact: true })).toBeVisible();
+  await expect(board.locator('[data-role-row="coordinator"]')).toContainText('空闲');
+  await expect(page.locator('.workspace-role-status')).toContainText('共启用 7 个项目角色');
+}
 
-test('中文界面的角色列表和详情使用完整中文名称与职责，标识只在高级里', async ({ page }) => {
+test('中文界面在总览、角色列表和表单保留名称原文，内置职责使用中文', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   mkdirSync(out, { recursive: true });
@@ -24,11 +31,13 @@ test('中文界面的角色列表和详情使用完整中文名称与职责，�
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
     await page.setViewportSize({ width: 1440, height: 900 });
-    await login(page, h.admin + '/#/projects/101/roles', password);
+    await login(page, h.admin + '/#/projects/101/overview', password);
+    await checkOverview(page);
+    await page.getByRole('link', { name: '角色与并发配置 →' }).click();
     await openRoleAdvanced(page);
     const table = page.getByRole('table', { name: '角色解析结果', exact: true });
-    for (const name of chineseNames) await expect(table.getByRole('link', { name, exact: true })).toBeVisible();
-    for (const name of ['Dev', 'Developer', 'Manager', 'Independent QA', 'UX reviewer']) {
+    for (const name of storedNames) await expect(table.getByRole('link', { name, exact: true })).toBeVisible();
+    for (const name of ['Dev', '开发', '项目管理者', '跨任务协调']) {
       await expect(table.getByRole('link', { name, exact: true })).toHaveCount(0);
     }
     const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
@@ -40,8 +49,8 @@ test('中文界面的角色列表和详情使用完整中文名称与职责，�
     await expect(table).not.toContainText('Implements or investigates');
     await page.screenshot({ path: `${out}/list-zh-1440.png`, fullPage: true });
 
-    await openRoleFromList(page, '开发');
-    await expect(page.getByLabel('显示名称', { exact: true })).toHaveValue('开发');
+    await openRoleFromList(page, 'Developer');
+    await expect(page.getByLabel('显示名称', { exact: true })).toHaveValue('Developer');
     await expect(page.getByLabel('职责', { exact: true })).toHaveValue('在入口已有的权限范围内实现或调查任务。');
     await expect(page.getByRole('heading', { name: '基本信息', exact: true })).toBeVisible();
     await expect(page.getByTestId('role-id')).toBeHidden();
@@ -59,7 +68,7 @@ test('中文界面的角色列表和详情使用完整中文名称与职责，�
   } finally { await h.stop(); }
 });
 
-test('英文界面同一位置使用完整英文，不再中英夹杂', async ({ page }) => {
+test('英文界面在总览、角色列表和表单保留相同名称，内置职责使用英文', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
@@ -67,11 +76,13 @@ test('英文界面同一位置使用完整英文，不再中英夹杂', async ({
     await repository(admin, a.id, '101');
     await page.addInitScript(() => { globalThis.__consoleLocale = 'en'; document.documentElement.lang = 'en'; });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await login(page, h.admin + '/#/projects/101/roles', password);
+    await login(page, h.admin + '/#/projects/101/overview', password);
+    await checkOverview(page);
+    await page.getByRole('link', { name: '角色与并发配置 →' }).click();
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
     const table = page.getByRole('table', { name: 'Role list', exact: true });
-    for (const name of englishNames) await expect(table.getByRole('link', { name, exact: true })).toBeVisible();
+    for (const name of storedNames) await expect(table.getByRole('link', { name, exact: true })).toBeVisible();
     for (const name of ['Dev', '开发', '项目管理者', '独立 QA', '独立验收']) {
       await expect(table.getByRole('link', { name, exact: true })).toHaveCount(0);
     }
@@ -97,5 +108,37 @@ test('英文界面同一位置使用完整英文，不再中英夹杂', async ({
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
     await page.screenshot({ path: `${out}/list-en-390.png`, fullPage: true });
+  } finally { await h.stop(); }
+});
+
+
+test('已保存的历史简称、中文和自定义角色名原样显示，关闭的角色从总览移除', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, roles: [
+      { role_id: 'dev', name: 'Dev' }, { role_id: 'test', enabled: false }, { role_id: 'observer_one', name: '开发' },
+    ] });
+    expect(saved.status).toBe(200);
+    await login(page, h.admin + '/#/projects/101/roles', password);
+    const roleTable = page.getByRole('table', { name: '角色解析结果' });
+    const renamed = '协调 $& Team';
+    await roleTable.getByRole('link', { name: 'Task Coordinator', exact: true }).click();
+    const input = page.getByLabel('显示名称', { exact: true });
+    await input.fill(renamed);
+    await consoleSave(page).click();
+    await expect(page.locator('.flash')).toContainText('角色配置已保存');
+    await page.reload();
+    await expect(input).toHaveValue(renamed);
+    await expect(page.getByTestId('role-enable-reason')).toContainText(renamed + '是必需角色');
+    await page.getByTestId('role-list-link').click();
+    for (const name of [renamed, 'Dev', '开发']) await expect(roleTable.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(page.getByText(/是必需角色，其余角色都可以删除/)).toContainText(renamed);
+    await page.goto(h.admin + '/#/projects/101/overview');
+    const board = page.getByTestId('project-role-board');
+    await expect(page.locator('.workspace-role-status')).toContainText('共启用 7 个项目角色');
+    for (const name of [renamed, 'Dev', '开发']) await expect(board.getByText(name, { exact: true })).toBeVisible();
+    await expect(board.locator('[data-role-row="test"]')).toHaveCount(0);
   } finally { await h.stop(); }
 });

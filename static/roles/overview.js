@@ -77,10 +77,10 @@ function roleOverviewCards(state, redraw) {
   const starting = new Map((data.configuration.roles || []).map(role => [role.role_id, role]));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
-    const link = element('a', roleConfigName(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
+    const link = element('a', roleConfigName(role)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
     link.dataset.testid = 'role-list-' + role.role_id;
     tableCell(row, rolePageText('columns')[0], link);
-    tableCell(row, rolePageText('columns')[1], roleCheck(rolePageText('enableList') + ' ' + roleConfigName(role.role_id, role.name), role, 'enabled', state, requiredRoleLocked(role), { reason: requiredEnableReason(role), redraw }));
+    tableCell(row, rolePageText('columns')[1], roleCheck(rolePageText('enableList') + ' ' + roleConfigName(role), role, 'enabled', state, requiredRoleLocked(role), { reason: requiredEnableReason(role), redraw }));
     const dutyText = roleConfigDuty(role.role_id, role.responsibility);
     const duty = note(dutyText || rolePageText('emptyDuty')); if (dutyText) duty.title = dutyText; tableCell(row, rolePageText('columns')[2], duty);
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
@@ -90,13 +90,15 @@ function roleOverviewCards(state, redraw) {
     body.append(row);
   }
   overview.append(table);
-  overview.append(consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '配置项目整体的事件来源；新任务默认由 Manager 安排'));
+  const controller = draft.roles.find(role => role.role_id === draft.controller.role);
+  overview.append(consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', `配置项目整体的事件来源；新任务默认由 ${controller?.name || draft.controller.role} 安排`));
+  const requiredNames = new Intl.ListFormat(consoleLocale()).format(draft.roles.filter(requiredRoleLocked).map(roleConfigName));
   const custom = card('自定义角色'), name = input('new_role', '', { placeholder: '如 security_checker', maxLength: 32 });
   const error = element('p', '', 'view-error'); custom.append(field('新角色标识', name), button('添加角色', () => {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name.value) || draft.roles.some(role => role.role_id === name.value)) { error.textContent = '使用小写字母开头的唯一名称，可包含数字、下划线或连字符。'; return; }
     const defaults = structuredClone(Object.hasOwn(data.role_defaults, name.value) ? data.role_defaults[name.value] : data.role_defaults.observer);
     draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); markRoleDirty(state); redraw();
-  }), note(rolePageText('requiredNote')), error);
+  }), note(rolePageText('requiredNote')(requiredNames)), error);
   const availability = roleBackendAvailabilityCard(state);
   return [overview, ...(availability ? [availability] : []), roleSkillsCard(state, redraw), roleStagesCard(state, redraw), custom];
 }

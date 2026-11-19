@@ -1,3 +1,4 @@
+import { taskOriginsForDisplay } from '../tasks/origin-display.js';
 import {taskRelations} from '../tasks/priority.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
@@ -56,7 +57,7 @@ const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.reposit
   object_number:row.object_number,head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
   error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
   retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
-const taskOrigin=(store:Store,id:string)=>store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message,source_task_id FROM task_origins WHERE task_id=?',id)??null;
+
 
 function detailState(store:Store,id:string){
  const state=new TaskRecords(store).get(id),candidate=state.candidate;
@@ -147,7 +148,9 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       const completedCount=flowRequested ? Number(store.get(`SELECT COUNT(*) AS n FROM tasks WHERE ${[...clauses,completedGroupSQL].join(' AND ')}`,...args)?.n ?? 0) : undefined;
       const selectedClauses=[...clauses];
       if(selected && selected!=='all') selectedClauses.push(taskListGroups[selected]!);
-      const baseTasks=withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(row=>({...publicTask(row),origin:taskOrigin(store,row.id)})));
+      const rows=store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset);
+      const origins = taskOriginsForDisplay(store, rows.map(row => row.id), true);
+      const baseTasks = withTaskMetrics(store, rows.map(row => ({ ...publicTask(row), origin: origins.get(row.id) ?? null })));
       const tasks=flowRequested ? attachTaskRoleFlows(store,attachExternalLinks(store,baseTasks)) : baseTasks;
       return {tasks,execution_available:true,...(summary?{summary}:{}),...(completedCount!==undefined?{completed_count:completedCount}:{})};
     };
@@ -187,7 +190,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       return { logs, log_page: { has_older: ascending ? false : more, has_newer: ascending && more,
         first_sequence: rows[0]?.sequence ?? null, last_sequence: rows.at(-1)?.sequence ?? null } };
     }
-    const baseTask = {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null};
+    const baseTask = {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOriginsForDisplay(store, [row.id], true).get(row.id) ?? null,structured:detailState(store,row.id),error_detail:row.error_detail||null};
     const taskWithLinks = attachExternalLinks(store, [baseTask])[0]!;
     const roleTrace = taskRoleTrace(store, taskWithLinks, user.context ? { actor: user.context } : undefined);
     const canManage = (() => { try { if (user.context) authorize(user.context, 'tasks.write', { project_id: row.repository_id }); return true; } catch { return false; } })();

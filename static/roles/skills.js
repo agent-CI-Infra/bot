@@ -45,7 +45,7 @@ function roleModelResolution(role, state, access) {
   region.append(field('解析工作类型', selector), read, status, result); return region;
 }
 function roleSettingsCard(role, state, redraw, access) {
-  const section = card(roleConfigName(role.role_id, role.name) + rolePageText('formSuffix'));
+  const section = card(roleConfigName(role) + rolePageText('formSuffix'));
   section.dataset.testid = 'role-form';
   const enable = roleCheck(rolePageText('enable'), role, 'enabled', state, requiredRoleLocked(role), { reason: requiredEnableReason(role) });
   const title = section.querySelector('h3');
@@ -125,7 +125,7 @@ function roleSettingsCard(role, state, redraw, access) {
   if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) group('danger', '删除角色', advanced).append(button('删除这个角色', async () => {
     const stages = state.draft.required_stages.filter(stage => stage.role_constraints.role_ids?.includes(role.role_id));
     if (stages.length) { await askConfirm({ title: '先调整任务阶段', body: ['这些阶段仍指定了该角色：' + stages.map(stage => stage.stage_id).join('、') + '。请在概览中修改阶段角色或移除阶段，再删除角色。'], action: '知道了' }); return; }
-    if (!await askConfirm({ title: '删除角色 ' + roleConfigName(role.role_id, role.name) + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。阶段要求如引用此角色，需要一并调整。'], action: '删除角色' })) return;
+    if (!await askConfirm({ title: '删除角色 ' + roleConfigName(role) + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。阶段要求如引用此角色，需要一并调整。'], action: '删除角色' })) return;
     state.draft.roles = state.draft.roles.filter(entry => entry !== role);
     if (state.data.configuration.roles.some(entry => entry.role_id === role.role_id)) state.draft.deleted_roles = [...new Set([...(state.draft.deleted_roles || []), role.role_id])]; markRoleDirty(state); current.item = null; history.replaceState(null, '', `#/projects/${current.id}/roles`); redraw(); }, 'quiet destructive'));
   section.append(advanced);
@@ -134,7 +134,7 @@ function roleSettingsCard(role, state, redraw, access) {
 const skillSourceNames = { repository: '固定仓库提交', inline: '控制台文件' };
 function roleSkillFacts(bundle, state) {
   const saved = state.data.configuration.skills.find(entry => entry.id === bundle.id), box = element('section', '', 'skill-saved-facts'); box.setAttribute('aria-label', '已保存技能版本');
-  const savedBindings = state.data.configuration.roles.filter(role => role.skill_bundle_ref?.id === bundle.id).map(role => roleConfigName(role.role_id, role.name));
+  const savedBindings = state.data.configuration.roles.filter(role => role.skill_bundle_ref?.id === bundle.id).map(roleConfigName);
   box.append(facts([['已保存版本', saved ? String(saved.revision) : '此标识尚未保存'], ['已保存来源', saved ? skillSourceNames[saved.source.type] || saved.source.type : '尚未保存'], ['已保存绑定角色', savedBindings.join('、') || '无'], ['内容哈希', saved?.content_hash || '保存后由服务端计算']]));
   if (saved?.source.origin) box.append(note('已迁移为控制台文件；保留原绑定内容和文件哈希。原指南：' + saved.source.origin.playbooks.join('、') + '；原版本：' + saved.source.origin.revision + '；原内容哈希：' + saved.source.origin.content_hash));
   if (saved?.source.type === 'repository') box.append(note('已固定提交：' + saved.source.commit));
@@ -183,7 +183,7 @@ function roleSkillsCard(state, redraw, selected = null) {
     }
     if (selected) {
       const bindings = element('fieldset', '', 'role-choices'); bindings.append(element('legend', '草稿绑定角色'));
-      for (const role of draft.roles) { const wrap = checkbox('bind:' + role.role_id, role.skill_bundle_ref?.id === bundle.id, roleConfigName(role.role_id, role.name));
+      for (const role of draft.roles) { const wrap = checkbox('bind:' + role.role_id, role.skill_bundle_ref?.id === bundle.id, roleConfigName(role));
         roleBound(wrap.querySelector('input'), checked => { if (checked) role.skill_bundle_ref = { id: bundle.id }; else if (role.skill_bundle_ref?.id === bundle.id) role.skill_bundle_ref = null; }, state); bindings.append(wrap); }
       group.append(bindings, note('移除技能包会同时解除草稿中的角色绑定；保存后影响新任务，运行中的快照保持。'));
     }

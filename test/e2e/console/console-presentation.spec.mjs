@@ -83,13 +83,13 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
     await page.evaluate(() => openTask('coordinated'));
-    await expect(next).toHaveText('Reviewer（Codex）正在做主控交给它的工作：Check the redirect against both criteria');
+    await expect(next).toHaveText('reviewer（Codex）正在做主控交给它的工作：Check the redirect against both criteria');
     await expect(fact('目标')).toContainText('The redirect keeps ?next='); await expect(fact('候选')).toContainText('cand12345678');
     await expect(fact('证据')).toContainText('项目测试命令'); await expect(fact('证据')).toContainText('1/1 已核验');
     await expect(fact('验收')).toContainText('退回修改'); await expect(fact('验收')).toContainText('Keep #fragment as well');
     await expect(fact('发布')).toContainText('验收通过后，由控制面按工作类型允许的写入发布到 GitHub。');
     const execution = side.locator('.task-execution');
-    await expect(execution).toContainText('角色协调：主控 Manager（Pi）按需委派工作'); await expect(execution).toContainText('运行过 1 次，每次都是新的上下文');
+    await expect(execution).toContainText('角色协调：主控 manager（Pi）按需委派工作'); await expect(execution).toContainText('运行过 1 次，每次都是新的上下文');
     await expect(execution.locator('.role-work > li')).toHaveCount(2);
     await expect(execution.locator('.role-work > li').nth(1)).toContainText('Check the redirect against both criteria');
     await expect(execution).toContainText('这不是预设流程，也不授予权限');

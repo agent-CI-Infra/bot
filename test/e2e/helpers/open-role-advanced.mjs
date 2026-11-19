@@ -7,7 +7,7 @@ export async function openRoleAdvanced(page) {
   await expect(overview).toBeVisible({ timeout: 20000 });
 }
 
-const roleIds = { Manager: 'manager', Dev: 'dev', Test: 'test', Reviewer: 'reviewer', Coordinator: 'coordinator', UX: 'ux', '独立 QA': 'qa', QA: 'qa', '跨任务协调': 'coordinator', '项目管理者': 'manager', '开发': 'dev', '测试': 'test', '检视': 'reviewer', '体验检视': 'ux', '独立验收': 'qa', 'Developer': 'dev', 'Project controller': 'manager', 'Tester': 'test', 'UX reviewer': 'ux', 'Independent QA': 'qa', 'Task coordinator': 'coordinator' };
+const roleIds = { Manager: 'manager', Dev: 'dev', Test: 'test', Reviewer: 'reviewer', Coordinator: 'coordinator', UX: 'ux', '独立 QA': 'qa', QA: 'qa', '跨任务协调': 'coordinator', '项目管理者': 'manager', '开发': 'dev', '测试': 'test', '检视': 'reviewer', '体验检视': 'ux', '独立验收': 'qa', 'Developer': 'dev', 'Project controller': 'manager', 'Tester': 'test', 'UX reviewer': 'ux', 'Independent QA': 'qa', 'Task Coordinator': 'coordinator' };
 
 export async function openRoleFromList(page, name) {
   await openRoleAdvanced(page);

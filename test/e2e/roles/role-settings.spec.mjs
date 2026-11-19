@@ -122,7 +122,7 @@ test('新增角色、删除内置角色并重载，只有三个必需角色不�
     await consoleSave(page).click();
     // The first save leaves the defaults (#1068).
     await expect(page.locator('.flash')).toHaveText('角色配置已保存为自定义配置，不再跟随内置默认。新任务使用新配置；收回权限会阻止后续调用');
-    for (const name of ['Manager', '跨任务协调', '独立 QA']) {
+    for (const name of ['Project controller', 'Task Coordinator', 'Independent QA']) {
       await goRolePage(page, { role: name });
       await openRoleFormAdvanced(page);
       await expect(page.getByRole('button', { name: '删除这个角色', exact: true })).toHaveCount(0);

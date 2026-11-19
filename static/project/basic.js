@@ -9,7 +9,7 @@ const modelSources = { role: '角色', workflow: '工作类型', project: '项�
 const entryWorkers = (config, entry) => ['review', 'actions'].includes(entry) ? config.roles.filter(role => role.role_id === 'dev')
   : config.roles.filter(role => role.enabled && ['writer', 'observer'].includes(role.kind));
 const workerNames = roles => roles.map(role => roleLabel(role.role_id, role.name)).join('、') || '无';
-const entryDevText = config => { const dev = entryDevBackend(config); return `只委派 Dev，Dev 用这个入口的工具和工作区，后端 ${harnessName(dev.id)}${dev.kept ? '（旧 V2 配置沿用 Pi，Dev 的后端选择改变后才换）' : ''}`; };
+const entryDevText = config => { const dev = entryDevBackend(config); return `只委派 ${dev.name}，使用这个入口的工具和工作区，后端 ${harnessName(dev.id)}${dev.kept ? '（旧 V2 配置沿用 Pi，该角色的后端选择改变后才换）' : ''}`; };
 /**
  * The backend Dev uses when the controller delegates it in review or Actions analysis (src/roles/definition.ts): Dev's
  * own backend once its choice applies to these entries (entry_harness_source "role"); an older V2 configuration keeps
@@ -18,7 +18,7 @@ const entryDevText = config => { const dev = entryDevBackend(config); return `�
 function entryDevBackend(config) {
   const dev = config.roles.find(role => role.role_id === 'dev');
   const own = dev?.entry_harness_source === 'role';
-  return { id: own ? dev.harness_ref.id : 'pi', kept: !own && !!dev && dev.harness_ref.id !== 'pi' };
+  return { name: dev?.name || 'dev', id: own ? dev.harness_ref.id : 'pi', kept: !own && !!dev && dev.harness_ref.id !== 'pi' };
 }
 function roleModelText(preview) {
   if (!preview) return '—';

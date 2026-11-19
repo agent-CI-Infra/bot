@@ -28,10 +28,10 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(table.getByRole('columnheader', { name: 'Agent 后端', exact: true })).toHaveCount(0);
     await expect(table.getByRole('columnheader', { name: '模型', exact: true })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
-    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: '项目管理者', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Project controller', exact: true })).toHaveCount(0);
     await page.screenshot({ path: `${out}/list-1440.png`, fullPage: true });
 
-    await openRoleFromList(page, 'Dev');
+    await openRoleFromList(page, 'Developer');
     await expect(page).toHaveURL(/\/roles\/dev$/);
     await expect(page.getByTestId('role-form')).toBeVisible();
     await expect(page.getByRole('heading', { name: '基本信息', exact: true })).toBeVisible();
@@ -46,8 +46,8 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
     const crumb = page.getByTestId('role-list-link');
     await expect(crumb).toHaveText('← 角色列表');
-    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: '开发', exact: true })).toHaveAttribute('aria-current', 'page');
-    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: '项目管理者', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Developer', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Project controller', exact: true })).toHaveCount(0);
     await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
     await page.getByLabel('角色提示词', { exact: true }).fill('先读复现，再改代码。');
     const save = consoleSave(page);
@@ -63,7 +63,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: `${out}/list-390.png`, fullPage: true });
-    await openRoleFromList(page, 'Dev');
+    await openRoleFromList(page, 'Developer');
     await expect(page.getByTestId('role-form')).toBeVisible();
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再改代码。');
     await openRoleFormAdvanced(page);

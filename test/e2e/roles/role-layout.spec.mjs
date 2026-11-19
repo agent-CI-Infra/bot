@@ -25,7 +25,7 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginRoles(page, h, password);
     const table = page.getByRole('table', { name: '角色解析结果', exact: true });
-    await expect(table.getByRole('link', { name: '开发', exact: true })).toBeVisible();
+    await expect(table.getByRole('link', { name: 'Developer', exact: true })).toBeVisible();
 
     const layout = await page.evaluate(() => {
       const pageEl = document.querySelector('.project-page');
@@ -57,9 +57,9 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     for (const { id, text } of described) { expect(id).not.toMatch(/\s/); expect(text).toContain('不能关闭'); }
     expect(new Set(described.map(entry => entry.id)).size).toBe(described.length);
 
-    await openRoleFromList(page, '项目管理者');
+    await openRoleFromList(page, 'Project controller');
     await expect(page.getByLabel('启用角色', { exact: true })).toBeDisabled();
-    await expect(page.getByTestId('role-enable-reason')).toContainText('项目管理者是必需角色，不能关闭');
+    await expect(page.getByTestId('role-enable-reason')).toContainText('Project controller是必需角色，不能关闭');
     const requiredBox = await page.evaluate(() => {
       const input = document.querySelector('.role-form input[type=checkbox]:disabled, .roles-page input[type=checkbox]:disabled');
       return { cursor: input ? getComputedStyle(input).cursor : 'missing', width: input?.getBoundingClientRect().width };
@@ -69,7 +69,7 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     await page.screenshot({ path: `${out}/form-required-1440.png`, fullPage: true });
 
     await page.getByTestId('role-list-link').click();
-    await openRoleFromList(page, '开发');
+    await openRoleFromList(page, 'Developer');
     const enable = page.getByLabel('启用角色', { exact: true });
     await expect(enable).toBeEnabled();
     await expect(page.getByTestId('role-enable-reason')).toHaveCount(0);
@@ -85,10 +85,10 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => window.scrollTo(0, 0));
-    await expect(page.getByRole('heading', { name: /开发/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Developer/ })).toBeVisible();
     await expect(enable).toBeVisible();
     const firstScreen = await page.evaluate(() => {
-      const heading = [...document.querySelectorAll('h2, h3')].find(el => /开发/.test(el.textContent));
+      const heading = [...document.querySelectorAll('h2, h3')].find(el => /Developer/.test(el.textContent));
       const input = document.querySelector('.role-form-head input[type=checkbox]') || document.querySelector('.roles-page input[type=checkbox]');
       const bar = 64;
       const hb = heading.getBoundingClientRect(), ib = input.getBoundingClientRect();
