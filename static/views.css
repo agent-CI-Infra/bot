@@ -620,6 +620,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   min-width: 0;
 }
 .task-goal-line { margin: 0; font-size: var(--font-size-2); line-height: 1.55; overflow-wrap: anywhere; }
+.task-goal-text { white-space: pre-wrap; }
 .task-criteria-fold { margin-top: 8px; }
 .task-criteria-list { margin: 6px 0 0; padding-left: 18px; color: var(--color-text); font-size: var(--font-size-label); }
 

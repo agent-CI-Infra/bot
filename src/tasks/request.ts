@@ -8,6 +8,7 @@ import { executionModel } from './configuration.js';
 import { assertRequestPullRequest, genericTask, pullRequestRefusal, softwareRequest, requestPolicyHash, publishRequestPullRequest, workflowChanges } from './pull-request.js';
 import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRequestQaRequired, toolGrant } from './grants.js';
 import { checkPullRequestLabels, pullRequestLabelsSchema } from '../github/pull-request-labels.js';
+import { pullRequestSummaryRules } from '../github/text.js';
 import { ownLabels } from '../rules/service.js';
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
@@ -129,7 +130,8 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
         const command=commandTool(180,'Run bounded implementation/verification commands in this task workspace. Never publish, push, merge, use host credentials or access other tasks.');
         const write={type:'function',function:{name:'write_file',description:'Write a text artifact or source file within the task checkout',parameters:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content'],additionalProperties:false}}};
         const submit={type:'function',function:{name:'submit_delivery',description:'Submit the completed bounded report/artifact for independent acceptance now. This ends execution; the framework decides pass or remediation. Do not keep probing unrelated unknowns after the report is ready.',parameters:{type:'object',properties:{summary:{type:'string'},artifacts:{type:'array',items:{type:'object',properties:{path:{type:'string'},description:{type:'string'}},required:['path','description'],additionalProperties:false}},evidence:{type:'array',items:{type:'object',properties:{source:{type:'string'},result:{type:'string'}},required:['source','result'],additionalProperties:false}},unknowns:{type:'array',items:{type:'string'}}},required:['summary','artifacts'],additionalProperties:false}}};
-        const pullRequestFields={change_title:{type:'string'},labels:pullRequestLabelsSchema,test_command:{type:'string'}};
+        // A software delivery's summary is the public pull request description, as in the development team path (#1106).
+        const pullRequestFields={summary:{type:'string',description:'The public pull request description on GitHub, read by the repository\'s maintainers as written. '+pullRequestSummaryRules},change_title:{type:'string'},labels:pullRequestLabelsSchema,test_command:{type:'string'}};
         if(software()&&!generic){Object.assign(submit.function.parameters.properties,pullRequestFields);submit.function.description='Submit the fixed software candidate for policy tests and independent QA. The framework publishes its PR only after those gates pass. Include a concise change_title and any labels this repository\'s contribution rules ask for.';}
         // Delivery tools of a generic task (#814): a report always; a PR, a review and direct GitHub writes while granted.
         const qaGate=pullRequestQaRequired(store,task.repository_id);

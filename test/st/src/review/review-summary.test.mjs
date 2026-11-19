@@ -255,7 +255,7 @@ test('a development PR body links its Issue once, also when the summary already 
   const count = text => (text.match(/(?:closes|fixes|resolves):? #3\b/gi) || []).length;
   assert.equal(count(implementationText(candidate('Rejects over-shipping.'), 3).body), 1);
   for (const summary of ['Rejects over-shipping.\n\nCloses #3', 'Fixes #3: rejects over-shipping.', 'resolves: #3', 'Resolved octo/hello#3 too'])
-    assert.ok(implementationText(candidate(summary), 3).body.startsWith(summary + '\n\nTests: make test\n'), summary);
+    assert.ok(implementationText(candidate(summary), 3).body.startsWith(summary + '\n\n### Tests\n'), summary);
   // Another Issue's number is not this Issue.
   assert.match(implementationText(candidate('Closes #31'), 3).body, /^Closes #3$/m);
 });
@@ -263,6 +263,34 @@ test('a development PR body links its Issue once, also when the summary already 
 test('a direct software request never invents an Issue link or numbered title',()=>{
   const candidate={summary:'Deliver the scoped change.',implementation_goal:'Add the verified feature',validation:{source:'policy',command:'make test',exit_code:0},remote_sha:'a'.repeat(40)};
   for(const issue of [null,0,undefined]){
-    const text=implementationText(candidate,issue);assert.equal(text.title,'Add the verified feature');assert.doesNotMatch(text.body,/Closes #|#(?:null|undefined|0)\b/);assert.match(text.body,/Policy tests: make test/);
+    const text=implementationText(candidate,issue);assert.equal(text.title,'Add the verified feature');assert.doesNotMatch(text.body,/Closes #|#(?:null|undefined|0)\b/);assert.match(text.body,/```\nmake test\n```\n\nThe platform reran this command/);
   }
 });
+
+// #1106: the developer's summary is published as written; the platform adds a Markdown part in the summary's language.
+test('a development PR body keeps the summary as written and adds Markdown tests and commit in its language', () => {
+  const sha = 'b'.repeat(40);
+  const candidate = (summary, validation, test_command = 'npm test') => ({ summary, change_title: 'Fix it', test_command, validation, remote_sha: sha });
+  const agent = { command: 'npm test', source: 'agent', skipped: true };
+  const english = '## What changed\n\nAdd rejects negative input.\n\n## Risk\n\nNone known.';
+  assert.equal(implementationText(candidate(english, agent), 7).body, english + '\n\nCloses #7\n\n### Tests\n\n```\nnpm test\n```\n\n'
+    + 'Reported by the agent; the platform did not rerun it.\n\nCommit: `' + sha + '`');
+  const chinese = '## 改了什么\n\n加法拒绝负数。\n\n## 风险\n\n暂无。';
+  assert.equal(implementationText(candidate(chinese, agent), 7).body, chinese + '\n\nCloses #7\n\n### 测试\n\n```\nnpm test\n```\n\n'
+    + '由 agent 自报，平台未重跑。\n\n提交：`' + sha + '`');
+  // The repository's review language decides when it is set, as for review comments.
+  assert.match(implementationText(candidate(english, agent), 7, 'zh').body, /\n### 测试\n/);
+  // A policy rerun names the project's command when it differs from the agent's, with its exit code.
+  const policy = { command: 'make check', source: 'policy', exit_code: 0, stdout: '' };
+  assert.ok(implementationText(candidate(english, policy), 7).body.endsWith('### Tests\n\n```\nnpm test\n```\n\n'
+    + 'The platform reran the project\'s test command `make check` on the published snapshot: exit code 0.\n\nCommit: `' + sha + '`'));
+  assert.match(implementationText(candidate(chinese, policy), 7).body, /平台在发布快照上重跑了项目测试命令 `make check`，退出码 0。/);
+  assert.match(implementationText(candidate(english, { ...policy, command: 'npm test' }), 7).body, /```\n\nThe platform reran this command on the published snapshot: exit code 0\.\n/);
+  // A skipped policy run (no project command) reran nothing, so the agent's report stands.
+  assert.match(implementationText(candidate(english, { command: '', source: 'policy', skipped: true }), 7).body, /```\nnpm test\n```\n\nReported by the agent; the platform did not rerun it\./);
+  // A summary that already closes the Issue gets no second line; a command with backticks keeps a longer fence.
+  const closing = implementationText(candidate('Rejects negatives.\n\nCloses #7', agent, 'echo ```x```'), 7).body;
+  assert.equal((closing.match(/Closes #7/g) || []).length, 1);
+  assert.ok(closing.includes('\n````\necho ```x```\n````\n'));
+});
+

@@ -12,6 +12,9 @@ const roleLabel = (id, name) => name || id;
 const acceptanceLabels = { pass: '通过', pass_with_issues: '带问题通过', return: '退回修改', insufficient_evidence: '证据不足', needs_human: '需要人决定' };
 const shortId = value => value ? String(value).slice(0, 12) : '—';
 const mutedLine = text => element('p', text, 'muted');
+// A task goal can quote a GitHub body (a review's goal holds the PR description): its line breaks stay, and HTML comments
+// such as the bot's hidden markers, which GitHub never shows, are left out. A comment the stored goal cut off ends the text.
+const goalText = text => String(text ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
 const publicationLabels = { comment: '总结评论', review: '行内检视（COMMENT）', label: '标签', branch: 'bot 分支', pull_request: 'PR' };
 const publicationStates = { sent: ['已发布', 'success'], pending: ['待发布', 'info'], inflight: ['发布中', 'info'], unknown: ['结果待确认', 'warning'], recheck: ['重试前再查一次', 'info'] };
 const emptyRepositoryMessage = '仓库还没有提交；默认分支出现提交后会自动继续。';

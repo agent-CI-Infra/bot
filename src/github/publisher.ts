@@ -3,7 +3,7 @@ import { assertPublicationStages } from '../roles/schedule.js';
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, sha, stop, TaskError, treeSha } from '../agent/common.js';
-import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted } from './text.js';
+import { implementationText, reviewLanguage, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 import { applyPullRequestLabels } from './pull-request-labels.js';
 import { assertTaskExternalEffect } from '../tasks/management.js';
@@ -45,6 +45,11 @@ export class Publisher {
     finally{this.github.beforeWrite=previous;}
   }
   marker(key:string){return `<!-- dept-bot:${operationId(this.scope+':'+key)} -->`;}
+  // The platform's words in a development PR follow the repository's review language, else the summary's (#1106).
+  private pullRequestText(candidate:any,issue:number|null){
+    const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',this.task.repository_id)?.review_language;
+    return implementationText(candidate,issue,reviewLanguage(setting,String(candidate.summary??'')));
+  }
   async discussion(key:string,body:string){
     const path=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker(key),payload={body:body+'\n\n'+marker};
     return this.effect(key,'comment',payload,()=>this.github.request('POST',path,payload),async()=>
@@ -270,8 +275,8 @@ export class Publisher {
       }
       if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head',`PR #${candidate.pr_number} 尚未更新到提交 ${sha}，当前 head=${pr?.head.sha||'未知'}。`);
       const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
-      const content=implementationText(candidate,Number(source?.object_number||this.task.object_number));
-      const updateKey='pr-update:'+sha+':'+operationId(JSON.stringify(implementationText(candidate,Number(source?.object_number||this.task.object_number)))) ,marker=this.marker(updateKey),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
+      const content=this.pullRequestText(candidate,Number(source?.object_number||this.task.object_number));
+      const updateKey='pr-update:'+sha+':'+operationId(JSON.stringify(content)) ,marker=this.marker(updateKey),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
       await this.effect(updateKey,'pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
         const current=await this.github.object('review.pr',pr.number);assertOwnedPR(owned,current,this.github.actorId,this.task.repository_id);
         return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
@@ -281,8 +286,8 @@ export class Publisher {
       publicationFact(this.store,this.task,'pr_confirmed',{pr_number:pr.number,commit_sha:sha});
       return {...pr,...payload};
     }
-    const marker=this.marker('pr'),path=this.github.path('/pulls'),body=implementationText(candidate,this.task.object_number).body+'\n\n'+marker;
-    const request={head:candidate.branch,base:candidate.base_branch,...implementationText(candidate,this.task.object_number),body};
+    const marker=this.marker('pr'),path=this.github.path('/pulls'),content=this.pullRequestText(candidate,this.task.object_number);
+    const request={head:candidate.branch,base:candidate.base_branch,...content,body:content.body+'\n\n'+marker};
     const pr=await this.effect('pr','pull_request',request,()=>this.github.request('POST',path,request),async()=>
       (await this.github.pages(path+'?state=all&head='+encodeURIComponent(this.github.fullName.split('/')[0]+':'+candidate.branch))).find(p=>p.head?.ref===candidate.branch&&String(p.head?.repo?.id)===this.task.repository_id&&String(p.body).includes(marker)));
     if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission',`新建 PR #${pr.number} 的作者、来源仓库、分支或提交与候选分支 ${candidate.branch} 不一致。`);

@@ -506,14 +506,14 @@ function renderTaskSummaryBody(task, detail) {
   // 1. Task Goal
   const goalBox = $('task-goal-box');
   if (goalBox) {
-    const goalText = task.structured?.contract?.goal || task.summary || objectLabel(task);
+    const goal = goalText(task.structured?.contract?.goal || task.summary) || objectLabel(task);
     const criteria = task.structured?.contract?.criteria || [];
-    const sig = JSON.stringify([goalText, criteria]);
+    const sig = JSON.stringify([goal, criteria]);
     if (goalBox.dataset.signature !== sig) {
       goalBox.dataset.signature = sig;
       goalBox.replaceChildren();
       const p = element('p', '', 'task-goal-line');
-      p.append(element('strong', '任务目标：'), element('span', goalText));
+      p.append(element('strong', '任务目标：'), element('span', goal, 'task-goal-text'));
       goalBox.append(p);
       if (criteria.length) {
         const fold = element('details', '', 'fold task-criteria-fold');
