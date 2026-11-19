@@ -56,8 +56,8 @@ test('#978 设置页项目管理表：门禁与看板徽章在 1280/1440 完整�
   };
   const readRow = async (id, width) => {
     const line = row(page, id);
-    const gate = line.locator('.project-cell[data-label="门禁"] [data-integration]');
-    const board = line.locator('.project-cell[data-label="看板"] [data-board-status]');
+    const gate = line.locator('.project-cell[data-label="gates"] [data-integration]');
+    const board = line.locator('.project-cell[data-label="board"] [data-board-status]');
     // The exact sentences the columns used to lose: the gate chip has no integration to report (so it is the full
     // 发布检查未完成), and the board was just switched on (看板采集中).
     await expect(gate).toHaveText('发布检查未完成');
@@ -100,7 +100,7 @@ test('#978 设置页项目管理表：门禁与看板徽章在 1280/1440 完整�
     // wrapping rule must not follow it down there.
     for (const width of [1279, 1024, 390]) {
       await page.setViewportSize({ width, height: 900 });
-      await expect(row(page, '101').locator('.project-cell[data-label="门禁"]')).toBeVisible();
+      await expect(row(page, '101').locator('.project-cell[data-label="gates"]')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       for (const id of ['101', '202']) {
         await fits(row(page, id).locator('[data-integration]'), `${width} 门禁`);

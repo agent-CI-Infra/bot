@@ -5,13 +5,13 @@ import { harness, setup, account, repository } from '../../fixtures/helpers.mjs'
 // #527 slice: the project-list column labels come from the dictionary, so an English console names its columns in
 // English. The list prints those labels two different ways: at 1440 it draws the real header; below 1280 the header is
 // display:none and each cell prints its own label through ::before. Both paths are asserted at their own viewport,
-// because a reading taken at the default 1280x720 width says nothing about 390. 项目 and 任务 own the whole card row
-// below 1280 and print no caption.
+// because a reading taken at the default 1280x720 width says nothing about 390.
 const keys = ['project', 'enabled', 'review', 'development', 'access', 'gates', 'board', 'tasks', 'actions'];
 const chinese = ['项目', '启用', '检视', '开发', '权限', '门禁', '看板', '任务', '操作'];
 const english = ['Project', 'Enabled', 'Review', 'Develop', 'Access', 'Gates', 'Board', 'Tasks', 'Actions'];
-const captionedChinese = ['启用', '检视', '开发', '权限', '门禁', '看板', '操作'];
-const captionedEnglish = ['Enabled', 'Review', 'Develop', 'Access', 'Gates', 'Board', 'Actions'];
+// 项目 owns its whole row and prints no caption; every other cell names its column through ::before, 任务 included.
+const captionedChinese = ['启用', '检视', '开发', '权限', '门禁', '看板', '任务', '操作'];
+const captionedEnglish = ['Enabled', 'Review', 'Develop', 'Access', 'Gates', 'Board', 'Tasks', 'Actions'];
 const viewports = [[1440, 900], [768, 1024], [390, 844]];
 const han = /[\u4e00-\u9fff]/;
 
@@ -73,8 +73,10 @@ test('English 界面：三个视口都显示英文列头，不横向溢出，ari
     // The same words where the list speaks through title/aria only: the review switch names its column in English.
     await page.setViewportSize({ width: 1440, height: 900 });
     const review = row.locator(':scope > .project-cell').nth(2).locator('.status').first();
+    // The switch names the column and then the same word the chip prints, so a screen reader hears what a sighted
+    // reader sees instead of a second spelling of the state.
     expect(await review.getAttribute('title')).toBe('Review: off');
-    expect(await review.getAttribute('aria-label')).toBe('alpha/one Review: off');
+    expect(await review.getAttribute('aria-label')).toBe('alpha/one Review: Off');
     expect((await page.locator('#rows').innerText()) + (await review.getAttribute('aria-label'))).not.toContain('projects.columns.');
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
@@ -91,7 +93,7 @@ test('zh-CN 界面：九个列头与稳定单元格 token 不变，切换回来�
     // The cell token is the stable key the layout and the other pages address the column by; it stays a slug.
     expect(await row.locator(':scope > .project-cell').evaluateAll(cells => cells.map(cell => cell.dataset.label))).toEqual(keys);
     await page.setViewportSize({ width: 390, height: 844 });
-    expect(await cellCaptions(row)).toEqual(['', ...captionedChinese, '']);
+    expect(await cellCaptions(row)).toEqual(['', ...captionedChinese]);
     expect(await page.locator('#rows').innerText()).not.toContain('projects.columns.');
 
     await page.setViewportSize({ width: 1440, height: 900 });

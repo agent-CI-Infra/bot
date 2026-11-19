@@ -199,7 +199,7 @@ async function refreshProjectActivity(force = false) {
       const row = rows.get(line.dataset.repositoryId); if (row) {
         updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
         // Replace only the chip so sibling controls are not redrawn; the placeholder of a non-installed row is left alone.
-        const boardCell = [...line.children].find(child => child.dataset.label === '看板'), chip = boardCell?.querySelector('[data-board-status]');
+        const boardCell = [...line.children].find(child => child.dataset.label === 'board'), chip = boardCell?.querySelector('[data-board-status]');
         if (chip) chip.replaceWith(boardChip(row));
         line.querySelector('.project-controls')?.updateBoard?.(row, requestedAt);
       }
@@ -230,18 +230,24 @@ function installedDetail(row) {
 }
 // #544: one shared column definition for the project list, so 启用/检视/开发/权限/门禁/看板/任务 line up across rows and
 // across organizations instead of every row laying its own badges out. Labels are only shown where the header is not.
-const projectColumnLabels = ['项目', '启用', '检视', '开发', '权限', '门禁', '看板', '任务', '操作'];
+// #527: a column is a stable key. The key names the cell (data-label), the header id every cell points at, and the CSS
+// that places the column; the reader's language only decides the text (data-col-label and the header word itself).
+const projectColumnLabels = ['project', 'enabled', 'review', 'development', 'access', 'gates', 'board', 'tasks', 'actions'];
+const projectColumnText = label => t('projects.columns.' + label);
 function projectCell(label, ...nodes) {
-  const cell = element('div', '', 'project-cell'); cell.dataset.label = label;
+  const cell = element('div', '', 'project-cell'); cell.dataset.label = label; cell.dataset.colLabel = projectColumnText(label);
   cell.setAttribute('aria-labelledby', projectColumnId(label)); cell.append(...nodes); return cell;
 }
 function projectNotApplicable(label) {
-  const empty = element('span', '—', 'project-empty'); empty.setAttribute('aria-label', label + '不适用'); return empty;
+  const empty = element('span', '—', 'project-empty');
+  empty.setAttribute('aria-label', t('projects.columns.not_applicable', { column: projectColumnText(label) })); return empty;
 }
-function projectStatusCell(label, row, on, caption) {
-  const chip = badge(on ? '开' : '关', on ? 'info' : '');
-  chip.title = `${caption}${on ? '已开启' : '未开启'}`;
-  chip.setAttribute('aria-label', `${row.full_name} ${label}：${on ? '开' : '关'}`);
+function projectStatusCell(label, row, on) {
+  const chip = badge(t(on ? 'projects.columns.on' : 'projects.columns.off'), on ? 'info' : '');
+  chip.title = t(on ? 'projects.columns.state_on' : 'projects.columns.state_off', { column: projectColumnText(label) });
+  chip.setAttribute('aria-label', t('projects.columns.switch_aria', {
+    repo: row.full_name, column: projectColumnText(label), state: t(on ? 'projects.columns.on' : 'projects.columns.off')
+  }));
   return projectCell(label, chip);
 }
 // The cells of one project row, in the order of projectColumnLabels; 项目 and 操作 are built by the renderer.
@@ -251,21 +257,21 @@ function projectRowCells(row, integration, installed) {
   const state = [availability];
   if (row.installed === false) state.push(badge('已移出安装', 'danger'));
   else if (row.installed === null) state.push(badge('不在安装列表'));
-  const taskCell = projectCell('任务');
+  const taskCell = projectCell('tasks');
   // #544: the task cell keeps the drill-down the pre-table row had; an unstarted project has no activity page yet.
   const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
   if (registered) preview.href = `#/projects/${row.id}/activity`;
   updateProjectTaskPreview(preview, row); taskCell.append(preview);
   // #544 review: the gate cell always uses the shared chip, so it carries data-integration and the first background
   // check can replace it in place; a hand-written fallback badge left the cell out of every later refresh.
-  const gate = installed ? installedIntegration(integration)[0] : projectNotApplicable('门禁');
+  const gate = installed ? installedIntegration(integration)[0] : projectNotApplicable('gates');
   return [
-    projectCell('启用', ...state),
-    projectStatusCell('检视', row, !!row.review_enabled, '检视'),
-    projectStatusCell('开发', row, !!row.development_enabled, '开发'),
-    projectCell('权限', permissionCell(row)),
-    installed ? projectCell('门禁', gate) : projectCell('门禁', projectNotApplicable('门禁')),
-    installed ? projectCell('看板', boardChip(row)) : projectCell('看板', projectNotApplicable('看板')),
+    projectCell('enabled', ...state),
+    projectStatusCell('review', row, !!row.review_enabled),
+    projectStatusCell('development', row, !!row.development_enabled),
+    projectCell('access', permissionCell(row)),
+    installed ? projectCell('gates', gate) : projectCell('gates', projectNotApplicable('gates')),
+    installed ? projectCell('board', boardChip(row)) : projectCell('board', projectNotApplicable('board')),
     taskCell,
   ];
 }
