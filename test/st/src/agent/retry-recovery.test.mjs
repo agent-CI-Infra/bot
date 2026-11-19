@@ -200,28 +200,29 @@ test('a development stopped by a removed label goes to the Manager, and resumes 
   assert.ok(h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.taskId).some(row=>JSON.parse(row.content).type==='resumed'));
 });
 
+// #1100: an update that joins while a review publishes no longer sends it back to the model; it waits for the next round.
+// The object checks before each GitHub write still hold: a closed, draft or moved pull request stops the publication.
 for(const [change,status,code] of [['closed','cancelled','object_closed_or_draft'],['draft','cancelled','object_closed_or_draft'],['head','queued','pull_request_head_changed']]){
-  test(`ReviewUpdated rechecks ${change} before continuing the model in the same run`,async t=>{
-    let h,inserted=false,resumeChecks=0;const object=structuredClone(pull);
+  test(`an update while a review publishes does not return it to the model; ${change} still stops it before any write`,async t=>{
+    let h,inserted=false,modelChecks=0;const object=structuredClone(pull);
     h=await emptyRepositoryFixture(t,{github(path,send){
       if(!path.endsWith('/pulls/1'))return false;
-      const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase,response=structuredClone(object);
-      if(inserted&&phase==='model')resumeChecks++;
+      const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase;
+      if(inserted&&phase==='model')modelChecks++;
       if(!inserted&&phase==='publish'){
-        // The object read for the pending write is open, then new discussion invalidates that result. The object
-        // changes before ReviewUpdated returns to the model, so that entry must read it again before continue.
+        // New discussion joins, and the check right before the first write reads the changed object.
         h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'before-publication',JSON.stringify({reason:'comment',actor:'alice'}));
         inserted=true;
         if(change==='closed')object.state='closed';
         if(change==='draft')object.draft=true;
         if(change==='head')object.head.sha='f'.repeat(40);
       }
-      send(response);return true;
+      send(structuredClone(object));return true;
     }});
     const input={object:pull,context:{mode:'review'},files:[],coverage:[]};
     h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=? WHERE id=?",pull.head.sha,JSON.stringify(input),h.taskId);
     const task=await h.run();
-    assert.equal(inserted,true);assert.equal(resumeChecks,1);assert.deepEqual([task.status,task.error_code],[status,code]);
+    assert.equal(inserted,true);assert.equal(modelChecks,0,'the publication went on instead of returning to the model');assert.deepEqual([task.status,task.error_code],[status,code]);
     assert.equal(h.operations.filter(type=>type==='workspace_agent_start').length,1);
     assert.equal(h.operations.includes('workspace_agent_continue'),false);assert.equal(h.comments.length,0);
   });

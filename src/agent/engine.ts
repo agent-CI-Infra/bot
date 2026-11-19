@@ -56,8 +56,9 @@ import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest, projectLabels, developingLabel } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
-import { ReviewUpdated, pendingReviewUpdates, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
-import { continueFinishedReview, continuationContext, resumeFinishedReviews } from '../review/continuation.js';
+import { pendingReviewUpdates, resultCoverage, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
+import { continueFinishedReview, continuationContext, continuationUpdates, resumeFinishedReviews } from '../review/continuation.js';
+import { publicationFact } from '../tasks/publication.js';
 import { type GitCache } from './git-cache.js';
 import { workOf } from '../work/catalog.js';
 import { workEnabled } from '../work/settings.js';
@@ -438,7 +439,7 @@ export class TaskEngine {
         records.atomic(()=>{
           update({input:storedInput(this.store,redactor.clean(input),task.repository_id),head_sha:next});
           this.store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,`${id}:head:${heads.length}:${next}`,
-            JSON.stringify({reason:'pull_request_head_changed',previous_head:previous,current_head:next,compare,saved_changes:moved.saved}));
+            JSON.stringify({reason:'pull_request_head_changed',previous_head:previous,current_head:next,compare,saved_changes:moved.saved,at:new Date().toISOString()}));
         });
         log({type:'head_moved',previous_head:previous,current_head:next,saved_changes:moved.saved,
           detail:`PR #${number} 有新提交：工作区已从 ${previous.slice(0,7)} 移到 ${next.slice(0,7)}${moved.saved?`，原有改动（${moved.saved.count} 个文件）已保存到 ${moved.saved.path}`:''}。`});
@@ -446,8 +447,8 @@ export class TaskEngine {
       workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
       await assessRetryReport(this.store,task,workspace,github,guard,redactor);
       const investigateRetry=retryNeedsInvestigation(this.store,id);
-      // Reuse a check only at the immediately following phase boundary in this run. A resumed run or a
-      // ReviewUpdated loop starts without this credit and must read the current object before continuing.
+      // Reuse a check only at the immediately following phase boundary in this run. A resumed run starts without this
+      // credit and must read the current object before continuing.
       let validatedPhase:'model'|'publish'|undefined;
       const accept=async(artifact:any, evidence:any[]=[])=>{
         evidence=[...evidence,...this.store.all("SELECT id,data FROM task_history WHERE task_id=? AND type IN ('memory_read','memory_search') AND run_id IN(SELECT id FROM task_runs WHERE task_id=? AND kind='execution' AND attempt=?) ORDER BY id",id,id,task.attempt).map(row=>observation('task_history:'+row.id,sha(row.data),row.data))];
@@ -712,7 +713,7 @@ export class TaskEngine {
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
       // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates. A review's
       // conversation is its Pi session (#1040): a later round or a retry reopens it, and Pi compacts it when it must.
-      const conversation=!review?undefined:{resume:false,boundary:async(stage:string,recovery?:string)=>{
+      const conversation=!review?undefined:{boundary:async(stage:string,recovery?:string)=>{
         if(stage!=='start'&&!pendingReviewUpdates(this.store,task).length)return {messages:[]};
         // Between turns nothing runs in the workspace: a new head moves it there, which is an update of its own.
         const object=await github.object(task.kind,task.object_number);await validate(object,true);
@@ -747,11 +748,9 @@ export class TaskEngine {
           :event?input.context?.work_prompt||input.context?.workflow_prompt||`${task.kind}: ${task.summary}`:`${task.kind}: ${input.object?.title||task.summary}. Requested result: ${input.object?.body||task.summary}`;
         records.contract(id,input.contract||{goal,scope:[development?goal:task.kind],criteria:[development?'Implement the recorded goal and approved actionable findings; mandatory project verification must pass.':'Deliver a factual requested report, inspect relevant artifacts, distinguish findings from suggestions, and support conclusions with evidence.'],endpoint:development?'reviewable_pull_request':'report',source:{kind:task.kind,object_number:task.object_number,delivery_id:task.source_delivery_id},completeness:'derived_from_source'});
       }
-      for(;;){
-      try{
       if(task.phase==='model'){
         // The agent is idle here unless a restart found its process still running: then the next turn's boundary moves it.
-        if(validatedPhase!=='model')await validate(undefined,!!conversation?.resume||!this.store.get('SELECT model_started FROM tasks WHERE id=?',id)?.model_started);
+        if(validatedPhase!=='model')await validate(undefined,!this.store.get('SELECT model_started FROM tasks WHERE id=?',id)?.model_started);
         validatedPhase=undefined;await beginProgress();
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         // github_write: a direct write the acting role's GitHub permissions allow (#381), keyed per task so a retried attempt
@@ -839,11 +838,22 @@ export class TaskEngine {
         if(validatedPhase!=='publish')await validate();
         validatedPhase=undefined;await beginProgress();
         if(!development)await acceptReport(result);
+        // What a review's result covers (#1100) is what this publication answers; later updates are its next round's.
+        const covered=review?resultCoverage(task,result):0;
+        const publicationDecided=()=>{
+          const carried=continuationUpdates(this.store,task,covered),ids=carried.map(update=>update.id);
+          const decision={decision:'publish',covered_through:covered,carried:ids,reasons:[...new Set(carried.map(update=>String(update.data?.reason||'update')))]};
+          publicationFact(this.store,task,'review_publication',decision);
+          log({type:'publication_decision',...decision,detail:ids.length
+            ?`检视结果已通过验收，开始发布到 GitHub。更新 ${ids.join('、')} 不在这份结果的覆盖范围内，这次发布不回应它们；发布完成后它们开始下一轮检视，改写同一条总结评论。`
+            :'检视结果已通过验收，开始发布到 GitHub；收到的更新都在这份结果里。'});
+        };
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
-          // No await between checking the inbox and fencing the first GitHub write.
           if(this.store.get('SELECT publication_started FROM tasks WHERE id=?',id)?.publication_started)return;
-          if(review&&pendingReviewUpdates(this.store,task).some(row=>JSON.parse(row.data).reason!=='pushed'))throw new ReviewUpdated();
           update({publication_started:1});
+          // #1100: a QA-approved review publishes. Updates its result does not cover hold nothing back: they start its next
+          // round once this publication is done. The first GitHub write is where that is decided, so it is recorded here.
+          if(review)publicationDecided();
         });
         if(!development&&!review){
           // A reply task publishes what its writes allow and stops: no development, no conversation to keep.
@@ -893,7 +903,8 @@ export class TaskEngine {
           const requests=await this.revisionRequests(github,task,result,input).catch(()=>[]);
           if(requests.length)log({type:'revision_requests',requests:requests.map(r=>({type:r.type,id:r.id,author:r.author,author_type:r.author_type,url:r.url}))});
           this.store.transaction(()=>{
-            update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
+            // The cursor now says what the published result covers: the updates after it start the next round (#770).
+            update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null,review_update_cursor:covered});
             this.queueDevelopment(github,task,input,result,approved,requests);
           });
         }
@@ -910,12 +921,6 @@ export class TaskEngine {
             stop(String(published.error),'queued',String((published as any).reason||'独立验收要求修订或补证。'));
           }
         }
-      }
-      break;
-      }catch(error){
-        if(error instanceof ReviewUpdated&&conversation){validatedPhase=undefined;conversation.resume=true;this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);update({phase:'model',result:null,status:'running'});continue;}
-        throw error;
-      }
       }
       await this.release(workspace,task);await issueProgress();log({type:'completed',status:task.status});
     }catch(error){
@@ -981,9 +986,9 @@ export class TaskEngine {
         (['execution_interrupted','tool_operation_conflict','operation_result_expired'].includes(failure.code)||failure instanceof VolumeFull)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
-        // The next attempt takes again the updates of its round (a review's later round starts past those of earlier rounds).
-        const roundCursor=Number(this.store.get("SELECT json_extract(input,'$.round_update_cursor') c FROM tasks WHERE id=?",id)?.c||0);
-        update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:roundCursor,publication_started:0,attempt:task.attempt+1});
+        // A review's update cursor stays (#1100): a result an earlier attempt made keeps what it covered, and the next session
+        // reads the current discussion at its start.
+        update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
       }
       // Waiting conditions can be polled every five seconds; retain one copy of an unchanged reason. The state is the one
       // the task is left in; entering the slow cycle is a distinct event even when the reason stays the same.
