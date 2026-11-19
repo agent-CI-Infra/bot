@@ -1,8 +1,12 @@
 // Only these self-identifying formats are recognized without a registered value.
-export const githubTokenSource = String.raw`\b(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{22,})`;
-const providerTokenSource = String.raw`\b(?:sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_[A-Za-z0-9_-]{16,})`;
+// An installation token can wrap a JWT. gh auth status replaces its final component with stars.
+// Consume the wrapper and the components together, leaving adjacent punctuation in the comment.
+const installationToken = String.raw`(?:gh[pousr]_|github_pat_)\d+_(?=[\w.*-]{20})[\w-]+(?:\.[\w-]+\.[\w-]+|(?:\.[\w-]+)?(?=\*))`;
+const githubBoundary = String.raw`(?:\b|(?<=\\[nrt]|\x1b\[[0-9;]{0,32}m))`;
+export const githubTokenSource = githubBoundary + '(?:' + installationToken + String.raw`|gh[pousr]_(?=[\w*]{30})\w+|github_pat_(?=[\w*]{22})\w+)\**`;
+const providerTokenSource = String.raw`\b(?:sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_(?:[\w-]{12}\.[\w-]{43}|[\w-]{16,}))`;
 const tokens = new RegExp(githubTokenSource + '|' + providerTokenSource, 'g');
-const pemDelimiter = /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/g;
+const pemDelimiter = /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----/g;
 const marker = '[REDACTED]';
 
 function mapStrings(value, clean, keys = false) {
@@ -22,7 +26,7 @@ export class Redactor {
   #raw;
   #public;
   add(value) {
-    if (typeof value !== 'string' || !value || this.values.has(value)) return;
+    if (typeof value !== 'string' || value.length < 8 || this.values.has(value)) return;
     this.values.add(value);
     this.#raw = this.#public = undefined;
   }

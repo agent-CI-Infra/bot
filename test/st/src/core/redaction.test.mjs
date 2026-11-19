@@ -1,10 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Redactor } from '../../../../dist/agent/common.js';
+import { publicText, registeredRedactor } from '../../../../dist/core/redaction.js';
 import { managementFixture, command, settled } from '../../../fixtures/management-fixture.mjs';
 
 const ordinary = ['密码: test_value', 'api_key = env.OPENAI_API_KEY', 'session_token = user_session_token_id',
   'token = "my_custom_identifier_12345"', '-----BEGIN CERTIFICATE-----', '{\n  "token": "ordinary public value",\n  "analysis": [1, 2]\n}'];
+test('a short configured model key preserves ordinary text and binary content', async t => {
+  const { admin, h } = await managementFixture(t);
+  const model = await admin('/api/models','POST',{model_name:'local',api_url:'http://localhost:8484/v1',api_key:'x'});
+  assert.equal(model.status,201);
+  const redactor = registeredRedactor(h.store), text = 'example x text';
+  assert.equal(redactor.text(text), text);
+  assert.equal(publicText(text, redactor), text);
+  assert.equal(redactor.contains(Buffer.from(text)), false);
+  redactor.add('12345678');
+  assert.equal(redactor.text('x 12345678'), 'x [REDACTED]');
+  assert.equal(redactor.contains(Buffer.from('x 12345678')), true);
+});
+
 test('management input and commands accept and retain normal text without trace-only transformations',async t=>{
   const f=await managementFixture(t);
   f.modelState.respond=(_body,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'已读取'}}]}));};

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { credentialExamples, maskedExamples, pgpBlock } from '../../../fixtures/public-credentials.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { GitHub } from '../../../../dist/github/client.js';
-import { Redactor, TaskError } from '../../../../dist/agent/common.js';
+import { Redactor, sha, TaskError } from '../../../../dist/agent/common.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { dueProgress, renderProgress, reportMilestone, settleProgress, startProgress } from '../../../../dist/review/progress.js';
 import { recordBasis } from '../../../../dist/dispatch/basis.js';
@@ -60,6 +61,25 @@ async function fixture(t) {
 }
 const posts = state => state.requests.filter(r => r === 'POST /repos/fixture/project-101/issues/5/comments').length;
 const patches = state => state.requests.filter(r => r.startsWith('PATCH /repos/fixture/project-101/issues/comments/')).length;
+
+test('the development status comment masks credentials before clipping, sending and hashing the body', async t => {
+  const f = await fixture(t), store = f.h.store;
+  const task = f.task('running', {input:JSON.stringify({manager:{brief:{goal:'Investigate '+credentialExamples+'.'}}})});
+  startProgress(store, task, f.issue);
+  assert.equal(await settleProgress(store, task.id, f.github), true);
+  assert.ok(f.state.comments[0].body.includes('Investigate '+maskedExamples+'.'));
+  const longKey = pgpBlock.replace('example material','sensitive example '.repeat(100));
+  const plan = {milestone:'plan', conclusion:'Keep public context '+longKey+' intact.', changes:['Document body and opaque-installation-example.']};
+  assert.equal(reportMilestone(store, task.id, plan).recorded, true);
+  f.github.redactor.add('opaque-installation-example');
+  assert.equal(await settleProgress(store, task.id, async () => f.github), true);
+  const body = f.state.comments[0].body;
+  assert.ok(body.includes('Keep public context [REDACTED] intact.'));
+  assert.ok(body.includes('Document body and [REDACTED].'));
+  assert.equal(f.row(task.id).body_sha, sha(body));
+  assert.equal(await settleProgress(store, task.id, f.github), true);
+  assert.equal(posts(f.state), 1); assert.equal(patches(f.state), 1);
+});
 
 test('a development puts the developing label on, creating it first, and keeps one comment it only edits until its pull request', async t => {
   const f = await fixture(t), task = f.task();
