@@ -1,4 +1,4 @@
-titles.onboarding='接入向导';
+titles.onboarding='系统初始化';
 let onboardingStep=0;
 // Null until step 1 is drawn, which then picks Cloudflare Tunnel when a tunnel token is saved; leaving step 1 resets it.
 let onboardingTunnel=null;

@@ -1,67 +1,107 @@
-// #934: scenario A of #929 in the browser, at 1440 and at 390. An administrator of a repository whose organization is not
-// trusted opens 开始接入, the assistant reads the repository and asks; the answers bring a plan; confirming it asks a super
-// administrator, who approves in 待处理; the plan is applied with receipts and a failed item is retried on the completion
-// page. A reload, and at 1440 a second device, come back to the same state. GitHub and the model are local fixtures.
+// #934, #1133: unified repository onboarding in the Management Assistant, at 1440 and at 390.
+// An administrator with zero started projects opens 开始接入 (and legacy #/onboarding/103), analyzes the unstarted
+// repository read-only in #/management, files a start request, has a super administrator approve in 待处理 (#/inbox),
+// applies confirmed settings, confirms a staged workflow_changes: true development task card in the console, and
+// re-enters onboarding from #/projects/103/basic. GitHub and the model are local fixtures.
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, assistantModel } from '../../fixtures/onboarding-fixture.mjs';
 
-const output = '.tmp/repository-onboarding-934';
-const questions = [
-  { id: 'level', question: '要不要让 bot 自动开发简单问题？', options: [{ label: '先只检视和打标签', description: '能力上限「可评论和打标签」' }, { label: '也开发简单问题', description: '能力上限「可开发并开 PR」' }],
-    recommended: '先只检视和打标签', reason: '仓库还没有 CI，先看检视的质量。' },
-  { id: 'labels', question: '分类标签怎么定？', options: [{ label: '用 kind/ 前缀', description: '新建 kind/bug、kind/feature' }, { label: '沿用现有标签', description: '现在只有 bug' }],
-    recommended: '用 kind/ 前缀', reason: '现有标签不够用来分类。' },
-];
-const plan = {
-  profile: { summary: '一个 Node.js 命令行工具。README 写明用 `npm test` 跑测试；只有一个定时的 Nightly 工作流，PR 很少有人检视。', stack: ['Node.js', 'npm'],
-    collaboration: '维护者直接开 PR，少有检视。', ci: '只有 nightly.yml，每天 UTC 16:00 定时运行。', labels: '只有 bug 一个标签。', sources: ['README.md', '/labels', '.github/workflows/nightly.yml', '/actions/runs'] },
-  capability_ceiling: { value: 'comment', reason: '先只检视和打标签。' },
-  test_command: { value: 'npm test', reason: 'README 写明。' },
-  labels: { items: [{ name: 'kind/bug', color: 'd73a4a', description: '缺陷', action: 'create' }, { name: 'kind/feature', color: '0e8a16', description: '新功能', action: 'create' }], reason: '用 kind/ 前缀分类。' },
-  conventions: { label_usage: 'kind/bug 表示缺陷，kind/feature 表示新功能。', review_focus: '关注命令行参数的兼容性。' },
-  // #1072: a recommendation only; it is never one of the changes and never in the way of the start.
-  scheduled_dispatch: { workflows: [{ path: '.github/workflows/nightly.yml', cron: '0 16 * * *', delay: '最近 5 次平均晚 7 小时' }], reason: 'Nightly 的定时运行经常晚好几个小时，建议改由 bot 按时触发。' },
-};
-// The first message reads the repository, reports progress and asks; the answers bring the plan.
-const script = context => String(context.request).startsWith('我的回答') ? [
-  call(0, ['propose_onboarding_plan', plan]),
-  { role: 'assistant', content: '方案草稿已保存为第 1 版：先只检视和打标签，新建 `kind/bug` 和 `kind/feature`。请在「方案」里核对后确认。' },
-] : [
-  call(0, ['github_read', { repository: 'fixture/project-103', path: '/readme' }]),
-  call(1, ['send_message', { text: '已读完 README，正在整理仓库画像。' }]),
-  call(2, ['ask_onboarding_questions', { questions }]),
-  { role: 'assistant', content: '**仓库画像**：一个 Node.js 命令行工具，用 `npm test` 跑测试。请先回答两个问题，我再给出方案。' },
-];
+const output = '.tmp/repository-onboarding-1133';
+const toolResults = body => body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
 
-for (const width of [1440, 390]) test(`场景 A 在 ${width} 宽度下走完接入向导：分析、回答、确认申请、超管同意、完成页重试`, async ({ page, browser }) => {
+const script = (context, body) => {
+  const text = String(context.request ?? '');
+  const steps = body.messages.filter(m => m.role === 'assistant').length;
+  const obs = toolResults(body);
+  if (text.includes('确认按推荐方案启动')) {
+    return [
+      call(0, ['start_repository', { action: 'start', repository: 'fixture/project-103', capability_ceiling: 'develop',
+        summary: 'Node.js 命令行工具（`npm test`）；计划开启 `develop` 能力上限、新建 `kind/bug` 标签并补齐 `.github/workflows/ci.yml`。' }]),
+      { role: 'assistant', content: '所属组织尚未加入受信组织，已为你提交启动申请，等待超级管理员在控制台「待处理」或飞书私聊同意后再继续配置。' },
+    ];
+  }
+  if (text.includes('超级管理员已同意启动')) {
+    if (steps === 0) return [call(0, ['management_query', { operation: 'get_effective_config', target: { project_id: '103' }, arguments: {} }])];
+    if (steps === 1) {
+      const cfg = obs.at(-1);
+      return [call(1,
+        ['management_command', { operation: 'project.update', target: { project_id: '103' }, expected_revision: cfg.revision,
+          arguments: { test_command: 'npm test' } }],
+        ['github_write', { repository: 'fixture/project-103', method: 'POST', path: '/labels', key: 'e2e-kind-bug',
+          body: { name: 'kind/bug', color: 'd73a4a', description: '缺陷' } }],
+        ['github_write', { repository: 'fixture/project-103', method: 'POST', path: '/labels', key: 'e2e-developing',
+          body: { name: 'bot-developing', color: 'fbca04', description: 'Developing' } }],
+        ['github_write', { repository: 'fixture/project-103', method: 'POST', path: '/labels', key: 'e2e-developed',
+          body: { name: 'bot-developed', color: '0e8a16', description: 'Developed' } }])];
+    }
+    if (steps === 2) {
+      const policyReceipt = obs.find(o => o.operation === 'project.update');
+      return [call(2,
+        ['management_command', { operation: 'task.create', target: { project_id: '103' }, expected_revision: policyReceipt.after_revision,
+          arguments: { intent: 'development', workflow_changes: true, request: '为 PR 增加 npm test 自动检查工作流',
+            contract: { goal: '在 .github/workflows/ci.yml 中增加 PR 自动运行 npm test 的检查', scope: ['.github/workflows/ci.yml'],
+              criteria: ['改动经 bot PR 交付，由人检视并合并', 'PR 触发 npm test'], endpoint: 'reviewable_pull_request' } } }])];
+    }
+    return [{ role: 'assistant', content: '已保存测试命令 `npm test`（待首次运行验证）并创建标签；修改 `.github/workflows/ci.yml` 的开发任务需要你在上方确认卡片点击「确认执行」后才会创建。' }];
+  }
+  if (steps === 0) {
+    return [call(0,
+      ['management_query', { operation: 'list_projects', target: {}, arguments: {} }],
+      ['github_read', { repository: 'fixture/project-103', path: '/readme' }],
+      ['github_read', { repository: 'fixture/project-103', path: '/labels' }])];
+  }
+  if (steps === 1) {
+    return [call(1, ['send_message', { text: '已读完 README 与现有标签，正在整理仓库画像。' }])];
+  }
+  return [{ role: 'assistant', content: [
+    '### 仓库画像',
+    '- **定位与技术栈**：Node.js 命令行工具（来源：`README.md`、`/labels`），测试命令为 `npm test`，目前只有 `bug` 标签，尚无 PR CI 工作流。',
+    '- **能力上限说明**：`read` 只读问答；`comment` 检视评论与分类打标；`develop` 可在机器人分支开发并提 PR。',
+    '',
+    '### 关键选择与推荐',
+    '1. **能力上限**：推荐 `develop`（可开发简单问题并提交 CI 工作流 PR）。',
+    '2. **分类标签**：推荐新建 `kind/bug`（保留现有 `bug`）。',
+    '3. **CI 工作流**：推荐在项目启动后由 bot 提交 `.github/workflows/ci.yml` PR。',
+    '',
+    '请确认是否按上述推荐项启动并配置？',
+  ].join('\n') }];
+};
+
+for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手完成仓库接入、启动审批与工作流变更确认 (#1133)`, async ({ page, browser }) => {
   test.setTimeout(120_000);
   const cleanups = [], t = { after: fn => cleanups.push(fn) }, errors = [];
   const f = await identityFixture(undefined, { github: true });
   const viewport = { width, height: width === 390 ? 844 : 900 };
   mkdirSync(output, { recursive: true });
   const shot = async (target, name) => {
-    if (width === 390) expect(await target.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
-    // From the top with nothing focused, so the sticky sidebar and the skip link sit where a reader first sees them.
+    expect(await target.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     await target.evaluate(() => { document.activeElement?.blur?.(); scrollTo(0, 0); });
     await target.screenshot({ path: `${output}/${width}-${name}.png`, fullPage: true });
   };
   page.on('pageerror', error => errors.push(error.message));
   try {
-    installed(f, '103'); f.state.accessible = ['101', '103'];
-    const routes = repositoryRoutes(f), answer = f.state.route; let labelsReadable = false;
-    // The first read of the labels fails, so the completion page has a failed item to retry.
-    f.state.route = (path, method, body, send) => !labelsReadable && method === 'GET' && /\/labels(\?|$)/.test(path) ? (send({ message: 'Resource not accessible by integration' }, 403), true) : answer(path, method, body, send);
+    // Zero started projects for this GitHub user: only unstarted installed repository 103 in an untrusted organization.
+    installed(f, '103'); f.state.accessible = ['103'];
+    const routes = repositoryRoutes(f);
     await assistantModel(f.admin, await provider(t, script));
-    // The GitHub user administers the repository; the organization is not trusted.
     Object.assign(f.state, { owner: false, permission: 'admin' });
-    await page.setViewportSize(viewport);
-    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
-    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
-    await expect(page.locator('.identity-pending-repos').getByRole('link', { name: '开始接入 fixture/project-103' })).toHaveAttribute('href', '#/onboarding/103');
 
-    // The project list carries one entry for the repository; there is no gate entry anywhere.
+    await page.setViewportSize(viewport);
+    await page.goto(f.h.admin);
+    await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await expect(page.locator('.identity-pending-repos').getByRole('link', { name: '开始接入 fixture/project-103' })).toHaveAttribute('href', '#/management');
+
+    // Legacy #/onboarding/103 redirects smoothly to #/management and prefills the repository onboarding prompt.
+    await page.goto(f.h.admin + '/#/onboarding/103');
+    await expect(page).toHaveURL(/#\/management$/);
+    const chat = page.locator('#management-chat');
+    const composer = chat.getByLabel('管理消息', { exact: true });
+    await expect(composer).toHaveValue(/^请帮我接入已安装仓库 fixture\/project-103：/);
+
+    // Project list entry also navigates to #/management with the onboarding prompt prefilled and focused.
     await page.goto(f.h.admin + '/#/projects');
     const pending = page.locator('[data-key="pending:103"]');
     await expect(pending.getByRole('link', { name: '开始接入 fixture/project-103' })).toBeVisible();
@@ -69,127 +109,79 @@ for (const width of [1440, 390]) test(`场景 A 在 ${width} 宽度下走完接�
     await expect(page.locator('body')).not.toContainText('接入门禁');
     await shot(page, '01-projects');
     await pending.getByRole('link', { name: '开始接入 fixture/project-103' }).click();
+    await expect(page).toHaveURL(/#\/management$/);
+    await expect(composer).toHaveValue(/^请帮我接入已安装仓库 fixture\/project-103：/);
+    await expect(composer).toBeFocused();
+    await shot(page, '02-prefilled');
 
-    const phase = page.getByTestId('onboarding-phase'), next = page.getByTestId('onboarding-next');
-    await expect(page.getByRole('heading', { name: 'fixture/project-103', level: 1 })).toBeVisible();
-    await expect(phase).toHaveText('未开始');
-    await expect(next).toContainText('点「开始分析」，助手只读分析仓库');
-    await expect(page.locator('#console-page')).not.toContainText('接入门禁');
-    await shot(page, '02-start');
-    await next.getByRole('button', { name: '开始分析' }).click();
-
-    // The analysis: a progress message and the answer stream into the conversation, then the questions wait for answers.
-    await expect(phase).toHaveText('待回答');
-    await expect(next).toContainText('回答助手的问题');
-    const chat = page.locator('.ro-chat');
-    await expect(chat).toContainText('已读完 README，正在整理仓库画像。');
-    await expect(chat).toContainText('请先回答两个问题');
-    await expect(chat.locator('.ro-reads summary')).toHaveText('读取与操作 2 步');
+    // Turn 1: read-only analysis, progress message, and structured profile + recommended choices.
+    await chat.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(chat).toContainText('已读完 README 与现有标签，正在整理仓库画像。');
+    await expect(chat).toContainText('请确认是否按上述推荐项启动并配置？');
     await shot(page, '03-analysis');
-    if (width === 390) {
-      await expect(page.getByRole('tab', { name: /问题/ })).toContainText('2');
-      await page.getByRole('tab', { name: /问题/ }).click();
-      await expect(chat).toBeHidden();
-    }
-    const questionsPanel = page.locator('.ro-questions');
-    await expect(questionsPanel.getByRole('radio', { name: /先只检视和打标签/ })).toBeChecked();
-    await expect(questionsPanel).toContainText('推荐理由：仓库还没有 CI，先看检视的质量。');
-    await questionsPanel.getByLabel('第 2 题的补充').fill('标签颜色沿用 GitHub 默认');
-    await shot(page, '04-questions');
-    await questionsPanel.getByRole('button', { name: '提交回答' }).click();
 
-    // The plan: every item says what changes and where; one is left out before confirming.
-    await expect(phase).toHaveText('待确认');
-    if (width === 390) await page.getByRole('tab', { name: /方案/ }).click();
-    const planPanel = page.locator('.ro-plan');
-    await expect(planPanel.locator('.ro-change')).toHaveCount(5);
-    await expect(planPanel.locator('[data-item=start]')).toContainText('确认后向超级管理员申请启动');
-    await expect(planPanel.locator('[data-item=start] input')).toBeDisabled();
-    await expect(planPanel.locator('[data-item=labels]')).toContainText('在哪里生效：GitHub 标签');
-    await planPanel.locator('[data-item=conventions]').getByRole('checkbox').uncheck();
-    await expect(planPanel).toContainText('将应用 4 项，共 5 项');
-    // The bot-scheduling recommendation sits below the plan, outside its items; before the start it only says what comes next.
-    const recommended = planPanel.locator('[data-item=scheduled_dispatch]');
-    await expect(recommended).toContainText('用 Bot 定时触发 workflow');
-    await expect(recommended).toContainText('.github/workflows/nightly.yml：0 16 * * *，最近 5 次平均晚 7 小时');
-    await expect(recommended).toContainText('不随方案应用，也不影响启动项目');
-    await expect(recommended).toContainText('项目启动后可以交给管理助手处理');
-    await expect(recommended.getByRole('checkbox')).toHaveCount(0);
-    // The profile: its own tab on a phone, beside the plan on a desktop.
-    if (width === 390) {
-      await page.getByRole('tab', { name: /画像/ }).click();
-      await expect(page.locator('.ro-profile')).toContainText('一个 Node.js 命令行工具'); await shot(page, '05-profile');
-      await page.getByRole('tab', { name: /方案/ }).click();
-    } else await expect(page.locator('.ro-profile')).toContainText('维护者直接开 PR');
-    await shot(page, '06-plan');
-    await planPanel.getByRole('button', { name: '确认并申请启动' }).click();
+    // Turn 2: confirm choices -> files start request for super administrator approval.
+    await composer.fill('确认按推荐方案启动（能力上限 develop），新建 kind/bug 标签并补齐 CI 工作流');
+    await chat.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(chat).toContainText('已为你提交启动申请，等待超级管理员');
+    await shot(page, '04-requested');
 
-    // Requested: the start waits for a super administrator; a reload (and another device) shows the same state.
-    await expect(phase).toHaveText('已申请（等待超管）');
-    await expect(next).toContainText('已向超级管理员申请启动');
-    await expect(planPanel.locator('[data-item=start]')).toContainText('等待审批');
-    await expect(planPanel.locator('[data-item=conventions]')).toContainText('确认时去掉了这一项。');
-    await shot(page, '07-requested');
+    // Reload preserves the conversation and step state.
     await page.reload();
-    await expect(phase).toHaveText('已申请（等待超管）');
-    if (width === 1440) {
-      const other = await browser.newContext({ viewport }), device = await other.newPage();
-      await device.goto(f.h.admin); await device.getByRole('link', { name: '使用 GitHub 登录' }).click();
-      await expect(device.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
-      await device.goto(f.h.admin + '/#/onboarding/103');
-      await expect(device.getByTestId('onboarding-phase')).toHaveText('已申请（等待超管）');
-      await expect(device.locator('.ro-chat')).toContainText('请先回答两个问题');
-      await other.close();
-    }
+    await expect(chat).toContainText('已为你提交启动申请，等待超级管理员');
 
-    // The super administrator decides in 待处理 of their own session.
+    // Super administrator approves in 待处理 (#/inbox) of their own session.
     const adminContext = await browser.newContext({ viewport }), adminPage = await adminContext.newPage();
     await adminPage.goto(f.h.admin + '/#/inbox');
-    await adminPage.getByLabel('用户名', { exact: true }).fill('administrator'); await adminPage.getByLabel('密码', { exact: true }).fill(f.password);
+    await adminPage.getByLabel('用户名', { exact: true }).fill('administrator');
+    await adminPage.getByLabel('密码', { exact: true }).fill(f.password);
     await adminPage.getByRole('button', { name: '登录', exact: true }).click();
     const requestCard = adminPage.getByTestId('start-requests').locator('.start-request');
     await expect(requestCard).toContainText('fixture/project-103');
-    await expect(requestCard).toContainText('kind/bug、kind/feature');
+    await expect(requestCard).toContainText('可开发并开 PR');
     await expect(requestCard).toContainText('@administrator 于');
+    await requestCard.locator('.start-request-profile summary').click();
+    await expect(requestCard.locator('.start-request-profile')).toContainText('Node.js 命令行工具');
     await requestCard.getByRole('button', { name: '同意…' }).click();
-    await expect(requestCard.locator('select[name=level]')).toHaveValue('comment');
-    await shot(adminPage, '08-inbox-request');
+    await expect(requestCard.locator('select[name=level]')).toHaveValue('develop');
+    await shot(adminPage, '05-inbox-request');
     await requestCard.getByRole('button', { name: '确认同意并启动' }).click();
     await expect(adminPage.getByTestId('start-requests')).toHaveCount(0);
     await adminContext.close();
 
-    // Back on the requester's page: the project started and the plan was applied; the labels could not be read yet.
-    await expect(phase).toHaveText('部分未生效', { timeout: 30_000 });
-    const done = page.getByTestId('onboarding-done');
-    await expect(done.getByRole('heading', { name: '接入完成，有 1 项没有生效' })).toBeVisible();
-    await expect(done.locator('[data-item=start]')).toContainText('超级管理员同意后启动');
-    await expect(done.locator('[data-item=test_command]')).toContainText('尚未验证');
-    await expect(done.locator('[data-item=labels]')).toContainText('读不到仓库现有的标签');
-    await shot(page, '09-done-failed');
-    labelsReadable = true;
-    await done.locator('[data-item=labels]').getByRole('button', { name: '重试「GitHub 标签」' }).click();
-    await expect(phase).toHaveText('完成');
-    await expect(done.getByRole('heading', { name: '接入完成', exact: true })).toBeVisible();
-    await expect(done.locator('[data-item=labels]')).toContainText('kind/bug 已新建、kind/feature 已新建');
-    expect(routes.created.map(write => write.body.name)).toEqual(['kind/bug', 'kind/feature']);
-    // The completion page says what the bot does now, how to use it on GitHub and Feishu, and where to change it later.
-    await expect(done).toContainText('能力上限「可评论和打标签」');
-    await expect(done).toContainText('在 Issue 或 PR 的评论里 @ 这个 GitHub App 的机器人账号');
-    await expect(done).toContainText('私聊 bot 等同你在控制台的权限');
-    await expect(done.getByRole('link', { name: /监听与触发/ })).toHaveAttribute('href', '#/projects/103/triggers');
-    const dispatch = done.locator('[data-item=scheduled_dispatch]');
-    await expect(dispatch.getByRole('link', { name: /去定时任务页/ })).toHaveAttribute('href', '#/projects/103/schedules');
-    await shot(page, '10-done');
-    // 交给管理助手 puts the request in the assistant's composer; the person reads it and sends it themselves.
-    await dispatch.getByRole('button', { name: '交给管理助手' }).click();
-    const composer = page.getByLabel('管理消息', { exact: true });
-    await expect(composer).toHaveValue(/^请为 fixture\/project-103 开启 Bot 定时触发：\.github\/workflows\/nightly\.yml（0 16 \* \* \*）。/);
-    await expect(composer).toBeFocused();
-    await shot(page, '11-dispatch-to-assistant');
+    // Turn 3: apply policy + labels and stage workflow_changes: true task.create confirmation card.
+    await composer.fill('超级管理员已同意启动，请继续应用确认的配置并提交 CI 工作流变更开发任务');
+    await chat.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(chat).toContainText('点击「确认执行」后才会创建');
+    expect(routes.created.map(write => write.body.name)).toEqual(['kind/bug', 'bot-developing', 'bot-developed']);
 
-    // The started project offers to run the wizard again from its settings.
+    const confirmCard = chat.locator('.management-workflow-confirm');
+    await expect(confirmCard).toContainText('执行前确认');
+    await expect(confirmCard).toContainText('.github/workflows/ci.yml');
+    expect(f.h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='103'").n).toBe(0);
+    await shot(page, '06-workflow-confirm');
+
+    await confirmCard.getByRole('button', { name: '确认执行', exact: true }).click();
+    await expect(chat.locator('.management-receipt').filter({ hasText: '操作 创建任务' })).toContainText('已执行');
+    expect(f.h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='103'").n).toBe(1);
+    const createdTask = f.h.store.get("SELECT input FROM tasks WHERE repository_id='103'");
+    expect(Boolean(JSON.parse(createdTask.input).workflow_changes?.confirmed_by)).toBe(true);
+    await shot(page, '07-confirmed-receipt');
+
+    // Reloading does not offer a duplicate confirmation button for an already-confirmed step.
+    await page.reload();
+    await expect(chat).toContainText('这项修改 .github/workflows/ 的开发任务已在下方确认提交');
+    await expect(chat.locator('.management-workflow-confirm').getByRole('button', { name: '确认执行' })).toHaveCount(0);
+
+    // Started project's settings offer 仓库接入, opening #/projects/103/management with review prompt prefilled.
     await page.goto(f.h.admin + '/#/projects/103/basic');
-    await expect(page.getByRole('link', { name: /重新运行接入向导/ })).toHaveAttribute('href', '#/onboarding/103');
+    const onboardLink = page.getByRole('link', { name: /仓库接入/ });
+    await expect(onboardLink).toHaveAttribute('href', '#/projects/103/management');
+    await shot(page, '08-project-basic');
+    await onboardLink.click();
+    await expect(page).toHaveURL(/#\/projects\/103\/management$/);
+    await expect(composer).toHaveValue(/^请帮我核对并优化仓库 fixture\/project-103 的接入配置：/);
+
     expect(errors).toEqual([]);
   } finally { await f.close(); for (const cleanup of cleanups.reverse()) await cleanup(); }
 });

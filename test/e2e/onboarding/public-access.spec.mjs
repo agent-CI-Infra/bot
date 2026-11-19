@@ -37,7 +37,7 @@ test('公网接入同屏显示地址、验证结果、Tunnel 与只读的 GitHub
     await expect(card).toContainText(h.admin + '/auth/github/callback');
     // 只读：没有输入框、选择框或按钮，只有一条去向导第 3 步的链接。
     await expect(card.locator('input, select, textarea, button')).toHaveCount(0);
-    await expect(card.getByRole('link', { name: '接入向导第 3 步（GitHub 登录）', exact: true })).toHaveAttribute('href', '#/settings/onboarding/2');
+    await expect(card.getByRole('link', { name: '系统初始化第 3 步（GitHub 登录）', exact: true })).toHaveAttribute('href', '#/settings/onboarding/2');
     await expect(card).toContainText('换 OAuth App 或 Client ID 后，现有 GitHub 会话失效');
     await expect(page.locator('#settings-panel')).toContainText('还没有验证过的公网地址');
     // 这一页沿用打开控制台时已经发出的请求：只读登录配置不再多读一次接口。

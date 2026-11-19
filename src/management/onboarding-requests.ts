@@ -45,7 +45,7 @@ export const startRequestsName = 'start_requests';
 export const startRequestsTool = { type: 'function', function: { name: startRequestsName,
   description: 'Start requests: administrators of repositories in organizations that are not trusted ask a super administrator, the person you are talking with, to start their project. '
     + 'context.pending_start_requests lists the pending ones. action list: read them again. '
-    + 'approve {request_id; capability_ceiling, model_id or trust_organization only when the person asks for them}: starts the project and applies the rest of its plan as the requester. '
+    + 'approve {request_id; capability_ceiling, model_id or trust_organization only when the person asks for them}: starts the project (and applies any waiting items from an earlier plan). '
     + 'reject {request_id, reason}: the reason is required and is sent to the requester; ask for it when the person gave none. '
     + 'Decide only when the person says so in this conversation, for example 同意 or 拒绝 with a reason in answer to a start request notice; when several are pending and it is unclear which one they mean, ask instead of choosing.',
   parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
@@ -79,6 +79,28 @@ export class OnboardingRequests {
     const repository = this.host.repository(id)!;
     // Where to decide depends on the chat it reaches, so the channels add it (channels/service.ts).
     this.notify?.(this.superAdministrators(), `仓库 ${repository.full_name} 申请启动：${summary(plan)}`,
+      { request_id: request, repository_id: id, state: 'pending', tenant: 'github.com:' + repository.owner_id, audience: 'super_admin' });
+    return this.store.get('SELECT * FROM onboarding_requests WHERE id=?', request)!;
+  }
+
+  /** Files or updates an open start request directly from a management assistant conversation (#1133), without a plan draft. */
+  openDirect(actor: ActorContext, repository: Row, options: { capability_ceiling?: string; summary?: string } = {}): Row {
+    const id = String(repository.id), time = now();
+    const saved = JSON.stringify({ profile: options.summary?.trim().slice(0, 2000) || null, capability_ceiling: options.capability_ceiling ?? null });
+    const existing = this.store.get("SELECT * FROM onboarding_requests WHERE repository_id=? AND state='pending'", id);
+    if (existing) {
+      if (existing.application_id)
+        this.host.startOutcome(String(existing.application_id), { state: 'failed', error: 'start_request_superseded', detail: {}, executed_by: actor.principal_id });
+      this.store.run('UPDATE onboarding_requests SET application_id=NULL,requested_by=?,summary=?,updated_at=? WHERE id=?', actor.principal_id, saved, time, existing.id);
+      return this.store.get('SELECT * FROM onboarding_requests WHERE id=?', existing.id)!;
+    }
+    const request = randomId();
+    this.store.transaction(() => {
+      this.store.run(`INSERT INTO onboarding_requests(id,repository_id,application_id,requested_by,requested_at,state,summary,updated_at) VALUES(?,?,NULL,?,?,'pending',?,?)`,
+        request, id, actor.principal_id, time, saved, time);
+      this.store.audit(actor.principal_id, 'onboarding.start_requested', request, id);
+    });
+    this.notify?.(this.superAdministrators(), `仓库 ${repository.full_name} 申请启动：${directSummary(options)}`,
       { request_id: request, repository_id: id, state: 'pending', tenant: 'github.com:' + repository.owner_id, audience: 'super_admin' });
     return this.store.get('SELECT * FROM onboarding_requests WHERE id=?', request)!;
   }
@@ -120,24 +142,32 @@ export class OnboardingRequests {
     if (input.capability_ceiling !== undefined && !isCeiling(input.capability_ceiling)) fail(400, 'invalid_capability_ceiling', 'capability_ceiling');
     if (input.model_id !== undefined && (typeof input.model_id !== 'string' || !input.model_id)) fail(400, 'invalid_model', 'model_id');
     if (input.trust_organization !== undefined && typeof input.trust_organization !== 'boolean') fail(400, 'invalid_field', 'trust_organization');
-    const application = this.store.get('SELECT * FROM onboarding_applications WHERE id=?', request.application_id)!;
-    const plan = JSON.parse(this.store.get('SELECT plan FROM onboarding_plans WHERE id=?', application.plan_id)!.plan) as Json;
-    const planned = this.store.get("SELECT state FROM onboarding_receipts WHERE application_id=? AND item='capability_ceiling'", application.id)?.state === 'pending' ? (plan.capability_ceiling as Json).value : undefined;
+    const application = request.application_id ? this.store.get('SELECT * FROM onboarding_applications WHERE id=?', request.application_id) : undefined;
+    const plan = application ? parseJsonObject(this.store.get('SELECT plan FROM onboarding_plans WHERE id=?', application.plan_id)?.plan) : {};
+    const saved = application ? {} : parseJsonObject(request.summary);
+    const planned = application
+      ? (this.store.get("SELECT state FROM onboarding_receipts WHERE application_id=? AND item='capability_ceiling'", application.id)?.state === 'pending' ? (plan.capability_ceiling as Json | undefined)?.value : undefined)
+      : (isCeiling(saved.capability_ceiling) ? saved.capability_ceiling : undefined);
     const ceiling = input.capability_ceiling ?? planned;
     const model = input.model_id ?? this.store.get("SELECT m.id FROM settings s JOIN models m ON m.id=json_extract(s.value,'$') AND m.repository_id IS NULL WHERE s.key='onboarding.model' AND json_valid(s.value)")?.id;
     await installationApi(this.store, undefined, user, 'POST', new URL(`http://local/api/installations/${request.repository_id}/activate`),
       { ...(ceiling ? { capability_ceiling: ceiling } : {}), ...(model ? { model_id: model } : {}), ...(input.trust_organization ? { trust_organization: true } : {}) });
+    this.host.service.reconcileProjects?.();
     const decision = { capability_ceiling: projectCeiling(this.store, String(request.repository_id)), model_id: this.store.get('SELECT model_id FROM policies WHERE repository_id=?', request.repository_id)?.model_id ?? null,
       trust_organization: input.trust_organization === true };
     this.decide(request, 'approved', actor.principal_id, { decision });
-    // The level the super administrator chose is the project's level: the plan's level item does not move it again.
-    if (input.capability_ceiling !== undefined && input.capability_ceiling !== planned)
-      this.store.run("UPDATE onboarding_receipts SET state='skipped',error='decided_by_approval',detail=?,updated_at=? WHERE application_id=? AND item='capability_ceiling' AND state='pending'",
-        JSON.stringify({ approved: decision.capability_ceiling }), now(), application.id);
-    const requester = resolvePrincipalActor(this.store, String(request.requested_by), 'github.com:' + this.host.repository(String(request.repository_id))!.owner_id, undefined, 'web');
-    this.host.startOutcome(String(application.id), { state: 'succeeded', detail: { by: 'approval', approved_by: actor.principal_id, ...decision }, executed_by: actor.principal_id });
-    await this.host.resume(String(application.id), requester);
-    this.tell(request, 'approved', `仓库 ${this.fullName(request)} 的启动申请已同意，项目已启动，方案其余各项正按你的确认应用，结果见接入页。`);
+    if (application) {
+      // The level the super administrator chose is the project's level: the plan's level item does not move it again.
+      if (input.capability_ceiling !== undefined && input.capability_ceiling !== planned)
+        this.store.run("UPDATE onboarding_receipts SET state='skipped',error='decided_by_approval',detail=?,updated_at=? WHERE application_id=? AND item='capability_ceiling' AND state='pending'",
+          JSON.stringify({ approved: decision.capability_ceiling }), now(), application.id);
+      const requester = resolvePrincipalActor(this.store, String(request.requested_by), 'github.com:' + this.host.repository(String(request.repository_id))!.owner_id, undefined, 'web');
+      this.host.startOutcome(String(application.id), { state: 'succeeded', detail: { by: 'approval', approved_by: actor.principal_id, ...decision }, executed_by: actor.principal_id });
+      await this.host.resume(String(application.id), requester);
+      this.tell(request, 'approved', `仓库 ${this.fullName(request)} 的启动申请已同意，项目已启动，方案其余各项正按你的确认应用，可在管理助手查看。`);
+    } else {
+      this.tell(request, 'approved', `仓库 ${this.fullName(request)} 的启动申请已同意，项目已启动，可在管理助手继续配置。`);
+    }
     return this.read(actor, id);
   }
 
@@ -149,7 +179,7 @@ export class OnboardingRequests {
     const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
     if (!reason || reason.length > 2000) fail(400, 'rejection_reason_required', 'reason');
     this.decide(request, 'rejected', actor.principal_id, { reason });
-    this.host.startOutcome(String(request.application_id), { state: 'failed', error: 'start_rejected', detail: { reason, rejected_by: actor.principal_id }, executed_by: actor.principal_id });
+    if (request.application_id) this.host.startOutcome(String(request.application_id), { state: 'failed', error: 'start_rejected', detail: { reason, rejected_by: actor.principal_id }, executed_by: actor.principal_id });
     this.tell(request, 'rejected', `仓库 ${this.fullName(request)} 的启动申请被拒绝：${reason}`);
     return this.read(actor, id);
   }
@@ -161,22 +191,23 @@ export class OnboardingRequests {
     const request = this.store.get("SELECT * FROM onboarding_requests WHERE repository_id=? AND state='pending'", repositoryId);
     if (!request) return fail(404, 'onboarding_request_not_found');
     this.decide(request, 'withdrawn', actor.principal_id, {});
-    this.host.startOutcome(String(request.application_id), { state: 'failed', error: 'start_request_withdrawn', detail: { withdrawn_by: actor.principal_id }, executed_by: actor.principal_id });
+    if (request.application_id) this.host.startOutcome(String(request.application_id), { state: 'failed', error: 'start_request_withdrawn', detail: { withdrawn_by: actor.principal_id }, executed_by: actor.principal_id });
   }
 
   /**
    * Open requests lapse when nobody needs to decide any more: the repository left the installation, was started another way,
    * or its organization became trusted (its administrators then start it themselves: retrying the start does). Checked
-   * whenever requests are read, so no background job is needed.
+   * whenever requests are read or a repository is started directly, so no background job is needed.
    */
-  private lapse(repositoryId?: string): void {
+  lapse(repositoryId?: string): void {
     for (const request of this.store.all(`SELECT * FROM onboarding_requests WHERE state='pending'${repositoryId ? ' AND repository_id=?' : ''}`, ...(repositoryId ? [repositoryId] : []))) {
       const repository = this.host.repository(String(request.repository_id));
       const reason = this.store.get('SELECT 1 FROM repositories WHERE id=?', request.repository_id) ? 'project_started' : !repository ? 'repository_not_installed'
         : trustedOrganization(this.store, String(repository.owner_id)) ? 'organization_trusted' : null;
       if (!reason) continue;
       this.decide(request, 'lapsed', null, { reason });
-      if (reason !== 'project_started') this.host.startOutcome(String(request.application_id), { state: 'failed', error: 'start_request_lapsed', detail: { reason }, executed_by: String(request.requested_by) });
+      if (reason !== 'project_started' && request.application_id)
+        this.host.startOutcome(String(request.application_id), { state: 'failed', error: 'start_request_lapsed', detail: { reason }, executed_by: String(request.requested_by) });
     }
   }
   private decide(request: Row, state: RequestState, by: string | null, extra: { reason?: string; decision?: Json }): void {
@@ -208,19 +239,35 @@ export class OnboardingRequests {
     if (repository) this.notify?.([String(request.requested_by)], text, { request_id: String(request.id), repository_id: String(request.repository_id), state, tenant: 'github.com:' + repository.owner_id, audience: 'requester' });
   }
   private view(row: Row): Json {
-    const application = this.store.get('SELECT plan_id,version FROM onboarding_applications WHERE id=?', row.application_id);
-    const plan = application ? JSON.parse(this.store.get('SELECT plan FROM onboarding_plans WHERE id=?', application.plan_id)?.plan ?? '{}') as Json : {};
+    const application = row.application_id ? this.store.get('SELECT plan_id,version FROM onboarding_applications WHERE id=?', row.application_id) : undefined;
+    const plan = application ? parseJsonObject(this.store.get('SELECT plan FROM onboarding_plans WHERE id=?', application.plan_id)?.plan) : {};
+    const saved = application ? {} : parseJsonObject(row.summary);
     // A GitHub account's username is an internal id: the console names it by its GitHub login (#934).
     const requester = this.store.get(`SELECT u.username,(SELECT i.display_name FROM external_identities i WHERE i.principal_id=p.id AND i.provider='github' AND i.status<>'revoked' ORDER BY i.verified_at DESC LIMIT 1) AS login
       FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=?`, row.requested_by);
     const repository = this.host.repository(String(row.repository_id));
     return { id: row.id, state: row.state, repository: { id: row.repository_id, full_name: repository?.full_name ?? null, organization_trusted: repository ? !!trustedOrganization(this.store, String(repository.owner_id)) : false },
       requested_by: { principal_id: row.requested_by, name: requester?.username ?? null, github_login: requester?.login ?? null }, requested_at: row.requested_at, plan_version: application?.version ?? null,
-      summary: { profile: (plan.profile as Json | undefined)?.summary ?? null, capability_ceiling: (plan.capability_ceiling as Json | undefined)?.value ?? null,
-        labels: (((plan.labels as Json | undefined)?.items as Json[] | undefined) ?? []).filter(label => label.action === 'create').map(label => label.name),
-        schedules: ((plan.schedules as Json[] | undefined) ?? []).map(schedule => schedule.name), ci: !!plan.ci },
-      decided_by: row.decided_by ?? null, decided_at: row.decided_at ?? null, reason: row.reason ?? null, decision: row.decision ? JSON.parse(row.decision) : null };
+      summary: application
+        ? { profile: (plan.profile as Json | undefined)?.summary ?? null, capability_ceiling: (plan.capability_ceiling as Json | undefined)?.value ?? null,
+          labels: (((plan.labels as Json | undefined)?.items as Json[] | undefined) ?? []).filter(label => label.action === 'create').map(label => label.name),
+          schedules: ((plan.schedules as Json[] | undefined) ?? []).map(schedule => schedule.name), ci: !!plan.ci }
+        : { profile: typeof saved.profile === 'string' ? saved.profile : null, capability_ceiling: isCeiling(saved.capability_ceiling) ? saved.capability_ceiling : null,
+          labels: [], schedules: [], ci: false },
+      decided_by: row.decided_by ?? null, decided_at: row.decided_at ?? null, reason: row.reason ?? null, decision: row.decision ? parseJsonObject(row.decision) : null };
   }
+}
+
+function parseJsonObject(value: unknown): Json {
+  if (typeof value !== 'string' || !value) return {};
+  try { const parsed: unknown = JSON.parse(value); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Json : {}; } catch { return {}; }
+}
+
+function directSummary(options: { capability_ceiling?: string; summary?: string }): string {
+  const parts: string[] = [];
+  if (options.capability_ceiling) parts.push('能力档 ' + options.capability_ceiling);
+  const profile = (options.summary ?? '').trim().slice(0, 300);
+  return (parts.join('；') || '在管理助手申请启动') + (profile ? `。摘要：${profile}` : '');
 }
 
 /** One line of the plan for the notification: level, labels to create, Manager checks, CI. */

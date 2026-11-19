@@ -204,7 +204,7 @@ test('已安装但未启动的仓库写明启动需超级管理员同意，项�
     await expect(page.locator('#identity-panel')).toContainText('fixture/project-101');
     await expect(page.locator('#identity-panel')).toContainText('启动需超级管理员同意');
     await expect(page.locator('.identity-connection-status')).toContainText('已安装但还没有被超级管理员启动');
-    await expect(page.locator('.identity-pending-repos').getByRole('link', { name: '开始接入 fixture/project-101' })).toHaveAttribute('href', '#/onboarding/101');
+    await expect(page.locator('.identity-pending-repos').getByRole('link', { name: '开始接入 fixture/project-101' })).toHaveAttribute('href', '#/management');
     await shot('identity-pending', 1440);
     await shot('identity-pending', 390);
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -213,14 +213,14 @@ test('已安装但未启动的仓库写明启动需超级管理员同意，项�
     const pendingRow = page.locator('.project-pending-row');
     await expect(pendingRow.locator('p')).toHaveCount(0);
     await expect(pendingRow.locator('.status')).toHaveText('启动需超级管理员同意');
-    await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动，所属组织未受信任的由超级管理员同意后启动。启动后它们出现在上面的项目列表里。');
+    await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App。点「开始接入」打开管理助手并自动填入接入提示词：助手先只读分析仓库并提出关键选项，你确认后启动（所属组织未受信任的会提交启动申请，由超级管理员同意后启动）。启动后它们出现在上面的项目列表里。');
     await expect(pendingRow.getByRole('button', { name: '去启动' })).toHaveCount(0);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.getByRole('heading', { name: '已登录，尚无可管理的项目' })).toHaveCount(0);
     await expect(page.locator('#count')).toContainText('0 个项目，1 个待接入');
     await expect(page.locator('.project-pending-group').getByRole('link', { name: '项目总览' })).toHaveCount(0);
     const entry = pendingRow.getByRole('link', { name: '开始接入 fixture/project-101' });
-    await expect(entry).toHaveAttribute('href', '#/onboarding/101');
+    await expect(entry).toHaveAttribute('href', '#/management');
     await expect(pendingRow.getByRole('button')).toHaveCount(0);
     await shot('projects-pending', 1440);
     await shot('projects-pending', 390);
@@ -235,7 +235,7 @@ test('已安装但未启动的仓库写明启动需超级管理员同意，项�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const installedRow = page.locator('#rows .row', { hasText: 'fixture/project-101' });
     await expect(installedRow.getByRole('button', { name: '启动', exact: true })).toBeVisible();
-    await expect(installedRow.getByRole('link', { name: /^开始接入/ })).toHaveAttribute('href', '#/onboarding/101');
+    await expect(installedRow.getByRole('link', { name: /^开始接入/ })).toHaveAttribute('href', '#/management');
     await expect(page.locator('.project-pending-group')).toHaveCount(0);
     await installedRow.getByRole('button', { name: '启动', exact: true }).click();
     await expect(page.locator('#activation-title')).toHaveText('启动 fixture/project-101');
@@ -403,7 +403,7 @@ test('待启动仓库很多时项目列表和身份页默认折叠，可按名�
       const fold = page.locator('#rows [data-testid=pending-repo-fold]');
       await expect(fold.locator('summary')).toHaveText('查看 15 个待接入仓库');
       await expect(fold.locator('.project-pending-row').first()).toBeHidden();
-      await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动，所属组织未受信任的由超级管理员同意后启动。启动后它们出现在上面的项目列表里。');
+      await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App。点「开始接入」打开管理助手并自动填入接入提示词：助手先只读分析仓库并提出关键选项，你确认后启动（所属组织未受信任的会提交启动申请，由超级管理员同意后启动）。启动后它们出现在上面的项目列表里。');
       if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
       await page.screenshot({ path: `.tmp/ui-979/projects-folded-${width}.png`, fullPage: true });
       await fold.locator('summary').focus();
@@ -455,7 +455,7 @@ test('待启动仓库很多时项目列表和身份页默认折叠，可按名�
       await expect(page.locator('#count')).toContainText('0 个项目，15 个待接入');
       const fold = page.locator('#rows [data-testid=pending-repo-fold]');
       await expect(fold.locator('summary')).toHaveText('查看 15 个待接入仓库');
-      await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动，所属组织未受信任的由超级管理员同意后启动。启动后它们出现在上面的项目列表里。');
+      await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App。点「开始接入」打开管理助手并自动填入接入提示词：助手先只读分析仓库并提出关键选项，你确认后启动（所属组织未受信任的会提交启动申请，由超级管理员同意后启动）。启动后它们出现在上面的项目列表里。');
       if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
       await page.screenshot({ path: `.tmp/ui-979/projects-self-start-folded-${width}.png`, fullPage: true });
       await fold.locator('summary').click();

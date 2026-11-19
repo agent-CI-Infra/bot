@@ -227,7 +227,7 @@ test('role-only and onboarding impacts remain visible before cancelling a shared
   const opening = click(); await settle();
   assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one · Saved reviewer（reviewer） · 已停用', 'Saved assistant（assistant）']);
   const body = view.querySelectorAll('p').map(node => node.textContent).join('\n');
-  assert.match(body, /显式模型引用会保留为不可用/); assert.match(body, /平台服务角色将变为未配置模型/); assert.match(body, /接入向导的默认模型/); assert.match(body, /不包括历史运行快照/);
+  assert.match(body, /显式模型引用会保留为不可用/); assert.match(body, /平台服务角色将变为未配置模型/); assert.match(body, /系统初始化的默认模型/); assert.match(body, /不包括历史运行快照/);
   cancel(); await opening; assert.deepEqual(page.requests, ['GET /api/models/m']);
 });
 

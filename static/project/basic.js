@@ -45,8 +45,16 @@ function basicSection() {
     ['可见性', installed ? installed.private ? '私有' : '公开' : null],
     ['项目状态', policy.enabled ? '已启用' : '已禁用']]));
   if (target.rules?.retired_files?.length) info.append(retiredRulesNotice(target.rules));
-  // #934: the onboarding wizard again, against the project as it is now: it lists only what it would change.
-  if (editable) info.append(consoleLink(`#/onboarding/${id}`, '重新运行接入向导', '助手对照现在的设置给出建议，只列出要改变的项；不确认就不改'));
+  // #934, #1133: opens the project's management assistant conversation with an onboarding review prompt prefilled.
+  if (editable) {
+    const onboard = consoleLink(`#/projects/${id}/management`, '仓库接入', '在管理助手对照当前设置分析仓库，确认后再调整配置');
+    onboard.addEventListener('click', event => {
+      if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || typeof openRepositoryOnboarding !== 'function') return;
+      event.preventDefault();
+      Promise.resolve(openRepositoryOnboarding({ id, full_name: repository.full_name, started: true })).catch(error);
+    });
+    info.append(onboard);
+  }
   const summary = card('当前配置一览');
   const machineSize = current.rules?.computer?.cpus
     ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB`

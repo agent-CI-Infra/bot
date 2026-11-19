@@ -57,7 +57,7 @@ test('shared deletion names service roles and onboarding without changing them o
     await row(page).getByRole('button', { name: '删除', exact: true }).click();
     await expect(dialog(page)).toContainText('管理助手（management-assistant）');
     await expect(dialog(page)).toContainText('仓库问答助手（repository-assistant）');
-    await expect(dialog(page)).toContainText('接入向导的默认模型');
+    await expect(dialog(page)).toContainText('系统初始化的默认模型');
     await page.setViewportSize({ width: 390, height: 568 });
     await dialog(page).getByRole('button', { name: '取消', exact: true }).click();
     expect(h.store.all('SELECT * FROM service_roles')).toEqual(roles); expect((await admin('/api/onboarding')).value.model_id).toBe(model.id);

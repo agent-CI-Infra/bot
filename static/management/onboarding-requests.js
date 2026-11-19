@@ -16,9 +16,13 @@ async function renderStartRequests(holder, isCurrent = () => holder.isConnected)
   const requests = listed.requests;
   if (!requests.length) { holder.replaceChildren(); return; }
   const section = element('section', '', 'start-requests'); section.dataset.testid = 'start-requests';
-  section.append(element('h2', `启动申请（${requests.length}）`), element('p', '这些仓库的管理员走完了接入向导，所属组织还没受信任，需要你同意才能启动。同意后其余各项以申请人的身份、按申请人自己的权限应用。', 'muted'));
+  section.append(element('h2', `启动申请（${requests.length}）`), element('p', '这些仓库所属组织尚未受信任，仓库管理员在管理助手提交了启动申请，需要你同意才能启动。', 'muted'));
   for (const request of requests) section.append(startRequestCard(request, models, () => renderStartRequests(holder, isCurrent)));
   holder.replaceChildren(section);
+}
+
+function startRequestCeilingCaption(value) {
+  return projectCeilingOptions.find(([level]) => level === value)?.[1] || value;
 }
 
 function startRequestCard(request, models, reload) {
@@ -26,13 +30,15 @@ function startRequestCard(request, models, reload) {
   const summary = request.summary, name = request.repository.full_name || request.repository.id;
   const head = element('div', '', 'start-request-head');
   head.append(element('h3', name), element('span', '待处理', 'status status-warning'));
-  card.append(head, element('p', `${(request.requested_by.github_login ? '@' + request.requested_by.github_login : request.requested_by.name || '管理员')} 于 ${timestamp(request.requested_at)} 申请 · 第 ${request.plan_version} 版方案`, 'muted'));
+  card.append(head, element('p', `${(request.requested_by.github_login ? '@' + request.requested_by.github_login : request.requested_by.name || '管理员')} 于 ${timestamp(request.requested_at)} 申请${request.plan_version != null ? ` · 第 ${request.plan_version} 版方案` : ''}`, 'muted'));
   const facts = element('dl', '', 'start-request-facts');
   const fact = (term, value) => facts.append(element('dt', term), element('dd', value));
-  fact('能力上限', summary.capability_ceiling ? repoOnboardingCeiling(summary.capability_ceiling)[1] : '方案未写');
-  fact('新建标签', summary.labels.length ? summary.labels.join('、') : '无');
-  fact('定时检查', summary.schedules.length ? summary.schedules.join('、') : '无');
-  fact('CI 建议', summary.ci ? '有，确认后转成开发任务（bot 开 PR，人合并）' : '无');
+  fact('能力上限', summary.capability_ceiling ? startRequestCeilingCaption(summary.capability_ceiling) : '未指定（默认评论与标签）');
+  if (request.plan_version != null) {
+    fact('新建标签', summary.labels.length ? summary.labels.join('、') : '无');
+    fact('定时检查', summary.schedules.length ? summary.schedules.join('、') : '无');
+    fact('CI 建议', summary.ci ? '有，确认后转成开发任务（bot 开 PR，人合并）' : '无');
+  }
   card.append(facts);
   if (summary.profile) {
     const profile = element('details', '', 'start-request-profile'), body = element('div', '', 'management-markdown');
@@ -60,7 +66,7 @@ function startRequestCard(request, models, reload) {
     form.append(field('模型', model), field('能力上限', level), trustLabel, actions);
     form.addEventListener('submit', event => {
       event.preventDefault();
-      void decide('approve', { ...(model.value ? { model_id: model.value } : {}), capability_ceiling: level.value, ...(trust.checked ? { trust_organization: true } : {}) }, submit, `已同意 ${name} 启动，方案其余各项正在应用。`);
+      void decide('approve', { ...(model.value ? { model_id: model.value } : {}), capability_ceiling: level.value, ...(trust.checked ? { trust_organization: true } : {}) }, submit, request.plan_version != null ? `已同意 ${name} 启动，方案其余各项正在应用。` : `已同意 ${name} 启动。`);
     });
     slot.replaceChildren(form); model.focus();
   };

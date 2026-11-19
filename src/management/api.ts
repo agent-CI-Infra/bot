@@ -5,6 +5,7 @@ import { assertCurrent } from '../identity/authorization.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 import { ManagementService } from './service.js';
 import { ManagementAgent } from './agent.js';
+import { retiredApi } from '../app/retired.js';
 import { managerPrompt } from '../work/settings.js';
 import { managerView } from '../work/api.js';
 
@@ -33,18 +34,7 @@ export class ManagementApi {
         return this.agent.send(actor,id,input);
       }
     }
-    // Repository onboarding (#930): the repository's session, opened or closed; its conversation uses the routes above.
-    // Confirming its plan and retrying an item of the confirmed plan (#932); withdrawing its start request (#933).
-    const onboarding=/^\/api\/management\/onboarding\/([1-9]\d*)(?:\/(close|confirm|request\/withdraw)|\/items\/([a-z_]+)\/(retry))?$/.exec(path);
-    if(onboarding){
-      const repository=onboarding[1]!;
-      if(method==='POST'&&onboarding[2]==='request/withdraw')return this.agent.onboarding.withdraw(actor,repository,input);
-      if(method==='GET'&&!onboarding[2]&&!onboarding[4])return this.agent.onboarding.view(actor,repository);
-      if(method==='POST'&&onboarding[2]==='confirm')return this.agent.onboarding.confirm(actor,repository,input);
-      if(method==='POST'&&onboarding[4])return this.agent.onboarding.retry(actor,repository,onboarding[3]!,input);
-      if(method==='POST'){fields(input,[]);return onboarding[2]?this.agent.onboarding.close(actor,repository):this.agent.onboarding.open(actor,repository);}
-    }
-    // Start requests (#933), for super administrators to decide.
+    // Start requests (#933, #1133), for super administrators to decide.
     if(path==='/api/management/onboarding-requests'&&method==='GET')return this.agent.onboarding.apply.requests.list(actor,url.searchParams.get('state'));
     const request=/^\/api\/management\/onboarding-requests\/([a-f0-9]+)(?:\/(approve|reject))?$/.exec(path);
     if(request){
@@ -52,6 +42,7 @@ export class ManagementApi {
       if(method==='POST'&&request[2]==='approve')return this.agent.onboarding.apply.requests.approve(actor,request[1]!,input);
       if(method==='POST'&&request[2]==='reject')return this.agent.onboarding.apply.requests.reject(actor,request[1]!,input);
     }
+    retiredApi(url);
     return fail(404,'management_endpoint_not_found');
   }
   async stream(actor:ActorContext,url:URL,res:ServerResponse):Promise<void>{

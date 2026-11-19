@@ -65,7 +65,8 @@ async function openManagementChat(projectId = null) {
   await chat.loading;
   if (managementChat !== chat || version !== chat.openVersion || !chat.client) return;
   await syncManagementScope();
-  if (!chat.window.hidden && document.activeElement === focusAtOpen) chat.client.focus();
+  const drafted = chat.client.applyOnboarding?.();
+  if (!drafted && !chat.window.hidden && document.activeElement === focusAtOpen) chat.client.focus();
   activity(chat.active);
 }
 function syncManagementScope() {

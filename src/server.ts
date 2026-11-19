@@ -132,6 +132,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     protectedVersions: cli => activeCliVersions(store, cli),
   });
   sharedManagement.assistants = assistants;
+  sharedManagement.reconcileProjects = () => { void options.projects?.reconcile().catch(() => {}); };
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);

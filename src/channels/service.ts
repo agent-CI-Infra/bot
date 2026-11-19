@@ -425,7 +425,8 @@ export class ChannelService {
    * is decided on 待处理 only.
    */
   private onboardingNotice(principals: string[], notice: string, about: RequestNotice): void {
-    const link = this.options.origin ? '\n' + this.options.origin + (about.audience === 'super_admin' ? '/#/inbox' : '/#/onboarding/' + about.repository_id) : '';
+    const link = this.options.origin ? '\n' + this.options.origin + (about.audience === 'super_admin' ? '/#/inbox'
+      : about.state === 'approved' ? '/#/projects/' + about.repository_id + '/management' : '/#/management') : '';
     for (const principal of principals) for (const row of this.store.all("SELECT c.id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=? AND c.chat_type='p2p'", principal)) {
       try {
         const chat = this.employees.chat(String(row.id)), application = this.applicationTenant(chat);

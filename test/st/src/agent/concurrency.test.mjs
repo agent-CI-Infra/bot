@@ -300,7 +300,7 @@ test('global settings change the wizard settings and shared models without a pro
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
   await page.run('renderSettings(renderVersion)');
-  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['工作电脑', '#/settings/work-computers'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['助手电脑', '#/settings/assistant-computers'], ['Agent CLI 工具卷', '#/settings/agent-tools'], ['存储', '#/settings/storage'], ['接入向导', '#/settings/onboarding'], ['公网接入', '#/settings/access'], ['外部执行', '#/settings/external'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['飞书连接', '#/settings/feishu'], ['项目管理', '#/settings/projects'], ['用户', '#/settings/users']]);
+  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['工作电脑', '#/settings/work-computers'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['助手电脑', '#/settings/assistant-computers'], ['Agent CLI 工具卷', '#/settings/agent-tools'], ['存储', '#/settings/storage'], ['系统初始化', '#/settings/onboarding'], ['公网接入', '#/settings/access'], ['外部执行', '#/settings/external'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['飞书连接', '#/settings/feishu'], ['项目管理', '#/settings/projects'], ['用户', '#/settings/users']]);
   assert.deepEqual(cards(), ['同时运行的任务', '默认资源', '当前运行版本']);
   assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '工作电脑');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);
@@ -333,8 +333,8 @@ test('global settings change the wizard settings and shared models without a pro
   assert.match(text(section('Cloudflare Tunnel')), /未配置/); assert.equal(buttons(section('Cloudflare Tunnel'), '撤销 token').length, 0);
 
   // The accounts category shows the wizard's App, which now flags the webhook left on the old address, and every account.
-  await open('accounts'); assert.deepEqual(cards(), ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']);
-  const app = () => section('接入向导使用的 GitHub App');
+  await open('accounts'); assert.deepEqual(cards(), ['系统初始化使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']);
+  const app = () => section('系统初始化使用的 GitHub App');
   assert.match(text(app()), /webhook 不在当前公网地址下/);
   assert.deepEqual(section('已登记的账号').querySelectorAll('.row strong').map(node => node.textContent), ['First App', 'Second App', 'Token account']);
   assert.match(text(section('已登记的账号')), /凭据已撤销/); assert.ok(buttons(section('已登记的账号'), '新增账号').length);
@@ -363,7 +363,7 @@ test('global settings change the wizard settings and shared models without a pro
   assert.match(text(section('部署共享模型')), /已保存模型名 renamed-model/);
   const deleting = buttons(row('renamed-model'), '删除')[0].listeners.click[0](); await settle();
   assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /所有项目都不能再选/);
-  assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /接入向导的默认模型/);
+  assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /系统初始化的默认模型/);
   assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one']);
   await confirm(deleting);
   assert.deepEqual(sent.at(-1), ['DELETE', '/api/models/m2', {}]);

@@ -118,8 +118,16 @@ async function render(quiet = false) {
     const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     const heading = element('strong', name); heading.title = name; heading.classList.add('row-title'); content.append(heading);
     if (tab === 'projects' && !hiddenView && row.registered !== false) content.append(consoleLink(`#/projects/${row.id}/overview`, '项目总览', '查看工作进展与待处理事项'));
-    // #934: a super administrator's installed list keeps 启动 in 操作; the onboarding wizard sits where 项目总览 would.
-    else if (tab === 'projects' && !hiddenView && row.installed) content.append(consoleLink(`#/onboarding/${row.id}`, '开始接入', '助手先分析仓库、给出方案，确认后启动'));
+    // #934, #1133: a super administrator's installed list keeps 启动 in 操作; 开始接入 opens the management assistant where 项目总览 would.
+    else if (tab === 'projects' && !hiddenView && row.installed) {
+      const onboard = consoleLink('#/management', '开始接入', '在管理助手分析仓库、确认后启动并配置');
+      onboard.addEventListener('click', event => {
+        if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || typeof openRepositoryOnboarding !== 'function') return;
+        event.preventDefault();
+        Promise.resolve(openRepositoryOnboarding({ id: row.id, full_name: row.full_name, started: false })).catch(error);
+      });
+      content.append(onboard);
+    }
     const detail = taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
       : installedView ? installedDetail(row) : (row.model_id ? '' : '还没有默认模型');
     // The repository number leaves the first screen but stays on hover, with or without a detail line.

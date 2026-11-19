@@ -132,7 +132,7 @@ function consoleGroups() {
   ];
   if (me.role === 'super_admin') {
     management.push(
-      ['#/settings/onboarding', '接入向导', '部署接入步骤'],
+      ['#/settings/onboarding', '系统初始化', '部署初始化步骤'],
       ['#/settings/installations', '安装档案', 'GitHub App 安装记录'],
       ['#/settings/accounts', '机器人账号', '接入使用的 GitHub App'],
       ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
@@ -234,7 +234,7 @@ function syncConsoleShell() {
   $('console-context').textContent = project ? (repo ? organization(repo) + ' / ' + shortName(repo) + (project.section === 'overview' ? '' : ' / ' + (projectSectionCaption(project.section) || '找不到页面'))
     : unstarted?.registered === false ? organization(unstarted) + ' · ' + shortName(unstarted) + ' · ' + t('nav.unstarted')
       : typeof current !== 'undefined' && current?.unavailable && String(current.id) === String(project.id) ? t(current.unavailable === 'missing' ? 'nav.project_not_found' : 'nav.project_unavailable') : t('nav.reading_project'))
-    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: settingsContext, 'repository-onboarding': t('nav.repository_onboarding') }[tab] || titles[tab] || t('identity.title'));
+    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: settingsContext }[tab] || titles[tab] || t('identity.title'));
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
   const permission = $('console-permission');
@@ -401,7 +401,6 @@ async function renderConsolePage(request) {
   else if (tab === 'new-task') await renderNewTask(request);
   else if (tab === 'conversations') await renderChannelConsole(request);
   else if (tab === 'more') renderConsoleMore();
-  else if (tab === 'repository-onboarding') await renderRepositoryOnboarding(request);
   else {
     await renderConsoleInbox(request);
     const origin = consoleInboxReturn;

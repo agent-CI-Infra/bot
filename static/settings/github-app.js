@@ -9,7 +9,7 @@ function appBody(view, redraw) {
     if (selected) name.append(' ', badge('当前', 'success'));
     name.append(element('p', 'App ID ' + app.app_id, 'muted'));
     const use = button(selected ? '重新检查' : '改用此 App', async () => {
-      if (!selected && !await askConfirm({ title: `改用 ${app.name}？`, body: ['接入向导的安装和启用步骤改用这个 App；已启用的项目继续使用各自的账号。', `GitHub 上这个 App 的 webhook 会改为 ${origin} 下的地址。`], action: '改用' })) return;
+      if (!selected && !await askConfirm({ title: `改用 ${app.name}？`, body: ['系统初始化的安装和启用步骤改用这个 App；已启用的项目继续使用各自的账号。', `GitHub 上这个 App 的 webhook 会改为 ${origin} 下的地址。`], action: '改用' })) return;
       use.disabled = true; message.textContent = '';
       try { view.onboarding.app = (await api('/api/onboarding/use-app', 'POST', { account_id: app.id, update_webhook: true })).app; redraw(selected ? '已重新检查，webhook 指向当前公网地址' : `已改用 ${app.name}`); }
       catch (err) { use.disabled = false; message.textContent = readErrorText(err); }
@@ -17,6 +17,6 @@ function appBody(view, redraw) {
     use.disabled = !origin; row.append(name, use); list.append(row);
   }
   if (!apps.length) list.append(element('li', '本系统还没有登记 GitHub App。', 'muted'));
-  nodes.push(list, message, note(origin ? '改用或重新检查时向 GitHub 核对 App 凭据和安装数，并把 App 的 webhook 设为上面已验证的公网地址。新建 App 和安装到账号在「接入向导」里完成。' : '先验证公网 HTTPS 地址，才能改用或重新检查 App。'));
+  nodes.push(list, message, note(origin ? '改用或重新检查时向 GitHub 核对 App 凭据和安装数，并把 App 的 webhook 设为上面已验证的公网地址。新建 App 和安装到账号在「系统初始化」里完成。' : '先验证公网 HTTPS 地址，才能改用或重新检查 App。'));
   return nodes;
 }

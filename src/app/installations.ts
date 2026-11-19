@@ -11,6 +11,7 @@ import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { accessGaps, appGaps } from './access.js';
 import { installationSnapshot, installationRef, accountRef, queueInstallationSync, installationExecutionDenied } from '../installations/archive.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
+import { identityProjection } from '../identity/storage.js';
 import { requestedCeiling, trustCeiling, trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { adoptOnboardingUsage } from '../management/storage.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
@@ -529,6 +530,7 @@ function activate(store: Store, user: Actor, id: string, input: Json, check: () 
       if (store.get('SELECT id FROM repositories WHERE full_name=?', chosen!.full_name)) fail(409, 'repository_exists');
       store.run('INSERT INTO repositories VALUES(?,?,?,?)', id, chosen!.full_name, chosen!.owner_id, chosen!.account_id);
       store.run('INSERT INTO policies(repository_id) VALUES(?)', id);
+      if (store.hasTable('identity_projects')) identityProjection(store);
     }
     // A deployment-shared model becomes available to this repository when chosen here.
     if (modelRow && modelRow.repository_id === null) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);

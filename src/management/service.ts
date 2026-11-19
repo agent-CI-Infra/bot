@@ -4,6 +4,7 @@ import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
+import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import type { Actor } from '../app/auth.js';
 import { projectLabels, rulesUpdateRemoved, type RuleService } from '../rules/service.js';
@@ -46,6 +47,8 @@ export class ManagementService {
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
   /** The conversation owners' computers (#457) used by the management assistant and group assistants. */
   assistants?: AssistantComputerService;
+  /** Reconciles project environments after starting a repository through the management assistant or start requests. */
+  reconcileProjects?: () => void;
   constructor(readonly store: Store, readonly rules: RuleService, readonly tasks: TaskCommands, readonly computer?:Manager, readonly githubUrl?:string) {}
   register(operation: string, extension: ManagementExtension): void {
     if(!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation))throw new Error('invalid_management_registration');
@@ -60,6 +63,55 @@ export class ManagementService {
   projects(actor: ActorContext): string[] {
     assertCurrent(actor);
     return effectiveRepositories(this.store,actor).filter(id=>!actor.project_id||id===actor.project_id);
+  }
+  /** An unstarted repository installed in this deployment, matched by numeric id or full_name. */
+  findInstalledRepository(selected: unknown): Row | undefined {
+    if (typeof selected !== 'string' || !selected) return undefined;
+    const installed = this.store.get(`SELECT i.repository_id AS id,i.full_name,i.owner_id,i.account_id FROM installed_repositories i JOIN accounts a ON a.id=i.account_id
+      WHERE (i.repository_id=? OR i.full_name=?) AND i.installed=1 AND i.hidden=0 AND NOT EXISTS(SELECT 1 FROM repositories p WHERE p.id=i.repository_id)
+      ORDER BY (a.type='github_app') DESC,i.synced_at DESC LIMIT 1`, selected, selected);
+    if (installed) return installed;
+    return this.store.get(`SELECT r.repository_id AS id,r.full_name,r.owner_id,g.account_id AS account_id FROM installation_repositories r
+      JOIN github_installations g ON g.ref=r.installation_ref
+      WHERE (r.repository_id=? OR r.full_name=?) AND r.present=1 AND g.status='active'
+      AND NOT EXISTS(SELECT 1 FROM repositories p WHERE p.id=r.repository_id)
+      AND NOT EXISTS(SELECT 1 FROM installed_repositories h WHERE h.repository_id=r.repository_id AND h.hidden=1)
+      ORDER BY g.revision DESC LIMIT 1`, selected, selected);
+  }
+  /** Unstarted installed repositories this actor administers (GitHub repo/org admin or super_admin) within their current scope. */
+  pendingRepositories(actor: ActorContext): { id: string; full_name: string; owner_id: string; account_id: string; self_start: boolean }[] {
+    assertCurrent(actor);
+    if (this.user(actor).role === 'super_admin') {
+      const seen = new Map<string, { id: string; full_name: string; owner_id: string; account_id: string; self_start: boolean }>();
+      for (const row of this.store.all(`SELECT i.repository_id AS id,i.full_name,i.owner_id,i.account_id FROM installed_repositories i JOIN accounts a ON a.id=i.account_id
+        WHERE i.installed=1 AND i.hidden=0 AND NOT EXISTS(SELECT 1 FROM repositories p WHERE p.id=i.repository_id)
+        ORDER BY (a.type='github_app') DESC,i.synced_at DESC`)) {
+        const id = String(row.id), owner = String(row.owner_id);
+        if ((actor.project_id && actor.project_id !== id) || (actor.tenant_id && actor.tenant_id !== 'github.com:' + owner) || seen.has(id)) continue;
+        seen.set(id, { id, full_name: String(row.full_name), owner_id: owner, account_id: String(row.account_id), self_start: true });
+      }
+      for (const row of this.store.all(`SELECT r.repository_id AS id,r.full_name,r.owner_id,g.account_id AS account_id FROM installation_repositories r
+        JOIN github_installations g ON g.ref=r.installation_ref
+        WHERE r.present=1 AND g.status='active' AND NOT EXISTS(SELECT 1 FROM repositories p WHERE p.id=r.repository_id)
+        AND NOT EXISTS(SELECT 1 FROM installed_repositories h WHERE h.repository_id=r.repository_id AND h.hidden=1)
+        ORDER BY g.revision DESC`)) {
+        const id = String(row.id), owner = String(row.owner_id);
+        if ((actor.project_id && actor.project_id !== id) || (actor.tenant_id && actor.tenant_id !== 'github.com:' + owner) || seen.has(id)) continue;
+        seen.set(id, { id, full_name: String(row.full_name), owner_id: owner, account_id: String(row.account_id), self_start: true });
+      }
+      return [...seen.values()].sort((a, b) => a.full_name.localeCompare(b.full_name) || a.id.localeCompare(b.id));
+    }
+    if (!actor.capabilities.includes('*') && !actor.capabilities.includes('config.write')) return [];
+    return pendingInstalledRepositories(this.store, actor.principal_id, actor.tenant_id)
+      .filter(repo => !actor.project_id || actor.project_id === repo.id)
+      .flatMap(repo => {
+        const found = this.findInstalledRepository(repo.id);
+        return found ? [{ id: repo.id, full_name: String(found.full_name), owner_id: String(found.owner_id), account_id: String(found.account_id), self_start: repo.self_start }] : [];
+      });
+  }
+  pendingRepository(actor: ActorContext, selected: unknown): Row | undefined {
+    if (typeof selected !== 'string' || !selected) return undefined;
+    return this.pendingRepositories(actor).find(r => r.id === selected || r.full_name === selected);
   }
   scope(actor:ActorContext,project:string,capability='tasks.read'): Row {
     if(actor.project_id&&actor.project_id!==project)fail(403,'project_scope_mismatch');
@@ -159,7 +211,8 @@ export class ManagementService {
     if(operation==='list_projects')return {projects:ids.slice(offset,offset+limit).map(id=>{
       const project=this.scope(actor,id),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!;
       return {id,tenant_id:this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',id)?.tenant_id,full_name:project.full_name,enabled:!!project.enabled,configuration_gaps:[...(!policy.model_id?['model_not_configured']:[]),...(installationExecutionDenied(this.store,project.account_id,id)?['installation_unavailable']:[])],url:'#/projects/'+id+'/basic'};
-    }),total:ids.length,next_offset:offset+limit<ids.length?offset+limit:null};
+    }),total:ids.length,next_offset:offset+limit<ids.length?offset+limit:null,
+      ...(!target.project_id&&offset===0?{pending_repositories:this.pendingRepositories(actor).map(r=>({id:r.id,full_name:r.full_name,started:false,self_start:r.self_start,tenant_id:'github.com:'+r.owner_id}))}:{})};
     if(operation==='get_effective_config'){if(!target.project_id)fail(400,'project_target_required');return this.effective(actor,target.project_id);}
     if(operation==='search_knowledge'){if(!target.project_id)fail(400,'project_target_required');if(!this.knowledgeSearch)fail(409,'knowledge_not_registered');return this.knowledgeSearch!(actor,target.project_id,args.query??'',offset,limit);}
     if(['read_knowledge','knowledge_versions'].includes(operation)){if(!target.project_id||typeof args.id!=='string')fail(400,'knowledge_target_required');if(!this.knowledgeRead)fail(409,'knowledge_not_registered');return this.knowledgeRead!(actor,target.project_id,args.id,args.revision,operation==='knowledge_versions',args.baseline);}

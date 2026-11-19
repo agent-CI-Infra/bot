@@ -29,7 +29,7 @@ test('a trusted organization lets its repository administrator start a repositor
     await member.goto(f.h.admin + '/#/projects');
     await expect(member.getByRole('heading', { name: '待接入的仓库' })).toBeVisible();
     await expect(member.locator('[data-key="pending:103"]')).toContainText('启动需超级管理员同意');
-    await expect(member.locator('[data-key="pending:103"]').getByRole('link', { name: '开始接入 fixture/project-103' })).toHaveAttribute('href', '#/onboarding/103');
+    await expect(member.locator('[data-key="pending:103"]').getByRole('link', { name: '开始接入 fixture/project-103' })).toHaveAttribute('href', '#/management');
 
     // The super administrator trusts fixture in the settings card, with the shared model and the develop ceiling.
     await login(page, f, '/#/settings/projects');
@@ -48,9 +48,11 @@ test('a trusted organization lets its repository administrator start a repositor
     const row = member.locator('[data-key="pending:103"]');
     await expect(member.getByRole('heading', { name: '待接入的仓库' })).toBeVisible();
     await expect(row).toContainText('可自行启动');
-    // #934: the row's one entry is the onboarding wizard, which says the confirmation starts it directly.
+    await expect(row).toContainText('所属组织已受信任，在管理助手确认后可以直接启动');
+    // #934, #1133: 开始接入 opens the management assistant with the repository onboarding prompt prefilled.
     await row.getByRole('link', { name: '开始接入 fixture/project-103' }).click();
-    await expect(member.locator('.ro-scope')).toContainText('所属组织已受信任，确认后可以直接启动');
+    await expect(member).toHaveURL(/#\/management$/);
+    await expect(member.getByLabel('管理消息', { exact: true })).toHaveValue(/fixture\/project-103/);
     // The start itself is #848's: the same call the wizard's start item makes for a trusted organization.
     await member.evaluate(() => api('/api/installations/103/activate', 'POST', {}));
     await member.goto(f.h.admin + '/#/projects');

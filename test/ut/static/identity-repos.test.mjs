@@ -44,8 +44,8 @@ test('connected identity lists started repositories and separates pending ones',
   const pending = panel.querySelector('.identity-pending-repos');
   assert.equal(pending.querySelector('strong').textContent, 'ThinkFlowLab/FlyBot');
   assert.equal(pending.querySelector('.status').textContent, '启动需超级管理员同意');
-  // #934: each pending repository opens its onboarding wizard.
-  assert.equal(pending.querySelector('a').href, '#/onboarding/202');
+  // #934, #1133: each pending repository opens the management assistant with a prefilled onboarding prompt.
+  assert.equal(pending.querySelector('a').href, '#/management');
   assert.equal(pending.querySelector('a').textContent, '开始接入');
   assert.equal(panel.querySelector('.identity-openable-repos .status'), null);
 });
