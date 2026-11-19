@@ -35,7 +35,9 @@ const settingsCards = {
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? timeText(value) : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = view.overview ? element('div', '', 'storage-updated') : settingsCard('存储', 'h2');
-    intro.append(note(`这里统计已采集的文件与项目工作卷。后台快照每 5 分钟更新一次，目录按小时测量，工作卷每 6 小时扫描。最近刷新 ${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
+    intro.append(advancedHelp('这里统计已采集的文件与项目工作卷。', '后台快照每 5 分钟更新一次，目录按小时测量，工作卷每 6 小时扫描。'));
+    // The refresh time and a failed manager read are state, not an explanation: they stay on the first screen (#1064).
+    intro.append(note(`最近刷新 ${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
       + (view.manager_error ? view.manager_read_at
         ? `上次读取于 ${time(view.manager_read_at)}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。`
