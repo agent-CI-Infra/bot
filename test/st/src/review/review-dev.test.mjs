@@ -164,8 +164,8 @@ test('a comment continues the published Issue review as its next round, with tri
   assert.equal(development.source_task_id,task.id);assert.equal(development.status,'queued');assert.equal(development.unique_key,'101:development.issue:1:update:'+task.id);
 });
 
-test('an Issue review that concludes ready_for_development offers development without a label, only at the develop ceiling (#1026)',async t=>{
-  for(const [ceiling,conclusion,offered] of [['develop','ready_for_development',true],['develop','needs_information',false],['comment','ready_for_development',false]]){
+test('every published Issue review offers development without a label at the develop ceiling, whatever it concluded (#1026, #1104)',async t=>{
+  for(const [ceiling,conclusion,offered,said] of [['develop','ready_for_development',true,/结论为可开发/],['develop','needs_information',true,/结论为缺信息/],['comment','ready_for_development',false]]){
     const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[],assignees:[{login:'someone'}]};
     const h=await emptyRepositoryFixture(t,{
       github:(path,send)=>{if(path.endsWith('/issues/1')){send(issue);return true;}if(path.endsWith('/issues/1/events')){send([]);return true;}},
@@ -179,9 +179,9 @@ test('an Issue review that concludes ready_for_development offers development wi
     // No label is on the Issue, so the Manager needs a basis of its own; the rule decider of the tests never develops.
     const facts=JSON.parse(event.facts),[option]=JSON.parse(event.options);
     assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],[null,null,['someone']]);
-    assert.equal(facts.review.conclusion,'ready_for_development');
+    assert.equal(facts.review.conclusion,conclusion);
     assert.deepEqual([option.id,option.work,option.default],['development','development.issue',false]);
-    assert.match(event.summary,/结论为可开发/);
+    assert.match(event.summary,said);
     assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
   }
 });

@@ -42,7 +42,7 @@ import { dueProgress, milestoneToolName, reportMilestone, settleProgress, startP
 import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, developmentApproved, carryRevisionRequests,
   ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, type DevelopmentOffer, type GoAhead } from '../review/development.js';
-import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
+import { actionsConfigurationError, actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
@@ -381,11 +381,10 @@ export class TaskEngine {
           if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha))await headMoved(String(current.head?.sha),current,move);
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)issueEdited(current);
         // The go-ahead must still hold until publication: a development started on the label keeps it on the Issue (#815:
-        // other bases do not need it; older developments have no recorded basis and still do), and an Issue filed from an
-        // Actions failure stays unassigned.
+        // other bases do not need it; older developments have no recorded basis and still do).
         const basis=task.kind==='development.issue'?taskBasis(this.store,task.id):null;
-        if(task.kind==='development.issue'&&((!basis||basis.kind==='label')&&!developmentReady(current,this.label(task))||actionsIssueAssigned(this.store,task.repository_id,task.object_number,current)))
-          stop('development_not_approved','needs_replan',`Issue #${task.object_number} 不再满足开发条件：开发标签已被移除，或这个 Actions 提报的 Issue 已指派给别人。`);
+        if(task.kind==='development.issue'&&(!basis||basis.kind==='label')&&!developmentReady(current,this.label(task)))
+          stop('development_not_approved','needs_replan',`Issue #${task.object_number} 不再满足开发条件：开发标签已被移除。`);
         if(task.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,current,input.review))stop('actions_development_not_approved','needs_replan');
         const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
         if(actionsIssue!==null){
@@ -396,7 +395,8 @@ export class TaskEngine {
           }
           if(development&&task.kind.endsWith('.pr')){
             const issue=await github.object('development.issue',actionsIssue);
-            if(issue.state!=='open'||!developmentReady(issue,this.label(task))||actionsIssueAssigned(this.store,task.repository_id,actionsIssue,issue)||!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue,issue))stop('actions_development_not_approved','needs_replan');
+            // A revision of the bot's pull request for an Actions report needs that Issue open and the project's switches (#1104).
+            if(issue.state!=='open'||!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue,issue))stop('actions_development_not_approved','needs_replan');
           }
         }
         if(development){
@@ -890,15 +890,15 @@ export class TaskEngine {
           }
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0,...(o.resolved_threads?{resolved_threads:o.resolved_threads.length}:{})})});
           result={...result,outputs};
-          // A published Issue review offers development to the Manager with a person's go-ahead already on the Issue, or,
-          // without one, when it concludes ready_for_development (#1026): the Manager then needs a basis of its own, such as
-          // its prompt's rule for clear Issues. Otherwise the labeled webhook offers it later. A failed check counts as no
-          // go-ahead; the assignees of an offer without one are those of the object publisher.review just validated.
+          // A published Issue review always offers development to the Manager at the develop ceiling (#1104), whatever it
+          // concluded: with a person's go-ahead already on the Issue, or without one, when the Manager needs a basis of its
+          // own, such as its prompt's rule for clear Issues. A failed check counts as no go-ahead; the assignees of an offer
+          // without one are those of the object publisher.review just validated.
           const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
           let approved:DevelopmentOffer|null=null;
           if(task.kind==='review.issue'&&covers(projectCeiling(this.store,task.repository_id,policy),'develop')){
             approved=await this.developmentApproved(github,task).catch(()=>null);
-            if(!approved&&result.conclusion==='ready_for_development')approved=await (seen?Promise.resolve(seen):github.object(task.kind,task.object_number))
+            if(!approved)approved=await (seen?Promise.resolve(seen):github.object(task.kind,task.object_number))
               .then((issue:any)=>({label:null,labeled_by:null,assignees:assigneesOf(issue)}),()=>null);
             // Whether someone else has taken the Issue on is the Manager's judgement (#1047); it gets the facts as they are now.
             if(approved){const issue=seen??await github.object(task.kind,task.object_number).catch(()=>({number:task.object_number}));approved={...approved,claims:await issueClaims(github,this.store,issue,{comments:true})};}

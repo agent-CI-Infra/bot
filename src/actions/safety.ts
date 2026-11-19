@@ -1,4 +1,3 @@
-import { marked } from 'marked';
 import { hasCredentials, redactCredentials } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
 import { Redactor } from '../agent/common.js';
@@ -146,32 +145,13 @@ export function actionsSourceIssue(store: Store, task: { repository_id: string; 
 }
 
 /**
- * An Issue filed from an Actions failure keeps the strict development gates other Issues hand to the Manager: its text
- * comes from logs, so it is developed only unassigned and with a review that found the change requested.
+ * An Issue filed from an Actions failure is developed like any other the Manager judges (#1104): its classification, structure,
+ * review conclusion and assignees are facts for the Manager, not gates. What stays are the project's switches: the project is
+ * enabled, Actions failure handling is on, and the capability ceiling allows development.
  */
 export const actionsReport = (store: Store, id: string, number: number) => !!store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', id, number);
-export function actionsIssueAssigned(store: Store, id: string, number: number, issue: any) {
-  const assigned = !!issue?.assignee || Array.isArray(issue?.assignees) && issue.assignees.length > 0;
-  return assigned && actionsReport(store, id, number);
-}
-export function actionsDevelopmentAllowed(store: Store, id: string, number: number, issue?: any, result?: any) {
-  const source = store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?', id, number);
-  if (!source) return true;
+export function actionsDevelopmentAllowed(store: Store, id: string, number: number, _issue?: any, _result?: any) {
+  if (!actionsReport(store, id, number)) return true;
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', id);
-  if (source.classification !== 'code' || !policy?.enabled || !policy.actions_failures_enabled || !covers(projectCeiling(store, id, policy), 'develop')) return false;
-  const config = store.get('SELECT configured_at,error FROM actions_failure_scans WHERE repository_id=?', id);
-  if (!config?.configured_at || actionsConfigurationErrors.includes(config.error)) return false;
-  if (!issue) return true;
-  const prose = String(issue.body || '').split('<!-- dept-bot-actions-log-start -->')[0]!;
-  // Only sections in the author's prose count. Examples inside fenced code and blockquotes are evidence.
-  const sections = new Set<string>();
-  let section = '';
-  for (const block of marked.lexer(prose)) {
-    if (block.type === 'heading') section = block.depth === 2 ? block.text : '';
-    else if (section && ['paragraph', 'list', 'code', 'table', 'blockquote'].includes(block.type)
-      && ('text' in block ? block.text : block.raw).trim()) sections.add(section);
-  }
-  if (!['Current behavior', 'Expected behavior', 'Requested code change'].every(title => sections.has(title))) return false;
-  // The review that checked repository code confirms the product defect; the quote it once had to return went with #815.
-  return !result || result.product_defect === true;
+  return !!policy?.enabled && !!policy.actions_failures_enabled && covers(projectCeiling(store, id, policy), 'develop');
 }

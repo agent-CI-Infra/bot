@@ -4,7 +4,7 @@ import { randomId, type Json } from '../core/security.js';
 import { sha as digest } from '../agent/common.js';
 import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
-import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
+import { actionsDevelopmentAllowed } from '../actions/safety.js';
 import { recordEvent, recordFiltered, type CreateOption, type EventInput } from '../dispatch/store.js';
 import { eventFilters, labelDispatched, type EventFilters } from '../work/settings.js';
 
@@ -68,7 +68,7 @@ function botPullRequest(store: Store, repositoryId: string, pr: any, opening = f
 }
 // How often the bot's pull request was revised for requests so far, and how often for this author's (#1104): with no limit of
 // its own, the control plane gives the Manager the facts to tell a useful revision from two bots answering each other.
-function revisionFacts(store: Store, repositoryId: string, number: number, author: unknown) {
+export function revisionFacts(store: Store, repositoryId: string, number: number, author: unknown) {
   const count = (extra: string, ...args: string[]) => Number(store.get(`SELECT count(DISTINCT task_id) n FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done'${extra}`,
     repositoryId, number, ...args)?.n || 0);
   return { for_requests: count(''), for_this_author: author ? count(' AND author_id=?', String(author)) : 0 };
@@ -191,7 +191,7 @@ export function enqueueRefusal(store: Store, repositoryId: string, kind: string,
   commentId: string | null = null, updateId: string | null = null): { code: string; reason: string; task_id?: string } | null {
   if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return { code: 'invalid_object', reason: '事件对象的编号或提交无效。' };
   if (kind === 'development.issue' && !actionsDevelopmentAllowed(store, repositoryId, number))
-    return { code: 'actions_development_not_allowed', reason: '这是 Actions 失败提报的 Issue，它的分类、结构或指派不允许开发。' };
+    return { code: 'actions_development_not_allowed', reason: '这是 Actions 失败提报的 Issue，项目已关闭 Actions 失败处理或能力上限不到「可开发并开 PR」。' };
   if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return { code: 'invalid_object', reason: '评论编号无效。' };
   // A development is keyed by the labeling that asked for it, so a person can ask again after an earlier one ended.
   if (updateId !== null && (!['review.issue','review.pr','development.issue'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return { code: 'invalid_object', reason: '更新编号无效。' };
@@ -244,9 +244,10 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   const p = payload as any, action = String(p.action || ''), actor = String(p.sender?.login || '');
   const base = (type: string, key: string, object: 'issue' | 'pr', number: number, summary: string, facts: Json): Omit<EventInput, 'options'> =>
     ({ repositoryId, key: `${repositoryId}:${key}`, type, source: 'github', summary, facts: { event, action, actor, ...facts }, object: { type: object, number }, delivery });
-  // An edit of an Issue's title or body is first an update of its running development (#815): the development takes the
-  // current text instead of stopping. Comments and mentions ask for an answer, which a review gives.
-  const updateKinds = (object: 'issue' | 'pr', kind: string, trigger: Json) => object === 'issue' && (trigger as any).reason === 'issue_edited' ? ['development.issue', kind] : [kind];
+  // Any update of an Issue (an edit, a comment, a mention, a label) can continue its running development as well as its review
+  // (#815, #1104): the Manager picks which, and the development reads the update. A development takes the current text instead
+  // of stopping.
+  const updateKinds = (object: 'issue' | 'pr', kind: string, _trigger: Json) => object === 'issue' ? ['development.issue', kind] : [kind];
   // An update or mention: a review that answers it, joining a running review of the same object instead.
   const update = (type: string, object: 'issue' | 'pr', number: number, target: any, trigger: Json, merge: string, review: { commentId?: string; updateId?: string }, extra: Json = {}): EventInput => {
     const kind = object === 'pr' ? 'review.pr' : 'review.issue', head = object === 'pr' ? sha(target?.head?.sha) : null;
@@ -399,7 +400,7 @@ function developmentOffer(store: Store, repositoryId: string, issue: any, number
   if (issue?.state !== 'open' || issue.pull_request) return null;
   const review = store.get("SELECT id,result FROM tasks WHERE repository_id=? AND kind='review.issue' AND object_number=? AND status='succeeded' ORDER BY created_at DESC LIMIT 1", repositoryId, number);
   const result = review?.result ? JSON.parse(review.result) : null, assignees = assigneesOf(issue);
-  if (!actionsDevelopmentAllowed(store, repositoryId, number, issue, result ?? {}) || actionsReport(store, repositoryId, number) && assignees.length) return null;
+  if (!actionsDevelopmentAllowed(store, repositoryId, number)) return null;
   const option: CreateOption = { id: 'development', work: 'development.issue', title: `开发 Issue #${number}`,
     spec: { type: 'object', kind: 'development.issue', number, head: null, delivery, source_task: review?.id ?? null, update_id: delivery,
       input: { review: result, object_hash: digest(JSON.stringify([issue.title, issue.body])) } } };
