@@ -5,7 +5,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: requestedProject ? { project_id: requestedProject } : {}, arguments: { limit: 100 } }, { signal })).projects;
   if (!panel.isConnected || me?.id !== user) return null;
   panel.replaceChildren(); panel.className = 'management-panel';
-  const header = element('div', '', 'management-scope');
   let scope = requestedProject ? 'project:' + requestedProject : 'platform';
   const conversationKey = () => 'management-conversation:' + user + ':' + scope;
   const stored = key => { try { return localStorage.getItem(key); } catch { return null; } };
@@ -15,37 +14,39 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const available = value => value === 'platform' || !!scopeProject(value);
   const scopeName = value => value === 'platform' ? '全部项目' : scopeProject(value)?.full_name;
   if (!available(scope)) throw Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' });
-  const scopeLabel = element('strong', scopeName(scope), 'management-scope-name'); scopeLabel.dataset.scope = scope;
-  const toolsButton = button('快捷操作', () => showTools(!toolsOpen), 'quiet'); toolsButton.setAttribute('aria-expanded', 'false'); toolsButton.setAttribute('aria-controls', 'management-tools');
-  const fresh = button('＋ 新建会话', () => openConversation(true).catch(showAccessError), 'quiet management-new-conversation');
+  const layout = element('div', '', 'management-layout');
+  const sidebar = element('aside', '', 'management-sidebar'); sidebar.id = 'management-conversation-sidebar'; sidebar.setAttribute('aria-label', '会话记录');
+  const sidebarHead = element('div', '', 'management-sidebar-head');
+  const closeSessions = button('关闭', () => setSessionsOpen(false), 'quiet management-session-close'); closeSessions.setAttribute('aria-label', '关闭会话列表');
+  sidebarHead.append(element('h2', '会话记录'), closeSessions);
+  const fresh = button('＋ 新建会话', () => { setSessionsOpen(false); openConversation(true).catch(showAccessError); }, 'quiet management-new-conversation');
   fresh.setAttribute('aria-label', '新建会话');
-  header.append(scopeLabel, fresh, toolsButton); panel.append(header);
-  const sessions = element('details', '', 'management-sessions'), sessionBody = element('div', '', 'management-session-controls');
-  sessions.append(element('summary', '会话记录'));
-  const conversations = document.createElement('select'); conversations.setAttribute('aria-label', '持久会话');
-  sessionBody.append(field('切换会话', conversations)); sessions.append(sessionBody); panel.append(sessions);
+  const scopeLabel = element('strong', scopeName(scope), 'management-scope-name'); scopeLabel.dataset.scope = scope;
+  const scopeBox = element('div', '', 'management-scope'); scopeBox.append(element('span', '当前范围', 'muted'), scopeLabel);
+  const conversations = document.createElement('ul'); conversations.className = 'management-conversation-list'; conversations.setAttribute('aria-label', '持久会话');
+  sidebar.append(sidebarHead, fresh, scopeBox, conversations);
+  const main = element('div', '', 'management-main');
+  const sessionToolbar = element('div', '', 'management-conversation-toolbar');
+  const sessionToggle = button('会话记录', () => setSessionsOpen(!layout.classList.contains('sessions-open')), 'quiet management-session-toggle');
+  sessionToggle.setAttribute('aria-expanded', 'false'); sessionToggle.setAttribute('aria-controls', sidebar.id); sessionToolbar.append(sessionToggle);
+  function setSessionsOpen(open) {
+    layout.classList.toggle('sessions-open', open); sessionToggle.setAttribute('aria-expanded', String(open));
+    if (!open && consoleMedia.matches && sidebar.contains(document.activeElement)) sessionToggle.focus();
+  }
+  layout.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && layout.classList.contains('sessions-open')) { event.preventDefault(); setSessionsOpen(false); }
+  });
+  layout.append(sidebar, main); panel.append(layout);
   const feed = element('div', '', 'management-feed'); feed.setAttribute('aria-label', '管理会话记录'); feed.setAttribute('role', 'log'); feed.setAttribute('aria-live', 'polite');
   const welcome = element('div', '', 'management-welcome');
   welcome.append(element('span', '✦', 'management-welcome-icon'), element('p', '你的项目工作台', 'management-eyebrow'), element('h3', '一起推进下一步'), element('p', '查进展、找原因、调整配置。执行过程和结果都会在这里实时呈现。', 'muted'));
-  const suggestions = element('div', '', 'management-suggestions');
-  for (const [caption, text] of [['查看任务进展', '有哪些任务需要处理？'], ['分析阻塞原因', '帮我看看任务为什么没有继续。'], ['了解项目配置', '当前项目的配置是什么？']]) {
-    const suggestion = button('', () => { message.value = text; message.focus(); }, 'quiet');
-    suggestion.append(element('strong', caption), element('span', text)); suggestions.append(suggestion);
-  }
-  welcome.append(suggestions); feed.append(welcome);
+  feed.append(welcome);
   const feedWrap = element('div', '', 'management-feed-wrap'), latest = button('↓ 回到最新消息', () => { flushMarkdown(true); scrollOutput(true); }, 'quiet management-latest');
-  // Blurring the composer can restore mobile navigation and move this button before pointer-up.
   latest.addEventListener('pointerdown', event => event.preventDefault());
-  latest.hidden = true; feedWrap.append(feed, latest); panel.append(feedWrap);
-  // #616: a failed open is a page state of its own, not a message inside the scrolling transcript, so its card and the
-  // recovery links sit in this slot and the feed steps aside while it shows.
-  const accessSlot = element('div', '', 'management-access-state'); accessSlot.hidden = true; panel.append(accessSlot);
-  const tools = element('div', '', 'management-tools'); tools.id = 'management-tools'; tools.hidden = true;
-  tools.append(element('h3', '快捷操作'), note('直接查询或使用表单。操作结果会回到对话里。'),
-    note('默认配置只影响新任务；补充指令会追加记录。修改目标或验收条件会使旧候选和验收失效。采用新执行配置前，请先暂停并等待旧执行结束。'));
-  const actions = element('div', '', 'management-queries'), forms = element('div', '', 'management-forms'); tools.append(actions, forms); panel.append(tools);
+  latest.hidden = true; feedWrap.append(feed, latest); main.append(sessionToolbar, feedWrap);
+  const accessSlot = element('div', '', 'management-access-state'); accessSlot.hidden = true; main.append(accessSlot);
   const statusBar = element('div', '', 'management-status-bar'), status = element('p', '正在读取会话…', 'management-status muted'); status.setAttribute('role', 'status');
-  const reconnect = button('重新连接', () => read(), 'quiet'); reconnect.hidden = true; statusBar.append(status, reconnect); panel.append(statusBar);
+  const reconnect = button('重新连接', () => read(), 'quiet'); reconnect.hidden = true; statusBar.append(status, reconnect); main.append(statusBar);
   const input = document.createElement('form'), message = textarea('management-message', '', { rows: 3, placeholder: '发消息，或告诉我你想推进什么…' });
   input.className = 'management-input'; message.setAttribute('aria-label', '管理消息'); message.maxLength = 16000;
   const send = element('button', '发送', 'management-send btn-primary'), stopButton = button('停止', async () => {
@@ -54,40 +55,30 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }, 'quiet');
   send.type = 'submit'; send.disabled = true; stopButton.hidden = true;
   const footer = element('div', '', 'management-input-footer'), controls = element('div', '', 'actions');
-  controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); panel.append(input);
-  let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null, formGeneration = 0;
-  let disposed = false, opening = false, submitting = false, historyReady = false, toolsOpen = false, toolsDirty = true, followOutput = true, unseenOutput = false, renderFrame = 0;
+  controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); main.append(input);
+  let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null;
+  let disposed = false, opening = false, submitting = false, historyReady = false, followOutput = true, unseenOutput = false, renderFrame = 0;
   const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
-  // #874: one error used to leave this line assertive for good, so every ordinary progress written after it was
-  // announced as an alert. Ordinary progress goes through showStatus, which hands the line back to its polite role;
-  // showError and showAccessError still give it the alert role for as long as the error stands.
   const showStatus = (text = status.textContent) => { if (disposed) return; status.classList.remove('view-error'); status.setAttribute('role', 'status'); status.textContent = text; };
   const showError = err => { if (!disposed) { status.textContent = readErrorText(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
-  // #616: a working conversation is what puts the composer and the transcript back; until then the page states the
-  // failure once, in one card, and leaves nothing that looks able to send.
   const showConversation = () => {
     accessSlot.hidden = true; accessSlot.replaceChildren();
-    statusBar.hidden = false; sessions.hidden = false; feedWrap.hidden = toolsOpen; input.hidden = toolsOpen;
-    for (const control of [fresh, toolsButton]) { control.removeAttribute('title'); control.removeAttribute('aria-describedby'); }
+    statusBar.hidden = false; sidebar.hidden = false; sessionToolbar.hidden = false; feedWrap.hidden = false; input.hidden = false;
+    fresh.removeAttribute('title'); fresh.removeAttribute('aria-describedby');
   };
   const showAccessError = err => {
     if (disposed) return;
-    // #616: the failure state owns the panel. A conversation, an open shortcut drawer or a half-read history from the
-    // scope that just failed is not usable under the card, so it is closed here instead of being left to each caller.
-    conversation = null; historyReady = false; active = null; showTools(false); updateBusy();
+    conversation = null; historyReady = false; active = null; setSessionsOpen(false); updateBusy();
     welcome.hidden = true;
     const empty = consoleState('无法打开管理会话', managementAccessMessage(err), { tone: 'error', retry: () => openConversation().catch(showAccessError) });
     const reload = empty.querySelector('button'); if (reload) reload.textContent = '重试';
     empty.append(consoleLink('#/projects', '查看项目列表'), consoleLink('#/identity', '查看身份与权限')); empty.id = 'management-access-reason';
-    // The card is the only place this reason is written: the status line keeps its polite role and stays empty, instead
-    // of announcing the same sentence a second time as an alert.
     status.textContent = ''; status.classList.remove('view-error'); status.setAttribute('role', 'status');
-    statusBar.hidden = true;
-    feedWrap.hidden = true; sessions.hidden = true; accessSlot.replaceChildren(empty); accessSlot.hidden = false; input.hidden = true;
-    fresh.setAttribute('title', '恢复管理会话后才能新建会话。'); toolsButton.setAttribute('title', '恢复管理会话后才能使用快捷操作。');
-    for (const control of [fresh, toolsButton]) control.setAttribute('aria-describedby', 'management-access-reason');
+    statusBar.hidden = true; sidebar.hidden = true; sessionToolbar.hidden = true;
+    feedWrap.hidden = true; accessSlot.replaceChildren(empty); accessSlot.hidden = false; input.hidden = true;
+    fresh.setAttribute('title', '恢复管理会话后才能新建会话。'); fresh.setAttribute('aria-describedby', 'management-access-reason');
   };
   const selectedWithin = node => {
     const selection = window.getSelection();
@@ -122,25 +113,11 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const queueMarkdown = answer => { pendingMarkdown.add(answer); scheduleMarkdown(); };
   const updateBusy = () => {
     message.disabled = opening || !conversation;
-    for (const suggestion of welcome.querySelectorAll('button')) suggestion.disabled = message.disabled;
     send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active;
-    // #616: without a conversation the two header controls are unusable too, not just the composer.
-    fresh.disabled = opening || submitting || !conversation; toolsButton.disabled = !conversation;
+    fresh.disabled = opening || submitting || !conversation; sessionToggle.disabled = opening || !conversation;
     input.classList.toggle('is-running', !!active); onActivity(!!active);
   };
-  function showTools(open) {
-    toolsOpen = open; tools.hidden = !open; feedWrap.hidden = open; feed.hidden = open; input.hidden = open;
-    toolsButton.textContent = open ? '返回对话' : '快捷操作'; toolsButton.setAttribute('aria-expanded', String(open));
-    if (open && toolsDirty) void refreshTools();
-  }
-  async function refreshTools() {
-    const generation = scopeGeneration;
-    try { await configureForms(); } catch (err) { if (alive(generation)) { toolsDirty = true; forms.replaceChildren(note('快捷操作暂不可用：' + readErrorText(err)), button('重新读取', refreshTools, 'quiet')); } }
-  }
-  const target = () => scope.startsWith('project:') ? { project_id: scope.slice(8) } : {};
-  const query = (operation, targetValue = target()) => submit({ query: { operation, target: targetValue, arguments: {} } });
-  // One pending command at a time across the whole console (#355): opening another preview drops the earlier one, and a
-  // write leaves this page only after 确认执行 — for a quick action and for a receipt's rollback alike.
+  // Receipt rollbacks use the same preview and explicit confirmation as other writes.
   let pendingPreview = null;
   function previewCommand(slot, command, context) {
     pendingPreview?.(); const drawn = managementPreview(command, context);
@@ -153,7 +130,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     pendingPreview = close; slot.replaceChildren(drawn.box); drawn.box.scrollIntoView({ block: 'nearest' });
     return drawn;
   }
-  actions.append(button('查询项目', () => query('list_projects', {}), 'quiet'), button('查询任务', () => query('list_tasks'), 'quiet'), button('查询有效配置', () => query('get_effective_config'), 'quiet'), button('成本与预算', () => query('get_usage'), 'quiet'), button('操作审计', () => query('list_audit'), 'quiet'), button('重新连接', () => read(), 'quiet'));
   const turn = id => {
     if (turns.has(id)) return turns.get(id);
     welcome.hidden = true;
@@ -311,7 +287,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
       else output(step.detail, ownStep ? '独立任务结果' : '查询事实', receipt, true);
       currentTurn.stage = '正在整理结果';
-      if (receipt.id && receipt.operation) toolsDirty = true;
       onActivity(!!active, true);
     } else if (row.type === 'reply') {
       const item = answer(currentTurn); item.text = data.text; item.node.classList.remove('management-stream'); queueMarkdown(item); currentTurn.provisional = null;
@@ -365,7 +340,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
             if (!['pending', 'running'].includes(message.state)) finishTurn(value, message.state, message.updated_at);
           }
           if (!pending) { showStatus('就绪 · 操作结果可在执行进展中核对'); break; }
-          showStatus('处理中 · 可以继续写草稿，收起窗口后仍会继续');
+          showStatus('处理中 · 可以继续写草稿，离开助手页后仍会继续');
           streamController = new AbortController();
           const response = await fetch(endpoint + '/conversations/' + id + '/events?stream=1&after=' + cursor, { signal: streamController.signal });
           if (!response.ok) throw new Error('读取运行流失败，请重新连接。');
@@ -381,25 +356,34 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     reading = work;
     try { await work; } finally { if (reading === work) reading = null; if (!disposed && generation !== scopeGeneration && conversation) void read(); }
   }
+  function renderConversations(all) {
+    conversations.replaceChildren(...all.map(item => {
+      const entry = document.createElement('li');
+      const choose = button('', () => { setSessionsOpen(false); openConversation(false, item.id).catch(showAccessError); }, 'quiet management-conversation');
+      choose.dataset.conversationId = item.id;
+      if (item.id === conversation) choose.setAttribute('aria-current', 'true');
+      choose.append(element('strong', timestamp(item.created_at) || '新会话'), element('small', '#' + item.id.slice(0, 8)));
+      entry.append(choose); return entry;
+    }));
+  }
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
-    const generation = ++scopeGeneration; formGeneration++; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
+    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
-    forms.replaceChildren(); toolsDirty = true; showStatus('正在读取会话…');
+    showStatus('正在读取会话…');
     try {
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope);
       if (!alive(generation)) return;
-      conversations.replaceChildren(...all.map(item => { const option = element('option', timestamp(item.created_at) + ' · ' + item.id.slice(0, 8)); option.value = item.id; return option; }));
       if (create || !all.length) {
         if (!projects.length) {
           showAccessError(Object.assign(new Error(managementAccessHints.scope_forbidden), { code: 'scope_forbidden' }));
           return;
         }
         const result = await api(endpoint + '/conversations', 'POST', { scope: scope }); if (!alive(generation)) return;
-        conversation = result.conversation.id; const option = element('option', '新会话 ' + conversation.slice(0, 8)); option.value = conversation; conversations.prepend(option);
+        conversation = result.conversation.id; all.unshift({ ...result.conversation, created_at: new Date().toISOString() });
       } else conversation = all.find(item => item.id === (selected || stored(conversationKey())))?.id ?? all[0].id;
-      conversations.value = conversation; remember(conversationKey(), conversation); message.value = drafts.get(conversation) ?? '';
-      if (toolsOpen) void refreshTools(); void read();
+      renderConversations(all); remember(conversationKey(), conversation); message.value = drafts.get(conversation) ?? '';
+      void read();
     } catch (err) {
       if (alive(generation)) showAccessError(err);
     } finally { if (alive(generation)) { opening = false; updateBusy(); } }
@@ -411,43 +395,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: crypto.randomUUID(), ...body });
       if (!alive(generation) || conversation !== id) return true;
       messages.set(result.id, { input: body, state: result.state, created_at: new Date().toISOString() }); turn(result.id); active = result.id;
-      followOutput = true; showTools(false); sessions.open = false; scrollOutput(true); showStatus('请求已发送 · 正在连接助手'); void read(); return true;
+      followOutput = true; setSessionsOpen(false); scrollOutput(true); showStatus('请求已发送 · 正在连接助手'); void read(); return true;
     } catch (err) { if (alive(generation)) showError(err); return false; }
     finally { if (alive(generation)) { submitting = false; updateBusy(); } }
-  }
-  async function configureForms(){
-    const generation=++formGeneration; toolsDirty=false;
-    // One pending preview at a time: clicking another write replaces it instead of stacking two commands. A confirm that
-    // the page cannot send (connection, authorization) keeps the preview so the person can retry or cancel it.
-    const previewSlot = element('div', '', 'management-command-preview-slot');
-    const confirmCommand = (command, context) => previewCommand(previewSlot, command, context);
-    forms.replaceChildren();if(!target().project_id){forms.append(note('选择具体项目后可以修改配置或管理任务。'));return;}
-    const project=target().project_id;
-    const effective=await api(endpoint+'/query','POST',{operation:'get_effective_config',target:{project_id:project},arguments:{}});
-    if(generation!==formGeneration)return;
-    const workflow=document.createElement('select');workflow.setAttribute('aria-label','工作类型');
-    for(const w of effective.workflows){const o=element('option',w.name+' · '+w.prompt.source);o.value=w.id;workflow.append(o);}
-    const prompt=textarea('prompt','',{rows:5});prompt.setAttribute('aria-label','默认提示词');
-    const chosen=()=>effective.workflows.find(w=>w.id===workflow.value);
-    // A section whose text comes from the repository's skill (release notes) is changed by a configuration PR of that skill.
-    const sourceNote=note('');
-    const fill=()=>{prompt.value=chosen()?.prompt.effective??'';sourceNote.textContent=chosen()?.prompt.source==='repository'?`这类工作的文本来自仓库 skill ${chosen().prompt.path}，它优先于 Manager 章节：保存章节不改变行为，要改请创建配置 PR，合入后生效。`:'保存的是 Manager 提示词里这类工作的章节，只影响之后新建的任务。'+(chosen()?.prompt.path?`也可以创建配置 PR，在仓库里加上 skill ${chosen().prompt.path}，合入后它优先于这个章节。`:'');};workflow.onchange=fill;fill();
-    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),sourceNote,save);
-    form.onsubmit=e=>{e.preventDefault();confirmCommand({operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name});};const publish=button('创建配置 PR',()=>confirmCommand({operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name}),'quiet');form.append(publish);const showPublish=()=>{publish.hidden=!chosen()?.prompt.path;};workflow.addEventListener('change',showPublish);showPublish();
-    forms.append(form);
-    const tasks=(await api(endpoint+'/query','POST',{operation:'list_tasks',target:{project_id:project},arguments:{limit:100}})).tasks;
-    if(generation!==formGeneration)return;
-    const task=document.createElement('select');task.setAttribute('aria-label','管理任务');
-    for(const t of tasks){const o=element('option',t.task.summary+' · '+t.task.status);o.value=t.task.id;task.append(o);}
-    const taskBox=element('section','');taskBox.append(element('h3','任务管理'),field('任务',task));
-    taskBox.append(button('查看阻塞原因',()=>query('get_task',{project_id:project,task_id:task.value}), 'quiet'));
-    for(const [action,caption] of [['pause','暂停任务'],['cancel','取消任务'],['retry','重试任务'],['adopt-config','采用新执行配置']])taskBox.append(button(caption,async()=>{try{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.'+action,target:{project_id:project,task_id:task.value},arguments:{},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});}catch(e){status.textContent = readErrorText(e);}},'quiet'));
-    const instruction=textarea('instruction','',{rows:2});instruction.setAttribute('aria-label','补充指令');taskBox.append(field('追加补充指令',instruction),button('追加指令',async()=>{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.instructions',target:{project_id:project,task_id:task.value},arguments:{instruction:instruction.value},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});},'quiet'));
-    forms.append(taskBox, previewSlot);
-    if (typeof renderSchedules === 'function') {
-      const schedules = element('section', ''); forms.append(schedules);
-      try { await renderSchedules(schedules, project); } catch (e) { schedules.append(note('定时任务暂不可用：' + readErrorText(e))); }
-    }
   }
   input.onsubmit = async event => {
     event.preventDefault(); const value = message.value, id = conversation;
@@ -465,7 +415,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     scope = value; scopeLabel.textContent = scopeName(scope); scopeLabel.dataset.scope = scope;
     return changed;
   };
-  conversations.onchange = () => openConversation(false, conversations.value).catch(showAccessError);
   const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
@@ -474,11 +423,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
         scopeGeneration++; streamController?.abort(); send.disabled = true;
         showAccessError(Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' })); return;
       }
+      setSessionsOpen(false);
       if (applyScope(value)) await openConversation().catch(showAccessError);
     },
-    focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
+    focus() { message.focus(); },
     // Puts a prepared request in the composer for the person to read and send (#1072: the onboarding page's recommendation).
-    draft(text) { if (toolsOpen) toolsButton.click(); message.value = text; message.focus(); },
-    dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
+    draft(text) { message.value = text; message.focus(); },
+    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
   };
 }

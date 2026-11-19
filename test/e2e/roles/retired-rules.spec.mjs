@@ -1,4 +1,3 @@
-import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
@@ -6,7 +5,6 @@ import { TaskEngine } from '../../../dist/agent/engine.js';
 import { RuleService } from '../../../dist/rules/service.js';
 import { consoleSave } from '../helpers/console-save.mjs';
 import { goRolePage } from '../helpers/open-role-advanced.mjs';
-import { managementFixture } from '../../fixtures/management-fixture.mjs';
 
 const out = '.tmp/retired-rules-935';
 
@@ -79,26 +77,4 @@ test('an upgraded project shows its imported .bot/ files as deletable, its label
     await record.evaluate(node => node.scrollIntoView({ block: 'center' })); await page.screenshot({ path: `${out}/manager-import-390.png` });
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
-});
-
-// The management chat's Manager section form offers a configuration PR only for a section with a repository skill, and
-// starts it from that skill's text; the other sections are saved in the Manager prompt.
-test('the management chat offers a configuration PR only for a skill-backed section, starting from the skill', async ({ page }) => {
-  const f = await managementFixture(), errors = [];
-  page.on('pageerror', error => errors.push(error.message));
-  try {
-    new RuleService(f.h.store).cache('101', 'a'.repeat(40), { '.agents/skills/release-notes/SKILL.md': '# Release notes\nGroup the changes by area.\n', '.bot/guide.md': '' });
-    await page.goto(f.h.admin + '/#/management');
-    await page.getByLabel('用户名', { exact: true }).fill('administrator');
-    await page.getByLabel('密码', { exact: true }).fill(f.password);
-    await page.getByRole('button', { name: '登录', exact: true }).click();
-    await switchConsoleProject(page, '101');
-    await page.getByRole('button', { name: '快捷操作', exact: true }).click();
-    const workType = page.getByLabel('工作类型', { exact: true }), form = workType.locator('xpath=ancestor::form'), publish = form.getByRole('button', { name: '创建配置 PR', exact: true });
-    await expect(form).toContainText('保存的是 Manager 提示词里这类工作的章节'); await expect(publish).toBeHidden();
-    await workType.selectOption({ label: '发行说明 · repository' });
-    await expect(page.getByLabel('默认提示词', { exact: true })).toHaveValue(/Group the changes by area/);
-    await expect(form).toContainText('这类工作的文本来自仓库 skill .agents/skills/release-notes/SKILL.md'); await expect(publish).toBeVisible();
-    expect(errors).toEqual([]);
-  } finally { await f.close(); }
 });

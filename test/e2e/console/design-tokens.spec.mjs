@@ -159,10 +159,10 @@ test('#551 对话页共用正文/辅助色和标题字号，1440 与 390 不横�
       h1: '30px', body: '14px',
     });
     expect(await page.evaluate(() => getComputedStyle(document.body).color)).toBe(tokens.textRgb);
-    const title = page.locator('#management-chat-title');
+    const title = page.locator('.management-welcome h3');
     await expect(title).toBeVisible();
-    expect(await title.evaluate(el => getComputedStyle(el).fontSize)).toBe('16px');
-    const muted = page.locator('.management-window-title p, .management-welcome > .muted, .management-scope-note').first();
+    expect(await title.evaluate(el => getComputedStyle(el).fontSize)).toBe('28px');
+    const muted = page.locator('.management-welcome > .muted');
     await expect(muted).toBeVisible();
     expect(await muted.evaluate(el => getComputedStyle(el).color)).toBe(tokens.mutedRgb);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
@@ -170,6 +170,7 @@ test('#551 对话页共用正文/辅助色和标题字号，1440 与 390 不横�
 
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(title).toBeVisible();
+    expect(await title.evaluate(el => getComputedStyle(el).fontSize)).toBe('24px');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await capture(page, 'management-after-390');
   } finally { await f.close(); }

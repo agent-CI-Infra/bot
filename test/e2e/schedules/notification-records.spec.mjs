@@ -21,8 +21,7 @@ async function environment() {
   return f;
 }
 async function login(page,f){
-  await page.goto(f.h.admin+'/#/management');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();
-  await switchConsoleProject(page, '101');await page.getByRole('button',{name:'快捷操作',exact:true}).click();
+  await page.goto(f.h.admin+'/#/projects/101/schedules');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();
   await page.getByRole('button',{name:'查看通知及失败队列',exact:true}).click();
   await expect(page.locator('.schedule-record')).toHaveCount(1);
 }

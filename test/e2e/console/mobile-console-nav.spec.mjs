@@ -5,7 +5,7 @@ import { managementFixture } from '../../fixtures/management-fixture.mjs';
 
 // #481 Console UX 2/3 — the mobile shell owns five destinations (`项目 / 任务 / 待处理 / 助手 / 更多`), the assistant
 // moves into the bar at ≤767px, `更多` becomes supplemental navigation, the section selector keeps its groups, and the
-// header collapses identity, role and sign-out into one account menu. Desktop keeps its sidebar and floating launcher.
+// header collapses identity, role and sign-out into one account menu. Desktop uses its sidebar without a floating launcher.
 
 async function login(page, h, password, hash = '#/projects', username = 'administrator') {
   await page.goto(h.admin + '/' + hash);
@@ -68,7 +68,7 @@ test('767px 是真实断点：767 仍是移动底栏，768 回到桌面侧栏', 
   } finally { await h.stop(); }
 });
 
-test('移动端从「助手」打开现有管理助手，不再有悬浮按钮；桌面保持悬浮按钮', async ({ page }) => {
+test('移动端从底栏「助手」进入普通页面，桌面只从侧栏进入且没有悬浮按钮', async ({ page }) => {
   const f = await managementFixture();
   try {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -77,30 +77,24 @@ test('移动端从「助手」打开现有管理助手，不再有悬浮按钮�
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.locator('#workspace')).toBeVisible();
-    // The floating launcher is gone at this breakpoint: it used to cover forms and lists.
-    await expect(page.locator('#management-launcher')).toBeHidden();
+    await expect(page.locator('#management-launcher')).toHaveCount(0);
     const assistant = page.locator('#console-mobile-nav a[data-page="assistant"]');
-    await expect(assistant).toBeVisible();
-    await assistant.click();
+    await expect(assistant).toBeVisible(); await assistant.click();
     const window_ = page.locator('.management-window');
-    await expect(window_).toBeVisible();
-    await expect(page.locator('.management-scope-name')).toBeVisible();
-    // Opening from the bar is the same call the launcher made: no project argument, so #480's default order decides.
+    await expect(window_).toBeVisible(); await expect(page).toHaveURL(/#\/management$/);
+    await expect(page.getByRole('button', { name: '会话记录', exact: true })).toBeVisible();
     await expect(assistant).toHaveAttribute('aria-current', 'page');
-    // Minimizing returns to the bar instead of revealing a floating control over the page.
-    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
-    await expect(window_).toBeHidden();
-    await expect(page.locator('#management-launcher')).toBeHidden();
-    await expect(assistant).toBeFocused();
-    // Desktop is unchanged: the bar is gone and the existing launcher is still there.
+    await page.locator('#console-mobile-nav a[data-page="board"]').click();
+    await expect(window_).toBeHidden(); await expect(page).toHaveURL(/#\/board$/);
+    await assistant.click(); await expect(window_).toBeVisible();
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(f.h.admin + '/#/board');
     await expect(page.locator('#console-mobile-nav')).toBeHidden();
-    await expect(page.locator('#management-launcher')).toBeVisible();
+    await expect(page.locator('#console-sidebar')).toBeVisible(); await expect(page.locator('#management-launcher')).toHaveCount(0);
   } finally { await f.close(); }
 });
 
-test('助手的作用域与会话在底栏入口处保留，不因入口变化而重置', async ({ page }) => {
+test('助手的作用域与会话在底栏入口处保留，不因页面切换而重置', async ({ page }) => {
   const f = await managementFixture();
   try {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -111,20 +105,17 @@ test('助手的作用域与会话在底栏入口处保留，不因入口变化�
     const assistant = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await assistant.click();
     const scope = page.locator('.management-scope-name');
-    await expect(scope).toBeVisible();
     await switchConsoleProject(page, '101');
-    await expect(page.locator('.management-scope-name')).toContainText('admin-fixture-101');
-    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
-    await expect(page.locator('.management-window')).toBeHidden();
-    // The bar opens the same assistant instance: the scope the reader chose is still selected and the conversation is
-    // the one it was, not a new one.
-    await assistant.click();
     await expect(scope).toHaveAttribute('data-scope', 'project:101');
-    expect(await page.locator('.management-scope-name').innerText()).toContain('admin-fixture-101');
+    const current = page.locator('.management-conversation[aria-current=true]'), id = await current.getAttribute('data-conversation-id');
+    await page.locator('#console-mobile-nav a[data-page="board"]').click();
+    await expect(page.locator('.management-window')).toBeHidden();
+    await assistant.click();
+    await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(current).toHaveAttribute('data-conversation-id', id);
   } finally { await f.close(); }
 });
 
-test('进行中与未读状态镜像到底栏「助手」，并在收起后接住焦点', async ({ page }) => {
+test('进行中与未读状态在离开助手页后镜像到底栏「助手」', async ({ page }) => {
   const f = await managementFixture();
   let release; const gate = new Promise(done => { release = done; });
   f.modelState.respond = async (_body, res) => {
@@ -143,16 +134,12 @@ test('进行中与未读状态镜像到底栏「助手」，并在收起后接�
     await page.getByLabel('管理消息', { exact: true }).fill('看一下进展');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(page.locator('.management-turn-state')).toHaveAttribute('data-state', 'running');
-    // Collapsing the floating chat really closes it: the bar is now the only entry point and takes focus back.
-    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
+    await page.locator('#console-mobile-nav a[data-page="board"]').click();
     await expect(page.locator('.management-window')).toBeHidden();
-    await expect(assistant).toBeFocused();
-    // While a turn runs the bar destination says so, with a badge and in its accessible name.
     await expect(assistant).toHaveAttribute('data-active', '1');
     await expect(assistant.locator('.console-nav-badge')).toBeVisible();
     expect(await assistant.getAttribute('aria-label')).toContain('正在处理');
     expect(await assistant.getAttribute('aria-label')).toContain('助手');
-    // A reply that arrives while the assistant is closed is unread until it is opened again.
     release();
     await expect(assistant).toHaveAttribute('data-unread', '1');
     expect(await assistant.getAttribute('aria-label')).toContain('未读');
@@ -330,7 +317,7 @@ test('换一次会话后底栏「助手」不保留上一位用户的进行中�
     await page.getByLabel('管理消息', { exact: true }).fill('看一下进展');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(page.locator('.management-turn-state')).toHaveAttribute('data-state', 'running');
-    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
+    await page.locator('#console-mobile-nav a[data-page="board"]').click();
     await expect(assistant).toHaveAttribute('data-active', '1');
     // Leave the reply unread, then change session from the account menu: the next owner starts idle and read.
     release();

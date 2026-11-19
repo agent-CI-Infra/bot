@@ -96,10 +96,9 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(identity.fabHitsTarget).toBe(false);
     expect(identity.fabHitsNav).toBe(false);
     expect(identity.fabHitsLogout).toBe(false);
-    // F6: #481 hides the floating assistant on a phone, so there is no launcher to collide with; the assistant is the
-    // bar's 助手 destination instead.
-    await expect(page.locator('#management-launcher')).toBeHidden();
-    expect(identity.fab === null || (identity.fab.width === 0 && identity.fab.height === 0)).toBe(true);
+    // The assistant is a normal page reached from the bar; no floating launcher can cover page controls.
+    await expect(page.locator('#management-launcher')).toHaveCount(0);
+    expect(identity.fab).toBeNull();
     const assistant = page.locator('.console-mobile-nav a[href="#/management"]');
     await expect(assistant).toBeVisible();
     await expect(assistant).toHaveAccessibleName(/^助手/);

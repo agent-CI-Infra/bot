@@ -50,7 +50,7 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 #main-content:focus { outline: none; }
 .console-ready :is(button, .button-link, input:not([type=checkbox]):not([type=radio]), select) { min-height: var(--control-min); }
 .console-ready :is(button, input, select, textarea) { font: inherit; }
-.console-ready :is(button, .button-link):not(.quiet):not(.btn-secondary):not(.btn-text):not(.btn-danger):not(.status):not(.management-size-handle) { background-color: var(--color-brand); border-color: var(--color-brand); color: var(--color-text-inverse); }
+.console-ready :is(button, .button-link):not(.quiet):not(.btn-secondary):not(.btn-text):not(.btn-danger):not(.status) { background-color: var(--color-brand); border-color: var(--color-brand); color: var(--color-text-inverse); }
 .console-ready :is(button, a, input, select, textarea, summary):focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 3px; }
 .console-ready :is(h1, h2, h3, p, label, a, pre) { overflow-wrap: anywhere; }
 .console-ready .muted { line-height: var(--line-height-relaxed); }
@@ -106,10 +106,10 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 @media(max-width:767px) {
   .console-mobile-scope { display: block; position: sticky; top: 0; z-index: 3; flex: none; margin-bottom: 12px; background: var(--color-bg); }
   body.console-ready .management-page { top: calc(var(--management-header-height,48px) + var(--console-scope-height,0px) + 8px); }
-  /* Errors and pending confirmations use one panel scroller, keeping their reading area out of a nested viewport. */
-  body.console-ready .management-page .management-panel:has(.management-command-preview, .management-feed > .console-state-error) { overflow-y: auto; overscroll-behavior: contain; }
-  body.console-ready .management-page .management-panel:has(.management-command-preview, .management-feed > .console-state-error) .management-feed-wrap { flex: 1 0 auto; min-height: min(320px,50dvh); }
-  body.console-ready .management-page .management-panel:has(.management-command-preview, .management-feed > .console-state-error) .management-feed { flex: none; width: 100%; overflow: visible; }
+  /* Pending confirmations use the conversation's scroller so the sidebar stays in place. */
+  body.console-ready .management-page .management-main:has(.management-command-preview, .management-feed > .console-state-error) { overflow-y: auto; overscroll-behavior: contain; }
+  body.console-ready .management-page .management-main:has(.management-command-preview, .management-feed > .console-state-error) .management-feed-wrap { flex: 1 0 auto; min-height: min(320px,50dvh); }
+  body.console-ready .management-page .management-main:has(.management-command-preview, .management-feed > .console-state-error) .management-feed { flex: none; width: 100%; overflow: visible; }
   body.console-ready.board-mode .board-filter-controls { max-height: max(100px,calc(38dvh - var(--console-scope-height,0px))); }
   .console-ready dialog.console-scope-picker { inset: 0; width: 100%; height: 100dvh; max-height: 100dvh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); border: 0; border-radius: 0; }
   .console-scope-search-row input { font-size: 16px; }
@@ -293,8 +293,6 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-ready dialog { width: 100%; max-width: none; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; padding: 16px 16px calc(var(--console-mobile-height) + 16px); }
   body.console-ready.board-mode main { width: 100%; padding: 8px 10px calc(var(--console-mobile-height) + 12px); }
   body.console-ready .management-page { left: 0; bottom: var(--console-mobile-height); }
-  .console-ready .management-launcher { bottom: calc(var(--console-mobile-height) + 12px); }
-  .console-ready .management-window:not(.management-page):not(.management-fullscreen) { bottom: calc(var(--console-mobile-height) + 10px); max-height: calc(100dvh - var(--console-mobile-height) - 20px); }
 }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 
@@ -303,19 +301,12 @@ body.console-ready .management-page { left: var(--console-rail); }
 .console-ready #tabs button, .console-link { transition: background-color var(--motion-fast), color var(--motion-fast); }
 
 @media(max-width:767px) { body.console-ready.board-mode .console-location:has(#console-section-label[hidden]) { display: none; } }
-/* A short viewport cannot hold the floating composer and a second fixed navigation bar. */
-@media(max-width:767px) and (max-height:560px) {
-  body.console-ready:has(.management-window:not([hidden]):not(.management-page):not(.management-fullscreen)) { --console-mobile-height: 0px; }
-  body.console-ready:has(.management-window:not([hidden]):not(.management-page):not(.management-fullscreen)) .console-mobile-nav { display:none; }
-}
-
 /* #481: the bar keeps its five destinations while a field has focus instead of hiding as it did before, and the page
    reserves the bar's height through scroll-padding-bottom, so typing never puts the field under it. */
 html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 @media(max-width:767px) { .console-ready #paging { padding-right:96px; } }
 
-/* #562: 390 / 768 / 1440 layout sets. Mobile nav structure is unchanged (#481 / #496); #481 already hides the
-   floating assistant on a phone, so there is no launcher rule here. */
+/* #562: 390 / 768 / 1440 layout sets. The assistant is a normal page on both sidebars and the mobile bar. */
 @media (max-width: 1439px) {
   .role-nav {
     flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
@@ -370,8 +361,6 @@ button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: 
 @media (max-width:767px) {
   #identity #who, #identity #logout { display: none; }
   #console-account { display: inline-flex; }
-  /* The bar is the assistant's entry point here, so the floating control must not sit over the page. */
-  .console-ready .management-launcher { display: none; }
 }
 /* #555: project / event list filters stay folded until needed, so they do not take the first screen. */
 .console-filters-fold {
