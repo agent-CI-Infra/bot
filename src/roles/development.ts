@@ -15,12 +15,20 @@ import {stop,blobSha} from '../agent/common.js';
 import type {AgentSpec} from '../agent/runtime.js';
 import {githubWriteTool} from '../github/write.js';
 import {pullRequestLabelsSchema} from '../github/pull-request-labels.js';
+import {pullRequestSummaryRules} from '../github/text.js';
 import {milestoneTool,milestoneToolName} from '../review/progress.js';
 const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
+// The team path's developer never gets the entry's system prompt (runRole replaces it), so the guidance of the single-agent
+// create_pull_request path on the PR description travels with the tool (#1106).
+const summaryDescription='The public pull request description on GitHub, read by the repository\'s maintainers as written; on a revision of the bot\'s pull request it replaces the existing description. '
+ +'Say what development started on (development_basis: the label and who added it, the maintainer\'s comment with its link, or the project rule, then mention the Issue\'s author as @login) and the goal you implemented; on a revision keep what the description already says about this. '
+ +pullRequestSummaryRules;
 /** Existing engine remains the publisher and QA authority; team only prepares its input. */
 export async function developmentTeam(workspace:Workspace,system:string,prompt:string,publish:(id:string,args:any)=>Promise<any>,access:{read:boolean;write:boolean;shell:boolean},githubWrite?:(args:unknown)=>Promise<any>,milestone?:(args:unknown)=>Promise<any>,remote?:()=>Promise<GitHub>){
  const {store,task,redactor,guard}=workspace,records=new TaskRecords(store),spaces=roleWorkspaces(workspace);
- const submit=tool('submit_delivery','Submit code candidate metadata for mandatory QA and framework publication. Never publish yourself.',{summary:{type:'string'},test_command:{type:'string'},change_title:{type:'string'},labels:pullRequestLabelsSchema},['summary','test_command']);
+ const submit=tool('submit_delivery','Submit code candidate metadata for mandatory QA and framework publication. Never publish yourself.',{summary:{type:'string',description:summaryDescription},
+  test_command:{type:'string',description:'The command you ran to test the change. The pull request description shows it as your report; the platform reruns only a project test command it has configured.'},
+  change_title:{type:'string',description:'The commit subject and pull request title: a concise description of the code change.'},labels:pullRequestLabelsSchema},['summary','test_command']);
  const validate=(v:any)=>{if(!v||typeof v.summary!=='string'||!v.summary.trim()||typeof v.test_command!=='string'||!v.test_command.trim())return stop('role_delivery_invalid','retry_wait');return redactor.clean(v);};
  for(let round=0;round<3;round++){
   const spec:AgentSpec<any>={store,task,redactor,guard,system:system.replace(/ At task start, read the existing notes[\s\S]*?Notes are never committed or put in a publication tree\./,' Use project/role memory tools for durable knowledge. Do not write ../notes files.').replace(/When ready, call create_pull_request:[\s\S]*?ends development\./,'When ready, call submit_delivery with PR metadata; framework QA and publication follow. Never call create_pull_request yourself.'),prompt:JSON.stringify({original:prompt,version_context:await versionTool(store,task,spaces.current,'read_version_context',{},remote)}),maxTurns:64,maxOutputTokens:16384,tools:[...(access.read?[tool('read_file','Read text from this role workspace',{path:{type:'string'}},['path'])]:[]),...(access.write?[tool('write_file','Write repository relative text',{path:{type:'string'},content:{type:'string'}},['path','content'])]:[]),...(access.shell?[commandTool(180,'Run verification/implementation commands without publication or credentials.')]:[]),submit,...versionTools,...taskTools,...memoryTools,

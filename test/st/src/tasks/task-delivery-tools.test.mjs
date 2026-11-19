@@ -140,8 +140,14 @@ test('a delivery call the task no longer holds is refused with its reason, nothi
       const prompt = JSON.parse(messages[1].content);
       return !names.includes('delegate_role') ? call('delegate_role', { role: 'dev', purpose: 'Fix add and deliver it', refs: [prompt.task_ref] }) : call('nominate_delivery', { result_ref: latestResult(results) });
     },
-    dev: ({ tools, names, messages, store }) => {
-      if (!names.includes('write_file')) { assert.ok(tools.includes('open_pull_request')); return call('write_file', { path: 'calc.mjs', content: fixed }); }
+    dev: ({ body, tools, names, messages, store }) => {
+      if (!names.includes('write_file')) {
+        assert.ok(tools.includes('open_pull_request'));
+        // #1106: a pull request delivery says its summary is the public PR description; a report's summary is not one.
+        const summary = name => body.tools.find(t => t.function.name === name).function.parameters.properties.summary.description;
+        assert.match(summary('open_pull_request'), /^The public pull request description on GitHub[\s\S]*No internal references/); assert.equal(summary('submit_report'), undefined);
+        return call('write_file', { path: 'calc.mjs', content: fixed });
+      }
       if (!names.includes('open_pull_request')) {
         // The Manager narrows the grant while the executor works: the next call is checked against the grant as it is now.
         const id = store.get("SELECT id FROM tasks WHERE kind='task.request'").id;

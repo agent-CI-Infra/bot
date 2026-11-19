@@ -15,7 +15,7 @@ function taskFactsCard(task, record, publications) {
   };
   const list = items => { const ul = element('ul', '', 'task-fact-list'); for (const item of items) ul.append(item instanceof Node ? item : element('li', item)); return ul; };
   const contract = record.contract, candidate = record.candidate;
-  part('目标', badge('需求版本 ' + record.revision), element('p', contract.goal, 'say'),
+  part('目标', badge('需求版本 ' + record.revision), element('p', goalText(contract.goal), 'say'),
     facts([['验收条件', contract.criteria?.length ? list(contract.criteria) : '没有写明，按目标判断'], ['约束', contract.constraints?.length ? list(contract.constraints) : null],
       ['交付终点', contract.endpoint || '尚未明确'], ['选用的指南', record.selections?.length ? list(record.selections.map(p => `${p.id} · ${shortId(p.version)} · ${p.purpose}`)) : null]]));
   if (!candidate) part('候选', badge('还没有'), mutedLine('执行方提交成果后，候选固定在这里，之后的验收只认这一版。'));

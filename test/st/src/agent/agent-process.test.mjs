@@ -377,8 +377,10 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   assert.deepEqual(d.replies, [{ pr: { number: JSON.parse(d.task.result).pr_number, html_url: JSON.parse(d.task.result).pr_url, sha: d.candidate.remote_sha } }]);
   assert.equal(d.candidate.tree_sha, JSON.parse(d.task.result).tree_sha);
   const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json());
-  assert.match(state.prs.at(-1).body, /Tests: agent-already-ran-tests/);
-  assert.match(state.prs.at(-1).body, /not rerun by the control plane/); assert.doesNotMatch(state.prs.at(-1).body, /Exit code:/);
+  // The platform's part is Markdown (#1106): the reported command in a code block under Tests, and the hidden marker last.
+  assert.match(state.prs.at(-1).body, /\n### Tests\n\n```\nagent-already-ran-tests\n```\n\nReported by the agent; the platform did not rerun it\.\n/);
+  assert.ok(state.prs.at(-1).body.includes('Commit: `' + d.candidate.remote_sha + '`'));
+  assert.match(state.prs.at(-1).body, /\n\n<!-- dept-bot:[a-f0-9]{48} -->$/); assert.doesNotMatch(state.prs.at(-1).body, /exit code/i);
   // Only the one edited file goes to GitHub, on top of the snapshot's source tree, and GitHub's tree is the verified one.
   assert.deepEqual(state.trees.at(-1), { repository_id: 101, base_tree: d.candidate.source_tree, entries: 1 });
 });

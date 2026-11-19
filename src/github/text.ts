@@ -14,12 +14,40 @@ export function testEvidence(candidate: any) {
     ? 'Reported by the agent; not rerun by the control plane.'
     : `${validation.source==='policy'?'Policy tests: '+validation.command+'\n':''}Exit code: ${validation.exit_code}`);
 }
-export function implementationText(candidate: any, issue: number | null) {
+/**
+ * What the developer's summary is, for the tools whose `summary` becomes a development's pull request description (#1106).
+ * The platform publishes the text as written; it only appends its own part (see implementationText).
+ */
+export const pullRequestSummaryRules = 'Markdown in the repository\'s language: the language its Issue and docs are written in, whatever language your brief or other instructions use. Under 2000 characters, '
+  + 'in short sections: what changed and why, how it was verified with the actual results, and the remaining risk. '
+  + 'No internal references such as task_history:…, task:… or candidate ids, and no Closes/Fixes, Tests or Commit lines: '
+  + 'the platform appends the Issue link, the test evidence and the commit below the text.';
+// A code span or fence longer than any run of backticks in the text, so a command is shown as written.
+const ticks = (text: string, least: number) => '`'.repeat(Math.max(least, ...[...text.matchAll(/`+/g)].map(m => m[0].length + 1)));
+const codeSpan = (text: string) => { const fence = ticks(text, 1), pad = /^`|`$/.test(text) ? ' ' : ''; return `${fence}${pad}${text}${pad}${fence}`; };
+const codeBlock = (text: string) => { const fence = ticks(text, 3); return `${fence}\n${text}\n${fence}`; };
+const deliveryWords = {
+  zh: { tests: '测试', agent: '由 agent 自报，平台未重跑。', rerun: (code: unknown) => `平台在发布快照上重跑了这条命令，退出码 ${code}。`,
+    policy: (command: string, code: unknown) => `平台在发布快照上重跑了项目测试命令 ${codeSpan(command)}，退出码 ${code}。`, commit: '提交：' },
+  en: { tests: 'Tests', agent: 'Reported by the agent; the platform did not rerun it.', rerun: (code: unknown) => `The platform reran this command on the published snapshot: exit code ${code}.`,
+    policy: (command: string, code: unknown) => `The platform reran the project's test command ${codeSpan(command)} on the published snapshot: exit code ${code}.`, commit: 'Commit: ' },
+};
+/**
+ * A development's pull request: the developer's summary as written, then the platform's own Markdown part — the Issue
+ * link, a Tests section with the command in a code block and who ran it, and the commit. The platform's words follow the
+ * summary's language, as reviewLanguage decides for review comments; the publisher appends its hidden markers after it.
+ */
+export function implementationText(candidate: any, issue: number | null, language: 'zh' | 'en' = reviewLanguage(undefined, String(candidate.summary ?? ''))) {
   const linked = Number.isSafeInteger(issue) && Number(issue)>0;
   const title = shortTitle(candidate.change_title || (linked ? `Implement #${issue}: ` : '') + (candidate.implementation_goal || 'Update implementation'));
   // The model is told the control plane links the Issue; a summary that closes it anyway is not given a second line.
   const closes = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s+(?:[\\w.-]+/[\\w.-]+)?#${issue}(?!\\d)`, 'i').test(String(candidate.summary));
-  const body = `${candidate.summary}${!linked || closes ? '' : `\n\nCloses #${issue}`}\n\n${testEvidence(candidate)}\nCommit: ${candidate.remote_sha}`;
+  const w = deliveryWords[language], validation = candidate.validation ?? {}, command = String(candidate.test_command || validation.command || '').trim();
+  // Only a policy run that was not skipped reran anything; a skipped one (no project test command) leaves the agent's report.
+  const rerun = validation.source === 'policy' && !validation.skipped;
+  const note = !rerun ? w.agent : validation.command && validation.command.trim() !== command ? w.policy(validation.command.trim(), validation.exit_code) : w.rerun(validation.exit_code);
+  const tests = [`### ${w.tests}`, ...(command ? [codeBlock(command)] : []), note].join('\n\n');
+  const body = [String(candidate.summary ?? '').trim(), ...(!linked || closes ? [] : [`Closes #${issue}`]), tests, `${w.commit}${codeSpan(String(candidate.remote_sha))}`].join('\n\n');
   return { title, body };
 }
 // Presentation-only routing reasons are retained in task results, never published as findings.
