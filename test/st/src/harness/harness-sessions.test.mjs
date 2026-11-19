@@ -51,7 +51,7 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
  });model.listen(0,'127.0.0.1');await once(model,'listening');
  t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
  s.run("INSERT INTO accounts VALUES('a','test','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/probe','o','a')");
- s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','101',?,'fixture',?,'now')",'http://127.0.0.1:'+model.address().port+'/v1',s.secrets.seal({value:'fixture'},'model:m'));
+ s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','101',?,'fixture',?,'now')",'http://127.0.0.1:'+model.address().port+'/v1',s.secrets.seal({value:'local-model-test-key'},'model:m'));
  s.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
  const environment=await manager.call('PUT','/v1/projects/101');
  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES('t','101','task.request','running','inspect evidence','{}',1,?,?)",environment.generation,randomBytes(24).toString('hex'));

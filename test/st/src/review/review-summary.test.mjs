@@ -85,10 +85,12 @@ const decision = { id: 'f-decision', body: 'Whether the old parser stays as a fa
 test('review publication masks only credential spans in both the summary and inline findings', async t => {
   const f = await fixture(t);
   const code = 'token = "my_custom_identifier_12345"\n-----BEGIN CERTIFICATE-----';
-  const value = code+'\nbefore ghp_'+'Z'.repeat(30)+' after';
+  const branch = 'bot/task-'+'a'.repeat(40), modelKey = 'sk-'+'M'.repeat(20);
+  const value = code+'\nbefore ghp_'+'Z'.repeat(30)+' after\n'+branch+' ('+modelKey+')';
   await f.review('a', {summary:'Summary\n'+value,findings:[{...inlineFinding,body:'Inline\n'+value}]});
   for (const text of [f.state.comments[0].body,f.state.reviewComments[0].body]) {
     assert.ok(text.includes(code)); assert.ok(text.includes('before [REDACTED] after')); assert.ok(!text.includes('ghp_'));
+    assert.ok(text.includes(branch+' ([REDACTED])')); assert.ok(!text.includes(modelKey));
   }
 });
 

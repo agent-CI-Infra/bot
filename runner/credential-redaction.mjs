@@ -1,6 +1,7 @@
 // Only these self-identifying formats are recognized without a registered value.
-export const githubTokenSource = String.raw`(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{22,})`;
-const tokens = new RegExp(githubTokenSource + '|' + String.raw`sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_[A-Za-z0-9_-]{16,}`, 'g');
+export const githubTokenSource = String.raw`\b(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{22,})`;
+const providerTokenSource = String.raw`\b(?:sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_[A-Za-z0-9_-]{16,})`;
+const tokens = new RegExp(githubTokenSource + '|' + providerTokenSource, 'g');
 const pemDelimiter = /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/g;
 const marker = '[REDACTED]';
 
