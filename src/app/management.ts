@@ -268,7 +268,7 @@ export async function management(store: Store, user: Actor, method: string, url:
       fields(body, ['confirm']); if (body.confirm !== true) fail(400, 'confirmation_required');
       return store.transaction(() => {
         if (store.get('SELECT 1 FROM repositories WHERE account_id=?', id)) fail(409, 'account_has_projects');
-        for (const table of ['endpoints', 'installation_syncs', 'installed_repositories', 'processed_deliveries']) store.run(`DELETE FROM ${table} WHERE account_id=?`, id);
+        for (const table of ['endpoints', 'installation_syncs', 'installed_repositories', 'processed_deliveries', 'github_actors']) store.run(`DELETE FROM ${table} WHERE account_id=?`, id);
         if (store.hasTable('app_manifest_states')) store.run('DELETE FROM app_manifest_states WHERE account_id=?', id);
         // The onboarding wizard must not keep offering an App that is gone.
         store.run("DELETE FROM settings WHERE key='onboarding.app' AND json_valid(value) AND json_extract(value,'$.account_id')=?", id);

@@ -327,6 +327,10 @@ export class GitHub {
     if (String(repo.id) !== this.repository.id || String(repo.owner?.id) !== this.repository.owner_id) stop('github_repository_scope_changed','waiting_permission', `GitHub 返回的仓库身份或所有者与登记仓库 ${this.repository.id} 不一致。`);
     this.fullName = repo.full_name; this.defaultBranch = repo.default_branch; this.cloneUrl = typeof repo.clone_url === 'string' ? repo.clone_url : '';
     if ((identifyActor && !this.actorId) || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid',undefined,`GitHub 仓库 ${this.repository.id} 缺少有效的机器人身份、默认分支或仓库全名。`);
+    // Remember whom this account acts as (#1104), written only when it changes: a webhook that arrives before the bot's pull
+    // request is recorded compares its author with it.
+    if (identifyActor && this.actorId) this.store.run(`INSERT INTO github_actors VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET actor_id=excluded.actor_id,login=excluded.login,updated_at=excluded.updated_at
+      WHERE github_actors.actor_id<>excluded.actor_id OR github_actors.login<>excluded.login`, account!.id, this.actorId, this.actorLogin, new Date().toISOString());
     return repo;
   }
   authorEmail(): string {
