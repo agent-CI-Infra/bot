@@ -15,6 +15,8 @@ const open = async (page, f, id) => { await page.goto(f.h.admin + '/#/management
 
 test('a receipt shows the idempotency key with what a repeat submission does, and the impact the server recorded', async ({ page }) => {
   const f = await managementFixture(), writes = [];
+  const requested = Promise.withResolvers(), respond = Promise.withResolvers();
+  let receiptReads = 0;
   page.on('request', request => {
     const url = new URL(request.url());
     if (url.pathname.startsWith('/api/management/commands') && request.method() !== 'GET') writes.push(url.pathname);
@@ -22,9 +24,22 @@ test('a receipt shows the idempotency key with what a repeat submission does, an
   try {
     const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Keep the review prompt.' })).value;
     expect(receipt.state).toBe('succeeded');
+    await page.route('**/api/management/commands/' + receipt.id, async route => {
+      receiptReads++;
+      requested.resolve();
+      await respond.promise;
+      await route.continue();
+    });
     await login(page, f);
     const panel = await open(page, f, receipt.id);
     await expect(panel).toBeVisible();
+    await requested.promise;
+    await page.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+    respond.resolve();
+    await expect(panel.locator('[data-receipt-state]')).toHaveText('已执行');
+    const navigation = panel.getByRole('navigation', { name: '命令回执导航' });
+    await expect(navigation.getByRole('link', { name: '项目配置' })).toHaveCount(1);
+    await expect(navigation.getByRole('link', { name: '任务', exact: true })).toHaveCount(1);
     // The key is the reason a repeat submission is safe, so the page states the key and the rule beside it.
     const idempotency = panel.locator('[data-receipt-idempotency]');
     await expect(idempotency).toContainText(receipt.idempotency_key);
@@ -43,9 +58,10 @@ test('a receipt shows the idempotency key with what a repeat submission does, an
     await expect(result).not.toContainText('命令未执行');
     await expect(result).not.toContainText('结果待确认');
     // Still a read: opening the fields adds no request beyond the one receipt read, and no write at all.
+    expect(receiptReads).toBe(1);
     expect(writes).toEqual([]);
     await expect(panel.getByRole('button')).toHaveCount(0);
-  } finally { await f.close(); }
+  } finally { respond.resolve(); await f.close(); }
 });
 
 test('a failed command keeps its refusal in the failure section, apart from the success words', async ({ page }) => {
