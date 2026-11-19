@@ -49,15 +49,17 @@ test('missing role records do not invent an executor, and independent QA remains
 test('under the controller the next step names the role at work, its executor and the purpose it was handed', async t => {
   const task = { id: 't2', repository_id: '101', kind: 'development.issue', object_number: 8, status: 'running', phase: 'model', attempt: 2,
     structured: record({ candidate, acceptance: { outcome: 'return', reason: 'The redirect drops the fragment', gaps: ['Keep #fragment as well'], residuals: [], candidate_id: candidate.id, revision: 2 } }) };
-  const roles = { instances: [{ id: 'i-m', role: 'manager', harness: 'pi', snapshot_id: 's-m' }, { id: 'i-d', role: 'dev', harness: 'native' }, { id: 'i-r', role: 'reviewer', harness: 'codex' }, { id: 'i-q', role: 'qa', harness: 'native' }],
+  const roles = { instances: [{ id: 'i-m', role: 'manager', harness: 'pi', snapshot_id: 's-m' }, { id: 'i-d', role: 'dev', harness: 'native' }, { id: 'i-r', role: 'reviewer', harness: 'codex', snapshot_id: 's-later' }, { id: 'i-q', role: 'qa', harness: 'native' }],
     assignments: [{ id: 'a1', instance_id: 'i-d', status: 'completed', candidate_version: null }, { id: 'a2', instance_id: 'i-r', status: 'running', candidate_version: 'tree9876543210fedcba' }],
-    runs: [{ role: 'manager', status: 'running' }, { role: 'qa', status: 'completed' }], snapshots: { 's-m': { legacy: false } } };
+    runs: [{ role: 'manager', status: 'running' }, { role: 'qa', status: 'completed' },
+      { role: 'reviewer', status: 'running', harness: 'codex', assignment_id: 'a2', role_snapshot: 's-r' }],
+    snapshots: { 's-m': { name: 'Delivery lead', legacy: false }, 's-r': { name: 'Release reviewer' }, 's-later': { name: 'Renamed after the run' } } };
   const handoffs = [{ data: { assignment_id: 'a1', purpose: 'Implement the redirect fix' } }, { data: { assignment_id: 'a2', purpose: 'Check the redirect against the criteria' } }];
   const view = taskPage(t, task, roles, handoffs); await view.open();
-  assert.equal(view.next(), 'reviewer（Codex）正在做主控交给它的工作：Check the redirect against the criteria');
+  assert.equal(view.next(), 'Release reviewer（Codex）正在做主控交给它的工作：Check the redirect against the criteria');
   const side = view.side();
-  assert.match(side, /角色协调：主控 manager（Pi）按需委派工作/); assert.match(side, /独立 QA\n运行过 1 次，每次都是新的上下文/);
-  assert.match(side, /委派记录\ndev\nNative\n已交回\nImplement the redirect fix/); assert.match(side, /reviewer\nCodex\n进行中\nCheck the redirect against the criteria\n看的是候选版本 tree98765432/);
+  assert.match(side, /角色协调：主控 Delivery lead（Pi）按需委派工作/); assert.match(side, /独立 QA\n运行过 1 次，每次都是新的上下文/);
+  assert.match(side, /委派记录\ndev\nNative\n已交回\nImplement the redirect fix/); assert.match(side, /Release reviewer\nCodex\n进行中\nCheck the redirect against the criteria\n看的是候选版本 tree98765432/);
   // The delegation list is a record, not a plan or a grant.
   assert.match(side, /这不是预设流程，也不授予权限/);
   assert.match(side, /候选\n当前\n编号\ncand12345678/); assert.match(side, /项目测试命令\n已核验/); assert.match(side, /任务记录 #41\n未核验/); assert.match(side, /1\/2 已核验/);

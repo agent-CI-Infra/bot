@@ -53,21 +53,24 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
       VALUES(?,?,?,'running',?,?,?,1,?,?)`, id, '101', kind, contract.goal, number, phase, now, now);
     const record = (id, values) => h.store.run('UPDATE task_records SET contract=?,candidate=?,acceptance=?,next_action=? WHERE task_id=?', JSON.stringify(contract), JSON.stringify(values.candidate ?? null), values.acceptance ? JSON.stringify(values.acceptance) : null, values.next ?? null, id);
     // Runs as /roles returns them: a QA run is kind acceptance; a delegated run names its assignment and actual harness.
-    const run = (id, task, role, status, harness = role === 'manager' ? 'pi' : 'native', assignment = null) => h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,harness,assignment_id) VALUES(?,?,?,1,1,?,?,'{}','{}',?,?,?)",
-      id, task, role === 'qa' ? 'acceptance' : 'role', now, status, role, harness, assignment);
+    const run = (id, task, role, status, harness = role === 'manager' ? 'pi' : 'native', assignment = null, snapshot = null) => h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,harness,assignment_id,role_snapshot) VALUES(?,?,?,1,1,?,?,'{}','{}',?,?,?,?)",
+      id, task, role === 'qa' ? 'acceptance' : 'role', now, status, role, harness, assignment, snapshot);
     const instance = (id, task, role, harness, snapshot = null) => h.store.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,snapshot_id,config_revision,role_revision) VALUES(?,?,?,?,?,?,?,1,1)', id, task, role, '{}', harness, now, snapshot);
     task('plain', 'review.issue', 11, 'model'); record('plain', { candidate: { ...candidate, artifacts: [{ kind: 'report', reference: 'task:plain:candidate', version: 'report123456789' }] } });
     instance('plain-qa', 'plain', 'qa', 'native'); run('plain-qa-run', 'plain', 'qa', 'running');
     task('coordinated', 'development.issue', 12, 'model');
     record('coordinated', { candidate, next: 'Ask Reviewer to check the redirect', acceptance: { outcome: 'return', reason: 'The redirect drops the fragment', gaps: ['Keep #fragment as well'], residuals: [], candidate_id: candidate.id, revision: 1 } });
-    h.store.run("INSERT INTO role_snapshots VALUES('s-manager','101','manager',1,1,?,?)", JSON.stringify({ legacy: false, harness: { id: 'pi', source: 'role' } }), now);
-    instance('c-manager', 'coordinated', 'manager', 'pi', 's-manager'); instance('c-dev', 'coordinated', 'dev', 'native'); instance('c-reviewer', 'coordinated', 'reviewer', 'codex'); instance('c-qa', 'coordinated', 'qa', 'native');
+    for (const [role, name, backend] of [['manager', 'Delivery lead', 'pi'], ['reviewer', 'Release reviewer', 'codex']]) {
+      h.store.run("INSERT INTO role_snapshots VALUES(?,'101',?,1,1,?,?)", 's-' + role, role,
+        JSON.stringify({ name, legacy: false, harness: { id: backend, source: 'role' } }), now);
+    }
+    instance('c-manager', 'coordinated', 'manager', 'pi', 's-manager'); instance('c-dev', 'coordinated', 'dev', 'native'); instance('c-reviewer', 'coordinated', 'reviewer', 'codex', 's-reviewer'); instance('c-qa', 'coordinated', 'qa', 'native');
     for (const [id, owner, status, version] of [['a-dev', 'c-dev', 'completed', null], ['a-reviewer', 'c-reviewer', 'running', candidate.artifacts[0].version]])
       h.store.run('INSERT INTO role_assignments VALUES(?,?,?,1,?,?,?,NULL)', id, 'coordinated', owner, version, status, 'input-' + id);
     for (const [assignment, role, purpose] of [['a-dev', 'dev', 'Implement the redirect fix'], ['a-reviewer', 'reviewer', 'Check the redirect against both criteria']])
       h.store.run("INSERT INTO task_history(task_id,type,data,created_at,actor) VALUES('coordinated','role_handoff',?,?,'role:manager')", JSON.stringify({ assignment_id: assignment, role, purpose, refs: [], revision: 1 }), now);
-    run('c-manager-run', 'coordinated', 'manager', 'running'); run('c-qa-run', 'coordinated', 'qa', 'succeeded');
-    run('c-dev-run', 'coordinated', 'dev', 'succeeded', 'native', 'a-dev'); run('c-reviewer-run', 'coordinated', 'reviewer', 'running', 'codex', 'a-reviewer');
+    run('c-manager-run', 'coordinated', 'manager', 'running', 'pi', null, 's-manager'); run('c-qa-run', 'coordinated', 'qa', 'succeeded');
+    run('c-dev-run', 'coordinated', 'dev', 'succeeded', 'native', 'a-dev'); run('c-reviewer-run', 'coordinated', 'reviewer', 'running', 'codex', 'a-reviewer', 's-reviewer');
 
     const side = page.locator('#task-side'), fact = name => side.locator(`.task-fact[data-fact="${name}"]`);
     await page.evaluate(() => openTask('plain'));
@@ -83,13 +86,13 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
     await page.evaluate(() => openTask('coordinated'));
-    await expect(next).toHaveText('reviewer（Codex）正在做主控交给它的工作：Check the redirect against both criteria');
+    await expect(next).toHaveText('Release reviewer（Codex）正在做主控交给它的工作：Check the redirect against both criteria');
     await expect(fact('目标')).toContainText('The redirect keeps ?next='); await expect(fact('候选')).toContainText('cand12345678');
     await expect(fact('证据')).toContainText('项目测试命令'); await expect(fact('证据')).toContainText('1/1 已核验');
     await expect(fact('验收')).toContainText('退回修改'); await expect(fact('验收')).toContainText('Keep #fragment as well');
     await expect(fact('发布')).toContainText('验收通过后，由控制面按工作类型允许的写入发布到 GitHub。');
     const execution = side.locator('.task-execution');
-    await expect(execution).toContainText('角色协调：主控 manager（Pi）按需委派工作'); await expect(execution).toContainText('运行过 1 次，每次都是新的上下文');
+    await expect(execution).toContainText('角色协调：主控 Delivery lead（Pi）按需委派工作'); await expect(execution).toContainText('运行过 1 次，每次都是新的上下文');
     await expect(execution.locator('.role-work > li')).toHaveCount(2);
     await expect(execution.locator('.role-work > li').nth(1)).toContainText('Check the redirect against both criteria');
     await expect(execution).toContainText('这不是预设流程，也不授予权限');
