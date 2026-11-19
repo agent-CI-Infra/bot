@@ -58,7 +58,7 @@ function refreshWorkbenchTimes(container) {
   }
 }
 
-function renderRoleBoardRow(role, unsupportedQueue) {
+function renderRoleBoardRow(role, unsupportedQueue, projectConcurrency) {
   const row = element('div', '', 'role-board-row');
   row.dataset.roleRow = role.role;
 
@@ -87,7 +87,7 @@ function renderRoleBoardRow(role, unsupportedQueue) {
   } else if (readyList.length > 0) {
     capBadge = badge(`待调度 · 排队 ${readyList.length}`, 'warning');
   } else {
-    capBadge = badge(limit !== null ? `空闲 0/${limit}` : '空闲', '');
+    capBadge = badge(limit !== null ? `空闲 0/${limit}` : Number.isFinite(projectConcurrency) ? `空闲 0/${projectConcurrency}` : '空闲', '');
   }
   capCell.append(capBadge);
 
@@ -401,7 +401,8 @@ function workspaceOverview() {
       const capacityWaitingCount = board.project?.capacity_waiting_tasks ?? 0;
       const unattributedQueued = board.project?.unattributed_queued ?? 0;
       const runningSlots = board.project?.running_tasks ?? 0;
-      const maxSlots = board.project?.task_concurrency ?? '—';
+      const projectConcurrency = board.project?.task_concurrency ?? null;
+      const maxSlots = projectConcurrency ?? '—';
       statRunning.textContent = `正在执行：${activeRoleCount} 个角色`;
       statQueued.textContent = capacityWaitingCount > 0
         ? `排队中：${queuedTaskCount} 项（另 ${capacityWaitingCount} 项等槽位）`
@@ -412,11 +413,11 @@ function workspaceOverview() {
       roleStatus.textContent = `共启用 ${visibleRoles.length} 个项目角色 · 角色并发限额${board.enforced ? '已启用' : '未单独限制（共享项目槽位）'}${unattributedQueued > 0 ? ` · ${unattributedQueued} 项排队任务待调度确定角色` : ''} · 更新于 ${timestamp(lastRoles)}`;
 
       if (viewMode === 'roles') {
-        const nextSig = JSON.stringify([visibleRoles, board.unsupported]);
+        const nextSig = JSON.stringify([visibleRoles, board.unsupported, projectConcurrency]);
         if (roleSignature !== nextSig || !roleRows.childElementCount) {
           roleSignature = nextSig;
           const focusedTask = roleRows.contains(document.activeElement) ? document.activeElement.dataset?.attentionTask : null;
-          roleRows.replaceChildren(...visibleRoles.map(r => renderRoleBoardRow(r, unsupportedQueue)));
+          roleRows.replaceChildren(...visibleRoles.map(r => renderRoleBoardRow(r, unsupportedQueue, projectConcurrency)));
           if (focusedTask) roleRows.querySelector(`[data-attention-task="${CSS.escape(focusedTask)}"]`)?.focus({ preventScroll: true });
         } else {
           refreshWorkbenchTimes(roleRows);
