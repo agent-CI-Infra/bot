@@ -155,7 +155,7 @@ function machineSection(globalSettings = false) {
   }, 'quiet');
   const canEdit = editable && !unread;
   const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);
-  // When the unified bar is present,「重新读取」lives in its advanced fold (#567). Otherwise keep it next to the heading for recovery.
+  // When the unified bar is present,「重新读取」lives directly in the save bar. Otherwise keep it next to the heading for recovery.
   if (!canEdit) toolbar.append(heading, reread);
   else toolbar.append(heading);
   toolbar.after(sourceReadError);

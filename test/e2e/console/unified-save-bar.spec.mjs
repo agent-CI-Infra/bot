@@ -44,6 +44,8 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     await expect(page.getByTestId('role-form')).toBeVisible();
     await expect(consoleSaveStatus(page)).toHaveText('已保存');
     await expect(consoleSave(page)).toBeHidden();
+    await expect(page.getByRole('button', { name: '读取最新版本并比较', exact: true })).toBeVisible();
+    await expect(page.getByTestId('console-save-advanced')).toHaveCount(0);
     const prompt = page.getByLabel('角色提示词', { exact: true });
     const previous = await prompt.inputValue();
     await prompt.fill('统一保存栏提示词');
@@ -63,6 +65,15 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     expect(saved.persona_prompt).toBe('统一保存栏已写入');
 
     await page.goto(h.admin + '/#/projects/101/basic');
+    const fold = page.getByTestId('console-save-advanced');
+    await expect(fold).toBeVisible();
+    const groupDiscards = fold.getByTestId('console-save-group-discard');
+    await expect(groupDiscards).toHaveCount(2);
+    await expect(groupDiscards.first()).toBeHidden();
+    await openSaveAdvanced(page);
+    await expect(groupDiscards.first()).toBeVisible();
+    await fold.locator('summary').click();
+    await expect(groupDiscards.first()).toBeHidden();
     await page.getByLabel('基准分支', { exact: true }).fill('feature/unified-save');
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     await expect(page.getByRole('button', { name: '保存', exact: true })).toHaveCount(1);
@@ -84,7 +95,7 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
   } finally { await h.stop(); }
 });
 
-test('机器配置把「重新读取」放进保存栏的高级区，保存仍重建电脑', async ({ page }) => {
+test('机器配置把「重新读取」直接放进保存栏，有草稿时先确认，保存仍重建电脑', async ({ page }) => {
   test.setTimeout(90000);
   const cleanup = [], manager = await managerFixture({ after: action => cleanup.push(action) });
   const h = await harness(undefined, manager.manager);
@@ -102,10 +113,23 @@ test('机器配置把「重新读取」放进保存栏的高级区，保存仍�
     await login(page, h.admin + '/#/projects/101/machine', password);
     await expect(page.locator('.machine-config-card')).toBeVisible();
     await expect(consoleSave(page)).toBeHidden();
-    await expect(page.getByRole('button', { name: '重新读取电脑配置', exact: true })).toBeHidden();
-    await openSaveAdvanced(page);
-    await expect(page.getByRole('button', { name: '重新读取电脑配置', exact: true })).toBeVisible();
-    await page.getByLabel('CPU（核）', { exact: true }).fill('2');
+    const reread = page.getByRole('button', { name: '重新读取电脑配置', exact: true });
+    await expect(reread).toBeVisible();
+    await expect(page.getByTestId('console-save-advanced')).toHaveCount(0);
+    const cpu = page.getByLabel('CPU（核）', { exact: true });
+    await cpu.fill('2');
+    await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
+    await expect(consoleSave(page)).toBeVisible();
+    await reread.click();
+    const confirmation = page.getByRole('dialog');
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(cpu).toHaveValue('2');
+    await reread.click();
+    await confirmation.getByRole('button', { name: '重新读取', exact: true }).click();
+    await expect(cpu).toHaveValue('3');
+    await expect(consoleSave(page)).toBeHidden();
+    await cpu.fill('2');
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     await expect(consoleSave(page)).toBeVisible();
     await page.screenshot({ path: `${out}/machine-1440.png`, fullPage: true });
