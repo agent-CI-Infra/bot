@@ -78,6 +78,8 @@ test('public dashboard and repository board show generic data without console lo
 
 test('the Actions calendar shows run details and keeps the date a reader scrolled to', async ({ page }, testInfo) => {
   const cleanup = [], f = await publicBoardFixture({ after: fn => cleanup.push(fn) });
+  const firstSnapshot = Promise.withResolvers(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
   try {
     f.state.failRunBackfill = true;
     calendarRuns(f.state);
@@ -86,13 +88,19 @@ test('the Actions calendar shows run details and keeps the date a reader scrolle
     const legacy = (await f.get('/boards/octo/hello/data/snapshot.json')).data;
     legacy.schema_version = 2;
     legacy.sections.ci.data.lanes = { zone: 'Asia/Shanghai', days: ['2026-01-01'], lanes: {}, order: [] };
-    await page.route('**/data/snapshot.json?*', route => route.fulfill({ json: legacy }), { times: 1 });
+    await page.route('**/data/snapshot.json?*', async route => {
+      await firstSnapshot.promise;
+      await route.fulfill({ json: legacy });
+    }, { times: 1 });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.webhook + '/boards/');
     await page.locator('a.card').click();
     await page.locator('[data-tab="ci"]').click();
+    await expect(page.locator('[data-tab="ci"]')).toHaveAttribute('aria-current', 'page');
+    firstSnapshot.resolve();
     const calendar = page.getByRole('table', { name: '近 30 天运行记录' });
     await expect(page.locator('#tab-ci')).toContainText('Workflow 健康');
+    expect(errors).toEqual([]);
     await expect(calendar).toHaveCount(0);
     await page.getByRole('button', { name: '刷新视图' }).click();
     await expect(calendar.getByRole('rowheader')).toHaveText(['PR', '合并队列', 'Daily', '版本', '主干', '其他']);
@@ -128,7 +136,7 @@ test('the Actions calendar shows run details and keeps the date a reader scrolle
     await page.getByRole('button', { name: '刷新视图' }).click();
     await expect.poll(() => oldTable.evaluate(el => el.isConnected)).toBe(false);
     expect(await scroll.evaluate(el => el.scrollLeft)).toBeCloseTo(away, 0);
-  } finally { for (const fn of cleanup.reverse()) await fn(); }
+  } finally { firstSnapshot.resolve(); for (const fn of cleanup.reverse()) await fn(); }
 });
 
 test('repository list switches replace legacy board execution and control public visibility before activation', async ({ page }) => {
