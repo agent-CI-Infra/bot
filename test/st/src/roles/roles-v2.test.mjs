@@ -192,18 +192,18 @@ test('a surviving Pi entry mailbox cannot relay retired worker management schema
   assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
 });
 
-test('only Manager, Coordinator and QA are protected; deleted built-in roles stay deleted through later saves', async t => {
+test('only Manager and QA are protected; deleted built-in roles stay deleted through later saves', async t => {
   const f = await fixture(t, () => call('finish', {}));
   f.put({});
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, expected_revision: roleApi(f.s, admin, 'GET', rolesUrl, {}).revision, ...body }).configuration;
-  for (const id of ['manager', 'coordinator', 'qa']) rejects(() => put({ deleted_roles: [id] }), 'role_required', 'roles.' + id);
-  put({ deleted_roles: ['dev', 'test', 'reviewer', 'ux'], roles: [{ role_id: 'security', persona_prompt: 'Inspect security.' }] });
+  for (const id of ['manager', 'qa']) rejects(() => put({ deleted_roles: [id] }), 'role_required', 'roles.' + id);
+  put({ deleted_roles: ['dev', 'test', 'reviewer', 'ux', 'coordinator'], roles: [{ role_id: 'security', persona_prompt: 'Inspect security.' }] });
   let roles = roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles;
-  assert.deepEqual(roles.map(role => role.role_id).sort(), ['coordinator', 'manager', 'qa', 'security']);
+  assert.deepEqual(roles.map(role => role.role_id).sort(), ['manager', 'qa', 'security']);
   assert.throws(() => resolveRole(f.s, 'r', 'dev', 'task.request'), { code: 'unknown_role' });
   put({ roles: [{ role_id: 'security', permissions: { commands: 'deny' } }] });
   roles = put({ deleted_roles: ['security'] }).roles;
-  assert.deepEqual(roles.map(role => role.role_id).sort(), ['coordinator', 'manager', 'qa']);
+  assert.deepEqual(roles.map(role => role.role_id).sort(), ['manager', 'qa']);
   assert.equal(put({ roles: [{ role_id: 'dev' }] }).roles.find(role => role.role_id === 'dev').persona_prompt, roleTemplate('dev'));
 });
 
@@ -272,7 +272,7 @@ test('unchanged pinned repository bundles survive a newer rule cache while edits
   assert.equal(skillFiles(f.s, 'r', snapshot.skills)[0].content, 'Original pinned instructions.');
 });
 
-test('two roles resolve different supported models, pinned skills and harnesses; model order is role, workflow, project', async t => {
+test('two roles resolve different supported models, pinned skills and harnesses; model order is role, project', async t => {
   const f = await fixture(t, () => call('finish', {}));
   f.s.run("CREATE TABLE IF NOT EXISTS repository_rule_sources(repository_id TEXT PRIMARY KEY,sha TEXT NOT NULL,files TEXT NOT NULL,updated_at TEXT NOT NULL)");
   f.s.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', 'r', 'b'.repeat(40), JSON.stringify({ '.agents/skills/sec/SKILL.md': '---\ndescription: security\n---\nCheck trust boundaries.' }), 'now');
@@ -283,21 +283,21 @@ test('two roles resolve different supported models, pinned skills and harnesses;
       { role_id: 'test', skill_bundle_ref: { id: 'repo-sec' } }] });
   const repo = config.skills.find(b => b.id === 'repo-sec');
   assert.equal(repo.source.commit, 'b'.repeat(40)); assert.equal(repo.files[0].path, '.agents/skills/sec/SKILL.md'); assert.match(repo.files[0].sha256, /^[a-f0-9]{64}$/);
-  const reviewer = resolveRole(f.s, 'r', 'reviewer', 'development.issue').snapshot, tester = resolveRole(f.s, 'r', 'test', 'development.issue').snapshot;
+  const reviewer = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot, tester = resolveRole(f.s, 'r', 'test', 'task.request').snapshot;
   assert.deepEqual([reviewer.model.id, reviewer.model.source, reviewer.harness.id, reviewer.skills.id], ['m2', 'role', 'process', 'review-kit']);
   assert.deepEqual([tester.model.id, tester.model.source, tester.harness.id, tester.skills.id], ['m', 'project', 'native', 'repo-sec']);
   assert.notEqual(reviewer.skills.content_hash, tester.skills.content_hash);
-  // A workflow override sits between the role's own profile and the project default.
+  // Retired task_models overrides are ignored; only role profile and project default model apply (#1122).
   f.s.run(`UPDATE policies SET task_models='{"development.issue":"m3"}' WHERE repository_id='r'`);
-  assert.deepEqual([resolveRole(f.s, 'r', 'test', 'development.issue').snapshot.model.id, resolveRole(f.s, 'r', 'test', 'development.issue').snapshot.model.source], ['m3', 'workflow']);
+  assert.deepEqual([resolveRole(f.s, 'r', 'test', 'development.issue').snapshot.model.id, resolveRole(f.s, 'r', 'test', 'development.issue').snapshot.model.source], ['m', 'project']);
   assert.equal(resolveRole(f.s, 'r', 'reviewer', 'development.issue').snapshot.model.id, 'm2');
   // A pinned model whose endpoint changed is a configuration error at start, not a silent switch.
   f.s.run("UPDATE models SET model_name='renamed',version=version+1 WHERE id='m2'");
-  assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'development.issue'), e => e.code === 'role_model_profile_changed' && /roles\.reviewer\.model_profile_ref\.profile_hash/.test(e.detail));
+  assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'task.request'), e => e.code === 'role_model_profile_changed' && /roles\.reviewer\.model_profile_ref\.profile_hash/.test(e.detail));
   // The API preview reports the same field and stores nothing.
   const before = f.s.get('SELECT count(*) n FROM role_snapshots').n;
-  rejects(() => roleApi(f.s, admin, 'POST', new URL('http://local/api/repositories/r/roles/resolve'), { role: 'reviewer', workflow: 'development.issue' }), 'role_model_profile_changed', 'roles.reviewer.model_profile_ref.profile_hash');
-  assert.equal(roleApi(f.s, admin, 'POST', new URL('http://local/api/repositories/r/roles/resolve'), { role: 'test', workflow: 'development.issue' }).snapshot.model.id, 'm3');
+  rejects(() => roleApi(f.s, admin, 'POST', new URL('http://local/api/repositories/r/roles/resolve'), { role: 'reviewer' }), 'role_model_profile_changed', 'roles.reviewer.model_profile_ref.profile_hash');
+  assert.equal(roleApi(f.s, admin, 'POST', new URL('http://local/api/repositories/r/roles/resolve'), { role: 'test' }).snapshot.model.id, 'm');
   assert.equal(f.s.get('SELECT count(*) n FROM role_snapshots').n, before);
   assert.equal(f.s.get("SELECT count(*) n FROM tasks").n, 1, 'management queries never create tasks');
   const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
@@ -423,7 +423,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'decide_coordination', 'delegate_role', 'finish_coordination', 'grant_writes', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_skill', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'read_tool_result', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'set_task_priority', 'wait_for_children', 'wait_for_tasks']);
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'decide_coordination', 'delegate_role', 'delegate_roles', 'finish_coordination', 'grant_writes', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_skill', 'read_task_history', 'read_task_record', 'read_tool_result', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'set_task_priority', 'wait_for_children', 'wait_for_tasks'].filter(name => session.parsed.tools.some(t => t.function.name === 'delegate_roles') || name !== 'delegate_roles'));
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));

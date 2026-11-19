@@ -254,3 +254,16 @@ test('dispatch failure evidence follows the explicit project trajectory window; 
  assert.deepEqual(store.all('SELECT event_id,attempt FROM dispatch_failures ORDER BY event_id,attempt').map(r=>[r.event_id,r.attempt]),[['bounded',2],['keep',1],['keep',2]]);
  assert.equal(store.get("SELECT state FROM dispatch_events WHERE id='bounded'").state,'pending','retention never stops retries');
 });
+
+test('#1122 inactive dispatch_threads past the project trajectory window are pruned while active or pending threads stay',async t=>{
+ const {store}=fixture(t);
+ task(store,'active-task','101','running',daysAgo(10));
+ store.run("INSERT INTO dispatch_threads(thread_key,repository_id,object_type,object_number,messages,summary,active_task_id,updated_at) VALUES('101:event:old','101','event',NULL,'[]','old',NULL,?)",daysAgo(5));
+ store.run("INSERT INTO dispatch_threads(thread_key,repository_id,object_type,object_number,messages,summary,active_task_id,updated_at) VALUES('101:issue:9','101','issue',9,'[]','active','active-task',?)",daysAgo(5));
+ store.run("INSERT INTO dispatch_threads(thread_key,repository_id,object_type,object_number,messages,summary,active_task_id,updated_at) VALUES('102:event:keep','102','event',NULL,'[]','keep',NULL,?)",daysAgo(5));
+ saveRetention(store,'admin',{trajectory_days_by_project:{101:1}});
+ const cleanup=new RetentionCleanup(store,undefined,{pauseMs:0});t.after(()=>cleanup.stop());
+ const result=await cleanup.run();
+ assert.equal(result.dispatch_threads.count,1);
+ assert.deepEqual(store.all('SELECT thread_key FROM dispatch_threads ORDER BY thread_key').map(r=>r.thread_key),['101:issue:9','102:event:keep']);
+});

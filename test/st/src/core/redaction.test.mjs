@@ -36,7 +36,7 @@ test('management input and commands accept and retain normal text without trace-
     }
     const history=await settled(f.admin,conversation,submitted.value.id);assert.equal(history.messages.find(row=>row.id===submitted.value.id).state,'completed');
     assert.equal(JSON.parse(f.h.store.get('SELECT input FROM management_messages WHERE id=?',submitted.value.id).input).content,expected);
-    const result=await command(f.admin,'workflow.update',{project_id:'101',workflow_id:'review.issue'},{prompt:content},'ordinary-command-'+index);
+    const result=await command(f.admin,'manager.update',{project_id:'101'},{prompt:content},'ordinary-command-'+index);
     assert.equal(result.status,201,JSON.stringify(result.value));
     const stored=f.h.store.get('SELECT arguments FROM management_commands WHERE idempotency_key=?','ordinary-command-'+index);
     assert.equal(JSON.parse(stored.arguments).prompt,expected);

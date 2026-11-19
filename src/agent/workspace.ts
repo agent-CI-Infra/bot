@@ -476,7 +476,6 @@ export class Workspace {
       JOIN task_history h ON ${eventHistory}
       WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev'
         AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id)
-        AND EXISTS(SELECT 1 FROM task_stage_plans p WHERE p.task_id=e.task_id AND p.contract_revision=r.revision)
       ORDER BY ${historyOrder} DESC LIMIT 1`,this.task.id);
     if(pinned){const output=JSON.parse(pinned.data).data,candidate=output.candidate_ref?.kind==='code'?output.candidate_ref:output.source_snapshot,ctx=JSON.parse(pinned.run_context??'{}'),base=executionBaseline(this.task);
       const source=base&&/^[a-f0-9]{40}$/.test(base)?'commit:'+base:'contract:revision:'+ctx.contract_revision;

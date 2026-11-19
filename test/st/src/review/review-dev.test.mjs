@@ -416,7 +416,7 @@ test('a person\'s development label reaches the Manager with the facts it judges
   // #815: work the project does not allow now (reply is off by default) is kept too, so the Manager is told why.
   assert.deepEqual(JSON.parse(event.options).map(o=>o.id),['development','review','reply']);
   const {dispatchContext}=await import('../../../../dist/dispatch/store.js'),context=dispatchContext(h.store,event);
-  assert.deepEqual(context.options.map(o=>o.id),['development','review']);assert.deepEqual(context.unavailable.map(w=>[w.id,w.code]),[['reply','work_disabled']]);
+  assert.deepEqual(context.options.map(o=>o.id),['development','review','reply']);assert.deepEqual(context.unavailable,[]);
   assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],['bot-develop','maintainer',['someone']]);
   // The review is reported by its summary and recommendation; it carries no authorization fields since #815.
   assert.deepEqual([facts.development.review.task_id,facts.development.review.summary,facts.development.review.issue_requests_code],['rv','s',undefined]);
@@ -429,7 +429,7 @@ test('a person\'s development label reaches the Manager with the facts it judges
   // with the reason, and a review can answer the person.
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});assert.equal(await labeled('l5','bot-develop','User',['bot-develop']),0);
   const off=dispatchContext(h.store,events().at(-1));
-  assert.deepEqual([off.options.map(o=>o.id),off.unavailable.map(w=>[w.id,w.code])],[['review'],[['development','capability_ceiling'],['reply','work_disabled']]]);
+  assert.deepEqual([off.options.map(o=>o.id),off.unavailable.map(w=>[w.id,w.code])],[['review','reply'],[['development','capability_ceiling']]]);
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);assert.equal(events().length,2);
   // A person's label after the review starts development, keyed by that labeling; another one meanwhile is refused.
   assert.equal(await labeled('l6','BOT-develop','User',['bot-develop']),1);assert.equal(await labeled('l7','bot-develop','User',['bot-develop']),0);

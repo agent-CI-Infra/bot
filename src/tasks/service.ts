@@ -4,7 +4,6 @@ import {childTaskContext} from './children.js';
 import {captureTaskConfiguration} from './configuration.js';
 import {followupDecision,followupTarget,followupRefusal,recordFollowupRelation,coordinateFollowup,completedFollowupTarget} from './followups.js';
 import {setTaskPriority,taskRelations} from './priority.js';
-import { reconcileAssignments, assertStageAcceptance } from '../roles/schedule.js';
 import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,decideCoordination,type CoordinationRequest} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
 import { taskControllerReads, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
@@ -90,7 +89,7 @@ export class TaskRecords {
     if (!r||!t) throw new Error('task_not_found');
     const relations=taskRelations(this.store,id);
     return {children:childTaskContext(this.store,id),contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), priority:{level:t.priority,sequence:t.queue_seq},relations:relations.items.map(link=>({...link,reason:link.reason.slice(0,1000),evidence:{excerpt:link.evidence.slice(0,1000),truncated:link.evidence.length>1000}})),relation_page:{total:relations.total,next_offset:relations.next_offset,url:'/api/tasks/'+id+'/relations'},progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|paused$|needs_replan$|needs_help$|failed$)/.test(t.status)?t.error_code:null},
-      stage_schedule:reconcileAssignments(this.store,id),selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
+      selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
       coordination:coordinationContext(this.store,id),retry_reports:retryContext(this.store,id),submission_reports:this.store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='submission_retry_report' ORDER BY id DESC LIMIT 3",id).map(row=>({ref:'task_history:'+row.id,...JSON.parse(row.data)})),scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
   /** The record as an agent's task context. The candidate keeps its artifacts and evidence as references only: evidence
@@ -190,7 +189,6 @@ export class TaskRecords {
     this.assertClaim(id,token);validateVerdict(verdict);const current=this.get(id);
     assertCoordinationCurrent(this.store,id,current.candidate);
     if(current.candidate?.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
-    if(['pass','pass_with_issues'].includes(verdict.outcome))assertStageAcceptance(this.store,id,current.candidate,verdict);
     this.store.run('UPDATE task_records SET pending=? WHERE task_id=?',JSON.stringify({...verdict,...binding,candidate_id:candidateId,revision}),id);
     this.history(id,'acceptance_staged',{...verdict,candidate_id:candidateId,revision});
     });
@@ -203,7 +201,7 @@ export class TaskRecords {
       this.assertClaim(id,token);
       const current=this.get(id),task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
       if(!current.candidate||current.candidate.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
-      if(['pass','pass_with_issues'].includes(verdict.outcome)){assertCoordinationCurrent(this.store,id,current.candidate);assertStageAcceptance(this.store,id,current.candidate,verdict);}
+      if(['pass','pass_with_issues'].includes(verdict.outcome))assertCoordinationCurrent(this.store,id,current.candidate);
       if(['cancelled','superseded'].includes(task.status))throw new Error('task_cancelled');
       const evaluated=this.store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance_evaluated' AND json_extract(data,'$.candidate_id')=? ORDER BY id DESC LIMIT 1",id,candidateId);
       const evaluationRef=evaluated?'task_history:'+evaluated.id:null;

@@ -28,12 +28,18 @@ async function readyIdentity(page, url) {
   const github = page.getByRole('heading', { name: '我的 GitHub 连接' });
   const legacy = page.getByRole('heading', { name: '我的身份与有效权限' });
   await expect(github.or(org).or(legacy).first()).toBeVisible({ timeout: 15000 });
-  if (await org.isVisible()) return;
-  const summary = page.locator('details.identity-advanced > summary');
-  if (await summary.count()) {
-    await summary.first().click();
-    await expect(org).toBeVisible({ timeout: 10000 });
+  const feishuReady = page.locator('.identity-feishu > .side-card, .identity-feishu .console-state');
+  if (await page.locator('.identity-feishu').count()) {
+    await expect(feishuReady.first()).toBeVisible({ timeout: 10000 });
   }
+  if (!(await org.isVisible())) {
+    const summary = page.locator('details.identity-advanced > summary');
+    if (await summary.count()) {
+      await summary.first().click();
+    }
+  }
+  await expect(page.locator('.identity-layout > .identity-advanced[open] > .side-card').first()).toBeVisible({ timeout: 10000 });
+  await expect(org).toBeVisible({ timeout: 10000 });
   const switcher = page.getByRole('button', { name: '切换组织' });
   if (await switcher.count()) await switcher.first().scrollIntoViewIfNeeded();
 }

@@ -29,7 +29,7 @@
 }
 ```
 
-- **平台模型配置（历史字段 `model_source: "gateway"`）**：按“角色显式 `model_profile_ref` → 工作类型模型 `task_models` → 项目默认模型”选定模型。这个历史字段不再代表模型传输开关。默认由原生 Harness 直连供应商；只有显式 `modelTransport: "gateway"` 时，才启用原来的项目可见模型选择与多协议转换。
+- **平台模型配置（历史字段 `model_source: "gateway"`）**：按“角色显式 `model_profile_ref` → 项目默认模型”选定模型。这个历史字段不再代表模型传输开关。默认由原生 Harness 直连供应商；只有显式 `modelTransport: "gateway"` 时，才启用原来的项目可见模型选择与多协议转换。
 - **供应商订阅模式（`model_source: "subscription"`，预留）**：接口与数据结构（`src/harness/subscription.ts`、角色配置页选择器）已预留，当前未实现；选择后保存配置会记录 `model_source: "subscription"`，切回平台网关保存后显式发送 `model_source: "gateway"` 并清除原订阅标记。订阅模式在控制台展示“未实现”，解析与运行准备阶段明确以 `subscription_mode_not_implemented` 拒绝，不会静默回退到网关或宿主凭据。
 
 角色配置页展示 `claude_code` 与 `codex` 的工具卷挂载状态、已安装版本、所选版本、兼容版本范围、实际解析模型配置就绪状态与上游连通性状态（区分“连通性未探测”“连通正常”“连通失败”，并提供“探测模型连通性”操作）及不可用原因。模型完整 ID、CLI 版本和启动配置哈希进入 `RunContext` 和运行快照；同一角色 revision 恢复时变更模型或启动配置会以 `model_revision_changed` 拒绝，不静默换模型。

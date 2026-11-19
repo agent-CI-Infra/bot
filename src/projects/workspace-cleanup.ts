@@ -83,10 +83,13 @@ function pullRequests(store: Store, repo: string): PullRequests {
   const bot = store.all('SELECT number,source_task_id FROM bot_pull_requests WHERE repository_id=?', repo), bySource = new Map<string, number[]>(), byIssue = new Map<number, number[]>();
   for (const row of bot) push(bySource, String(row.source_task_id), Number(row.number));
   // Later developments of the same Issue continue the bot's pull request opened by the first one. The Issue number is read
-  // from the board's covering index: a tasks row holds the task input (about 1 MB in production) before object_number.
+  // from the board's covering index for legacy development.issue rows, and by primary key for generic task.request Issue rows.
   const sources = JSON.stringify([...bySource.keys()]);
   for (const row of store.all(`SELECT id,object_number FROM tasks INDEXED BY board_task_cover WHERE kind='development.issue' AND repository_id=?
     AND id IN (SELECT value FROM json_each(?))`, repo, sources)) for (const number of bySource.get(row.id) ?? []) push(byIssue, Number(row.object_number), number);
+  for (const row of store.all(`SELECT id,object_number FROM tasks WHERE kind='task.request' AND repository_id=? AND object_number IS NOT NULL
+    AND id IN (SELECT value FROM json_each(?)) AND json_extract(input,'$.target.type')='issue'`, repo, sources))
+    for (const number of bySource.get(row.id) ?? []) push(byIssue, Number(row.object_number), number);
   return { closed, bySource, byIssue };
 }
 
@@ -146,6 +149,17 @@ function retention(store: Store, repo: string, list: string[], prs: PullRequests
   const owners = JSON.stringify([...new Set(rows.map(row => row.task_id))]);
   // status precedes the task input in a tasks row, so this reads no more than the row's first page.
   const status = new Map(store.all('SELECT id,status FROM tasks WHERE id IN (SELECT value FROM json_each(?))', owners).map(row => [row.id, String(row.status)]));
+  const requestOwners = JSON.stringify([...new Set(rows.filter(row => row.task_kind === 'task.request' && Number(row.object_number) > 0).map(row => row.task_id))]);
+  const requestMeta = new Map(
+    store.all(
+      `SELECT t.id, json_extract(t.input,'$.target.type') AS target_type,
+        (json_extract(t.input,'$.delivery')='pull_request' OR EXISTS (
+          SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request')
+        )) AS has_pr_write
+       FROM tasks t WHERE t.id IN (SELECT value FROM json_each(?))`,
+      requestOwners,
+    ).map(row => [String(row.id), { targetType: row.target_type ? String(row.target_type) : null, hasPrWrite: Boolean(row.has_pr_write) }]),
+  );
   const parents = new Set(store.all(`SELECT DISTINCT f.parent_id FROM task_followups f JOIN tasks t ON t.id=f.task_id
     WHERE f.parent_id IN (SELECT value FROM json_each(?)) AND t.status NOT IN ${ended}`, owners).map(row => row.parent_id));
   // The last update comes from the board's covering index, one seek per object, for the same reason as above.
@@ -158,12 +172,14 @@ function retention(store: Store, repo: string, list: string[], prs: PullRequests
   for (const row of rows) if (status.has(row.task_id)) byName.set(row.workspace_id, [...byName.get(row.workspace_id) ?? [], row]);
   // When a task stops needing the directory, and why: Infinity keeps it.
   const until = (row: Row, activeAt: number): [number, string] => {
-    const state = status.get(row.task_id)!, number = Number(row.object_number);
+    const state = status.get(row.task_id)!, number = Number(row.object_number), req = requestMeta.get(String(row.task_id));
     if (![...finished, 'failed'].includes(state)) return [Infinity, 'active'];
     if (parents.has(row.task_id)) return [Infinity, 'followup'];
-    const pulls = [...prs.bySource.get(row.task_id) ?? [], ...row.task_kind === 'development.pr' ? [number] : [], ...row.task_kind === 'development.issue' ? prs.byIssue.get(number) ?? [] : []];
+    const isPrDev = row.task_kind === 'development.pr' || (row.task_kind === 'task.request' && req?.targetType === 'pr' && req.hasPrWrite);
+    const isIssueDev = row.task_kind === 'development.issue' || (row.task_kind === 'task.request' && req?.targetType === 'issue' && req.hasPrWrite);
+    const pulls = [...prs.bySource.get(row.task_id) ?? [], ...(isPrDev ? [number] : []), ...(isIssueDev ? prs.byIssue.get(number) ?? [] : [])];
     if (pulls.length) return pulls.some(pr => !prs.closed.has(pr)) ? [Infinity, 'pr_open'] : [0, 'pr_closed'];
-    if (row.task_kind === 'review.pr' && prs.closed.has(number)) return [0, 'pr_closed'];
+    if ((row.task_kind === 'review.pr' || (row.task_kind === 'task.request' && req?.targetType === 'pr')) && prs.closed.has(number)) return [0, 'pr_closed'];
     const last = Math.max(updated.get(row.task_id) ?? 0, activeAt);
     return state === 'failed' ? [last + failedMs, 'failed'] : [last + finishedMs, 'finished'];
   };

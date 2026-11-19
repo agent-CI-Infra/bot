@@ -1,5 +1,5 @@
 // Shared role labels and editable definitions; roles.js renders the overview and role forms.
-const modelSources = { role: '角色', workflow: '工作类型', project: '项目默认' };
+const modelSources = { role: '角色', project: '项目默认' };
 
 /**
  * The roles the controller may delegate in one entry (src/roles/team.ts, src/agent/loop.ts). Development and ordinary

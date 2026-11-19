@@ -15,7 +15,6 @@ import { githubReadScopes, githubResources } from '../roles/permissions.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { taskPermissions } from '../tasks/configuration.js';
 import { taskReadScopes } from '../tasks/management.js';
-import { workType, workOf } from '../work/catalog.js';
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, selectCompatibleCliVersion, type AgentToolCli } from './agent-tools.js';
 import { createMailboxModelGateway, type FileBackedModelProvider, type PolledModelRequestEntry } from './model-gateway.js';
 import { modelTransport, nativeModelConnection, type ModelTransport } from './model-connection.js';
@@ -227,11 +226,8 @@ export function computeAllowedGithubScopes<T>(spec: AgentSpec<T>): { initial: st
       scopes = githubReadScopes(roleDef.permissions);
     }
     if (spec.task?.id && spec.task.kind !== 'role.conversation' && spec.store.get('SELECT 1 FROM tasks WHERE id=?', spec.task.id)) {
-      const kind = workOf(spec.task as any);
-      if (workType(kind)) {
-        const tp = taskPermissions(spec.store, spec.task).github;
-        scopes = scopes.filter(s => tp.includes(s));
-      }
+      const tp = taskPermissions(spec.store, spec.task).github;
+      scopes = scopes.filter(s => tp.includes(s));
       const trs = taskReadScopes(spec.store, spec.task);
       scopes = scopes.filter(s => trs.includes(s));
     }

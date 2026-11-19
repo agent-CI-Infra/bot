@@ -8,10 +8,8 @@ import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import type { Actor } from '../app/auth.js';
 import { projectLabels, rulesUpdateRemoved, type RuleService } from '../rules/service.js';
-import { managerPrompt } from '../work/settings.js';
-import { applyManagerChange, managerView, workCompatibility, workflowUpdate } from '../work/api.js';
-import { parseSections } from '../work/settings.js';
-const parseSectionBody=(content:string,id:string)=>parseSections(content).sections.get(id)?.body??null;
+import { managerPrompt } from '../dispatch/settings.js';
+import { applyManagerChange, managerView } from '../dispatch/api.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
@@ -25,7 +23,7 @@ import type { AssistantComputerService } from '../service-roles/assistant-comput
 import { schedulingCommands } from '../schedules/schema.js';
 
 export interface ManagementCommand {
-  operation: string; target: {project_id:string;task_id?:string;workflow_id?:string}; arguments: Json; expected_revision: string;
+  operation: string; target: {project_id:string;task_id?:string}; arguments: Json; expected_revision: string;
   idempotency_key: string; source_conversation: string; source_message: string;
 }
 export interface ManagementExtension {
@@ -148,10 +146,8 @@ export class ManagementService {
     const project=this.scope(actor,target.project_id,entry.capability);
     if(target.task_id&&!this.store.get('SELECT 1 FROM tasks WHERE id=? AND repository_id=?',target.task_id!,target.project_id))fail(404,'task_not_found');
     if(operation.startsWith('task.')&&operation!=='task.create'&&!target.task_id!)fail(400,'task_target_required');
-    // workflow.update is the pre-#207 name for editing one work type's defaults (its Manager section, switch and writes).
-    if(operation==='workflow.update'&&!target.workflow_id)fail(400,'workflow_target_required');
-    if(!operation.startsWith('task.')&&operation!=='workflow.update'&&(target.task_id||target.workflow_id))fail(400,'invalid_management_target');
-    if((operation==='workflow.update'&&target.task_id!)||(operation.startsWith('task.')&&target.workflow_id)||operation==='task.create'&&target.task_id!)fail(400,'invalid_management_target');
+    if(!operation.startsWith('task.')&&target.task_id)fail(400,'invalid_management_target');
+    if(operation==='task.create'&&target.task_id!)fail(400,'invalid_management_target');
     // Stop/cancel remains available while disabled. Project defaults only persist configuration;
     // their switches take effect after an explicit enable. Execution commands still require an active project.
     if(!['task.pause','task.cancel','schedule.pause','schedule.delete','subscription.pause','subscription.delete'].includes(operation)){
@@ -167,7 +163,7 @@ export class ManagementService {
 
   async effective(actor:ActorContext,project:string):Promise<Json>{
     this.scope(actor,project);
-    const rules=await this.rules.view(project),work=await workCompatibility(this.store,this.rules,project),manager=await managerView(this.store,this.rules,project);
+    const rules=await this.rules.view(project),manager=await managerView(this.store,this.rules,project);
     const sources={sha:rules.sha,updated_at:rules.updated_at,needs_refresh:rules.needs_refresh};
     this.scope(actor,project);
     let taskCreation:{allowed:boolean;reason:string|null;workflow_changes?:boolean}={allowed:true,reason:null};
@@ -176,13 +172,8 @@ export class ManagementService {
     // Whether this person may confirm a development as a CI change (#931): project configuration rights.
     if(taskCreation.allowed){try{authorize(actor,'config.write',{project_id:project});taskCreation.workflow_changes=true;}catch{taskCreation.workflow_changes=false;}}
     const roles=roleApi(this.store,this.user(actor),'GET',new URL('http://local/api/repositories/'+project+'/roles'),{}) as {configuration:any;preview:{error?:string}[]};
-    // manager is the project's flow definition; workflows lists the work types in the shape older clients read. A section
-    // replaces the layers below it, so effective is the text in force; each layer keeps its source and version, not a
-    // second copy of the text (#1026: the copies pushed this result past the management tool budget).
-    return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,manager:{prompt:manager.prompt,work:manager.work,events:manager.events,migration:manager.migration},
-      workflows:work.map(w=>({...w,
-      prompt:{...w.prompt,version:w.prompt.source==='repository'?sources.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map(({content,...l}:any)=>({...l,version:l.source==='repository'?sources.sha:parameterHash(content)}))},
-      model:{...w.model,source:w.model.id||w.model.default_id?'console':'builtin',version:this.store.get('SELECT version FROM models WHERE id=?',w.model.id||w.model.default_id)?.version??null}})),
+    return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,
+      manager:{capability_ceiling:manager.capability_ceiling,prompt:manager.prompt,standing_rules:manager.standing_rules,events:manager.events,rules:manager.rules,migration:manager.migration},
       roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:roles.configuration.follows_default?'builtin':'console'}))},
       skills:rules.files.filter((f:any)=>f.path.startsWith('.agents/skills/')).map((f:any)=>({path:f.path,source:f.source,version:sources.sha,content:f.effective})),
       sources,capability_gaps:[...new Set(roles.preview.filter(r=>r.error).map(r=>r.error))],semantics:{defaults:'只影响之后新建的任务。',instructions:'追加记录，不改写旧 run 快照；后续步骤读取。',contract:'增加合同 revision，清除旧候选和验收。',adopt_config:'先暂停并等待旧执行结束，再显式采用新配置 revision。'}});
@@ -261,6 +252,7 @@ export class ManagementService {
   async submit(actor:ActorContext,input:Json):Promise<Json>{
     // The rule files' console layer is gone (#935): an old client learns what replaces it instead of a schema error.
     if(input?.operation==='rules.update')throw Object.assign(new HttpError(410,'rules_update_removed'),{detail:rulesUpdateRemoved});
+    if(input?.operation==='workflow.update')throw Object.assign(new HttpError(410,'workflow_update_removed'),{detail:'固定工作类型已退役（#1122）：请用 manager.update 修改统一 Manager 提示词与事件规则，或用 roles.update 修改角色提示词与权限。'});
     validate(commandSchema,input);const submitted=input as unknown as ManagementCommand,entry=commands[submitted.operation]!;
     validate(entry.arguments,submitted.arguments);
     this.scope(actor,submitted.target.project_id,entry.capability);
@@ -313,19 +305,16 @@ export class ManagementService {
         let result:Json;
         if(operation==='project.update'){
           result=updatePolicy(this.store,user,target.project_id,args);
-        }else if(operation==='workflow.update'){
-          // A work type's Manager section, switch and writes, under the command name clients used before #207.
-          const id=target.workflow_id!,sectionId=(id.startsWith('development.')?'development':id);
-          const before=managerPrompt(this.store,target.project_id),oldPrompt=parseSectionBody(before.content,sectionId);
-          const saved=workflowUpdate(this.store,target.project_id,id,args,user.id);
-          // The Manager section is the only text of this work (#935): no repository file overrides it any more.
-          result={saved:true,manager_revision:saved.revision,effect:'future_tasks',effective:true,source:'console',diff:{before:{prompt:oldPrompt},after:args},rollback:{operation:'workflow.update',target,arguments:{prompt:oldPrompt},expected_revision:this.revision(target)},configuration_url:'#/projects/'+target.project_id+'/roles',notice:'Manager 章节已保存，只影响之后新建任务；已有 run 保留原配置。'};
         }else if(operation==='manager.update'){
           const before=managerPrompt(this.store,target.project_id),saved=applyManagerChange(this.store,target.project_id,args,user.id);
-          result={saved:true,manager_revision:saved.revision,effect:'future_tasks',diff:{before:{revision:before.revision},after:{revision:saved.revision}},configuration_url:'#/projects/'+target.project_id+'/roles',
+          const after=managerPrompt(this.store,target.project_id);
+          const hasPromptChange=args.prompt!==undefined||args.content!==undefined;
+          result={saved:true,effective:true,source:'console',manager_revision:saved.revision,effect:'future_tasks',diff:{before:{revision:before.revision,prompt:before.content},after:{revision:saved.revision,prompt:after.content}},
+            ...(hasPromptChange?{rollback:{operation:'manager.update',target:{project_id:target.project_id},arguments:{prompt:before.content},expected_revision:this.revision(target)}}:{}),
+            configuration_url:'#/projects/'+target.project_id+'/roles/manager',
             notice:'Manager 配置已保存为第 '+saved.revision+' 版，只影响之后的分派和新建任务；已有 run 保留原配置。'};
         }else if(operation==='roles.update'){
-          const allowed=JSON.parse(this.policy(actor,target.project_id)?.role_fields??'["enabled","controller","roles","skills","required_stages"]');
+          const allowed=JSON.parse(this.policy(actor,target.project_id)?.role_fields??'["enabled","controller","roles","skills"]');
           // Deleting roles and restoring the defaults (#1068) both rewrite the roles.
           if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(['deleted_roles','follow_default'].includes(k)?'roles':k)))fail(403,'role_setting_forbidden');
           result=roleApi(this.store,user,'PUT',new URL('http://local/api/repositories/'+target.project_id+'/roles'),args)!;

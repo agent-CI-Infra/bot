@@ -6,7 +6,7 @@ async function fixture() {
   const manager={call:async(_method,path)=>({repository_id:path.split('/')[3],generation:1,state:'ready',desired:'ready',revision:1,computer:{}})};
   const h=await harness(undefined,manager),{admin,password}=await setup(h),a=await account(admin);
   await repository(admin,a.id,'101');await repository(admin,a.id,'202');
-  const seed=(id,status,repo='101')=>h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',id,repo,'review.issue',status,
+  const seed=(id,status,repo='101')=>h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',id,repo,'task.request',status,
     {active:'检查移动端导航与任务详情',publishing:'整理验证证据并准备回复',blocked:'补齐项目模型配置',failed:'检查验证失败的原因'}[id]||`项目工作 ${id}`,1,'2026-11-10T14:00:00Z','2026-11-10T14:00:00Z');
   seed('active','running');seed('publishing','result_ready');seed('blocked','waiting_configuration');seed('failed','failed');seed('automatic','retry_wait');seed('foreign-private','failed','202');
   for(let i=0;i<12;i++)seed('queued-'+String(i).padStart(2,'0'),'queued');

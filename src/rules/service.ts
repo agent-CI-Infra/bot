@@ -171,7 +171,7 @@ export class RuleService {
     store.transaction(() => {
       for (const row of store.all("SELECT repository_id,rule_overrides,review_instructions,review_label FROM policies WHERE review_instructions<>'' OR review_label<>''")) {
         const overrides = JSON.parse(row.rule_overrides || '{}');
-        if (row.review_instructions) for (const path of ['.bot/rules/issue-review.md', '.bot/rules/pr-review.md']) if (!Object.hasOwn(overrides, path)) overrides[path] = defaults[path] + '\n\n' + row.review_instructions;
+        if (row.review_instructions) for (const path of ['.bot/rules/issue-review.md', '.bot/rules/pr-review.md']) if (!Object.hasOwn(overrides, path)) overrides[path] = (defaults[path]!.trimEnd() + '\n\n' + String(row.review_instructions).trim()).replace(/\n{3,}/g, '\n\n');
         if (row.review_label && !Object.hasOwn(overrides, '.bot/rules/labels.md')) overrides['.bot/rules/labels.md'] = 'review_label: ' + JSON.stringify(row.review_label);
         store.run("UPDATE policies SET rule_overrides=?,review_instructions='',review_label='' WHERE repository_id=?", JSON.stringify(overrides), row.repository_id);
       }

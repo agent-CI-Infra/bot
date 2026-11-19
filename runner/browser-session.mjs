@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -46,13 +46,17 @@ export async function stopBrowserSession(workspaceId, { keepEvidence = true } = 
 
 function talk(workspaceId, message, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(sockPath(workspaceId));
+    const fullSock = sockPath(workspaceId);
+    const dirFd = fullSock.length > 100 && existsSync('/proc/self/fd') ? openSync(browserSessionDir(workspaceId), 'r') : null;
+    const closeDirFd = () => { if (dirFd !== null) try { closeSync(dirFd); } catch { /* closed */ } };
+    const socket = createConnection(dirFd !== null ? `/proc/self/fd/${dirFd}/session.sock` : fullSock);
     let buffer = '', settled = false;
     const done = value => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
+      closeDirFd();
       resolve(value);
     };
     // The daemon arms the action deadline after Chromium boot and polls it every 1s,
@@ -72,7 +76,7 @@ function talk(workspaceId, message, timeoutMs) {
     socket.on('error', error => {
       if (error.code === 'ECONNREFUSED' || error.code === 'ENOENT')
         done({ error: 'browser_crashed', detail: '项目电脑上的浏览器会话已经结束。' });
-      else if (!settled) { settled = true; clearTimeout(timer); reject(error); }
+      else if (!settled) { settled = true; clearTimeout(timer); closeDirFd(); reject(error); }
     });
     socket.on('end', () => {
       if (!settled) done({ error: 'browser_crashed', detail: '项目电脑上的浏览器会话已经结束。' });

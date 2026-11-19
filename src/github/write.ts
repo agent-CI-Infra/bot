@@ -3,7 +3,7 @@ import { GitHub } from './client.js';
 import { registeredRedactor, publicText } from '../core/redaction.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { digest, randomId } from '../core/security.js';
-import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
+import { covers, projectCeiling, resourceLevel } from '../projects/ceiling.js';
 
 /**
  * github_write: one GitHub write tool for every agent, shaped like the GitHub REST API (#381).

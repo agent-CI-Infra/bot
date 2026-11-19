@@ -1,6 +1,6 @@
 import { readToolResult } from './tool-results.js';
-import {submissionFeedback} from '../roles/submission-feedback.js';
-import { commandTimeoutLimit, commandTool, resolveCommandTimeout, runCommand } from './command.js';
+import { submissionFeedback } from '../roles/submission-feedback.js';
+import { commandTool, resolveCommandTimeout, runCommand } from './command.js';
 import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { taskConfiguration, taskPermissions } from '../tasks/configuration.js';
@@ -20,8 +20,8 @@ import { type Redactor, stop, blobSha, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
 import { validateReview, validateReply } from '../review/findings.js';
 import { reviewUpdateCursor } from '../review/sessions.js';
-import { workType } from '../work/catalog.js';
-import { sectionText } from '../work/settings.js';
+import { eventAdapterId } from '../tasks/event-adapters.js';
+import { effectiveManagerPrompt } from '../dispatch/settings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
 import { RepositoryExplorer, repositoryTools } from './exploration.js';
@@ -45,10 +45,11 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   // Permissions and a reply task's prompt are read from trusted storage here, for every caller and every attempt. A task of a
   // former custom workflow keeps the prompt its snapshot captured; new reply tasks follow the Manager's reply section.
-  const reply = String(task.kind).startsWith('workflow.'), legacy = reply && task.workflow_id ? taskConfiguration(store,task)?.workflow : undefined;
+  const profileKind = eventAdapterId(task) ?? String(task.kind);
+  const reply = profileKind.startsWith('workflow.'), legacy = reply && task.workflow_id ? taskConfiguration(store, task)?.workflow : undefined;
   const prompt = !reply ? undefined : legacy ? { id: String(legacy.id), name: String(legacy.name), prompt: String(legacy.prompt ?? '') }
-    : { id: 'reply', name: workType('reply')!.name, prompt: sectionText(store, task.repository_id, 'reply') };
-  const profile = workspaceProfile(String(task.kind), context, taskPermissions(store, task), prompt);
+    : { id: 'reply', name: '事件回复', prompt: effectiveManagerPrompt(store, task.repository_id) };
+  const profile = workspaceProfile(profileKind, context, taskPermissions(store, task), prompt);
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const records = new TaskRecords(store);
   for(const tool of taskTools) {
@@ -66,8 +67,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     profile.tools.push(browserTool as any);
     platform[browserTool.function.name] = async (_id, args) => { await guard(); return runBrowserTool(store, task, args, { guard, workspace }); };
   }
-  // Review and Actions analysis under the project controller, and development under its team, run through runTeam below.
-  const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
+  // Legacy review and Actions analysis under the project controller, and development under its team, run through runTeam below.
+  const entry = String(task.kind).startsWith('review.') ? 'review' : profileKind === 'actions.failures' ? 'actions' : null;
   const team = !!entry && controlled(store, task, entry) || profile.completion === 'publication' && !!createPullRequest && controlled(store, task, 'development');
   // Without a role team the executing agent chooses the task's workspace itself (#769), while it holds none yet.
   const plan = workspace.plannedWorktree?.(), choosing = !team && !!plan && plan.state !== 'bound';
@@ -117,11 +118,13 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // Review and Actions analysis retain their task/tools/completion as the dev assignment. Both the controller and
   // that assignment use their selected backend; old V2 entries retain Pi until the dev backend changes.
   if (entry && controlled(store, task, entry)) {
-    const { repository, token, complete } = session, round = randomId(), spaces=roleWorkspaces(workspace);
-    const staged=!!records.get(task.id).stage_schedule.plan_revision||!!(taskConfiguration(store,task)?.roles?.required_stages?.length);
+    const { repository, token, complete } = session, round = randomId(), spaces = roleWorkspaces(workspace);
     const execute = async (name: string, args: any) => {
-      if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return name==='run_command'?runCommand(spaces.current,'stage-observation:'+randomId(),args,120,spaces.role):spaces.current.call('stage-observation:'+randomId(),{type:'workspace_read',path:args?.path});
-      if(staged&&spaces.role!=='dev'&&memoryTools.some(tool=>tool.function.name===name))return memoryTool(store,{...task,active_role:spaces.role,trace_run_id:spaces.runId},name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('stage-memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},spaces.current);
+      if (spaces.role && spaces.role !== 'dev' && ['read_file', 'run_command'].includes(name)) {
+        return name === 'run_command'
+          ? runCommand(spaces.current, 'stage-observation:' + randomId(), args, 120, spaces.role)
+          : spaces.current.call('stage-observation:' + randomId(), { type: 'workspace_read', path: args?.path });
+      }
       if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
       if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
       if (name === 'github_read_token') {
@@ -152,7 +155,11 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
-      { entry, workspace, ...(staged?{observerTools:profile.tools.map(t=>t.function.name==='run_command'?commandTool(observerBudget.defaultSeconds, undefined, observerBudget.maxSeconds):t)}:{}), prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot}:{workers:['dev']}),
+      { entry, workspace, observerTools: profile.tools.map(t => t.function.name === 'run_command' ? commandTool(observerBudget.defaultSeconds, undefined, observerBudget.maxSeconds) : t),
+        prepare: async (role: string) => profile.capabilities.workspace.write || role !== 'dev' ? spaces.prepare(role) : undefined,
+        controller: spaces.controller, worker: spaces.worker,
+        withRole: spaces.withRole, withObservers: spaces.withObservers, bindRun: spaces.bindRun,
+        snapshot: profile.capabilities.workspace.write ? spaces.snapshot : undefined,
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
           : spaces.worker(instance, resolved) } });

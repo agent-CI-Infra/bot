@@ -345,9 +345,8 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
   // development: false keeps the project's capability ceiling at comment (#850), so replies still post but deliver no code.
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, capability_ceiling: custom?.development === false ? 'comment' : 'develop', test_command: policy });
-  const taskId = randomBytes(24).toString('hex'), input = custom ? {} : { review: { implementation_goal: 'Fix requested addition' } };
-  // A reply task (the work type of former custom workflows) follows the Manager's reply section with the project's writes.
-  if (custom) assert.equal((await saveManager(admin, '101', { content: '## 通用回复 `reply`\n\nFix what the Issue asks.\n', work: { reply: { enabled: true, writes: custom.writes } } })).status, 200);
+  const taskId = randomBytes(24).toString('hex'), input = custom ? { ...(custom.writes ? { manager: { writes: custom.writes } } : {}) } : { review: { implementation_goal: 'Fix requested addition' } };
+  if (custom) assert.equal((await saveManager(admin, '101', { content: 'Fix what the Issue asks.\n' })).status, 200);
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101',?,'running','dev',1,'claim',?,?)", taskId, custom ? 'workflow.issue' : 'development.issue', JSON.stringify(input), new Date().toISOString());
   h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", taskId, new Date().toISOString());
   const engine = new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptor);

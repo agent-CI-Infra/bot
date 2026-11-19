@@ -2,7 +2,7 @@ import { acceptanceFixture } from '../../../fixtures/acceptance-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{createHash}from'node:crypto';import{rmSync}from'node:fs';
 import{harness,setup,account,repository,pinLegacyTaskConfiguration}from'../../../fixtures/helpers.mjs';import{TaskEngine}from'../../../../dist/agent/engine.js';import{blobSha}from'../../../../dist/agent/common.js';
 import{RuleService,resolveRules,developmentLabel,developingLabel,ownLabels,skillIndex,behaviorPath,projectLabels}from'../../../../dist/rules/service.js';import{explainFailure}from'../../../../dist/agent/failures.js';
-import{managerPrompt,managerSection,saveManager,withSection}from'../../../../dist/work/settings.js';
+import{managerPrompt,saveManager}from'../../../../dist/dispatch/settings.js';
 
 const id=value=>createHash('sha1').update(JSON.stringify(value)).digest('hex');
 // A fake GitHub repository whose branches point at commits built from {path: text | {data, mode}}, and a manager whose
@@ -185,15 +185,18 @@ test('a project waiting for its .bot/ import imports at its first task, which al
   assert.equal(task.status,'succeeded',task.error_code);
   assert.ok(f.config.system.includes('## Behavior guide (Manager section `guide`, console)\nImported guide.'));
   assert.ok(f.config.system.includes('## Labeling (Manager section `labels`, console)\nreview_label: team-reviewed\n\n# Our labels'));
-  // The project's sections hold the imported texts for the tasks after it.
   const short=f.heads.main.slice(0,7);
-  assert.equal(managerSection(f.store,'101','guide'),`由 \`.bot/guide.md\` 导入（提交 ${short}）。\n\nImported guide.`);
+  assert.equal(JSON.parse(f.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/guide.md'],`由 \`.bot/guide.md\` 导入（提交 ${short}）。\n\nImported guide.`);
   assert.deepEqual(f.labels,['team-reviewed']);
   assert.equal(f.store.get("SELECT pending,sha FROM rule_imports WHERE repository_id='101'").sha,f.heads.main);
 });
 
-// The project's guide is its Manager section; the console text of a section is written through the Manager prompt.
-const writeSection=(store,id,section,text)=>{const current=managerPrompt(store,id);saveManager(store,id,{expected_revision:current.revision,content:withSection(current.content,section,text)},null,'test');};
+const sectionPath={guide:'.bot/guide.md','review.issue':'.bot/rules/issue-review.md','review.pr':'.bot/rules/pr-review.md',development:'.bot/rules/issue-development.md',labels:'.bot/rules/labels.md'};
+const writeSection=(store,id,section,text)=>{
+  const row=store.get('SELECT rule_overrides FROM policies WHERE repository_id=?',id);
+  const current=JSON.parse(row?.rule_overrides||'{}');
+  store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?',JSON.stringify({...current,[sectionPath[section]||section]:text}),id);
+};
 
 test('long rule sections and skills are sent whole',async t=>{
   const f=await repositoryFixture(t),skill=(name,bytes)=>[`.agents/skills/${name}/SKILL.md`,`# ${name}\n`+'s'.repeat(bytes-name.length-3)];

@@ -30,7 +30,7 @@ const dialog = page => page.getByRole('dialog', { name: '删除模型 Role-only 
 test('role-only references remain clear before cancelling deletion on desktop and small phones', async ({ page }) => {
   const { h, admin, model } = await prepared(page), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
-    await expect(row(page).locator('.model-usage')).toHaveText('无项目默认或工作类型引用');
+    await expect(row(page).locator('.model-usage')).toHaveText('无项目默认引用');
     const before = h.store.all('SELECT * FROM audit');
     await row(page).getByRole('button', { name: '删除', exact: true }).click();
     await expect(dialog(page)).toContainText('fixture/project-101 · Release reviewer（reviewer） · 已停用');
@@ -53,7 +53,7 @@ test('shared deletion names service roles and onboarding without changing them o
   const { h, admin, model } = await prepared(page, true);
   try {
     const roles = h.store.all('SELECT * FROM service_roles');
-    await expect(page.getByText('部署共享模型可供项目和平台服务角色选用。', { exact: false })).toContainText('工作类型与项目角色的显式引用保留为不可用');
+    await expect(page.getByText('部署共享模型可供项目和平台服务角色选用。', { exact: false })).toContainText('项目角色的显式引用保留为不可用');
     await row(page).getByRole('button', { name: '删除', exact: true }).click();
     await expect(dialog(page)).toContainText('管理助手（management-assistant）');
     await expect(dialog(page)).toContainText('仓库问答助手（repository-assistant）');

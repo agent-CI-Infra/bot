@@ -1,8 +1,15 @@
 import { parse } from 'yaml';
 import type { Store } from '../storage/database.js';
-import { sections } from '../work/catalog.js';
-import { managerPrompt, parseSections, saveManager, withSection } from '../work/settings.js';
+import { managerPrompt, saveManager } from '../dispatch/settings.js';
 import { computerKeys, declaredLabel, defaultLabels, defaults, retiredPath, type Labels } from './service.js';
+
+const legacyRuleSections = [
+  { id: 'guide', title: '行为指南', rule: '.bot/guide.md' },
+  { id: 'review.issue', title: 'Issue 检视规则', rule: '.bot/rules/issue-review.md' },
+  { id: 'review.pr', title: 'PR 检视规则', rule: '.bot/rules/pr-review.md' },
+  { id: 'development', title: '开发与 Bot PR 跟进规则', rule: '.bot/rules/issue-development.md' },
+  { id: 'labels', title: '标签规则', rule: '.bot/rules/labels.md' },
+] as const;
 
 /**
  * The upgrade that retires the repositories' .bot/ files (#935). Once per project, the layer that took effect before
@@ -104,19 +111,26 @@ function importProject(store: Store, id: string, files: Record<string, string>, 
     catch { report.warnings.push(`${path} 的 ${key} 不合法，使用默认值 ${defaultLabels[key]}`); }
   }
   let content = managerPrompt(store, id).content;
-  const written = parseSections(content).sections;
-  const write = (sectionId: string, text: string) => { content = withSection(content, sectionId, text); report.sections.push(sectionId); };
-  for (const section of sections.filter(entry => entry.rule && entry.rule !== '.bot/computer.yaml')) {
-    const path = section.rule!, key = declarations[path], text = repository(path), console = Object.hasOwn(overrides, path) ? String(overrides[path]) : null;
+  const nextOverrides: Record<string, string> = { ...overrides };
+  const blocks: string[] = [];
+  const write = (section: { id: string; title: string; rule: string }, text: string) => {
+    const trimmed = text.trim().replace(/\n{3,}/g, '\n\n');
+    nextOverrides[section.rule] = trimmed;
+    blocks.push(`## ${section.title}\n\n${trimmed}`);
+    report.sections.push(section.id);
+  };
+  for (const section of legacyRuleSections) {
+    const path = section.rule, key = declarations[path], text = repository(path), console = Object.hasOwn(overrides, path) ? String(overrides[path]) : null;
     const plain = (value: string) => key ? value.replace(line(key), '') : value;
     if (text?.includes('\0')) { report.warnings.push(`${path} 不是文本文件，未导入`); continue; }
-    if (text !== null) { report.files.push(path); write(section.id, `由 \`${path}\` 导入（提交 ${sha.slice(0, 7)}）。\n\n${plain(text)}`); }
-    // A console text kept only in rule_overrides (an older version wrote it there) joins the prompt, so saving it keeps it.
-    else if (console !== null && ((key && line(key).test(console)) || !written.has(section.id))) write(section.id, plain(console));
+    if (text !== null) { report.files.push(path); write(section, `由 \`${path}\` 导入（提交 ${sha.slice(0, 7)}）。\n\n${plain(text).trim()}`); }
+    else if (console !== null) write(section, plain(console));
   }
   store.run('INSERT INTO project_labels(repository_id,review_label,development_label) VALUES(?,?,?) ON CONFLICT(repository_id) DO NOTHING', id, report.labels.review_label, report.labels.development_label);
   if (report.sections.length) {
+    store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify(nextOverrides), id);
     const current = managerPrompt(store, id);
+    content = [content.trim(), ...blocks].filter(Boolean).join('\n\n') + '\n';
     saveManager(store, id, { expected_revision: current.revision, content }, null, 'upgrade');
   }
   // The project computer: the repository file's fields over the console's, as each task applied them.

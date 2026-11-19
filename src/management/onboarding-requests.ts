@@ -3,7 +3,7 @@ import { fail, fields, randomId, type Json } from '../core/security.js';
 import { resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { installationApi } from '../app/installations.js';
 import { trustedOrganization } from '../app/trusted-organizations.js';
-import { isCeiling, projectCeiling } from '../work/ceiling.js';
+import { isCeiling, projectCeiling } from '../projects/ceiling.js';
 import type { ManagementService } from './service.js';
 
 /**

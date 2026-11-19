@@ -8,7 +8,7 @@ import { managementFixture, query, command } from '../../fixtures/management-fix
 // rather than overwriting. Nothing here writes through the console: the receipts come from the API the fixture already
 // exposes, and the two page assertions read the same GET the console already makes.
 
-const target = { project_id: '101', workflow_id: 'review.issue' };
+const target = { project_id: '101' };
 const prompt = value => JSON.stringify(value);
 
 async function login(page, f) {
@@ -24,10 +24,10 @@ test('one idempotency key returns the same receipt and executes once, and a diff
   try {
     const revision = (await query(f.admin, 'get_effective_config', { project_id: '101' })).value.revision;
     const key = 'replay-355';
-    const first = await command(f.admin, 'workflow.update', target, { prompt: 'Replay prompt.' }, key, revision);
+    const first = await command(f.admin, 'manager.update', target, { prompt: 'Replay prompt.' }, key, revision);
     expect(first.status).toBe(201);
     expect(first.value.state).toBe('succeeded');
-    const replay = await command(f.admin, 'workflow.update', target, { prompt: 'Replay prompt.' }, key, revision);
+    const replay = await command(f.admin, 'manager.update', target, { prompt: 'Replay prompt.' }, key, revision);
     expect(replay.status).toBe(201);
     // The replay answers with the receipt already stored: same id, same outcome, nothing executed a second time.
     expect(replay.value.id).toBe(first.value.id);
@@ -37,7 +37,7 @@ test('one idempotency key returns the same receipt and executes once, and a diff
     // The configuration moved once, not twice: the replay did not save the same prompt again.
     expect((await query(f.admin, 'get_effective_config', { project_id: '101' })).value.revision).toBe(first.value.after_revision);
     // The same key with different arguments is a conflict, not a second execution hidden behind the first receipt.
-    const changed = await command(f.admin, 'workflow.update', target, { prompt: 'Different prompt.' }, key, first.value.after_revision);
+    const changed = await command(f.admin, 'manager.update', target, { prompt: 'Different prompt.' }, key, first.value.after_revision);
     expect(changed.status).toBe(409);
     expect(changed.value.error).toBe('idempotency_conflict');
     expect(f.h.store.get('SELECT count(*) n FROM management_commands WHERE idempotency_key=?', key).n).toBe(1);
@@ -52,7 +52,7 @@ test('a receipt read that loses its connection is reported, and the re-read show
     if (url.pathname.startsWith('/api/management/commands') && request.method() !== 'GET') writes.push(url.pathname);
   });
   try {
-    const receipt = (await command(f.admin, 'workflow.update', target, { prompt: 'Reconnect prompt.' })).value;
+    const receipt = (await command(f.admin, 'manager.update', target, { prompt: 'Reconnect prompt.' })).value;
     expect(receipt.state).toBe('succeeded');
     // The fixture's own setup already recorded console writes, so the comparison is a before/after snapshot.
     const recorded = () => f.h.store.get('SELECT count(*) n FROM management_commands').n;
@@ -92,16 +92,16 @@ test('switching the chat to another project and back keeps the submitted receipt
     await switchConsoleProject(page, '101');
     await message.fill('更新任务默认提示词');
     await page.getByRole('button', { name: '发送', exact: true }).click();
-    await expect(feed.getByText('操作 更新工作配置')).toHaveCount(1);
+    await expect(feed.getByText('操作 更新 Manager 配置')).toHaveCount(1);
     await expect(feed).toContainText('已执行');
-    const commands = () => f.h.store.get("SELECT count(*) n FROM management_commands WHERE operation='workflow.update'").n;
+    const commands = () => f.h.store.get("SELECT count(*) n FROM management_commands WHERE operation='manager.update'").n;
     expect(commands()).toBe(1);
     // Another project has its own conversation: the receipt of 101 is not carried over.
     await switchConsoleProject(page, '102');
-    await expect(feed.getByText('操作 更新工作配置')).toHaveCount(0);
+    await expect(feed.getByText('操作 更新 Manager 配置')).toHaveCount(0);
     // Coming back re-reads the same conversation and renders the receipt once, not twice.
     await switchConsoleProject(page, '101');
-    await expect(feed.getByText('操作 更新工作配置')).toHaveCount(1);
+    await expect(feed.getByText('操作 更新 Manager 配置')).toHaveCount(1);
     await expect(feed).toContainText('已执行');
     expect(commands()).toBe(1);
     expect(errors).toEqual([]);
@@ -112,9 +112,9 @@ test('a stale revision is refused instead of overwriting, and the receipt page e
   const f = await managementFixture();
   try {
     const revision = (await query(f.admin, 'get_effective_config', { project_id: '101' })).value.revision;
-    const applied = await command(f.admin, 'workflow.update', target, { prompt: 'First prompt.' }, 'stale-355-a', revision);
+    const applied = await command(f.admin, 'manager.update', target, { prompt: 'First prompt.' }, 'stale-355-a', revision);
     expect(applied.status).toBe(201);
-    const refused = await command(f.admin, 'workflow.update', target, { prompt: 'Overwriting prompt.' }, 'stale-355-b', revision);
+    const refused = await command(f.admin, 'manager.update', target, { prompt: 'Overwriting prompt.' }, 'stale-355-b', revision);
     expect(refused.status).toBe(409);
     expect(refused.value.error).toBe('management_revision_conflict');
     // The stale write is refused before it is recorded: no receipt, no second save, the current value still stands.
@@ -138,7 +138,7 @@ test('a stale revision is refused instead of overwriting, and the receipt page e
     // The positive control lives in this same test: a command submitted at the current revision does succeed and its
     // receipt page renders exactly that sentence, so the negative assertion above is known to be able to bite.
     const currentRevision = (await query(f.admin, 'get_effective_config', { project_id: '101' })).value.revision;
-    const succeededCommand = await command(f.admin, 'workflow.update', target, { prompt: 'Second prompt.' }, 'stale-355-c', currentRevision);
+    const succeededCommand = await command(f.admin, 'manager.update', target, { prompt: 'Second prompt.' }, 'stale-355-c', currentRevision);
     expect(succeededCommand.status).toBe(201);
     expect(succeededCommand.value.state).toBe('succeeded');
     await page.goto(f.h.admin + '/#/management/commands/' + succeededCommand.value.id);

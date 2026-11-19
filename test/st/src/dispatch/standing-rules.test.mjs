@@ -44,7 +44,8 @@ test('with the built-in rules routine Issue and PR events are dispatched without
   let event = f.last();
   assert.deepEqual([event.decision, event.model, JSON.parse(event.rule)], ['create', null, { id: 'issue-opened', revision: 0 }]);
   assert.equal(f.requests.length, 0, 'no model call');
-  const review = f.h.store.get("SELECT * FROM tasks WHERE kind='review.issue'"); assert.ok(review);
+  const review = f.h.store.get("SELECT * FROM tasks WHERE kind='task.request'"); assert.ok(review);
+  assert.equal(JSON.parse(review.input).executor_role, 'reviewer');
   // An update joins the review while it still works on the Issue.
   const comment = (id, body) => queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', issue, sender: { ...alice, login: 'maria', id: 9 }, comment: { id, body, author_association: 'MEMBER' } }, 'comment-' + id);
   comment(31, 'The file was saved on Windows.'); await f.run();
@@ -85,7 +86,7 @@ test('the Manager registers a rule and the next event like it follows the rule; 
   assert.equal(f.last().decision, 'create'); assert.equal(f.requests.length, 2);
   const saved = (await f.manager()).standing_rules;
   assert.equal(saved.source, 'saved'); assert.equal(saved.revision, before + 1);
-  assert.deepEqual(saved.rules.at(-1), { id: 'question-label', event: 'issue.labeled', action: 'continue_or_create', work: 'review.issue', reason: '常设规则：问题标签交给 Issue 检视。', when: { labels_any: ['question'] } });
+  assert.deepEqual(saved.rules.at(-1), { id: 'question-label', event: 'issue.labeled', action: 'continue_or_create', role: 'reviewer', writes: ['review'], reason: '常设规则：问题标签交给 Issue 检视。', when: { labels_any: ['question'] } });
   assert.deepEqual(saved.rules.slice(0, builtinRules.length), builtinRules, 'registering starts from the rules in force');
   assert.ok(f.h.store.get("SELECT 1 FROM audit WHERE action='manager.rule' AND repository_id='101'"));
   f.state.message = () => assert.fail('the rule decides this one');
@@ -119,7 +120,7 @@ test('continue_or_create creates the work when nothing can be continued; labels_
   await f.run();
   let event = f.last();
   assert.deepEqual([event.decision, JSON.parse(event.rule).id, f.requests.length], ['create', 'pull-request-push', 0]);
-  assert.ok(f.h.store.get("SELECT 1 FROM tasks WHERE kind='review.pr' AND object_number=8 AND head_sha=?", 'c'.repeat(40)));
+  assert.ok(f.h.store.get("SELECT 1 FROM tasks WHERE kind='task.request' AND object_number=8 AND head_sha=?", 'c'.repeat(40)));
   // A rule for Issues without `wontfix` (compared without case): such an Issue goes to the Manager, another is settled by it.
   const manager = await f.manager();
   assert.equal((await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision, standing_rules: [{ id: 'issues', event: 'issue.opened',

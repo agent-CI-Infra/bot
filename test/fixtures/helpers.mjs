@@ -99,8 +99,8 @@ export async function saveManager(admin, id, change) {
   if (current.status !== 200) throw new Error(JSON.stringify(current));
   return admin(`/api/repositories/${id}/manager`, 'PUT', { expected_revision: current.value.manager.prompt.revision, ...change });
 }
-// The text a Manager section takes effect with (a repository file, the project's section, or the built-in text).
-export const managerSection = async (admin, id, section) => (await admin(`/api/repositories/${id}/manager`)).value.manager.sections.find(entry => entry.id === section).effective;
+// The effective Manager prompt text of a project (#1122).
+export const managerSection = async (admin, id) => (await admin(`/api/repositories/${id}/manager`)).value.manager.prompt.effective;
 
 // Protocol fixtures for the retained direct executor represent pre-Manager task snapshots, not project defaults.
 // Current/default Manager routing is exercised separately by manager-settings and roles-v2.

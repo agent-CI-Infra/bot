@@ -13,7 +13,7 @@ const out='.tmp/project-navigation-boundaries';
 test('a project receipt retains the navigation scope and both back links reopen its assistant without replaying a command',async({page})=>{
  const f=await managementFixture();try {
   const conversation=(await f.admin('/api/management/conversations','POST',{scope:'project:101'})).value.conversation.id;
-  const receipt=(await command(f.admin,'workflow.update',{project_id:'101',workflow_id:'review.issue'},{prompt:'Receipt scope regression.'})).value;
+  const receipt=(await command(f.admin,'manager.update',{project_id:'101'},{prompt:'Receipt scope regression.'})).value;
   f.h.store.run('UPDATE management_commands SET source_conversation=?,source_message=? WHERE id=?',conversation,'receipt-source',receipt.id);
   const before=f.h.store.get('SELECT count(*) n FROM management_commands').n;
   await login(page,f.h,f.password,'#/projects/101/management');await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope','project:101');

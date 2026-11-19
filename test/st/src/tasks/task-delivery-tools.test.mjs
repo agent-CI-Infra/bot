@@ -217,6 +217,7 @@ function grantFixture(t) {
   s.run("INSERT INTO policies(repository_id,enabled,development_enabled,capability_ceiling) VALUES('r',1,1,'develop')");
   const cfg = roleConfiguration(s, 'r'); cfg.enabled = true; s.run("INSERT INTO settings VALUES('roles:r',?)", JSON.stringify(cfg));
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('parent','r','task.request','running','Parent','{}')");
+  s.run("INSERT INTO task_write_grants VALUES('parent','[\"pull_request\",\"review\",\"github\",\"actions_rerun\"]',1,'now')");
   new TaskRecords(s).contract('parent', { goal: 'Parent', scope: ['Parent'], criteria: ['Done'], endpoint: 'report' });
   const caller = roleTaskCaller(s, 'r', 'manager', { source_task_id: 'parent', guard() {} }), commands = new TaskCommands(s);
   const create = (args = {}) => commands.tool(caller, 'create_task', { request: 'Look into it', criteria: ['A factual answer'], ...args });

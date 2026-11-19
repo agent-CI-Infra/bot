@@ -5,8 +5,6 @@ import { randomId, verifySignature, type Json } from '../core/security.js';
 import { pullRequestNeeded, queueWebhook } from '../review/queue.js';
 import { GitHub } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
-import { recordAutomation } from '../automation/runner.js';
-import type { AutomationConfig } from '../automation/config.js';
 import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
 import { actionsWebhook } from '../actions/storage.js';
@@ -15,7 +13,7 @@ import { archiveInstallationEvent, isInstallationControlEvent } from '../install
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { activeScopes, invalidate, invalidateIfLost } from '../identity/authorization.js';
 import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './delivery-audit.js';
-import { covers, projectCeiling } from '../work/ceiling.js';
+import { covers, projectCeiling } from '../projects/ceiling.js';
 
 export async function ingest(
   store: Store,
@@ -24,8 +22,6 @@ export async function ingest(
   headers: IncomingHttpHeaders,
   bytes: Buffer,
   complete: boolean,
-  /** Repository YAML configs, keyed by lower-cased `owner/repo` (#1). */
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>,
   githubUrl?: string,
 ) {
   const endpoint = store.get('SELECT id,account_id,secret FROM endpoints WHERE id=? AND account_id=?', endpointId, accountId);
@@ -128,9 +124,6 @@ export async function ingest(
       // A disabled project archives everything, whatever its review switch says; the deliveries page says which one held it back.
       Object.assign(response,{review_outcome:pr?.draft===true?'draft':policy&&!policy.enabled?'project_disabled':!covers(projectCeiling(store,String(owner.id),policy),'comment')?'review_disabled':'not_trigger'});
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest);
-      // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
-      const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());
-      try { recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback); } catch { /* a rule cannot fail ingestion */ }
       Object.assign(response, { forwards_created: enqueueForwards(store,String(owner.id),event,payload,id) });
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }

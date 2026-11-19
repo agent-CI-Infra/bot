@@ -252,12 +252,8 @@ function containerCliStatus(
       )?.n ?? 0,
     );
     try {
-      const opened = selectedModel(store, repositoryId, workflow);
-      const policy = store.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId);
-      let overrides: Record<string, unknown> = {};
-      try { overrides = JSON.parse(String(policy?.task_models || '{}')); } catch {}
-      const source: 'workflow' | 'project' = Object.hasOwn(overrides, workflow) ? 'workflow' : 'project';
-      resolvedModel = { id: String(opened.id), name: String(opened.model), source };
+      const opened = selectedModel(store, repositoryId);
+      resolvedModel = { id: String(opened.id), name: String(opened.model), source: 'project' };
       resolvedModelRow = store.get('SELECT id,model_name,version,updated_at FROM models WHERE id=?', opened.id) ?? null;
     } catch (err) {
       modelErrorCode = err instanceof TaskError ? err.code : 'model_not_configured';
@@ -298,7 +294,7 @@ function containerCliStatus(
     reasonCode = modelErrorCode ?? 'model_not_configured';
     reason =
       modelCount > 0
-        ? `项目已有 ${modelCount} 个带密钥模型，但尚未选择默认模型或工作类型模型（请在项目设置选择默认模型，或为使用 ${label} 的角色单独指定模型）。`
+        ? `项目已有 ${modelCount} 个带密钥模型，但尚未选择项目默认模型（请在项目设置选择默认模型，或为使用 ${label} 的角色单独指定模型）。`
         : '项目尚未配置可用于容器内模型中转的上游模型与凭据。';
   }
 

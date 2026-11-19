@@ -1,18 +1,17 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail } from '../core/security.js';
 import { stop } from '../agent/common.js';
-import { workType } from './catalog.js';
 
 /**
- * The project's capability ceiling (#850): the most the bot may write in a project, in three levels.
+ * The project's capability ceiling (#850, #1122): the single project-wide write gate, in three levels.
  *
  * - read: answer and review in chat; nothing is written on GitHub.
  * - comment: every write on Issues and Pull requests (comments, labels, titles and bodies, assignees, closing, new Issues,
  *   reviews), Actions reruns and starting workflows (workflow_dispatch, #1072); no code.
  * - develop: change code and open PRs as well, including Contents writes and merging, which the Manager holds by default.
  *
- * Every write the bot makes sits under it: the deliveries of work types, and github_write of project roles, Feishu groups and
- * the management assistant. Work-type writes, role permissions, a group's level and a person's grant only narrow it; event
+ * Every write the bot makes sits under it: generic task deliveries, and github_write of project roles, Feishu groups and
+ * the management assistant. Task grants, role permissions, a group's level and a person's grant only narrow it; event
  * switches only decide which GitHub events reach the Manager. The former review and development switches stay in the policy
  * equal to it (review_enabled: comment or more, development_enabled: develop) for older readers; only setCeiling writes them.
  */
@@ -30,12 +29,12 @@ export const ceilingTitles: Record<Ceiling, string> = { read: '只读问答', co
 export const ceilingScopes: Record<Ceiling, string> = {
   read: '不在 GitHub 上写任何内容',
   comment: '可以写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、新建 Issue、发检视；可以触发 Actions 工作流，不改代码',
-  develop: '另外可以改代码、开 PR、写分支和合并 PR' };
+  develop: '另外可以改代码、开 PR、写分支和合并 PR',
+};
 
 /**
- * The level today's switches and writes stand for, used once to upgrade a policy and for a policy row nothing has set the
- * ceiling on yet: develop with the development switch on, comment while any work type writes on GitHub (reviews, Actions
- * failure handling, replies), else read. It is never wider than what those settings already allowed.
+ * The level historical switches stood for, used once to upgrade a policy and for a policy row nothing has set the
+ * ceiling on yet: develop with the development switch on, comment while review or Actions failure handling was on, else read.
  */
 export function derivedCeiling(policy: Row | undefined): Ceiling {
   if (!policy) return 'read';
@@ -50,31 +49,38 @@ export function projectCeiling(store: Store, repositoryId: string, policy: Row |
   return isCeiling(policy?.capability_ceiling) ? policy!.capability_ceiling : derivedCeiling(policy);
 }
 
-/**
- * The level a work-type write needs. Release notes are written only after a person confirms them in the console (发版本),
- * as that person's operation, so they need none.
- */
-const writeLevels: Record<string, Ceiling> = { reply: 'comment', labels: 'comment', issue: 'comment', actions_rerun: 'comment', code: 'develop', pull_request: 'develop',
-  release_notes: 'read' };
+const writeLevels: Record<string, Ceiling> = {
+  reply: 'comment',
+  review: 'comment',
+  github: 'comment',
+  labels: 'comment',
+  issue: 'comment',
+  actions_rerun: 'comment',
+  code: 'develop',
+  pull_request: 'develop',
+  release_notes: 'read',
+};
 export const writeLevel = (write: string): Ceiling => writeLevels[write] ?? 'develop';
 /** The level a github_write on a GitHub resource needs: merging a PR and pushing are Contents writes; Issues, pull requests
  * and Actions (starting a workflow) need comment. */
 export const resourceLevel = (resource: string): Ceiling => resource === 'contents' ? 'develop' : 'comment';
-/**
- * The level a work type needs to run at all: reviews, replies and Actions failure handling write on GitHub, development
- * delivers code. Ordinary tasks, CI observation and release notes run at any level; their writes are
- * still capped one by one.
- */
-export function workLevel(id: string): Ceiling {
-  const base = workType(id)?.base;
-  return base === 'development' ? 'develop' : base === 'review' || base === 'reply' || base === 'actions' ? 'comment' : 'read';
-}
 /** The writes of a list the ceiling allows. */
 export const withinCeiling = (ceiling: Ceiling, writes: string[]) => writes.filter(write => covers(ceiling, writeLevel(write)));
 
 /**
+ * The minimum ceiling level a task needs to continue running at all. Generic tasks (`task.request`) check their
+ * granted writes per delivery tool call rather than stopping read-only execution; legacy in-flight rows follow their kind.
+ */
+export function taskRequiredCeiling(task: { kind?: unknown }): Ceiling {
+  const kind = String(task.kind ?? 'task.request');
+  if (kind === 'development.issue' || kind === 'development.pr' || kind === 'task.development') return 'develop';
+  if (kind.startsWith('review.') || kind.startsWith('workflow.') || kind === 'actions.failures') return 'comment';
+  return 'read';
+}
+
+/**
  * Why something above the ceiling was refused: the project's level and the level needed, each with what it allows. People
- * read it on refused tasks and API calls; the Manager reads it on work an event cannot create.
+ * read it on refused tasks and API calls; the Manager reads it when a write is unavailable.
  */
 export const ceilingMessage = (needed: Ceiling, ceiling: Ceiling) =>
   `项目能力上限为「${ceilingTitles[ceiling]}」(${ceiling}，${ceilingScopes[ceiling]})，这项操作需要「${ceilingTitles[needed]}」(${needed}，${ceilingScopes[needed]})；项目管理员可以在「项目设置 → 监听与触发」调整。`;
@@ -109,12 +115,6 @@ export function legacySwitchCeiling(current: Ceiling, review: unknown, developme
   return level;
 }
 
-/**
- * Once per policy (#850): the ceiling is the narrowest level today's switches and writes allow (derivedCeiling), so no project
- * gains authority. Settings that were narrower than that level are written out so every project keeps the writes it had:
- * a project that developed without reviewing keeps its review work types switched off, and ordinary tasks, which wrote
- * nothing unless an administrator chose their writes, keep writing nothing instead of inheriting the ceiling.
- */
 export function ceilingStorage(store: Store): void {
   if (!store.all('PRAGMA table_info(policies)').some(column => column.name === 'capability_ceiling'))
     store.db.exec('ALTER TABLE policies ADD COLUMN capability_ceiling TEXT');
@@ -123,14 +123,6 @@ export function ceilingStorage(store: Store): void {
   store.transaction(() => {
     for (const policy of pending) {
       const level = derivedCeiling(policy);
-      let work: Record<string, any> = {};
-      try { const saved = JSON.parse(String(policy.work_settings ?? '{}')); if (saved && typeof saved === 'object' && !Array.isArray(saved)) work = saved; } catch { work = {}; }
-      const before = JSON.stringify(work);
-      if (covers(level, 'comment') && !policy.review_enabled)
-        for (const id of ['review.issue', 'review.pr']) if (work[id]?.enabled !== false) work[id] = { ...(work[id] ?? {}), enabled: false, version: Number(work[id]?.version ?? 0) + 1 };
-      // Writes are unchanged in effect, so the version a stage gate compares stays as it was.
-      if (!Array.isArray(work['task.request']?.writes)) work['task.request'] = { ...(work['task.request'] ?? {}), writes: [] };
-      if (JSON.stringify(work) !== before) store.run('UPDATE policies SET work_settings=? WHERE repository_id=?', JSON.stringify(work), policy.repository_id);
       store.run('UPDATE policies SET capability_ceiling=?,review_enabled=?,development_enabled=? WHERE repository_id=?', level, Number(covers(level, 'comment')), Number(level === 'develop'), policy.repository_id);
       store.audit('system', 'policy.capability_ceiling_migrated', level, String(policy.repository_id));
     }

@@ -40,7 +40,7 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   'search_conversation_history','read_conversation_message','read_conversation_summary',
   'read_managed_task','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task',
   'search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
-  'read_coordination','acknowledge_coordination','read_stage_schedule','plan_task','start_agent','dispatch',
+  'read_coordination','acknowledge_coordination','start_agent','dispatch',
   'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
   'finish_analysis','finish_observation','finish_release_notes','submit_acceptance',
   // Framework deliveries (#381): a tested PR from the task's candidate, Actions reruns and failure reports. The work type's

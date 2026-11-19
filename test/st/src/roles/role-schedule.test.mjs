@@ -3,596 +3,244 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
-import { TaskCommands } from '../../../../dist/tasks/commands.js';
-import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { runTeam } from '../../../../dist/roles/team.js';
-import { evaluateDelivery } from '../../../../dist/tasks/acceptance.js';
-import { Publisher } from '../../../../dist/github/publisher.js';
-import { mergeApi } from '../../../../dist/roles/merge.js';
-import { explainFailure } from '../../../../dist/agent/failures.js';
 import { captureTaskConfiguration } from '../../../../dist/tasks/configuration.js';
-import { runRole, roleInstance, roleRuns } from '../../../../dist/roles/run.js';
-import { roleApi } from '../../../../dist/roles/api.js';
+import { runRole, roleInstance } from '../../../../dist/roles/run.js';
 import { saveConfiguration } from '../../../../dist/roles/definition.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { traceEvent, beginRun } from '../../../../dist/tasks/trace.js';
-import { planTask, reconcileAssignments, bindStageAssignment, recordStageResult, latestRoleCandidate, evaluateRequiredStages, assertRequiredStages, assertStageStart, stageBudgetUsage, candidateKey, deliveryCandidate } from '../../../../dist/roles/schedule.js';
+import { latestRoleCandidate } from '../../../../dist/roles/schedule.js';
 
-const tool = name => ({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
-const call = (name,args) => ({role:'assistant',content:null,tool_calls:[{id:randomBytes(4).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
+const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
+const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: randomBytes(4).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 const tree = c => c.repeat(40);
-const stage = (stage_id, {writer=false,deps=[],types=['code'],capabilities=[],budget={},attempts=4}={}) => ({stage_id,depends_on:deps,delivery_types:types,role_constraints:{kinds:[writer?'writer':'observer'],role_ids:[writer?'dev':stage_id],capabilities:['version_binding','output_validation','raw_evidence',...(writer?[]:['fresh_context','fixed_candidate_read']),...capabilities],independent:!writer},required:true,completion:{evidence_types:[writer?'role_result':'tool_observation'],min_evidence:1,no_findings:!writer},retry:{max_attempts:attempts},budget});
-async function fixture(t,{stages=[],roles=[],file=':memory:',handler}={}) {
-  const key=randomBytes(32);let s=new Store(file,key),calls=[];
+
+async function fixture(t, { roles = [], file = ':memory:', handler } = {}) {
+  const key = randomBytes(32);
+  const s = new Store(file, key), calls = [];
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
   s.run("INSERT INTO repositories VALUES('r','fixture/stages','o','a')");
   s.run("INSERT INTO repositories VALUES('other','fixture/other','o','a')");
-  const server=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const body=JSON.parse(raw);calls.push(body);const system=body.messages[0].content;
-    const message=handler?await handler(body):JSON.parse(body.messages[1].content).role_context?.role==='qa'?call('finish',{outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true}):body.tools.some(tool=>tool.function.name==='submit_role_result')?(body.messages.at(-1).role==='tool'?call('submit_role_result',{summary:'checked',findings:[],inspected_scope:['fixture'],unknowns:[]}):call('read_file',{path:'fixture'})):call('finish',{summary:'implemented'});
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));});
-  server.listen(0,'127.0.0.1');await once(server,'listening');
-  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','r',`http://127.0.0.1:${server.address().port}/v1`,'fixture',s.secrets.seal({value:'fixture-stages-key'},'model:m'),'now');
+  const server = createServer(async (req, res) => {
+    let raw = '';
+    for await (const c of req) raw += c;
+    const body = JSON.parse(raw);
+    calls.push(body);
+    const message = handler
+      ? await handler(body)
+      : JSON.parse(body.messages[1].content).role_context?.role === 'qa'
+        ? call('finish', { outcome: 'pass', reason: 'verified', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true })
+        : body.tools.some(tool => tool.function.name === 'submit_role_result')
+          ? (body.messages.at(-1).role === 'tool' ? call('submit_role_result', { summary: 'checked', findings: [], inspected_scope: ['fixture'], unknowns: [] }) : call('read_file', { path: 'fixture' }))
+          : call('finish', { summary: 'implemented' });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', 'r', `http://127.0.0.1:${server.address().port}/v1`, 'fixture', s.secrets.seal({ value: 'fixture-stages-key' }, 'model:m'), 'now');
   s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('r','m',1,1)");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt) VALUES('t','r','development.issue','running','stages','{}',1)");
-  const records=new TaskRecords(s);records.contract('t',{goal:'stages',scope:['fixture'],criteria:['verified'],endpoint:'code'});
-  const native=['manager','dev','test','reviewer','ux','qa','coordinator'].map(role_id=>({role_id,harness_ref:{id:'native'},...roles.find(r=>r.role_id===role_id)}));
-  saveConfiguration(s,'r',{expected_revision:0,enabled:true,roles:native,required_stages:stages},'owner');
-  captureTaskConfiguration(s,'t');
-  const spec=()=>({store:s,task:s.get("SELECT * FROM tasks WHERE id='t'"),redactor:new Redactor(),guard:async()=>{},system:'Execution',prompt:'{}',tools:[tool('finish')],finish:{name:'finish',validate:v=>v},maxTurns:4});
-  t.after(()=>new Promise(r=>{s.close();server.close(r);server.closeAllConnections();}));
-  return {get s(){return s;},records,calls,spec,reopen(){s.close();s=new Store(file,key);},retry(){s.run("UPDATE tasks SET status='paused' WHERE id='t'");new TaskCommands(s).api({id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/retry'),{});},plan:()=>planTask(s,'t',records.get('t').revision),assign(role,id,stage_id){const instance=roleInstance(s,spec().task,role);s.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,?)',id,'t',instance.id,records.get('t').revision,null,'running',id,null);bindStageAssignment(s,'t',id,role,stage_id);return id;},async writer(id='dev-1',sha='a',hash='b'){this.assign('dev',id,'dev');return runRole(spec(),'dev',id,undefined,{snapshot:async()=>({local_sha:tree(sha),tree_sha:tree(hash)})});},async observer(role,id=role+'-1'){this.assign(role,id,role);const candidate=latestRoleCandidate(s,'t');if(candidate.kind==='code')traceEvent(s,'t','role_candidate',{role,sha:candidate.commit_sha,version:candidate.tree_hash,workspace_id:'readonly-'+id});const v=await runRole({...spec(),maxTurns:8,system:'Inspect fixed',tools:[tool('read_file'),tool('submit_role_result')],finish:{name:'submit_role_result',validate:v=>v},execute:async()=>({content:'actual source'})},role,id);s.run("UPDATE role_assignments SET status='completed',result_ref=? WHERE id=?",v.reference,id);return v;}};
+  const records = new TaskRecords(s);
+  records.contract('t', { goal: 'stages', scope: ['fixture'], criteria: ['verified'], endpoint: 'code' });
+  const native = ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa', 'coordinator'].map(role_id => ({ role_id, harness_ref: { id: 'native' }, ...roles.find(r => r.role_id === role_id) }));
+  saveConfiguration(s, 'r', { expected_revision: 0, enabled: true, roles: native }, 'owner');
+  captureTaskConfiguration(s, 't');
+  const spec = () => ({ store: s, task: s.get("SELECT * FROM tasks WHERE id='t'"), redactor: new Redactor(), guard: async () => {}, system: 'Execution', prompt: '{}', tools: [tool('finish')], finish: { name: 'finish', validate: v => v }, maxTurns: 4 });
+  t.after(() => new Promise(r => { s.close(); server.close(r); server.closeAllConnections(); }));
+  return {
+    get s() { return s; },
+    records,
+    calls,
+    spec,
+    assign(role, id) {
+      const instance = roleInstance(s, spec().task, role);
+      s.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,?)', id, 't', instance.id, records.get('t').revision, null, 'running', id, null);
+      return id;
+    },
+    async writer(id = 'dev-1', sha = 'a', hash = 'b') {
+      this.assign('dev', id);
+      return runRole(spec(), 'dev', id, undefined, { snapshot: async () => ({ local_sha: tree(sha), tree_sha: tree(hash) }) });
+    },
+  };
 }
 
-test('stage plans preserve required policy, reject invalid DAGs and use optimistic versions',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']}),stage('test',{deps:['reviewer']})]});
-  const p=f.plan();assert.equal(f.plan().revision,p.revision);assert.deepEqual(reconcileAssignments(f.s,'t').next,['dev']);
-  assert.throws(()=>planTask(f.s,'t',1),/task_revision_changed/);
-  assert.throws(()=>planTask(f.s,'t',f.records.get('t').revision,[],p.revision),/required_stage_immutable/);
-  const optional={...stage('ux',{deps:['dev']}),required:false};
-  assert.equal(planTask(f.s,'t',f.records.get('t').revision,[...JSON.parse(p.stages),optional],p.revision).revision,p.revision+1);
-  assert.throws(()=>planTask(f.s,'t',f.records.get('t').revision,undefined,p.revision),/stage_plan_revision_changed/);
-  for(const broken of [[stage('reviewer',{deps:['test']}),stage('test',{deps:['reviewer']})],[stage('reviewer',{deps:['missing']})],[stage('reviewer',{types:['code']}),stage('test',{deps:['reviewer'],types:['artifact']})],[stage('manager')],[stage('dev',{writer:true,capabilities:['unknown']})]]) {
-    assert.throws(()=>saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:broken},'owner'),{code:'invalid_stage_policy'});
-  }
+test('later snapshot operations keep the collected commit for unchanged files, but changed trees create new inputs', async t => {
+  const { Workspace } = await import('../../../../dist/agent/workspace.js');
+  const f = await fixture(t);
+  await f.writer();
+  assert.equal(latestRoleCandidate(f.s, 't').commit_sha, tree('a'));
+  let version = tree('b');
+  const manager = { call: async () => ({ ok: true, result: { local_sha: tree('c'), tree_sha: version, files: [] } }) };
+  const workspace = new Workspace(f.s, manager, f.spec().task, new Redactor(), async () => {}, () => {});
+  assert.equal((await workspace.artifact('later-observer')).local_sha, tree('a'));
+  version = tree('d');
+  assert.equal((await workspace.artifact('changed-source')).local_sha, tree('c'));
 });
 
-test('plan_task accepts reordered required definitions and a read_stage_schedule round trip',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']})]});const first=f.plan();
-  const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).reverse().map(([key,item])=>[key,reorder(item)])):value;
-  const stages=reorder(reconcileAssignments(f.s,'t').stages),optional={...stage('ux',{deps:['dev']}),required:false};
-  const second=planTask(f.s,'t',f.records.get('t').revision,[...stages,optional],first.revision);
-  assert.equal(second.revision,first.revision+1);
-  assert.equal(planTask(f.s,'t',f.records.get('t').revision,reorder(reconcileAssignments(f.s,'t').stages),second.revision).revision,second.revision);
-  const changed=JSON.parse(second.stages);changed[0].retry.max_attempts++;
-  assert.throws(()=>planTask(f.s,'t',f.records.get('t').revision,changed,second.revision),/required_stage_immutable/);
-});
-
-test('a repair round can delegate the same passed writer without a stage_id',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']})]});f.plan();await f.writer();
-  const instance=f.s.get("SELECT role_instance_id FROM task_runs WHERE role='dev'").role_instance_id;
-  f.assign('dev','repair');await runRole(f.spec(),'dev','repair',undefined,{snapshot:async()=>({local_sha:tree('c'),tree_sha:tree('d')})});
-  assert.equal(f.s.get("SELECT stage_id FROM task_stage_assignments WHERE assignment_id='repair'").stage_id,'dev');
-  assert.equal(f.s.get("SELECT role_instance_id FROM task_runs WHERE assignment_id='repair'").role_instance_id,instance);
-  assert.deepEqual(reconcileAssignments(f.s,'t').next,['reviewer']);
-});
-
-test('runTeam preserves permanent gate codes and the engine waits for an explicit human operation',async t=>{
-  const scenarios={
-    stage_policy_changed:async f=>f.s.run("UPDATE policies SET test_command='changed' WHERE repository_id='r'"),
-    stage_plan_stale:async f=>f.records.contract('t',{...f.records.get('t').contract,criteria:['changed']}),
-    repository_policy_disabled:async f=>f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'"),
-    paused:async f=>f.s.run("UPDATE tasks SET status='paused' WHERE id='t'"),
-    cancelled:async f=>f.s.run("UPDATE tasks SET status='cancelled' WHERE id='t'")
-  };
-  for(const [reason,change] of Object.entries(scenarios))await t.test(reason,async t=>{
-    const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],attempts:1})],handler:body=>body.tools.some(t=>t.function.name==='submit_role_result')?call('submit_role_result',{summary:'No proof yet',findings:[],unknowns:[],inspected_scope:['fixture']}):call('finish',{summary:'implemented'})});f.plan();await change(f);
-    const expected=['paused','cancelled'].includes(reason)?'task_claim_revoked':reason,state=['cancelled','repository_policy_disabled'].includes(reason)?'cancelled':'paused',before=f.calls.length;
-    const team=()=>runTeam(f.spec(),{prepare:async()=>{}});
-    await assert.rejects(team(),{code:expected,state});assert.equal(f.calls.length,before,'a hard preflight wait must not start a manager');
-    if(['paused','cancelled'].includes(reason))return;
-    // Exercise the actual engine failure handler around runTeam, before opening a GitHub transport.
-    const engine=new TaskEngine(f.s,{call:async()=>null});t.after(()=>engine.close());engine.share=team;
-    f.s.run("UPDATE tasks SET claim_token='claim',retry_count=4,retry_cycle_started_at=1 WHERE id='t'");f.s.run("INSERT INTO task_claims VALUES('t','r','claim','now')");
-    await engine.run('t','claim');const row=f.s.get("SELECT * FROM tasks WHERE id='t'");
-    assert.equal(row.status,state);assert.equal(row.error_code,expected);assert.equal(row.retry_count,0);assert.equal(row.retry_cycle_started_at,null);
-    if(state==='paused')assert.equal(f.records.get('t').progress.waiting_reason,expected);
-    f.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");engine.tick();await Promise.all(engine.active.values());
-    assert.equal(f.calls.length,before);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,state);
-    if(state==='paused'){f.retry();assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'queued');}
+test('a running manager stops when its GitHub read authority is revoked after preflight', async t => {
+  let written;
+  const f = await fixture(t, {
+    handler: body => {
+      if (body.tools.some(tool => tool.function.name === 'nominate_delivery')) {
+        saveConfiguration(f.s, 'r', { expected_revision: 1, roles: [{ role_id: 'manager', permissions: { github_issues: 'none' } }] }, 'owner');
+        return call('nominate_delivery', { result_ref: written.reference });
+      }
+      return call('finish', { summary: 'implemented' });
+    },
   });
+  written = await f.writer();
+  await assert.rejects(runTeam(f.spec(), { prepare: async () => {} }), { code: 'role_authority_revoked', state: 'waiting_configuration' });
+  assert.equal(f.s.get("SELECT stop_reason FROM task_runs WHERE role='manager'").stop_reason, 'role_authority_revoked');
+  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n, 0);
 });
 
-test('runTeam stops a newly added applicable required policy even when its snapshot had no stages',async t=>{
-  const f=await fixture(t);saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:[stage('dev',{writer:true})]},'owner');
-  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'stage_policy_changed',state:'paused'});
-  assert.equal(f.calls.length,0);assert.equal(reconcileAssignments(f.s,'t').waiting[0].reason,'stage_policy_changed');
-  assert.equal(reconcileAssignments(f.s,'t').plan_revision,0);
-  f.s.run("UPDATE tasks SET status='paused' WHERE id='t'");new TaskCommands(f.s).api({id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/adopt-config'),{});
-  captureTaskConfiguration(f.s,'t');assert.equal(f.plan().revision,1);
-});
-
-test('stage threshold reports to the same Manager, which can continue without increasing the limit',async t=>{
- let step=0,devRef,reportRef,reviewCalls=0,managerRun;let f;
- f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],attempts:1})],handler:body=>{
-  if(body.tools.some(t=>t.function.name==='nominate_delivery')){
-   const current=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
-   if(managerRun)assert.equal(current,managerRun);else managerRun=current;
-   switch(step++){
-    case 0:return call('delegate_role',{role:'dev',purpose:'Deliver',refs:['task:t']});
-    case 1:devRef=JSON.parse(body.messages.at(-1).content).result_ref;return call('delegate_role',{role:'reviewer',purpose:'Inspect',refs:[devRef]});
-    case 2:return call('delegate_role',{role:'reviewer',purpose:'Inspect with evidence',refs:[devRef]});
-    case 3:{const report=JSON.parse(body.messages.at(-1).content);assert.equal(report.status,'stage_attempt_threshold_reached');assert.equal(report.started,false);assert.equal(report.attempts,1);assert.equal(report.threshold,1);reportRef=report.report_ref;return call('delegate_role',{role:'reviewer',purpose:'Inspect with evidence',refs:[devRef],attempt_report_ref:reportRef});}
-    case 4:return call('nominate_delivery',{result_ref:devRef});
-    default:assert.fail('unexpected Manager restart');
-   }
-  }
-  if(body.tools.some(t=>t.function.name==='submit_role_result'))return reviewCalls++===1?call('read_task_record',{ref:'task:t'}):call('submit_role_result',{summary:'Checked',findings:[],unknowns:[],inspected_scope:['fixture']});
-  return call('finish',{summary:'implemented'});
- }});
- const result=await runTeam({...f.spec(),maxTurns:8},{prepare:async role=>{if(role!=='dev')traceEvent(f.s,'t','role_candidate',{role,sha:tree('a'),version:tree('b'),workspace_id:'readonly'});},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})});
- assert.equal(result.summary,'implemented');assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,2);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);assert.equal(f.s.get("SELECT status FROM task_runs WHERE id=?",managerRun).status,'succeeded');
- assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
- assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_report'").n,1);
- assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_continue' AND json_extract(data,'$.report_ref')=?",reportRef).n,1);
- assert.equal(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='reviewer').retry.max_attempts,1);
-});
-
-test('runTeam lets the manager repair missing evidence and dependencies while attempts remain',async t=>{
-  let step=0,review=0,ref;const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']})],handler:body=>{
-    if(body.tools.some(t=>t.function.name==='nominate_delivery')){
-      const done=body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));ref??=done.find(r=>r.result_ref)?.result_ref;
-      return [()=>call('delegate_role',{role:'dev',purpose:'Deliver',refs:['task:t']}),()=>call('delegate_role',{role:'reviewer',purpose:'First inspection',refs:[ref]}),()=>call('read_stage_schedule',{}),()=>call('delegate_role',{role:'reviewer',purpose:'Supply actual evidence',refs:[ref]}),()=>call('nominate_delivery',{result_ref:ref})][step++]();
-    }
-    if(body.tools.some(t=>t.function.name==='submit_role_result'))return review++===1?call('read_task_record',{ref}):call('submit_role_result',{summary:'Inspected',findings:[],unknowns:[],inspected_scope:['fixture']});
-    return call('finish',{summary:'implemented'});
-  }});
-  const result=await runTeam(f.spec(),{prepare:async role=>{if(role!=='dev')traceEvent(f.s,'t','role_candidate',{role,sha:tree('a'),version:tree('b'),workspace_id:'readonly'});},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})});
-  assert.equal(result.summary,'implemented');assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,2);assert.equal(step,5);
-});
-
-test('a past explicit retry does not authorize a later policy change',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true})]});f.plan();f.retry();f.plan();
-  f.s.run("UPDATE policies SET test_command='later change' WHERE repository_id='r'");
-  assert.throws(()=>f.plan(),{code:'stage_policy_changed',state:'paused'});f.retry();assert.equal(f.plan().revision,2);
-});
-
-test('retired coordination switches cannot bypass required stages or revoke a verified delivery',async t=>{
-  const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required});const plan=f.plan();await f.writer();
-  const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
-  traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.decide('t',candidate.id,candidate.revision,verdict,'pr_opened');
-  const saved=saveConfiguration(f.s,'r',{expected_revision:1,enabled:false,controller:{entries:{development:false}},roles:[],required_stages:required},'owner');
-  assert.equal(saved.enabled,true);assert.equal(saved.controller.entries.development,true);
-  const current=()=>latestRoleCandidate(f.s,'t');assert.equal(evaluateRequiredStages(f.s,'t',current()).satisfied,true);assert.equal(f.plan().revision,plan.revision);
-  const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();sends++;return {ok:true};};
-  await publisher.effect('resume','comment',{},send,async()=>null);assert.equal(sends,1);
-  f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'");assert.throws(()=>assertRequiredStages(f.s,'t',current()),{code:'repository_policy_disabled',state:'cancelled'});
-});
-
-test('a running manager stops when its GitHub read authority is revoked after preflight',async t=>{
-  let written;const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required,handler:body=>{
-    if(body.tools.some(tool=>tool.function.name==='nominate_delivery')){saveConfiguration(f.s,'r',{expected_revision:1,roles:[{role_id:'manager',permissions:{github_issues:'none'}}],required_stages:required},'owner');return call('nominate_delivery',{result_ref:written.reference});}
-    return call('finish',{summary:'implemented'});
-  }});f.plan();written=await f.writer();
-  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'role_authority_revoked',state:'waiting_configuration'});
-  assert.equal(f.s.get("SELECT stop_reason FROM task_runs WHERE role='manager'").stop_reason,'role_authority_revoked');
-  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
-});
-
-test('restoring the pinned stage policy and retrying resumes publication without adopting after a sent effect',async t=>{
-  const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required});const plan=f.plan();await f.writer();
-  const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
-  traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.stage('t',candidate.id,candidate.revision,verdict);
-  const snapshot=f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot;
-  f.s.run("UPDATE tasks SET phase='publish' WHERE id='t'");
-  const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();return {sequence:++sends};};
-  await publisher.effect('first','comment',{},send,async()=>null);assert.equal(sends,1);
-  saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:[...required,stage('reviewer',{deps:['dev']})]},'owner');
-  await assert.rejects(publisher.effect('next','comment',{},send,async()=>null),{code:'stage_policy_changed',state:'paused'});assert.equal(sends,1);
-  f.s.run("UPDATE tasks SET status='paused',error_code='stage_policy_changed' WHERE id='t'");
-  const commands=new TaskCommands(f.s),user={id:'owner',role:'project_admin',repositories:['r']};
-  assert.throws(()=>commands.api(user,'POST',new URL('http://local/api/tasks/t/adopt-config'),{}),{code:'task_config_after_publication'});
-  saveConfiguration(f.s,'r',{expected_revision:2,enabled:true,roles:[],required_stages:required},'owner');
-  commands.api(user,'POST',new URL('http://local/api/tasks/t/retry'),{});
-  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'queued');assert.equal(f.plan().revision,plan.revision);
-  assert.equal(f.s.get("SELECT phase FROM tasks WHERE id='t'").phase,'publish');
-  assert.equal(f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot,snapshot);
-  assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
-  await publisher.effect('first','comment',{},send,async()=>null);assert.equal(sends,1,'a sent effect must not be repeated');
-  await publisher.effect('next','comment',{},send,async()=>null);assert.equal(sends,2);
-  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='configuration_adopted'").n,0);
-});
-
-test('serial dev → reviewer → test binds evidence to exact candidate and still requires framework QA',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']}),stage('test',{deps:['reviewer']})]});f.plan();
-  assert.throws(()=>f.assign('test','early','test'),/stage_not_runnable/);
-  await f.writer();assert.deepEqual(reconcileAssignments(f.s,'t').next,['reviewer']);
-  await f.observer('reviewer');assert.deepEqual(reconcileAssignments(f.s,'t').next,['test']);
-  assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,false);
-  await f.observer('test');const candidate=latestRoleCandidate(f.s,'t');assert.equal(evaluateRequiredStages(f.s,'t',candidate).satisfied,true);
-  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
-  const results=f.s.all('SELECT result FROM task_stage_results').map(r=>JSON.parse(r.result));assert.equal(results.length,3);
-  for(const result of results){assert.ok(result.run_id&&result.assignment_id&&result.role_revision&&result.policy_hash&&result.snapshot_ref&&result.evidence.length);assert.equal(candidateKey(result.candidate_ref),candidateKey(candidate));}
-  const submitted=f.records.submit('t',[{kind:'code',reference:'workspace:t',version:tree('b'),content:{local_sha:tree('a')}}],[],{});
-  assert.equal(candidateKey(deliveryCandidate(submitted)),candidateKey(candidate));
-  const verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
-  assert.throws(()=>f.records.stage('t',submitted.id,submitted.revision,verdict),{code:'acceptance_required'});
-  traceEvent(f.s,'t','acceptance_started',{candidate_id:submitted.id,source_tree:tree('b'),context:'fresh'});
-  await runRole({...f.spec(),system:'QA verified'},'qa');f.records.stage('t',submitted.id,submitted.revision,verdict);
-  assert.equal(f.records.get('t').pending.outcome,'pass');
-  const api=roleApi(f.s,{id:'owner',role:'project_admin',repositories:['r']},'GET',new URL('http://local/api/tasks/t/roles'),{});assert.equal(api.stage_schedule.stages.filter(s=>s.status==='passed').length,3);
-  assert.throws(()=>roleApi(f.s,{id:'outsider',role:'project_admin',repositories:['other']},'GET',new URL('http://local/api/tasks/t/roles'),{}),/task_not_found/);
-  await f.writer('dev-2','c','d');assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,false);assert.deepEqual(reconcileAssignments(f.s,'t').next,['reviewer']);
-});
-
-test('read-only stages really overlap on the same candidate and cannot race a writer',async t=>{
-  let release,started=0;const barrier=new Promise(r=>release=r);
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']}),stage('test',{deps:['dev']})],handler:async body=>{if(!body.tools.some(tool=>tool.function.name==='submit_role_result'))return call('finish',{summary:'implemented'});if(body.messages.at(-1).role==='tool')return call('submit_role_result',{summary:'checked',findings:[],unknowns:[],inspected_scope:['fixture']});if(++started===2)release();await barrier;return call('read_file',{path:'fixture'});}});f.plan();await f.writer();
-  assert.deepEqual(reconcileAssignments(f.s,'t').next,['reviewer','test']);
-  const checks=[f.observer('reviewer'),f.observer('test')];await barrier;
-  await assert.rejects(f.writer('concurrent-writer','c','d'),{code:'candidate_writer_busy'});
-  await Promise.all(checks);assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
-  const runs=f.s.all("SELECT started_at,ended_at,run_context FROM task_runs WHERE role IN ('reviewer','test')");assert.equal(runs.length,2);assert.ok(runs[0].started_at<=runs[1].ended_at&&runs[1].started_at<=runs[0].ended_at);
-  assert.equal(candidateKey(JSON.parse(runs[0].run_context).candidate_ref),candidateKey(JSON.parse(runs[1].run_context).candidate_ref));
-});
-
-test('policy/contract changes, revoked project and unsupported capabilities cannot certify a gate',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],capabilities:['run_isolation']})]});f.plan();await f.writer();
-  await assert.rejects(f.observer('reviewer'),{code:'unsupported_capability'});
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,0);
-  f.s.run("UPDATE policies SET test_command='new check' WHERE repository_id='r'");assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,false);
-  assert.ok(reconcileAssignments(f.s,'t').waiting.some(w=>w.reason==='stage_policy_changed'));
-  f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'");assert.throws(()=>f.assign('dev','revoked','dev'),{code:'repository_policy_disabled'});
-});
-
-test('reopen reconstructs the timeline; resumed run retains assignment/instance and rejects old epochs and conflicting replay',async t=>{
-  mkdirSync('.tmp/168-tests',{recursive:true});const root=mkdtempSync(resolve('.tmp/168-tests/reopen-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
-  const f=await fixture(t,{stages:[stage('dev',{writer:true})],file:resolve(root,'db')});f.plan();const first=await f.writer();
-  const run=f.s.get("SELECT * FROM task_runs WHERE assignment_id='dev-1'");
-  const refs={result_ref:first.reference,candidate_ref:first.candidate_ref};assert.equal(recordStageResult(f.s,'dev-1',run.id,run.lease_epoch,refs).run_id,run.id);
-  assert.throws(()=>recordStageResult(f.s,'dev-1',run.id,run.lease_epoch,{...refs,candidate_ref:{...first.candidate_ref,tree_hash:tree('f')}}),/stage_result_conflict/);
-  f.reopen();assert.equal(reconcileAssignments(f.s,'t').stages[0].status,'passed');
-  const spec=f.spec(),prepared=await roleRuns.prepare(spec,'dev','dev-1',undefined,{snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')}),recover:{previous_run_id:run.id}}),handle=await roleRuns.start(prepared);
-  await roleRuns.collect(handle);const next=f.s.get("SELECT * FROM task_runs WHERE assignment_id='dev-1' ORDER BY rowid DESC LIMIT 1");
-  assert.notEqual(next.id,run.id);assert.equal(next.resume_from_run_id,run.id);assert.equal(next.role_instance_id,run.role_instance_id);assert.ok(next.lease_epoch>run.lease_epoch);
-  assert.throws(()=>recordStageResult(f.s,'dev-1',run.id,run.lease_epoch,refs),{code:'lease_epoch_stale'});
-  assert.equal(f.s.get('SELECT count(*) n FROM tasks').n,1);assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n,1);
-});
-
-test('absent stages preserve minimal teams; code gates do not apply to artifact or no_changes deliveries',async t=>{
-  const f=await fixture(t);assert.equal(f.plan(),null);assert.equal(evaluateRequiredStages(f.s,'t',null).satisfied,true);
-  saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:[stage('reviewer')]},'owner');
-  f.s.run('DELETE FROM task_execution_configs');captureTaskConfiguration(f.s,'t');f.plan();
-  assert.equal(evaluateRequiredStages(f.s,'t',{kind:'no_changes',ref:'result:none',source_ref:'commit:'+tree('a'),record_hash:'b'.repeat(64)}).satisfied,true);
-  f.s.run("UPDATE tasks SET kind='task.request' WHERE id='t'");f.records.contract('t',{...f.records.get('t').contract,endpoint:'artifact'});
-  assert.equal(evaluateRequiredStages(f.s,'t',null).satisfied,true);
-});
-
-test('hard stage resource budgets survive optional replanning; run-count thresholds do not pause',async t=>{
-  for(const harness of ['native','process'])await t.test(harness,async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],budget:{max_tool_calls:1},attempts:1})],roles:[{role_id:'reviewer',harness_ref:{id:harness}}],handler:body=>!body.tools.some(tool=>tool.function.name==='submit_role_result')?call('finish',{summary:'implemented'}):body.messages.filter(m=>m.role==='tool').length<2?call('read_file',{path:'fixture'}):call('submit_role_result',{summary:'inspected',findings:[],unknowns:[],inspected_scope:['fixture']})});const plan=f.plan();await f.writer();
-  await assert.rejects(f.observer('reviewer'),{code:'stage_budget_exhausted'});
-  assert.notEqual(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='reviewer').waiting_reason,'stage_retry_exhausted');
-  const optional={...stage('ux',{deps:['dev']}),required:false};planTask(f.s,'t',f.records.get('t').revision,[...JSON.parse(plan.stages),optional],plan.revision);
-  assert.equal(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='dev').status,'passed');
-  const before=f.calls.length;await assert.rejects(f.observer('reviewer','retry-again'),{code:'stage_budget_exhausted'});
-  assert.equal(f.calls.length,before,'an explicit hard resource budget still prevents additional model work');
+test('an overlong handoff returns existing limits without starting a role or aborting Manager', async t => {
+  let observed = false;
+  const f = await fixture(t, {
+    handler: body => {
+      const failure = body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } }).find(x => x.error === 'invalid_role_assignment');
+      if (!failure) return call('delegate_role', { role: 'dev', purpose: 'large'.repeat(501), refs: ['task:t'] });
+      observed = true;
+      assert.equal(failure.limits.purpose_max_chars, 2000);
+      assert.equal(failure.received.purpose_chars, 2505);
+      assert.equal(failure.contract_ref, 'contract:revision:2');
+      return call('finish_coordination', { action: 'continue', reason: 'Use a short purpose and retained contract refs for the next assignment.' });
+    },
   });
+  await assert.rejects(runTeam(f.spec(), { prepare: async () => {} }), { code: 'manager_deferred' });
+  assert.equal(observed, true);
+  assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n, 0);
 });
 
-test('contract changes and cancellation preserve history but reject new certification',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']})]});f.plan();await f.writer();await f.observer('reviewer');const old=latestRoleCandidate(f.s,'t');
-  f.records.contract('t',{...f.records.get('t').contract,criteria:['new contract requirement']});assert.equal(evaluateRequiredStages(f.s,'t',old).satisfied,false);
-  assert.ok(reconcileAssignments(f.s,'t').waiting.some(w=>w.reason==='stage_plan_stale'));assert.throws(()=>f.plan(),{code:'stage_plan_stale',state:'paused'});f.retry();f.plan();assert.equal(latestRoleCandidate(f.s,'t'),null);
-  f.s.run("UPDATE tasks SET status='cancelled' WHERE id='t'");assert.throws(()=>f.assign('dev','after-cancel','dev'),{code:'task_claim_revoked'});
-  assert.equal(f.s.get('SELECT count(*) n FROM task_stage_results').n,2);
-});
-
-test('later snapshot operations keep the collected commit for unchanged files, but changed trees create new inputs',async t=>{
-  const {Workspace}=await import('../../../../dist/agent/workspace.js');const f=await fixture(t,{stages:[stage('dev',{writer:true})]});f.plan();await f.writer();
-  let version=tree('b');const manager={call:async()=>({ok:true,result:{local_sha:tree('c'),tree_sha:version,files:[]}})},workspace=new Workspace(f.s,manager,f.spec().task,new Redactor(),async()=>{},()=>{});
-  assert.equal((await workspace.artifact('later-observer')).local_sha,tree('a'));
-  version=tree('d');assert.equal((await workspace.artifact('changed-source')).local_sha,tree('c'));
-});
-
-test('failed, truncated or irrelevant observations do not satisfy required execution evidence',async t=>{
-  const review=stage('reviewer',{deps:['dev']});review.completion.tools=['run_command'];
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),review],handler:body=>body.tools.some(tool=>tool.function.name==='submit_role_result')?(body.messages.at(-1).role==='tool'?call('submit_role_result',{summary:'claimed pass',findings:[],unknowns:[],inspected_scope:['fixture']}):call('run_command',{command:'npm test'})):call('finish',{summary:'implemented'})});f.plan();await f.writer();f.assign('reviewer','bad-proof','reviewer');
-  const current=latestRoleCandidate(f.s,'t');traceEvent(f.s,'t','role_candidate',{role:'reviewer',sha:current.commit_sha,version:current.tree_hash,workspace_id:'readonly'});
-  await runRole({...f.spec(),system:'Inspect fixed',tools:[tool('run_command'),tool('submit_role_result')],finish:{name:'submit_role_result',validate:v=>v},execute:async()=>({exit_code:1,output:'assertion failed'})},'reviewer','bad-proof');
-  const result=JSON.parse(f.s.get("SELECT result FROM task_stage_results WHERE stage_id='reviewer'").result);
-  assert.equal(result.passed,false);assert.deepEqual(result.evidence,[]);assert.equal(result.reason,'insufficient_evidence');assert.equal(evaluateRequiredStages(f.s,'t',current).satisfied,false);
-});
-
-test('wall budget cancels an in-flight backend without turning budget exhaustion into task cancellation',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true,budget:{max_wall_seconds:1}})],handler:async()=>{await new Promise(r=>setTimeout(r,1200));return call('finish',{summary:'late result'});}});f.plan();
-  await assert.rejects(f.writer(),error=>error.code==='stage_budget_exhausted'&&error.state==='paused');
-  assert.equal(f.s.get('SELECT count(*) n FROM task_stage_results').n,0);assert.ok(f.s.get("SELECT id FROM task_history WHERE type='role_run_checkpoint' AND json_extract(data,'$.reason') LIKE 'stage_budget_exhausted:%'"));
-  assert.equal(f.s.get('SELECT count(*) n FROM role_run_tokens WHERE revoked_at IS NULL').n,0);
-});
-
-test('new gate policy invalidates old QA even after stages are rerun, and Publisher cannot send before fresh QA',async t=>{
-  const {Publisher}=await import('../../../../dist/github/publisher.js');const f=await fixture(t,{stages:[stage('dev',{writer:true})]});f.plan();await f.writer();
-  const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
-  traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.stage('t',candidate.id,candidate.revision,verdict);
-  f.s.run("UPDATE policies SET test_command='changed check' WHERE repository_id='r'");assert.throws(()=>f.plan(),{code:'stage_policy_changed',state:'paused'});f.retry();f.plan();await f.writer('dev-recheck');assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
-  assert.throws(()=>f.records.stage('t',candidate.id,candidate.revision,verdict),{code:'acceptance_required'});
-  let sends=0;const github={},publisher=new Publisher(f.s,github,f.spec().task,async()=>{});const send=async()=>{github.beforeWrite?.();sends++;return {ok:true};};
-  await assert.rejects(publisher.effect('publish','comment',{},send,async()=>null),{code:'acceptance_required'});assert.equal(sends,0);
-  assert.equal(f.s.get("SELECT state FROM github_effects").state,'pending');assert.equal(f.s.get('SELECT count(*) n FROM task_followups').n,0);
-  await runRole({...f.spec(),system:'QA verified'},'qa');f.records.stage('t',candidate.id,candidate.revision,verdict);
-  await publisher.effect('publish','comment',{},send,async()=>null);await publisher.effect('publish','comment',{},send,async()=>null);assert.equal(sends,1);
-});
-
-test('an operator can dequeue an accepted PR after stage or test-command policy changes',async t=>{
-  for(const change of ['stages','test_command'])await t.test(change,async t=>{
-    const {mergeApi}=await import('../../../../dist/roles/merge.js'),{authorizeMerge}=await import('../../../../dist/tasks/integration.js');
-    const f=await fixture(t,{stages:[stage('dev',{writer:true})]});f.plan();await f.writer();
-    const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
-    traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.decide('t',candidate.id,candidate.revision,verdict,'pr_opened');
-    f.s.run("UPDATE tasks SET result=? WHERE id='t'",JSON.stringify({pr_number:1,sha:tree('a')}));
-    f.s.run("UPDATE accounts SET type='bot_account',credentials=? WHERE id='a'",f.s.secrets.seal({token:'fixture-queue-token'},'account:a'));
-    const user={id:'owner',role:'project_admin',repositories:['r']};authorizeMerge(f.s,f.spec().task,user,tree('a'),'squash');
-    f.s.run("UPDATE task_merge_requests SET state='queued' WHERE task_id='t'");
-    f.s.run("INSERT INTO github_effects VALUES('enqueued','t','merge_queue','{}','sent','{}','fixture')");
-    if(change==='stages')saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']})]},'owner');
-    else f.s.run("UPDATE policies SET test_command='new check' WHERE repository_id='r'");
-    let dequeues=0;const server=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const body=raw?JSON.parse(raw):{},path=new URL(req.url,'http://fixture').pathname;
-      const value=path==='/repositories/r'?{id:'r',full_name:'fixture/stages',owner:{id:'o'},default_branch:'main'}:path.endsWith('/pulls/1')?{node_id:'PR_fixture',number:1,state:'open',merged:false,head:{sha:tree('a')}}:path==='/graphql'?body.query.includes('dequeuePullRequest')?(dequeues++,{data:{dequeuePullRequest:{clientMutationId:null}}}):{data:{repository:{pullRequest:{id:'PR_fixture',mergeQueueEntry:{id:'entry'}}}}}:{};
-      res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));
-    });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections();}));
-    const response=await mergeApi(f.s,user,'DELETE',new URL('http://local/api/tasks/t/merge'),{},'http://127.0.0.1:'+server.address().port);
-    assert.equal(response.cancelled,true);assert.equal(dequeues,1);assert.equal(f.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'cancelled');
-    assert.equal(f.s.get("SELECT state FROM github_effects WHERE kind='dequeue'").state,'sent');
+test('Manager routes version queries and reads all Dev/QA records of its task through real role tools', async t => {
+  const { versionTools, versionTool, resolveVersion } = await import('../../../../dist/tasks/versions.js');
+  const { traceSnapshot } = await import('../../../../dist/tasks/trace.js');
+  let step = 0;
+  const seen = [];
+  const f = await fixture(t, {
+    handler: body => {
+      const last = body.messages.at(-1);
+      if (last?.role === 'tool') seen.push(JSON.parse(last.content));
+      return [
+        () => call('read_version_context', {}),
+        () => call('read_task_record', { ref: checkpoint }),
+        () => call('read_task_record', { ref: 'task_runs:' + qa.id + ':context' }),
+        () => call('read_task_record', { ref: 'model_requests:qa-source:request' }),
+        () => call('finish_coordination', { action: 'continue', reason: 'Read the offered version and all task records, no execution or acceptance.' }),
+      ][step++]();
+    },
   });
+  const dev = beginRun(f.s, { id: 't' }, 'role', { role: 'dev' });
+  f.s.run("UPDATE task_runs SET role='dev' WHERE id=?", dev.id);
+  const checkpoint = traceEvent(f.s, 't', 'artifact_checkpoint', { tree_sha: tree('b'), marker: 'dev-checkpoint' }, dev.id);
+  const qa = beginRun(f.s, { id: 't' }, 'role', { role: 'qa' });
+  f.s.run("UPDATE task_runs SET role='qa',context_snapshot=? WHERE id=?", traceSnapshot({ marker: 'qa-context', captured: { ref: 'project_memories:role-private:1', body: 'captured-role-note' } }), qa.id);
+  f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,request_snapshot) VALUES('qa-source','t','r','probe','m','fixture','now',?,?)", qa.id, traceSnapshot({ marker: 'qa-model-input', api_key: 'fixture-stages-key' }));
+  const workspace = { task: { workspace_id: 'probe' }, call: async () => ({ local_sha: tree('a'), tree_sha: tree('b') }) };
+  let routed = 0;
+  await assert.rejects(runTeam({ ...f.spec(), tools: versionTools, execute: async (name, args) => { routed++; return versionTool(f.s, f.spec().task, workspace, name, args, async () => ({ defaultBranch: 'main', permissions: { contents: 'read' }, ref: async () => ({ object: { sha: tree('c') } }) })); } }, { prepare: async () => {} }), { code: 'manager_deferred' });
+  assert.equal(routed, 1);
+  assert.equal(resolveVersion(f.s, f.spec().task, seen[0].remote.current_main_ref).commit_sha, tree('c'));
+  assert.ok(seen[1].content.includes('dev-checkpoint'));
+  assert.ok(seen[2].content.includes('qa-context'));
+  assert.ok(seen[2].content.includes('captured-role-note'));
+  assert.ok(seen[3].content.includes('qa-model-input'));
+  assert.ok(!JSON.stringify(seen).includes('fixture-stages-key'));
 });
 
-test('simultaneous writer starts cannot pass the pre-bind race or reuse a handle belonging to another assignment',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true})]});f.plan();f.assign('dev','race-one','dev');f.assign('dev','race-two','dev');
-  const outcomes=await Promise.allSettled(['race-one','race-two'].map(id=>runRole(f.spec(),'dev',id,undefined,{snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})})));
-  assert.equal(outcomes.filter(o=>o.status==='fulfilled').length,1);assert.equal(outcomes.filter(o=>o.status==='rejected').length,1);
-  assert.ok(['role_run_already_active','candidate_writer_busy'].includes(outcomes.find(o=>o.status==='rejected').reason.code));assert.equal(f.calls.length,1);assert.equal(f.s.get('SELECT count(*) n FROM task_stage_results').n,1);
+test('Manager can hand an authorized parent task reference to Dev without copying records', async t => {
+  const { attachChild } = await import('../../../../dist/tasks/children.js');
+  let delegated = false;
+  const f = await fixture(t, {
+    handler: body => {
+      const role = JSON.parse(body.messages[1].content).role_context?.role;
+      if (role === 'dev') {
+        if (body.messages.at(-1).role !== 'tool') return call('read_managed_task', { task_id: 'parent' });
+        assert.ok(body.messages.at(-1).content.includes('parent goal'));
+        return call('finish', { summary: 'Read the handed-off parent task facts' });
+      }
+      if (!delegated) { delegated = true; return call('delegate_role', { role: 'dev', purpose: 'Read the parent goal from its durable task reference', refs: ['task:parent'] }); }
+      const result = JSON.parse(body.messages.at(-1).content);
+      assert.ok(result.result_ref);
+      return call('finish_coordination', { action: 'continue', reason: 'Parent reference handoff completed' });
+    },
+  });
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('parent','r','development.issue','running','parent','{}')");
+  f.records.contract('parent', { goal: 'parent goal', scope: ['fixture'], criteria: ['verified'], endpoint: 'code' });
+  attachChild(f.s, 'parent', 't');
+  await assert.rejects(runTeam(f.spec(), { prepare: async () => {} }), { code: 'manager_deferred' });
+  assert.equal(f.s.get("SELECT count(*) n FROM role_assignments WHERE task_id='t' AND status='completed'").n, 1);
 });
 
-test('artifact gates bind report content as well as file tree, so changed prose cannot inherit an old pass',async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true,types:['artifact']}),stage('reviewer',{deps:['dev'],types:['artifact']})]});
-  f.s.run("UPDATE tasks SET kind='task.request' WHERE id='t'");f.records.contract('t',{...f.records.get('t').contract,endpoint:'artifact'});f.plan();
-  const delivered=await f.writer();assert.equal(delivered.candidate_ref.kind,'artifact');await f.observer('reviewer');
-  const artifacts=[{kind:'report',reference:'report:t',version:'v1',content:delivered.result},{kind:'files',reference:'files:t',version:tree('b'),content:{local_sha:tree('a')}}];
-  const original=f.records.submit('t',artifacts,[],delivered.result);assert.equal(candidateKey(deliveryCandidate(original)),candidateKey(delivered.candidate_ref));assert.equal(evaluateRequiredStages(f.s,'t',deliveryCandidate(original)).satisfied,true);
-  const changed=f.records.submit('t',[{...artifacts[0],version:'v2',content:{summary:'changed report prose'}},artifacts[1]],[],{summary:'changed report prose'});
-  assert.equal(evaluateRequiredStages(f.s,'t',deliveryCandidate(changed)).satisfied,false);
+test('refused handoff refs are correctable observations and unrelated records stay task scoped', async t => {
+  let step = 0;
+  const seen = [];
+  const f = await fixture(t, {
+    handler: body => {
+      const last = body.messages.at(-1);
+      if (last?.role === 'tool') seen.push(JSON.parse(last.content));
+      return [
+        () => call('read_task_record', { ref: 'task:unrelated' }),
+        () => call('delegate_role', { role: 'dev', purpose: 'Inspect', refs: ['task:missing'] }),
+        () => call('delegate_role', { role: 'dev', purpose: 'Inspect', refs: ['task:unrelated'] }),
+        () => call('finish_coordination', { action: 'continue', reason: 'Refusals are facts; retain the task and correct the references.' }),
+      ][step++]();
+    },
+  });
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('unrelated','r','development.issue','running','unrelated','{}')");
+  f.records.contract('unrelated', { goal: 'UNRELATED_PRIVATE_GOAL', scope: [], criteria: ['test'], endpoint: 'code' });
+  await assert.rejects(runTeam(f.spec(), { prepare: async () => {} }), { code: 'manager_deferred' });
+  assert.equal(seen[0].error, 'task_record_not_found');
+  assert.equal(seen[1].error, 'invalid_task_reference');
+  assert.equal(seen[2].error, 'invalid_task_reference');
+  assert.ok(!JSON.stringify(seen).includes('UNRELATED_PRIVATE_GOAL'));
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n, 0);
+  assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n, 0);
 });
 
-test('a capacity wait does not consume a stage attempt or stage wall time', async t => {
-  const f = await fixture(t, { stages: [stage('dev', { writer: true, attempts: 1 })] });
-  f.plan(); f.assign('dev', 'dev-1');
-  // Admission refused this run at bind: its row exists and carries the assignment, but nothing ran.
-  const refused = beginRun(f.s, f.spec().task, 'execution', {});
-  f.s.run("UPDATE task_runs SET role='dev',assignment_id='dev-1',status='stopped',stop_reason='role_capacity' WHERE id=?", refused.id);
-  // attempts=1, so a counted row would already exhaust the stage; the real attempt still starts, and its wall time is 0.
-  assert.equal(assertStageStart(f.s, 't', 'dev-1', 'writer'), undefined);
-  assert.equal(stageBudgetUsage(f.s, 'dev-1').wall_ms, 0);
-  // The row is still history: it is not deleted, only excluded from the stage budget.
-  assert.equal(f.s.get('SELECT stop_reason FROM task_runs WHERE id=?', refused.id).stop_reason, 'role_capacity');
+test('non-array parallel assignments return validation facts without aborting Manager', async t => {
+  let step = 0;
+  const f = await fixture(t, {
+    handler: body => {
+      if (step++ === 0) return call('delegate_roles', { assignments: 'invalid' });
+      assert.equal(JSON.parse(body.messages.at(-1).content).error, 'parallel_observers_required');
+      return call('finish_coordination', { action: 'continue', reason: 'Correct parallel assignment format' });
+    },
+  });
+  await assert.rejects(runTeam(f.spec(), { prepare: async () => {}, withRole: async () => assert.fail('no role should start') }), { code: 'manager_deferred' });
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n, 0);
 });
 
-test('two capacity refusals on one stage neither exhaust it nor pause the task, and a third attempt runs', async t => {
-  const f = await fixture(t, { stages: [stage('dev', { writer: true, attempts: 1 })] });
-  f.plan(); f.assign('dev', 'dev-1');
-  const refuse = () => { const r = beginRun(f.s, f.spec().task, 'execution', {}); f.s.run("UPDATE task_runs SET role='dev',assignment_id='dev-1',status='stopped',stop_reason='role_capacity' WHERE id=?", r.id); return r.id; };
-  refuse(); refuse();
-  const dev = () => reconcileAssignments(f.s, 't').stages.find(s => s.stage_id === 'dev');
-  // max_attempts=1: two counted refusals would already be `stage_retry_exhausted` on a stage that never ran.
-  assert.equal(dev().attempts, 0);
-  assert.equal(dev().status, 'ready');
-  assert.notEqual(dev().waiting_reason, 'stage_retry_exhausted');
-  assert.notEqual(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'paused');
-  // A slot frees up: the next attempt really runs instead of being refused as exhausted, and it counts as one attempt.
-  const run = await runRole(f.spec(), 'dev', 'dev-1', undefined, { snapshot: async () => ({ local_sha: tree('a'), tree_sha: tree('b') }) });
-  assert.ok(run.reference);
-  assert.equal(dev().attempts, 1);
-  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'running');
-});
-
-test('a stopped stage row with no stop_reason still counts as an attempt', async t => {
-  const f = await fixture(t, { stages: [stage('dev', { writer: true, attempts: 2 })] });
-  f.plan(); f.assign('dev', 'dev-1');
-  const r = beginRun(f.s, f.spec().task, 'execution', {});
-  // `stopped` with a NULL reason is not a capacity wait: the null-safe filter must keep it in the attempt count.
-  f.s.run("UPDATE task_runs SET role='dev',assignment_id='dev-1',status='stopped',stop_reason=NULL WHERE id=?", r.id);
-  const dev = () => reconcileAssignments(f.s, 't').stages.find(s => s.stage_id === 'dev');
-  assert.equal(dev().attempts, 1);
-  assert.equal(dev().status, 'ready');
-});
-
-test('Manager receives current revisions after a rejected plan and can correct it in the same turn',async t=>{
-  let corrected=false,steps=0;
-  const f=await fixture(t,{handler:body=>{
-    steps++;const observations=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}}),failure=observations.find(x=>x.error==='task_revision_changed');
-    if(!failure)return call('plan_task',{expected_revision:0});
-    assert.equal(failure.submitted.revision,0);assert.equal(failure.contract_ref,'contract:revision:'+failure.current.revision);assert.equal(typeof failure.current.plan_revision,'number');
-    if(!corrected){corrected=true;return call('plan_task',{expected_revision:failure.current.revision});}
-    return call('finish_coordination',{action:'continue',reason:'The corrected call succeeded; retain the original goal and choose the next work.'});
-  }});
-  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});
-  assert.equal(corrected,true);assert.equal(steps,3);assert.equal(f.records.get('t').contract.goal,'stages');
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);
-});
-
-test('an overlong handoff returns existing limits without starting a role or aborting Manager',async t=>{
- let observed=false;
- const f=await fixture(t,{handler:body=>{const failure=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}}).find(x=>x.error==='invalid_role_assignment');
-  if(!failure)return call('delegate_role',{role:'dev',purpose:'large'.repeat(501),refs:['task:t']});
-  observed=true;assert.equal(failure.limits.purpose_max_chars,2000);assert.equal(failure.received.purpose_chars,2505);assert.equal(failure.contract_ref,'contract:revision:2');
-  return call('finish_coordination',{action:'continue',reason:'Use a short purpose and retained contract refs for the next assignment.'});
- }});
- await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});assert.equal(observed,true);assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n,0);
-});
-
-test('Manager routes version queries and reads all Dev/QA records of its task through real role tools',async t=>{
- const {versionTools,versionTool,resolveVersion}=await import('../../../../dist/tasks/versions.js'),{traceSnapshot}=await import('../../../../dist/tasks/trace.js');let step=0;const seen=[];
- const f=await fixture(t,{handler:body=>{const last=body.messages.at(-1);if(last?.role==='tool')seen.push(JSON.parse(last.content));
-  return [()=>call('read_version_context',{}),()=>call('read_task_record',{ref:checkpoint}),()=>call('read_task_record',{ref:'task_runs:'+qa.id+':context'}),()=>call('read_task_record',{ref:'model_requests:qa-source:request'}),()=>call('finish_coordination',{action:'continue',reason:'Read the offered version and all task records, no execution or acceptance.'})][step++]();
- }});
- const dev=beginRun(f.s,{id:'t'},'role',{role:'dev'});f.s.run("UPDATE task_runs SET role='dev' WHERE id=?",dev.id);
- const checkpoint=traceEvent(f.s,'t','artifact_checkpoint',{tree_sha:tree('b'),marker:'dev-checkpoint'},dev.id);
- const qa=beginRun(f.s,{id:'t'},'role',{role:'qa'});f.s.run("UPDATE task_runs SET role='qa',context_snapshot=? WHERE id=?",traceSnapshot({marker:'qa-context',captured:{ref:'project_memories:role-private:1',body:'captured-role-note'}}),qa.id);
- f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,request_snapshot) VALUES('qa-source','t','r','probe','m','fixture','now',?,?)",qa.id,traceSnapshot({marker:'qa-model-input',api_key:'fixture-stages-key'}));
- const workspace={task:{workspace_id:'probe'},call:async()=>({local_sha:tree('a'),tree_sha:tree('b')})};let routed=0;
- await assert.rejects(runTeam({...f.spec(),tools:versionTools,execute:async(name,args)=>{routed++;return versionTool(f.s,f.spec().task,workspace,name,args,async()=>({defaultBranch:'main',permissions:{contents:'read'},ref:async()=>({object:{sha:tree('c')}})}));}},{prepare:async()=>{}}),{code:'manager_deferred'});
- assert.equal(routed,1);assert.equal(resolveVersion(f.s,f.spec().task,seen[0].remote.current_main_ref).commit_sha,tree('c'));
- assert.ok(seen[1].content.includes('dev-checkpoint'));assert.ok(seen[2].content.includes('qa-context'));assert.ok(seen[2].content.includes('captured-role-note'));assert.ok(seen[3].content.includes('qa-model-input'));assert.ok(!JSON.stringify(seen).includes('fixture-stages-key'));
-});
-
-test('Manager can hand an authorized parent task reference to Dev without copying records',async t=>{
- const {attachChild}=await import('../../../../dist/tasks/children.js');let delegated=false;
- const f=await fixture(t,{handler:body=>{
-  const role=JSON.parse(body.messages[1].content).role_context?.role;
-  if(role==='dev'){if(body.messages.at(-1).role!=='tool')return call('read_managed_task',{task_id:'parent'});assert.ok(body.messages.at(-1).content.includes('parent goal'));return call('finish',{summary:'Read the handed-off parent task facts'});}
-  if(!delegated){delegated=true;return call('delegate_role',{role:'dev',purpose:'Read the parent goal from its durable task reference',refs:['task:parent']});}
-  const result=JSON.parse(body.messages.at(-1).content);assert.ok(result.result_ref);return call('finish_coordination',{action:'continue',reason:'Parent reference handoff completed'});
- }});
- f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('parent','r','development.issue','running','parent','{}')");
- f.records.contract('parent',{goal:'parent goal',scope:['fixture'],criteria:['verified'],endpoint:'code'});attachChild(f.s,'parent','t');
- await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});
- assert.equal(f.s.get("SELECT count(*) n FROM role_assignments WHERE task_id='t' AND status='completed'").n,1);
-});
-
-test('refused handoff refs are correctable observations and unrelated records stay task scoped',async t=>{
- let step=0;const seen=[];
- const f=await fixture(t,{handler:body=>{
-  const last=body.messages.at(-1);if(last?.role==='tool')seen.push(JSON.parse(last.content));
-  return [()=>call('read_task_record',{ref:'task:unrelated'}),()=>call('delegate_role',{role:'dev',purpose:'Inspect',refs:['task:missing']}),()=>call('delegate_role',{role:'dev',purpose:'Inspect',refs:['task:unrelated']}),()=>call('finish_coordination',{action:'continue',reason:'Refusals are facts; retain the task and correct the references.'})][step++]();
- }});
- f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('unrelated','r','development.issue','running','unrelated','{}')");f.records.contract('unrelated',{goal:'UNRELATED_PRIVATE_GOAL',scope:[],criteria:['test'],endpoint:'code'});
- await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});
- assert.equal(seen[0].error,'task_record_not_found');assert.equal(seen[1].error,'invalid_task_reference');assert.equal(seen[2].error,'invalid_task_reference');assert.ok(!JSON.stringify(seen).includes('UNRELATED_PRIVATE_GOAL'));
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n,0);
-});
-test('non-array parallel assignments return validation facts without aborting Manager',async t=>{
- let step=0;const f=await fixture(t,{handler:body=>{if(step++===0)return call('delegate_roles',{assignments:'invalid'});assert.equal(JSON.parse(body.messages.at(-1).content).error,'parallel_observers_required');return call('finish_coordination',{action:'continue',reason:'Correct parallel assignment format'});}});
- await assert.rejects(runTeam(f.spec(),{prepare:async()=>{},withRole:async()=>assert.fail('no role should start')}),{code:'manager_deferred'});
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);
-});
-
-test('capability refusal returns to the same Manager turn, which revises the optional plan and delegates successfully',async t=>{
- let managerSteps=0,workerCalls=0,refused,managerRun;
- const unavailable={...stage('repair',{writer:true,capabilities:['run_isolation']}),required:false};
- const supported={...unavailable,role_constraints:{...unavailable.role_constraints,capabilities:unavailable.role_constraints.capabilities.filter(c=>c!=='run_isolation')}};
- let f;
- f=await fixture(t,{handler:body=>{
-  if(!body.tools.some(t=>t.function.name==='nominate_delivery')){workerCalls++;return call('finish',{summary:'implemented after capability negotiation'});}
-  const current=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
-  if(managerRun)assert.equal(current,managerRun);else managerRun=current;
-  const rev=f.records.get('t').revision;
-  switch(managerSteps++){
-   case 0:return call('plan_task',{expected_revision:rev,expected_plan_revision:0,stages:[unavailable]});
-   case 1:return call('delegate_role',{role:'dev',purpose:'Repair requested code',refs:[],stage_id:'repair'});
-   case 2:{
-    refused=JSON.parse(body.messages.at(-1).content);
-    assert.equal(refused.error,'unsupported_capability');assert.equal(refused.started,false);
-    assert.deepEqual(refused.missing,['run_isolation']);assert.ok(refused.available.includes('version_binding'));
-    assert.equal(refused.available.includes('run_isolation'),false);assert.equal(refused.provided.run_isolation.ok,false);
-    assert.match(refused.admission_ref,/^task_history:/);assert.equal(workerCalls,0);
-    const persisted=JSON.parse(f.s.get("SELECT data FROM task_history WHERE 'task_history:'||id=?",refused.admission_ref).data);
-    assert.deepEqual(persisted.available,refused.available);assert.equal(persisted.provided.run_isolation.ok,false);
-    assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,0);
-    return call('plan_task',{expected_revision:rev,expected_plan_revision:1,stages:[supported]});
-   }
-   case 3:return call('delegate_role',{role:'dev',purpose:'Repair requested code',refs:[],stage_id:'repair'});
-   case 4:return call('nominate_delivery',{result_ref:JSON.parse(body.messages.at(-1).content).result_ref});
-   default:assert.fail('unexpected Manager restart or loop');
-  }
- }});
- const spec={...f.spec(),maxTurns:8};
- const result=await runTeam(spec,{prepare:async()=>{},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})});
- assert.equal(result.summary,'implemented after capability negotiation');assert.equal(workerCalls,1);assert.equal(managerSteps,5);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
- assert.equal(f.s.get("SELECT status FROM task_runs WHERE id=?",managerRun).status,'succeeded');
- assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
- assert.equal(f.s.get("SELECT attempt FROM tasks WHERE id='t'").attempt,1);
- const failures=f.s.all("SELECT data FROM task_history WHERE type='role_assignment_fault'").map(r=>JSON.parse(r.data));
- assert.equal(failures.length,1);assert.equal(failures[0].started,false);assert.equal(failures[0].admission_ref,refused.admission_ref);
-});
-
-test('parallel delegation keeps successful peer results when another role lacks a capability',async t=>{
- let step=0,devRef,peerCalls=0,managerRun;let f;
- const optional=id=>({...stage(id,{capabilities:id==='reviewer'?['run_isolation']:[]}),required:false,completion:{evidence_types:['role_result'],min_evidence:1,no_findings:true}});
- f=await fixture(t,{handler:body=>{
-  if(!body.tools.some(t=>t.function.name==='nominate_delivery')){
-   if(body.tools.some(t=>t.function.name==='submit_role_result')){peerCalls++;return call('submit_role_result',{summary:'Checked fixed candidate',findings:[],unknowns:[],inspected_scope:['fixture']});}
-   return call('finish',{summary:'implemented with a successful peer inspection'});
-  }
-  const run=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
-  if(managerRun)assert.equal(run,managerRun);else managerRun=run;
-  switch(step++){
-   case 0:return call('delegate_role',{role:'dev',purpose:'Implement',refs:[]});
-   case 1:devRef=JSON.parse(body.messages.at(-1).content).result_ref;return call('plan_task',{expected_revision:f.records.get('t').revision,expected_plan_revision:0,stages:[optional('test'),optional('reviewer')]});
-   case 2:return call('delegate_roles',{assignments:[{role:'test',purpose:'Test fixed candidate',refs:[],stage_id:'test'},{role:'reviewer',purpose:'Review with isolation',refs:[],stage_id:'reviewer'}]});
-   case 3:{
-    const value=JSON.parse(body.messages.at(-1).content);assert.equal(value.results.length,2);
-    assert.match(value.results[0].result_ref,/^task_history:/);
-    assert.equal(value.results[1].error,'unsupported_capability');assert.equal(value.results[1].role,'reviewer');assert.equal(value.results[1].started,false);
-    assert.deepEqual(value.results[1].missing,['run_isolation']);
-    return call('nominate_delivery',{result_ref:devRef});
-   }
-   default:assert.fail('Manager must continue in the same turn');
-  }
- }});
- const result=await runTeam({...f.spec(),maxTurns:8},{prepare:async role=>{if(role!=='dev')traceEvent(f.s,'t','role_candidate',{role,sha:tree('a'),version:tree('b'),workspace_id:'readonly-'+role});},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')}),withRole:async(_role,work)=>work()});
- assert.equal(result.summary,'implemented with a successful peer inspection');assert.equal(peerCalls,1);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,0);
- assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='test'").status,'succeeded');
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
-});
-
-test('two successful Dev runs report before a third; an old report cannot silently authorize a fourth',async t=>{
- let step=0,firstReport,latestDev,managerRun;let f;
- f=await fixture(t,{stages:[stage('dev',{writer:true,attempts:2})],handler:body=>{
-  if(!body.tools.some(t=>t.function.name==='nominate_delivery'))return call('finish',{summary:'successful development'});
-  const current=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
-  if(managerRun)assert.equal(current,managerRun);else managerRun=current;
-  switch(step++){
-   case 0:return call('delegate_role',{role:'dev',purpose:'Third development',refs:[],stage_id:'dev'});
-   case 1:{const report=JSON.parse(body.messages.at(-1).content);assert.equal(report.started,false);assert.equal(report.attempts,2);assert.equal(report.threshold,2);assert.equal(report.next_attempt,3);assert.deepEqual(report.attempt_history.map(r=>r.status),['succeeded','succeeded']);firstReport=report.report_ref;return call('delegate_role',{role:'dev',purpose:'Third development',refs:[],stage_id:'dev',attempt_report_ref:firstReport});}
-   case 2:latestDev=JSON.parse(body.messages.at(-1).content).result_ref;return call('delegate_role',{role:'dev',purpose:'Fourth development',refs:[],stage_id:'dev',attempt_report_ref:firstReport});
-   case 3:{const report=JSON.parse(body.messages.at(-1).content);assert.equal(report.started,false);assert.equal(report.attempts,3);assert.notEqual(report.report_ref,firstReport);assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,3);return call('nominate_delivery',{result_ref:latestDev});}
-   default:assert.fail('unexpected Manager retry');
-  }
- }});
- f.plan();await f.writer('dev-first','a','b');await f.writer('dev-second','c','d');
- const result=await runTeam({...f.spec(),maxTurns:8},{prepare:async()=>{},snapshot:async()=>({local_sha:tree('e'),tree_sha:tree('f')})});
- assert.equal(result.summary,'successful development');assert.equal(step,4);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,3);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
- assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
- const reports=f.s.all("SELECT run_id FROM task_history WHERE type='stage_attempt_report'");assert.equal(reports.length,2);assert.ok(reports.every(r=>r.run_id===managerRun));
- assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_continue'").n,1);
-});
-
-test('Manager corrects repeated wrong refs then reuses an accepted child without another Dev run',async t=>{
- let step=0;let f;
- f=await fixture(t,{handler:body=>{
-  assert.ok(body.tools.some(t=>t.function.name==='nominate_delivery'),'no worker execution should be needed');
-  if(step>0&&step<=4){const feedback=JSON.parse(body.messages.at(-1).content);assert.equal(feedback.reason,'reference_not_found_or_inaccessible');if(step===3)assert.equal(feedback.manager_notice.attempts,3);}
-  return step++<4?call('nominate_delivery',{result_ref:'task_history:999999'}):call('nominate_delivery',{result_ref:'task:child',summary:'Integrated parent capability',change_title:'Parent delivery'});
- }});
- f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('child','r','task.development','pr_opened','child','{}')");
- const child=f.records.get('child'),revision=child.revision;
- f.s.run("INSERT INTO task_children VALUES('t','child','now')");
- f.s.run("UPDATE tasks SET result=? WHERE id='child'",JSON.stringify({summary:'child done',change_title:'Child result'}));
- f.s.run("UPDATE task_records SET candidate=?,acceptance=? WHERE task_id='child'",JSON.stringify({id:'c',revision,artifacts:[]}),JSON.stringify({outcome:'pass',revision,candidate_id:'c'}));
- const result=await runTeam(f.spec(),{prepare:async()=>{}});
- assert.equal(result.summary,'Integrated parent capability');assert.equal(step,5);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,0);
- assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
- assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running','nomination is not acceptance');
- const nominated=JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='t' AND type='delivery_nominated'").data);
- assert.equal(nominated.qa_required,true);assert.equal(nominated.sources[0].task_id,'child');assert.equal(nominated.candidate_scope,'current_parent_workspace');
+test('Manager corrects repeated wrong refs then reuses an accepted child without another Dev run', async t => {
+  let step = 0;
+  let f;
+  f = await fixture(t, {
+    handler: body => {
+      assert.ok(body.tools.some(t => t.function.name === 'nominate_delivery'), 'no worker execution should be needed');
+      if (step > 0 && step <= 4) {
+        const feedback = JSON.parse(body.messages.at(-1).content);
+        assert.equal(feedback.reason, 'reference_not_found_or_inaccessible');
+        if (step === 3) assert.equal(feedback.manager_notice.attempts, 3);
+      }
+      return step++ < 4 ? call('nominate_delivery', { result_ref: 'task_history:999999' }) : call('nominate_delivery', { result_ref: 'task:child', summary: 'Integrated parent capability', change_title: 'Parent delivery' });
+    },
+  });
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('child','r','task.development','pr_opened','child','{}')");
+  const child = f.records.get('child'), revision = child.revision;
+  f.s.run("INSERT INTO task_children VALUES('t','child','now')");
+  f.s.run("UPDATE tasks SET result=? WHERE id='child'", JSON.stringify({ summary: 'child done', change_title: 'Child result' }));
+  f.s.run("UPDATE task_records SET candidate=?,acceptance=? WHERE task_id='child'", JSON.stringify({ id: 'c', revision, artifacts: [] }), JSON.stringify({ outcome: 'pass', revision, candidate_id: 'c' }));
+  const result = await runTeam(f.spec(), { prepare: async () => {} });
+  assert.equal(result.summary, 'Integrated parent capability');
+  assert.equal(step, 5);
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n, 0);
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n, 1);
+  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'running', 'nomination is not acceptance');
+  const nominated = JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='t' AND type='delivery_nominated'").data);
+  assert.equal(nominated.qa_required, true);
+  assert.equal(nominated.sources[0].task_id, 'child');
+  assert.equal(nominated.candidate_scope, 'current_parent_workspace');
 });

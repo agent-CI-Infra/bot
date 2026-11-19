@@ -6,9 +6,9 @@ import { assigneesOf, developmentReady, revisionFacts, sameLabel } from './queue
 import { actionsDevelopmentAllowed } from '../actions/safety.js';
 import { stop } from '../agent/common.js';
 import { developmentLabel } from '../rules/service.js';
-import { eventFilters } from '../work/settings.js';
+import { eventFilters } from '../dispatch/settings.js';
 import { recordEvent } from '../dispatch/store.js';
-import { covers, projectCeiling } from '../work/ceiling.js';
+import { covers, projectCeiling } from '../projects/ceiling.js';
 import type { ClaimFacts } from './claims.js';
 
 // Use the caller's lookups so development follows the same ownership and label checks as task execution.
@@ -28,7 +28,7 @@ export function developmentLabelForTask(store:Store,task:Row){return development
 // The go-ahead for development: the label is on the Issue and the latest time it was added was by a user account, not
 // an app. Null without it. Who is assigned is a fact for the Manager, not a condition.
 export async function developmentApproved(context:DevelopmentContext,github:GitHub,task:Row):Promise<GoAhead|null>{
-  const label=context.label(task),issue=await github.object(task.kind,task.object_number);
+  const label=context.label(task),issue=await github.object('review.issue',task.object_number);
   if(!developmentReady(issue,label))return null;
   const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
   const added=events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1);
@@ -54,19 +54,14 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
   const published=randomId().slice(0,16);
   const event=(type:'issue'|'pr',title:string,option:any)=>recordEvent(context.store,{repositoryId:task.repository_id,key:`${task.repository_id}:review.published:${task.id}:${published}`,type:'review.published',source:'review',
     summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option]});
-  if(task.kind==='review.issue'){
-    // Every published review offers development; whether this review supports developing now (what it found and
-    // recommends, who is assigned or has claimed it) is the Manager's judgement (#815, #1104). approved.label is null
-    // without a person's label.
+  const isIssueReview = task.kind === 'review.issue' || (task.kind === 'task.request' && input?.target?.type === 'issue');
+  if(isIssueReview){
     if(!approved||!filters['review.published.issue'])return;
     if(!actionsDevelopmentAllowed(context.store,task.repository_id,number))return;
-    // Whether the bot already has a pull request for this Issue is a fact for the Manager, not a budget (#1104).
     const owned=context.store.get(`SELECT 1 FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
-      WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? LIMIT 1`,task.repository_id,number);
-    // What the control plane did before #207 (for the rule decider in tests): the first development of an unassigned Issue.
-    const earlier=context.store.get("SELECT 1 FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=? AND unique_key IS NOT NULL LIMIT 1",task.repository_id,number);
+      WHERE p.repository_id=? AND (t.kind='development.issue' OR (t.kind='task.request' AND json_extract(t.input,'$.target.type')='issue')) AND t.object_number=? LIMIT 1`,task.repository_id,number);
+    const earlier=context.store.get("SELECT 1 FROM tasks t WHERE t.repository_id=? AND (t.kind='development.issue' OR (t.kind='task.request' AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request')))) AND t.object_number=? AND t.unique_key IS NOT NULL LIMIT 1",task.repository_id,number);
     Object.assign(facts,{development:{...approved,bot_pull_request:owned?true:false}});
-    // The rule decider of the tests never develops without a label, as before #1026.
     const concluded:Record<string,string>={ready_for_development:'可开发',needs_information:'缺信息',human_decision_required:'需要人决定',no_code_change:'不需要改代码'};
     event('issue',approved.label?`Issue 检视已发布，开发标签已加：#${number}`:`Issue 检视已发布${concluded[result.conclusion]?`，结论为${concluded[result.conclusion]}`:''}：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,
       default:!!approved.label&&!approved.assignees.length&&!earlier,
@@ -75,10 +70,8 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     if(!filters['review.published.pr'])return;
     let owned:Row;try{owned=context.owned(github,task,input.object);}catch{return;}
     const source=context.store.get('SELECT * FROM tasks WHERE id=?',owned.source_task_id);
-    if(source&&source.kind==='development.issue'&&!actionsDevelopmentAllowed(context.store,task.repository_id,source.object_number))return;
-    // A review of the bot's own pull request runs only when someone asked for it (#1104); what it found that the bot can change
-    // is offered to the Manager as a revision, with no budget: the bot's pushes are not reviewed again, so nothing loops.
-    const findings=result.findings.filter(actionableFinding);
+    if(source&&(source.kind==='development.issue'||(source.kind==='task.request'&&JSON.parse(source.input||'{}')?.target?.type==='issue'))&&!actionsDevelopmentAllowed(context.store,task.repository_id,source.object_number))return;
+    const findings=(result.findings||[]).filter(actionableFinding);
     if(!findings.length)return;
     const goal=source?developmentGoal(JSON.parse(source.input)):'';
     // The comments that started this review (or joined it) asked for what it found: a revision of them is counted for their
@@ -125,7 +118,7 @@ export function developmentStopped(store:Store,task:Row,detail:string){
  * ends, they go back to the Manager as an update of the pull request offering another revision, so none is silently dropped.
  */
 export function carryRevisionRequests(store:Store,task:Row,covered:any[],head:string|null){
-  if(task.kind!=='development.pr'||!/^[a-f0-9]{40}$/.test(String(head||'')))return;
+  if((task.kind!=='development.pr'&&task.kind!=='task.request')||!/^[a-f0-9]{40}$/.test(String(head||'')))return;
   const key=(r:any)=>`${r.type}:${r.id}`,done=new Set(covered.map(key));
   const stored=JSON.parse(store.get('SELECT input FROM tasks WHERE id=?',task.id)?.input||'{}');
   const open=((stored.revision?.requests||[]) as any[]).filter(r=>!done.has(key(r)));

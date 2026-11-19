@@ -22,7 +22,7 @@ test('a receipt shows the idempotency key with what a repeat submission does, an
     if (url.pathname.startsWith('/api/management/commands') && request.method() !== 'GET') writes.push(url.pathname);
   });
   try {
-    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Keep the review prompt.' })).value;
+    const receipt = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Keep the review prompt.' })).value;
     expect(receipt.state).toBe('succeeded');
     await page.route('**/api/management/commands/' + receipt.id, async route => {
       receiptReads++;
@@ -88,7 +88,7 @@ test('a failed command keeps its refusal in the failure section, apart from the 
 test('an unconfirmed command has its own section, and a recorded impact is shown when the server provides one', async ({ page }) => {
   const f = await managementFixture();
   try {
-    const unknown = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Unconfirmed prompt.' })).value;
+    const unknown = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Unconfirmed prompt.' })).value;
     f.h.store.run("UPDATE management_commands SET state='unknown', result=? WHERE id=?", JSON.stringify({ error: 'external_result_unknown', effect: 'future_tasks', impact: '之后的新任务会使用这段提示词。', notice: '这条 notice 应该让位给 result.impact。' }), unknown.id);
     await login(page, f);
     const panel = await open(page, f, unknown.id);
@@ -117,10 +117,10 @@ test('a notice without an effect statement stays out of the impact row', async (
     // Two shapes where the server writes a notice but no effect: a command retired by the approval-flow removal
     // (src/management/storage.ts) and a configuration PR that is still pending merge (src/management/configuration-pr.ts).
     const retiredNotice = '审批流程已取消，这条等待审批的命令没有执行；需要时请重新发起。';
-    const retired = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Retired prompt.' })).value;
+    const retired = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Retired prompt.' })).value;
     f.h.store.run("UPDATE management_commands SET state='failed', result=? WHERE id=?", JSON.stringify({ error: 'approval_retired', notice: retiredNotice }), retired.id);
     const pendingNotice = '待合入默认分支；当前实际行为尚未改变。';
-    const pending = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Pending prompt.' })).value;
+    const pending = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Pending prompt.' })).value;
     f.h.store.run("UPDATE management_commands SET state='succeeded', result=? WHERE id=?", JSON.stringify({ state: 'pending_merge', effective: false, notice: pendingNotice }), pending.id);
     await login(page, f);
     for (const [id, notice] of [[retired.id, retiredNotice], [pending.id, pendingNotice]]) {
@@ -141,7 +141,7 @@ test('a notice without an effect statement stays out of the impact row', async (
 test('a notice shown as the impact is not repeated in the record section', async ({ page }) => {
   const f = await managementFixture();
   try {
-    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'One notice only.' })).value;
+    const receipt = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'One notice only.' })).value;
     expect(receipt.state).toBe('succeeded');
     expect(receipt.result?.effect).toBe('future_tasks');
     const notice = receipt.result?.notice;

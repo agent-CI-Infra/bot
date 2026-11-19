@@ -152,21 +152,23 @@ test('a later throttled SSE guard preserves the original lease failure and stops
   assert.equal(f.store.get('SELECT state FROM model_requests').state, 'guard_failed');
 });
 
-test('concurrent task overrides isolate messages and bill the actual models at their own prices', async t => {
+test('concurrent role models isolate messages and bill the actual models at their own prices', async t => {
+  const { selectedModel } = await import('../../../../dist/agent/model.js');
+  const { saveConfiguration, roleConfiguration } = await import('../../../../dist/roles/definition.js');
   const f = await fixture(t);
   f.store.run(`INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at)
     SELECT 'coding','r',api_url,'coding-model',?,updated_at FROM models WHERE id='m'`, f.store.secrets.seal({value:'coding-secret-key'}, 'model:coding'));
   f.store.run("INSERT INTO model_pricing VALUES('m','USD',1,2,1)");
   f.store.run("INSERT INTO model_pricing VALUES('coding','CNY',10,20,10)");
-  f.store.run('UPDATE policies SET task_models=?', JSON.stringify({'review.pr':'m','development.issue':'coding'}));
+  saveConfiguration(f.store, 'r', { expected_revision: roleConfiguration(f.store, 'r').revision, enabled: true, roles: [{ role_id: 'dev', model_profile_ref: { model_id: 'coding' } }] }, 'fixture');
   let release; const bothStarted = new Promise(resolve => { release = resolve; });
   f.respond(async body => {
     if (f.requests.length === 2) release();
     await bothStarted;
     return {choices:[{message:{content:body.model}}],usage:{prompt_tokens:5,completion_tokens:2}};
   });
-  const result = await Promise.all(['review.pr','development.issue'].map(kind => runAgent({
-    ...f.spec, task:{...f.spec.task,id:kind,kind}, redactor:new Redactor(), prompt:kind
+  const result = await Promise.all([['reviewer', 'review.pr'], ['dev', 'development.issue']].map(([role, label]) => runAgent({
+    ...f.spec, model: selectedModel(f.store, 'r', role), task:{...f.spec.task,id:label,kind:'task.request'}, redactor:new Redactor(), prompt:label
   })));
   assert.deepEqual(result,['fixture','coding-model']);
   for (const request of f.requests) {

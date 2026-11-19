@@ -10,9 +10,9 @@ import { failedStepOutput, verifiedEvidence, classifyFailure, normalizeSignature
 import { actionsModel, reportFor } from '../../../fixtures/actions-model.mjs';
 import { runEventTasks } from '../../../fixtures/event-tasks.mjs';
 import { workspaceProfile } from '../../../../dist/agent/profiles.js';
-import { workAccess as workflowAccess } from '../../../../dist/work/catalog.js';
-import { publicText } from '../../../../dist/core/redaction.js';
-import { actionsDevelopmentAllowed } from '../../../../dist/actions/safety.js';
+import { taskPermissions } from '../../../../dist/tasks/configuration.js';
+import { setGrant } from '../../../../dist/tasks/grants.js';
+import { actionsDevelopmentAllowed, publicText } from '../../../../dist/actions/safety.js';
 import { recordActionsRun } from '../../../../dist/actions/storage.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { Redactor, sha } from '../../../../dist/agent/common.js';
@@ -133,7 +133,7 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   assert.equal(request.target.files['failed-steps/91.log'], 'HTTPError: HTTP 429 Too Many Requests');
   // #1072: the analysis also carries what to recommend when it sees a workflow's scheduled runs start late.
   assert.match(request.target.context.late_scheduled_runs, /^# Late scheduled workflow runs[\s\S]*workflow_dispatch/);
-  const profile = workspaceProfile('actions.failures', request.target.context, workflowAccess('actions.failures')), names = profile.tools.map(tool => tool.function.name);
+  const profile = workspaceProfile('actions.failures', request.target.context, taskPermissions(f.h.store, task)), names = profile.tools.map(tool => tool.function.name);
   assert.match(profile.system, /# Actions failure analysis/); assert.deepEqual(profile.finishTools, ['finish_analysis']);
   for (const name of ['read_file', 'run_command', 'read_job_log', 'rerun_failed_run', 'report_failure', 'finish_analysis', 'start_agent']) assert.ok(names.includes(name), name);
   assert.ok(!names.includes('create_issue'));
@@ -590,13 +590,17 @@ test('historical uncertain receipts reconcile without resending, and the same up
 test('reporting permission revoked during reconciliation prevents both normal and unconfirmed-rerun writes', async t => {
   let f = await fixture(t, { log: log('AssertionError: failed') });
   f.state.custom = ({ path }) => {
-    if (path.endsWith('/issues')) f.h.store.run('UPDATE policies SET work_settings=?', JSON.stringify({ 'actions.failures': { writes: ['actions_rerun'] } }));
+    if (path.endsWith('/issues')) {
+      const task = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:actions.failures:%' ORDER BY rowid DESC LIMIT 1");
+      if (task) setGrant(f.h.store, task, ['actions_rerun'], 'role:manager', null);
+    }
     return false;
   };
   await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'write_not_allowed');
   f = await fixture(t, { noAdvance: true, unknownRerun: true }); await f.tick();
   f.h.store.run('UPDATE actions_failure_runs SET retry_at=?', Date.now() - 6 * 60_000);
-  f.h.store.run('UPDATE policies SET work_settings=?', JSON.stringify({ 'actions.failures': { writes: ['actions_rerun'] } }));
+  const task2 = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:actions.failures:%' ORDER BY rowid DESC LIMIT 1");
+  if (task2) setGrant(f.h.store, task2, ['actions_rerun'], 'role:manager', null);
   await f.restart(); await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 1);
 });
 

@@ -123,16 +123,10 @@ GitHub 登录、统一授权、迁移和隔离验收见 [身份与授权](identi
 
 持久化调度、项目定时任务、事件订阅、受控触发契约、通知 outbox 和项目日报的迁移见 [项目定时任务与事件订阅](schedules.md)。
 
-## 按任务选择模型
+## 模型选择（项目默认 + 按角色覆写）
 
-在项目「模型」页选择项目默认模型，再在「工作类型模型」表格中按需为工作类型覆盖模型；继承项目默认的工作类型不写入覆盖。覆盖保存在 `task_models` 里，键是工作类型 id，例如 `review.issue`、`review.pr`、`development.issue`、`development.pr`、`reply`、`release.observe`、`release.notes`、`actions.failures`、`task.development`、`task.request`；`manager` 是每个事件一轮的 Manager 分派。升级前自定义工作流的模型迁移为 `reply` 的模型。已经保存在配置中的扩展任务标识会单独显示，可以改模型或移除，不要求修改选择器，也不需要用户手填内部标识。
+模型配置统一为两层（#1122）：在项目「模型」页选择项目默认模型（`policies.model_id`），需要为个别角色（包括 `manager`、`reviewer`、`dev`、`test`、`qa` 等）单独指定模型时，在项目「角色」页设置该角色的 `model_profile_ref`。未显式指定模型的角色继承项目默认模型。原来的 `policies.task_models`（按工作类型覆写）已退役，升级时原有的按工作类型模型配置已一次性迁移到对应角色的 `model_profile_ref`（存在冲突时记录审计与提示，不静默覆盖）。
 
-`PATCH /api/repositories/:id/policy` 接受 `task_models` 对象，例如：
+已显式绑定角色但不可用、已删除、撤销凭据或撤销项目共享授权的模型会等待配置，不会静默切换到项目默认模型或其他模型。模型必须属于当前项目或被明确共享给该项目；超级管理员选择共享模型时与默认模型选择一样同时授权该项目使用。
 
-```json
-{"task_models":{"review.pr":"review-model-id","development.issue":"coding-model-id","release.notes":"summary-model-id"}}
-```
-
-该对象完整替换映射；省略字段保持原值，发送 `{}` 清除全部任务覆盖并恢复项目默认。未配置覆盖的任务使用 `model_id`；已配置但不可用、已删除、撤销凭据或撤销项目共享授权的覆盖会等待配置，不静默切换到默认模型。模型必须属于当前项目或被明确共享给该项目；超级管理员选择共享模型时与默认模型选择一样同时授权该项目使用。
-
-此配置仅由经过项目授权检查的管理 API 写入。Issue、PR、工具输出不能指定模型 ID、端点或密钥。调用 `selectedModel` 时由可信任务描述传入 task kind，模型请求账本仍保存实际使用模型及其计价快照。
+此配置仅由经过项目授权检查的管理 API 写入。Issue、PR、工具输出不能指定模型 ID、端点或密钥；模型请求账本仍保存实际使用模型及其计价快照。

@@ -15,7 +15,7 @@ export function managementStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS management_approvals(command_id TEXT PRIMARY KEY,parameter_hash TEXT NOT NULL,target_revision TEXT NOT NULL,
       expires_at INTEGER NOT NULL,decided_by TEXT,decision TEXT,decided_at INTEGER);
     CREATE TABLE IF NOT EXISTS management_policies(tenant_id TEXT PRIMARY KEY,revision INTEGER NOT NULL DEFAULT 1,
-      approval_operations TEXT NOT NULL DEFAULT '[]',role_fields TEXT NOT NULL DEFAULT '["enabled","controller","roles","skills","required_stages"]');
+      approval_operations TEXT NOT NULL DEFAULT '[]',role_fields TEXT NOT NULL DEFAULT '["enabled","controller","roles","skills"]');
     DROP TABLE IF EXISTS management_budgets;
     CREATE TABLE IF NOT EXISTS management_conversations(id TEXT PRIMARY KEY,principal_id TEXT NOT NULL,tenant_id TEXT NOT NULL,
       scope TEXT NOT NULL,created_at TEXT NOT NULL);

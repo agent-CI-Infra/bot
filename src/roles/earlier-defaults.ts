@@ -16,7 +16,7 @@ export const earlierTemplates: Record<string, readonly string[]> = {
   test: ['b8b51c1cec64e139', 'aca4aff03a4e6b83'],
   reviewer: ['c1ae792f7fd67fa9', 'b1ea141f88613a65'],
   ux: ['cf36d72ec5ee24cd', '9753ca40d90640f8'],
-  qa: ['81b872dde03f64d3', 'b1550f15a6304eeb', '24275e8117dcd47b'],
+  qa: ['81b872dde03f64d3', 'b1550f15a6304eeb', '24275e8117dcd47b', '7f788306ca8d1072'],
 };
 
 /**

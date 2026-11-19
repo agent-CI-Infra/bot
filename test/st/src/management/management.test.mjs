@@ -38,19 +38,19 @@ test('configuration commands execute normally, conflict without overwrite, repla
   const {h,admin}=await managementFixture(t),before=(await query(admin,'get_effective_config',project)).value;
   const bytes=Buffer.byteLength(JSON.stringify(before));
   assert.ok(bytes<=batchBytes,`The default effective configuration must fit the tool budget (${bytes} > ${batchBytes}); the query cannot page its omitted content.`);
-  const result=await command(admin,'workflow.update',workflow,{prompt:'New default'},'save-one',before.revision);
+  const result=await command(admin,'manager.update',project,{prompt:'New default'},'save-one',before.revision);
   assert.equal(result.status,201);assert.equal(result.value.state,'succeeded');assert.equal(result.value.channel,'api');assert.equal(result.value.result.diff.after.prompt,'New default');assert.equal(result.value.result.effect,'future_tasks');
-  assert.deepEqual((await command(admin,'workflow.update',workflow,{prompt:'New default'},'save-one',before.revision)).value,result.value);
-  const conflicting=await command(admin,'workflow.update',workflow,{prompt:'Stale value'},'stale',before.revision);assert.equal(conflicting.status,409);assert.equal(conflicting.value.error,'management_revision_conflict');
-  assert.equal((await managerSection(admin,'101','review.issue')),'New default');
-  assert.equal((await command(admin,'workflow.update',workflow,{prompt:'Different payload'},'save-one',before.revision)).value.error,'idempotency_conflict');
+  assert.deepEqual((await command(admin,'manager.update',project,{prompt:'New default'},'save-one',before.revision)).value,result.value);
+  const conflicting=await command(admin,'manager.update',project,{prompt:'Stale value'},'stale',before.revision);assert.equal(conflicting.status,409);assert.equal(conflicting.value.error,'management_revision_conflict');
+  assert.equal((await managerSection(admin,'101')),'New default');
+  assert.equal((await command(admin,'manager.update',project,{prompt:'Different payload'},'save-one',before.revision)).value.error,'idempotency_conflict');
   h.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)','101','a'.repeat(40),JSON.stringify({'.bot/rules/issue-review.md':'Repository rule'}),'now');
-  // The repository's .bot/ files are no longer read (#935): the Manager section is the rule.
-  const saved=await command(admin,'workflow.update',workflow,{prompt:'Console text'});
+  // The repository's .bot/ files are no longer read (#935): the Manager prompt is the rule.
+  const saved=await command(admin,'manager.update',project,{prompt:'Console text'});
   assert.equal(saved.value.result.effect,'future_tasks');assert.equal(saved.value.result.effective,true);
-  const effective=(await query(admin,'get_effective_config',project)).value.workflows.find(w=>w.id==='review.issue');assert.equal(effective.prompt.source,'console');assert.equal(effective.prompt.effective,'Console text');
+  const effective=(await query(admin,'get_effective_config',project)).value.manager.prompt;assert.equal(effective.source,'console');assert.equal(effective.effective,'Console text');
   assert.equal(h.store.get("SELECT count(*) n FROM management_approvals").n,0);
-  assert.equal((await query(admin,'list_audit',project)).value.audit.filter(r=>r.state==='succeeded'&&r.operation==='workflow.update').length,2);
+  assert.equal((await query(admin,'list_audit',project)).value.audit.filter(r=>r.state==='succeeded'&&r.operation==='manager.update').length,2);
 });
 
 test('disabled projects save review and development defaults without enabling execution',async t=>{
@@ -80,7 +80,7 @@ test('disabled projects save review and development defaults without enabling ex
 
 test('concurrent writes commit one revision; task commands create only one business task, append instructions and invalidate obsolete acceptance explicitly',async t=>{
   const {h,admin}=await managementFixture(t),rev=(await query(admin,'get_effective_config',project)).value.revision;
-  const writes=await Promise.all(['a','b'].map(text=>command(admin,'workflow.update',workflow,{prompt:text},text,rev)));
+  const writes=await Promise.all(['a','b'].map(text=>command(admin,'manager.update',project,{prompt:text},text,rev)));
   assert.deepEqual(writes.map(r=>r.status).sort(),[201,409]);
   const args={request:'Write a bounded report',contract:{goal:'Inspect current state',scope:['project 101'],criteria:['Cite original facts'],endpoint:'report'}};
   const first=await command(admin,'task.create',project,args,'new-work');assert.equal(first.value.state,'succeeded');
@@ -99,7 +99,7 @@ test('concurrent writes commit one revision; task commands create only one busin
 test('run configuration stays pinned; explicit adoption ends the old run and uses a new execution revision',async t=>{
   const {h,admin}=await managementFixture(t),row=h.store.get("SELECT * FROM tasks WHERE id='blocked'");
   const original=executionModel(h.store,row);const before=taskConfiguration(h.store,row);
-  await command(admin,'workflow.update',workflow,{prompt:'Future default',model_id:null});
+  await command(admin,'project.update',project,{test_command:'npm test'});
   assert.deepEqual(executionModel(h.store,row),original);assert.deepEqual(taskConfiguration(h.store,row),before);
   await command(admin,'task.pause',task);const adopted=await command(admin,'task.adopt-config',task);assert.equal(adopted.value.state,'succeeded');
   executionModel(h.store,h.store.get("SELECT * FROM tasks WHERE id='blocked'"));
@@ -111,10 +111,11 @@ test('changing defaults affects newly created tasks while a queued task retains 
   const {h,admin}=await managementFixture(t),args={request:'Inspect facts',contract:{goal:'Inspect facts',scope:['project'],criteria:['Cite original records'],endpoint:'report'}};
   const first=(await command(admin,'task.create',project,args,'before-default-change')).value.result.id;
   const before=taskConfiguration(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',first));assert.ok(before);
-  await command(admin,'workflow.update',workflow,{prompt:'A new default for future tasks'});
+  const roleRev=(await query(admin,'get_effective_config',project)).value.roles.revision;
+  await command(admin,'roles.update',project,{expected_revision:roleRev,enabled:true,roles:[{role_id:'reviewer',persona_prompt:'A new default for future tasks'}]});
   const second=(await command(admin,'task.create',project,args,'after-default-change')).value.result.id;
   assert.deepEqual(taskConfiguration(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',first)),before);
-  const next=taskConfiguration(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',second));assert.equal(JSON.parse(next.policy.rule_overrides)['.bot/rules/issue-review.md'],'A new default for future tasks');
+  const next=taskConfiguration(h.store,h.store.get('SELECT * FROM tasks WHERE id=?',second));assert.equal(next.roles.roles.find(r=>r.role_id==='reviewer').persona_prompt,'A new default for future tasks');
   const records=new TaskRecords(h.store),candidate=records.submit(first,[{kind:'report',reference:'r',version:'tree'}],[],{});
   await command(admin,'task.pause',{...project,task_id:first});await command(admin,'task.adopt-config',{...project,task_id:first});
   const revised=records.submit(first,[{kind:'report',reference:'r',version:'tree'}],[],{});assert.notEqual(candidate.id,revised.id);
@@ -123,15 +124,15 @@ test('changing defaults affects newly created tasks while a queued task retains 
 test('commands execute directly: a leftover approval policy holds nothing back, the approval endpoint is gone and a waiting command never runs',async t=>{
   const {h,admin,member}=await managementFixture(t),single=await member('single',{repository_ids:['101']});
   // A policy written by an older version is no longer read: the authorized operator's command runs at once.
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\",\"tasks.write\"]')");
-  const direct=await command(single.client,'workflow.update',workflow,{prompt:'Saved without approval'},'direct');
-  assert.equal(direct.value.state,'succeeded',JSON.stringify(direct.value));assert.equal(await managerSection(admin,'101','review.issue'),'Saved without approval');
+  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"manager.update\",\"tasks.write\"]')");
+  const direct=await command(single.client,'manager.update',project,{prompt:'Saved without approval'},'direct');
+  assert.equal(direct.value.state,'succeeded',JSON.stringify(direct.value));assert.equal(await managerSection(admin,'101'),'Saved without approval');
   assert.equal(h.store.get('SELECT count(*) n FROM management_approvals').n,0);
   assert.equal((await admin('/api/management/commands/'+direct.value.id+'/approval','POST',{parameter_hash:direct.value.parameter_hash,expected_revision:direct.value.expected_revision,decision:'approve'})).status,404);
   // Authorization is still the operator's own: a deactivated user cannot submit.
   await admin('/api/users/'+single.id,'PATCH',{active:false});
-  const denied=await command(single.client,'workflow.update',workflow,{prompt:'Must not save'},'revoked',direct.value.after_revision);
-  assert.ok(denied.status>=400||denied.value.state==='failed');assert.equal(await managerSection(admin,'101','review.issue'),'Saved without approval');
+  const denied=await command(single.client,'manager.update',project,{prompt:'Must not save'},'revoked',direct.value.after_revision);
+  assert.ok(denied.status>=400||denied.value.state==='failed');assert.equal(await managerSection(admin,'101'),'Saved without approval');
   // A command left waiting for approval by an older version ends as failed on startup and is never executed.
   const before=h.store.get("SELECT status FROM tasks WHERE id='blocked'").status;
   h.store.run(`INSERT INTO management_commands(id,principal_id,tenant_id,project_id,channel,operation,target,arguments,expected_revision,idempotency_key,parameter_hash,authorization_revision,execution_fence,source_conversation,source_message,state,before_revision,created_at,updated_at)

@@ -9,8 +9,7 @@ import {traceEvent} from './trace.js';
 import {Redactor} from '../agent/common.js';
 import {roleConfiguration} from '../roles/definition.js';
 import {permitsTool,githubWriteAllowed} from '../roles/permissions.js';
-import {workPermissions} from '../work/settings.js';
-import {workOf} from '../work/catalog.js';
+import {covers,projectCeiling} from '../projects/ceiling.js';
 
 type ObjectRef={type:'issue'|'pull_request';number:number};
 /** What a follow-up's executor must be able to do to finish it; each maps to permissions the control plane can check. */
@@ -39,7 +38,17 @@ const planningInstructions=priorityInstructions+' You are Task Manager performin
 export function changedObject(parent:Row,decision:Pick<FollowupDecision,'target'>):ObjectRef|null{
  if(decision.target)return decision.target.type==='none'?null:decision.target;
  const kind=/^(review|workflow)\.(issue|pr)$/.exec(String(parent.kind));
- return kind&&Number.isSafeInteger(parent.object_number)&&parent.object_number>0?{type:kind[2]==='pr'?'pull_request':'issue',number:Number(parent.object_number)}:null;
+ if(kind&&Number.isSafeInteger(parent.object_number)&&parent.object_number>0)return {type:kind[2]==='pr'?'pull_request':'issue',number:Number(parent.object_number)};
+ if(parent.kind==='task.request'){
+  try{
+   const saved=JSON.parse(String(parent.input||'{}'));
+   const target=saved.target;
+   if(target&&(target.type==='pr'||target.type==='issue')&&Number.isSafeInteger(target.number)&&target.number>0&&saved.delivery==='review'){
+    return {type:target.type==='pr'?'pull_request':'issue',number:Number(target.number)};
+   }
+  }catch{}
+ }
+ return null;
 }
 const words=(text:unknown)=>String(text??'').replace(/\s+/g,' ').trim();
 /**
@@ -47,12 +56,12 @@ const words=(text:unknown)=>String(text??'').replace(/\s+/g,' ').trim();
  * whether it is closed, and the words its author wrote in it (title, body, and the comments or reviews that started tasks).
  */
 export function objectFacts(s:Store,repo:string,target:ObjectRef){
- const pr=target.type==='pull_request',kinds=pr?['review.pr','workflow.pr','development.pr']:['review.issue','workflow.issue','development.issue'];
+ const pr=target.type==='pull_request',kinds=pr?['review.pr','workflow.pr','development.pr','task.request']:['review.issue','workflow.issue','development.issue','task.request'];
  const owned=!!s.get(pr?'SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?':'SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?',repo,target.number);
  // Only the parts that matter are extracted: a task input can be large, and this runs inside the acceptance transaction.
  const rows=s.all(`SELECT json_extract(input,'$.object') object,json_extract(input,'$.pull_request') pull_request,json_extract(input,'$.issue') issue,
   json_extract(input,'$.comment') comment,json_extract(input,'$.review') review FROM tasks
-  WHERE repository_id=? AND object_number=? AND kind IN (?,?,?) AND json_valid(input) ORDER BY created_at DESC,id LIMIT 20`,repo,target.number,...kinds);
+  WHERE repository_id=? AND object_number=? AND kind IN (?,?,?,?) AND json_valid(input) ORDER BY created_at DESC,id LIMIT 20`,repo,target.number,...kinds);
  const parse=(value:unknown)=>{try{return typeof value==='string'?JSON.parse(value):null;}catch{return null;}};
  let latest:any=null;const authored:string[]=[];
  for(const row of rows){
@@ -74,9 +83,10 @@ export function objectFacts(s:Store,repo:string,target:ObjectRef){
  * What the follow-up's executor may do. The dev role carries it out, in a new ordinary request (task.request) or in the
  * existing task it supplements, whose work type decides whether files may change.
  */
-export function followupExecutor(s:Store,repo:string,target:ObjectRef|null,work='task.request'):Record<FollowupNeed,boolean>{
+export function followupExecutor(s:Store,repo:string,target:ObjectRef|null,kind='task.request'):Record<FollowupNeed,boolean>{
  const dev=roleConfiguration(s,repo).roles.find(role=>role.role_id==='dev'&&role.enabled),p=dev?.permissions??{};
- return {edit_files:!!dev&&workPermissions(s,repo,work).writes.includes('code')&&permitsTool(p,'write_file'),
+ const canEditCode=covers(projectCeiling(s,repo),'develop')&&!/^(review|workflow)\./.test(kind);
+ return {edit_files:!!dev&&canEditCode&&permitsTool(p,'write_file'),
   run_commands:!!dev&&permitsTool(p,'run_command'),
   github_write:!!dev&&(target?.type==='issue'?githubWriteAllowed(p,'issues'):target?githubWriteAllowed(p,'pull_requests')||githubWriteAllowed(p,'contents'):permitsTool(p,'github_write'))};
 }
@@ -95,7 +105,7 @@ export function followupRefusal(s:Store,parent:Row,decision:FollowupDecision,sup
   if(!facts.owned&&!(quote.length>=12&&facts.authored.some(text=>text.includes(quote))))
    reasons.push({code:'followup_others_work',detail:`${name} was opened by ${facts.author?'@'+facts.author:'someone the control plane cannot confirm'}, not the bot, and the plan quotes no request from that author in it.`});
  }
- const can=followupExecutor(s,parent.repository_id,target,supplemented?workOf({kind:String(supplemented.kind)}):undefined),missing=(decision.needs??[]).filter(need=>!can[need]);
+ const can=followupExecutor(s,parent.repository_id,target,supplemented?String(supplemented.kind):undefined),missing=(decision.needs??[]).filter(need=>!can[need]);
  if(missing.length)reasons.push({code:'followup_executor_unauthorized',detail:`The follow-up executor (dev) cannot ${missing.join(', ')} under the project's permissions.`});
  return reasons;
 }
@@ -153,7 +163,7 @@ export function recordFollowupRelation(s:Store,parent:Row,candidate:Candidate,re
 export function followupTarget(s:Store,parent:Row,candidate:Candidate,residual:Residual,decision:FollowupDecision):Row|undefined{
  let target=decision.task_id?s.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',decision.task_id,parent.repository_id):undefined;
  if(!target&&decision.issue_url)target=s.get(`SELECT t.* FROM tasks t JOIN task_relations r ON r.target_task_id=t.id WHERE t.repository_id=? AND r.issue_url=? AND t.status NOT IN ('completed','succeeded','pr_opened','cancelled','superseded') ORDER BY t.created_at,t.id LIMIT 1`,parent.repository_id,decision.issue_url);
- if(!target&&decision.issue_url){const number=Number(decision.issue_url.split('/').at(-1));target=s.get("SELECT * FROM tasks WHERE repository_id=? AND object_number=? AND kind LIKE 'development.%' AND status NOT IN ('completed','succeeded','pr_opened','cancelled','superseded') ORDER BY created_at,id LIMIT 1",parent.repository_id,number);}
+ if(!target&&decision.issue_url){const number=Number(decision.issue_url.split('/').at(-1));target=s.get("SELECT * FROM tasks WHERE repository_id=? AND object_number=? AND (kind LIKE 'development.%' OR kind='task.request') AND status NOT IN ('completed','succeeded','pr_opened','cancelled','superseded') ORDER BY created_at,id LIMIT 1",parent.repository_id,number);}
  return target;
 }
 export function coordinateFollowup(s:Store,source:Row,target:Row,parent:Row,candidate:Candidate,residual:Residual,decision:FollowupDecision){

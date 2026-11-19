@@ -156,7 +156,7 @@ test('streaming does not move the reader away from older content, and latest ret
 
 test('a leftover approval policy holds nothing back: the operation executes and its receipt offers no approval', async ({ page }) => {
   const f = await managementFixture();
-  f.h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
+  f.h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"manager.update\"]')");
   try {
     await login(page, f);
     await page.getByLabel('管理消息', { exact: true }).fill('更新任务默认提示词');
@@ -167,7 +167,7 @@ test('a leftover approval policy holds nothing back: the operation executes and 
     await expect(step.locator('.management-step-status')).toHaveText('已完成');
     await expect(feed.getByRole('button', { name: '批准此版本', exact: true })).toHaveCount(0);
     await expect(feed).not.toContainText('等待审批');
-    expect(f.h.store.get("SELECT state FROM management_commands WHERE operation='workflow.update'").state).toBe('succeeded');
+    expect(f.h.store.get("SELECT state FROM management_commands WHERE operation='manager.update'").state).toBe('succeeded');
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 

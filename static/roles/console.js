@@ -6,8 +6,7 @@ function rolesConsole() {
   const failed = err => {
     if (!live()) return;
     if ([401, 403].includes(err.status)) { target.rolesDraft = null; state = null; holder.replaceChildren(note('当前身份无权读取或修改角色配置，已清空本页草稿。'), message); }
-    const description = err.code === 'invalid_stage_policy' ? stagePolicyErrorText(err.field) : readErrorText(err);
-    if (err.code === 'invalid_stage_policy' && state) { state.stageError = { field: err.field, message: description }; state.focusStageError = true; }
+    const description = readErrorText(err);
     message.textContent = `${description}${err.field ? '（配置项：' + err.field + '）' : ''}`;
   };
   const compare = async () => {
@@ -26,10 +25,10 @@ function rolesConsole() {
     let saveRoles = async () => {};
     holder.replaceChildren(); roleDraftStatus = null;
     const requestedView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
-    const auxiliaryView = !current.item && ['skills', 'stages'].includes(requestedView) ? requestedView : '';
+    const auxiliaryView = !current.item && requestedView === 'skills' ? 'skills' : '';
     const fields = element('fieldset', '', 'role-editor-fields'); fields.disabled = !!state.busy;
     const role = state.draft.roles.find(role => role.role_id === current.item);
-    // #566: overview is a list; a role (or skills/stages) page only has a back crumb, not a tab strip of every role.
+    // #566: overview is a list; a role (or skills) page only has a back crumb, not a tab strip of every role.
     const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
     if (current.item || auxiliaryView) {
       const back = element('a', '← 角色列表');
@@ -42,19 +41,16 @@ function rolesConsole() {
         here.setAttribute('aria-current', 'page');
         nav.append(here);
       } else {
-        const titles = { skills: '技能包目录', stages: '阶段策略' };
-        const here = element('a', titles[auxiliaryView]);
-        here.href = `#/projects/${id}/roles?view=${auxiliaryView}`;
+        const here = element('a', '技能包目录');
+        here.href = `#/projects/${id}/roles?view=skills`;
         here.setAttribute('aria-current', 'page');
         nav.append(here);
       }
     } else {
       const skills = element('a', '技能包目录'); skills.href = `#/projects/${id}/roles?view=skills`; skills.dataset.testid = 'role-skills-link';
-      const stages = element('a', '阶段策略'); stages.href = `#/projects/${id}/roles?view=stages`; stages.dataset.testid = 'role-stages-link';
-      nav.append(skills, stages);
+      nav.append(skills);
     }
     if (auxiliaryView === 'skills') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSkillsWorkspace(state, draw)); }
-    else if (auxiliaryView === 'stages') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleStageWorkspace(state, draw)); }
     else if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));
     else if (role) {
       roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus);
@@ -67,9 +63,8 @@ function rolesConsole() {
       if (state.busy || state.conflict) return;
       state.busy = true; draw(); message.textContent = '';
       try {
-        const { required_stages, ...draft } = structuredClone(state.draft);
-        const stagesChanged = JSON.stringify(required_stages) !== JSON.stringify(state.data.configuration.required_stages || []);
-        await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), ...(stagesChanged ? { required_stages } : {}), expected_revision: state.data.configuration.revision });
+        const draft = structuredClone(state.draft);
+        await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), expected_revision: state.data.configuration.revision });
         // The result belongs to this project; navigating elsewhere must not clear that other project's draft.
         if (target.rolesDraft === state) target.rolesDraft = null;
         if (current === target && current.section === 'roles') await reloadWith(state.data.configured === false ? rolePageText('savedCustom') : '角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
@@ -117,7 +112,6 @@ function rolesConsole() {
     holder.append(actions);
 
     if (comparison) holder.append(comparison); holder.append(fields);
-    if (state.stageError && state.focusStageError) { state.focusStageError = false; focusStagePolicyError(holder, state.stageError); }
     if (comparison && state.focusComparison) {
       state.focusComparison = false;
       comparison.style.scrollMarginTop = `${Math.ceil(actions.getBoundingClientRect().height) + 16}px`;

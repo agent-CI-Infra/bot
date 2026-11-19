@@ -94,7 +94,7 @@ const result = await runAgent({
 
 任务调度、触发与持久化仍由调用方负责。工具 schema、executor、guard 必须来自可信控制面配置，不能从 Issue/PR/模型结果直接生成权限。默认 tool loop 有轮数和输出上限，单条消息的工具调用数量不设上限，请求大小由上面的省略机制控制；它只执行已公布工具，且每次工具/模型调用前检查 guard。Pi adapter 保留原来的无总轮数限制行为。
 
-项目通过 [Manager 与工作类型](workflows.md)配置任务：事件由项目 Manager 分派，提示词、工作类型的开关、写入和模型都保存在控制面。读取对所有工作类型开放，写入按工作类型在项目配置里勾选，并配置成平台工具；Manager 只能为单个任务收窄写入。工具、执行器和 guard 仍由可信代码按保存的配置生成，不能从 Issue、PR、仓库文件、Manager 提示词或模型结果取得权限。`task_models` 按工作类型 id 选择模型，`manager` 是分派调用的模型，见[开发说明](development.md#按任务选择模型)。
+项目通过 [统一任务调度与对象 Manager](workflows.md) 配置任务：每个根 Issue 或独立 PR 维护持久对象 Manager 线程，按事件需要直接调用 `github_write`、新建绑定目标（`issue` / `pr` / `branch` / `commit`）的通用任务 `task.request`（直派 `reviewer` / `test` / `dev` 等角色并显式授予 `writes`）或续接已有任务。工具、执行器和 guard 由可信代码按 `capability_ceiling`、`task_write_grants` 与角色权限生成，不能从 Issue、PR、仓库文件、Manager 提示词或模型结果取得权限。模型按“角色显式配置 → 项目默认模型”两层解析，见[开发说明](development.md#模型选择项目默认--按角色覆写)。
 
 ## 权限与隔离
 

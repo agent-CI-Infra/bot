@@ -43,12 +43,12 @@ test('configuration PR uses a scoped installation token, discloses pending merge
   const unsafe=await command(admin,'configuration.pr',target,{path:'.github/workflows/injected.yml',content:'unsafe'},'unsafe');assert.notEqual(unsafe.value.state,'succeeded');assert.equal(prs.length,2);
   // .bot/ files are no longer configuration (#935): a configuration PR only changes a skill.
   const retired=await command(admin,'configuration.pr',target,{path:'.bot/rules/issue-review.md',content:'Revised prompt'},'retired');assert.notEqual(retired.value.state,'succeeded');assert.equal(prs.length,2);
-  // So the configuration offers a configuration PR only for a repository skill, never for a rule section's .bot/ name.
-  const paths=(await query(admin,'get_effective_config',target)).value.workflows.map(w=>w.prompt.path);
-  assert.ok(paths.every(path=>path===null||path.startsWith('.agents/skills/')),JSON.stringify(paths));
-  assert.ok((await admin('/api/repositories/101/manager')).value.manager.sections.every(section=>section.path===null||section.path.startsWith('.agents/skills/')));
-  // A section backed by a repository skill shows that skill's text, so a configuration PR starts from it.
+  // Configuration offers a configuration PR only for repository skills (.agents/skills/...), never .bot/ files (#935, #1122).
+  const cfg=(await query(admin,'get_effective_config',target)).value;
+  assert.equal(cfg.workflows,undefined);
+  assert.ok(typeof cfg.manager?.prompt?.effective==='string');
   h.store.run("UPDATE repository_rule_sources SET files=? WHERE repository_id='101'",JSON.stringify({'.agents/skills/review/SKILL.md':'Original prompt','.agents/skills/release-notes/SKILL.md':'Release notes skill text.'}));
-  const notes=(await query(admin,'get_effective_config',target)).value.workflows.find(w=>w.id==='release.notes').prompt;
-  assert.deepEqual([notes.path,notes.source,notes.effective],['.agents/skills/release-notes/SKILL.md','repository','Release notes skill text.']);
+  const updatedCfg=(await query(admin,'get_effective_config',target)).value;
+  assert.equal(updatedCfg.skills.length,2);
+  assert.ok(updatedCfg.skills.every(s=>s.path.startsWith('.agents/skills/')));
 });

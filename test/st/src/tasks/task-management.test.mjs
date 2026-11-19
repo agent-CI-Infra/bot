@@ -198,7 +198,7 @@ test('event Manager and role callers use the same task-management boundary and i
   const result = applyDecision(s, event, decision, null);
   assert.equal(result.created.length, 1);
   const origin = s.get('SELECT * FROM task_origins WHERE task_id=?', result.created[0]);
-  assert.equal(origin.source_kind, 'event'); assert.equal(origin.source_role, 'manager'); assert.equal(origin.executor_role, 'dev');
+  assert.equal(origin.source_kind, 'event'); assert.equal(origin.source_role, 'manager'); assert.equal(origin.executor_role, 'reviewer');
 });
 
 test('human project API retains explicit operator authority without synthesizing a role', t => {

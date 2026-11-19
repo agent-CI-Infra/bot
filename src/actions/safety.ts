@@ -1,6 +1,6 @@
 export { publicText, registeredRedactor as actionsRedactor } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
-import { covers, projectCeiling } from '../work/ceiling.js';
+import { covers, projectCeiling } from '../projects/ceiling.js';
 
 // Configuration errors that stop Actions failure handling until an App manager or installation owner acts.
 export const actionsConfigurationErrors = ['actions_permission_missing', 'actions_workflow_run_subscription_missing'];
@@ -16,11 +16,17 @@ export function actionsConfigurationError(github: { installationPermissions: Rec
 }
 
 // Revisions of a bot PR retain the original Issue's feature and approval boundary.
-export function actionsSourceIssue(store: Store, task: { repository_id: string; kind: string; object_number: number }): number | null {
+export function actionsSourceIssue(store: Store, task: { repository_id: string; kind: string; object_number: number; input?: string }): number | null {
   if (task.kind.endsWith('.issue')) return store.get('SELECT number FROM actions_failure_issues WHERE repository_id=? AND number=?', task.repository_id, task.object_number)?.number ?? null;
+  if (task.kind === 'task.request' && task.object_number != null) {
+    try {
+      const target = typeof task.input === 'string' ? JSON.parse(task.input)?.target : null;
+      if (target?.type === 'issue') return store.get('SELECT number FROM actions_failure_issues WHERE repository_id=? AND number=?', task.repository_id, task.object_number)?.number ?? null;
+    } catch { /* ignore */ }
+  }
   return store.get(`SELECT a.number FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
     JOIN actions_failure_issues a ON a.repository_id=t.repository_id AND a.number=t.object_number
-    WHERE p.repository_id=? AND p.number=? AND t.kind='development.issue'`, task.repository_id, task.object_number)?.number ?? null;
+    WHERE p.repository_id=? AND p.number=? AND (t.kind='development.issue' OR (t.kind='task.request' AND json_extract(t.input,'$.target.type')='issue'))`, task.repository_id, task.object_number)?.number ?? null;
 }
 
 /**

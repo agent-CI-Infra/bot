@@ -27,7 +27,7 @@ import { RepositoryOnboarding, onboardingInstructions, onboardingRepositoryOf, s
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 import { lateSchedules } from '../actions/late-schedules.js';
 import { readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
-import { assertCeiling } from '../work/ceiling.js';
+import { assertCeiling } from '../projects/ceiling.js';
 import { projectRefusal } from '../tasks/grants.js';
 
 const now=()=>new Date().toISOString();

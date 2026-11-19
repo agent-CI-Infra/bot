@@ -4,7 +4,7 @@
  * request is a short process; this daemon holds the Chromium session.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,6 +62,8 @@ function resolveChromium() {
 mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
 mkdirSync(profileDir, { recursive: true, mode: 0o700 });
 try { unlinkSync(sockPath); } catch { /* first start */ }
+const listenSockDirFd = sockPath.length > 100 && existsSync('/proc/self/fd') ? openSync(sessionRoot, 'r') : null;
+const listenSockPath = listenSockDirFd !== null ? `/proc/self/fd/${listenSockDirFd}/session.sock` : sockPath;
 
 let context, page, policy = null, steps = [], secretTyped = false, closed = false;
 const blocked = { url: null };
@@ -386,7 +388,7 @@ const server = createServer(socket => {
     });
   });
 });
-server.listen(sockPath, () => {
+server.listen(listenSockPath, () => {
   try { writeFileSync(join(sessionRoot, 'ready'), 'ok', { mode: 0o600 }); } catch { /* best-effort */ }
 });
 server.on('error', error => {
@@ -395,4 +397,7 @@ server.on('error', error => {
 });
 process.on('SIGTERM', () => { shutdown().finally(() => process.exit(0)); });
 process.on('SIGINT', () => { shutdown().finally(() => process.exit(0)); });
-process.on('exit', () => { try { unlinkSync(sockPath); } catch { /* gone */ } });
+process.on('exit', () => {
+  try { unlinkSync(sockPath); } catch { /* gone */ }
+  if (listenSockDirFd !== null) try { closeSync(listenSockDirFd); } catch { /* closed */ }
+});

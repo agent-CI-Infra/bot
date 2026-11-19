@@ -379,21 +379,22 @@ test('global settings change the wizard settings and shared models without a pro
 });
 
 // The deadline includes provisioning a full account/project/model fixture before exercising the engine.
-test('TaskEngine runs an override-only review without a default model', {timeout: 15000}, async t => {
+test('TaskEngine runs a task using its pinned model snapshot even after policy model_id is cleared', {timeout: 15000}, async t => {
   const f = await fixture(t);
-  const model = f.h.store.get("SELECT model_id FROM policies WHERE repository_id='101'").model_id;
-  await f.admin('/api/repositories/101/policy', 'PATCH', {model_id: null, task_models: {'review.issue': model}});
+  await f.admin('/api/repositories/101/policy', 'PATCH', {model_id: null});
   f.engine.tick(); await f.reached(1);
   assert.equal(f.task(1).status, 'running'); await f.finish(1);
   assert.equal(f.task(1).status, 'succeeded');
 });
 
-test('TaskEngine rejects a revoked override before workspace execution, even with a valid default', {timeout: 15000}, async t => {
-  let chosen;
-  const f = await fixture(t,{beforeQueue:async({admin})=>{
+test('TaskEngine rejects a revoked pinned model before workspace execution, even with a valid current default', {timeout: 15000}, async t => {
+  let chosen, fallback;
+  const f = await fixture(t,{beforeQueue:async({admin,h})=>{
+    fallback = h.store.get("SELECT model_id FROM policies WHERE repository_id='101'").model_id;
     chosen=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://other.invalid/v1',api_key:testPassword(),model_name:'override'})).value.model;
-    await admin('/api/repositories/101/policy','PATCH',{task_models:{'review.issue':chosen.id}});
+    await admin('/api/repositories/101/policy','PATCH',{model_id:chosen.id});
   }});
+  await f.admin('/api/repositories/101/policy', 'PATCH', {model_id: fallback});
   await f.admin(`/api/models/${chosen.id}/credentials/revoke`, 'POST', {});
   f.engine.tick(); await f.engine.active.get(f.task(1).id);
   assert.equal(f.task(1).status, 'waiting_configuration');

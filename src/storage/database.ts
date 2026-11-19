@@ -21,10 +21,9 @@ import { boardStorage } from '../board/storage.js';
 import { metricsStorage } from '../metrics/storage.js';
 import { rateLimitStorage } from '../github/rate-limits.js';
 import { actionsStorage } from '../actions/storage.js';
-import { workStorage } from '../work/settings.js';
-import { migrateWorkflows } from '../work/migration.js';
-import { ceilingStorage } from '../work/ceiling.js';
-import { retireWorkTypes } from '../work/retired.js';
+import { managerStorage } from '../dispatch/settings.js';
+import { ceilingStorage } from '../projects/ceiling.js';
+import { migrateRetireWorkTypes } from '../dispatch/migration.js';
 import { grantStorage } from '../tasks/grants.js';
 import { basisStorage } from '../dispatch/basis.js';
 import { progressStorage } from '../review/progress.js';
@@ -259,7 +258,7 @@ export class Store {
     sharedModelStorage(this);
     // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
     trajectoryStorage(this.db);
-    workStorage(this);
+    managerStorage(this);
     dispatchStorage(this);
     githubWriteStorage(this);
     taskStorage(this);
@@ -294,12 +293,10 @@ export class Store {
     workspaceStorage(this);
     // The computers' shared git worktrees and which task held each when (#769).
     worktreeStorage(this);
-    // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
-    migrateWorkflows(this);
     // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
     ceilingStorage(this);
-    // Removed work types (gate onboarding, #931): what older versions saved for them.
-    retireWorkTypes(this);
+    // One-time #1122 migration retiring work_settings, task_models and legacy work-type sections.
+    migrateRetireWorkTypes(this);
   }
   private get now() { return this.options.now ?? (() => performance.now()); }
   private logSlow(ms: number, op: string, detail: string | (() => string)) {

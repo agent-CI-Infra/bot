@@ -9,7 +9,6 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { configureDispatch, Dispatcher } from '../../../../dist/dispatch/worker.js';
 import { queueWebhook, enqueue } from '../../../../dist/review/queue.js';
 import { taskPermissions } from '../../../../dist/tasks/configuration.js';
-import { workPermissions } from '../../../../dist/work/settings.js';
 import { roleConfiguration, saveConfiguration } from '../../../../dist/roles/definition.js';
 import { managerDecision } from '../../../../dist/dispatch/manager.js';
 import { recordEvent, checkDecision, dispatchContext, applyDecision } from '../../../../dist/dispatch/store.js';
@@ -94,8 +93,9 @@ test('an event reaches the Manager once; its decision creates the task with the 
   assert.equal(tasks(f.h).length, 0, 'nothing runs before the Manager decides');
   await f.run();
   const [task] = tasks(f.h), [event] = events(f.h);
-  assert.equal(task.kind, 'review.issue'); assert.equal(task.object_number, 5);
-  assert.deepEqual(JSON.parse(task.input).manager, { event_id: event.id, reason: '新 Issue 需要检视', brief: { goal: '确认 CRLF 文件的问题', criteria: ['回复结论'] } });
+  assert.equal(task.kind, 'task.request'); assert.equal(task.object_number, 5);
+  assert.equal(JSON.parse(task.input).executor_role, 'reviewer');
+  assert.deepEqual(JSON.parse(task.input).manager, { event_id: event.id, reason: '新 Issue 需要检视', brief: { goal: '确认 CRLF 文件的问题', criteria: ['回复结论'] }, writes: ['review'] });
   assert.equal(event.state, 'decided'); assert.equal(event.decision, 'create'); assert.equal(event.reason, '新 Issue 需要检视'); assert.equal(event.model, 'Manager fixture');
   assert.deepEqual(f.h.store.all('SELECT relation FROM task_events WHERE task_id=?', task.id).map(r => r.relation), ['created']);
   assert.ok(f.h.store.all('SELECT content FROM task_logs WHERE task_id=?', task.id).some(r => JSON.parse(r.content).type === 'dispatch'));
@@ -104,7 +104,7 @@ test('an event reaches the Manager once; its decision creates the task with the 
   assert.match(f.requests[0].messages[0].content, /project Manager/); assert.match(f.requests[0].messages[0].content, /# Event dispatch/);
   const input = JSON.parse(f.requests[0].messages[1].content);
   assert.equal(input.event.type, 'issue.opened'); assert.equal(input.event.facts.object.title, issue.title);
-  assert.deepEqual(input.work.create.find(o => o.work === 'review.issue').writes, ['reply', 'labels']);
+  assert.deepEqual(input.work.create.find(o => o.work === 'review.issue').writes, ['review']);
   assert.ok(!JSON.stringify(input).includes('"default"'), 'the Manager is never told what the old rules would do');
   // A restart that lost the decided state decides again: the task's own key refuses a second task.
   f.h.store.run("UPDATE dispatch_events SET state='dispatching',lease='lost',lease_until=0");
@@ -183,10 +183,10 @@ test('a person\'s development label always reaches the Manager: it answers with 
     brief: { goal: 'Answer the development label: say why development does not start and what a person can do.', criteria: ['Names what is missing'] } });
   assert.equal(label('label-1'), 1); await f.run();
   const offered = JSON.parse(f.requests[0].messages[1].content);
-  assert.deepEqual(offered.work.create.map(o => o.work), ['development.issue', 'review.issue']);
+  assert.deepEqual(offered.work.create.map(o => o.work), ['development.issue', 'review.issue', 'reply']);
   assert.deepEqual([offered.event.facts.development.labeled_by, offered.event.facts.development.review.recommendation], ['maintainer', 'Human decision required: who makes the change.']);
   assert.match(f.requests[0].messages[0].content, /## Starting development/);
-  const [answer] = tasks(f.h).filter(task => task.kind === 'review.issue' && task.id !== 'rv'), answerInput = JSON.parse(answer.input);
+  const [answer] = tasks(f.h).filter(task => task.kind === 'task.request' && task.id !== 'rv'), answerInput = JSON.parse(answer.input);
   assert.equal(answerInput.trigger.reason, 'labeled'); assert.match(answerInput.manager.brief.goal, /^Answer the development label/);
   f.h.store.run("UPDATE tasks SET status='succeeded',result=? WHERE id=?", JSON.stringify(result), answer.id);
   // Developing an Issue needs the Manager's brief (no review gives a goal); the refusal goes back to the model once.
@@ -195,9 +195,9 @@ test('a person\'s development label always reaches the Manager: it answers with 
   assert.equal(label('label-2'), 1); await f.run();
   const refusal = f.requests.at(-1).messages.find(m => m.role === 'tool');
   assert.match(refusal.content, /dispatch_brief_required/);
-  const development = tasks(f.h).find(task => task.kind === 'development.issue'), input = JSON.parse(development.input);
+  const development = tasks(f.h).find(task => task.kind === 'task.request' && JSON.parse(task.input).executor_role === 'dev'), input = JSON.parse(development.input);
   assert.equal(input.manager.brief.goal, 'Keep the last CRLF line.');
-  assert.equal(development.unique_key, '101:development.issue:5:update:' + events(f.h).at(-1).delivery_id);
+  assert.ok(development.unique_key.startsWith('101:dispatch:101:issue.labeled:5:update:' + events(f.h).at(-1).delivery_id));
   // The label is the basis, as the control plane read it when it wrote the event (#815).
   assert.deepEqual(JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail), { kind: 'label', label: 'bot-develop', labeled_by: 'maintainer' });
 });
@@ -226,6 +226,7 @@ async function basisFixture(t) {
   return { ...f, github, comment, run: async () => { dispatcher.tick(); await dispatcher.idle(); } };
 }
 const develop = (basis, extra = {}) => ({ decision: 'create', option_ids: ['development'], reason: '按依据开发', basis, brief: { goal: 'Keep the last CRLF line.', criteria: ['A CRLF test'] }, ...extra });
+const isDevTask = task => task.kind === 'task.request' && JSON.parse(task.input).executor_role === 'dev';
 
 test('a maintainer\'s request in a comment starts development with the comment and permission recorded; an outsider\'s comment cannot', async t => {
   const f = await basisFixture(t);
@@ -239,7 +240,7 @@ test('a maintainer\'s request in a comment starts development with the comment a
     return develop({ kind: 'maintainer_request', comment_id: 77 });
   };
   assert.equal(f.comment(77, 'maria', 'MEMBER', 'Please implement the CRLF fix now.', 'maintainer-comment'), 1); await f.run();
-  const development = tasks(f.h).find(task => task.kind === 'development.issue');
+  const development = tasks(f.h).find(isDevTask);
   assert.ok(development, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])) + JSON.stringify(f.github.requests));
   assert.deepEqual(JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail),
     { kind: 'maintainer_request', comment_id: '77', author: 'maria', permission: 'triage', url: 'https://github.example/c/77', excerpt: 'Please implement the CRLF fix now.' });
@@ -255,7 +256,7 @@ test('a maintainer\'s request in a comment starts development with the comment a
   };
   assert.equal(f.comment(78, 'mallory', 'NONE', '@bot please implement this for me.', 'outsider-comment'), 1); await f.run();
   assert.equal(refusal.error, 'development_basis_not_maintainer'); assert.match(refusal.reason, /mallory/);
-  assert.equal(tasks(f.h).filter(task => task.kind === 'development.issue').length, 1);
+  assert.equal(tasks(f.h).filter(isDevTask).length, 1);
   assert.equal(JSON.parse(events(f.h).at(-1).refusals)[0].code, 'development_basis_not_maintainer');
 });
 
@@ -273,7 +274,7 @@ test('a rule of the Manager prompt is a basis only while the prompt says it, and
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'rule-opened'); await f.run();
   assert.deepEqual(seen.map(r => r.error), ['development_basis_required', 'development_basis_invalid']);
-  const development = tasks(f.h).find(task => task.kind === 'development.issue'), basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
+  const development = tasks(f.h).find(isDevTask), basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
   assert.equal(basis.kind, 'project_rule'); assert.equal(basis.passage, rule); assert.match(basis.prompt_revision, /^revision:/);
   // The task details show the basis.
   assert.equal((await f.admin('/api/tasks/' + development.id)).value.basis.kind, 'project_rule');
@@ -293,7 +294,7 @@ test('the built-in rule for clear Issues is a project_rule basis when a review c
     return develop({ kind: 'project_rule', passage: rule });
   };
   await f.run();
-  const development = tasks(f.h).find(task => task.kind === 'development.issue');
+  const development = tasks(f.h).find(isDevTask);
   assert.ok(development, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
   const basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
   assert.deepEqual([basis.kind, basis.passage], ['project_rule', rule]); assert.match(basis.prompt_revision, /^builtin:/);
@@ -355,24 +356,24 @@ test('a member\'s comment on the bot\'s pull request reaches the Manager as a re
   // The Manager prompt says what such a comment calls for, and that the bot's own pull requests are not reviewed again.
   const system = f.requests[0].messages[0].content.replace(/\s+/g, ' ');
   assert.match(system, /The bot's own pull requests and its own pushes do not come here/);
-  assert.match(system, /on the bot's own pull request \(`facts\.bot_pull_request`\) \| judge what it asks\. A change to make: create \*\*Follow up bot PR\*\*/);
+  assert.match(system, /On the bot's own pull request \(`facts\.bot_pull_request`\), judge what it asks: for actionable changes, dispatch `dev` \(`writes: \["pull_request"\]`\)/);
   assert.match(system, /`facts\.revisions` says how often the pull request was already revised for comments \(`for_requests`\) and for this author \(`for_this_author`\); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again/);
-  assert.match(system, /\| An Issue review was published \| create \*\*Develop Issue\*\* when the review supports developing now/);
+  assert.match(system, /\| Issue review published \| Start `dev` \(`writes: \["pull_request"\]`\) when the review concludes `ready_for_development`/);
   assert.deepEqual(seen.event.facts.revisions, { for_requests: 0, for_this_author: 0 });
   assert.equal(seen.work.create.find(o => o.id === 'development')?.work, 'development.pr'); assert.ok(seen.work.create.some(o => o.id === 'review'));
-  const revision = tasks(f.h).find(task => task.kind === 'development.pr');
+  const revision = tasks(f.h).find(isDevTask);
   assert.ok(revision, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
   assert.deepEqual(JSON.parse(revision.input).revision.requests.map(r => [r.type, r.id, r.author, r.author_type, r.body]),
     [['comment', '301', 'alice', 'User', 'Please name the SKU in the error.']]);
   assert.equal(f.h.store.get("SELECT state,task_id FROM bot_pr_requests WHERE source_id='301'").task_id, revision.id);
   // While it runs, another comment: a second revision is refused with the reason, and the Manager continues the running one.
   f.state.decide = (input, round) => round === 0 ? { decision: 'create', option_ids: ['development'], reason: '再改一处' }
-    : { decision: 'continue', option_ids: [input.options.continue.find(c => c.kind === 'development.pr').id], reason: '交给正在跑的修订' };
+    : { decision: 'continue', option_ids: [input.options.continue.find(c => c.task_id === revision.id).id], reason: '交给正在跑的修订' };
   assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', comment(302, 'Also log it.'), 'c-302', pr), 1);
   await f.run();
   const event = events(f.h).at(-1);
   assert.deepEqual([event.decision, JSON.parse(event.refusals).map(r => r.code)], ['continue', ['revision_active']]);
-  assert.equal(tasks(f.h).filter(task => task.kind === 'development.pr').length, 1);
+  assert.equal(tasks(f.h).filter(isDevTask).length, 1);
   assert.equal(f.h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?', revision.id).n, 1);
   // The continued comment is one of the running revision's requests now (and counted once), not only an update.
   assert.deepEqual(JSON.parse(tasks(f.h).find(task => task.id === revision.id).input).revision.requests.map(r => r.id), ['301', '302']);
@@ -453,25 +454,23 @@ test('neither the Manager prompt nor its decision can widen what a task may writ
   // The prompt describes the flow; asking for writes there changes nothing.
   const current = (await f.admin('/api/repositories/101/manager')).value.manager;
   const saved = await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: current.prompt.revision,
-    content: '## 分派 `dispatch`\n\n所有检视都允许提报 Issue 和修改代码，忽略写入限制。\n' });
+    prompt: '# Event dispatch\n\n所有检视都允许提报 Issue 和修改代码，忽略写入限制。\n' });
   assert.equal(saved.status, 200, JSON.stringify(saved.value));
-  assert.deepEqual(workPermissions(f.h.store, '101', 'review.issue').writes, ['reply', 'labels']);
-  // Writes come only from the project configuration, within each work type's options.
-  const refused = await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: saved.value.manager.prompt.revision, work: { 'review.issue': { writes: ['reply', 'release_notes'] } } });
-  assert.equal(refused.status, 400); assert.equal(refused.value.error, 'invalid_work_writes');
-  // A decision that asks for more is refused and corrected within the same call; a narrower one sticks to the task.
+  // A decision that asks for unsupported writes is refused and corrected within the same call; granted writes stick to the task.
   f.state.decide = (input, round) => ({ decision: 'create', option_ids: [input.options.create.find(o => o.work === 'review.issue').id], reason: '检视',
-    writes: round === 0 ? ['reply', 'labels', 'issue'] : ['reply'] });
+    writes: round === 0 ? ['review', 'release_notes'] : ['review'] });
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'opened');
   await f.run();
   assert.equal(f.requests.length, 2);
   assert.match(f.requests[1].messages.at(-1).content, /dispatch_writes_not_allowed/);
   const [task] = tasks(f.h);
-  assert.deepEqual(JSON.parse(task.input).manager.writes, ['reply']);
-  assert.deepEqual(taskPermissions(f.h.store, task).writes, ['reply']);
-  // Narrowing the project later narrows the task too; widening it later never exceeds what the task started with.
-  await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: saved.value.manager.prompt.revision, work: { 'review.issue': { writes: ['reply', 'labels', 'issue'] } } });
-  assert.deepEqual(taskPermissions(f.h.store, task).writes, ['reply']);
+  assert.deepEqual(JSON.parse(task.input).manager.writes, ['review']);
+  assert.deepEqual(taskPermissions(f.h.store, task).writes, ['review']);
+  // Narrowing the project ceiling later narrows the task too; widening it later adds local checkout 'code' (#850) but never widens GitHub writes beyond ['review'].
+  await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'read' });
+  assert.deepEqual(taskPermissions(f.h.store, task).writes, []);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'develop' });
+  assert.deepEqual(taskPermissions(f.h.store, task).writes, ['code', 'review']);
 });
 
 test('a Manager that cannot be reached is waited out; a decision that stays invalid fails for a person to retry', async t => {
@@ -490,7 +489,7 @@ test('a Manager that cannot be reached is waited out; a decision that stays inva
   f.h.store.run('UPDATE dispatch_events SET attempts=7,next_run_at=0');
   await f.run();
   [event] = events(f.h);
-  assert.equal(event.state, 'pending'); assert.equal(JSON.parse(event.error).code, 'dispatch_option_not_offered'); assert.equal(tasks(f.h).length, 0);
+  assert.equal(event.state, 'pending'); assert.equal(JSON.parse(event.error).code, 'dispatch_continuation_unavailable'); assert.equal(tasks(f.h).length, 0);
   f.state.decide = input => ({ decision: 'create', option_ids: [input.work.create[0].id], reason: '恢复后检视' });
   assert.equal((await f.admin(`/api/repositories/101/dispatch/${event.id}/retry`, 'POST', {})).status, 201);
   await f.run();
@@ -569,7 +568,7 @@ test('the Manager comments on and labels the event Issue before dispatching; it 
     if (step === 1) return { role: 'assistant', content: null, tool_calls: [
       call('github_write', { repository: 'fixture/other', method: 'POST', path: '/issues', key: 'elsewhere', body: { title: 'Elsewhere' } }, 'w3'),
       call('github_write', { method: 'POST', path: '/repos/fixture/other/issues', key: 'elsewhere-2', body: { title: 'Elsewhere' } }, 'w4')] };
-    // The first attempt decides invalidly twice (an option that was never offered), so the event is dispatched again.
+    // The first attempt decides invalidly twice (an unknown work/role), so the event is dispatched again.
     const option = attempt === 0 ? 'invented' : input.options.create.find(o => o.work === 'review.issue').id;
     return { role: 'assistant', content: null, tool_calls: [call('create_task', { work: [option], reason: '已请作者补充信息，先检视' }, 'd' + step)] };
   };
@@ -594,7 +593,7 @@ test('the Manager comments on and labels the event Issue before dispatching; it 
   assert.deepEqual(made.writes_made.map(w => [w.key, w.method, w.path, w.state]), [['ask-author', 'POST', '/issues/5/comments', 'sent'], ['triage', 'POST', '/issues/5/labels', 'sent']]);
   assert.ok(retried[1].messages.filter(m => m.role === 'tool').slice(0, 2).every(m => JSON.parse(m.content).replayed === true));
   assert.equal(github.requests.filter(r => !r.startsWith('GET')).length, writes);
-  assert.equal(events(f.h)[0].state, 'decided'); assert.equal(tasks(f.h)[0].kind, 'review.issue');
+  assert.equal(events(f.h)[0].state, 'decided'); assert.equal(tasks(f.h)[0].kind, 'task.request');
   // Every call is audited with who asked; the refused ones too.
   const ledger = f.h.store.all('SELECT * FROM github_writes ORDER BY rowid');
   assert.deepEqual(ledger.filter(row => row.state === 'sent').map(row => [row.key, row.status]), [['ask-author', 201], ['triage', 200]]);
@@ -610,50 +609,50 @@ test('the Manager comments on and labels the event Issue before dispatching; it 
   assert.ok(f.requests.at(-1).tools.some(tool => tool.function.name === 'github_read'));
 });
 
-test('upgrading moves workflows into the Manager and project configuration once, with a record', async t => {
+test('upgrading folds legacy work-type sections, task_models and standing rules into roles and Manager once (#1122)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const mRev = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Reviewer override', api_url: 'http://127.0.0.1:9/v1', api_key: 'rev-key' })).value.model;
   await h.stop();
-  // A database from before #207: a custom workflow, a PR review without push reviews and extra writes, console prompts.
   const db = new DatabaseSync(h.database), now = new Date().toISOString();
-  db.exec(`CREATE TABLE workflows(repository_id TEXT NOT NULL,id TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',description TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,
-    triggers TEXT NOT NULL DEFAULT '[]',prompt TEXT,permissions TEXT,model_id TEXT,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,trigger_list TEXT,PRIMARY KEY(repository_id,id))`);
-  const insert = db.prepare('INSERT INTO workflows(repository_id,id,name,description,enabled,triggers,prompt,permissions,trigger_list,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
-  insert.run('101', 'review.pr', '', '', 1, '[]', null, JSON.stringify({ writes: ['reply', 'labels', 'issue'] }), JSON.stringify([{ id: 'pull_request.opened' }, { id: 'comment.mention' }]), now, now);
-  insert.run('101', 'custom.0123456789ab', 'Docs check', 'Checks documentation changes', 1, JSON.stringify([{ id: 'pull_request.labeled', label: 'docs' }]), 'Read the changed docs and reply.\n\n## 输出 `json`\n\nOne JSON object.', JSON.stringify({ writes: ['reply'] }), null, now, now);
-  insert.run('101', 'release.observe', '', '', 1, '[]', 'Observe the release run carefully.', null, null, now, now);
-  db.prepare("UPDATE policies SET rule_overrides=? WHERE repository_id='101'").run(JSON.stringify({ '.bot/rules/issue-review.md': 'Review issues briefly.' }));
+  db.exec(`CREATE TABLE workflows(repository_id TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(repository_id,id))`);
+  db.prepare('INSERT INTO workflows VALUES(?,?)').run('101', 'review.pr');
+  db.prepare("DELETE FROM settings WHERE key='migration:1122:repo:101'").run();
+  db.prepare('INSERT INTO manager_revisions VALUES(?,?,?,?,?,?,?,?)').run(
+    '101', 1,
+    '## 分派 `dispatch`\n\n# Event dispatch\n\nCustom dispatch note.\n\n## Issue 检视 `review.issue`\n\nReview issues briefly.\n\n## Issue 开发 `development`\n\nWrite a CRLF test first.\n\n## CI 观察 `release.observe`\n\nObserve the release run carefully.',
+    JSON.stringify({ 'review.pr': { writes: ['reply', 'labels'] } }), '{}', 'console', null, now,
+  );
+  db.exec('CREATE TABLE IF NOT EXISTS manager_rules(repository_id TEXT NOT NULL,revision INTEGER NOT NULL,rules TEXT NOT NULL,PRIMARY KEY(repository_id,revision))');
+  db.prepare('INSERT INTO manager_rules VALUES(?,?,?)').run(
+    '101', 1, JSON.stringify([{ id: 'pr-open', event: 'pull_request.opened', action: 'create', work: 'review.pr', reason: '检视 PR' }]),
+  );
+  db.prepare('UPDATE policies SET work_settings=?,task_models=?,rule_overrides=? WHERE repository_id=?').run(
+    JSON.stringify({ 'review.pr': { writes: ['reply'] } }),
+    JSON.stringify({ 'review.pr': mRev.id }),
+    JSON.stringify({ '.bot/rules/pr-review.md': 'Check diff anchors strictly.' }),
+    '101',
+  );
   db.close();
   await h.start();
   assert.equal(h.store.hasTable('workflows'), false);
-  const migration = h.store.get("SELECT * FROM manager_migrations WHERE repository_id='101'"), report = JSON.parse(migration.report), archive = JSON.parse(migration.archive);
-  assert.equal(archive.workflows.length, 3); assert.equal(report.manager_revision, 1);
-  assert.deepEqual(report.custom_workflows, [{ id: 'custom.0123456789ab', name: 'Docs check', enabled: true }]);
-  const revision = h.store.get("SELECT * FROM manager_revisions WHERE repository_id='101' AND revision=1");
-  assert.equal(revision.source, 'migration');
-  for (const text of ['`dispatch`', '| PR 推送新提交 | 不运行 |', '`review.issue`', 'Review issues briefly.', '`release.observe`', 'Observe the release run carefully.', '`reply`', 'Docs check', 'Read the changed docs and reply.'])
-    assert.ok(revision.content.includes(text), text);
-  const policy = h.store.get("SELECT * FROM policies WHERE repository_id='101'");
-  assert.equal(policy.review_pull_requests, 1); assert.equal(policy.review_pr_updates, 0); assert.equal(policy.review_pr_discussion, 0);
-  assert.deepEqual(JSON.parse(policy.event_filters)['pull_request.labels'], ['docs']);
-  assert.deepEqual(JSON.parse(policy.rule_overrides), { '.bot/rules/issue-review.md': 'Review issues briefly.' });
-  const work = JSON.parse(policy.work_settings);
-  // Filing an Issue is no longer a review write: it became github_write, governed by the role (#381).
-  assert.deepEqual(work['review.pr'].writes, ['reply', 'labels']); assert.deepEqual(work.reply, { enabled: true, writes: ['reply'], events: ['pull_request.labeled'], version: 0 });
-  // Each object work type is offered only on the events that used to start it.
-  assert.deepEqual(work['review.pr'].events, ['pull_request.opened', 'pull_request.mention']);
-  assert.deepEqual(work['review.issue'].events, ['issue.opened', 'issue.mention', 'issue.updated']);
-  // A heading-like line in a migrated prompt stays text in its section, and the report says it was escaped.
-  assert.ok(revision.content.includes('\\## 输出 `json`'));
-  assert.deepEqual([...(await import('../../../../dist/work/settings.js')).parseSections(revision.content).sections.keys()], ['dispatch', 'review.issue', 'release.observe', 'reply']);
-  assert.ok(report.warnings.some(warning => warning.includes('Docs check')));
+  const roles = roleConfiguration(h.store, '101').roles;
+  const reviewer = roles.find(r => r.role_id === 'reviewer'), dev = roles.find(r => r.role_id === 'dev');
+  assert.match(reviewer.persona_prompt, /Review issues briefly\./);
+  assert.match(reviewer.persona_prompt, /Check diff anchors strictly\./);
+  assert.equal(reviewer.model_profile_ref?.model_id, mRev.id);
+  assert.match(dev.persona_prompt, /Write a CRLF test first\./);
   const view = (await admin('/api/repositories/101/manager')).value.manager;
-  assert.equal(view.migration.report.manager_revision, 1); assert.equal(view.work.find(w => w.id === 'reply').active, true);
-  assert.equal(view.sections.find(s => s.id === 'review.issue').effective_source, 'console');
+  assert.match(view.prompt.content, /Custom dispatch note\./);
+  assert.match(view.prompt.content, /Observe the release run carefully\./);
+  assert.equal(view.standing_rules.rules[0].role, 'reviewer');
+  assert.deepEqual(view.standing_rules.rules[0].writes, ['review']);
+  const policy = h.store.get("SELECT work_settings,task_models FROM policies WHERE repository_id='101'");
+  assert.equal(policy.work_settings, '{}'); assert.equal(policy.task_models, '{}');
   const removed = await admin('/api/repositories/101/workflows');
   assert.equal(removed.status, 410); assert.equal(removed.value.error, 'workflows_removed');
-  // Starting again does nothing more.
+  const revCount = h.store.get("SELECT count(*) n FROM manager_revisions WHERE repository_id='101'").n;
   await h.stop(); await h.start();
-  assert.equal(h.store.get("SELECT count(*) n FROM manager_revisions WHERE repository_id='101'").n, 1);
+  assert.equal(h.store.get("SELECT count(*) n FROM manager_revisions WHERE repository_id='101'").n, revCount);
 });
 
 // #815: the Manager decides with create_task, continue_task or ignore_event; the control plane checks a creation when it is
@@ -666,22 +665,22 @@ test('work the project does not allow is shown with its reason; creating it is r
   f.state.message = (body, input) => {
     const results = toolResults(body);
     if (!results.length) {
-      // Reply is off by default: it is listed with the reason, not hidden.
-      assert.deepEqual(input.work.unavailable.map(work => [work.id, work.code]), [['reply', 'work_disabled'], ['development', 'capability_ceiling']]);
-      assert.match(body.messages[0].content, /Work the project does not allow now[\s\S]*reply/);
-      return toolCall('create_task', { work: ['reply'], reason: '作者要的是一条回复' }, 'c1');
+      // Development is blocked by default capability_ceiling = 'comment': listed with the reason, not hidden.
+      assert.deepEqual(input.work.unavailable.map(work => [work.id, work.code]), [['development', 'capability_ceiling']]);
+      assert.match(body.messages[0].content, /Restricted actions right now[\s\S]*development/);
+      return toolCall('create_task', { work: ['development'], reason: '尝试直接开发', brief: { goal: 'Fix CRLF', criteria: ['Test CRLF'] } }, 'c1');
     }
-    assert.equal(results[0].error, 'work_disabled'); assert.equal(results[0].created, false); assert.match(results[0].reason, /关闭/); assert.match(results[0].instruction, /Nothing was created/);
-    return toolCall('create_task', { work: ['review'], reason: '回复关着，改为检视' }, 'c2');
+    assert.equal(results[0].error, 'capability_ceiling'); assert.equal(results[0].created, false); assert.match(results[0].instruction, /Nothing was created/);
+    return toolCall('create_task', { work: ['review'], reason: '上限不允许开发，改为检视' }, 'c2');
   };
-  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'refused-reply');
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'refused-dev');
   await f.run();
   const event = events(f.h)[0];
-  assert.equal(event.decision, 'create'); assert.equal(tasks(f.h).length, 1); assert.equal(tasks(f.h)[0].kind, 'review.issue');
-  assert.deepEqual(JSON.parse(event.refusals).map(r => [r.work, r.code, r.tool]), [['reply', 'work_disabled', 'create_task']]);
+  assert.equal(event.decision, 'create'); assert.equal(tasks(f.h).length, 1); assert.equal(tasks(f.h)[0].kind, 'task.request');
+  assert.deepEqual(JSON.parse(event.refusals).map(r => [r.work, r.code, r.tool]), [['development.issue', 'capability_ceiling', 'create_task']]);
   // The dispatch detail shows the refusal.
   const detail = (await f.admin('/api/repositories/101/dispatch/' + event.id)).value;
-  assert.equal(detail.event.refusals[0].code, 'work_disabled');
+  assert.equal(detail.event.refusals[0].code, 'capability_ceiling');
 });
 
 test('a development the object already has is refused with that task, and the Manager can answer the person and ignore the event', async t => {
@@ -706,7 +705,7 @@ test('a development the object already has is refused with that task, and the Ma
 
 test('after three refusals the event is ignored with the refusals kept', async t => {
   const f = await fixture(t);
-  f.state.message = () => toolCall('create_task', { work: ['reply'], reason: '回复' }, 'c');
+  f.state.message = () => toolCall('create_task', { work: ['development'], reason: '开发', brief: { goal: 'Fix CRLF', criteria: ['Test CRLF'] } }, 'c');
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'three-refusals');
   await f.run();
   const event = events(f.h)[0];
@@ -728,7 +727,7 @@ test('dispatch survives more than eight invalid decisions, reports 3/6/9, and gi
  assert.equal(detail.recovery.failures.length,8);assert.deepEqual(detail.recovery.reports.map(r=>r.attempt),[9,6,3]);assert.equal(detail.event.attempts,10);
  const older=(await f.admin('/api/repositories/101/dispatch/'+event.id+'?failure_before='+detail.recovery.next_before_attempt)).value;assert.deepEqual(older.recovery.failures.map(r=>r.attempt),[2,1]);assert.equal(older.recovery.next_before_attempt,null);assert.equal((await f.admin('/api/repositories/101/dispatch/'+event.id+'?failure_before=nope')).status,400);
  await f.dispatcher.close();const recovered=new Dispatcher(f.h.store);t.after(()=>recovered.close());
- f.state.decide=input=>{assert.equal(input.recovery.failures[0].attempt,10);assert.equal(input.recovery.failures[0].error.code,'dispatch_option_not_offered');return {decision:'ignore',option_ids:[],reason:'Manager chooses no work after reviewing current facts'};};
+ f.state.decide=input=>{assert.equal(input.recovery.failures[0].attempt,10);assert.equal(input.recovery.failures[0].error.code,'dispatch_continuation_unavailable');return {decision:'ignore',option_ids:[],reason:'Manager chooses no work after reviewing current facts'};};
  f.h.store.run('UPDATE dispatch_events SET next_run_at=0 WHERE id=?',event.id);recovered.tick();await recovered.idle();
  assert.equal(events(f.h)[0].state,'decided');assert.equal(events(f.h)[0].decision,'ignore');assert.equal(declined,1,'only an actual Manager decision ends the owning work');
  assert.equal(f.h.store.get('SELECT count(*) n FROM dispatch_failures WHERE event_id=?',event.id).n,10);

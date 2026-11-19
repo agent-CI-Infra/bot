@@ -26,7 +26,7 @@ GitHub 的 run 列表支持 `created` 范围，不支持完成时间范围。扫
 
 ## 分析与分类
 
-失败原因由这类工作的模型分析（`src/actions/analysis.ts`），模型按 `task_models['actions.failures']` 选择，没有单独设置时用项目默认模型；提示词默认是 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md)，可以由 Manager 提示词的同名章节覆盖。
+失败原因由通用分析任务在项目电脑中分析（`src/actions/analysis.ts`），模型按执行角色配置或项目默认模型解析；分析说明见 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md) 与项目的 Manager 分派提示词。
 
 控制面先读取每个失败 job 的完整日志（不超过现有 GitHub 客户端 8 MiB 下载边界；超限不返回截断内容），取出失败 step 时间区间内的输出（`src/actions/classifier.ts`），然后为这个 attempt 排一个分析任务。任务和其他工作流一样在项目电脑里运行，检出失败运行的提交；run、job 和失败 step 的名字写在 `../context/run.json`，每个失败 job 的失败 step 输出写在 `../context/failed-steps/<job id>.log`（只放最后 400 行、4 万字符）。agent 需要更多时用 `read_job_log` 读完整日志，也可以在检出里运行命令、读工作流文件和代码、其他运行、Issue 和 PR，按提示词启动独立 agent。日志、job 名和 step 名都是不可信数据。
 

@@ -123,8 +123,8 @@ test('已保存的历史简称、中文和自定义角色名原样显示，关�
     expect(saved.status).toBe(200);
     await login(page, h.admin + '/#/projects/101/roles', password);
     const roleTable = page.getByRole('table', { name: '角色解析结果' });
-    const renamed = '协调 $& Team';
-    await roleTable.getByRole('link', { name: 'Task Coordinator', exact: true }).click();
+    const renamed = '验收 $& Team';
+    await roleTable.getByRole('link', { name: 'Independent QA', exact: true }).click();
     const input = page.getByLabel('显示名称', { exact: true });
     await input.fill(renamed);
     await consoleSave(page).click();

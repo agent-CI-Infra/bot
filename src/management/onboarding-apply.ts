@@ -8,9 +8,8 @@ import { agentReadPermissions } from '../github/client.js';
 import { githubWrite } from '../github/write.js';
 import { installationApi } from '../app/installations.js';
 import { trustCeiling, trustedOrganization } from '../app/trusted-organizations.js';
-import { projectCeiling } from '../work/ceiling.js';
-import { eventFilters, managerPrompt } from '../work/settings.js';
-import { dispatchPrompt } from '../dispatch/manager.js';
+import { projectCeiling } from '../projects/ceiling.js';
+import { effectiveManagerPrompt, eventFilters, managerPrompt } from '../dispatch/settings.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { defaultLimits } from '../schedules/types.js';
 import { ServiceRepositories } from '../service-roles/resources.js';
@@ -296,11 +295,10 @@ export class OnboardingApply {
   private async conventions(c: ItemContext): Promise<Outcome> {
     const version = Number(c.application.version), mark = conventionsMark(version), block = conventionsBlock(c.plan, version, String(c.application.confirmed_at).slice(0, 10));
     const done: Json = { manager: 'present', roles: [] as string[] };
-    if (!managerText(this.store, c.id).includes(mark)) {
-      const saved = this.store.get('SELECT content FROM manager_dispatch_prompts WHERE repository_id=? ORDER BY revision DESC LIMIT 1', c.id);
+    const currentText = managerText(this.store, c.id);
+    if (!currentText.includes(mark)) {
       const current = managerPrompt(this.store, c.id);
-      await this.command(c, 'manager.update', saved ? { expected_revision: current.revision, prompt: String(saved.content) + '\n\n' + block }
-        : { expected_revision: current.revision, content: withPreamble(current.content, block) }, 0);
+      await this.command(c, 'manager.update', { expected_revision: current.revision, prompt: currentText.trimEnd() + '\n\n' + block }, 0);
       done.manager = 'appended';
     }
     const roles = roleTargets(this.store, c.id).filter(role => !String(role.persona_prompt).includes(mark));
@@ -392,19 +390,9 @@ interface ItemContext { base: ActorContext; actor: ActorContext; id: string; app
 const roleKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];
 /** The roles that get the conventions: the enabled ones that work on the repository (not the cross-task coordinator). */
 const roleTargets = (store: Store, id: string) => roleConfiguration(store, id).roles.filter(role => role.enabled && role.role_id !== 'coordinator');
-/** The Manager text the dispatch reads: its saved dispatch prompt, else its prompt (whose preamble starts the dispatch prompt). */
+/** The Manager text the dispatch reads: the project's effective unified Manager prompt. */
 function managerText(store: Store, id: string): string {
-  return String(store.get('SELECT content FROM manager_dispatch_prompts WHERE repository_id=? ORDER BY revision DESC LIMIT 1', id)?.content ?? dispatchPrompt(store, id));
-}
-/** `content` with `block` at the end of its preamble, before the first section heading outside code fences. */
-function withPreamble(content: string, block: string): string {
-  const lines = content.replace(/\r\n/g, '\n').split('\n'); let fence = false, at = lines.length;
-  for (const [i, line] of lines.entries()) {
-    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
-    if (!fence && /^##[ \t]+.*`[a-z][a-z0-9._-]*`[ \t]*$/.test(line)) { at = i; break; }
-  }
-  const before = lines.slice(0, at).join('\n').trimEnd(), after = lines.slice(at).join('\n');
-  return [before, block, after].filter(Boolean).join('\n\n');
+  return effectiveManagerPrompt(store, id);
 }
 // Label lists compare as sets.
 const normal = (value: unknown) => Array.isArray(value) ? [...value].map(String).sort() : value;

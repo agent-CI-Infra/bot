@@ -26,7 +26,7 @@ test('a receipt opens as its own page with the project, the change and the recor
   });
   try {
     const prompt = 'Inspect evidence and cite the original logs.';
-    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt })).value;
+    const receipt = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt })).value;
     expect(receipt.state).toBe('succeeded');
     // A person can open the receipt while sign-in is still reading the project list.
     await page.route('**/api/repositories', async route => { await projects.promise; await route.continue(); });
@@ -36,7 +36,7 @@ test('a receipt opens as its own page with the project, the change and the recor
     await expect(panel.getByRole('heading', { name: '命令回执', exact: true })).toBeVisible();
     // The receipt arrives first. The later project list supplies the name and link without a second receipt read.
     await expect(panel.locator('[data-receipt-state]')).toHaveText('已执行');
-    await expect(panel).toContainText('更新工作配置');
+    await expect(panel).toContainText('更新 Manager 配置');
     projects.resolve();
     await expect(panel).toContainText('agent-test-zone/admin-fixture-101');
     await expect(panel).not.toContainText('项目 101');
@@ -44,11 +44,10 @@ test('a receipt opens as its own page with the project, the change and the recor
     // The initiator of this console command is the person reading it; a receipt from someone else says so instead.
     await expect(panel.locator('[data-receipt-initiator]')).toContainText('你');
     // What the command named and what it wrote, structurally rather than as one JSON blob.
-    await expect(panel.locator('[data-receipt-target]')).toContainText('review.issue');
+    await expect(panel.locator('[data-receipt-target]')).toContainText('101');
     await expect(panel.locator('[data-receipt-arguments]')).toContainText(prompt);
     // The recorded diff is a before/after row per field, and the revision moved from the old to the new one.
     const diff = panel.locator('[data-receipt-diff] tr', { hasText: 'prompt' });
-    await expect(diff).toContainText('未设置');
     await expect(diff).toContainText(prompt);
     await expect(panel).toContainText(receipt.before_revision.slice(0, 12));
     await expect(panel).toContainText(receipt.after_revision.slice(0, 12));
@@ -94,11 +93,11 @@ test('a failed command says why it did not run instead of showing the bare serve
 test('a receipt recorded as unknown and one recorded as rejected are told apart', async ({ page }) => {
   const f = await managementFixture();
   try {
-    const unknown = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Later prompt.' })).value;
+    const unknown = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Later prompt.' })).value;
     // The server writes these two states itself: `unknown` when an external call may have landed, `rejected` only on
     // receipts recorded before the approval flow was retired (#312). The fixture records both as the server would.
     f.h.store.run("UPDATE management_commands SET state='unknown', result=? WHERE id=?", JSON.stringify({ error: 'external_result_unknown', reconcile_required: true }), unknown.id);
-    const rejected = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'Refused prompt.' })).value;
+    const rejected = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Refused prompt.' })).value;
     f.h.store.run("UPDATE management_commands SET state='rejected' WHERE id=?", rejected.id);
     await login(page, f);
     const unknownPanel = await open(page, f, unknown.id);
@@ -147,7 +146,7 @@ test('the receipt card in the transcript links to that same receipt page', async
 test('a failed receipt read is not read again by the next automatic route', async ({ page }) => {
   const f = await managementFixture();
   try {
-    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, {})).value;
+    const receipt = (await command(f.admin, 'manager.update', { project_id: '101' }, {})).value;
     const reads = [];
     await page.route('**/api/management/commands/' + receipt.id, async route => {
       reads.push(route.request().url());
@@ -183,7 +182,7 @@ test('a failed receipt read is not read again by the next automatic route', asyn
 test('leaving a failed receipt and coming back in the same document reads it again and replaces the error', async ({ page }) => {
   const f = await managementFixture();
   try {
-    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, {})).value;
+    const receipt = (await command(f.admin, 'manager.update', { project_id: '101' }, {})).value;
     expect(receipt.state).toBe('succeeded');
     const reads = [];
     await page.route('**/api/management/commands/' + receipt.id, async route => {

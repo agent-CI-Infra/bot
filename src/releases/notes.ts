@@ -1,8 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { sha, stop, type Redactor } from '../agent/common.js';
 import type { Source } from './range.js';
-import { registerEventWork } from '../work/events.js';
-import { workActive, workPermissions } from '../work/settings.js';
+import { registerEventWork } from '../tasks/event-adapters.js';
 import { recordEvent, registerDispatchHook } from '../dispatch/store.js';
 
 const headings = ['Changes', 'Commits', 'Pull requests', 'Features', 'Fixes', 'Documentation', 'Tests', 'Other', '变更', '提交', '合并的 PR', '功能', '修复', '文档', '测试', '其他'];
@@ -19,8 +18,8 @@ export const builtinGroups = (input: Source[]): NoteGroup[] => [{ heading: 'Comm
  */
 export function notesUseModel(store: Store, row: Row, input: Source[]): boolean {
   const data = JSON.parse(row.data);
-  return ['repository', 'console'].includes(data.skill?.source) && input.length > 0 && workActive(store, row.repository_id, 'release.notes')
-    && workPermissions(store, row.repository_id, 'release.notes').writes.includes('release_notes');
+  const policy = store.get('SELECT enabled FROM policies WHERE repository_id=?', row.repository_id);
+  return ['repository', 'console'].includes(data.skill?.source) && input.length > 0 && !!policy?.enabled;
 }
 /** The model only groups verified sources: every source exactly once, under an allowed heading. */
 export function checkGroups(value: unknown, input: Source[]): NoteGroup[] {

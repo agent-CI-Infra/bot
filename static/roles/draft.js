@@ -34,7 +34,7 @@ function roleText(label, object, key, state, { multiline = false, ...attributes 
   return field(label, roleBound((multiline ? textarea : input)(key, shown, attributes), value => { object[key] = value; }, state));
 }
 function requiredRoleLocked(role) {
-  return ['controller', 'evaluator'].includes(role.kind);
+  return ['manager', 'qa'].includes(role.role_id);
 }
 function requiredEnableReason(role) {
   if (!requiredRoleLocked(role)) return '';
@@ -70,7 +70,7 @@ function roleModelPicker(role, state, redraw) {
   const { data } = state, backend = data.harnesses.find(entry => entry.id === role.harness_ref.id);
   const subscription = role.harness_ref?.model_source === 'subscription';
   const external = !!backend?.externalModel;
-  const defaultLabel = subscription ? '供应商订阅模式（预留 · 未实现）' : external ? 'Agent 自带模型' : '继承任务模型或项目默认';
+  const defaultLabel = subscription ? '供应商订阅模式（预留 · 未实现）' : external ? 'Agent 自带模型' : '继承项目默认模型';
   const select = roleSelect(role.role_id + ' 模型', role.model_profile_ref?.model_id || '', [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.shared ? '（共享）' : '')])], id => {
     markRoleDirty(state);
     role.model_profile_ref = id ? { model_id: id, api: backend?.model_api?.[0] || 'openai-chat-completions', tool_calls: true, structured_output: backend?.structured_output?.includes('tool_call') ? 'tool_call' : backend?.structured_output?.[0] || 'tool_call' } : null;
@@ -123,14 +123,14 @@ function roleBackendRuntimeBox(role, state) {
   } else if (rt.resolved_model && rt.resolved_model.source !== 'role') {
     const chosen = (state.data.models || []).find(entry => entry.id === rt.resolved_model.id);
     roleModelReady = true; targetModelId = rt.resolved_model.id; targetModelName = rt.resolved_model.name;
-    targetSourceLabel = rt.resolved_model.source === 'workflow' ? '工作类型模型' : '项目默认模型';
+    targetSourceLabel = '项目默认模型';
     conn = chosen?.connectivity || rt.connectivity || null;
   } else if (rt.config_override) {
     roleModelReady = true;
     relayText = '本地配置覆盖（连通性未探测）';
   } else {
     relayText = rt.model_count > 0
-      ? `未配置默认或工作类型模型（项目已有 ${rt.model_count} 个带密钥模型，请在项目设置选择默认模型或为本角色指定模型）`
+      ? `未配置项目默认模型（项目已有 ${rt.model_count} 个带密钥模型，请在项目设置选择默认模型或为本角色指定模型）`
       : '未配置（需先添加上游模型与凭据）';
   }
   if (roleModelReady && targetModelName) {
@@ -212,7 +212,7 @@ function permissionEditor(permissions, items, change, prefix = '', fixed = false
     for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
       const listed = shown.filter(item => item.group === group); if (!listed.length) continue;
       const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
-      if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案属于框架交付，由项目工作类型的写入控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。读写还以项目能力上限为顶：「可评论和打标签」只到 Issue、Pull Request 和 Actions（触发工作流），「可开发并开 PR」才含 Contents。'));
+      if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报和发行说明属于确定性交付工具，由项目能力上限与任务写入授权（task_write_grants）控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。读写还以项目能力上限为顶：「可评论和打标签」只到 Issue、Pull Request 和 Actions（触发工作流），「可开发并开 PR」才含 Contents。'));
       for (const item of listed) section.append(permissionRow(permissions, item, change, prefix, fixed));
       host.append(section);
     }
@@ -254,7 +254,7 @@ function mergeRoleDraft(base, draft, latest, choices = {}) {
   const merge = (before, local, remote, path) => {
     if (equal(local, before)) return clone(remote);
     if (equal(remote, before) || equal(local, remote)) return clone(local);
-    const key = path.length === 1 && ({ roles: 'role_id', skills: 'id', required_stages: 'stage_id' })[path[0]];
+    const key = path.length === 1 && ({ roles: 'role_id', skills: 'id' })[path[0]];
     if (key && [before, local, remote].every(value => Array.isArray(value) && value.every(row => object(row) && typeof row[key] === 'string'))) {
       const maps = [before, local, remote].map(rows => new Map(rows.map(row => [row[key], row]))), rows = [];
       for (const id of new Set([...remote.map(row => row[key]), ...local.map(row => row[key])])) {
@@ -280,7 +280,7 @@ function editableRoleDraft(data) {
   const config = data.configuration;
   return { controller: { role: config.controller.role },
     roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind })),
-    skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) };
+    skills: structuredClone(data.skill_inputs) };
 }
 function roleComparison(state, redraw, clearFeedback) {
   const comparison = state.comparison, section = card('比较角色配置'), choices = {};
