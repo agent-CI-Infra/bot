@@ -1,4 +1,4 @@
-import { hasCredentials } from '../core/redaction.js';
+import { configuredRedactor } from '../core/redaction.js';
 import type { Row, Store } from '../storage/database.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
 import type { ChannelEvent, StoredMessage } from './types.js';
@@ -54,8 +54,7 @@ export interface MessageQuery {
 }
 const sensitive = (message: StoredMessage): boolean =>
   // Self mentions may touch a binding command; inspect the same text that command parsing receives.
-  [message.content, message.command_text ?? ''].some(value => /(?:^|\s)(?:\/(?:bind|confirm|reauth)(?:\s|$)|(?:确认绑定|绑定|重新认证)\s+(?:FSB-[A-Z0-9]+|[A-Za-z0-9._~+/-]{16,}))/i.test(value)) ||
-  hasCredentials(message);
+  [message.content, message.command_text ?? ''].some(value => /(?:^|\s)(?:\/(?:bind|confirm|reauth)(?:\s|$)|(?:确认绑定|绑定|重新认证)\s+(?:FSB-[A-Z0-9]+|[A-Za-z0-9._~+/-]{16,}))/i.test(value));
 
 /** Only local persistence and reads. This repository deliberately has no provider client. */
 export class ChannelLedger {
@@ -121,7 +120,7 @@ export class ChannelLedger {
     }
     if (message.created_at < chat.retained_after && !message.deleted) return false;
     if (old && !message.deleted && (message.updated_at < old.updated_at || message.updated_at === old.updated_at && (source === 'history' || old.source === 'live'))) return false;
-    const data = message.deleted ? { ...message, content: '', command_text: '', raw_content: '', mentions: [] } : message;
+    const data = message.deleted ? { ...message, content: '', command_text: '', raw_content: '', mentions: [] } : { ...message, ...configuredRedactor(this.store).clean({ content:message.content, command_text:message.command_text, raw_content:message.raw_content }) };
     const sealed = this.store.secrets.seal(data, 'channel-message:' + chat.id + ':' + message.message_id);
     this.store.run(`INSERT INTO channel_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(chat_id,message_id) DO UPDATE SET sender_id=excluded.sender_id,sender_tenant=excluded.sender_tenant,

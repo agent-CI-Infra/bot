@@ -1,5 +1,6 @@
+import { configuredRedactor, publicContent, publicText, registeredRedactor } from '../core/redaction.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readFile, mkdir, mkdtemp, cp, rm } from 'node:fs/promises';
+import { readFile, readdir, writeFile, mkdir, mkdtemp, cp, rm } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { resolve, join, extname } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -22,6 +23,20 @@ export async function collectBoard(input: Collection): Promise<void> {
     GSB_CACHE_DIR: join(input.stateDirectory, '.cache') };
   await run(process.execPath, [resolve('public-board/collect.mjs'), String(input.repository.full_name), input.directory, input.stateDirectory],
     { env, timeout: 12 * 60_000, maxBuffer: 1024 * 1024 });
+}
+
+// Both collectors produce JSON data, including historical shards copied from the previous generation.
+async function redactBoardExport(directory: string, redactor: Redactor) {
+  for (const entry of await readdir(directory, {withFileTypes:true})) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) await redactBoardExport(path, redactor);
+    else if (entry.isFile() && entry.name.endsWith('.json')) {
+      const raw = await readFile(path, 'utf8');
+      // JSON escaping on disk must not hide newlines or quotes inside a registered value.
+      const original = JSON.parse(raw), safe = JSON.stringify(publicContent(original, redactor));
+      if (safe !== JSON.stringify(original)) await writeFile(path, safe);
+    }
+  }
 }
 
 /** A durable, coalescing queue: collection never holds up GitHub's delivery response. */
@@ -61,6 +76,7 @@ export class PublicBoards {
         // Validate before publishing. Failed collection leaves the last good snapshot readable.
         const snapshot = JSON.parse(await readFile(join(staging, 'board/data/snapshot.json'), 'utf8'));
         if (String(snapshot.repository?.name).toLowerCase() !== String(repo.full_name).toLowerCase()) throw new Error('snapshot_scope_changed');
+        await redactBoardExport(staging, registeredRedactor(this.store, github.redactor));
         if (!eligible()) continue;
         this.store.run(`UPDATE public_board_jobs SET active_path=?,collected_generation=?,attempts=0,next_attempt=0,last_error=NULL
           WHERE account_id=? AND repository_id=?`, staging, job.generation, repo.account_id, repo.repository_id);
@@ -84,7 +100,7 @@ export class PublicBoards {
     if (!['GET', 'HEAD'].includes(req.method || '')) return fail(404, 'not_found');
     if (path === '/dashboard') { res.writeHead(308, { Location: '/dashboard/' }); res.end(); return true; }
     const repos = publishedRepositories(this.store), available = repos.filter(row => row.active_path);
-    const json = (value: unknown) => { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : JSON.stringify(value)); return true; };
+    const json = (value: unknown) => { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : JSON.stringify(publicContent(value, configuredRedactor(this.store)))); return true; };
     type Loaded<T> = { ok: true; data: T } | { ok: false; reason: 'read_failed' | 'invalid_json' };
     // One repository's export is read on its own: a missing or corrupt file only marks that repository unavailable.
     const loadOptional = async <T>(repo: Row, name: string): Promise<Loaded<T>> => {
@@ -112,14 +128,15 @@ export class PublicBoards {
     if (path === '/boards/') {
       const moduleUrl = pathToFileURL(resolve('public-board/index.mjs')).href;
       const { renderIndex } = await import(moduleUrl);
-      const html = renderIndex(await Promise.all(repos.map(async row => {
+      const rows = await Promise.all(repos.map(async row => {
         let generatedAt: string | null = null;
         if (row.active_path) {
           const snapshot = await loadOptional<{ generated_at?: string }>(row, 'board/data/snapshot.json');
           if (snapshot.ok) generatedAt = snapshot.data.generated_at ?? null;
         }
         return { repository: { name: row.full_name }, label: row.full_name, boardUrl: `/boards/${String(row.full_name).toLowerCase()}/`, generatedAt };
-      })));
+      }));
+      const html = renderIndex(publicContent(rows, configuredRedactor(this.store)));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : html); return true;
     }
     const community = /^\/dashboard\/data\/([^/]+\/[^/]+)\/(meta|latest|history|pulls|issues|contributors|releases)\.json$/.exec(path);
@@ -150,8 +167,12 @@ export class PublicBoards {
     } else return fail(404, 'not_found');
     try {
       const bytes = await readFile(file);
+      const exported = community || board?.[2]?.startsWith('data/');
+      if (exported && extname(file) === '.json') return json(JSON.parse(bytes.toString('utf8')));
+      const body = exported && ['.txt','.log','.csv','.md'].includes(extname(file))
+        ? publicText(bytes.toString('utf8'), configuredRedactor(this.store)) : bytes;
       const mime: Record<string,string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.wasm': 'application/wasm', '.zip': 'application/zip', '.txt': 'text/plain' };
-      res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream' }); res.end(req.method === 'HEAD' ? undefined : bytes); return true;
+      res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream' }); res.end(req.method === 'HEAD' ? undefined : body); return true;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fail(404, 'not_found'); throw error; }
   }
 }

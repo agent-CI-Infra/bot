@@ -60,18 +60,7 @@ export function describeEntries(lines:string[],limit=24000):string {
   if(kept.length<lines.length)kept.push(`[… ${lines.length-kept.length} entries omitted …]`);
   return kept.join('\n');
 }
-export class Redactor {
-  readonly values = new Set<string>();
-  add(value: unknown): void { if (typeof value === 'string' && value.length >= 8) this.values.add(value); }
-  text(value: string): string { for (const secret of this.values) value = value.replaceAll(secret, '[REDACTED]'); return value; }
-  clean<T>(value: T): T {
-    if(typeof value==='string')return this.text(value) as T;
-    if(Array.isArray(value))return value.map(item=>this.clean(item)) as T;
-    if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,this.clean(item)])) as T;
-    return value;
-  }
-  contains(value: Buffer): boolean { return [...this.values].some(secret => value.includes(Buffer.from(secret))); }
-}
+export { Redactor } from '../../runner/credential-redaction.mjs';
 // Keeps the head and tail of long text so a stored log entry stays valid, bounded JSON.
 export const clip = (value: unknown, limit = 8000): string => {
   const text = typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value);

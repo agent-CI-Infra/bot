@@ -27,6 +27,9 @@ export function managementStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS task_execution_configs(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
       revision INTEGER NOT NULL,snapshot TEXT NOT NULL,created_at TEXT NOT NULL);
   `);
+  // Preserve retry identity even when two different inputs redact to the same stored text.
+  if (!store.all('PRAGMA table_info(management_messages)').some(column => column.name === 'input_hash'))
+    store.db.exec('ALTER TABLE management_messages ADD COLUMN input_hash TEXT');
   retireAcpTaskExecutionConfigs(store);
   retireIsolatedEnvironmentProfiles(store);
   onboardingStorage(store);

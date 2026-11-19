@@ -5,6 +5,22 @@ import { calendarRuns, publicBoardFixture } from '../../fixtures/public-board-fi
 import { PublicBoards } from '../../../dist/public-board/service.js';
 import { testPassword } from '../../fixtures/helpers.mjs';
 
+test('snapshot, history and dashboard data retain diagnostic text and mask only matching credentials', async t => {
+  const sample = 'token = "my_custom_identifier_12345"\\n-----BEGIN CERTIFICATE-----';
+  const { boards, hook, get, h } = await publicBoardFixture(t, async ({directory, repository, token}) => {
+    const text = [sample, Buffer.from(token).toString('base64'), '-----BEGIN EC PRIVATE KEY-----\\nexample\\n-----END EC PRIVATE KEY-----', 'end'].join(' | ');
+    await mkdir(directory+'/board/data/history',{recursive:true});
+    await writeFile(directory+'/board/data/snapshot.json',JSON.stringify({repository:{name:repository.full_name},text}));
+    await writeFile(directory+'/board/data/history/manifest.json',JSON.stringify({text}));
+    await writeFile(directory+'/summary.json',JSON.stringify({text}));
+  });
+  await hook('redaction'); await boards.drain();
+  const root = h.store.get('SELECT active_path FROM public_board_jobs').active_path;
+  for (const path of ['board/data/snapshot.json','board/data/history/manifest.json','summary.json'])
+    assert.equal(JSON.parse(await readFile(root+'/'+path,'utf8')).text,sample+' | [REDACTED] | [REDACTED] | end');
+  assert.equal((await get('/dashboard/data/index.json')).data.repos[0].text,sample+' | [REDACTED] | [REDACTED] | end');
+});
+
 test('verified deliveries update both public contracts through the real local collectors on the webhook listener', async t => {
   const { h, boards, state, hook, get } = await publicBoardFixture(t);
   for (const path of ['/dashboard/', '/boards/octo/hello/']) assert.equal((await fetch(h.webhook + path)).status, 200);

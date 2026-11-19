@@ -101,14 +101,21 @@ test('review transitions require evidence, retain original source and review his
   const merged=m.review('r',a.id,rev,{action:'merge',supersedes:[b.id],evidence:['comparison'],reason:'duplicate'});assert.deepEqual(merged.supersedes,[b.id]);
   assert.throws(()=>m.review('r',b.id,1,{action:'merge',supersedes:[a.id],evidence:['comparison'],reason:'cycle'}),/memory_replacement_cycle/);
 });
-test('agent notes have no artificial 3-note per-run cap, remain atomic, and reject credentials in body, metadata, sources or review evidence', async t => {
+test('shared notes support cross-role edits, preserve authentication examples and mask registered credentials', async t => {
   const {s,m,task}=fixture(t);
   for(let i=0;i<5;i++)assert.ok((await memoryTool(s,task(),'remember_project_memory',{key:'n'+i,body:'actual note '+i,kind:'experience',catalog:{title:'Observation '+i,aliases:['failure-'+i]}})).id);
   const updated=await memoryTool(s,task('reviewer'),'remember_project_memory',{key:'n0',body:'refined by reviewer',kind:'experience'});
   assert.equal(updated.revision,2);assert.equal(m.get('r','n0').body,'refined by reviewer');
-  const secret='ghp_'+'a'.repeat(30);
-  for(const data of [{...entry(secret)}, {...entry(),catalog:{aliases:[secret]}},{...entry(),sources:[{reference:secret}]}])assert.throws(()=>m.save('r','sensitive',data,0,'user:owner','check'),/memory_sensitive_content/);
-  const a=m.save('r','review',entry(),0,'user:owner','source');assert.throws(()=>m.review('r',a.id,1,{action:'accept',reason:'check',evidence:[secret]}),/memory_sensitive_content/);
+  const note='密码: test_value\napi_key = env.OPENAI_API_KEY\nsession_token = user_session_token_id';
+  s.run('UPDATE accounts SET credentials=? WHERE id=?',s.secrets.seal({token:'a-registered-token'},'account:a'),'a');
+  const a=m.save('r','review',entry(note+' a-registered-token'),0,'user:owner',note);
+  assert.equal(a.body,note+' [REDACTED]');
+  const edited=m.writeFile('r',a.id,a.revision,{content:'edited a-registered-token'});
+  assert.equal(edited.body,'edited [REDACTED]');
+  const reviewed=m.review('r',a.id,edited.revision,{action:'accept',reason:note+' a-registered-token',evidence:[note,'proof: a-registered-token']});
+  assert.deepEqual(reviewed.review.evidence,[note,'proof: [REDACTED]']);
+  assert.equal(s.get('SELECT reason FROM project_memory_versions WHERE memory_id=? AND revision=?',a.id,reviewed.revision).reason,note+' [REDACTED]');
+  assert.equal(s.get('SELECT reason FROM project_memory_versions WHERE memory_id=? AND revision=1',a.id).reason,note);
   // A failed trace write must roll back the knowledge row as well as the per-run receipt.
   s.db.exec("CREATE TRIGGER reject_memory_receipt BEFORE INSERT ON task_history WHEN NEW.type='memory_recorded' BEGIN SELECT RAISE(ABORT,'receipt failed'); END");
   const result=await memoryTool(s,{...task(),trace_run_id:'new-run'},'remember_project_memory',{key:'rollback',body:'must not persist',kind:'experience'});assert.ok(result.error);assert.throws(()=>m.get('r','rollback'),/memory_not_found/);

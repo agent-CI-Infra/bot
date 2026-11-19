@@ -1,8 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { GitHub } from './client.js';
-import { publicText, actionsRedactor } from '../actions/safety.js';
+import { registeredRedactor, publicText } from '../core/redaction.js';
 import { Redactor, TaskError } from '../agent/common.js';
-import { githubTokens } from '../core/redaction.js';
 import { digest, randomId } from '../core/security.js';
 import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
 
@@ -16,7 +15,7 @@ import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
  * token that can write.
  *
  * - Text meant for people (title and body of Issues, comments, PRs and reviews) gets the public-text redaction and is
- *   sent as written, `@` included; every other string (code, file content) only loses known secrets.
+ *   sent as written, mentions included. The same credential allowlist applies to other strings.
  * - The key makes a retried call return the earlier result instead of writing twice: within one scope (a task, a dispatched
  *   event, a group or management turn) a key that already reached GitHub is answered from the ledger.
  * - Every call is recorded in github_writes (who, repository, method, path, a request digest, GitHub's status and URL) and in
@@ -146,24 +145,19 @@ export function writeRoute(method: string, path: string): (Route & { number?: nu
   return null;
 }
 
-// Known secrets shapes that are never legitimate repository content: private keys and GitHub tokens.
-const secretShapes = (text: string) => text.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]+-----|$)/g, '[REDACTED]')
-  .replace(githubTokens(), '[REDACTED]');
-// A body that cannot be sent as given: binary content holding a credential, or human text that redaction would empty.
+// A body that cannot be sent as given: binary content holding a credential.
 class Unsendable extends Error { constructor(readonly code: string, readonly detail: string) { super(code); } }
 /**
- * The body GitHub receives. Human text gets the public-text redaction; every other string (code, commit
- * messages, refs) only loses known secrets. Base64 file content is redacted as text when it is UTF-8; binary content that
+ * The body GitHub receives. All strings use the publication allowlist. Base64 file content is redacted as text when it is UTF-8; binary content that
  * contains a known secret is refused instead of being corrupted. Every text body carries the bot's marker: a bot account
  * writes as an ordinary user, and the marker keeps its own comments and Issues from coming back as new events.
  */
 function sanitize(entry: Route, body: unknown, redactor: Redactor, marker: string): unknown {
-  const plain = (value: unknown): unknown => typeof value === 'string' ? secretShapes(redactor.text(value))
+  const plain = (value: unknown): unknown => typeof value === 'string' ? publicText(value, redactor)
     : Array.isArray(value) ? value.map(plain) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)])) : value;
   const human = (value: unknown, title = false) => {
     if (typeof value !== 'string') return plain(value);
     const cleaned = publicText(value, redactor);
-    if (value.trim() && !cleaned.trim()) throw new Unsendable('github_write_text_unsafe', 'The text contains key or certificate material that cannot be published; remove it and write again.');
     return title ? cleaned.replace(/[\r\n]+/g, ' ').trim() : cleaned;
   };
   const marked = (value: unknown) => typeof value === 'string' ? value + '\n\n' + marker : value;
@@ -185,7 +179,7 @@ function base64Content(value: string, redactor: Redactor): string {
   let text: string;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(data); }
   catch { if (redactor.contains(data)) throw new Unsendable('github_write_secret_in_content', 'The binary content contains a credential of this deployment.'); return value; }
-  const cleaned = secretShapes(redactor.text(text));
+  const cleaned = publicText(text, redactor);
   return cleaned === text ? value : Buffer.from(cleaned).toString('base64');
 }
 
@@ -221,8 +215,8 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     return { error: 'invalid_arguments', detail: 'github_write takes method (POST, PATCH, PUT or DELETE), a repository-relative path without a query, an optional JSON object body and a key of up to 120 characters.' };
   if (input.body !== undefined && Buffer.byteLength(JSON.stringify(input.body)) > 1024 * 1024) return { error: 'github_write_body_too_large', detail: 'The request body exceeds 1 MiB.' };
   // Every known credential of this deployment is redacted, not only the ones this caller holds.
-  const redactor = new Redactor();
-  for (const value of [...base.values, ...actionsRedactor(store).values]) redactor.values.add(value);
+  const redactor = registeredRedactor(store);
+  for (const value of base.values) redactor.add(value);
   const entry = writeRoute(method, path), marker = digest(context.scope + '\n' + key).slice(0, 24);
   const record = (state: string, fields: { request_digest?: string; status?: number | null; html_url?: string | null; response?: unknown; error?: string | null } = {}) => {
     const id = randomId(), time = now();
@@ -308,12 +302,19 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
       requestDigest, 'inflight', null, null, null, null, time, time, marker);
     sending = true;
     try {
-      const value = await github.request(method, github.path(path), body);
+      // Token issuance may have registered a new exact value since the idempotency digest was computed.
+      const outgoing = () => sanitize(entry, input.body, registeredRedactor(store, redactor), `<!-- dept-bot-write:${marker} -->`);
+      const value = await github.request(method, github.path(path), outgoing);
       const response = summarize(value), url = urlOf(value), status = github.status || 200;
       store.run("UPDATE github_writes SET state='sent',status=?,html_url=?,response=?,updated_at=? WHERE id=?", status, url, JSON.stringify(response), now(), id);
       audit('sent', status, url);
       return { ...(response && typeof response === 'object' && !Array.isArray(response) ? response : { result: response }), status };
     } catch (error) {
+      if (error instanceof Unsendable) {
+        store.run("UPDATE github_writes SET state='refused',error=?,updated_at=? WHERE id=?", error.code, now(), id);
+        audit('refused', null, null);
+        return { error: error.code, detail: error.detail };
+      }
       if (!(error instanceof TaskError)) throw error;
       const unknown = error.code === 'github_response_unknown', status = Number(/^github_(?:http|permission)_(\d+)$/.exec(error.code)?.[1]) || null;
       store.run('UPDATE github_writes SET state=?,status=?,error=?,updated_at=? WHERE id=?', unknown ? 'unknown' : 'failed', status, error.code, now(), id);

@@ -12,12 +12,14 @@ function seed(s){s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}
 const url=(q='')=>new URL('http://local/api/tasks/t/events'+(q?q+'&':'?')+'include_data=1');
 test('run snapshots survive reopen and input/config changes; interrupted run and recovery have stable ancestry',()=>{
  const dir=mkdtempSync(join(tmpdir(),'bot155-')),path=join(dir,'db');let s=new Store(path,Buffer.alloc(32));try{seed(s);
- const run=beginRun(s,{id:'t'},'execution',{model:'fixed',prompt:'original',api_key:'secret'});
+ const token='ghp_SECRET123456789012345678901234567890';
+ s.run('UPDATE accounts SET credentials=?',s.secrets.seal({token},'account:a'));
+ const run=beginRun(s,{id:'t'},'execution',{model:'fixed',prompt:'original',api_key:token});
  s.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('op','t',?,NULL,'pending')",JSON.stringify({type:'workspace_command',command:'npm test',token:'ghp_SECRET123456789012345678901234567890'}));
  s.run("UPDATE task_tools SET state='completed',result=? WHERE id='op'",JSON.stringify({exit_code:0,output:'actual observed result'}));
  s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({request:'changed later'}));s.close();s=new Store(path,Buffer.alloc(32));interruptRuns(s);
  const next=beginRun(s,{id:'t'},'execution',{prompt:'resumed'});assert.equal(s.get('SELECT previous_run_id FROM task_runs WHERE id=?',next.id).previous_run_id,run.id);
- const first=taskTrace(s,'t',url('?include_snapshots=1'),'runs').runs[0];assert.equal(first.status,'interrupted');assert.equal(first.context_snapshot.data.input.request,undefined);assert.equal(first.config_snapshot.data.prompt,'original');assert.equal(first.config_snapshot.data.api_key,undefined);
+ const first=taskTrace(s,'t',url('?include_snapshots=1'),'runs').runs[0];assert.equal(first.status,'interrupted');assert.equal(first.context_snapshot.data.input.request,undefined);assert.equal(first.config_snapshot.data.prompt,'original');assert.equal(first.config_snapshot.data.api_key,'[REDACTED]');
  const ops=taskTrace(s,'t',url('?type=operation'),'events').events;assert.equal(ops.length,2);assert.equal(ops[0].run_id,run.id);assert.match(JSON.stringify(ops[1]),/actual observed result/);assert.doesNotMatch(JSON.stringify(ops),/SECRET/);
  assert.ok(traceSource(s,'t',ops[1].event_id).complete);assert.throws(()=>traceSource(s,'foreign',ops[1].event_id));
  endRun(s,next,'succeeded');endRun(s,next,'succeeded');assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='run_ended' AND run_id=?",next.id).n,1);
@@ -51,8 +53,8 @@ test('legacy followups resolve exact acceptance events and replay never schedule
  assert.equal(s.get('SELECT count(*) n FROM tasks').n,3);
  }finally{s.close();}
 });
-test('bounded capture marks missing content and removes private reasoning and credentials',()=>{
- const captured=JSON.parse(traceSnapshot({api_key:'private',nested:JSON.stringify({authorization:'secret',content:'public'}),reasoning_content:'private thought',content:'public output'}));assert.equal(captured.complete,true);assert.doesNotMatch(JSON.stringify(captured),/private|secret/);
+test('bounded capture marks missing content and removes private reasoning while preserving diagnostic fields',()=>{
+ const captured=JSON.parse(traceSnapshot({api_key:'private',nested:JSON.stringify({authorization:'secret',content:'public'}),reasoning_content:'private thought',content:'public output'}));assert.equal(captured.complete,true);assert.doesNotMatch(JSON.stringify(captured),/private thought/);assert.equal(captured.data.api_key,'private');assert.equal(JSON.parse(captured.data.nested).authorization,'secret');
  const large=JSON.parse(traceSnapshot({text:'x'.repeat(3*1024*1024)}));assert.equal(large.complete,false);assert.equal(large.missing_reason,'capture_limit_exceeded');assert.ok(large.sha256);
 });
 

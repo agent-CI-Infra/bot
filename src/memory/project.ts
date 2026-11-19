@@ -1,4 +1,4 @@
-import { hasCredentials } from '../core/redaction.js';
+import { configuredRedactor } from '../core/redaction.js';
 import { memoryCatalog, validateCatalog, knowledgePath } from './catalog.js';
 import { authorize } from '../identity/authorization.js';
 import { memoryAuthorize, memoryVisible, visibleMemorySnapshot, taskMemoryAccess, type MemoryAccess } from './access.js';
@@ -51,12 +51,13 @@ export class ProjectMemory {
   if(!previous||input.sources!==undefined)for(const source of data.sources){if(!source||typeof source!=='object'||Array.isArray(source)||!Object.values(source).some(v=>typeof v==='string'&&v.trim()||typeof v==='number'))fail(400,'invalid_memory_source');if(source.path)knowledgePath(source.path);if(source?.task_id&&!this.store.get('SELECT 1 FROM tasks WHERE id=? AND repository_id=?',source.task_id,repo))fail(403,'memory_source_outside_project');}
   if(actor.startsWith('agent:')){data.verification='unverified';if(data.body.length>32000)fail(400,'memory_note_too_large');}
 
-  if(hasCredentials(reason))fail(400,'memory_sensitive_content');
-  if(hasCredentials(data))fail(400,'memory_sensitive_content');
   return this.commit(repo,key,old,data,actor,reason);
  }
  private commit(repo:string,key:string,old:Row|undefined,data:any,actor:string,reason:string){
-  if(!reason?.trim()||reason.length>1000)fail(400,'memory_reason_required');
+  if(typeof reason!=='string'||!reason.trim()||reason.length>1000)fail(400,'memory_reason_required');
+  const redactor = configuredRedactor(this.store);
+  data = redactor.clean(data);
+  reason = redactor.text(reason);
   if(old&&JSON.stringify({...JSON.parse(old.data),supersedes:JSON.parse(old.data).supersedes??[],catalog:memoryCatalog(JSON.parse(old.data),key),review:JSON.parse(old.data).review??null})===JSON.stringify(data))return this.get(repo,old.id);
   const id=old?.id??randomId(),revision=(old?.revision??0)+1,at=time();
   this.store.transaction(()=>{const current=this.store.get('SELECT revision FROM project_memories WHERE repository_id=? AND fact_key=?',repo,key);if((current?.revision??0)!==(old?.revision??0))fail(409,'memory_revision_changed');
@@ -138,7 +139,6 @@ export class ProjectMemory {
   const owner=principal?.kind==='human'?'human':prev.owner??'agent';
   const data={...prev,supersedes:input.action==='merge'?input.supersedes:prev.supersedes??[],status:actions[input.action],...(input.action==='accept'?{verification:'observed'}:{}),owner,catalog:{...memoryCatalog(prev,old.key),...(input.catalog??{}),reviewed_at:time()},review:{action:input.action,actor:access.actor.principal_id,at:time(),evidence,run_id:input.run_id??null}};
   validateCatalog(data.catalog,input.catalog);
-  if(hasCredentials(input.reason)||hasCredentials(data))fail(400,'memory_sensitive_content');
   return this.commit(repo,old.key,row,data,'user:'+access.actor.principal_id,input.reason);
  }
 }

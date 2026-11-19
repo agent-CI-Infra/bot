@@ -98,7 +98,7 @@ test('timeline pages newest messages without duplication and keeps tombstones an
   for (let i = 0; i < 110; i++) f.service.ledger.merge(chat, { message_id: 'page-' + String(i).padStart(3, '0'), sender_id: 'ou_member', sender_tenant: 'actor-tenant', sender_type: 'user', message_type: 'text',
     created_at: now, updated_at: now, content: 'discussion ' + i, raw_content: '{}', parent_id: '', root_id: '', thread_id: '', deleted: i === 100 }, 'history');
   f.service.ledger.merge(chat, { message_id: 'sensitive', sender_id: 'ou_member', sender_tenant: 'actor-tenant', sender_type: 'user', message_type: 'text',
-    created_at: now + 1, updated_at: now + 1, content: 'password=never-expose-this', raw_content: 'password=never-expose-this', parent_id: '', root_id: '', thread_id: '', deleted: false }, 'history');
+    created_at: now + 1, updated_at: now + 1, content: '/confirm never-expose-this', raw_content: '/confirm never-expose-this', parent_id: '', root_id: '', thread_id: '', deleted: false }, 'history');
   let cursor = '', ids = [], pages = [];
   do {
     const result = await f.admin(`/api/channels/chats/${chat.id}/timeline${cursor ? '?cursor=' + encodeURIComponent(cursor) : ''}`);

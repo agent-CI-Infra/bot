@@ -1,3 +1,4 @@
+import { configuredRedactor } from '../core/redaction.js';
 import { modelCatalogStorage } from '../models/catalog.js';
 import { sharedModelStorage } from '../models/sharing.js';
 import {childTaskStorage} from '../tasks/children.js';
@@ -78,7 +79,7 @@ export class Store {
     const empty = !this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' LIMIT 1").get();
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
-    this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'));
+    this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'), undefined, value => configuredRedactor(this).clean(value));
     // One place turns a post-commit cleanup failure into an audit row, whether the files belonged to a project or a
     // conversation, and whether the removal came from a deletion, a retention sweep or a retried reclaim (#771).
     this.trajectories.onCleanupFailure = (where, error) => {

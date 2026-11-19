@@ -19,7 +19,7 @@ import {createToolResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
 import {noSpace,toolDiskFull} from './disk.mjs';
-import {redactCredentials,redactCredentialShapes} from './credential-redaction.mjs';
+import {Redactor} from './credential-redaction.mjs';
 
 const root=process.argv[2],dir=root+'/agent',legacyCwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const direct=config.model_transport!=='gateway';
@@ -44,15 +44,14 @@ let steps=0,session,nativeSessionId,recovery,finished,requestFailure,failureDeta
 const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false};
 const outputReserve=config.output_tokens??modelCapabilities.max_output_tokens;
 const modelRequestTooLarge=(raw,reserve=0)=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+outputReserve+reserve>modelCapabilities.context_window;
-// Serialize model and tool events in execution order; mask every issued token before it reaches disk. Events become task
-// logs people read, so they also lose every credential by its form, such as a token `gh auth status` half masked (#1087).
-const secrets=new Set();let events=Promise.resolve();
-if(config.native_model?.key)secrets.add(config.native_model.key);
-const known=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
-const clean=value=>redactCredentials(known(value));
-// What a tool returns enters the session and the next model request. It loses issued tokens and the credential shapes
-// only: the context rules of the event log would also rewrite ordinary code that the model reads and then edits.
-const modelFacing=result=>Array.isArray(result?.content)?{...result,content:result.content.map(item=>item?.type==='text'&&typeof item.text==='string'?{...item,text:redactCredentialShapes(known(item.text))}:item)}:result;
+// Mask credentials issued to this runner before its model sees a result or an event reaches disk.
+const secrets = new Redactor();
+let events = Promise.resolve();
+secrets.add(config.native_model?.key);
+secrets.add(config.run_token);
+const clean = value => secrets.clean(value);
+const modelFacing = result => Array.isArray(result?.content) ? { ...result, content: result.content.map(item =>
+  item?.type === 'text' ? { ...item, text: clean(item.text) } : item) } : result;
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
 const exchange=createTokenExchange(dir),grant=createReadGrant(exchange,token=>secrets.add(token));

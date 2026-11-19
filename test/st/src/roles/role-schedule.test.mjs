@@ -443,11 +443,11 @@ test('Manager routes version queries and reads all Dev/QA records of its task th
  const dev=beginRun(f.s,{id:'t'},'role',{role:'dev'});f.s.run("UPDATE task_runs SET role='dev' WHERE id=?",dev.id);
  const checkpoint=traceEvent(f.s,'t','artifact_checkpoint',{tree_sha:tree('b'),marker:'dev-checkpoint'},dev.id);
  const qa=beginRun(f.s,{id:'t'},'role',{role:'qa'});f.s.run("UPDATE task_runs SET role='qa',context_snapshot=? WHERE id=?",traceSnapshot({marker:'qa-context',captured:{ref:'project_memories:role-private:1',body:'captured-role-note'}}),qa.id);
- f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,request_snapshot) VALUES('qa-source','t','r','probe','m','fixture','now',?,?)",qa.id,traceSnapshot({marker:'qa-model-input',api_key:'must-remain-redacted'}));
+ f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,request_snapshot) VALUES('qa-source','t','r','probe','m','fixture','now',?,?)",qa.id,traceSnapshot({marker:'qa-model-input',api_key:'fixture-stages-key'}));
  const workspace={task:{workspace_id:'probe'},call:async()=>({local_sha:tree('a'),tree_sha:tree('b')})};let routed=0;
  await assert.rejects(runTeam({...f.spec(),tools:versionTools,execute:async(name,args)=>{routed++;return versionTool(f.s,f.spec().task,workspace,name,args,async()=>({defaultBranch:'main',permissions:{contents:'read'},ref:async()=>({object:{sha:tree('c')}})}));}},{prepare:async()=>{}}),{code:'manager_deferred'});
  assert.equal(routed,1);assert.equal(resolveVersion(f.s,f.spec().task,seen[0].remote.current_main_ref).commit_sha,tree('c'));
- assert.ok(seen[1].content.includes('dev-checkpoint'));assert.ok(seen[2].content.includes('qa-context'));assert.ok(seen[2].content.includes('captured-role-note'));assert.ok(seen[3].content.includes('qa-model-input'));assert.ok(!JSON.stringify(seen).includes('must-remain-redacted'));
+ assert.ok(seen[1].content.includes('dev-checkpoint'));assert.ok(seen[2].content.includes('qa-context'));assert.ok(seen[2].content.includes('captured-role-note'));assert.ok(seen[3].content.includes('qa-model-input'));assert.ok(!JSON.stringify(seen).includes('fixture-stages-key'));
 });
 
 test('Manager can hand an authorized parent task reference to Dev without copying records',async t=>{

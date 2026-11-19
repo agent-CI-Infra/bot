@@ -209,8 +209,8 @@ test('local pagination searches decrypted safe text and metadata, hides sensitiv
   assert.throws(() => ledger.query(chat.id, { keyword: 'decision', cursor: first.next_cursor }), /invalid_pagination/);
   assert.equal(ledger.query(chat.id, { keyword: 'decision', from: 100, to: 130, sender_id: 'alice', reply_to: 'root' }).messages.length, 15);
   assert.equal(ledger.query(chat.id, { message_id: 'secret' }).messages[0].sensitive, true);
-  assert.doesNotMatch(JSON.stringify(ledger.query(chat.id, { from: 131 })), /fixture-confirmation|fixture-password/);
-  assert.equal(ledger.query(chat.id, { keyword: 'fixture-password' }).messages.length, 0);
+  assert.doesNotMatch(JSON.stringify(ledger.query(chat.id, { from: 131 })), /fixture-confirmation/);
+  assert.equal(ledger.query(chat.id, { keyword: 'fixture-password' }).messages.length, 1);
   assert.ok(ledger.query(chat.id).gaps.length);
   const revision = store.get('SELECT revision FROM channel_chats WHERE id=?', chat.id).revision;
   ledger.cleanup(chat.id, 100, revision);
@@ -349,7 +349,7 @@ test('history mentions use the same names as live ingress and disappear from rec
   const chat = f.service.ledger.chat(adapter.normalize(envelope('seed', { message: { chat_id: 'oc_mentions', chat_type: 'group' } })));
   f.service.ledger.merge(chat, history.items[0], 'history');
   assert.equal(f.service.ledger.query(chat.id, { message_id: 'history-mention' }).messages[0].mentions[0].name, 'LaunchPad-Test');
-  f.service.ledger.merge(chat, { ...history.items[0], message_id: 'sensitive-mention', content: 'password=private-value', raw_content: JSON.stringify({ text: 'password=private-value' }) }, 'history');
+  f.service.ledger.merge(chat, { ...history.items[0], message_id: 'sensitive-mention', content: '/confirm fixture-confirmation', raw_content: JSON.stringify({ text: '/confirm fixture-confirmation' }) }, 'history');
   assert.equal(f.service.ledger.query(chat.id, { message_id: 'sensitive-mention' }).messages[0].mentions, undefined);
   f.service.ledger.merge(chat, { ...history.items[0], deleted: true }, 'live');
   const recalled = f.service.ledger.query(chat.id, { message_id: 'history-mention' }).messages[0];
@@ -429,6 +429,18 @@ test('bot join starts only local recording and visible-history work; project acc
   assert.equal((await user.client(`/api/channels/chats/${chat.id}/messages`)).status, 403);
   assert.equal((await user.client(`/api/channels/chats/${chat.id}/sync`, 'POST', {})).status, 403);
   assert.equal((await admin(`/api/channels/chats/${chat.id}/messages`)).status, 200);
+});
+
+test('Feishu sends, replies and edits mask registered and self-identifying values inside message content', async t => {
+  const { wire, service, id } = await channelFixture(t), adapter = service.adapter(service.connector(id));
+  const sample = '密码: test_value\\n-----BEGIN CERTIFICATE-----';
+  const content = { text: [sample, credentials.app_secret, Buffer.from('fixture-provider-key').toString('base64'),
+    'fixture-only-access-token', 'sk-'+'X'.repeat(20), 'tail'].join(' | ') };
+  const delivery = {receive_id:'oc_fixture',receive_id_type:'chat_id',content};
+  await adapter.send(delivery,'send');
+  await adapter.send({...delivery,reply_to:'om_source'},'reply');
+  await adapter.update({...delivery,message_id:'om_edit'});
+  assert.deepEqual(wire.sent.map(item => item.content.text),Array(3).fill(sample+' | [REDACTED] | [REDACTED] | [REDACTED] | [REDACTED] | tail'));
 });
 
 test('ordinary binding questions and JSON remain visible while actual binding commands stay private',async t=>{

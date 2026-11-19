@@ -1,11 +1,9 @@
 import { closeSync, constants, copyFileSync, fdatasyncSync, fstatSync, mkdirSync, chmodSync, existsSync, lstatSync, readdirSync, openSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 import type { DatabaseSync } from 'node:sqlite';
 import { computerResultOwner } from '../../runner/result-owner.mjs';
 import type { TrajectoryScope } from './trajectories.js';
-import { credentialShapeStream, redactCredentialShapes } from '../core/redaction.js';
 
 export function toolResultStorage(db: DatabaseSync) {
   db.exec(`CREATE TABLE IF NOT EXISTS tool_result_files(file TEXT PRIMARY KEY,owner TEXT NOT NULL,source TEXT NOT NULL,
@@ -52,24 +50,20 @@ export class ToolResultFiles {
   private row(owner: string, source: string) {
     return this.db.prepare("SELECT file,bytes,expires_at FROM tool_result_files WHERE owner=? AND source=? AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')").get(owner, source) as { file: string; bytes: number; expires_at: string } | undefined;
   }
-  // A result file is read back by the agent: it loses credential shapes, as the tool results it is cut from do (#1087).
+  // The session masks its registered secrets across chunk boundaries before passing the stream here.
   async save(owner: string, scope: TrajectoryScope, source: string, chunks: AsyncIterable<string | Buffer>, guard: () => unknown | Promise<unknown>) {
     await guard();
     const previous = this.row(owner, source); if (previous) return this.reference(previous);
     this.directory(owner);
     const file = randomBytes(24).toString('hex'), target = this.path(file, owner), temporary = target + '.tmp';
     const fd = openSync(temporary, 'wx', 0o600); let bytes = 0, closed = false;
-    const decoder = new StringDecoder('utf8'), ready: string[] = [], shapes = credentialShapeStream(text => ready.push(text));
-    const write = () => {
-      for (const text of ready.splice(0)) {
-        const data = Buffer.from(text);
+    try {
+      for await (const chunk of chunks) {
+        await guard();
+        const data = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
         for (let offset = 0; offset < data.length;) offset += writeSync(fd, data, offset, data.length - offset);
         bytes += data.length;
       }
-    };
-    try {
-      for await (const chunk of chunks) { await guard(); shapes.data(typeof chunk === 'string' ? chunk : decoder.write(chunk)); write(); }
-      shapes.data(decoder.end()); shapes.end(); write();
       await guard(); fdatasyncSync(fd); closeSync(fd); closed = true;
       renameSync(temporary, target); chmodSync(target, 0o444);
       const created = new Date().toISOString(), expires_at = new Date(Date.now() + 86400_000).toISOString();
@@ -89,7 +83,7 @@ export class ToolResultFiles {
     const expires_at = new Date(Date.now() + 86400_000).toISOString(), created = new Date().toISOString();
     let fd: number | undefined;
     try {
-      fd = openSync(temporary, 'wx', 0o600); const data = Buffer.from(redactCredentialShapes(text));
+      fd = openSync(temporary, 'wx', 0o600); const data = Buffer.from(text);
       for (let offset = 0; offset < data.length;) offset += writeSync(fd, data, offset, data.length - offset);
       fdatasyncSync(fd); closeSync(fd); fd = undefined; renameSync(temporary, target); chmodSync(target, 0o444);
       this.db.prepare("UPDATE tool_result_files SET source='expired:'||file WHERE owner=? AND source=? AND expires_at<=?").run(owner, source, created);
