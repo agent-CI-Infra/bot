@@ -28,12 +28,15 @@ function consoleSaveBar({
   discard.dataset.testid = 'console-save-discard';
   actions.append(save, discard);
   bar.append(statusEl, messageEl, actions);
-  if (advanced) {
+  const advancedNodes = advanced ? (Array.isArray(advanced) ? advanced : [advanced]) : [];
+  if (advancedNodes.length === 1) {
+    bar.append(advancedNodes[0]);
+  } else if (advancedNodes.length > 1) {
     const fold = element('details', '', 'fold console-save-advanced');
     fold.dataset.testid = 'console-save-advanced';
     fold.append(element('summary', '高级'));
     const body = element('div', '', 'console-save-advanced-body');
-    body.append(...(Array.isArray(advanced) ? advanced : [advanced]));
+    body.append(...advancedNodes);
     fold.append(body);
     bar.append(fold);
   }
