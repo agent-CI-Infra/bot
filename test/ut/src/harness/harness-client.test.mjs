@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createHmac } from 'node:crypto';
+import { post } from '../../../fixtures/channel-fixture.mjs';
 import { fixtureClient, fixtureHook } from '../../../fixtures/helpers.mjs';
 
 async function fixture(t, handler) {
@@ -12,7 +13,7 @@ async function fixture(t, handler) {
   await once(server, 'listening');
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const origin = `http://127.0.0.1:${server.address().port}`, h = { admin: origin, webhook: origin };
-  return { server, client: fixtureClient(h), hook: fixtureHook(h) };
+  return { server, h, client: fixtureClient(h), hook: fixtureHook(h) };
 }
 
 test('fixture clients retain cookies, CSRF and JSON after the server closes idle connections', async t => {
@@ -82,4 +83,21 @@ test('webhook deliveries leave no closed idle socket for the next client write',
     assert.equal(request.signature, 'sha256=' + createHmac('sha256', secret).update(request.raw).digest('hex'));
   }
   assert.deepEqual(requests.at(-1), { path: '/after', method: 'POST', raw: '{"value":42}', delivery: undefined, event: undefined, signature: undefined });
+});
+
+test('successive Feishu fixture deliveries survive an idle connection close without replaying a write', async t => {
+  const received = [];
+  const { server, h } = await fixture(t, async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    received.push(JSON.parse(body).sequence);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ accepted: true }));
+  });
+  for (let sequence = 1; sequence <= 4; sequence++) await post(h, 'local', { sequence });
+  await nextTurn();
+  server.closeIdleConnections();
+  const result = await post(h, 'local', { sequence: 5 });
+  assert.deepEqual(result, { status: 200, value: { accepted: true } });
+  assert.deepEqual(received, [1, 2, 3, 4, 5]);
 });

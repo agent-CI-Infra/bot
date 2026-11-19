@@ -113,7 +113,7 @@ export async function post(h, id, data, { encrypted = false, headers = {}, times
     raw = JSON.stringify({ encrypt: Buffer.concat([iv, cipher.update(raw), cipher.final()]).toString('base64') });
   }
   const nonce = randomId(), signature = createHash('sha256').update(String(timestamp) + nonce + credentials.encrypt_key + raw).digest('hex');
-  const response = await fetch(h.webhook + '/hooks/feishu/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json',
+  const response = await fetch(h.webhook + '/hooks/feishu/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json', Connection: 'close',
     'X-Lark-Request-Timestamp': String(timestamp), 'X-Lark-Request-Nonce': nonce, 'X-Lark-Signature': signature, ...headers }, body: raw });
   return { status: response.status, value: await response.json() };
 }
