@@ -54,7 +54,7 @@
 | `pull_request.updated` | PR 修改、可信讨论、提交检视、回复检视意见；在 bot 自己的 PR 上还提供「修订 bot PR」，带上这条意见（#1104） | `review_pr_discussion`，默认还要 `review_pull_requests` 开着 |
 | `pull_request.mention` | PR 上的评论提到 bot | 默认跟随 `review_pull_requests` |
 | `pull_request.labeled` | 有人给 PR 加上项目登记的标签 | 标签列表 |
-| `review.published` | 检视发布：Issue 上有人加的开发标签时的 Issue 检视；能力上限为 `develop` 时，结论为「可开发」（`conclusion` 为 `ready_for_development`）的 Issue 检视（没有开发标签也算，#1026）；或有人要求的 bot PR 检视发现了可执行问题 | `review.published.issue`、`review.published.pr` |
+| `review.published` | 检视发布：能力上限为 `develop` 时的每次 Issue 检视，不论结论和有没有开发标签（#1104，之前只有带开发标签或结论为「可开发」的）；或有人要求的 bot PR 检视发现了可执行问题（带 `facts.revisions`） | `review.published.issue`、`review.published.pr` |
 | `development.stopped` | Issue 的开发因开发标签被去掉（或 Actions 提报的 Issue 被指派给别人）停在 `waiting_permission`（#815） | 无单独开关，项目启用即可 |
 | `release.manual` | 「发版本」页请求 CI 观察或起草发行说明 | 对应工作类型的开关 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败，或推送标签触发、提交在默认分支历史上的运行失败（版本标签运行，事件写明标签名，见 [Actions 失败分类与提报](actions-failures.md#运行范围与扫描)） | Actions 失败处理的开关 |

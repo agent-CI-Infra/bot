@@ -76,6 +76,7 @@ test('a comment continued into a revision after it prepared goes back to the Man
   const event = h.store.get("SELECT * FROM dispatch_events WHERE type='pull_request.updated' AND source='control_plane'");
   assert.ok(event, JSON.stringify(h.store.all('SELECT type,state FROM dispatch_events')));
   assert.equal(JSON.parse(event.facts).carried_from, h.taskId);
+  assert.deepEqual(JSON.parse(event.facts).revisions, { for_requests: 0, for_this_author: 0 });
   const [option] = JSON.parse(event.options);
   assert.deepEqual([option.work, option.spec.head, option.spec.input.revision.requests.map(r => r.id)], ['development.pr', commit, ['302']]);
 });

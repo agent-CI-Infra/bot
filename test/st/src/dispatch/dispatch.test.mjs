@@ -356,6 +356,9 @@ test('a member\'s comment on the bot\'s pull request reaches the Manager as a re
   const system = f.requests[0].messages[0].content.replace(/\s+/g, ' ');
   assert.match(system, /The bot's own pull requests and its own pushes do not come here/);
   assert.match(system, /on the bot's own pull request \(`facts\.bot_pull_request`\) \| judge what it asks\. A change to make: create \*\*Follow up bot PR\*\*/);
+  assert.match(system, /`facts\.revisions` says how often the pull request was already revised for comments \(`for_requests`\) and for this author \(`for_this_author`\); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again/);
+  assert.match(system, /\| An Issue review was published \| create \*\*Develop Issue\*\* when the review supports developing now/);
+  assert.deepEqual(seen.event.facts.revisions, { for_requests: 0, for_this_author: 0 });
   assert.equal(seen.work.create.find(o => o.id === 'development')?.work, 'development.pr'); assert.ok(seen.work.create.some(o => o.id === 'review'));
   const revision = tasks(f.h).find(task => task.kind === 'development.pr');
   assert.ok(revision, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
@@ -381,6 +384,20 @@ test('a member\'s comment on the bot\'s pull request reaches the Manager as a re
   assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', stranger, 'c-303', pr), 1);
   await f.run();
   assert.equal(seen.work.create.some(o => o.id === 'development'), false);
+});
+
+test('an Issue comment can continue the Issue\'s running development, which takes the comment as an update (#1104)', async t => {
+  const f = await fixture(t);
+  f.h.store.run("UPDATE policies SET development_enabled=1,capability_ceiling='develop' WHERE repository_id='101'");
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number) VALUES('dev','101','development.issue','running','dev','{}',5)");
+  let seen = null;
+  f.state.decide = input => { seen = input; return { decision: 'continue', option_ids: [input.options.continue.find(c => c.kind === 'development.issue').id], reason: '评论补充了要求，交给正在跑的开发' }; };
+  const comment = { action: 'created', sender: alice, issue: { ...issue, number: 5 }, comment: { id: 401, body: 'Please also keep a trailing CR.', author_association: 'MEMBER', html_url: 'https://github.invalid/issues/5#issuecomment-401' } };
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', comment, 'issue-comment-401'), 1);
+  await f.run();
+  assert.ok(seen.work.continue.some(c => c.kind === 'development.issue'), JSON.stringify(seen.work.continue));
+  assert.equal(events(f.h).at(-1).decision, 'continue');
+  assert.equal(f.h.store.get("SELECT count(*) n FROM review_updates WHERE task_id='dev'").n, 1);
 });
 
 test('filtered events never reach the Manager, and each keeps why', async t => {

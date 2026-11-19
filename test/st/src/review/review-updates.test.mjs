@@ -166,6 +166,20 @@ test('a review of the bot\'s own pull request offers what it found as a revision
   engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, { object: {} }, { findings: [finding('F3')] }, true); assert.equal(revisions().length, 2);
 });
 
+test('a revision from a review that comments started counts for their authors, and the next review event carries the counts (#1104)', async t => {
+  const { h, engine, task, finding, revisions } = await botPullRequest(t);
+  const byBot = id => ({ object: {}, trigger: { reason: 'review_comment', actor: 'copilot[bot]', actor_id: '77', actor_type: 'Bot', url: `https://github.invalid/pull/7#discussion_r${id}`, source: { type: 'review_comment', id } } });
+  engine.queueDevelopment({}, task, byBot(101), { findings: [finding('F1')] }, true);
+  assert.equal(revisions().length, 1);
+  assert.deepEqual(JSON.parse(revisions()[0].input).revision.asked_by.map(r => [r.id, r.author_type]), [['101', 'Bot']]);
+  assert.equal(h.store.get("SELECT task_id FROM bot_pr_requests WHERE source_id='101'").task_id, revisions()[0].id);
+  h.store.run("UPDATE tasks SET status='completed' WHERE kind='development.pr'");
+  // The bot asks again through another review: the event tells the Manager the pull request was already revised for it.
+  engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, byBot(102), { findings: [finding('F2')] }, true);
+  const last = h.store.get("SELECT facts FROM dispatch_events WHERE type='review.published' ORDER BY rowid DESC");
+  assert.deepEqual(JSON.parse(last.facts).revisions, { for_requests: 1, for_this_author: 1 });
+});
+
 test('another review bot\'s requests have no limit of the control plane\'s own; the Manager gets the counts (#1104)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });

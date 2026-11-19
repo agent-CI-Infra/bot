@@ -2,8 +2,8 @@ import type { Store, Row } from '../storage/database.js';
 import type { GitHub } from '../github/client.js';
 import { randomId } from '../core/security.js';
 import { assertOwnedPR } from '../github/publisher.js';
-import { assigneesOf, developmentReady, sameLabel } from './queue.js';
-import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
+import { assigneesOf, developmentReady, revisionFacts, sameLabel } from './queue.js';
+import { actionsDevelopmentAllowed } from '../actions/safety.js';
 import { stop } from '../agent/common.js';
 import { developmentLabel } from '../rules/service.js';
 import { eventFilters } from '../work/settings.js';
@@ -35,13 +35,13 @@ export async function developmentApproved(context:DevelopmentContext,github:GitH
   return added?.actor?.type==='User'?{label,labeled_by:String(added.actor.login||''),assignees:assigneesOf(issue)}:null;
 }
 /**
- * A published review is an event for the Manager when it may lead to development: an Issue review published while a
- * person's development label is on the Issue or that concludes ready_for_development (#1026), or a review of the bot's own
- * pull request (one a person or the Manager asked for) that found actionable problems. The control plane's conditions (the
- * capability ceiling at develop, a person's label or the review's conclusion, Actions clearance, one revision at a time)
- * decide whether development is offered at all; the Manager decides whether to start it, reading what the review found and
- * who is assigned, and states its basis (without a label, a rule of its prompt). Requests people make on the bot's pull
- * request reach the Manager directly as revisions (#1104), not through a review.
+ * A published review is an event for the Manager when it may lead to development: every Issue review at the develop ceiling
+ * (#1104; before, only one with a person's label on the Issue or the ready_for_development conclusion), or a review of the
+ * bot's own pull request (one a person or the Manager asked for) that found actionable problems. The control plane keeps only
+ * the project's switches (the capability ceiling at develop, Actions failure handling for its reports) and one development
+ * at a time; the Manager decides whether to start it, reading what the review found and who is assigned, and states its basis
+ * (without a label, a rule of its prompt). Requests people make on the bot's pull request reach the Manager directly as
+ * revisions (#1104), not through a review.
  */
 export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:Row,input:any,result:any,approved:DevelopmentOffer|null=null){
   const policy=context.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
@@ -55,12 +55,11 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
   const event=(type:'issue'|'pr',title:string,option:any)=>recordEvent(context.store,{repositoryId:task.repository_id,key:`${task.repository_id}:review.published:${task.id}:${published}`,type:'review.published',source:'review',
     summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option]});
   if(task.kind==='review.issue'){
-    // With a person's development label on the Issue, every published review offers development; whether this review
-    // supports developing now (what it found and recommends, who is assigned) is the Manager's judgement (#815). Without
-    // the label the engine offers only a review that concluded ready_for_development (approved.label is null then).
+    // Every published review offers development; whether this review supports developing now (what it found and
+    // recommends, who is assigned or has claimed it) is the Manager's judgement (#815, #1104). approved.label is null
+    // without a person's label.
     if(!approved||!filters['review.published.issue'])return;
-    if(!actionsDevelopmentAllowed(context.store,task.repository_id,number,input.object,result))return;
-    if(actionsReport(context.store,task.repository_id,number)&&approved.assignees.length)return;
+    if(!actionsDevelopmentAllowed(context.store,task.repository_id,number))return;
     // Whether the bot already has a pull request for this Issue is a fact for the Manager, not a budget (#1104).
     const owned=context.store.get(`SELECT 1 FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
       WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? LIMIT 1`,task.repository_id,number);
@@ -68,7 +67,8 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const earlier=context.store.get("SELECT 1 FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=? AND unique_key IS NOT NULL LIMIT 1",task.repository_id,number);
     Object.assign(facts,{development:{...approved,bot_pull_request:owned?true:false}});
     // The rule decider of the tests never develops without a label, as before #1026.
-    event('issue',approved.label?`Issue 检视已发布，开发标签已加：#${number}`:`Issue 检视已发布，结论为可开发：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,
+    const concluded:Record<string,string>={ready_for_development:'可开发',needs_information:'缺信息',human_decision_required:'需要人决定',no_code_change:'不需要改代码'};
+    event('issue',approved.label?`Issue 检视已发布，开发标签已加：#${number}`:`Issue 检视已发布${concluded[result.conclusion]?`，结论为${concluded[result.conclusion]}`:''}：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,
       default:!!approved.label&&!approved.assignees.length&&!earlier,
       spec:{type:'object',kind:'development.issue',number,head:null,input:{review:result,object_hash:input.object_hash},delivery:task.source_delivery_id,source_task:task.id,update_id:task.id}});
   }else{
@@ -81,8 +81,14 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const findings=result.findings.filter(actionableFinding);
     if(!findings.length)return;
     const goal=source?developmentGoal(JSON.parse(source.input)):'';
+    // The comments that started this review (or joined it) asked for what it found: a revision of them is counted for their
+    // authors like a direct one, and the Manager sees how often the pull request was already revised (#1104).
+    const asked=[input.trigger,...(input.merged_updates||[])].filter((t:any)=>t?.source&&t.reason!=='pushed'&&/^[1-9]\d*$/.test(String(t.source.id)))
+      .map((t:any)=>({type:String(t.source.type),id:String(t.source.id),author:String(t.actor||''),author_id:String(t.actor_id||''),author_type:t.actor_type==='Bot'?'Bot':'User',url:String(t.url||''),body:''}));
+    Object.assign(facts,{bot_pull_request:true,revisions:revisionFacts(context.store,task.repository_id,number,asked[0]?.author_id)});
     event('pr',`bot PR 检视已发布，发现可执行问题：#${number}`,{id:'development',work:'development.pr',title:`跟进 bot PR #${number}`,default:true,
-      spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review'}},delivery:task.source_delivery_id,source_task:task.id}});
+      spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review',...(asked.length?{asked_by:asked}:{})}},
+        delivery:task.source_delivery_id,source_task:task.id,...(asked.length?{requests:asked}:{})}});
   }
 }
 
@@ -127,7 +133,7 @@ export function carryRevisionRequests(store:Store,task:Row,covered:any[],head:st
   const number=Number(task.object_number);
   recordEvent(store,{repositoryId:task.repository_id,key:`${task.repository_id}:revision.carried:${task.id}`,type:'pull_request.updated',source:'control_plane',
     summary:`bot PR #${number} 修订进行中收到的意见`,object:{type:'pr',number},delivery:task.source_delivery_id??null,
-    facts:{bot_pull_request:true,carried_from:String(task.id),requests:open,
+    facts:{bot_pull_request:true,carried_from:String(task.id),requests:open,revisions:revisionFacts(store,task.repository_id,number,open[0]?.author_id),
       reason:'These comments arrived while the previous revision was already working; it did not carry them out.'},
     options:[{id:'development',work:'development.pr',title:`修订 bot PR #${number}`,default:false,
       spec:{type:'object',kind:'development.pr',number,head,input:{revision:{source:'request',requests:open}},delivery:null,requests:open}}]});
