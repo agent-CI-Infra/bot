@@ -2,6 +2,26 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
+// #1124: the activity panel is rebuilt every five seconds and a rebuild replaces the card nodes, so one read of three
+// boxes can span one and get null instead of a geometry. Read every card, accept a reading only when the next one
+// agrees with it, and name the cards still missing when the wait runs out.
+async function stableBoxes(page, panel, titles, timeout = 10000) {
+  const card = title => panel.locator('section').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
+  const boxes = {}, deadline = Date.now() + timeout;
+  let previous = '';
+  for (;;) {
+    // A card detached in the middle of a read throws instead of returning a box; that read is retried, not asserted on.
+    for (const title of titles) boxes[title] = await card(title).boundingBox({ timeout: 2000 }).catch(() => null);
+    const missing = titles.filter(title => !boxes[title]), reading = JSON.stringify(titles.map(title => boxes[title]));
+    if (!missing.length && reading === previous) return boxes;
+    previous = reading;
+    if (Date.now() >= deadline) throw new Error(missing.length
+      ? `等待 ${timeout / 1000} 秒仍未见${missing.map(title => `「${title}」`).join('、')}卡片`
+      : `等待 ${timeout / 1000} 秒仍未得到稳定几何（${titles.map(title => `「${title}」`).join('、')}）`);
+    await page.waitForTimeout(100);
+  }
+}
+
 test('项目运行状态展示执行和排队任务，自动刷新并保留项目权限', async ({ page, browser }) => {
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
   const h = await harness(undefined, manager), errors = [];
@@ -37,14 +57,14 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
     await expect(card('最近任务').getByRole('button')).toHaveCount(8); // Four completed plus four active/queued tasks.
     mkdirSync('.tmp/project-activity', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    // #1124: the activity panel is rebuilt every five seconds and a rebuild replaces the card nodes, so a read that
-    // spans one gets null instead of a geometry. Ask for a rebuild, then measure the nodes that were there before it:
-    // that is exactly what one sampling window sees.
+    // #1124: the activity panel is rebuilt every five seconds and a rebuild replaces the card nodes. Ask for a rebuild
+    // here, prove it replaced the nodes the page had, and then require the three boxes to come out of one stable read.
     const titles = ['正在执行 1／1', '排队任务 3', '最近任务'];
     const stale = await Promise.all(titles.map(title => card(title).elementHandle()));
     await page.evaluate(() => { void refreshProjectStatus(renderToken); });
     await expect.poll(() => Promise.all(stale.map(handle => handle.evaluate(node => node.isConnected))), { timeout: 10000 }).toEqual([false, false, false]);
-    const [workBox, queueBox, historyBox] = await Promise.all(stale.map(handle => handle.boundingBox()));
+    const boxes = await stableBoxes(page, panel, titles);
+    const [workBox, queueBox, historyBox] = titles.map(title => boxes[title]);
     expect(queueBox.x).toBeGreaterThan(workBox.x + workBox.width); expect(historyBox.width).toBeGreaterThan(workBox.width * 1.9);
     expect(historyBox.y).toBeGreaterThan(queueBox.y + queueBox.height);
     await page.screenshot({ path: '.tmp/project-activity/desktop.png', fullPage: true });
