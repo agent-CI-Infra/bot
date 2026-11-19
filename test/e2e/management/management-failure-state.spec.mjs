@@ -24,7 +24,7 @@ test('a management assistant that cannot open states the reason once and leaves 
     await expect(fresh).toHaveAttribute('title', /恢复管理会话/);
     await expect(fresh).toHaveAttribute('aria-describedby', 'management-access-reason');
     await expect(panel.getByRole('button', { name: '快捷操作', exact: true })).toHaveCount(0);
-    for (const [width, height] of [[1440, 900], [390, 844], [390, 700]]) {
+    for (const [width, height] of [[1440, 900], [390, 844], [390, 700], [390, 568], [320, 568]]) {
       await page.setViewportSize({ width, height });
       await expect(panel.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible();
       for (const name of ['查看项目列表', '查看身份与权限']) {
