@@ -7,7 +7,7 @@ import { taskPermissions } from '../tasks/configuration.js';
 import { workPermissions } from '../work/settings.js';
 import { analysisTask } from './analysis.js';
 import { normalizeSignature, type Evidence } from './classifier.js';
-import { actionsRedactor, publicText } from './safety.js';
+import { registeredRedactor, publicText } from '../core/redaction.js';
 import { causeIdentity, type CheckedReport } from './reports.js';
 
 // Kept byte-compatible with historical signatures, for matching an already-published upstream job on this run only.
@@ -84,7 +84,7 @@ async function deliverReport(store: Store, github: GitHub, run: any, row: Row, l
         if (String(row.signature).startsWith('cause-v2:') && source?.status !== 'succeeded') stop('actions_analysis_not_succeeded');
         if (source) assertManagedExecution(store, source);
         if (!(source ? taskPermissions(store, source) : workPermissions(store, id, 'actions.failures')).writes.includes('issue')) stop('write_not_allowed');
-        actionsRedactor(store, github.redactor);
+        registeredRedactor(store, github.redactor);
         const safe = publicProse(prose, github), title = publicTitle(row.title, github);
         if (!safe.trim() || !title) stop('actions_report_sensitive');
         payload.body = safe + '\n\n' + marker;

@@ -1,3 +1,5 @@
+import { publicContent } from '../core/redaction.js';
+import { Redactor } from '../agent/common.js';
 import { createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Row } from '../storage/database.js';
@@ -39,7 +41,8 @@ const equal = (a: string, b: string) => !!a && Buffer.byteLength(a) === Buffer.b
 /** Only this adapter reads credential values; persisted configuration and callers hold a reference. */
 export class FeishuAdapter implements ChannelAdapter {
   readonly capabilities = { messages: true, cards: true, update: true, group_history: true };
-  constructor(readonly connector: Row, private readonly secret: Json, private readonly request: ChannelFetch = fetch, private readonly guard: () => void = () => {}) {}
+  constructor(readonly connector: Row, private readonly secret: Json, private readonly request: ChannelFetch = fetch, private readonly guard: () => void = () => {},
+    private readonly publicationRedactor: () => Redactor = () => new Redactor()) {}
   verify(headers: IncomingHttpHeaders, body: Buffer): Json {
     const timestamp = String(headers['x-lark-request-timestamp'] ?? ''), nonce = String(headers['x-lark-request-nonce'] ?? '');
     const signature = String(headers['x-lark-signature'] ?? ''), key = String(this.secret.encrypt_key ?? '');
@@ -107,14 +110,15 @@ export class FeishuAdapter implements ChannelAdapter {
       updated_at: eventTime(message.update_time || message.create_time), kind: 'message', content, command_text: commandText, mentions, raw_content: raw,
       message_type: messageType, sender_type: String(sender.sender_type ?? 'unknown'), addressed: addressed && sender.sender_type === 'user' && id.open_id !== this.connector.bot_open_id };
   }
-  private async api(path: string, init: RequestInit, authenticated = true, binary = false): Promise<any> {
-    let token = '';
+  private async api(path: string, init: RequestInit, authenticated = true, binary = false, message?: { content: Json; fields?: Json }): Promise<any> {
+    let token = '', appToken = '';
     if (authenticated) {
       let data: any;
       if (this.connector.application_type === 'saas') {
         if (!this.secret.app_ticket || Number(this.secret.app_ticket_time) < Date.now() - 2 * 3600_000) fail(503, 'channel_app_ticket_required');
         const app = await this.api('/auth/v3/app_access_token', { method: 'POST', body: JSON.stringify({ app_id: this.connector.app_id, app_secret: this.secret.app_secret, app_ticket: this.secret.app_ticket }) }, false);
         if (typeof app.app_access_token !== 'string') fail(502, 'channel_auth_failed');
+        appToken = app.app_access_token;
         data = await this.api('/auth/v3/tenant_access_token', { method: 'POST', body: JSON.stringify({ app_access_token: app.app_access_token, tenant_key: this.connector.installation_tenant }) }, false);
       } else data = await this.api('/auth/v3/tenant_access_token/internal', { method: 'POST', body: JSON.stringify({ app_id: this.connector.app_id, app_secret: this.secret.app_secret }) }, false);
       if (typeof data.tenant_access_token !== 'string') fail(502, 'channel_auth_failed');
@@ -122,6 +126,13 @@ export class FeishuAdapter implements ChannelAdapter {
     }
     try {
       this.guard();
+      if (message) {
+        const redactor = this.publicationRedactor();
+        for (const key of ['app_secret', 'verification_token', 'encrypt_key', 'app_ticket']) redactor.add(this.secret[key]);
+        redactor.add(token); redactor.add(appToken);
+        const content = JSON.stringify(publicContent(message.content, redactor));
+        init = { ...init, body: JSON.stringify({ ...message.fields, content }) };
+      }
       const r = await this.request('https://open.feishu.cn/open-apis' + path, { ...init, redirect: 'error', signal: AbortSignal.timeout(15000),
         headers: { ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(authenticated ? { Authorization: 'Bearer ' + token } : {}) } });
       if (binary && r.ok) return r;
@@ -162,8 +173,9 @@ export class FeishuAdapter implements ChannelAdapter {
   }
   async send(delivery: ChannelDelivery, key: string): Promise<string> {
     const path = delivery.reply_to ? '/im/v1/messages/' + encodeURIComponent(delivery.reply_to) + '/reply' : '/im/v1/messages?receive_id_type=' + delivery.receive_id_type;
-    const data = await this.api(path, { method: 'POST',
-      body: JSON.stringify({ ...(delivery.reply_to ? { reply_in_thread: !!delivery.reply_in_thread } : { receive_id: delivery.receive_id }), msg_type: delivery.message_type ?? 'interactive', content: JSON.stringify(delivery.content), uuid: key.slice(0, 50) }) });
+    const fields = { ...(delivery.reply_to ? { reply_in_thread: !!delivery.reply_in_thread } : { receive_id: delivery.receive_id }),
+      msg_type: delivery.message_type ?? 'interactive', uuid: key.slice(0, 50) };
+    const data = await this.api(path, { method: 'POST' }, true, false, { content: delivery.content, fields });
     return text(data.data?.message_id);
   }
   async download(message: string, key: string, type: 'image' | 'file', maxBytes: number): Promise<{ data: Buffer; mime: string }> {
@@ -335,7 +347,7 @@ export class FeishuAdapter implements ChannelAdapter {
   }
   async update(delivery: ChannelDelivery): Promise<string> {
     const id = text(delivery.message_id);
-    await this.api('/im/v1/messages/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ content: JSON.stringify(delivery.content) }) });
+    await this.api('/im/v1/messages/' + encodeURIComponent(id), { method: 'PATCH' }, true, false, {content: delivery.content});
     return id;
   }
 }

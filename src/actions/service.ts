@@ -13,7 +13,8 @@ import { eventTaskActive } from '../work/events.js';
 import { workPermissions } from '../work/settings.js';
 import { assertManagedExecution } from '../tasks/management.js';
 import { taskPermissions } from '../tasks/configuration.js';
-import { actionsConfigurationError, actionsRedactor, publicText } from './safety.js';
+import { actionsConfigurationError } from './safety.js';
+import { registeredRedactor, publicText } from '../core/redaction.js';
 
 export const scanInterval = 60_000, scanPageSize = 50;
 // Reruns of earlier runs are looked for every 10 minutes among runs created in the last 72 hours.
@@ -55,7 +56,7 @@ export class ActionsFailures {
       if (this.closing || !actionsWorkflowOn(this.store, repo.id)) stop('actions_failures_disabled');
       if (!this.store.run('UPDATE actions_failure_scans SET lease_until=? WHERE repository_id=? AND lease=? AND lease_until>?', Date.now() + 120_000, repo.id, lease, Date.now()).changes) stop('actions_lease_lost');
     };
-    const redactor = actionsRedactor(this.store), github = new GitHub(this.store, repo, redactor, guard, this.apiUrl);
+    const redactor = registeredRedactor(this.store), github = new GitHub(this.store, repo, redactor, guard, this.apiUrl);
     try {
       if (this.store.get('SELECT type FROM accounts WHERE id=?', repo.account_id)?.type !== 'github_app') stop('actions_app_required');
       await github.connect(false, undefined, { contents: 'read', actions: 'write', issues: 'write' });

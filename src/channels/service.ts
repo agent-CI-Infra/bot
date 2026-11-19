@@ -1,3 +1,4 @@
+import { configuredRedactor, registeredRedactor, publicText } from '../core/redaction.js';
 import { TaskRecords } from '../tasks/service.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
@@ -262,7 +263,7 @@ export class ChannelService {
   adapter(c: Row, guard?: () => void): FeishuAdapter {
     const row = this.store.get('SELECT sealed FROM channel_credentials WHERE id=?', c.credential_ref);
     if (!row) return fail(403, 'channel_credentials_revoked');
-    return new FeishuAdapter(c, this.store.secrets.open(row.sealed, 'channel-credential:' + c.credential_ref), this.options.fetch, guard);
+    return new FeishuAdapter(c, this.store.secrets.open(row.sealed, 'channel-credential:' + c.credential_ref), this.options.fetch, guard, () => registeredRedactor(this.store));
   }
   receiveHTTP(id: string, headers: IncomingHttpHeaders, body: Buffer): Json {
     // One store app has one callback URL. Its verified installation tenant selects an explicitly configured connector.
@@ -742,7 +743,7 @@ export class ChannelService {
       else{
         let value=String(elements?.[0]?.text?.content??'');
         for(const el of elements??[])for(const action of el.actions??[])if(typeof action.url==='string'&&/^https?:\/\//.test(action.url))value+='\n\n[登录后台查看]('+action.url+')';
-        for(const content of markdownPosts(value,this.options.origin))parts.push({delivery:{...delivery,resources:undefined,content,message_type:'post'}});
+        for(const content of markdownPosts(publicText(value, configuredRedactor(store)),this.options.origin))parts.push({delivery:{...delivery,resources:undefined,content,message_type:'post'}});
       }
       for(const id of delivery.resources??[])parts.push({delivery:{...delivery,resources:undefined,content:{}},resource_id:id});
       parts.forEach((part,i)=>store.run('INSERT INTO channel_outbox_parts(outbox_id,part,payload,first_attempt) VALUES(?,?,?,?)',row.id,i,store.secrets.seal(part,'channel-outbox-part:'+row.id+':'+i),part.legacy?row.created_at:null));

@@ -4,7 +4,6 @@ import { digest } from '../core/security.js';
 import { appBucket, blockedUntil, bucketName, installationBucket, observe, refused, userBucket, utcTime, type Bucket } from './rate-limits.js';
 import { errorBody, networkReason, Redactor, safePath, stop, TaskError } from '../agent/common.js';
 import { installationExecutionDenied } from '../installations/archive.js';
-import { githubTokens } from '../core/redaction.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
 const treeCache=new WeakMap<object,Map<string,Promise<SnapshotTree>>>();
@@ -12,10 +11,6 @@ function errorDetail(message:unknown,redactor:Redactor,token:string,status:numbe
   let detail=typeof message==='string'?message:`GitHub HTTP ${status}`;
   if(token)detail=detail.replaceAll(token,'[REDACTED]');
   return redactor.text(detail)
-    .replace(/authorization[^\r\n]*/gi,'[REDACTED]')
-    .replace(/\b(?:Bearer|Basic)\s+\S+/gi,'[REDACTED]')
-    .replace(githubTokens(),'[REDACTED]')
-    .replace(/\b(?:access_token|token|api_key)\s*[:=]\s*[^\s,;]+/gi,'[REDACTED]')
     .replace(/\s+/g,' ').trim().slice(0,320)||`GitHub HTTP ${status}`;
 }
 // Rule preflight and workspace preparation share the same complete listing for an immutable tree.
@@ -166,9 +161,11 @@ export class GitHub {
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
     let response: Response;
     if(method!=='GET')this.beforeWrite?.();
+    // A publication may need the exact credentials that were issued during this guard or refresh.
+    const outgoing = typeof body === 'function' ? body() : body;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: jobLogs ? 'manual' : 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
+      ...(outgoing === undefined ? {} : { body: JSON.stringify(outgoing) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
     this.status = response.status;

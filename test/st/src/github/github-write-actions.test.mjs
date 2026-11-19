@@ -85,11 +85,9 @@ test('github_write starts a workflow at the comment ceiling, returns the run onc
   assert.equal(f.dispatches().length, 3);
 });
 
-// #1087: every string GitHub receives loses a GitHub token by its form, the <prefix><id>_<JWT> form included.
-test('a workflow input carrying an installation token reaches GitHub without it', async t => {
+test('a workflow input carrying a self-identifying token reaches GitHub without it', async t => {
   const f = await fixture(t); f.setCeiling('comment');
-  const jwt = ['{"alg":"RS256","typ":"JWT"}', '{"iss":"fixture-app"}'].map(part => Buffer.from(part).toString('base64url')).join('.');
-  const token = `ghs_424242_${jwt}.fixture_${'Sg9'.repeat(12)}`;
+  const token = 'ghs_' + 'X'.repeat(36);
   const started = await f.write({ method: 'POST', path: '/actions/workflows/nightly.yml/dispatches', key: 'token', body: { ref: 'main', inputs: { note: `use ${token}.`, suite: 'ghs_prefix' } } });
   assert.equal(started.workflow_run_id, 77);
   assert.deepEqual(f.dispatches().map(r => r.body.inputs), [{ note: 'use [REDACTED].', suite: 'ghs_prefix' }]);

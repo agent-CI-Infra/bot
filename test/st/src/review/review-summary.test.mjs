@@ -82,6 +82,16 @@ const inlineFinding = { id: 'f-inline', body: 'Off by one: `b` should be `a`.', 
 const decision = { id: 'f-decision', body: 'Whether the old parser stays as a fallback is not decided.\n\nKeeping it doubles the test matrix.', format: 'discussion', selection_reason: 'design',
   requires_human_decision: true, human_action: '决定旧解析器是否保留为回退路径' };
 
+test('review publication masks only credential spans in both the summary and inline findings', async t => {
+  const f = await fixture(t);
+  const code = 'token = "my_custom_identifier_12345"\n-----BEGIN CERTIFICATE-----';
+  const value = code+'\nbefore ghp_'+'Z'.repeat(30)+' after';
+  await f.review('a', {summary:'Summary\n'+value,findings:[{...inlineFinding,body:'Inline\n'+value}]});
+  for (const text of [f.state.comments[0].body,f.state.reviewComments[0].body]) {
+    assert.ok(text.includes(code)); assert.ok(text.includes('before [REDACTED] after')); assert.ok(!text.includes('ghp_'));
+  }
+});
+
 test('needs a person are named first and listed last; later reviews edit the first summary comment and resolve fixed threads', async t => {
   const f = await fixture(t);
   // The first review: an inline finding and one a maintainer has to decide.

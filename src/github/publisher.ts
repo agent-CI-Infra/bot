@@ -1,3 +1,4 @@
+import { publicContent, registeredRedactor } from '../core/redaction.js';
 import { publicationFact } from '../tasks/publication.js';
 import { assertPublicationStages } from '../roles/schedule.js';
 import { type Store, type Row } from '../storage/database.js';
@@ -40,18 +41,37 @@ export class Publisher {
     // Withdrawal must remain available even when a delivery gate no longer permits advancement.
     const checkStages=()=>{if(kind!=='dequeue')assertPublicationStages(this.store,this.task.id);};
     const previous=this.github.beforeWrite;
-    try{await this.validate();checkStages();assertTaskExternalEffect(this.store,this.task,kind);this.github.beforeWrite=()=>{checkStages();assertTaskExternalEffect(this.store,this.task,kind);previous?.();this.beforeWrite?.();};const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
+    try {
+      await this.validate();
+      checkStages();
+      assertTaskExternalEffect(this.store,this.task,kind);
+      this.github.beforeWrite = () => {
+        checkStages();
+        assertTaskExternalEffect(this.store,this.task,kind);
+        previous?.();
+        this.beforeWrite?.();
+        if (['comment','review','pull_request'].includes(kind)) Object.assign(request, this.published(request));
+      };
+      const result = await send();
+      this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);
+      return result;
+    }
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
     finally{this.github.beforeWrite=previous;}
   }
   marker(key:string){return `<!-- dept-bot:${operationId(this.scope+':'+key)} -->`;}
   // The platform's words in a development PR follow the repository's review language, else the summary's (#1106).
+  private published<T>(value:T):T {
+    const redactor = registeredRedactor(this.store);
+    for (const secret of this.github.redactor?.values ?? []) redactor.add(secret);
+    return publicContent(value, redactor);
+  }
   private pullRequestText(candidate:any,issue:number|null){
     const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',this.task.repository_id)?.review_language;
-    return implementationText(candidate,issue,reviewLanguage(setting,String(candidate.summary??'')));
+    return this.published(implementationText(candidate,issue,reviewLanguage(setting,String(candidate.summary??''))));
   }
   async discussion(key:string,body:string){
-    const path=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker(key),payload={body:body+'\n\n'+marker};
+    const path=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker(key),payload={body:this.published(body)+'\n\n'+marker};
     return this.effect(key,'comment',payload,()=>this.github.request('POST',path,payload),async()=>
       (await this.github.pages(path)).find(c=>String(c.user?.id)===this.github.actorId&&String(c.body).includes(marker)));
   }
@@ -65,7 +85,7 @@ export class Publisher {
     const coverage=`Reviewed commit: ${result.reviewed_sha}\nCoverage: ${result.coverage.join('; ')}`,outputs:any[]=[];
     if(inline.length){
       const path=this.github.path(`/pulls/${this.task.object_number}/reviews`),marker=this.marker('inline');
-      const payload={commit_id:result.reviewed_sha,event:'COMMENT',body:coverage+'\n\n'+marker,comments:inline};
+      const payload=this.published({commit_id:result.reviewed_sha,event:'COMMENT',body:coverage+'\n\n'+marker,comments:inline});
       outputs.push(await this.effect('inline','review',payload,()=>this.github.request('POST',path,payload),async()=>
         (await this.github.pages(path)).find(r=>String(r.user?.id)===this.github.actorId&&r.commit_id===result.reviewed_sha&&String(r.body).includes(marker))));
     }
@@ -93,7 +113,7 @@ export class Publisher {
     const outputs:any[]=[];
     if(inline.length){
       const path=this.github.path(`/pulls/${this.task.object_number}/reviews`),marker=this.marker('inline');
-      const payload={commit_id:result.reviewed_sha,event:'COMMENT',body:coverage+'\n\n'+marker,comments:inline};
+      const payload=this.published({commit_id:result.reviewed_sha,event:'COMMENT',body:coverage+'\n\n'+marker,comments:inline});
       const review=await this.effect('inline','review',payload,()=>this.github.request('POST',path,payload),async()=>
         (await this.github.pages(path)).find(r=>String(r.user?.id)===this.github.actorId&&r.commit_id===result.reviewed_sha&&String(r.body).includes(marker)));
       const comments=await this.github.pages(path+'/'+review.id+'/comments');
@@ -130,7 +150,7 @@ export class Publisher {
   // The first review posts the summary comment; later ones replace its body (an edit, so it is safe to repeat). A comment
   // that is gone is posted again and becomes the one later reviews edit.
   async summary(body:string){
-    const issues=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker('discussion'),payload={body:body+'\n\n'+marker};
+    const issues=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker('discussion'),payload={body:this.published(body)+'\n\n'+marker};
     const anchor=this.summaryAnchor(),comment=(id:string)=>this.github.path('/issues/comments/'+id);
     const result=await this.effect('discussion','comment',payload,async()=>{
       if(anchor){const updated=await this.github.request('PATCH',comment(anchor),payload,true);if(updated)return updated;}
@@ -234,7 +254,7 @@ export class Publisher {
     if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
     candidate.created_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
-    const commit=candidate.created_commit_sha?{sha:candidate.created_commit_sha,tree:{sha:expected}}:await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
+    const commit=candidate.created_commit_sha?{sha:candidate.created_commit_sha,tree:{sha:expected}}:await this.github.request('POST',this.github.path('/git/commits'),{message:this.published(implementationText(candidate,this.task.object_number).title),
       tree:expected,parents:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author});
     if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
     candidate.created_commit_sha=commit.sha;save();

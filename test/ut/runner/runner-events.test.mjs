@@ -213,7 +213,7 @@ test('a task whose worktree cannot be made answers its file tools with the contr
 
 // #1087: a command can print a token nobody registered, such as gh auth status with its masked tail. The model receives
 // the result without the token's form, ordinary code included as it is; the event log also applies the context rules.
-test('a token a command prints leaves the model-facing result and the events by its form; code the model edits stays',async t=>{
+test('unregistered examples and code are preserved in both model-facing results and events',async t=>{
   const base=await mkdtemp(join(tmpdir(),'pi-shapes-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
   // Constructed values: <prefix><id>_<JWT> with the tail gh masks after the token's last underscore.
@@ -230,9 +230,9 @@ test('a token a command prints leaves the model-facing result and the events by 
   assert.equal((await closed)[0],0,output);
   const results=Object.fromEntries((await readFile(seen,'utf8')).trim().split('\n').map(JSON.parse).map(({name,result})=>[name,JSON.parse(result.content[0].text)]));
   const events=await readFile(join(dir,'events.jsonl'),'utf8');
-  for(const text of [JSON.stringify(results),events])for(const piece of ['424242_',header,payload,'fixture_*'])assert.ok(!text.includes(piece),piece);
-  assert.equal(results.run_command.output,'github.com\n  - Token: [REDACTED]\n');
+  assert.ok(events.includes(printed));
+  assert.equal(results.run_command.output,'github.com\n  - Token: '+printed+'\n');
   assert.equal(results.read_file.content,code,'the model reads the code it may edit as it is');
   const logged=events.trim().split('\n').map(JSON.parse).filter(e=>e.type==='tool');
-  assert.equal(logged.find(e=>e.name==='read_file').result.content,'const token = [REDACTED];\n','the event log applies every credential rule');
+  assert.equal(logged.find(e=>e.name==='read_file').result.content,code);
 });

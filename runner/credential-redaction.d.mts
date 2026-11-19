@@ -1,6 +1,11 @@
 export const githubTokenSource: string;
-export function githubTokens(): RegExp;
-export function redactCredentials<T>(value: T): T;
-export function hasCredentials(value: unknown): boolean;
-export function redactCredentialShapes<T>(value: T): T;
-export function credentialShapeStream(write: (text: string) => void, holdLimit?: number): { data(text: string): void; end(): void };
+export class Redactor {
+  readonly values: Set<string>;
+  readonly publicationPattern: RegExp | undefined;
+  add(value: unknown): void;
+  text(value: string): string;
+  clean<T>(value: T): T;
+  contains(bytes: Buffer): boolean;
+}
+export function publicText(value: string, redactor: Pick<Redactor, 'publicationPattern'>): string;
+export function publicContent<T>(value: T, redactor: Pick<Redactor, 'publicationPattern'>): T;

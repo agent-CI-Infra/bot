@@ -11,7 +11,8 @@ import { actionsModel, reportFor } from '../../../fixtures/actions-model.mjs';
 import { runEventTasks } from '../../../fixtures/event-tasks.mjs';
 import { workspaceProfile } from '../../../../dist/agent/profiles.js';
 import { workAccess as workflowAccess } from '../../../../dist/work/catalog.js';
-import { actionsDevelopmentAllowed, publicText } from '../../../../dist/actions/safety.js';
+import { publicText } from '../../../../dist/core/redaction.js';
+import { actionsDevelopmentAllowed } from '../../../../dist/actions/safety.js';
 import { recordActionsRun } from '../../../../dist/actions/storage.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { Redactor, sha } from '../../../../dist/agent/common.js';
@@ -730,9 +731,9 @@ test('the Issue and follow-up preserve six diagnostic paragraphs and redact only
     assert.equal(row.title, cause + ' with [REDACTED]');
     if (attempt === 1) assert.equal(write.title, row.title);
     assert.equal(write.body, row.body);
-    assert.equal(visibleBody(write.body), [`Attempt ${attempt}`, ...paragraphs, 'Authorization: [REDACTED] returned HTTP 401.',
-      'password=[REDACTED] caused EACCES.', 'Archive: https://fixture.invalid/archive?X-Amz-Credential=[REDACTED]&X-Amz-Signature=[REDACTED]',
-      'Key: [REDACTED]\nECONNRESET persisted.', 'Encoded payload:\n> [REDACTED] was returned by the gateway.', 'End.'].join('\n\n'));
+    assert.equal(visibleBody(write.body), [`Attempt ${attempt}`, ...paragraphs, 'Authorization: Bearer shortKey7 returned HTTP 401.',
+      'password="private fixture" caused EACCES.', 'Archive: '+signed,
+      'Key: [REDACTED]\nECONNRESET persisted.', 'Encoded payload:\n> '+encodedLog+' was returned by the gateway.', 'End.'].join('\n\n'));
     await f.restart(); await f.hook(); await f.tick();
     assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, attempt - 1);
   }
@@ -749,12 +750,11 @@ test('legacy pending text is redacted at delivery, then reconciled with its orig
     id, '101', 800, 1, 'historical', 'unknown', body, 'HTTP 403 password=old-password');
   await f.restart(); await f.tick();
   const issue = f.state.issues[0];
-  assert.equal(issue.title, 'HTTP 403 password=[REDACTED]');
+  assert.equal(issue.title, 'HTTP 403 password=old-password');
   assert.ok(issue.body.endsWith(marker));
-  assert.match(issue.body, /HTTP 403 https:\/\/logs.invalid\/a\?sig=\[REDACTED\]/);
-  assert.doesNotMatch(issue.body, /short-signed-value|old appendix/);
-  assert.match(issue.body, /Payload: \[REDACTED\] during retry\.\s*<!--/);
-  assert.ok(!issue.body.includes(encoded));
+  assert.ok(issue.body.includes('https://logs.invalid/a?sig=short-signed-value'));
+  assert.ok(issue.body.includes('Payload: '+encoded+' during retry.'));
+  assert.doesNotMatch(issue.body, /old appendix/);
   await f.restart(); await f.tick(); await f.hook(); await f.tick();
   assert.deepEqual([f.state.issues.length, f.state.comments.length, filedFor(f, 800).id], [1, 0, id]);
 });

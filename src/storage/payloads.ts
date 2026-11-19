@@ -1,8 +1,8 @@
+import { configuredRedactor } from '../core/redaction.js';
 import type { Row, Store } from './database.js';
 import { payloadHeader, TrajectoryError } from './trajectories.js';
 import { currentRunTrace, traceSnapshot } from '../tasks/trace.js';
 import { randomId } from '../core/security.js';
-import { redactCredentials } from '../core/redaction.js';
 
 // Readers of payloads that moved to trajectory files. A row written since #436 keeps a small header in its old column
 // and a ref to its record; a row not migrated yet still holds the whole payload in the old column. Every reader that
@@ -92,11 +92,10 @@ export const inlineLogBytes = 2048;
 
 /**
  * Inserts a task log. A large log of a task inside a run goes to the run's trajectory file: the row keeps its small
- * fields (type, phase, code, a clipped detail…) for queries and a ref for the whole text. A log holds what an agent's
- * commands printed, so credentials are redacted by their form, not only the values this deployment knows (#1087).
+ * fields (type, phase, code, a clipped detail…) for queries and a ref for the whole text. Callers mask registered credentials before serializing the log.
  */
 export function insertTaskLog(store: Store, task: Row, content: string, createdAt = new Date().toISOString(), id = randomId()): string {
-  content = redactCredentials(content);
+  content = configuredRedactor(store).text(content);
   const { runId, role } = currentRunTrace(task);
   const scopedTask = runId && runId !== task.trace_run_id ? { ...task, trace_run_id: runId } : task;
   const scope = Buffer.byteLength(content) > inlineLogBytes ? store.trajectories.scopeOf(scopedTask) : null, data = scope ? logData(content) : null;

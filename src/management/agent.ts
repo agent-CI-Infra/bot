@@ -1,6 +1,6 @@
 import {serviceHarnessTurn} from '../harness/service-session.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
-import { hasCredentials } from '../core/redaction.js';
+import { configuredRedactor } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
@@ -140,15 +140,18 @@ export class ManagementAgent {
   send(base:ActorContext,conversationId:string,input:Json,options:{timer?:boolean}={}):Json{
     validate(obj({source_message:{...str,maxLength:240},content:{...str,maxLength:16000},query:managementTools[0]!.function.parameters,command:managementTools[1]!.function.parameters},['source_message']),input);
     if([input.content,input.query,input.command].filter(v=>v!==undefined).length!==1)fail(400,'one_management_input_required');
-    if(hasCredentials(input))fail(400,'sensitive_management_input');
     const {actor,row}=this.conversation(base,conversationId),onboarding=!!onboardingRepositoryOf(row.scope);
     // Onboarding answers in words only: no query or command runs from its conversation.
     if(onboarding&&input.content===undefined)fail(400,'onboarding_content_required');
     const previous=this.store.get('SELECT * FROM management_messages WHERE conversation_id=? AND source_message=?',conversationId,String(input.source_message));
-    if(previous){if(parameterHash(JSON.parse(previous.input))!==parameterHash(input))fail(409,'message_idempotency_conflict');return {id:previous.id,state:previous.state,replayed:true};}
+    const inputHash=parameterHash(input);
+    if(previous){if((previous.input_hash ?? parameterHash(JSON.parse(previous.input)))!==inputHash)fail(409,'message_idempotency_conflict');return {id:previous.id,state:previous.state,replayed:true};}
+    const redactor = configuredRedactor(this.store);
+    input = { ...input };
+    for (const name of ['content','query','command']) if (input[name] !== undefined) input[name] = redactor.clean(input[name]);
     if(onboarding)this.onboarding.admit(conversationId);
     const id=randomId(),time=now();
-    this.store.run('INSERT INTO management_messages VALUES(?,?,?,?,?,?,?,?)',id,conversationId,String(input.source_message),JSON.stringify(input),'pending',actor.authorization_revision,time,time);
+    this.store.run('INSERT INTO management_messages(id,conversation_id,source_message,input,state,authorization_revision,created_at,updated_at,input_hash) VALUES(?,?,?,?,?,?,?,?,?)',id,conversationId,String(input.source_message),JSON.stringify(input),'pending',actor.authorization_revision,time,time,inputHash);
     const controller=new AbortController();
     // A process/database shutdown may prevent the terminal event from committing; restart marks that row interrupted.
     const work=Promise.resolve().then(()=>this.run(base,actor,id,conversationId,input,controller.signal,!!options.timer)).catch(()=>{}).finally(()=>this.active.delete(id));

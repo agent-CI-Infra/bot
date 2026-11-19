@@ -1,5 +1,5 @@
+import { configuredRedactor } from '../core/redaction.js';
 import {dispatchScope} from '../storage/trajectories.js';
-import { redactCredentials } from '../core/redaction.js';
 import {childTaskContext} from './children.js';
 import { ProjectMemory } from '../memory/project.js';
 import { taskControllerReads, canReadMemory, memoryAuthorize, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
@@ -25,9 +25,9 @@ export function currentRunTrace(task:Row):{runId:string|null;role:string|null}{
 }
 function atomic<T>(store:Store,fn:()=>T):T{const name='trace_'+randomId();store.db.exec('SAVEPOINT '+name);try{const result=fn();store.db.exec('RELEASE '+name);return result;}catch(error){store.db.exec('ROLLBACK TO '+name);store.db.exec('RELEASE '+name);throw error;}}
 export function traceClean(value:any,literal=false):any {
-  if(typeof value==='string'){if(!literal&&/^[\[{]/.test(value)){try{const parsed=JSON.parse(value),clean=traceClean(parsed);return JSON.stringify(clean)===JSON.stringify(parsed)?redactCredentials(value):JSON.stringify(clean);}catch{}}return redactCredentials(value);}
+  if(typeof value==='string'){if(!literal&&/^[\[{]/.test(value)){try{const parsed=JSON.parse(value),clean=traceClean(parsed);return JSON.stringify(clean)===JSON.stringify(parsed)?value:JSON.stringify(clean);}catch{}}return value;}
   if(Array.isArray(value))return value.map(v=>traceClean(v,literal));
-  if(value&&typeof value==='object')return redactCredentials(Object.fromEntries(Object.entries(value).filter(([k])=>!/^(api_?key|authorization|credentials|claim_token|password|private_key|reasoning.*|thinking.*|base64)$/i.test(k)&&!(k.toLowerCase()==='analysis'&&value.role==='assistant')).map(([k,v])=>[k,traceClean(v,literal||(k==='content'&&value.encoding==='utf8'))])));
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(claim_token|reasoning.*|thinking.*|base64)$/i.test(k)&&!(k.toLowerCase()==='analysis'&&value.role==='assistant')).map(([k,v])=>[k,traceClean(v,literal||(k==='content'&&value.encoding==='utf8'))]));
   return value;
 }
 export function retainedTextArtifact(path:string,version:string,data:Buffer,expectedBytes:number,redact:(text:string)=>string){
@@ -51,7 +51,10 @@ export function traceSnapshot(value:any){
     ...(bytes<=2*1024*1024?{data:clean}:{preview:text.slice(0,64000),missing_reason:'capture_limit_exceeded'})});
 }
 export function traceStorage(store:Store){
-  store.db.function('trace_snapshot',(raw:any)=>{try{return traceSnapshot(JSON.parse(String(raw)));}catch{return traceSnapshot(String(raw));}});
+  store.db.function('trace_snapshot',(raw:any)=>{
+    let value: unknown; try { value=JSON.parse(String(raw)); } catch { value=String(raw); }
+    return traceSnapshot(configuredRedactor(store).clean(value));
+  });
   store.db.exec(`CREATE TABLE IF NOT EXISTS task_runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,attempt INTEGER NOT NULL,revision INTEGER NOT NULL,candidate_id TEXT,parent_run_id TEXT,previous_run_id TEXT,
     started_at TEXT NOT NULL,ended_at TEXT,status TEXT NOT NULL,stop_reason TEXT,context_snapshot TEXT NOT NULL,config_snapshot TEXT NOT NULL);
@@ -101,6 +104,7 @@ export function traceStorage(store:Store){
   END;`);
 }
 export function traceEvent(store:Store,taskId:string,type:string,data:any,runId?:string|null,actor='framework',causedBy:string[]=[]){
+  data=configuredRedactor(store).clean(data);
   if(typeof taskId==='string'&&taskId.startsWith('dispatch:')){
     const [eventId,attempt]=taskId.slice(9).split(':');
     const event=store.get('SELECT * FROM dispatch_events WHERE id=?',eventId!);
@@ -123,7 +127,7 @@ export function beginRun(store:Store,task:Row,kind:string,config:any){return ato
   const previous=store.get('SELECT id FROM task_runs WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',task.id,kind);
   const run={id:randomId(),task_id:task.id,kind,attempt:t.attempt,revision:r.revision,candidate_id:candidate?.id??null};
   store.run('INSERT INTO task_runs(id,task_id,kind,attempt,revision,candidate_id,parent_run_id,previous_run_id,started_at,ended_at,status,stop_reason,context_snapshot,config_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?)',run.id,task.id,kind,t.attempt,r.revision,candidate?.id??null,task.trace_run_id??null,previous?.id??null,now(),null,'running',null,
-    traceSnapshot({context_files:task.trace_context??{},input_candidate:candidate,contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:executionBaseline(t),object_head_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null}),traceSnapshot({...config,execution_revision:store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',task.id)?.revision??null,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null}));
+    traceSnapshot({context_files:task.trace_context??{},input_candidate:candidate,contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:executionBaseline(t),object_head_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null}),traceSnapshot({...configuredRedactor(store).clean(config),execution_revision:store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',task.id)?.revision??null,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null}));
   traceEvent(store,task.id,'run_started',{...run,parent_run_id:task.trace_run_id??null,previous_run_id:previous?.id??null},run.id);return run;
 });}
 export function endRun(store:Store,run:Row|null,status:string,reason?:string){if(!run)return;return atomic(store,()=>{

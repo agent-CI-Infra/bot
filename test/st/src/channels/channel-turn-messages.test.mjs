@@ -382,7 +382,7 @@ for (const kind of ['sensitive', 'recalled']) test(`a ${kind} merged message is 
   f.service.serviceSessions.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '完成' }; };
   f.modelState.respond = async (body, res) => { calls++; assert.ok(!JSON.stringify(body).includes('must-stay-private')); return calls===1?call(res, 'start_own_task'):say(res,'原问题正常完成'); };
   const initial = await post(f.h, f.id, inGroup('开始')); await until(() => executing);
-  const event = inGroup(kind === 'sensitive' ? 'password=must-stay-private' : '将被撤回的问题'), extra = await post(f.h, f.id, event);
+  const event = inGroup(kind === 'sensitive' ? '绑定消息 /confirm must-stay-private' : '将被撤回的问题'), extra = await post(f.h, f.id, event);
   if (kind === 'recalled') await post(f.h, f.id, { header: { ...event.header, event_id: 'recall-' + event.header.event_id, event_type: 'im.message.recalled_v1' },
     event: { chat_id: 'oc_group', message_id: event.event.message.message_id, recall_time: String(Date.now()) } });
   held.release(); assert.equal((await done(f, initial)).state, 'completed'); assert.equal((await done(f, extra)).state, 'completed');

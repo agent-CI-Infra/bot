@@ -1,4 +1,4 @@
-import { hasCredentials } from '../core/redaction.js';
+import { configuredRedactor } from '../core/redaction.js';
 import type { Manager } from '../projects/service.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
@@ -208,11 +208,12 @@ export class ManagementService {
   async submit(actor:ActorContext,input:Json):Promise<Json>{
     // The rule files' console layer is gone (#935): an old client learns what replaces it instead of a schema error.
     if(input?.operation==='rules.update')throw Object.assign(new HttpError(410,'rules_update_removed'),{detail:rulesUpdateRemoved});
-    validate(commandSchema,input);const command=input as unknown as ManagementCommand,entry=commands[command.operation]!;
-    validate(entry.arguments,command.arguments);
-    if(hasCredentials(command.arguments))fail(400,'sensitive_management_arguments');
-    this.scope(actor,command.target.project_id,entry.capability);
-    const hash=parameterHash(command),previous=this.store.get('SELECT * FROM management_commands WHERE principal_id=? AND idempotency_key=?',actor.principal_id,command.idempotency_key);
+    validate(commandSchema,input);const submitted=input as unknown as ManagementCommand,entry=commands[submitted.operation]!;
+    validate(entry.arguments,submitted.arguments);
+    this.scope(actor,submitted.target.project_id,entry.capability);
+    const hash=parameterHash(submitted);
+    const command={...submitted, arguments:configuredRedactor(this.store).clean(submitted.arguments)};
+    const previous=this.store.get('SELECT * FROM management_commands WHERE principal_id=? AND idempotency_key=?',actor.principal_id,command.idempotency_key);
     if(previous){if(previous.parameter_hash!==hash)fail(409,'idempotency_conflict');return this.receipt(previous);}
     const row=this.store.transaction(()=>{
       this.check(actor,command);const current=this.revision(command.target);

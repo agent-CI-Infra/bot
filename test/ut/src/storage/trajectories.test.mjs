@@ -168,7 +168,7 @@ function recordBoth(t) {
 test('evidence references read the same content from a file as from the old columns', t => {
   const { legacy, files } = recordBoth(t);
   for (const source of ['task_tools:op', 'task_logs:log']) assert.deepEqual(traceSource(files.store, 't', source), traceSource(legacy.store, 't', source));
-  assert.doesNotMatch(JSON.stringify(traceSource(files.store, 't', 'task_tools:op')), /SECRET/);
+  assert.match(JSON.stringify(traceSource(files.store, 't', 'task_tools:op')), /ghp_SECRET123456789012345678901234567890/);
   // The history rows the triggers wrote are small; read through task_history they expand to the old snapshots.
   const history = store => store.all("SELECT id,length(data) n FROM task_history WHERE type IN ('operation','runtime_log') ORDER BY id");
   const old = history(legacy.store), current = history(files.store);
@@ -207,33 +207,27 @@ test('model requests are written as the messages added since the previous reques
   assert.equal(modelSnapshot(store, row, 'response'), traceSnapshot({ choices: [{ message: { content: 'ok' } }] }));
 });
 
-// #1087: what an agent's commands printed reaches task logs and model records. A credential goes by its form there, also
-// when no one registered its value: here the tail gh auth status leaves of an installation token, and a model repeating it.
-test('task logs and model request and response records lose credentials by their form', t => {
+test('internal logs and model deltas preserve unregistered examples exactly', t => {
   const { path } = database(t), store = new Store(path, key); t.after(() => store.close()); seed(store);
-  const jwt = ['{"alg":"RS256","typ":"JWT"}', '{"iss":"fixture-app","installation_id":424242}'].map(part => Buffer.from(part).toString('base64url')).join('.');
-  const token = `ghs_424242_${jwt}.fixture_${'Sg9'.repeat(12)}`, printed = `ghs_424242_${jwt}.fixture_${'*'.repeat(36)}`;
-  const visible = text => ['424242_', jwt.split('.')[0], jwt.split('.')[1], 'Sg9'].filter(piece => text.includes(piece));
-  const task = { id: 't', repository_id: '101', trace_run_id: 'run-r' };
-  insertTaskLog(store, task, JSON.stringify({ type: 'tool', name: 'bash', result: { output: '  - Token: ' + printed + '\n' } }), 'now', 'small');
-  insertTaskLog(store, task, JSON.stringify({ type: 'tool', name: 'bash', output: 'x'.repeat(3000) + '\n  - Token: ' + printed }), 'now', 'large');
-  insertTaskLog(store, task, 'plain text ' + token + '.', 'now', 'plain');
-  for (const id of ['small', 'large', 'plain']) {
-    const row = store.get('SELECT * FROM task_logs WHERE id=?', id), text = logContent(store, row);
-    assert.deepEqual([...visible(text), ...visible(JSON.stringify(row))], [], id); assert.match(text, /\[REDACTED\]/, id);
+  const task = { id: 't', repository_id: '101', trace_run_id: 'run-r' }, scope = runScope('101','t','run-r');
+  const sample = 'token = "my_custom_identifier_12345"\\nfixture: ghp_' + 'a'.repeat(30);
+  for (const [id, output] of [['small', sample], ['large', 'x'.repeat(3000) + sample]]) {
+    const text = JSON.stringify({type:'tool',output});
+    insertTaskLog(store, task, text, 'now', id);
+    const row = store.get('SELECT * FROM task_logs WHERE id=?', id);
+    assert.equal(logContent(store,row),text); assert.equal(!!row.content_ref,id === 'large');
   }
-  assert.ok(store.get("SELECT content_ref FROM task_logs WHERE id='large'").content_ref, 'the large log went to the trajectory file');
-  assert.equal(logContent(store, store.get("SELECT * FROM task_logs WHERE id='plain'")), 'plain text [REDACTED].');
-  const scope = runScope('101', 't', 'run-r'), system = { role: 'system', content: 'S'.repeat(3000) };
-  const first = [system, { role: 'tool', tool_call_id: 'c1', content: JSON.stringify({ output: '  - Token: ' + printed }) }];
-  const second = [...first, { role: 'assistant', content: 'The token is ' + token + '.' }];
-  const refs = [first, second].map((messages, i) => store.trajectories.appendModelRequest(scope, 'm' + i, { model: 'fixture', messages }));
-  assert.equal(store.trajectories.read(refs[1]).data.from, 2, 'the next request still stores only its new message');
-  const request = store.trajectories.readModelRequest(refs[1]);
-  assert.deepEqual(visible(JSON.stringify(request)), []);
-  assert.deepEqual(request.messages.slice(1).map(message => message.content), [JSON.stringify({ output: '  - Token: [REDACTED]' }), 'The token is [REDACTED].']);
-  const response = store.trajectories.appendModelResponse(scope, 'm1', { choices: [{ message: { content: 'Found ' + token } }] });
-  assert.deepEqual(store.trajectories.read(response).data, { choices: [{ message: { content: 'Found [REDACTED]' } }] });
+  const secret = 'registered-for-this-deployment';
+  store.run('UPDATE accounts SET credentials=?',store.secrets.seal({token:secret},'account:a'));
+  const first = { role:'user',content:sample }, second = { role:'assistant',content:sample+' '+secret };
+  const expected = {...second, content:sample+' [REDACTED]'};
+  insertTaskLog(store,task,'before '+secret+' after','now','registered');
+  assert.equal(logContent(store,store.get("SELECT * FROM task_logs WHERE id='registered'")),'before [REDACTED] after');
+  store.trajectories.appendModelRequest(scope,'one',{messages:[first]});
+  const ref = store.trajectories.appendModelRequest(scope,'two',{messages:[first,second]});
+  assert.equal(store.trajectories.read(ref).data.from,1);
+  assert.deepEqual(store.trajectories.readModelRequest(ref).messages,[first,expected]);
+  assert.deepEqual(store.trajectories.read(store.trajectories.appendModelResponse(scope,'two',second)).data,expected);
 });
 
 test('the sealer closes files a stopped process left open and drops an incomplete last line', async t => {

@@ -1,6 +1,5 @@
 import type { GitHub } from '../github/client.js';
 import { verifiedEvidence, type FailureKind } from './classifier.js';
-import { redactCredentials } from '../core/redaction.js';
 
 export type Citation = { type: 'log'; job_id: number; lines: string[] }
   | { type: 'source'; path: string; lines: string[] }
@@ -62,5 +61,5 @@ export async function checkReports(github: GitHub, run: any, reports: FailureRep
     checked.push({ ...report, ...(!verified
       ? { withheld_reason: 'No cited reference could be verified; this report was withheld rather than automatically filed as unknown.' } : {}) });
   }
-  return redactCredentials(github.redactor.clean(checked));
+  return github.redactor.clean(checked);
 }
