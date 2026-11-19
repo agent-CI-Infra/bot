@@ -44,6 +44,8 @@ const ask = async (f, chat, text = '处理数据') => {
 
 test('two groups on one role get separate computers and HOMEs; the next turn reuses the computer and member changes keep the HOME', async t => {
   const f = await fixture(t), a = await boundGroup(f, ['101', '102'], 'oc_group'), b = await boundGroup(f, ['101'], 'oc_group_2');
+  // This test triggers each sweep itself. Drain scheduled maintenance before changing the bindings.
+  await f.service.close();
   const [ownerA, ownerB] = [a, b].map(chat => ownerId({ kind: 'group', subject: chat.id, tenant: chat.installation_tenant }));
   script(f, { [a.id]: [['write_file', { path: '~/report.md', content: 'group A data' }], ['run_command', { command: 'cat ~/report.md; echo scratch > /dev/null; echo tmp > note.txt' }]],
     [b.id]: [['read_file', { path: '~/report.md' }], ['run_command', { command: 'ls -A ~ | wc -l' }]] });
