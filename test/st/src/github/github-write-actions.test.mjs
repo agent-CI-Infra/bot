@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { credentialExamples, maskedExamples } from '../../../fixtures/public-credentials.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { Store } from '../../../../dist/storage/database.js';
@@ -87,8 +88,7 @@ test('github_write starts a workflow at the comment ceiling, returns the run onc
 
 test('a workflow input carrying a self-identifying token reaches GitHub without it', async t => {
   const f = await fixture(t); f.setCeiling('comment');
-  const token = 'ghs_' + 'X'.repeat(36);
-  const started = await f.write({ method: 'POST', path: '/actions/workflows/nightly.yml/dispatches', key: 'token', body: { ref: 'main', inputs: { note: `use ${token}.`, suite: 'ghs_prefix' } } });
+  const started = await f.write({ method: 'POST', path: '/actions/workflows/nightly.yml/dispatches', key: 'token', body: { ref: 'main', inputs: { note: `use ${credentialExamples}.`, suite: 'ghs_prefix' } } });
   assert.equal(started.workflow_run_id, 77);
-  assert.deepEqual(f.dispatches().map(r => r.body.inputs), [{ note: 'use [REDACTED].', suite: 'ghs_prefix' }]);
+  assert.deepEqual(f.dispatches().map(r => r.body.inputs), [{ note: `use ${maskedExamples}.`, suite: 'ghs_prefix' }]);
 });

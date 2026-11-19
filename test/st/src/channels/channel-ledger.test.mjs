@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { credentialExamples, maskedExamples } from '../../../fixtures/public-credentials.mjs';
 import { Store } from '../../../../dist/storage/database.js';
 import { ChannelLedger } from '../../../../dist/channels/ledger.js';
 import { ChannelHistorySync } from '../../../../dist/channels/history-sync.js';
@@ -435,12 +436,12 @@ test('Feishu sends, replies and edits mask registered and self-identifying value
   const { wire, service, id } = await channelFixture(t), adapter = service.adapter(service.connector(id));
   const sample = '密码: test_value\\n-----BEGIN CERTIFICATE-----';
   const content = { text: [sample, credentials.app_secret, Buffer.from('fixture-provider-key').toString('base64'),
-    'fixture-only-access-token', 'sk-'+'X'.repeat(20), 'tail'].join(' | ') };
+    'fixture-only-access-token', 'sk-'+'X'.repeat(20), credentialExamples, 'tail'].join(' | ') };
   const delivery = {receive_id:'oc_fixture',receive_id_type:'chat_id',content};
   await adapter.send(delivery,'send');
   await adapter.send({...delivery,reply_to:'om_source'},'reply');
   await adapter.update({...delivery,message_id:'om_edit'});
-  assert.deepEqual(wire.sent.map(item => item.content.text),Array(3).fill(sample+' | [REDACTED] | [REDACTED] | [REDACTED] | [REDACTED] | tail'));
+  assert.deepEqual(wire.sent.map(item => item.content.text),Array(3).fill(sample+' | [REDACTED] | [REDACTED] | [REDACTED] | [REDACTED] | '+maskedExamples+' | tail'));
 });
 
 test('ordinary binding questions and JSON remain visible while actual binding commands stay private',async t=>{

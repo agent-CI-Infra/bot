@@ -1,6 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import type { GitHub } from '../github/client.js';
-import { sha, TaskError } from '../agent/common.js';
+import { Redactor, sha, TaskError } from '../agent/common.js';
+import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
 import { taskBasis } from '../dispatch/basis.js';
 import { developedLabel, developingIssueLabel } from './labels.js';
 import { developingLabel } from '../rules/service.js';
@@ -47,10 +48,13 @@ export const milestoneTool = { type: 'function', function: { name: milestoneTool
     human_action: { type: 'string', description: 'stopped: what a person must decide or do so that the work can go on' } } } } };
 
 const maxText = 1500, maxItem = 500;
-const clip = (value: unknown, limit: number) => { const value_ = String(value ?? '').trim(); return value_.length > limit ? value_.slice(0, limit) + '…' : value_; };
-// Agent text goes into Markdown as it is, except that it cannot open an HTML comment and fake the bot's marker.
-const safe = (value: unknown, limit: number) => clip(value, limit).replace(/<!--/g, '&lt;!--');
-const strings = (value: unknown) => Array.isArray(value) ? value.filter(v => typeof v === 'string' && v.trim()).slice(0, 12).map(v => safe(v, maxItem)) : [];
+type PublicationValues = Pick<Redactor, 'publicationPattern'>;
+const safe = (text: string, limit: number) => {
+  text = text.trim();
+  return (text.length > limit ? text.slice(0, limit) + '…' : text).replace(/<!--/g, '&lt;!--');
+};
+// Mask before truncating: an excerpt may cut a private key before its closing delimiter.
+const excerpt = (value: unknown, limit: number, redactor: PublicationValues) => safe(publicText(String(value ?? ''), redactor), limit);
 
 /**
  * Checks and keeps a milestone the agent reported. Returns what the agent is told: the recorded milestone, or what to correct.
@@ -59,18 +63,21 @@ const strings = (value: unknown) => Array.isArray(value) ? value.filter(v => typ
 export function reportMilestone(store: Store, taskId: string, args: any): { recorded: true; milestone: string } | { error: string; message: string } {
   const row = store.get('SELECT milestones,language FROM issue_development_progress WHERE task_id=?', taskId);
   if (!row) return { error: 'milestone_unavailable', message: 'This development has no status comment yet; report the milestone again later.' };
+  const redactor = configuredRedactor(store);
+  const field = (value: unknown, limit: number) => excerpt(value, limit, redactor);
+  const strings = (value: unknown) => Array.isArray(value) ? value.filter(v => typeof v === 'string' && v.trim()).slice(0, 12).map(v => field(v, maxItem)) : [];
   const kind = String(args?.milestone ?? ''), invalid = (message: string) => ({ error: 'milestone_invalid', message });
   let value: any;
   if (kind === 'plan') {
-    value = { conclusion: safe(args.conclusion, maxText), changes: strings(args.changes), acceptance: strings(args.acceptance),
+    value = { conclusion: field(args.conclusion, maxText), changes: strings(args.changes), acceptance: strings(args.acceptance),
       decisions: (Array.isArray(args.decisions) ? args.decisions : []).filter((d: any) => typeof d?.decision === 'string' && d.decision.trim()).slice(0, 8)
-        .map((d: any) => ({ decision: safe(d.decision, maxItem), reason: safe(d.reason, maxItem) })) };
+        .map((d: any) => ({ decision: field(d.decision, maxItem), reason: field(d.reason, maxItem) })) };
     if (!value.conclusion || !value.changes.length) return invalid('A plan needs the conclusion of your analysis and the main changes (changes).');
   } else if (kind === 'completed') {
     value = { changes: strings(args.changes), tests: strings(args.tests) };
     if (!value.changes.length || !value.tests.length) return invalid('A completed milestone needs the key points of the change (changes) and the tests you ran (tests).');
   } else if (kind === 'stopped') {
-    value = { reason: safe(args.reason, maxText), human_action: safe(args.human_action, maxText) };
+    value = { reason: field(args.reason, maxText), human_action: field(args.human_action, maxText) };
     if (!value.reason) return invalid('A stopped milestone needs the reason.');
   } else return invalid('milestone must be plan, completed or stopped.');
   // The comment has one language, the one its headings use (the Issue's, unless the project sets one): a milestone in the
@@ -98,10 +105,11 @@ export function startProgress(store: Store, task: Row, issue: any) {
     store.run('UPDATE issue_development_progress SET milestones=?,final=0,pending=1,next_at=0,settled_status=NULL,updated_at=? WHERE task_id=?', JSON.stringify(milestones), now, id);
     return;
   }
-  const input = JSON.parse(task.input || '{}'), brief = input.manager?.brief, basis = taskBasis(store, id);
+  const manager = JSON.parse(task.input || '{}').manager, redactor = configuredRedactor(store);
+  const brief = manager?.brief, basis = taskBasis(store, id);
   const setting = store.get('SELECT review_language FROM policies WHERE repository_id=?', task.repository_id)?.review_language;
-  const start = { ...(basis ? { basis } : {}), ...(input.manager?.reason ? { reason: clip(input.manager.reason, maxText) } : {}),
-    ...(brief?.goal ? { goal: clip(brief.goal, maxText * 2) } : {}), ...(Array.isArray(brief?.criteria) ? { criteria: brief.criteria.slice(0, 12).map((c: unknown) => clip(c, maxItem)) } : {}) };
+  const start = { ...(basis ? { basis } : {}), ...(manager?.reason ? { reason: excerpt(manager.reason, maxText, redactor) } : {}),
+    ...(brief?.goal ? { goal: excerpt(brief.goal, maxText * 2, redactor) } : {}), ...(Array.isArray(brief?.criteria) ? { criteria: brief.criteria.slice(0, 12).map((c: unknown) => excerpt(c, maxItem, redactor)) } : {}) };
   store.run(`INSERT INTO issue_development_progress(task_id,repository_id,number,language,label,milestones,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
     ON CONFLICT(task_id) DO NOTHING`, id, task.repository_id, Number(task.object_number), reviewLanguage(setting, `${issue?.title ?? ''}\n${issue?.body ?? ''}`),
     developingLabel(store, task.repository_id) || null, JSON.stringify({ start }), now, now);
@@ -149,7 +157,7 @@ function controlStop(language: Language, status: string, code: string): { reason
 }
 
 /** The status comment of a development, as it reads for the task's current state. */
-export function renderProgress(row: Row, task: Row): string {
+export function renderProgress(row: Row, task: Row, redactor: PublicationValues = new Redactor()): string {
   const language: Language = row.language === 'zh' ? 'zh' : 'en', w = words[language], m = JSON.parse(row.milestones || '{}'), now = state(task);
   const colon = language === 'zh' ? '：' : ': ', field = (name: string, value: string) => `**${name}**${colon}${value}`;
   const bullets = (items: string[]) => items.map(item => `- ${item}`).join('\n');
@@ -166,18 +174,18 @@ export function renderProgress(row: Row, task: Row): string {
     `**${w.changes}**\n${bullets(m.plan.changes)}`, ...(m.plan.acceptance?.length ? [`**${w.acceptance}**\n${bullets(m.plan.acceptance)}`] : [])].join('\n\n'));
   if (now.pr) {
     // The agent's own account of the change, or else what it said when it published (the pull request summary and tests).
-    const highlights = m.completed?.changes ?? [safe(String(now.pr.result.summary ?? '').split(/\n\s*\n/)[0], 600)].filter(Boolean);
-    const tests = m.completed?.tests ?? (now.pr.result.validation ? testEvidence(now.pr.result).split('\n').filter(Boolean).map(line => safe(line, maxItem)) : []);
+    const highlights = m.completed?.changes ?? [safe(publicText(String(now.pr.result.summary ?? ''), redactor).split(/\n\s*\n/)[0]!, 600)].filter(Boolean);
+    const tests = m.completed?.tests ?? (now.pr.result.validation ? publicText(testEvidence(now.pr.result), redactor).split('\n').filter(Boolean).map(line => safe(line, maxItem)) : []);
     parts.push([`#### ${w.done}`, field(w.pr, `[#${now.pr.number}](${now.pr.url})`), ...(highlights.length ? [`**${w.highlights}**\n${bullets(highlights)}`] : []),
       ...(tests.length ? [`**${w.tests}**\n${bullets(tests)}`] : [])].join('\n\n'));
   } else if (now.stopped) {
     // The agent's reason when it stopped on its own (a milestone, or the summary of an unchanged tree), else the control plane's.
-    const own = m.stopped ?? (now.unchanged && now.result?.summary ? { reason: safe(now.result.summary, maxText) } : null);
+    const own = m.stopped ?? (now.unchanged && now.result?.summary ? { reason: excerpt(now.result.summary, maxText, redactor) } : null);
     const told = own ?? controlStop(language, now.status, String(task.error_code ?? now.status));
     parts.push([`#### ${w.stop}`, field(w.reason, told.reason), ...(told.human_action || (told as any).action ? [field(w.action, told.human_action || (told as any).action)] : [])].join('\n\n'));
   }
   parts.push(`<sub>${w.footer}</sub>`, `<!-- dept-bot:development-status:${row.task_id} -->`);
-  return parts.join('\n\n');
+  return publicText(parts.join('\n\n'), redactor);
 }
 
 async function addIssueLabel(github: GitHub, number: number, label: typeof developedLabel) {
@@ -206,28 +214,36 @@ export async function settleProgress(store: Store, taskId: string, github: GitHu
 async function settle(store: Store, taskId: string, client: GitHub | (() => Promise<GitHub>)): Promise<boolean> {
   const row = store.get('SELECT * FROM issue_development_progress WHERE task_id=?', taskId), task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
   if (!row || !task) return true;
-  const now = state(task), body = renderProgress(row, task), digest = sha(body), number = Number(row.number);
+  const now = state(task), number = Number(row.number);
   const wanted = !now.pr && !now.stopped ? developingIssueLabel(String(row.label ?? '')) : null;
   const changeDeveloping = !!wanted !== !!row.label_on;
   const markDeveloped = !!now.pr && row.settled_status !== now.status;
   const update = (fields: Record<string, unknown>) => store.run(`UPDATE issue_development_progress SET ${Object.keys(fields).map(key => key + '=?').join(',')},updated_at=? WHERE task_id=?`,
     ...Object.values(fields) as any[], new Date().toISOString(), taskId);
+  const settled = () => update({ settled_status: now.status, pending: 0, final: now.ended ? 1 : 0, failures: 0, next_at: 0, error: null });
   try {
-    const github = changeDeveloping || digest !== row.body_sha || markDeveloped ? typeof client === 'function' ? await client() : client : null;
-    if (github && changeDeveloping) {
+    if (typeof client === 'function' && !changeDeveloping && !markDeveloped && sha(renderProgress(row, task, configuredRedactor(store))) === row.body_sha) {
+      settled();
+      return true;
+    }
+    const github = typeof client === 'function' ? await client() : client;
+    if (changeDeveloping) {
       if (wanted) await addIssueLabel(github, number, wanted);
       else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(row.label)}`), undefined, true);
       update({ label_on: wanted ? 1 : 0 });
     }
     // The PR label and the linked comment can succeed independently. Keep the row pending until both are on GitHub.
     let labelError: unknown;
-    if (github && markDeveloped) {
+    if (markDeveloped) {
       try {
         await addIssueLabel(github, number, developedLabel);
         update({ settled_status: now.status, pending: 1 });
       } catch (error) { labelError = error; }
     }
-    if (github && digest !== row.body_sha) {
+    const redactor = registeredRedactor(store);
+    for (const value of github.redactor?.values ?? []) redactor.add(value);
+    const body = renderProgress(row, task, redactor), digest = sha(body);
+    if (digest !== row.body_sha) {
       const marker = `<!-- dept-bot:development-status:${taskId} -->`;
       let id: string | null = row.comment_id ? String(row.comment_id) : null;
       if (id && !await github.request('PATCH', github.path('/issues/comments/' + id), { body }, true)) id = null;
@@ -242,7 +258,7 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
       }
     }
     if (labelError) throw labelError;
-    update({ settled_status: now.status, pending: 0, final: now.ended ? 1 : 0, failures: 0, next_at: 0, error: null });
+    settled();
     return true;
   } catch (error) {
     deferProgress(store, taskId, error instanceof TaskError ? error.code : 'progress_write_failed');

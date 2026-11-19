@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { publicContent, publicText, Redactor } from '../../../runner/credential-redaction.mjs';
+import { exampleJwt, installationToken, maskedInstallation, pgpBlock } from '../../fixtures/public-credentials.mjs';
 
 test('only exact registered values and complete allowlisted formats are masked in public text', () => {
   const redactor = new Redactor(), value = 'deployed/+credential&';
@@ -8,12 +9,19 @@ test('only exact registered values and complete allowlisted formats are masked i
   const forms = [value, encodeURIComponent(value), Buffer.from(value).toString('base64'), Buffer.from(value).toString('base64url')];
   const tokenShapes = [...'pousr'].map(c => 'gh'+c+'_'+'X'.repeat(30)).concat([
     'github_pat_'+'0'.repeat(22), 'sk-'+'a'.repeat(20), 'AKIA'+'X'.repeat(16), 'ASIA'+'0'.repeat(16), 'AIza'+'_'.repeat(35),
-    ...[...'baprs'].map(c => 'xox'+c+'-'+'A'.repeat(10)), 'glpat-'+'Z'.repeat(20), 'rrt_'+'_'.repeat(16)]);
-  const shapes = [...tokenShapes, '-----BEGIN RSA PRIVATE KEY-----\nfirst\nsecond\n-----END RSA PRIVATE KEY-----'];
+    ...[...'baprs'].map(c => 'xox'+c+'-'+'A'.repeat(10)), 'glpat-'+'Z'.repeat(20), 'rrt_'+'_'.repeat(16),
+    'rrt_'+'I'.repeat(12)+'.'+'S'.repeat(43), installationToken, maskedInstallation]);
+  const shapes = [...tokenShapes, pgpBlock, '-----BEGIN RSA PRIVATE KEY-----\nfirst\nsecond\n-----END RSA PRIVATE KEY-----'];
   for (const token of tokenShapes) assert.equal(publicText('identifier_'+token, redactor), 'identifier_'+token);
   for (const item of [...forms, ...shapes]) assert.equal(publicText('before '+item+' after', redactor), 'before [REDACTED] after');
   for (const item of [...shapes,...forms.slice(1)]) assert.equal(redactor.text(item), item);
   assert.equal(redactor.text(value), '[REDACTED]');
+  assert.equal(publicText('example '+exampleJwt+'.', redactor), 'example '+exampleJwt+'.');
+  redactor.add(exampleJwt);
+  assert.equal(publicText('registered '+exampleJwt+'.', redactor), 'registered [REDACTED].');
+  for (const prefix of ['Token: ', '\\n', '\x1b[1m']) {
+    assert.equal(publicText(prefix+maskedInstallation+'.', redactor), prefix+'[REDACTED].');
+  }
   assert.deepEqual(publicContent({body: forms, max_tokens: 12}, redactor), {body: forms.map(() => '[REDACTED]'), max_tokens: 12});
 });
 

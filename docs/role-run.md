@@ -33,7 +33,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 - epoch 只由控制面在 run 绑定时分配（`allocateLease`），按任务单调递增，并写入 RunContext、运行令牌、事件、检查点。租约还记录调用方执行时持有的任务 claim（引擎的任务执行）；claim 被重新领取同样使旧租约失效。协调者等不在任务 claim 下运行的角色不绑定任务 claim，以自己的 worker claim 和租约 epoch 为准。
 - 同一 scope 的新 run 接管租约，旧 run 的令牌立即撤销；旧 run 之后的工具调用、事件、检查点和结果都以 `lease_epoch_stale` 拒绝，它的失败也不会改动 assignment 状态。
 - 网络断开后用 `events(handle, cursor)` 续读仍是原 run；重新执行或恢复才新建 run 和 epoch。
-- 运行令牌 `rrt_…` 只存哈希，绑定 tenant、project、task、run、epoch、role 和能力列表（`model:invoke`、`gateway:<tool>`、`github:read_token` 等）。默认 15 分钟有效，控制面持有该 run 时每分钟续期，崩溃后自然过期；结束、取消、预算耗尽或被接管时撤销。跨项目/任务/角色/运行复用、过期、撤销、旧租约和伪造均被拒绝。令牌进入运行的脱敏器，trace 再按形状脱敏。
+- 运行令牌 `rrt_…` 只存哈希，绑定 tenant、project、task、run、epoch、role 和能力列表（`model:invoke`、`gateway:<tool>`、`github:read_token` 等）。默认 15 分钟有效，控制面持有该 run 时每分钟续期，崩溃后自然过期；结束、取消、预算耗尽或被接管时撤销。跨项目/任务/角色/运行复用、过期、撤销、旧租约和伪造均被拒绝。运行脱敏器登记签发的完整令牌，内部轨迹按已登记原值替换。对外发布时也识别运行令牌的前缀和分段格式。
 - Process worker 在每次工具 RPC 上出示令牌；容器内 Claude Code 与 Codex 在每次模型中转请求、每次 stdio MCP `bot` 平台工具调用和每次 Git/`gh` 短期只读令牌申请时均出示 `rrt_…`，控制面逐次复核；运行自身的 guard 发现令牌失效即以 `run_token_revoked` 停止。
 
 ### 事件
