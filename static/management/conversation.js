@@ -370,6 +370,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     if (conversation) drafts.set(conversation, message.value);
     const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
+    // The list on screen is the previous scope's (or the previous pick) until the new one arrives: none of it is current now.
+    for (const choose of conversations.querySelectorAll('[aria-current]')) choose.removeAttribute('aria-current');
     showStatus('正在读取会话…');
     try {
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope);

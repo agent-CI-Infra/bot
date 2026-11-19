@@ -104,10 +104,17 @@ test('助手的作用域与会话在底栏入口处保留，不因页面切换�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const assistant = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await assistant.click();
-    const scope = page.locator('.management-scope-name');
+    const scope = page.locator('.management-scope-name'), current = page.locator('.management-conversation[aria-current=true]');
+    await expect(current).toHaveAttribute('data-conversation-id', /./);
+    const previous = await current.getAttribute('data-conversation-id');
     await switchConsoleProject(page, '101');
     await expect(scope).toHaveAttribute('data-scope', 'project:101');
-    const current = page.locator('.management-conversation[aria-current=true]'), id = await current.getAttribute('data-conversation-id');
+    // The scope label changes before the project's conversation list arrives. Each scope has its own conversations, so
+    // wait for the list the project rendered (a current conversation other than the previous scope's) before taking it.
+    await expect(current).toHaveAttribute('data-conversation-id', new RegExp(`^(?!${previous}$)[0-9a-f]+$`));
+    const id = await current.getAttribute('data-conversation-id');
+    const listed = (await (await page.request.get(f.h.admin + '/api/management/conversations')).json()).conversations;
+    expect(listed.find(item => item.id === id)?.scope).toBe('project:101');
     await page.locator('#console-mobile-nav a[data-page="board"]').click();
     await expect(page.locator('.management-window')).toBeHidden();
     await assistant.click();
