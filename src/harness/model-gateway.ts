@@ -595,7 +595,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       const cleaned = redactor.clean(value);
       const scope = store.trajectories.scopeOf(task);
       if (scope) {
-        store.run('UPDATE model_requests SET response_ref=? WHERE id=?', store.trajectories.append(scope, 'model_response', requestLogId, cleaned), requestLogId);
+        store.run('UPDATE model_requests SET response_ref=? WHERE id=?', store.trajectories.appendModelResponse(scope, requestLogId, cleaned), requestLogId);
       } else {
         const snap = task.conversation_id ? store.secrets.seal({ snapshot: traceSnapshot(cleaned) }, 'conversation-model-response:' + requestLogId) : traceSnapshot(cleaned);
         store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?', snap, requestLogId);

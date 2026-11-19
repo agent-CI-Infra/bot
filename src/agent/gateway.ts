@@ -67,7 +67,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   const scope=store.trajectories.scopeOf(task);
   const snapshot=(value:unknown,part:string)=>task.conversation_id?store.secrets.seal({snapshot:traceSnapshot(value)},'conversation-model-'+part+':'+requestLog):traceSnapshot(value);
   const respond=(value:unknown)=>{
-    if(scope)store.run('UPDATE model_requests SET response_ref=? WHERE id=?',store.trajectories.append(scope,'model_response',requestLog,value),requestLog);
+    if(scope)store.run('UPDATE model_requests SET response_ref=? WHERE id=?',store.trajectories.appendModelResponse(scope,requestLog,value),requestLog);
     else store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',snapshot(value,'response'),requestLog);
   };
   const captured=redactor.clean({ ...requestBody, model: model.model, [limit]: outputTokens, stream: true, stream_options: { include_usage: true } });

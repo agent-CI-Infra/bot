@@ -120,7 +120,7 @@ webhook 不直接创建开发任务，开发只由 Manager 按上述依据创建
 
 模型调用 `github_read_token` 时，runner 在任务邮箱写入请求，控制面轮询到后为本仓库签发一个 GitHub App 安装令牌：`repository_ids` 只含当前仓库，权限只取 `metadata`、`contents`、`issues`、`pull_requests`、`actions`、`checks`、`statuses` 中安装已授予的项，并一律降为 read；签发结果里只要有任何一项不是 read 就拒绝。机器人账号只有一个能写的长期 Token，不能派生更窄的令牌，所以不提供只读令牌，模型会收到 `github_app_required`。
 
-令牌经 manager 直接交给 runner，不写入 `task_tools` 或任务日志；runner 只把它放进该任务之后的 `run_command` 环境变量 `GH_TOKEN`、`GITHUB_TOKEN`，并在命令输出中替换为 `[REDACTED]`。模型拿到的工具结果只有变量名、仓库、权限和到期时间，看不到令牌本身。令牌加入任务的脱敏表，发往模型服务商的请求也会先脱敏。同一任务最多签发 10 次；模型阶段结束（完成、失败或被中止）时，控制面逐个调用 `DELETE /installation/token` 撤销。
+令牌经 manager 直接交给 runner，不写入 `task_tools` 或任务日志；runner 只把它放进该任务之后的 `run_command` 环境变量 `GH_TOKEN`、`GITHUB_TOKEN`，并在命令输出中替换为 `[REDACTED]`。模型拿到的工具结果只有变量名、仓库、权限和到期时间，看不到令牌本身。令牌加入任务的脱敏表，发往模型服务商的请求也会先脱敏。命令自己打印的令牌不一定等于登记的值（`gh auth status` 只遮住尾部），所以 Pi 返回给模型的工具结果还按格式去掉 GitHub 令牌、私钥等凭据，runner 事件和任务日志按全部凭据规则脱敏，见[轨迹文件](trajectories.md)。同一任务最多签发 10 次；模型阶段结束（完成、失败或被中止）时，控制面逐个调用 `DELETE /installation/token` 撤销。
 
 GitHub 安装令牌只有一小时，而一次检视常常跑得更久。控制面的每个 GitHub App 客户端（任务自身、只读令牌、`github_write` 等）在令牌剩余不足 15 分钟时先重新签发再发请求，权限与原令牌相同；GitHub 对 bot 自己签发的安装令牌回 401（过期或被吊销）时，重新签发并重试一次，第二次仍是 401 才进入 `waiting_permission`，诊断写明两枚令牌由哪个客户端在何时签发、何时到期、是否被 bot 吊销，不含令牌值。runner 不信任自己持有的令牌：模型每次调用 `github_read_token` 都向控制面重新换取，令牌剩余不足 10 分钟或检视会话进入下一轮（上一轮结束时控制面已撤销它）时，在下一条命令前先换取。
 

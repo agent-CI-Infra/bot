@@ -210,3 +210,29 @@ test('a task whose worktree cannot be made answers its file tools with the contr
   const events=(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.find(e=>e.type==='tool'&&e.name==='read_file').result,{error:'workspace_unavailable',message:'No worktree could be made for this task on the project computer.'});
 });
+
+// #1087: a command can print a token nobody registered, such as gh auth status with its masked tail. The model receives
+// the result without the token's form, ordinary code included as it is; the event log also applies the context rules.
+test('a token a command prints leaves the model-facing result and the events by its form; code the model edits stays',async t=>{
+  const base=await mkdtemp(join(tmpdir(),'pi-shapes-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
+  await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
+  // Constructed values: <prefix><id>_<JWT> with the tail gh masks after the token's last underscore.
+  const header=Buffer.from('{"alg":"RS256","typ":"JWT"}').toString('base64url'),payload=Buffer.from('{"iss":"fixture-app","installation_id":424242}').toString('base64url');
+  const printed=`ghs_424242_${header}.${payload}.fixture_${'*'.repeat(40)}`,code='const token = callOptions.token;\n';
+  await writeFile(join(root,'repo','status.txt'),`github.com\n  - Token: ${printed}\n`);await writeFile(join(root,'repo','code.js'),code);
+  const calls=[{name:'run_command',args:{command:'cat status.txt'}},{name:'read_file',args:{path:'code.js'}},{name:'finish_review',args:{summary:'Done'}}];
+  await writeFile(join(dir,'input.json'),JSON.stringify({model_transport:'gateway',workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+    tools:['read_file','run_command','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs'),seen=join(base,'model-results.jsonl');
+  await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
+  const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base,BOT_FIXTURE_RESULTS:seen},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
+  let output='';child.stderr.on('data',chunk=>output+=chunk);t.after(async()=>{child.kill('SIGKILL');await closed;});
+  assert.equal((await closed)[0],0,output);
+  const results=Object.fromEntries((await readFile(seen,'utf8')).trim().split('\n').map(JSON.parse).map(({name,result})=>[name,JSON.parse(result.content[0].text)]));
+  const events=await readFile(join(dir,'events.jsonl'),'utf8');
+  for(const text of [JSON.stringify(results),events])for(const piece of ['424242_',header,payload,'fixture_*'])assert.ok(!text.includes(piece),piece);
+  assert.equal(results.run_command.output,'github.com\n  - Token: [REDACTED]\n');
+  assert.equal(results.read_file.content,code,'the model reads the code it may edit as it is');
+  const logged=events.trim().split('\n').map(JSON.parse).filter(e=>e.type==='tool');
+  assert.equal(logged.find(e=>e.name==='read_file').result.content,'const token = [REDACTED];\n','the event log applies every credential rule');
+});

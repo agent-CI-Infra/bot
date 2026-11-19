@@ -161,3 +161,23 @@ test('recent results are bounded, expire and are shared by the same assistant co
   assert.equal(new ResultSession(store,first.scope,()=>assistantResultOwner(ownerId({kind:'group',tenant:'organization',subject:'group'})),()=>{}).recent().length,0);
   store.run('UPDATE tool_result_files SET expires_at=?',new Date(Date.now()-1).toISOString());assert.deepEqual(next.recent(),[]);
 });
+
+// #1087: the agent reads a result file back, so it loses credential shapes like the tool result it was cut from. Context
+// rules stay out: the file can hold code the agent edits.
+test('result files lose credential shapes in any chunking while ordinary code keeps its bytes',async t=>{
+  const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
+  const files=store.trajectories.results,scope=store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'});
+  const jwt=['{"alg":"RS256","typ":"JWT"}','{"iss":"fixture-app"}'].map(part=>Buffer.from(part).toString('base64url')).join('.');
+  const printed=`ghs_424242_${jwt}.fixture_${'*'.repeat(36)}`,code='const token = callOptions.token;\n';
+  const output=('中😀 build line\n').repeat(3000)+'  - Token: '+printed+'\n'+code+('tail 中\n').repeat(3000);
+  const expected=output.replace(printed,'[REDACTED]');
+  for(const [source,size] of [['tiny',3],['odd',10001]]){
+    const pieces=async function*(){const bytes=Buffer.from(output);for(let offset=0;offset<bytes.length;offset+=size)yield bytes.subarray(offset,offset+size);};
+    const ref=await files.save('role-a',scope,source,pieces(),()=>{});
+    let restored='',position=0;
+    do{const page=files.read('role-a',ref.file,position,65536);restored+=page.content;position=page.next_position;if(page.eof)break;}while(position<ref.bytes);
+    assert.equal(restored,expected,source);assert.equal(ref.bytes,Buffer.byteLength(expected));
+  }
+  const text=JSON.stringify({output:'  - Token: '+printed,content:code}),saved=files.saveText('role-a',scope,'whole',text);
+  assert.deepEqual(JSON.parse(files.read('role-a',saved.file).content),{output:'  - Token: [REDACTED]',content:code});
+});
