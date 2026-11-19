@@ -83,3 +83,32 @@ test('repository skill roots stay discoverable rather than hiding below .agents'
  assert.deepEqual(loadSkillsFromDir({dir:join(root,'skills'),source:'user'}).skills.map(s=>s.name).sort(),['roadmap-decomposition','team']);
  assert.equal(resolved.snapshot.skills.source.configured.source_path_root,'.agents/skills/');
 });
+
+test('a confirmed CI change gives its planning and writing roles the CI gate skill; other roles and tasks keep theirs',async t=>{
+ const s=fixture(t),ci=(role,options={})=>resolveRole(s,'r',role,'development.issue',{ciChange:true,...options});
+ const ordinary=resolve(s);
+ const manager=ci('manager');
+ assert.deepEqual(manager.snapshot.skills.source.defaults.map(d=>d.id),['roadmap-decomposition','layered-ci-gates']);
+ assert.notEqual(manager.snapshot.skills.content_hash,ordinary.snapshot.skills.content_hash);
+ assert.deepEqual(ordinary.snapshot.skills.source.defaults.map(d=>d.id),['roadmap-decomposition'],'other tasks keep the Manager bundle they had');
+ const dev=ci('dev'),paths=dev.snapshot.skills.files.map(f=>f.path);
+ assert.equal(dev.snapshot.skills.id,'@role-defaults/dev');assert.equal(dev.snapshot.skills.source.role,'dev');assert.equal(dev.snapshot.skills.source.configured,null);
+ assert.ok(paths.includes('defaults/layered-ci-gates/SKILL.md')&&paths.includes('defaults/layered-ci-gates/references/layers.md'),paths.join());
+ assert.match(skillFiles(s,'r',dev.snapshot.skills).find(f=>f.path==='defaults/layered-ci-gates/references/report.md').content,/# Recommendation report/);
+ // Reviewing and accepting the change are not where gates are designed: observers and evaluators keep their own bundle.
+ for(const role of ['reviewer','qa'])assert.equal(ci(role).snapshot.skills,null,role);
+ assert.equal(resolve(s).snapshot.skills.id,'@role-defaults/manager');
+ assert.equal(resolveRole(s,'r','dev','development.issue').snapshot.skills,null,'a development that may not change CI is unchanged');
+ // A project's own Dev bundle stays complete beside the default, under project/.
+ const config=bind(s,{...source('Project CI conventions.'),id:'dev-custom'});
+ saveConfiguration(s,'r',{expected_revision:config.revision,roles:[{role_id:'dev',skill_bundle_ref:{id:'dev-custom'}}]},'fixture');
+ const bound=ci('dev'),files=skillFiles(s,'r',bound.snapshot.skills);
+ assert.equal(files.find(f=>f.path==='project/notes.txt').content,'Keep this relative reference.');
+ assert.equal(bound.snapshot.skills.source.configured.id,'dev-custom');
+ const root=await mkdtemp(join(tmpdir(),'ci-change-skills-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const {loadSkillsFromDir}=await import('../../../../runner/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js');
+ await stageSessionSkills(root,files);
+ const loaded=loadSkillsFromDir({dir:join(root,'skills'),source:'user'});
+ assert.deepEqual(loaded.skills.map(s=>s.name).sort(),['layered-ci-gates','project']);
+ assert.deepEqual(loaded.diagnostics??[],[]);
+});

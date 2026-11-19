@@ -12,7 +12,7 @@ import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
 import { validateStages, type StageDefinition } from './stage-policy.js';
 import { cachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
-import {managerSkills} from './skill-defaults.js';
+import {roleSkills} from './skill-defaults.js';
 
 /**
  * RoleDefinitionV2: one project's versioned role configuration. Every reference names a fixed version: model profiles pin
@@ -680,7 +680,9 @@ export function rolePrompt(definition: RoleDefinitionV2) {
  * project default; the actual result is part of the snapshot. Unsupported combinations stop here, before any run starts.
  */
 export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean; entryExecutor?: boolean;
-  configuration?: RoleConfiguration; fallbackModel?:()=>{model:ReturnType<typeof openModel>;source:'workflow'|'project'} } = {}) {
+  configuration?: RoleConfiguration; fallbackModel?:()=>{model:ReturnType<typeof openModel>;source:'workflow'|'project'};
+  /** The task is a CI change a project administrator confirmed (#931): its planning and writing roles get the CI gate skill. */
+  ciChange?: boolean } = {}) {
   const config = roleConfiguration(s, repositoryId, options.configuration);
   if (options.expectedRevision !== undefined && options.expectedRevision !== config.revision) stop('role_configuration_changed', 'retry_wait', `角色配置已更新到 revision ${config.revision}，请求的是 ${options.expectedRevision}。`);
   const definition = config.roles.find(r => r.role_id === roleId), field = `roles.${roleId}`;
@@ -733,7 +735,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   const bundle = definition.skill_bundle_ref ? config.skills.find(b => b.id === definition.skill_bundle_ref!.id && b.revision === definition.skill_bundle_ref!.revision) : undefined;
   const projectFiles=definition.skill_bundle_ref?skillFiles(s,repositoryId,definition.skill_bundle_ref):[];
   const configuredSkills=bundle?{id:bundle.id,revision:bundle.revision,content_hash:bundle.content_hash,source:bundle.source,files:bundle.files}:null;
-  const skills=roleId==='manager'?managerSkills(s,repositoryId,configuredSkills,projectFiles,options.persist!==false):configuredSkills;
+  const skills=roleSkills(s,repositoryId,{id:roleId,kind:definition.kind},configuredSkills,projectFiles,options.persist!==false,!!options.ciChange);
   const system = rolePrompt(definition);
   const snapshot: RoleSnapshot = { schema: 2, repository_id: repositoryId, role_id: roleId, kind: definition.kind, role_revision: definition.revision, config_revision: config.revision, legacy: !!config.legacy,
     name: definition.name, responsibility: definition.responsibility,

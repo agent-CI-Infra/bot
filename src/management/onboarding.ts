@@ -17,6 +17,7 @@ import { developingLabel } from '../rules/service.js';
 import { localParts, parseCron } from '../schedules/time.js';
 import { obj } from './catalog-base.js';
 import { OnboardingApply } from './onboarding-apply.js';
+import { sameRepositoryName } from './repository-name.js';
 import type { ManagementService } from './service.js';
 
 /**
@@ -302,7 +303,7 @@ export class RepositoryOnboarding {
     const chosen = onboardingModel(this.store, repository);
     // Tokens cover only this repository and only the read scopes; the turn revokes them when it ends.
     const repositories = new ServiceRepositories(this.store, redactor, guard, selected => {
-      if (selected !== id && selected !== repository.full_name) fail(404, 'repository_not_found');
+      if (selected !== id && !sameRepositoryName(repository.full_name, selected)) fail(400, 'repository_not_found');
       return onboardingAccess(this.store, actor, id);
     }, () => Object.keys(agentReadPermissions), this.githubUrl);
     const policy = repository.started ? this.store.get('SELECT * FROM policies WHERE repository_id=?', id) : undefined, plan = this.latestPlan(id, session.id);

@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/openJiuwen-ai/sciencediscovery",
+  "revision": "a117ae9964f86cdfa6be5c21969a3e8ea5e07507",
+  "license": "Apache-2.0",
+  "references": [
+    ".ci/README.md",
+    ".ci/tier-policy.mjs",
+    ".ci/test-catalog.mjs",
+    ".ci/run-layer.mjs",
+    ".ci/test-selector.mjs",
+    ".ci/ci-contract.mjs",
+    ".github/workflows/ci.yml",
+    ".github/workflows/nightly.yml",
+    ".github/workflows/real-e2e.yml",
+    ".github/workflows/release.yml",
+    ".agents/skills/ci/SKILL.md",
+    ".agents/skills/ci/references/github.md"
+  ],
+  "adaptation": "Original Bot wording: the cumulative tier layout, tagged case catalog, event-routed aggregate check, Environment-scoped credentials and documentation-only fast path are summarised as ideas; no code or text is copied."
+}

@@ -9,6 +9,7 @@ import {executionBaseline} from '../agent/common.js';
 import { executionModel, taskConfiguration } from '../tasks/configuration.js';
 import { cleanRoleMessages } from './storage.js';
 import { workOf } from '../work/catalog.js';
+import { workflowChanges } from '../tasks/pull-request.js';
 import { runAgent,type AgentSpec } from '../agent/runtime.js';
 import { environmentProfiles } from './catalog.js';
 import { TaskToolGateway,gatewayToolNames,gatewayCapabilities } from './gateway.js';
@@ -42,7 +43,7 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
  let config=override??(fixed?roleConfig(s,task):undefined);
  if(!override&&config&&instance){const revision=Math.max(Number(instance.config_revision??0),Number(instance.pending_revision??0));
   if(revision>config.revision)config=configurationRevision(s,task.repository_id,revision)??config;}
- return resolveRole(s,task.repository_id,role,workOf(task as any),{harness,pinned,configuration:config,entryExecutor,
+ return resolveRole(s,task.repository_id,role,workOf(task as any),{harness,pinned,configuration:config,entryExecutor,ciChange:workflowChanges(task),
   // 'workflow' names a work type's own model (task_models), as role snapshots always called it.
   fallbackModel:fixed?()=>({model:model??executionModel(s,task,workOf(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),workOf(task as any))?'workflow':'project'}):undefined});
 }

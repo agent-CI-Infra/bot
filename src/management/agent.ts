@@ -26,6 +26,8 @@ import { conversationScheduleName, conversationScheduleTool } from '../channels/
 import { RepositoryOnboarding, onboardingRepositoryOf, onboardingToolNames, onboardingTools, type OnboardingTurn } from './onboarding.js';
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 import { lateSchedules } from '../actions/late-schedules.js';
+import { readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
+import { sameRepositoryName } from './repository-name.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -186,8 +188,8 @@ export class ManagementAgent {
       eligible:()=>{if(!this.service.projects(actor).some(project=>{try{this.service.scope(actor,project,'tasks.write');return true;}catch(error){if(error instanceof HttpError&&error.status===403)return false;throw error;}}))fail(403,'capability_forbidden');},
       notify:text=>progress({text})});
     const repositories=new ServiceRepositories(this.store,new Redactor(),guard,selected=>{
-      const project=this.store.all('SELECT * FROM repositories').find(r=>r.id===selected||r.full_name===selected);
-      if(!project)fail(404,'repository_not_found');this.service.scope(actor,project!.id);return project!;
+      const project=this.store.all('SELECT * FROM repositories').find(r=>r.id===selected||sameRepositoryName(r.full_name,selected));
+      if(!project)fail(400,'repository_not_found');this.service.scope(actor,project!.id);return project!;
     },()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
     const media=onboardingRepository?undefined:this.mediaTurn?.(actor,conversation,input,computer,()=>{assertCurrent(actor);this.conversation(base,conversation);});
     const schedules=onboardingRepository?undefined:this.conversationSchedules?.(actor,conversation);
@@ -201,14 +203,14 @@ export class ManagementAgent {
     const permissions=()=>JSON.parse(serviceRole(this.store,managementAssistant)?.permissions??'{}') as RolePermissions;
     // github_write (#381): the assistant's role permission, and the current user's authority to write tasks in the project.
     const write=async(args:any)=>{
-      const {repository:selected,...rest}=args,project=this.store.all('SELECT id,full_name FROM repositories').find(r=>r.id===selected||r.full_name===selected);
-      if(!project)fail(404,'repository_not_found');
+      const {repository:selected,...rest}=args,project=this.store.all('SELECT id,full_name FROM repositories').find(r=>r.id===selected||sameRepositoryName(r.full_name,selected));
+      if(!project)fail(400,'repository_not_found');
       const repository=this.service.scope(actor,project!.id,'tasks.write');
       return {repository:project!.full_name,result:await githubWrite({store:this.store,repository,redactor:new Redactor(),guard,apiUrl:this.service.githubUrl,scope:`management:${conversation}:${input.source_message}`,
         actor:{kind:'management',service_role_id:managementAssistant,conversation_id:conversation,source_message:String(input.source_message),principal_id:actor.principal_id},
         allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation)},rest)};
     };
-    const tools=onboardingRepository?[readToolResult,...serviceRepositoryTools,...onboardingTools,sendMessageTool]:[readToolResult,...managementTools,...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
+    const tools=onboardingRepository?[readToolResult,...serviceRepositoryTools,...onboardingTools,sendMessageTool]:[readToolResult,...managementTools,...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,readSkillTool,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     let ownHost:OwnTaskHost|undefined;
@@ -236,6 +238,7 @@ export class ManagementAgent {
         else if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await (onboarding?.repositories??repositories).execute(name,args);
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
+        else if(name===readSkillName)result=readSkill(args);
         else if(name===conversationScheduleName){if(!schedules)fail(403,'tool_not_allowed');result=schedules!(args);}
         else if(name===startRequestsName){if(!deciding)fail(403,'tool_not_allowed');validate(startRequestsTool.function.parameters,args);result=await requests.tool(actor,args);}
         else if(assistantComputerNames.includes(name))result=computer?await computer.execute(name,args):fail(409,'computer_not_configured');
