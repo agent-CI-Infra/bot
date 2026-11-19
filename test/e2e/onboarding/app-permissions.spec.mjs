@@ -166,10 +166,30 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     const englishResult = englishRow.locator('.permission-result');
     await expect(englishResult).toContainText('Actions: set to "Read and write" (currently "No access")');
     await expect(englishResult).toContainText('Subscribe to events: tick Issue comment, Pull request review, Pull request review comment');
-    await expect(englishResult).toContainText('Workflows: set to "Read and write" (currently "No access"); Confirmed CI changes need it');
+    // A feature gap usually names one feature, so the sentence has to read as well for one as for many.
+    await expect(englishResult).toContainText('Workflows: set to "Read and write" (currently "No access"); needed for Confirmed CI changes');
     await expect(englishResult).toContainText('This is an event subscription, not the Workflows permission');
     await expect(englishResult).toContainText("Open the App's Permissions & events");
     expect(cjkWords(await englishResult.innerText()), 'Chinese text left in the English permission report').toEqual([]);
+    // The wizard's "使用已登记的 App" card draws the same component with its own phrase for the button's subject. The
+    // wizard chrome around it is another slice of #527 and stays Chinese; the widget's own words do not.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(h.admin + '/#/settings/onboarding/1');
+    const wizardRow = page.locator('#onboarding-panel .row').filter({ has: page.locator('.permission-check') }).first();
+    await expect(wizardRow).toBeVisible();
+    await expect(wizardRow.getByRole('button', { name: 'Check permissions and events', exact: true })).toBeVisible();
+    await wizardRow.locator('.permission-check button').first().click();
+    const wizardResult = wizardRow.locator('.permission-result');
+    await expect(wizardResult).toContainText('Actions: set to "Read and write" (currently "No access")');
+    await expect(wizardResult).toContainText('needed for Confirmed CI changes');
+    await expect(wizardResult).toContainText("needed for Actions failure analysis. This is an event subscription, not the Workflows permission");
+    expect(cjkWords(await wizardResult.innerText()), 'Chinese text left in the English wizard report').toEqual([]);
+    for (const [width, height] of [[1440, 900], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      await expect(wizardResult).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `horizontal overflow in the wizard with the report open at ${width}px`).toBe(true);
+      expect(cjkWords(await wizardResult.innerText()), `Chinese text left in the wizard report at ${width}px`).toEqual([]);
+    }
     expect(errors).toEqual([]);
   } finally { await h.stop(); await new Promise(resolve => github.close(resolve)); }
 });
