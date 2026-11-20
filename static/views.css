@@ -36,7 +36,7 @@ pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:var(--co
 pre.output.snapshot-output{margin-top:10px;max-height:340px;background:var(--color-text);color:var(--color-text-inverse);border-color:var(--color-text);overscroll-behavior:contain}
 .calls{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.call{display:inline-block;max-width:100%;padding:2px 8px;border-radius:4px;background:#e8f0fb;color:#2c5791;font-size:var(--font-size-1);overflow-wrap:anywhere}
 a.call-link{background:#e5f2e9;color:#24603d}
-.live{display:flex;align-items:center;gap:8px;margin:12px 0 0;color:#2c5791;font-size:var(--font-size-label)}.live::before{content:"";flex-shrink:0;width:8px;height:8px;border-radius:50%;background:#2c5791;animation:live-pulse 1.2s ease-in-out infinite}
+.live{display:flex;align-items:center;gap:8px;margin:12px 0 0;color:var(--color-info);font-size:var(--font-size-label)}.live::before{content:"";flex-shrink:0;width:8px;height:8px;border-radius:50%;background:var(--color-info);animation:live-pulse 1.2s ease-in-out infinite}
 @keyframes live-pulse{50%{opacity:.25}}@media(prefers-reduced-motion:reduce){.live::before{animation:none}}
 .side-card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-card);padding:var(--space-6);box-shadow:var(--shadow-card);min-width:0}.side-card p{margin:6px 0 0;font-size:var(--font-size-label)}.side-card .actions{margin-top:8px}
 .facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:8px 0 0;font-size:var(--font-size-1)}.facts dt{color:var(--color-text-muted);white-space:nowrap}.facts dd{margin:0;overflow-wrap:anywhere}
@@ -615,8 +615,8 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-goal-box {
   padding: 10px 14px;
   border-radius: 6px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
   min-width: 0;
 }
 .task-goal-line { margin: 0; font-size: var(--font-size-2); line-height: 1.55; overflow-wrap: anywhere; }
@@ -633,7 +633,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-detail-page .task-next-text {
   margin: 0;
   font-size: var(--font-size-label);
-  color: #475569;
+  color: var(--color-text-muted);
 }
 .task-fault-box {
   margin-top: 10px;
@@ -668,7 +668,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-ext-label {
   font-size: var(--font-size-1);
   font-weight: 600;
-  color: #475569;
+  color: var(--color-text-muted);
   white-space: nowrap;
 }
 .task-ext-link {
@@ -851,13 +851,13 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   flex-wrap: wrap;
   gap: 8px 16px;
   padding: 12px 14px;
-  background: #f8fafc;
+  background: var(--color-surface-alt);
   cursor: pointer;
   list-style: none;
   min-width: 0;
 }
 .role-run-summary::-webkit-details-marker { display: none; }
-.role-run-running > .role-run-summary { background: #eff6ff; }
+.role-run-running > .role-run-summary { background: var(--color-info-bg); }
 .role-run-title-row {
   display: flex;
   align-items: center;
@@ -868,14 +868,14 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 }
 .role-run-title-row::before {
   content: '▸';
-  color: #475569;
+  color: var(--color-text-muted);
   font-size: 13px;
   flex-shrink: 0;
 }
 .role-run-fold[open] > .role-run-summary .role-run-title-row::before { content: '▾'; }
 .role-run-name { font-size: var(--font-size-2); color: var(--color-text); }
 .role-run-brief {
-  color: #475569;
+  color: var(--color-text-muted);
   font-size: var(--font-size-label);
   overflow-wrap: anywhere;
 }
@@ -885,7 +885,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   flex-wrap: wrap;
   gap: 8px 10px;
   font-size: var(--font-size-1);
-  color: #475569;
+  color: var(--color-text-muted);
 }
 .role-run-model {
   padding: 2px 7px;
@@ -905,7 +905,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .role-run-conclusion {
   padding: 9px 12px;
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--color-surface-alt);
   border-left: 3px solid var(--color-brand);
   font-size: var(--font-size-label);
 }
@@ -951,7 +951,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   min-width: 0;
 }
 .step-fold-summary::-webkit-details-marker { display: none; }
-.step-fold-summary:hover { background: #f8fafc; }
+.step-fold-summary:hover { background: var(--color-hover); }
 .step-fold-title {
   display: flex;
   align-items: center;
@@ -961,19 +961,19 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 }
 .step-fold-title::before {
   content: '▸';
-  color: #64748b;
+  color: var(--color-text-muted);
   font-size: 12px;
   flex-shrink: 0;
 }
 .step-fold[open] > .step-fold-summary .step-fold-title::before { content: '▾'; }
-.step-fold-num { color: #475569; font-weight: 600; flex-shrink: 0; }
+.step-fold-num { color: var(--color-text-muted); font-weight: 600; flex-shrink: 0; }
 .step-fold-caption { font-weight: 500; color: var(--color-text); overflow-wrap: anywhere; }
 .step-fold-meta {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: var(--font-size-1);
-  color: #475569;
+  color: var(--color-text-muted);
   flex-shrink: 0;
 }
 .step-fold-stat {
@@ -1001,11 +1001,11 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   padding: 12px 18px;
   font-weight: 600;
   font-size: var(--font-size-label);
-  color: #475569;
+  color: var(--color-text-muted);
   list-style: none;
 }
 .task-archive-fold > summary::-webkit-details-marker { display: none; }
-.task-archive-fold > summary::before { content: '▸ '; color: #64748b; }
+.task-archive-fold > summary::before { content: '▸ '; color: var(--color-text-muted); }
 .task-archive-fold[open] > summary::before { content: '▾ '; }
 .task-archive-body.task-side {
   border-left: 0;
@@ -1014,7 +1014,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   padding: 16px 18px;
-  background: #f8fafc;
+  background: var(--color-surface-alt);
 }
 .task-archive-body.task-side > .fold.raw { grid-column: 1 / -1; }
 
@@ -1038,6 +1038,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
   :root:not([data-theme="light"]) :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
+  :root:not([data-theme="light"]) :is(.task-goal-box, .role-run-conclusion, .role-run-summary) { background: var(--color-surface-alt); border-color: var(--color-border); }
   :root:not([data-theme="light"]) .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
   :root:not([data-theme="light"]) .step-running { border-color: var(--color-border); }
   :root:not([data-theme="light"]) .fault-action { color: var(--color-text); }
@@ -1048,6 +1049,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 }
 :root[data-theme="dark"] :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
 :root[data-theme="dark"] :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
+:root[data-theme="dark"] :is(.task-goal-box, .role-run-conclusion, .role-run-summary) { background: var(--color-surface-alt); border-color: var(--color-border); }
 :root[data-theme="dark"] .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
 :root[data-theme="dark"] .step-running { border-color: var(--color-border); }
 :root[data-theme="dark"] .fault-action { color: var(--color-text); }

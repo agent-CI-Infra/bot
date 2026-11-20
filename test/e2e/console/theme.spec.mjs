@@ -257,9 +257,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       const pages = [
-        ['#/tasks/t-750', ['pre.output', '.step', '.task-side', '.task-archive-body', '.back-link']],
+        ['#/tasks/t-750', ['pre.output', '.step', '.task-side', '.task-archive-body', '.back-link', '.task-goal-box', '.task-goal-line', '.task-next-text', '.task-ext-label', '.task-archive-fold > summary', '.live', '.task-metrics']],
         ['#/projects', [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar']],
-        ['#/projects/101/overview', ['.project-page']],
+        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link']],
       ];
       for (const [hash, selectors] of pages) {
         await page.goto(h.admin + '/' + hash);
@@ -302,5 +302,30 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     await page.locator('#rows .project-task-preview').first().hover();
     await page.waitForTimeout(250);
     readable((await colours(page, ['.project-task-preview']))[0], 4.5, 'hover .project-task-preview');
+
+    // Review at 20c9066e: the project detail tabs, the current tab, the footer link and the role-board row hover were
+    // still the light values, so dark text/links sat on near-white chips (1.51 / 1.59 / 1.14 / 3.00:1). Measure the
+    // computed pairs at both layouts, and hover the row for real because its fill only changes on hover.
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.goto(h.admin + '/#/projects/101/overview');
+      await page.waitForSelector('.role-board-row');
+      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.waitForTimeout(400);
+      for (const sample of await colours(page, ['.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.role-board-row'])) {
+        expect(sample.missing, `project detail ${sample.selector} ${width} must render`).toBeFalsy();
+        readable(sample, 4.5, `project detail ${sample.selector} ${width}`);
+        const [r, g, b] = rgb(sample.background);
+        expect(r + g + b, `project detail ${sample.selector} ${width} background ${sample.background}`).toBeLessThan(200);
+      }
+      await page.locator('.role-board-row').first().hover();
+      await page.waitForTimeout(250);
+      for (const sample of await colours(page, ['.role-board-row', '.role-board-row .role-title-line'])) {
+        expect(sample.missing, `project detail hover ${sample.selector} ${width} must render`).toBeFalsy();
+        readable(sample, 4.5, `project detail hover ${sample.selector} ${width}`);
+        const [r, g, b] = rgb(sample.background);
+        expect(r + g + b, `project detail hover ${sample.selector} ${width} background ${sample.background}`).toBeLessThan(200);
+      }
+    }
   } finally { await h.stop(); }
 });
