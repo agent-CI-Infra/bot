@@ -3,7 +3,8 @@
 // place to change it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilityStates, chatCapabilities, chatExamplesFor, groupCapabilityNotice, groupVenue } from '../../../../dist/projects/capabilities.js';
+import { capabilityStates, chatCapabilities, chatExamplesFor, groupCapabilityNotice, groupGatesOf, groupVenue } from '../../../../dist/projects/capabilities.js';
+import { levelPermissions } from '../../../../dist/channels/service-bindings.js';
 
 const allEvents = {
   'issue.opened': true, 'issue.updated': true, 'issue.mention': true, 'issue.labels': [], 'issue.development_label': true,
@@ -149,4 +150,13 @@ test('custom groups count by their items: no reads, no writes or no task creatio
 test('a published Issue review starts development under the project rule even with Issue-opened off', () => {
   const development = scenario('development', { events: { 'issue.opened': false, 'issue.development_label': false } });
   assert.equal(development.state, 'ready'); assert.match(development.detail, /检视结论为可开发/);
+});
+
+test('a group counts for questions only with reads that answer them: Checks or Commit Status alone do not', () => {
+  // Items as a binding stores them: the read level's, with resources taken away or added.
+  const read = levelPermissions('read'), none = { ...read, github_contents: 'none', github_issues: 'none', github_pull_requests: 'none', github_actions: 'none', github_checks: 'none', github_statuses: 'none' };
+  assert.deepEqual(groupGatesOf({ ...none, github_checks: 'read', github_statuses: 'read' }), { questions: false, write: false, dispatch: false });
+  assert.deepEqual(groupGatesOf({ ...none, github_contents: 'read' }), { questions: true, write: false, dispatch: false });
+  assert.deepEqual(groupGatesOf({ ...read, github_contents: 'write' }), { questions: true, write: false, dispatch: false });
+  assert.deepEqual(groupGatesOf(levelPermissions('dispatch')), { questions: true, write: true, dispatch: true });
 });

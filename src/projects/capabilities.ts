@@ -138,6 +138,16 @@ export const mentionNames = () => {
   return configured.toLowerCase() === 'off' ? [] : configured.split(',').map(name => name.trim()).filter(Boolean);
 };
 
+/** What answering questions about the code reads: Checks or Commit Status reads alone do not let a group read code or discussions. */
+const questionReads = new Set(['contents', 'issues', 'pull_requests', 'actions']);
+/**
+ * What one group's items allow, not its level's name (#1156 review): a custom binding may lack the reads questions need, Issue
+ * and pull request writes, or task creation.
+ */
+export function groupGatesOf(items: RolePermissions): { questions: boolean; write: boolean; dispatch: boolean } {
+  const venue = groupVenue(items);
+  return { questions: githubReadScopes(items).some(resource => questionReads.has(resource)), write: !!(venue.issues || venue.pulls), dispatch: !!venue.dispatch };
+}
 /** The facts of one project the projection reads. */
 export function projectCapabilityInputs(store: Store, repositoryId: string): CapabilityInputs {
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
@@ -146,12 +156,9 @@ export function projectCapabilityInputs(store: Store, repositoryId: string): Cap
   if (store.hasTable('channel_service_bindings'))
     for (const binding of store.all('SELECT * FROM channel_service_bindings WHERE enabled=1'))
       if (scopeProjects(store, String(binding.principal_id)).includes(repositoryId)) {
-        const items = bindingPermissions(binding), level = bindingLevel(items), venue = groupVenue(items);
+        const items = bindingPermissions(binding), level = bindingLevel(items), gates = groupGatesOf(items);
         groups[level] = (groups[level] ?? 0) + 1;
-        // What the group's tools allow, not its level's name: a custom binding may lack reads, writes or task creation.
-        if (githubReadScopes(items).length) groupGates.questions++;
-        if (venue.issues || venue.pulls) groupGates.write++;
-        if (venue.dispatch) groupGates.dispatch++;
+        groupGates.questions += Number(gates.questions); groupGates.write += Number(gates.write); groupGates.dispatch += Number(gates.dispatch);
       }
   const schedules = store.hasTable('schedules')
     ? store.all("SELECT spec FROM schedules WHERE project_id=? AND state='active'", repositoryId).filter(row => { try { return JSON.parse(String(row.spec)).workflow === scheduledCheck; } catch { return false; } }).length

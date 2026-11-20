@@ -79,4 +79,9 @@ test('a custom group counts only for what its items allow', async t => {
   // Visible tasks without task creation still cannot ask for tests.
   await items({ project_tasks: 'read' });
   assert.equal((await read()).scenarios.find(c => c.id === 'testing').state, 'off');
+  // Checks read alone does not read code or discussions: such a group is no question entry (second review of #1162).
+  await items({ github_contents: 'none', github_issues: 'none', github_pull_requests: 'none', github_actions: 'none', github_checks: 'read', project_tasks: 'none' });
+  card = await read();
+  assert.deepEqual(card.groups, { custom: 1 });
+  assert.equal(card.scenarios.find(c => c.id === 'qa').state, 'off');
 });
