@@ -133,7 +133,9 @@ async function render(quiet = false) {
     // The repository number leaves the first screen but stays on hover, with or without a detail line.
     if (tab === 'projects' && row.id) content.title = t('projects.list.number', { id: row.id });
     if (detail) { const detailLine = element('p', detail); detailLine.title = detail; content.append(detailLine); } line.append(content);
-    if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
+    // Hidden installation rows carry no project status; drawing one would print the string "undefined" beside the
+    // unstarted and hidden badges. Every other list row still shows the state it does have.
+    if(listTabs.includes(tab)){const statusBadge=taskTab?taskState(row):row.status==null?null:state(row.status);if(statusBadge)status.append(statusBadge);}
     // #544: the project list is one shared-column table. Each category gets its own cell so 启用/检视/开发/权限/门禁/看板/任务
     // line up across rows and organizations; the row keeps the selectors the rest of the console refreshes by.
     if (tab === 'projects' && !hiddenView) {

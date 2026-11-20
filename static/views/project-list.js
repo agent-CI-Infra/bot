@@ -297,7 +297,9 @@ const eventPermissionNotes = {
 const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', check_run: 'Check run', status: 'Status', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
 // Access gaps (access_gaps) name the features they stop; src/app/access.ts holds what each feature needs.
-const featureNames = { review: '检视', review_threads: '关闭已修复的行内意见', development: '开发', ci_reads: '任务读取 CI 结果', ci_checks: '控制台检查状态展示', board: '看板', release: '发版本', ci_changes: '经确认的 CI 改动', actions_failures: 'Actions 失败分析', actions_dispatch: '触发 Actions 工作流' };
+// The values are dictionary keys so the visible chip and its title read in the console's language (#527).
+const featureNames = { review: 'projects.list.gap.feature.review', review_threads: 'projects.list.gap.feature.review_threads', development: 'projects.list.gap.feature.development', ci_reads: 'projects.list.gap.feature.ci_reads', ci_checks: 'projects.list.gap.feature.ci_checks', board: 'projects.list.gap.feature.board', release: 'projects.list.gap.feature.release', ci_changes: 'projects.list.gap.feature.ci_changes', actions_failures: 'projects.list.gap.feature.actions_failures', actions_dispatch: 'projects.list.gap.feature.actions_dispatch' };
+const featureName = feature => featureNames[feature] ? t(featureNames[feature]) : feature;
 const featureImpact = {
   review: '读不到代码或发不出检视意见', review_threads: '检视照常发布，但作者修复后的行内意见不会自动关闭', development: '推不了分支、开不了或更新不了 PR', ci_reads: '任务看不到 Actions、检查和提交状态',
   ci_checks: '控制台任务列表与详情收不到或读不到检查状态',
@@ -314,7 +316,7 @@ const eventImpact = {
   status: '控制台任务列表与详情收不到实时的提交状态检查推送',
   workflow_run: '默认分支和版本标签上的失败运行不会生成排查事件',
 };
-const gapLabels = { permission: '权限不足', role: '权限不足', event: '事件未订阅', account: '需要 GitHub App' };
+const gapLabels = { permission: 'projects.list.gap.kind.permission', role: 'projects.list.gap.kind.role', event: 'projects.list.gap.kind.event', account: 'projects.list.gap.kind.account' };
 // Whether a stopped feature is in use on this row: on, off, or run by hand (releases and CI change PRs have no switch).
 function featureState(row, feature) {
   const active = !!row.enabled, on = { review: row.review_enabled, review_threads: row.review_enabled, development: row.development_enabled, ci_reads: row.review_enabled || row.development_enabled,
@@ -326,10 +328,11 @@ function featureState(row, feature) {
 }
 const stateNames = { on: '已开启', off: '未开启', manual: '手动使用时' };
 function gapWhat(gap) {
-  if (gap.kind === 'permission') return `${permissionNames[gap.name] || gap.name} 需要「${accessNames[gap.required] || gap.required}」，现在「${gap.current ? accessNames[gap.current] || gap.current : 'No access'}」`;
-  if (gap.kind === 'event') return `未订阅事件 ${eventNames[gap.name] || gap.name}`;
-  if (gap.kind === 'role') return `机器人账号的仓库角色需要「${roleNames.write}」，现在「${roleNames[gap.current] || gap.current || '无'}」`;
-  return '项目挂在机器人账号上，不是 GitHub App 安装';
+  if (gap.kind === 'permission') return t('projects.list.gap.permission', { permission: permissionNames[gap.name] || gap.name,
+    required: accessNames[gap.required] || gap.required, current: gap.current ? accessNames[gap.current] || gap.current : t('projects.list.gap.no_access') });
+  if (gap.kind === 'event') return t('projects.list.gap.event', { event: eventNames[gap.name] || gap.name });
+  if (gap.kind === 'role') return t('projects.list.gap.role', { required: roleNames.write, current: roleNames[gap.current] || gap.current || t('projects.list.gap.role_none') });
+  return t('projects.list.gap.account');
 }
 function gapHow(gap, row) {
   const owner = row.owner_login ? `（${row.owner_login}）` : '';
@@ -339,14 +342,14 @@ function gapHow(gap, row) {
   return '这些功能只用 GitHub App 安装令牌。在「系统初始化」创建 GitHub App 并安装到这个仓库，项目改用该 App 账号后才能使用。';
 }
 function gapImpact(gap, row) {
-  const used = gap.features.map(feature => `${featureNames[feature] || feature}（${stateNames[featureState(row, feature)]}）`).join('、');
+  const used = gap.features.map(feature => `${featureName(feature)}（${stateNames[featureState(row, feature)]}）`).join('、');
   if (!gap.features.length) return '接入基线要求这一级别；各功能目前用到的级别已经满足，暂不影响使用。';
   if (gap.kind === 'event') return `${eventImpact[gap.name] || '相关触发不会到达'}。涉及：${used}。`;
-  return gap.features.map(feature => `${featureNames[feature] || feature}（${stateNames[featureState(row, feature)]}）：${featureImpact[feature] || '无法使用'}`).join('；') + '。';
+  return gap.features.map(feature => `${featureName(feature)}（${stateNames[featureState(row, feature)]}）：${featureImpact[feature] || '无法使用'}`).join('；') + '。';
 }
 function gapSummary(gap) {
-  const names = gap.features.map(feature => featureNames[feature] || feature).join('、');
-  return gapWhat(gap) + (names ? `（影响${/^[A-Za-z]/.test(names) ? ' ' : ''}${names}）` : '');
+  const names = gap.features.map(featureName).join(t('projects.list.gap.features'));
+  return gapWhat(gap) + (names ? t('projects.list.gap.impact', { names, space: /^[A-Za-z]/.test(names) ? ' ' : '' }) : '');
 }
 // Use the full sync's installation snapshots: one installation can cover many repositories, including hidden ones.
 function installationSyncNotice(result) {
@@ -416,13 +419,13 @@ function permissionCell(row) {
 // when a stopped feature is on; a gap only for unused features is informational. Always drawn (hidden when nothing is
 // missing) so that a later permission check can swap it in place.
 function permissionBadge(row) {
-  const gaps = row.access_gaps || [], labels = [...new Set(gaps.map(gap => gapLabels[gap.kind]))];
+  const gaps = row.access_gaps || [], labels = [...new Set(gaps.map(gap => t(gapLabels[gap.kind])))];
   if (!labels.length) { const chip = element('span', ''); chip.hidden = true; chip.dataset.permission = ''; return chip; }
   const urgent = gaps.some(gap => gap.features.some(feature => featureState(row, feature) === 'on'));
   const chip = button(labels.join(' · '), () => openAccessGaps(row), `status status-${urgent ? 'warning' : 'info'} status-alert`);
   chip.prepend(warningIcon()); chip.dataset.permission = '';
-  chip.title = gaps.map(gapSummary).join('；') + '。点击查看处理方法。';
-  chip.setAttribute('aria-label', `${labels.join('、')}：${chip.title}`);
+  chip.title = t('projects.list.gap.title', { summary: gaps.map(gapSummary).join(t('projects.list.gap.summary_separator')) });
+  chip.setAttribute('aria-label', t('projects.list.gap.aria', { labels: labels.join(t('projects.list.gap.labels')), title: chip.title }));
   return chip;
 }
 // Replaces the permission badge of rows already on the list; nothing else in a row is redrawn.
