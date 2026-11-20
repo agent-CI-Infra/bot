@@ -21,16 +21,21 @@ async function reopenScope(page) {
 const chunk = (res, delta, finish = null) => res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n');
 const complete = res => { chunk(res, {}, 'stop'); res.end('data: [DONE]\n\n'); };
 
-test('real model streaming renders Markdown before completion, shows tool progress, preserves intermediate text and replays without writes', async ({ page, context }) => {
+test('streams intermediate and final answers, and copies all the turn text after replay', async ({ page, context }) => {
   test.setTimeout(60000);
   const f = await managementFixture(), next = deferred(), final = deferred(), errors = [], requests = [];
   page.on('pageerror', err => errors.push(err.message));
+  const intermediate = '### 正在检查\n\n先读取任务状态。';
+  const progressMessage = '**已找到任务**，正在核对等待原因。';
   const markdown = '## 检查结果\n\n**项目电脑未启动**，任务正在等待。\n\n- 查看项目电脑\n- [执行记录](https://example.com/runs)\n\n> 状态来自已读取的任务。\n\n```js\nconst state = "waiting_environment";\n```\n\n| 项目 | 状态 |\n| --- | --- |\n| 测试项目 | 等待环境 |\n\n- [x] 已查询\n- [ ] 待恢复\n\n[危险链接](javascript:alert(1))\n\n<img src="/unexpected-image" onerror="window.markdownAttack=1"><script>window.markdownAttack=1</script><input type="text" value="injected"><svg onload="window.markdownAttack=1"></svg>';
   f.modelState.respond = async (body, res) => {
     requests.push(body); res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     if (!body.messages.some(item => item.role === 'tool')) {
-      chunk(res, { content: '### 正在检查\n\n先读取任务状态。' }); await next.promise;
-      chunk(res, { tool_calls: [{ index: 0, id: 'read-task', type: 'function', function: { name: 'management_query', arguments: JSON.stringify({ operation: 'get_task', target: { project_id: '101', task_id: 'blocked' }, arguments: {} }) } }] }); complete(res);
+      chunk(res, { content: intermediate }); await next.promise;
+      chunk(res, { tool_calls: [
+        { index: 0, id: 'read-task', type: 'function', function: { name: 'management_query', arguments: JSON.stringify({ operation: 'get_task', target: { project_id: '101', task_id: 'blocked' }, arguments: {} }) } },
+        { index: 1, id: 'report-progress', type: 'function', function: { name: 'send_message', arguments: JSON.stringify({ text: progressMessage }) } },
+      ] }); complete(res);
     } else {
       chunk(res, { content: markdown.slice(0, 35) }); await final.promise;
       chunk(res, { content: markdown.slice(35) }); complete(res);
@@ -47,7 +52,9 @@ test('real model streaming renders Markdown before completion, shows tool progre
     await expect(feed.locator('.management-progress')).toBeHidden();
     await message.fill('下一条草稿'); next.resolve();
     await expect(feed.locator('.management-step-summary')).toContainText('读取任务状态');
+    await expect(feed.locator('.management-step-preview')).toHaveText('blocked');
     await expect(feed.locator('.management-step-status')).toHaveText('已完成');
+    await expect(feed.getByRole('heading', { name: '正在检查', exact: true })).toBeVisible();
     await expect(feed.getByRole('heading', { name: '检查结果', exact: true })).toBeVisible();
     await expect(message).toHaveValue('下一条草稿');
     mkdirSync('.tmp/management-live', { recursive: true }); await page.screenshot({ path: '.tmp/management-live/stream-desktop.png' });
@@ -58,7 +65,7 @@ test('real model streaming renders Markdown before completion, shows tool progre
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
     await expect(feed.locator('.management-progress > summary')).toHaveText('执行进展 · 1/1 步完成');
     await expect(page.getByRole('button', { name: '停止', exact: true })).toBeHidden();
-    await expect(feed.locator('.management-answer')).toHaveCount(2);
+    await expect(feed.locator('.management-answer')).toHaveCount(3);
     await expect(feed.locator('pre code')).toHaveText('const state = "waiting_environment";\n');
     await expect(feed.locator('table tbody tr td').last()).toHaveText('等待环境');
     await expect(feed.locator('blockquote')).toContainText('状态来自已读取的任务');
@@ -68,19 +75,80 @@ test('real model streaming renders Markdown before completion, shows tool progre
     await expect(feed.locator('input[type=checkbox]')).toHaveCount(2);
     expect(await page.evaluate(() => window.markdownAttack)).toBeUndefined();
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-    await feed.getByRole('button', { name: '复制回答', exact: true }).last().click();
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(markdown);
+    const copy = feed.getByRole('button', { name: '复制本回合回答', exact: true });
+    await expect(copy).toHaveCount(1);
+    await page.getByRole('button', { name: '发送', exact: true }).hover();
+    await expect(copy).toHaveCSS('opacity', '0');
+    await feed.locator('.management-progress-message').hover();
+    await expect(copy).toHaveCSS('opacity', '1');
+    await expect(copy).toHaveCSS('height', '26px');
     await page.screenshot({ path: '.tmp/management-live/result-desktop.png' });
+    await copy.click();
+    const copied = [intermediate, progressMessage, markdown].join('\n\n');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(copied);
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(message).toBeInViewport(); await expect(page.getByRole('button', { name: '发送', exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: '.tmp/management-live/result-mobile.png' });
     await page.reload(); await reopenScope(page);
-    await expect(feed.locator('.management-turn-state')).toHaveText('已完成'); await expect(feed.locator('.management-answer')).toHaveCount(2);
+    await expect(feed.locator('.management-turn-state')).toHaveText('已完成'); await expect(feed.locator('.management-answer')).toHaveCount(3);
     await expect(feed.getByRole('heading', { name: '检查结果', exact: true })).toBeVisible();
+    await expect(copy).toHaveCount(1);
+    await page.evaluate(() => navigator.clipboard.writeText(''));
+    await copy.focus();
+    await copy.press('Enter');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(copied);
     expect(requests).toHaveLength(2); expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(errors).toEqual([]);
   } finally { next.resolve(); final.resolve(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('long execution progress scrolls independently and previews command and file arguments', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    const conversation = (await f.admin('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
+    const run = (await f.admin('/api/management/conversations/' + conversation + '/messages', 'POST', { source_message: 'progress-preview', content: '检查仓库接入' })).value;
+    const history = await settled(f.admin, conversation, run.id);
+    const terminal = history.events.filter(event => event.type === 'reply' || event.type === 'done');
+    f.h.store.run("DELETE FROM management_events WHERE message_id=? AND type IN ('reply','done')", run.id);
+    const command = 'git status --short\ngit diff -- docs/onboarding/README.md docs/development.md';
+    const tools = [
+      { name: 'run_command', arguments: { command } },
+      ...Array.from({ length: 12 }, (_, i) => ({ name: 'read_file', arguments: { path: 'docs/onboarding/section-' + (i + 1) + '.md' } })),
+    ];
+    const recorded = new Date().toISOString();
+    const add = (type, data) => f.h.store.run('INSERT INTO management_events(message_id,type,data,created_at) VALUES(?,?,?,?)', run.id, type, JSON.stringify(data), recorded);
+    for (const [index, tool] of tools.entries()) {
+      const event = { ...tool, call_id: 'fixture-' + index };
+      add('tool_call', event); add('tool_result', { name: event.name, call_id: event.call_id, result: {} });
+    }
+    for (const event of terminal) add(event.type, event.data);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, f);
+    const progress = page.locator('.management-progress'), steps = progress.locator('.management-steps');
+    await expect(progress.locator('.management-step')).toHaveCount(tools.length + 1);
+    const commandStep = progress.locator('.management-step').nth(1);
+    await expect(commandStep.locator('summary').first()).toContainText('在助手电脑运行命令');
+    await expect(commandStep.locator('.management-step-preview')).toHaveText('git status --short git diff -- docs/onboarding/README.md docs/development.md');
+    await expect(progress.locator('.management-step-preview').nth(2)).toHaveText('docs/onboarding/section-1.md');
+    expect(await steps.evaluate(node => node.scrollHeight > node.clientHeight && node.clientHeight <= 260)).toBe(true);
+    await steps.hover();
+    mkdirSync('.tmp/management-live', { recursive: true });
+    await page.screenshot({ path: '.tmp/management-live/progress-desktop.png' });
+    await commandStep.locator('summary').first().click();
+    await commandStep.getByText('查看请求参数', { exact: true }).click();
+    await expect(commandStep.locator('.management-step-arguments pre')).toContainText(JSON.stringify(command));
+    await commandStep.locator('summary').first().click();
+    await steps.hover();
+    await page.mouse.wheel(0, 1000);
+    await expect(progress.locator('.management-step-preview').last()).toBeInViewport();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await steps.evaluate(node => { node.scrollTop = 0; });
+    await progress.evaluate(node => node.scrollIntoView({ block: 'start' }));
+    await expect(commandStep.locator('.management-step-preview')).toHaveCSS('white-space', 'nowrap');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: '.tmp/management-live/progress-mobile.png' });
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
 test('stop, model failure and restart interruption are visible and retain partial answers', async ({ page }) => {

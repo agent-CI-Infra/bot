@@ -73,16 +73,18 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   let dynamicRecommendations = null;
   const pendingMarkdown = new Set(), confirmButtons = new Set(), recommendationButtons = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
+  const conversationIdle = () => !!conversation && historyReady && !opening && !submitting && !active;
   function pickRecommendation(item) {
-    if (opening || !conversation) return;
+    if (!conversationIdle()) return;
     message.value = item.prompt;
     drafts.set(conversation, item.prompt);
     message.focus();
     try { message.setSelectionRange(item.prompt.length, item.prompt.length); } catch { /* Selection range unsupported. */ }
   }
   function syncRecommendationVisibility() {
-    welcomeRecommendations.hidden = !welcomeRecommendationList.childElementCount;
-    recommendationBar.hidden = !welcome.hidden || !accessSlot.hidden || !recommendationBar.childElementCount;
+    const idle = conversationIdle();
+    welcomeRecommendations.hidden = !idle || !welcomeRecommendationList.childElementCount;
+    recommendationBar.hidden = !idle || !welcome.hidden || !recommendationBar.childElementCount;
   }
   function syncRecommendations(nextDynamic = undefined) {
     if (nextDynamic !== undefined) dynamicRecommendations = Array.isArray(nextDynamic) && nextDynamic.length ? nextDynamic : null;
@@ -171,7 +173,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const composerDisabled = opening || !conversation;
     message.disabled = composerDisabled;
     for (const choose of recommendationButtons) choose.disabled = composerDisabled;
-    send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active;
+    send.disabled = !conversationIdle(); stopButton.hidden = !active;
     fresh.disabled = opening || submitting || !conversation; sessionToggle.disabled = opening || !conversation;
     for (const sync of confirmButtons) sync();
     syncRecommendationVisibility();
@@ -238,11 +240,23 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const assistant = element('div', '', 'management-assistant'), avatar = element('span', '✦', 'management-avatar'); avatar.setAttribute('aria-hidden', 'true');
     const content = element('div', '', 'management-assistant-content'), meta = element('div', '', 'management-assistant-meta');
     const badge = element('span', '', 'management-turn-state'), elapsed = element('span', '', 'management-elapsed');
-    meta.append(element('strong', '管理助手'), badge, elapsed);
+    const copyLabel = '复制本回合回答', copyStatus = element('span', '', 'sr-only');
+    copyStatus.setAttribute('role', 'status');
+    let copyTimer;
+    const copy = button('', async () => {
+      try {
+        await navigator.clipboard.writeText(value.answers.join('\n\n'));
+        copyStatus.textContent = '已复制'; copy.dataset.copied = 'true';
+        clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => { copyStatus.textContent = ''; delete copy.dataset.copied; }, 1600);
+      } catch { showError(new Error('复制失败，请选中回答后复制。')); }
+    }, 'btn-text management-copy-turn');
+    copy.setAttribute('aria-label', copyLabel); copy.title = copyLabel;
+    meta.append(element('strong', '管理助手'), badge, elapsed, copy, copyStatus);
     const progress = element('details', '', 'management-progress'), progressSummary = element('summary', '执行进展'), stepsBody = element('div', '', 'management-steps');
     progress.hidden = true; progress.open = true; progress.append(progressSummary, stepsBody);
     const replies = element('div', '', 'management-replies'); content.append(meta, progress, replies); assistant.append(avatar, content); item.append(assistant); feed.append(item);
-    const value = { item, replies, badge, elapsed, progress, progressSummary, stepsBody, steps: [], provisional: null,
+    const value = { item, replies, badge, elapsed, copy, answers: [], progress, progressSummary, stepsBody, steps: [], provisional: null,
       state: record?.state ?? 'pending', stage: '正在连接助手', startedAt: record?.created_at ?? new Date().toISOString(), finishedAt: record?.updated_at, notice: null };
     turns.set(id, value); paintTurn(value); return value;
   };
@@ -257,11 +271,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const completed = value.steps.filter(step => step.state === 'succeeded').length;
     value.progressSummary.textContent = '执行进展 · ' + completed + '/' + value.steps.length + ' 步完成';
     value.progress.hidden = !value.steps.length;
+    value.copy.hidden = !value.answers.length;
     value.item.setAttribute('aria-busy', String(running));
   }
   function finishTurn(value, state, at) {
     value.state = state; value.finishedAt = at;
-    if (value.provisional) { value.provisional.node.classList.remove('management-stream'); value.provisional = null; }
+    finishAnswer(value);
     for (const step of value.steps.filter(step => step.state === 'running')) setStepState(step, state === 'completed' ? 'unknown' : 'interrupted');
     if (state === 'interrupted' && !value.notice) {
       value.notice = element('p', '服务重启中断了这次处理。已产生的结果保留在执行进展中，请核对后再继续。', 'management-run-notice'); value.replies.append(value.notice);
@@ -271,12 +286,15 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   function answer(value) {
     if (value.provisional) return value.provisional;
     const node = element('article', '', 'management-answer management-stream'), body = element('div', '', 'management-markdown');
-    const item = { node, body, text: '' }, actions = element('div', '', 'management-answer-actions');
-    const copy = button('复制回答', async () => {
-      try { await navigator.clipboard.writeText(item.text); copy.textContent = '已复制'; }
-      catch { showError(new Error('复制失败，请选中回答后复制。')); }
-    }, 'quiet');
-    actions.append(copy); node.append(body, actions); value.replies.append(node); value.provisional = item; return item;
+    const item = { node, body, text: '' };
+    node.append(body); value.replies.append(node); value.provisional = item; return item;
+  }
+  function finishAnswer(value) {
+    const item = value.provisional;
+    if (!item) return;
+    item.node.classList.remove('management-stream');
+    if (item.text?.trim()) value.answers.push(item.text);
+    value.provisional = null;
   }
   function setStepState(step, state) {
     step.state = state; step.box.dataset.state = state;
@@ -286,14 +304,21 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const box = element('details', '', 'management-step'), summary = element('summary', '', 'management-step-summary');
     // The assistant's own independent tasks (#312) are named by their title; the inner queries and commands show as their own steps.
     const own = { start_own_task: '独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务' }[data.name];
-    const toolLabel = { start_repository: '仓库启动与申请', start_requests: '处理启动申请', github_read: '读取仓库内容', github_search: '检索仓库内容', read_job_log: '读取 Actions 日志', github_write: '写入 GitHub', run_command: '在助手电脑运行命令', read_file: '读取助手电脑文件', write_file: '写入助手电脑文件' }[data.name];
-    const operation = data.arguments?.operation, caption = own ? own + (data.arguments?.title ? '：' + data.arguments.title : '')
-      : managementOperationLabels[operation] ?? operation ?? toolLabel ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
+    const toolLabel = { start_repository: '仓库启动与申请', start_requests: '处理启动申请', github_read: '读取仓库内容', github_search: '检索仓库内容', read_job_log: '读取 Actions 日志', github_write: '写入 GitHub', run_command: '在助手电脑运行命令', read_file: '读取助手电脑文件', write_file: '写入助手电脑文件', delete_file: '删除助手电脑文件', read_skill: '读取技能', read_tool_result: '读取工具结果' }[data.name];
+    const args = data.arguments ?? {}, target = args.target ?? {}, operation = args.operation;
+    const caption = own ?? managementOperationLabels[operation] ?? operation ?? toolLabel ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
+    const preview = [args.command, args.path, args.file, args.query, args.arguments?.query, args.title, args.job_id, args.task_id, target.task_id, target.workflow_id, args.repository, target.project_id]
+      .find(value => (typeof value === 'string' && value.trim()) || typeof value === 'number');
     const indicator = element('span', '', 'management-step-indicator'); indicator.setAttribute('aria-hidden', 'true');
     const state = element('span', '', 'management-step-status'), detail = element('div', '', 'management-step-detail');
-    summary.append(indicator, element('span', caption, 'management-step-caption'), state); box.append(summary, detail); value.stepsBody.append(box);
+    summary.append(indicator, element('span', caption, 'management-step-caption'));
+    if (preview !== undefined) {
+      const line = String(preview).replace(/\s*[\r\n]+\s*/g, ' ').trim();
+      const snippet = element('span', line, 'management-step-preview'); snippet.title = line; summary.append(snippet);
+    }
+    summary.append(state); box.append(summary, detail); value.stepsBody.append(box);
     if (data.arguments) {
-      const args = element('details', '', 'management-step-arguments'); args.append(element('summary', '查看请求参数'), element('pre', JSON.stringify(data.arguments, null, 2))); detail.append(args);
+      const request = element('details', '', 'management-step-arguments'); request.append(element('summary', '查看请求参数'), element('pre', JSON.stringify(data.arguments, null, 2))); detail.append(request);
     }
     const step = { id: data.call_id ?? 'legacy-' + sequence, box, detail, status: state, name: data.name, state: 'running' };
     value.steps.push(step); setStepState(step, 'running'); paintTurn(value); return step;
@@ -379,9 +404,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const data = row.data, currentTurn = turn(row.message_id), replies = currentTurn.replies;
     if (row.type === 'running' || row.type === 'model_start') {
       currentTurn.state = 'running'; currentTurn.stage = data.turn > 0 ? '正在整理结果' : '正在分析请求';
-      if (row.type === 'model_start' && currentTurn.provisional) { currentTurn.provisional.node.classList.remove('management-stream'); currentTurn.provisional = null; }
+      if (row.type === 'model_start') finishAnswer(currentTurn);
     } else if (row.type === 'tool_call') {
-      if (currentTurn.provisional) { currentTurn.provisional.node.classList.remove('management-stream'); currentTurn.provisional = null; }
+      finishAnswer(currentTurn);
       const step = toolStep(currentTurn, data, row.sequence);
       currentTurn.stage = step.box.querySelector('.management-step-caption').textContent;
     } else if (row.type === 'tool_result') {
@@ -409,18 +434,21 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       currentTurn.stage = '正在整理结果';
       onActivity(!!active, true);
     } else if (row.type === 'reply') {
-      const item = answer(currentTurn); item.text = data.text; item.node.classList.remove('management-stream'); queueMarkdown(item); currentTurn.provisional = null;
+      const item = answer(currentTurn); item.text = data.text; queueMarkdown(item); finishAnswer(currentTurn);
       onActivity(!!active, true);
     } else if (row.type === 'message') {
       // A progress message the assistant sent while working (#435): its own labelled entry, in order, before the final answer.
-      if (currentTurn.provisional) { currentTurn.provisional.node.classList.remove('management-stream'); currentTurn.provisional = null; }
-      const item = answer(currentTurn); item.node.classList.remove('management-stream'); item.node.classList.add('management-progress-message');
+      finishAnswer(currentTurn);
+      const item = answer(currentTurn); item.node.classList.add('management-progress-message');
       item.node.prepend(element('span', '进展消息 ' + data.sequence, 'management-progress-label'));
-      item.text = data.text; queueMarkdown(item); currentTurn.provisional = null;
+      item.text = data.text; queueMarkdown(item); finishAnswer(currentTurn);
       currentTurn.stage = '已发送进展'; onActivity(!!active, true);
     } else if (row.type === 'model_retry') {
       // The failed attempt's partial answer is not the answer: drop it, the retry writes a new one.
-      if (currentTurn.provisional) { currentTurn.provisional.node.remove(); currentTurn.provisional = null; }
+      if (currentTurn.provisional) {
+        pendingMarkdown.delete(currentTurn.provisional);
+        currentTurn.provisional.node.remove(); currentTurn.provisional = null;
+      }
       currentTurn.stage = `模型暂时没有响应，正在重试（第 ${data.retry}/${data.retries} 次）`;
     } else if (row.type === 'text') {
       const item = answer(currentTurn); item.text += data.delta ?? ''; queueMarkdown(item);
@@ -532,7 +560,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     } finally { if (alive(generation)) { opening = false; updateBusy(); } }
   }
   async function submit(body, sourceMessage = crypto.randomUUID()) {
-    if (!conversation || opening || !historyReady || submitting || active) return false;
+    if (!conversationIdle()) return false;
     const id = conversation, generation = scopeGeneration; submitting = true; updateBusy(); showStatus();
     try {
       const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: sourceMessage, ...body });
