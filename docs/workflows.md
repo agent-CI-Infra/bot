@@ -32,17 +32,19 @@
 | 档位 | 含义 |
 | --- | --- |
 | `disallow` 不允许自动合并 | 包括 bot 自己的 PR 在内都不自行合并；只有对仓库有写权限的维护者在 GitHub 评论、飞书或管理会话里明确要求合并某条 PR 时才合并 |
-| `non_bot_only` 不自动合并 bot 开发的 PR | bot 开的 PR（`bot_pull_requests`）仍要维护者明确要求；其他 PR 满足仓库规则时可以自动合并 |
+| `non_bot_only` 不自动合并 bot 开发的 PR | bot 开的 PR 仍要维护者明确要求；其他 PR 满足仓库规则时可以自动合并。bot 开的 PR 指 `bot_pull_requests` 登记的，以及作者是 bot 自己 GitHub 账号的（例如经 `github_write POST /pulls` 开的）；读不到作者时按 bot 的算 |
 | `allow_all` 允许所有自动合并 | 包括 bot 自己的 PR，满足仓库规则时都可以自动合并 |
 
 档位在「监听与触发」页的「自动合并」卡片、`PATCH /api/repositories/:id/policy` 或管理命令 `project.update` 里设置，`get_effective_config` 返回当前档位；改变档位记一条审计 `policy.auto_merge`。
 
-合并只有一个入口：`github_write` 的 `PUT /pulls/{n}/merge`。控制面先用只读令牌读 PR 和目标分支的规则（与 `POST /api/tasks/:id/merge` 共用 `src/github/merge-queue.ts`）：目标分支要求 merge queue 时改用 GraphQL `enqueuePullRequest` 送入队列，按 Agent 给的 `sha` 或读到的 head 固定，合并方式由队列设置决定，回执带 `queued: true` 和队列条目；否则直接合并。两种方式同一道闸门：能力上限 `develop`、调用方角色对 Contents 和 Pull requests 都有写权限，以及本策略；写令牌只含这两项写权限。回执的 `via` 写明是 `merge` 还是 `merge_queue`。
+合并只有一个入口：`github_write` 的 `PUT /pulls/{n}/merge`。控制面先用只读令牌读 PR 和目标分支的规则（与 `POST /api/tasks/:id/merge` 共用 `src/github/merge-queue.ts`）：目标分支要求 merge queue 时改用 GraphQL `enqueuePullRequest` 送入队列，按 Agent 给的 `sha` 或读到的 head 固定，合并方式由队列设置决定，回执带 `queued: true` 和队列条目；否则直接合并；读不出目标分支是否要求队列（规则、分支保护和 GraphQL 都读不到）时返回 `merge_queue_unknown`，不发送，不会退回直接合并。两种方式同一道闸门：能力上限 `develop`、调用方角色对 Contents 和 Pull requests 都有写权限，以及本策略；写令牌只含这两项写权限。回执的 `via` 写明是 `merge` 还是 `merge_queue`。
 
 档位要求维护者请求时（`disallow` 下的所有 PR、`non_bot_only` 下 bot 的 PR），调用要带 `merge_request`，控制面核实请求的来源，而不是相信模型的转述：
 
 - **GitHub 链接**：这条 PR 上的普通评论（`#issuecomment-…`）、检视（`#pullrequestreview-…`）或行内评论（`#discussion_r…`）。作者不能是 bot（App 账号、本 bot 的账号或带 bot 标记的内容），并且在平台的仓库协作者缓存（#1158）里是 write、maintain 或 admin，或是安装所有者。
-- **`current_message`**：管理助手或群聊助手正在回答的这条消息。管理会话看登录的这个人；飞书群看发这条消息的人自己关联的平台账号，不是群绑定的配置人。这个人要在该项目有写任务的权限（仓库写权限或项目管理员给的）。Manager 分派和任务里没有这样的消息，只能引用 GitHub 链接。
+- **`current_message`**：管理助手或群聊助手正在回答的这条消息。管理会话看登录的这个人；飞书群看发这条消息的人自己关联的平台账号，不是群绑定的配置人。这个人要在该项目有写任务的权限（仓库写权限或项目管理员给的）。Manager 分派和任务里没有这样的消息，只能引用 GitHub 链接；它们的提示词因此只写 GitHub 链接，飞书或管理会话里的请求由那里的助手合并。
+
+不经 PR 直接移动默认分支的写入同样受这个策略约束，按合并 bot 自己的改动处理：`PUT`/`DELETE /contents/...` 写在默认分支上（不写 `branch` 时就是默认分支）、`PATCH`/`DELETE /git/refs/heads/<默认分支>`、`POST /merges` 合进默认分支。`allow_all` 下由仓库自己的分支规则决定；`disallow` 和 `non_bot_only` 下要带 `merge_request`，链接可以在本仓库任一 Issue 或 PR 上，否则返回 `auto_merge_not_allowed`（带 `default_branch`），提示改走分支、PR 和 `PUT /pulls/{n}/merge`。写其他分支、建新 ref 不受影响。
 
 请求的文字是不是真的要求合并这条 PR，由 Agent 判断并在回报时引用；批准、"LGTM" 或检查通过都不算。没有核实的请求时返回 `auto_merge_not_allowed`（带 `policy`、`bot_pull_request` 和原因），不签发写令牌、不发送，账本和审计记下这次拒绝；准备合并期间档位被调严，发送前同样拒绝。档位不要求请求时，`merge_request` 不核对也不影响合并。
 
