@@ -129,7 +129,9 @@ export function bindFixture(h, id, principal, actor = 'ou_alice', tenant = 'acto
 }
 export async function channelFixture(t, options = {}) {
   const wire = transport(); let service;
-  const f = await managementFixture(t, store => ({ ...(typeof options === 'function' ? options(store) : options), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }, onChannels: s => { service = s; } }));
+  const f = await managementFixture(t, store => ({ ...(typeof options === 'function' ? options(store) : options), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false,
+    // A group's capability card (#1123) is one more message on every binding; only the tests about it turn it on.
+    capabilityNotices: (typeof options === 'object' && options.capabilityNotices) === true }, onChannels: s => { service = s; } }));
   f.h.channels = service;
   const id = await connector(f.admin), principal = (await f.admin('/api/auth/me')).value.id;
   bindFixture(f.h, id, principal);

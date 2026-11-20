@@ -32,6 +32,7 @@ import {
 import { isRefusal, promptRevision, verifyBasis } from './basis.js';
 import { GitHub } from '../github/client.js';
 import { scheduledCheckDecision } from './schedule.js';
+import { chatCapabilities, chatExamplesFor, projectCapabilityInputs } from '../projects/capabilities.js';
 
 const fn = (name: string, description: string, properties: Record<string, unknown>, required: string[]) =>
   ({ type: 'function', function: { name, description, parameters: { type: 'object', additionalProperties: false, required, properties } } });
@@ -147,6 +148,12 @@ function toDecision(name: string | null, args: any): any {
 }
 
 const maxRefusals = 3;
+
+/** What a GitHub thread can ask the bot for in this project now, and three requests to copy (#1123). */
+function githubCapabilities(store: Store, repositoryId: string) {
+  const list = chatCapabilities(projectCapabilityInputs(store, repositoryId), { kind: 'github' });
+  return { scenarios: list.map(({ id, title, state_title, how }) => ({ id, title, state: state_title, how })), examples: chatExamplesFor(list, '') };
+}
 
 export function dispatchPrompt(store: Store, repositoryId: string): string {
   return effectiveManagerPrompt(store, repositoryId);
@@ -325,6 +332,8 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
         related_tasks: context.related,
         capability_ceiling: ceiling,
         roles: workerRoles,
+        // #1123: on a mention, what this project can do now and requests people can copy, for 「你能干什么」 questions.
+        ...(['issue.mention', 'pull_request.mention'].includes(String(event.type)) ? { capabilities: githubCapabilities(store, repositoryId) } : {}),
         work: {
           create: context.options.map(option => ({
             id: option.id,

@@ -27,6 +27,7 @@ flowchart TD
 - Answer with a comment when `github_read` and `github_search` are enough; dispatch `reviewer` (`writes: ["github"]`) in the same object thread when the answer needs a checkout, running code or a longer investigation. While a task on the object is active, `continue_task` it instead.
 - Answer in the language of the question, cite `path:line` and links, and say what you could not verify.
 - A question is not a request for changes: do not edit, label or start development because of it.
+- When someone asks what the bot can do, how it works or how to work with it, answer from `capabilities` in the event: what this project can do now, one line on how a request flows, and three requests from its `examples` they can copy; do not offer what it marks as unavailable.
 
 ## 2. Issue and PR daily management（Issue/PR 日常管理）
 
