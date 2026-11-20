@@ -828,3 +828,66 @@ test('direct Codex reports an incompatible provider protocol without silently en
  await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code:'harness_direct_protocol_unsupported'});
  assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n,0);
 });
+
+test('#1171 Codex disables checkout AGENTS.md on untrusted PR checkouts, injects trusted base AGENTS.md, and fails closed on leaked instructionSources', async t => {
+  // 1) Trusted checkout loads checkout `AGENTS.md` in `instructionSources`.
+  const trusted = fixture(t);
+  const trustedWsId = 'a'.repeat(48);
+  const trustedRepo = join(trusted.root, 'sessions', 'tasks', trustedWsId, 'repo');
+  mkdirSync(trustedRepo, { recursive: true, mode: 0o700 });
+  writeFileSync(join(trustedRepo, 'AGENTS.md'), 'TRUSTED_CHECKOUT_CODEX_AGENTS_MD_1171\n');
+  trusted.s.run("UPDATE tasks SET workspace_id=? WHERE id='t'", trustedWsId);
+  trusted.spec.task.workspace_id = trustedWsId;
+  await runRole(trusted.spec, 'dev', undefined, 'codex');
+  const trustedBound = trusted.events().find(e => e.type === 'session_bound');
+  assert.deepEqual(trustedBound.instructionSources, [join(trustedRepo, 'AGENTS.md')]);
+
+  // 2) Untrusted PR checkout (`kind='review.pr'`) disables Codex project docs (`project_doc_max_bytes = 0`),
+  // keeps `instructionSources` empty, and injects trusted base-branch `AGENTS.md` via `developerInstructions`.
+  const untrusted = fixture(t);
+  const untrustedWsId = 'b'.repeat(48);
+  const untrustedRepo = join(untrusted.root, 'sessions', 'tasks', untrustedWsId, 'repo');
+  mkdirSync(untrustedRepo, { recursive: true, mode: 0o700 });
+  writeFileSync(join(untrustedRepo, 'AGENTS.md'), 'EVIL_UNTRUSTED_PR_CODEX_AGENTS_MD_1171\n');
+  untrusted.s.run(
+    "UPDATE tasks SET kind='review.pr', workspace_id=?, input=? WHERE id='t'",
+    untrustedWsId,
+    JSON.stringify({ checkout_trusted: false, trusted_agents_md: 'TRUSTED_BASE_CODEX_AGENTS_MD_1171' }),
+  );
+  untrusted.spec.task = untrusted.s.get("SELECT * FROM tasks WHERE id='t'");
+  const roleTools = [
+    ...untrusted.spec.tools,
+    tool('submit_role_result'),
+  ];
+  await runRole(
+    {
+      ...untrusted.spec,
+      tools: roleTools,
+      finish: { name: 'finish', validate: v => v },
+    },
+    'reviewer',
+    undefined,
+    'codex',
+  );
+  const generatedToml = readFileSync(join(untrusted.home, 'config.toml'), 'utf8');
+  assert.match(generatedToml, /project_doc_max_bytes = 0/);
+  const threadStart = untrusted.lines('doc-params.jsonl').at(-1);
+  assert.equal(threadStart.project_doc_max_bytes, 0);
+  assert.match(threadStart.developerInstructions, /TRUSTED_BASE_CODEX_AGENTS_MD_1171/);
+  assert.doesNotMatch(threadStart.developerInstructions, /EVIL_UNTRUSTED_PR_CODEX_AGENTS_MD_1171/);
+  const untrustedBound = untrusted.events().find(e => e.type === 'session_bound');
+  assert.deepEqual(untrustedBound.instructionSources, [], 'untrusted PR checkout must not load checkout AGENTS.md');
+
+  // 3) Fail closed if an app-server ignores `project_doc_max_bytes = 0` and reports checkout `instructionSources`.
+  const leaky = fixture(t, { FIXTURE_IGNORE_PROJECT_DOC_LIMIT: 'true' });
+  const leakyWsId = 'c'.repeat(48);
+  const leakyRepo = join(leaky.root, 'sessions', 'tasks', leakyWsId, 'repo');
+  mkdirSync(leakyRepo, { recursive: true, mode: 0o700 });
+  writeFileSync(join(leakyRepo, 'AGENTS.md'), 'LEAKED_UNTRUSTED_AGENTS_MD\n');
+  leaky.s.run("UPDATE tasks SET kind='review.pr', workspace_id=? WHERE id='t'", leakyWsId);
+  leaky.spec.task = leaky.s.get("SELECT * FROM tasks WHERE id='t'");
+  await assert.rejects(
+    runRole({ ...leaky.spec, finish: { name: 'finish', validate: v => v } }, 'reviewer', undefined, 'codex'),
+    { code: 'harness_permission_mismatch' },
+  );
+});

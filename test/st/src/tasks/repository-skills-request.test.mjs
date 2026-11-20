@@ -18,6 +18,9 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { treeHash } from '../../../fixtures/agent-server.mjs';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
+import { runRole, taskCheckoutContext } from '../../../../dist/roles/run.js';
+import { Redactor } from '../../../../dist/agent/common.js';
+import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { configureDispatch, Dispatcher, ruleDecider } from '../../../../dist/dispatch/worker.js';
 import { managerDecision } from '../../../../dist/dispatch/manager.js';
 import { recordEvent } from '../../../../dist/dispatch/store.js';
@@ -57,6 +60,8 @@ function createSkillGitHubFixture() {
 
   const trustedFiles = {
     'calc.mjs': 'export const add = (a, b) => a + b;\n',
+    'AGENTS.md': '# Trusted Repository Guide\nTRUSTED_MAIN_AGENTS_MD_1171\n',
+    'CLAUDE.md': '# Trusted Claude Guide\nTRUSTED_MAIN_CLAUDE_MD_1171\n',
     '.agents/skills/calc-ops/SKILL.md': [
       '---',
       'name: calc-ops',
@@ -80,18 +85,44 @@ function createSkillGitHubFixture() {
   const untrustedPrSha = putCommit({
     ...trustedFiles,
     'calc.mjs': 'export const add = (a, b) => a - b;\n',
+    'AGENTS.md': '# Untrusted PR Injection\nEVIL_PR_AGENTS_MD_1171\n',
+    'CLAUDE.md': 'EVIL_PR_CLAUDE_MD_1171\n',
+    '.pi/skills/evil-pi/SKILL.md': '---\nname: evil-pi\ndescription: EVIL_PI_SKILL_1171\n---\nEVIL_PI_BODY_1171\n',
     '.agents/skills/calc-ops/SKILL.md': '---\nname: calc-ops\ndescription: EVIL_UNTRUSTED_PR_OVERRIDE\n---\nEVIL_PR_BODY\n',
     '.agents/skills/calc-ops/references/checklist.md': 'EVIL_PR_CHECKLIST\n',
     '.agents/skills/injected/SKILL.md': '---\nname: injected\ndescription: INJECTED_UNTRUSTED_PR_SKILL\n---\nEVIL_INJECTED\n',
   }, mainSha, 'external untrusted PR');
 
+  const botPrSha = putCommit({
+    ...trustedFiles,
+    'calc.mjs': 'export const add = (a, b) => a + b + 0;\n',
+    'AGENTS.md': '# Unmerged Bot PR Head\nBOT_PR_UNMERGED_AGENTS_MD_1171\n',
+    'CLAUDE.md': 'BOT_PR_UNMERGED_CLAUDE_MD_1171\n',
+    '.pi/skills/bot-pr-unmerged/SKILL.md': '---\nname: bot-pr-unmerged\ndescription: BOT_PR_UNMERGED_PI_SKILL_1171\n---\nBOT_PR_UNMERGED_PI_BODY_1171\n',
+    '.agents/skills/calc-ops/SKILL.md': '---\nname: calc-ops\ndescription: BOT_PR_UNMERGED_SKILL_1171\n---\nBOT_PR_UNMERGED_BODY_1171\n',
+  }, mainSha, 'unmerged bot PR head');
+
   const state = {
     trustedFiles,
     mainSha,
     untrustedPrSha,
-    refs: { main: mainSha, 'feat/untrusted': untrustedPrSha },
+    botPrSha,
+    refs: { main: mainSha, 'feat/untrusted': untrustedPrSha, 'bot/issue-1': botPrSha },
     requests: [],
     postedComments: [],
+    issues: new Map([
+      [1, {
+        id: 4001,
+        number: 1,
+        title: 'Issue #1 with existing open bot PR',
+        body: 'Continue revising the bot PR safely.',
+        state: 'open',
+        user: { id: 10, login: 'maintainer' },
+        assignees: [{ id: 999, login: 'dept-bot[bot]' }],
+        labels: [{ name: 'bot-develop' }],
+        html_url: 'https://github.invalid/101/issues/1',
+      }],
+    ]),
     pulls: new Map([
       [88, {
         id: 5088,
@@ -106,9 +137,25 @@ function createSkillGitHubFixture() {
         labels: [],
         html_url: 'https://github.invalid/101/pull/88',
       }],
+      [89, {
+        id: 5089,
+        number: 89,
+        title: 'Bot PR for Issue #1 touching .pi/skills and AGENTS.md',
+        body: 'Fixes #1',
+        state: 'open',
+        draft: false,
+        user: { id: 999, login: 'dept-bot[bot]' },
+        head: { sha: botPrSha, ref: 'bot/issue-1', repo: { id: 101 } },
+        base: { sha: mainSha, ref: 'main', repo: { id: 101 } },
+        labels: [],
+        html_url: 'https://github.invalid/101/pull/89',
+      }],
     ]),
     prFiles: [
       { filename: 'calc.mjs', status: 'modified', patch: '@@ -1 +1 @@\n-export const add = (a, b) => a + b;\n+export const add = (a, b) => a - b;' },
+      { filename: 'AGENTS.md', status: 'modified', patch: '@@ -1,2 +1,2 @@\n+EVIL_PR_AGENTS_MD_1171' },
+      { filename: 'CLAUDE.md', status: 'modified', patch: '@@ -1,2 +1 @@\n+EVIL_PR_CLAUDE_MD_1171' },
+      { filename: '.pi/skills/evil-pi/SKILL.md', status: 'added', patch: '@@ -0,0 +1,4 @@\n+EVIL_PI_BODY_1171' },
       { filename: '.agents/skills/calc-ops/SKILL.md', status: 'modified', patch: '@@ -1,6 +1,4 @@\n+EVIL_PR_BODY' },
       { filename: '.agents/skills/injected/SKILL.md', status: 'added', patch: '@@ -0,0 +1,4 @@\n+EVIL_INJECTED' },
     ],
@@ -152,6 +199,13 @@ function createSkillGitHubFixture() {
     const sub = path.slice(prefix.length);
     let m;
     if (sub === '/labels') return send([]);
+    if ((m = /^\/issues\/(\d+)\/events$/.exec(sub)) && req.method === 'GET') {
+      return send(page === 1 ? [{ event: 'labeled', label: { name: 'bot-develop' }, actor: { login: 'maintainer', type: 'User' } }] : []);
+    }
+    if ((m = /^\/issues\/(\d+)$/.exec(sub)) && req.method === 'GET') {
+      const issue = state.issues.get(Number(m[1]));
+      return send(issue || { message: 'Not Found' }, issue ? 200 : 404);
+    }
     if ((m = /^\/pulls\/(\d+)$/.exec(sub))) {
       const pr = state.pulls.get(Number(m[1]));
       return send(pr || { message: 'Not Found' }, pr ? 200 : 404);
@@ -246,11 +300,37 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
       assert.ok(plainMatch, `Pi resource loader must discover staged plain-guide/SKILL.md (without frontmatter); sys tail=${sys.slice(-1200)}`);
       assert.ok(!sys.includes('billing-plugin') && !sys.includes('DO_NOT_MOUNT_PLUGIN_SKILL'), 'Business directory SKILL.md must never be mounted');
       assert.ok(!sys.includes('EVIL_UNTRUSTED_PR_OVERRIDE') && !sys.includes('INJECTED_UNTRUSTED_PR_SKILL') && !sys.includes('/injected/SKILL.md'), 'Untrusted PR .agents/skills in checkout must never be loaded by Pi');
+      assert.ok(!sys.includes('evil-pi') && !sys.includes('EVIL_PI_SKILL_1171') && !sys.includes('EVIL_PI_BODY_1171'), 'Untrusted PR .pi/skills in checkout must never be loaded by Pi');
+      assert.ok(!sys.includes('EVIL_PR_AGENTS_MD_1171') && !sys.includes('EVIL_PR_CLAUDE_MD_1171'), 'Untrusted PR AGENTS.md/CLAUDE.md in checkout must never be loaded by Pi');
+      assert.ok(!sys.includes('bot-pr-unmerged') && !sys.includes('BOT_PR_UNMERGED_PI_SKILL_1171') && !sys.includes('BOT_PR_UNMERGED_PI_BODY_1171'), 'Unmerged bot PR head .pi/skills in checkout must never be loaded by Pi');
+      assert.ok(!sys.includes('BOT_PR_UNMERGED_AGENTS_MD_1171') && !sys.includes('BOT_PR_UNMERGED_CLAUDE_MD_1171') && !sys.includes('BOT_PR_UNMERGED_SKILL_1171'), 'Unmerged bot PR head AGENTS.md/CLAUDE.md/.agents/skills must never be loaded by Pi');
+      assert.match(sys, /TRUSTED_MAIN_AGENTS_MD_1171/, 'Pi on untrusted or bot-PR checkout must still receive trusted base-branch AGENTS.md');
+
+      const calls = messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls || []);
+      const toolMsgs = messages.filter(m => m.role === 'tool').map(m => msgText(m.content));
+
+      if (tools.includes('finish_coordination')) {
+        const mgrReply = calls.length === 0
+          ? callTool('delegate_role', { role: 'test', purpose: 'Inspect bot PR checkout safely', refs: [] })
+          : callTool('finish_coordination', { action: 'wait', reason: 'Verified bot PR head checkout isolation.', resume_condition: 'Maintainer check' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: mgrReply }], usage: { prompt_tokens: 15, completion_tokens: 8 } }));
+        return;
+      }
+      if (tools.includes('submit_role_result')) {
+        const workerReply = callTool('submit_role_result', {
+          summary: 'Inspected bot PR checkout under base-branch skills and AGENTS.md.',
+          findings: [],
+          inspected_scope: ['calc.mjs'],
+          unknowns: [],
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: workerReply }], usage: { prompt_tokens: 15, completion_tokens: 8 } }));
+        return;
+      }
 
       const calcDir = dirname(calcMatch[1]);
       const plainDir = dirname(plainMatch[1]);
-      const calls = messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls || []);
-      const toolMsgs = messages.filter(m => m.role === 'tool').map(m => msgText(m.content));
 
       let reply;
       if (calls.length === 0) {
@@ -332,6 +412,72 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
   assert.match(observed.checklist, /CHECKLIST_SENTINEL_1171/);
   assert.match(observed.plainAsset, /ASSET_SENTINEL_1171/);
   assert.match(observed.scriptOut, /SCRIPT_SENTINEL_1171/);
+
+  // Continuing an open bot PR (`development.issue` with `input.bot_pr`, as well as `task.request` on an Issue with `bot_pr`)
+  // checks out `botPrSha` on disk, yet MUST treat the unmerged bot PR head checkout as untrusted (`trustedCheckout: false`),
+  // never loading `.pi/skills` or `AGENTS.md` from `botPrSha`, while still supplying trusted base-branch `AGENTS.md` and `.agents/skills/`.
+  await admin('/api/repositories/101/policy', 'PATCH', { enabled: true, capability_ceiling: 'develop', model_id: model.id });
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,object_number) VALUES('orig-dev-1','101','development.issue','pr_opened','done','Original dev','{}',1)");
+  h.store.run(
+    "INSERT INTO bot_pull_requests VALUES('101',89,'5089','999','101','bot/issue-1',?,'orig-dev-1',0)",
+    ghFixture.state.botPrSha,
+  );
+  // Pre-upgrade / direct row with `input.bot_pr` and no `checkout_trusted` boolean must also resolve `trustedCheckout: false`.
+  const legacyBotPrRow = {
+    id: 'legacy-dev-bot-pr',
+    repository_id: '101',
+    kind: 'development.issue',
+    input: JSON.stringify({ bot_pr: { number: 89, head: { sha: ghFixture.state.botPrSha }, base: { ref: 'main' } } }),
+  };
+  assert.equal(taskCheckoutContext(h.store, legacyBotPrRow).trustedCheckout, false);
+
+  const sysCountBeforeBotPr = observed.systemTexts.length;
+  // 1) `development.issue` continuing `bot_pr` (#89) through `TaskEngine` + real `Pi` entry executor:
+  const devIssueTaskId = 'task-dev-issue-bot-pr-1171';
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,object_number,created_at,updated_at) VALUES(?,'101','development.issue','queued','prepare','Continue bot PR 89',?,1,datetime('now'),datetime('now'))",
+    devIssueTaskId,
+    JSON.stringify({
+      review: { implementation_goal: 'Keep calc clean', requires_code_change: true },
+      manager: { event_id: 'evt-dev-1171', reason: '维护者已放行', brief: { goal: 'Keep calc clean', criteria: ['No untrusted skill leak'] } },
+    }),
+  );
+  authorizeKnowledgeTask(h.store, devIssueTaskId);
+  engine.tick();
+  await Promise.all(engine.active.values());
+  if (observed.serverError) throw observed.serverError;
+  const devIssueDone = h.store.get('SELECT status,error_code,input FROM tasks WHERE id=?', devIssueTaskId);
+  assert.deepEqual([devIssueDone.status, devIssueDone.error_code], ['retry_wait', 'manager_deferred'], `unexpected development.issue status: ${JSON.stringify(devIssueDone)}`);
+  const devIssueInput = JSON.parse(devIssueDone.input);
+  assert.equal(devIssueInput.snapshot_sha, ghFixture.state.botPrSha, 'development.issue continuing bot_pr must check out bot PR head');
+  assert.equal(devIssueInput.checkout_trusted, false, 'development.issue continuing bot_pr must mark checkout_trusted=false');
+  assert.ok(observed.systemTexts.length >= sysCountBeforeBotPr + 2, 'development.issue must have invoked Pi for both controller and delegated worker on bot PR checkout');
+
+  // 2) `task.request` on Issue #1 with `pull_request` write grant continuing `bot_pr` (#89) through `runRequest` + real `Pi`:
+  const sysCountBeforeReqBotPr = observed.systemTexts.length;
+  const reqBotPrTaskId = 'task-req-issue-bot-pr-1171';
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,created_at,updated_at) VALUES(?,'101','task.request','queued','prepare','Inspect bot PR 89 via issue',?,datetime('now'),datetime('now'))",
+    reqBotPrTaskId,
+    JSON.stringify({
+      generic: true,
+      executor_role: 'test',
+      target: { type: 'issue', number: 1 },
+      request: 'Verify skills while continuing Issue #1 bot PR',
+      contract: { goal: 'Verify skills on Issue #1', scope: ['calc.mjs'], criteria: ['Read companion files'], endpoint: 'report', source: 'request' },
+    }),
+  );
+  authorizeKnowledgeTask(h.store, reqBotPrTaskId);
+  setGrant(h.store, { id: reqBotPrTaskId, repository_id: '101' }, ['pull_request'], 'test', null);
+  engine.tick();
+  await Promise.all(engine.active.values());
+  if (observed.serverError) throw observed.serverError;
+  const reqBotPrDone = h.store.get('SELECT status,error_code,input FROM tasks WHERE id=?', reqBotPrTaskId);
+  assert.equal(reqBotPrDone.status, 'completed', `unexpected task.request bot_pr status: ${JSON.stringify(reqBotPrDone)}`);
+  const reqBotPrInput = JSON.parse(reqBotPrDone.input);
+  assert.equal(reqBotPrInput.snapshot_sha, ghFixture.state.botPrSha, 'task.request continuing bot_pr must check out bot PR head');
+  assert.equal(reqBotPrInput.checkout_trusted, false, 'task.request continuing bot_pr must mark checkout_trusted=false');
+  assert.ok(observed.systemTexts.length > sysCountBeforeReqBotPr, 'task.request continuing bot_pr must have invoked Pi model');
 });
 
 test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Native roles & Event Dispatch Manager read trusted base-branch skills and companion files; bad .agents/skills/ stops at waiting_configuration', { timeout: 90000 }, async t => {
@@ -349,6 +495,8 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
     dispatchList: null,
     dispatchCompanion: null,
     dispatchWarmSummaries: null,
+    dispatchRestrictedTools: null,
+    dispatchRestrictedPayload: null,
     prReviewerPrompt: null,
     prSkillList: null,
     prSkillBody: null,
@@ -378,8 +526,19 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
         acceptable_risk: true,
       });
     } else if (tools.includes('ignore_event') && tools.includes('create_task') && !tools.includes('submit_report')) {
-      const userPayload = JSON.parse(msgText(messages[1].content));
-      if (userPayload.event.summary === 'Warm dispatch event') {
+      const sysText = messages.filter(m => m.role === 'system' || m.role === 'developer').map(m => msgText(m.content)).join('\n');
+      const userMsg = messages.find(m => m.role === 'user');
+      const userPayload = JSON.parse(msgText(userMsg?.content ?? '{}'));
+      if (userPayload.event?.summary === 'Restricted warm dispatch event') {
+        seen.dispatchRestrictedTools = tools;
+        seen.dispatchRestrictedPayload = userPayload;
+        seen.dispatchRestrictedSys = sysText;
+        reply = callTool('ignore_event', { reason: '无 Contents 读权限时不暴露仓库 skill。' });
+      } else if (userPayload.event?.summary === 'Untrusted warm dispatch event') {
+        seen.dispatchUntrustedWarmPayload = userPayload;
+        seen.dispatchUntrustedWarmSys = sysText;
+        reply = callTool('ignore_event', { reason: '未标记可信的旧缓存不得直接注入。' });
+      } else if (userPayload.event.summary === 'Warm dispatch event') {
         seen.dispatchWarmSummaries = userPayload.repository_skills;
         reply = callTool('ignore_event', { reason: '已核对缓存的仓库 skill 摘要。' });
       } else if (calls.length === 0) {
@@ -393,12 +552,20 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
         reply = callTool('ignore_event', { reason: '已按需读取可信基准分支 skill 及附属文件。' });
       }
     } else {
-      // 2. Native worker role turn (reviewer on PR #88 or branch feat/untrusted)
+      // 2. Native worker role turn (reviewer on PR #88, branch/commit target, or direct model-phase role run)
       const promptObj = JSON.parse(msgText(messages[1].content));
-      if (promptObj.target?.type === 'branch') {
+      if (promptObj.direct_inflight_probe) {
+        seen.inflightRolePrompt = promptObj;
+        reply = callTool('submit_report', {
+          summary: 'Checked direct model-phase role run.',
+          artifacts: [],
+          evidence: [],
+          unknowns: [],
+        });
+      } else if (promptObj.target?.type === 'branch' || promptObj.target?.type === 'commit') {
         seen.branchSkillSummaries = promptObj.role_context?.skills?.summaries;
         reply = callTool('submit_report', {
-          summary: 'Checked branch with trusted main skills only.',
+          summary: 'Checked branch/commit with trusted main skills only.',
           artifacts: [],
           evidence: [],
           unknowns: [],
@@ -503,6 +670,39 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
   assert.equal(ghFixture.state.requests.length, ghBeforeWarm, 'warm dispatch without tool calls must make zero GitHub HTTP requests');
   assert.deepEqual(seen.dispatchWarmSummaries.skills.map(s => s.name), ['calc-ops', 'plain-guide']);
 
+  // B2. Warm-cache Event Dispatch Manager with Contents `none` MUST NOT receive `read_skill` or `repository_skills`.
+  const currentRoles = (await admin('/api/repositories/101/roles')).value.configuration;
+  const managerDef = currentRoles.roles.find(r => r.role_id === 'manager');
+  const savedRestricted = await admin('/api/repositories/101/roles', 'PUT', {
+    expected_revision: currentRoles.revision,
+    roles: [{
+      role_id: 'manager',
+      permissions: { ...managerDef.permissions, github_contents: 'none' },
+    }],
+  });
+  assert.equal(savedRestricted.status, 200, JSON.stringify(savedRestricted.value));
+  recordEvent(h.store, {
+    repositoryId: '101',
+    key: 'restricted-warm-dispatch-1171',
+    type: 'issue.mention',
+    source: 'webhook',
+    objectType: 'issue',
+    objectNumber: 3,
+    summary: 'Restricted warm dispatch event',
+    facts: {},
+    options: [{ id: 'opt3', work: 'task.request', title: 'Review', spec: { type: 'request', key: 'k3', request: 'Inspect', principal: null } }],
+  });
+  dispatcher.tick();
+  await dispatcher.idle();
+  assert.ok(seen.dispatchRestrictedTools && !seen.dispatchRestrictedTools.includes('read_skill'), 'restricted Manager without Contents read must not be offered read_skill');
+  assert.equal(seen.dispatchRestrictedPayload?.repository_skills, undefined, 'restricted Manager without Contents read must not receive cached repository_skills');
+  assert.ok(!seen.dispatchRestrictedSys.includes('calc-ops') && !seen.dispatchRestrictedSys.includes('plain-guide'), 'restricted Manager harnessResources must not stage cached repository skills');
+  const { role_id: _rid, enabled, name, responsibility, persona_prompt, model_profile_ref, skill_bundle_ref, harness_ref, permissions, environment_profile_ref, budget_policy_ref, output_schema_ref } = managerDef;
+  await admin('/api/repositories/101/roles', 'PUT', {
+    expected_revision: savedRestricted.value.configuration.revision,
+    roles: [{ role_id: 'manager', enabled, name, responsibility, persona_prompt, model_profile_ref, skill_bundle_ref, harness_ref, permissions, environment_profile_ref, budget_policy_ref, output_schema_ref }],
+  });
+
   // C. External PR #88 modifies .agents/skills/calc-ops/SKILL.md and adds .agents/skills/injected/SKILL.md:
   // reviewer MUST load trusted main skills, never PR head skills, while flagging behavior_changes.
   const prTaskId = 'task-pr-88';
@@ -521,12 +721,23 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
   setGrant(h.store, { id: prTaskId, repository_id: '101' }, ['review'], 'test', null);
   engine.tick();
   await Promise.all(engine.active.values());
-  assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?', prTaskId).status, 'succeeded');
-  assert.deepEqual(seen.prReviewerPrompt.behavior_changes, ['.agents/skills/calc-ops/SKILL.md', '.agents/skills/injected/SKILL.md']);
+  const prDoneRow = h.store.get('SELECT status,input FROM tasks WHERE id=?', prTaskId);
+  assert.equal(prDoneRow.status, 'succeeded');
+  const prStoredInput = JSON.parse(prDoneRow.input);
+  assert.match(prStoredInput.trusted_agents_md, /TRUSTED_MAIN_AGENTS_MD_1171/);
+  assert.match(prStoredInput.trusted_claude_md, /TRUSTED_MAIN_CLAUDE_MD_1171/, 'RuleService.fetch/runRequest must populate trusted_claude_md from trusted base branch');
+  assert.ok(!prStoredInput.trusted_claude_md.includes('EVIL_PR_CLAUDE_MD_1171'));
+  assert.deepEqual(seen.prReviewerPrompt.behavior_changes, [
+    'AGENTS.md',
+    'CLAUDE.md',
+    '.pi/skills/evil-pi/SKILL.md',
+    '.agents/skills/calc-ops/SKILL.md',
+    '.agents/skills/injected/SKILL.md',
+  ]);
   assert.equal(ghFixture.state.postedComments.length, 1, 'post_review must publish summary comment on PR #88');
   assert.match(
     ghFixture.state.postedComments[0].body,
-    /These files change the bot's behavior; a maintainer decides whether to accept them: \.agents\/skills\/calc-ops\/SKILL\.md, \.agents\/skills\/injected\/SKILL\.md/,
+    /These files change the bot's behavior; a maintainer decides whether to accept them: AGENTS\.md, CLAUDE\.md, \.pi\/skills\/evil-pi\/SKILL\.md, \.agents\/skills\/calc-ops\/SKILL\.md, \.agents\/skills\/injected\/SKILL\.md/,
   );
   assert.deepEqual(seen.prSkillList.summaries.map(s => s.name), ['calc-ops', 'plain-guide']);
   assert.ok(!JSON.stringify(seen.prSkillList).includes('injected') && !JSON.stringify(seen.prSkillList).includes('EVIL_'));
@@ -554,6 +765,196 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?', branchTaskId).status, 'completed');
   assert.deepEqual(seen.branchSkillSummaries.map(s => s.name), ['calc-ops', 'plain-guide']);
   assert.ok(!JSON.stringify(seen.branchSkillSummaries).includes('EVIL_') && !JSON.stringify(seen.branchSkillSummaries).includes('injected'));
+
+  // D2. F4(a/b/c) + F5 regressions:
+  // (a) A role run started directly at `model` phase with legacy unmarked `task_execution_configs.rule_files` from an untrusted SHA
+  //     (and no `repository_skill_bundle`), plus an untrusted `repository_rule_sources` row, MUST NOT mount untrusted skills or AGENTS/CLAUDE docs.
+  h.store.run(
+    "UPDATE repository_rule_sources SET sha=?, files=? WHERE repository_id='101'",
+    ghFixture.state.untrustedPrSha,
+    JSON.stringify({ '.agents/skills/injected/SKILL.md': '---\ndescription: EVIL_UNTRUSTED_DISPATCH_SKILL\n---\nEVIL_DISPATCH_BODY\n' }),
+  );
+  const inflightTaskId = 'task-inflight-model-untrusted-cache';
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,object_number,head_sha,created_at,updated_at) VALUES(?,'101','review.pr','running','model','In-flight legacy review','{}',88,?,datetime('now'),datetime('now'))",
+    inflightTaskId,
+    ghFixture.state.untrustedPrSha,
+  );
+  new TaskRecords(h.store).contract(inflightTaskId, { goal: 'Legacy in-flight review', scope: ['PR #88'], criteria: ['Report'], endpoint: 'report' });
+  h.store.run(
+    "INSERT INTO task_execution_configs VALUES(?,1,?,datetime('now'))",
+    inflightTaskId,
+    JSON.stringify({
+      policy: h.store.get('SELECT * FROM policies WHERE repository_id=?', '101'),
+      work: 'review.pr',
+      permissions: { writes: [], workspace: { read: true, write: false, shell: true, notes: false }, github: ['contents', 'issues', 'pull_requests', 'metadata'], agents: false },
+      roles: (await admin('/api/repositories/101/roles')).value.configuration,
+      model: { id: model.id, url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: 'fixture-model', version: 1 },
+      credentials: h.store.secrets.seal({ value: 'fixture-key' }, 'task-model:' + inflightTaskId),
+      rule_sha: ghFixture.state.untrustedPrSha,
+      rule_files: {
+        '.agents/skills/injected/SKILL.md': '---\ndescription: EVIL_LEGACY_INFLIGHT_SKILL\n---\nEVIL_INFLIGHT\n',
+        'AGENTS.md': 'EVIL_LEGACY_AGENTS_MD',
+        'CLAUDE.md': 'EVIL_LEGACY_CLAUDE_MD',
+      },
+    }),
+  );
+  const inflightTaskRow = h.store.get('SELECT * FROM tasks WHERE id=?', inflightTaskId);
+  assert.deepEqual(taskCheckoutContext(h.store, inflightTaskRow), {
+    trustedCheckout: false,
+    trustedAgentsMd: null,
+    trustedClaudeMd: null,
+  });
+  await runRole(
+    {
+      store: h.store,
+      task: inflightTaskRow,
+      redactor: new Redactor(),
+      guard: async () => {},
+      system: 'Probe legacy in-flight role skills',
+      prompt: JSON.stringify({ direct_inflight_probe: true }),
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'submit_report',
+          description: 'Submit report',
+          parameters: { type: 'object', properties: { summary: { type: 'string' }, artifacts: { type: 'array' }, evidence: { type: 'array' }, unknowns: { type: 'array' } }, required: ['summary'] },
+        },
+      }],
+      finish: { name: 'submit_report', validate: v => v },
+    },
+    'reviewer',
+    undefined,
+    'native',
+  );
+  const inflightPromptStr = JSON.stringify(seen.inflightRolePrompt);
+  assert.ok(
+    !inflightPromptStr.includes('injected') && !inflightPromptStr.includes('EVIL_LEGACY_INFLIGHT_SKILL') && !inflightPromptStr.includes('EVIL_UNTRUSTED_DISPATCH_SKILL'),
+    `in-flight role run must refuse unmarked legacy rule_files and untrusted repository_rule_sources: ${inflightPromptStr}`,
+  );
+
+  // (b) Warm Event Dispatch with `repository_rule_sources.sha` set to `untrustedPrSha` MUST NOT expose the untrusted skills on warm turn,
+  //     and when `read_skill` is called it re-fetches from trusted `main`.
+  recordEvent(h.store, {
+    repositoryId: '101',
+    key: 'untrusted-warm-dispatch-1171',
+    type: 'issue.mention',
+    source: 'webhook',
+    objectType: 'issue',
+    objectNumber: 4,
+    summary: 'Untrusted warm dispatch event',
+    facts: {},
+    options: [{ id: 'opt4', work: 'task.request', title: 'Review', spec: { type: 'request', key: 'k4', request: 'Inspect', principal: null } }],
+  });
+  dispatcher.tick();
+  await dispatcher.idle();
+  assert.equal(seen.dispatchUntrustedWarmPayload?.repository_skills, undefined, 'warm dispatch must ignore untrusted repository_rule_sources.sha');
+  assert.ok(!seen.dispatchUntrustedWarmSys.includes('injected') && !seen.dispatchUntrustedWarmSys.includes('EVIL_UNTRUSTED_DISPATCH_SKILL'));
+
+  seen.dispatchList = null;
+  recordEvent(h.store, {
+    repositoryId: '101',
+    key: 'refetch-warm-dispatch-1171',
+    type: 'issue.mention',
+    source: 'webhook',
+    objectType: 'issue',
+    objectNumber: 5,
+    summary: 'Refetch after untrusted cache',
+    facts: {},
+    options: [{ id: 'opt5', work: 'task.request', title: 'Review', spec: { type: 'request', key: 'k5', request: 'Inspect', principal: null } }],
+  });
+  dispatcher.tick();
+  await dispatcher.idle();
+  assert.deepEqual(seen.dispatchList.summaries.map(s => s.name), ['calc-ops', 'plain-guide'], 'read_skill after untrusted cache must re-fetch trusted main');
+
+  // (c) + F5: With `policies.base_branch = 'missing-base'`, a trusted-current prepare (`target: { type: 'branch', ref: 'main' }`)
+  //     falls back to `main`, marks `checkout_trusted = true` (F5), and replaces a stale unmarked `task_execution_configs` cache (F4c)!
+  await admin('/api/repositories/101/policy', 'PATCH', { base_branch: 'missing-base' });
+  seen.branchSkillSummaries = null;
+  const fallbackMainBranchTaskId = 'task-main-branch-missing-base-fallback';
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,created_at,updated_at) VALUES(?,'101','task.request','queued','prepare','Check main branch with missing base_branch',?,datetime('now'),datetime('now'))",
+    fallbackMainBranchTaskId,
+    JSON.stringify({
+      generic: true,
+      executor_role: 'reviewer',
+      target: { type: 'branch', ref: 'main' },
+      request: 'Inspect branch main',
+      contract: { goal: 'Inspect main', scope: ['main'], criteria: ['Report'], endpoint: 'report', source: 'request' },
+    }),
+  );
+  h.store.run(
+    "INSERT INTO task_execution_configs VALUES(?,1,?,datetime('now'))",
+    fallbackMainBranchTaskId,
+    JSON.stringify({
+      policy: h.store.get('SELECT * FROM policies WHERE repository_id=?', '101'),
+      work: 'task.request',
+      permissions: { writes: [], workspace: { read: true, write: false, shell: true, notes: false }, github: ['contents', 'issues', 'pull_requests', 'metadata'], agents: false },
+      roles: (await admin('/api/repositories/101/roles')).value.configuration,
+      model: { id: model.id, url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: 'fixture-model', version: 1 },
+      credentials: h.store.secrets.seal({ value: 'fixture-key' }, 'task-model:' + fallbackMainBranchTaskId),
+      rule_sha: ghFixture.state.untrustedPrSha,
+      rule_files: { '.agents/skills/injected/SKILL.md': 'EVIL_CACHED_UNTRUSTED_SKILL' },
+    }),
+  );
+  authorizeKnowledgeTask(h.store, fallbackMainBranchTaskId);
+  setGrant(h.store, { id: fallbackMainBranchTaskId, repository_id: '101' }, [], 'test', null);
+  engine.tick();
+  await Promise.all(engine.active.values());
+  const fbMainDone = h.store.get('SELECT status,input FROM tasks WHERE id=?', fallbackMainBranchTaskId);
+  assert.equal(fbMainDone.status, 'completed');
+  const fbMainInput = JSON.parse(fbMainDone.input);
+  assert.equal(fbMainInput.checkout_trusted, true, 'branch target equal to fallback defaultBranch (`main`) must be marked checkout_trusted=true');
+  assert.deepEqual(seen.branchSkillSummaries.map(s => s.name), ['calc-ops', 'plain-guide']);
+  assert.match(fbMainInput.trusted_agents_md, /TRUSTED_MAIN_AGENTS_MD_1171/);
+  assert.match(fbMainInput.trusted_claude_md, /TRUSTED_MAIN_CLAUDE_MD_1171/);
+  assert.equal(JSON.parse(h.store.get('SELECT snapshot FROM task_execution_configs WHERE task_id=?', fallbackMainBranchTaskId).snapshot).rule_trusted, true);
+
+  // Commit target equal to `trustedSkillSha` (`mainSha`) is trusted, whereas an untrusted commit (`untrustedPrSha`) is untrusted.
+  for (const [cid, csha, expectedTrusted] of [
+    ['task-commit-trusted-main', ghFixture.state.mainSha, true],
+    ['task-commit-untrusted-pr', ghFixture.state.untrustedPrSha, false],
+  ]) {
+    h.store.run(
+      "INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,created_at,updated_at) VALUES(?,'101','task.request','queued','prepare','Check commit',?,datetime('now'),datetime('now'))",
+      cid,
+      JSON.stringify({
+        generic: true,
+        executor_role: 'reviewer',
+        target: { type: 'commit', ref: csha },
+        request: 'Inspect commit',
+        contract: { goal: 'Inspect commit', scope: ['commit'], criteria: ['Report'], endpoint: 'report', source: 'request' },
+      }),
+    );
+    authorizeKnowledgeTask(h.store, cid);
+    setGrant(h.store, { id: cid, repository_id: '101' }, [], 'test', null);
+    engine.tick();
+    await Promise.all(engine.active.values());
+    const cRow = h.store.get('SELECT status,input FROM tasks WHERE id=?', cid);
+    assert.equal(cRow.status, 'completed');
+    assert.equal(JSON.parse(cRow.input).checkout_trusted, expectedTrusted, cid);
+  }
+
+  delete ghFixture.state.refs.main;
+  const noTrustedBaseTaskId = 'task-branch-no-trusted-base';
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,created_at,updated_at) VALUES(?,'101','task.request','queued','prepare','No trusted base',?,datetime('now'),datetime('now'))",
+    noTrustedBaseTaskId,
+    JSON.stringify({
+      generic: true,
+      executor_role: 'reviewer',
+      target: { type: 'branch', ref: 'feat/untrusted' },
+      request: 'Inspect branch feat/untrusted',
+      contract: { goal: 'Inspect branch', scope: ['feat/untrusted'], criteria: ['Report'], endpoint: 'report', source: 'request' },
+    }),
+  );
+  authorizeKnowledgeTask(h.store, noTrustedBaseTaskId);
+  setGrant(h.store, { id: noTrustedBaseTaskId, repository_id: '101' }, [], 'test', null);
+  engine.tick();
+  await Promise.all(engine.active.values());
+  const noTrustedRow = h.store.get('SELECT status,phase,error_code FROM tasks WHERE id=?', noTrustedBaseTaskId);
+  assert.deepEqual([noTrustedRow.status, noTrustedRow.phase, noTrustedRow.error_code], ['waiting_configuration', 'prepare', 'repository_has_no_commit']);
+  await admin('/api/repositories/101/policy', 'PATCH', { base_branch: '' });
 
   // E. Oversized companion file on trusted `main` stops `runRequest` cleanly in `prepare` with `waiting_configuration` (`skill_file_too_large`).
   ghFixture.state.refs.main = ghFixture.putCommit({

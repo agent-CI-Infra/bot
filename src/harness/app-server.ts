@@ -44,6 +44,7 @@ export interface CodexDialectContext {
   sandbox: 'danger-full-access' | 'workspace-write' | 'read-only';
   computerAllowed?: boolean;
   fileWriteAllowed?: boolean;
+  trustedCheckout?: boolean;
   recordNativeReceipt?:(item:Record<string,unknown>)=>string;
   model?: string;
   modelProvider?: string;
@@ -629,6 +630,16 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
     if (missingEnabled.length) {
       stop('codex_builtin_tools_enabled', 'waiting_configuration', `Codex 容器原生工具未开启：${missingEnabled.join(', ')}`);
     }
+    if (ctx.trustedCheckout === false) {
+      const repoRoot = resolve(cwd);
+      const untrustedDoc = (thread.instructionSources ?? []).find(src => {
+        const resolved = resolve(String(src));
+        return resolved === repoRoot || resolved.startsWith(repoRoot + '/');
+      });
+      if (untrustedDoc) {
+        stop('harness_permission_mismatch', 'waiting_configuration', 'Codex loaded project instructions from an untrusted checkout.');
+      }
+    }
     return [...deniedFeatures];
   }
 
@@ -703,6 +714,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
           },
           features: featurePolicy,
           web_search: ctx.egress ? 'live' : 'disabled',
+          ...(ctx.trustedCheckout === false ? { project_doc_max_bytes: 0 } : {}),
         },
         ...(ctx.model ? { model: ctx.model } : {}),
         ...(ctx.modelProvider ? { modelProvider: ctx.modelProvider } : {}),

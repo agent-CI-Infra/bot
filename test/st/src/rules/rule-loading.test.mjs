@@ -74,6 +74,8 @@ test('the computer and its field sources are the project console spec; .bot/ fil
   // A pull request that changes .bot/ no longer changes how the bot works; one that changes a skill does.
   assert.equal(behaviorPath('.bot/guide.md'),false);assert.equal(behaviorPath('.bot'),false);
   assert.equal(behaviorPath('.agents/skills/ci/SKILL.md'),true);assert.equal(behaviorPath('.agents/skills'),true);
+  assert.equal(behaviorPath('AGENTS.md'),true);assert.equal(behaviorPath('CLAUDE.md'),true);
+  assert.equal(behaviorPath('.pi/skills/triage/SKILL.md'),true);assert.equal(behaviorPath('packages/sub/AGENTS.md'),false);
 });
 
 test('a project added after the upgrade reads its skills and lists its .bot/ files without importing them',async t=>{
@@ -186,6 +188,26 @@ test('an Issue development that continues the bot PR checks out its head and rea
   await f.run('ext-pr');
   const prInput=JSON.parse(f.store.get("SELECT input FROM tasks WHERE id='ext-pr'").input);
   assert.equal(prInput.context.effective_rules.files.find(row=>row.path==='.agents/skills/ci/SKILL.md').effective,'Release skill');
+
+  // If the configured base_branch is missing, event PR review falls back only to defaultBranch (`main`), NEVER to the untrusted PR head;
+  // and if defaultBranch is also unreadable, it stops at `waiting_configuration` (`repository_has_no_commit`) instead of loading PR head skills.
+  await f.admin('/api/repositories/101/policy','PATCH',{base_branch:'missing-base'});
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at) VALUES('ext-pr-fallback','101','review.pr','queued','ext-fb','{}',7,?,'2026-10-27T00:00:00Z')",head);
+  await f.run('ext-pr-fallback');
+  const fbInput=JSON.parse(f.store.get("SELECT input FROM tasks WHERE id='ext-pr-fallback'").input);
+  assert.equal(fbInput.context.effective_rules.files.find(row=>row.path==='.agents/skills/ci/SKILL.md').effective,'Main skill');
+
+  // Non-event Issue review (`review.issue`) also falls back to `defaultBranch` (`main`) when `base_branch` is missing.
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,created_at) VALUES('issue-fallback','101','review.issue','queued','issue-fb','{}',1,'2026-10-27T00:00:00Z')");
+  await f.run('issue-fallback');
+  const issueFbInput=JSON.parse(f.store.get("SELECT input FROM tasks WHERE id='issue-fallback'").input);
+  assert.equal(issueFbInput.checkout_trusted,true);
+  assert.equal(issueFbInput.context.effective_rules.files.find(row=>row.path==='.agents/skills/ci/SKILL.md').effective,'Main skill');
+
+  delete f.heads.main;
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at) VALUES('ext-pr-no-trusted','101','review.pr','queued','ext-none','{}',7,?,'2026-10-27T00:00:00Z')",head);
+  const blockedPr=await f.run('ext-pr-no-trusted');
+  assert.deepEqual([blockedPr.status,blockedPr.phase,blockedPr.error_code],['waiting_configuration','prepare','repository_has_no_commit']);
 });
 
 // A project that had nothing cached at the upgrade imports its .bot/ files at its first task. That task, created before

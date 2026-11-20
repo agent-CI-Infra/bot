@@ -284,12 +284,18 @@ export async function runCodex<T>(
   const platformTools = filterPlatformTools(spec);
   const offeredToolNames = platformTools.map(t => t.function.name);
   const finishDesc = (spec.finish?.names ?? [spec.finish?.name ?? '(none)']).join(' or ');
+  const checkoutTrusted = spec.harnessAccess?.trustedCheckout !== false;
+  const trustedAgentsSection =
+    !checkoutTrusted && typeof spec.harnessAccess?.trustedAgentsMd === 'string' && spec.harnessAccess.trustedAgentsMd.trim()
+      ? '\n\n## Trusted Repository Instructions (AGENTS.md)\n' + spec.harnessAccess.trustedAgentsMd
+      : '';
   const instructions =
     spec.system +
     '\n\nYou execute one Bot role assignment inside the isolated workspace container with cwd at the repository checkout. ' +
     'Use native shell, file reading/editing, search, image viewing, and sub-agent tools directly on the repository checkout, and use the offered bot MCP tools for platform task records, memory, skills, and structured submission. ' +
     'Do not publish, push, or merge directly from shell. ' +
-    `Use the offered submission tool ${finishDesc} once your role result is ready; a text message alone is not a submission, and submission is followed by independent acceptance. After successful submission, end this turn without further actions.`;
+    `Use the offered submission tool ${finishDesc} once your role result is ready; a text message alone is not a submission, and submission is followed by independent acceptance. After successful submission, end this turn without further actions.` +
+    trustedAgentsSection;
 
   const rawSessionKey = spec.harnessSessionKey ?? spec.roleRun?.instance_id ?? String(spec.task?.id ?? 'default');
   const sessionKey = String(rawSessionKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'default';
@@ -406,6 +412,7 @@ export async function runCodex<T>(
           sandbox,
           computerAllowed: spec.harnessAccess?.commands!==false,
           fileWriteAllowed:spec.harnessAccess?(spec.harnessAccess.fileTools??spec.harnessAccess.workspace)==='write':true,
+          trustedCheckout: checkoutTrusted,
           recordNativeReceipt:item=>traceEvent(spec.store,spec.task.id,'harness_native_receipt',spec.redactor.clean(item),spec.task.trace_run_id,'harness'),
           ...(prepared.model ? { model: prepared.model } : {}),
           ...(prepared.modelProvider ? { modelProvider: prepared.modelProvider } : {}),
