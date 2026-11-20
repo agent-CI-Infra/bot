@@ -551,8 +551,11 @@ const PIN_ROWS = [
   ['task', '.task-next-text'], ['task', '.task-ext-label'], ['task', '.step-fold-num'], ['task', '.step-fold-meta'],
   ['task', '.role-run-brief'], ['task', '.role-run-meta'], ['task', '.task-archive-fold > summary'],
   ['task', '.task-metrics'], ['task', '.live'], ['task', '.task-cancel-btn'],
-  ['task', '.role-run-fold'], ['task', '.role-run-fold.role-run-returned'], ['task', '.role-run-findings'],
+  ['task', '.role-run-fold'], ['task', '.role-run-fold.role-run-running'],
+  ['task', '.role-run-fold.role-run-returned'], ['taskpaused', '.role-run-fold.role-run-paused'],
+  ['task', '.role-run-findings'],
   ['task', '.role-step-toolbar > .muted'], ['task', '.role-empty-steps'],
+  ['task', '.live::before'], ['overview', '.role-chip-time'],
   ['task', '.step-fold-title::before'], ['task', '.role-run-title-row::before'], ['task', '.task-archive-fold > summary::before'],
   ['projects', '.project-owner-bar'], ['projects', '.project-table-head'],
   ['overview', '.project-page'], ['overview', '.workbench-tab'],
@@ -569,8 +572,10 @@ const PIN_ROWS = [
 ];
 
 // The values below were measured on this head, once, and are now the pin: [page, selector, dark [color, background],
-// light [color, background]]. The light column is the base value — the light pixel comparison against b6b67bbf is
-// 0 px on every light frame, so a light value here and a base value are the same measurement.
+// light [color, background], optional darkBorder, lightBorder]. The light column is the base value — the light pixel
+// comparison against b6b67bbf is 0 px on every light frame, so a light value here and a base value are the same
+// measurement. A border pin exists where the base paints a border that a token swap had already moved once
+// (settings / confirm / role-run folds): color+background alone would not catch that drift.
 const PIN_TABLE = [
   ['task', '.step', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
   ['task', '.task-side', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(248, 250, 252)']],
@@ -589,9 +594,13 @@ const PIN_TABLE = [
   ['task', '.task-metrics', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(82, 110, 124)', 'rgb(255, 255, 255)']],
   ['task', '.live', ['rgb(168, 198, 245)', 'rgb(22, 29, 39)'], ['rgb(44, 87, 145)', 'rgb(255, 255, 255)']],
   ['task', '.task-cancel-btn', ['rgb(255, 156, 156)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
-  ['task', '.role-run-fold', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
-  ['task', '.role-run-fold.role-run-returned', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['task', '.role-run-fold', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(85, 104, 138)', 'rgb(219, 228, 238)'],
+  ['task', '.role-run-fold.role-run-running', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(45, 69, 112)', 'rgb(96, 165, 250)'],
+  ['task', '.role-run-fold.role-run-returned', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(107, 85, 36)', 'rgb(252, 211, 77)'],
+  ['taskpaused', '.role-run-fold.role-run-paused', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(107, 85, 36)', 'rgb(252, 211, 77)'],
   ['task', '.role-run-findings', ['rgb(240, 200, 130)', 'rgb(27, 36, 48)'], ['rgb(120, 53, 15)', 'rgb(248, 250, 252)']],
+  ['task', '.live::before', ['rgb(168, 198, 245)', 'rgb(168, 198, 245)'], ['rgb(44, 87, 145)', 'rgb(44, 87, 145)']],
+  ['overview', '.role-chip-time', ['rgb(163, 179, 199)', 'rgb(22, 35, 58)'], ['rgb(71, 85, 105)', 'rgb(239, 246, 255)']],
   ['task', '.role-step-toolbar > .muted', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
   ['task', '.role-empty-steps', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
   ['task', '.step-fold-title::before', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(100, 116, 139)', 'rgb(255, 255, 255)']],
@@ -612,13 +621,13 @@ const PIN_TABLE = [
   ['overview', '.capability-tile[data-state=off] .capability-links a', ['rgb(150, 180, 255)', 'rgb(27, 36, 48)'], ['rgb(36, 93, 224)', 'rgb(248, 250, 252)']],
   ['tasks', '.workbench-filter-pill', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(51, 65, 85)', 'rgb(255, 255, 255)']],
   ['tasks', '.workbench-filter-pill[aria-current=page]', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(237, 242, 255)']],
-  ['settings', '.settings-body', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['settings', '.settings-body', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(85, 104, 138)', 'rgb(227, 234, 240)'],
   ['settings', '.project-nav', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
-  ['settings', '.settings-rows', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['settings', '.settings-rows', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(85, 104, 138)', 'rgb(232, 238, 242)'],
   ['audit', '.audit-filters button[aria-pressed=true]', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(232, 243, 244)']],
   ['confirm', '.confirm-icon.danger', ['rgb(255, 156, 156)', 'rgb(58, 29, 31)'], ['rgb(160, 43, 49)', 'rgb(251, 234, 234)']],
   ['confirm', '.confirm-body label', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(34, 49, 58)', 'rgb(255, 255, 255)']],
-  ['confirm', '.confirm-actions', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(246, 249, 250)']],
+  ['confirm', '.confirm-actions', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(246, 249, 250)'], 'rgb(85, 104, 138)', 'rgb(227, 234, 240)'],
   ['confirm', '.confirm-status.error', ['rgb(255, 156, 156)', 'rgb(22, 29, 39)'], ['rgb(160, 43, 49)', 'rgb(255, 255, 255)']],
 ];
 
@@ -639,7 +648,14 @@ async function pinValues(page, rows) {
       if (!el) { out[`${pageName} ${selector}`] = { missing: true }; continue; }
       const visible = !!el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) && el.getBoundingClientRect().width > 1;
       const style = getComputedStyle(el, pseudo || undefined);
-      out[`${pageName} ${selector}`] = { color: style.color, background: pseudo ? painted(el) : painted(el), visible };
+      const own = style.backgroundColor;
+      const paints = own && own !== 'transparent' && !/rgba\(0, 0, 0, 0\)/.test(own);
+      out[`${pageName} ${selector}`] = {
+        color: style.color,
+        background: pseudo && paints ? own : painted(el),
+        border: style.borderTopColor,
+        visible,
+      };
     }
     return out;
   }, rows);
@@ -664,16 +680,32 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
       JSON.stringify({ assignment_id: 'asg-750', role: 'reviewer', purpose: '核对深色主题的对比度' }));
     h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_result',?,'2026-11-18T08:13:00Z','run-3','role:reviewer')",
       JSON.stringify({ role: 'reviewer', assignment_id: 'asg-750', result: { summary: '退回 1 项问题', findings: [{ description: '深色下折叠体仍是白纸', evidence: ['static/views.css'] }], inspected_scope: ['static/'], unknowns: [] } }));
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,created_at,updated_at) VALUES('t-750p','101','development.issue','paused','P2','暂停中的任务：折叠体边框',751,'model','2026-11-18T09:00:00Z','2026-11-18T09:10:00Z')");
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-p1','t-750p','execution',1,1,'2026-11-18T09:00:00Z','paused','{}','{}','dev')");
     await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page, h, password);
-    const pages = { task: '#/tasks/t-750', projects: '#/projects', overview: '#/projects/101/overview', tasks: '#/projects/101/overview/tasks.active', settings: '#/settings/work-computers', audit: '#/projects/101/activity' };
+    const pages = { task: '#/tasks/t-750', taskpaused: '#/tasks/t-750p', projects: '#/projects', overview: '#/projects/101/overview', tasks: '#/projects/101/overview/tasks.active', settings: '#/settings/work-computers', audit: '#/projects/101/activity' };
     const collect = async () => {
       const values = {};
       for (const [name, hash] of Object.entries(pages)) {
         await page.goto(h.admin + '/' + hash);
         await page.waitForFunction(() => (document.getElementById('console-page')?.innerText || document.querySelector('#workspace')?.innerText || '').trim().length > 0).catch(() => {});
         await page.waitForLoadState('networkidle').catch(() => {});
-        await page.evaluate(() => document.querySelectorAll('details').forEach((node) => { node.open = true; }));
+        // The task page streams its run folds and re-renders them; keep opening details until every pinned row of
+        // this page is actually laid out, otherwise the visibility assertion below can read a fold mid-render.
+        const rows = PIN_ROWS.filter(([p]) => p === name);
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const ready = await page.evaluate((rows) => {
+            document.querySelectorAll('details').forEach((node) => { node.open = true; });
+            return rows.every(([, selector]) => {
+              const base = selector.includes('::') ? selector.slice(0, selector.indexOf('::')) : selector;
+              const el = document.querySelector(base);
+              return !el || (!!el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) && el.getBoundingClientRect().width > 1);
+            });
+          }, rows);
+          if (ready) break;
+          await page.waitForTimeout(150);
+        }
         if (name === 'settings') await page.evaluate(() => { const host = document.querySelector('.settings-body'); const probe = document.createElement('div'); probe.className = 'settings-rows'; host?.append(probe); });
         await page.waitForTimeout(300);
         Object.assign(values, await pinValues(page, PIN_ROWS.filter(([p]) => p === name)));
@@ -694,16 +726,17 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
     const light = await collect();
     if (process.env.PIN_DUMP) console.log('PIN_LIGHT=' + JSON.stringify(light));
     if (process.env.PIN_DUMP) return;
-    for (const [pageName, selector, expectedDark, expectedLight] of PIN_TABLE) {
+    for (const [pageName, selector, expectedDark, expectedLight, darkBorder, lightBorder] of PIN_TABLE) {
       const key = `${pageName} ${selector}`;
       const d = dark[key], l = light[key];
       expect(d?.missing, `${key} must render`).toBeFalsy();
       expect(l?.missing, `${key} must render in light`).toBeFalsy();
       expect(d.visible, `${key} must be visible in dark`).toBe(true);
       expect(l.visible, `${key} must be visible in light`).toBe(true);
-      for (const [theme, sample, expected] of [['dark', d, expectedDark], ['light', l, expectedLight]]) {
+      for (const [theme, sample, expected, expectedBorder] of [['dark', d, expectedDark, darkBorder], ['light', l, expectedLight, lightBorder]]) {
         expect(sample.color, `${key} ${theme} color`).toBe(expected[0]);
         expect(sample.background, `${key} ${theme} background`).toBe(expected[1]);
+        if (expectedBorder) expect(sample.border, `${key} ${theme} border`).toBe(expectedBorder);
       }
     }
   } finally { await h.stop(); }
