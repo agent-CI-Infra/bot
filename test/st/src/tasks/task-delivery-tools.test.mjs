@@ -85,7 +85,7 @@ const latestResult = results => results.filter(r => r.result_ref).at(-1)?.result
 const contract = goal => ({ goal, scope: ['calc.mjs'], criteria: ['add(2, 3) returns 5 and the project test passes'], endpoint: 'report' });
 
 test('a report task that finds a needed change continues after grant_writes and opens the PR behind independent QA', { timeout: 240000 }, async t => {
-  let granted = false, prsBefore, mediaSelectionAttempted = false, mediaRefusal;
+  let granted = false, prsBefore, mediaSelectionAttempted = false, mediaRefusal, nominationRefusal;
   const h = await engineFixture(t, {
     manager: ({ tools, names, results, messages }) => {
       assert.ok(tools.includes('grant_writes'), 'the Task Manager of a generic task can change its writes');
@@ -95,7 +95,12 @@ test('a report task that finds a needed change continues after grant_writes and 
       if (!names.includes('grant_writes')) return call('grant_writes', { task_id: prompt.task_id, writes: ['pull_request'], reason: 'The report found that calc.mjs must change; deliver the fix as a PR in the same task' });
       if (delegated === 1) { const grant = results.at(-1); assert.deepEqual(grant.writes, ['pull_request'], JSON.stringify(grant)); granted = true;
         return call('delegate_role', { role: 'dev', purpose: 'Fix add in calc.mjs and open the pull request', refs: [prompt.task_ref, latestResult(results)] }); }
-      return call('nominate_delivery', { result_ref: latestResult(results) });
+      const result_ref = latestResult(results);
+      if (!names.includes('nominate_delivery'))
+        return call('nominate_delivery', { result_ref, summary: '![Screenshot](workspace:.tmp/unselected.png)' });
+      nominationRefusal = messages.filter(message => ['tool', 'user'].includes(message.role)).map(message => JSON.stringify(message.content))
+        .find(text => text.includes('must name a selected media file') && text.includes('.tmp/unselected.png'));
+      return call('nominate_delivery', { result_ref });
     },
     dev: ({ tools, names, messages }) => {
       if (!granted) {
@@ -126,6 +131,7 @@ test('a report task that finds a needed change continues after grant_writes and 
   assert.equal(task.status, 'pr_opened', h.logs(id));
   assert.equal(task.kind, 'task.request');
   assert.ok(mediaRefusal, 'an invalid media file can be corrected in the active delivery turn');
+  assert.ok(nominationRefusal, 'the Manager can repair a media reference before ending the nomination turn');
   const prs = (await h.state()).prs;
   assert.equal(prs.length, prsBefore + 1);
   assert.equal(prs.at(-1).head.ref, 'bot/task-' + id, 'the same task opened the PR');
