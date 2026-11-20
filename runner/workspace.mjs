@@ -375,6 +375,205 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     for(const name of saved.conflicts){const bytes=await readFile(await path(name)).catch(()=>null);if(bytes&&/^(?:<<<<<<< |=======\r?$|>>>>>>> )/m.test(bytes.toString('utf8')))unresolved.push(name);}
     return {unresolved};
   }
+  if(input.type==='workspace_import_commits'){
+    await checkoutDirectory(repo,worktreeRoot);
+    const unlocked=await unlock();
+    const commits=Array.isArray(input.commits)?input.commits:[];
+    const refMap={};
+    const hasCommit=async sha=>/^[a-f0-9]{40}$/.test(sha||'')&&await git(['cat-file','-e',sha+'^{commit}']).then(()=>true,()=>false);
+    const buildTree=async entries=>{
+      const byDir=new Map([['',[]]]);
+      const ensureDir=dir=>{
+        if(byDir.has(dir))return;
+        const parent=dir.includes('/')?dir.slice(0,dir.lastIndexOf('/')):'';
+        ensureDir(parent);
+        byDir.set(dir,[]);
+        byDir.get(parent).push({mode:'040000',type:'tree',name:dir.includes('/')?dir.slice(dir.lastIndexOf('/')+1):dir,dir});
+      };
+      for(const f of entries){
+        const p=safe(f.path),slash=p.lastIndexOf('/'),dir=slash>=0?p.slice(0,slash):'',name=slash>=0?p.slice(slash+1):p;
+        if(!/^[a-f0-9]{40}$/.test(f?.sha||''))throw new Error('invalid_import_blob_sha:'+p);
+        if(f.type==='commit'&&String(f.mode)==='160000'){
+          ensureDir(dir);
+          byDir.get(dir).push({mode:'160000',type:'commit',name,sha:f.sha});
+          continue;
+        }
+        if(!['100644','100755','120000'].includes(String(f.mode||'100644')))throw new Error('invalid_import_blob_mode:'+p);
+        let blobSha=f.sha;
+        if(typeof f.base64==='string'){
+          blobSha=(await git(['hash-object','--no-filters','-w','--stdin'],Buffer.from(f.base64,'base64'))).toString().trim();
+          if(blobSha!==f.sha)throw new Error(`import_blob_sha_mismatch:${p}:expected ${f.sha}, actual ${blobSha}`);
+        }else if(!(await git(['cat-file','-e',f.sha+'^{blob}']).then(()=>true,()=>false))){
+          throw new Error('import_blob_missing:'+p);
+        }
+        ensureDir(dir);
+        byDir.get(dir).push({mode:f.mode||'100644',type:'blob',name,sha:blobSha});
+      }
+      const writeDir=async dir=>{
+        const items=byDir.get(dir)||[];
+        const lines=[];
+        for(const item of items){
+          const sha=item.type==='tree'?await writeDir(item.dir):item.sha;
+          lines.push(`${item.mode} ${item.type} ${sha}\t${item.name}`);
+        }
+        return (await git(['mktree'],Buffer.from(lines.length?lines.join('\n')+'\n':''))).toString().trim();
+      };
+      return writeDir('');
+    };
+    for(const c of commits){
+      if(!/^[a-f0-9]{40}$/.test(c?.sha||''))throw new Error('invalid_import_commit');
+      if(!/^[a-f0-9]{40}$/.test(c?.tree_sha||''))throw new Error('invalid_import_tree');
+      if(await hasCommit(c.sha)){
+        const existingTree=(await git(['rev-parse',c.sha+'^{tree}'])).toString().trim();
+        if(existingTree!==c.tree_sha)throw new Error(`import_existing_tree_mismatch:${c.sha}`);
+        await git(['update-ref','refs/bot/base/'+c.sha,c.sha]);
+        refMap[c.sha]=c.sha;
+        continue;
+      }
+      let treeSha=c.tree_sha;
+      if(Array.isArray(c.files)){
+        treeSha=await buildTree(c.files);
+        if(treeSha!==c.tree_sha)throw new Error(`import_tree_sha_mismatch:${c.sha}:expected ${c.tree_sha}, actual ${treeSha}`);
+      }else if(!(await git(['cat-file','-e',c.tree_sha+'^{tree}']).then(()=>true,()=>false))){
+        throw new Error(`import_tree_missing:${c.sha}:${c.tree_sha}`);
+      }
+      const parentArgs=[];
+      for(const p of Array.isArray(c.parents)?c.parents:[]){
+        if(!/^[a-f0-9]{40}$/.test(p||''))throw new Error(`invalid_import_parent:${c.sha}`);
+        const mapped=refMap[p]||(await hasCommit(p)?p:null);
+        if(!mapped){
+          if(c.boundary_lca===true)continue;
+          throw new Error(`import_parent_missing:${c.sha}:${p}`);
+        }
+        parentArgs.push('-p',mapped);
+      }
+      const synth=(await git(['commit-tree',treeSha,...parentArgs],Buffer.from((c.message||'Imported commit')+'\n'))).toString().trim();
+      await git(['update-ref','refs/bot/base/'+c.sha,synth]);
+      refMap[c.sha]=synth;
+    }
+    if(!(await git(['config','--get','user.name']).then(b=>b.toString().trim(),()=>''))){
+      await git(['config','user.name','Department Bot']);
+    }
+    if(!(await git(['config','--get','user.email']).then(b=>b.toString().trim(),()=>''))){
+      await git(['config','user.email',author.email||'department-bot@invalid.local']);
+    }
+    if(input.conflict_base_sha){
+      const baseRefTarget=refMap[input.conflict_base_sha]||(await hasCommit(input.conflict_base_sha)?input.conflict_base_sha:null);
+      if(!baseRefTarget)throw new Error('conflict_base_missing');
+      await git(['update-ref','refs/heads/bot-conflict-base',baseRefTarget]);
+    }
+    if(input.pr_head_sha){
+      const prRefTarget=refMap[input.pr_head_sha]||(await hasCommit(input.pr_head_sha)?input.pr_head_sha:null);
+      if(!prRefTarget)throw new Error('pr_head_missing');
+      const headSha=(await git(['rev-parse','HEAD'])).toString().trim();
+      const headTree=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
+      const prTree=(await git(['rev-parse',prRefTarget+'^{tree}'])).toString().trim();
+      const headParents=(await git(['rev-list','--parents','-n','1',headSha])).toString().trim().split(/\s+/).slice(1);
+      if(!headParents.length&&headSha!==prRefTarget){
+        if(headTree===prTree){
+          await git(['update-ref','refs/heads/bot-local',prRefTarget]);
+          await git(['update-ref','refs/bot/pr-local/'+input.pr_head_sha,prRefTarget]);
+          await git(['symbolic-ref','HEAD','refs/heads/bot-local']).catch(()=>{});
+        }else{
+          const prParents=(await git(['rev-list','--parents','-n','1',prRefTarget])).toString().trim().split(/\s+/).slice(1);
+          const pArgs=prParents.flatMap(p=>['-p',p]);
+          const rooted=(await git(['commit-tree',headTree,...pArgs],Buffer.from('Snapshot PR head\n'))).toString().trim();
+          await git(['update-ref','refs/heads/bot-local',rooted]);
+          await git(['update-ref','refs/bot/pr-local/'+input.pr_head_sha,rooted]);
+          await git(['symbolic-ref','HEAD','refs/heads/bot-local']).catch(()=>{});
+        }
+      }
+    }
+    return {imported:Object.keys(refMap),refs:refMap,...unlocked};
+  }
+  if(input.type==='workspace_verify_merge'){
+    if(![input.base_sha,input.head_sha,input.head_tree_sha].every(v=>/^[a-f0-9]{40}$/.test(v||'')))throw new Error('invalid_verify_merge');
+    return withWorkspaceLock(root+'/finalize.lock',async()=>{
+      await checkoutDirectory(repo,worktreeRoot);
+      const unlocked=await unlock();
+      const unmerged=(await git(['diff','--name-only','--diff-filter=U','-z'])).toString().split('\0').filter(Boolean);
+      if(unmerged.length)return {ok:false,reason:'unmerged_index',files:unmerged.slice(0,50),...unlocked};
+      await git(['add','--all']);
+      const candidateTree=(await git(['write-tree'])).toString().trim();
+      const resolveRef=async ref=>{
+        const resolved=await git(['rev-parse','--verify','--quiet',ref+'^{commit}']).then(b=>b.toString().trim(),()=>'');
+        return /^[a-f0-9]{40}$/.test(resolved)?resolved:null;
+      };
+      const resolveCommit=async sha=>(await resolveRef(sha))||(await resolveRef('refs/bot/base/'+sha));
+      const baseCommit=await resolveCommit(input.base_sha);
+      if(!baseCommit)return {ok:false,reason:'base_commit_missing',candidate_tree:candidateTree,...unlocked};
+      const prCommit=await resolveCommit(input.head_sha);
+      if(!prCommit)return {ok:false,reason:'pr_commit_missing',candidate_tree:candidateTree,...unlocked};
+      const prLocalCommit=await resolveRef('refs/bot/pr-local/'+input.head_sha);
+      const headCommit=(await git(['rev-parse','HEAD'])).toString().trim();
+      const baseTreeSha=(await git(['rev-parse',baseCommit+'^{tree}'])).toString().trim();
+      const prTreeSha=(await git(['rev-parse',prCommit+'^{tree}'])).toString().trim();
+      const mergeHead=await readFile(repo+'/.git/MERGE_HEAD','utf8').then(s=>s.trim(),()=>'');
+      const isAncestor=(anc,desc)=>git(['merge-base','--is-ancestor',anc,desc]).then(()=>true,()=>false);
+      const baseInHead=await isAncestor(baseCommit,headCommit);
+      const prInHead=(await isAncestor(prCommit,headCommit))||Boolean(prLocalCommit&&await isAncestor(prLocalCommit,headCommit));
+      const gitMerged=(baseInHead&&prInHead)||(prInHead&&mergeHead===baseCommit)||(baseInHead&&(mergeHead===prCommit||(Boolean(prLocalCommit)&&mergeHead===prLocalCommit)));
+      const alreadyAncestor=await isAncestor(baseCommit,prCommit);
+      const prAlreadyInBase=await isAncestor(prCommit,baseCommit);
+      if(!alreadyAncestor&&!prAlreadyInBase){
+        if(candidateTree===input.head_tree_sha||candidateTree===prTreeSha){
+          return {ok:false,reason:'tree_unchanged_from_pr_head',candidate_tree:candidateTree,git_merged:false,...unlocked};
+        }
+        if(candidateTree===baseTreeSha){
+          return {ok:false,reason:'tree_unchanged_from_base',candidate_tree:candidateTree,git_merged:false,...unlocked};
+        }
+      }
+      const treeMap=async treeish=>{
+        const map=new Map();
+        if(!treeish)return map;
+        const out=await git(['ls-tree','-r','-z',treeish]).then(b=>b.toString(),()=>'');
+        for(const entry of out.split('\0').filter(Boolean)){
+          const tab=entry.indexOf('\t');if(tab<0)continue;
+          const [mode,type,sha]=entry.slice(0,tab).trim().split(/\s+/),name=entry.slice(tab+1);
+          if(type==='blob'||type==='commit')map.set(name,`${mode}:${type}:${sha}`);
+        }
+        return map;
+      };
+      const mergeBase=await git(['merge-base',baseCommit,prCommit]).then(b=>b.toString().trim(),()=>null);
+      if(!mergeBase&&!alreadyAncestor&&!prAlreadyInBase){
+        return {ok:false,reason:'merge_base_missing',candidate_tree:candidateTree,...unlocked};
+      }
+      const [oMap,bMap,pMap,cMap]=await Promise.all([
+        treeMap(mergeBase),
+        treeMap(baseCommit),
+        treeMap(prCommit),
+        treeMap(candidateTree),
+      ]);
+      const isCommitEntry=v=>typeof v==='string'&&v.includes(':commit:');
+      const isBlobEntry=v=>typeof v==='string'&&v.includes(':blob:');
+      const markerFiles=[];
+      const allPaths=new Set([...oMap.keys(),...bMap.keys(),...pMap.keys(),...cMap.keys()]);
+      for(const name of allPaths){
+        const cSha=cMap.get(name);
+        if(!isBlobEntry(cSha)||(cSha===bMap.get(name)&&cSha===pMap.get(name)))continue;
+        if(cSha!==bMap.get(name)&&cSha!==pMap.get(name)){
+          const bytes=await readFile(await path(name)).catch(()=>null);
+          if(bytes&&/^(?:<<<<<<< |=======\r?$|>>>>>>> )/m.test(bytes.toString('utf8')))markerFiles.push(name);
+        }
+      }
+      if(markerFiles.length)return {ok:false,reason:'conflict_markers_present',files:markerFiles.slice(0,50),candidate_tree:candidateTree,...unlocked};
+      if(mergeBase&&!alreadyAncestor&&!prAlreadyInBase){
+        const missingBase=[],missingPr=[],unmergedConflicts=[];
+        for(const name of allPaths){
+          const o=oMap.get(name),b=bMap.get(name),p=pMap.get(name),c=cMap.get(name);
+          const effectiveC=c===undefined&&isCommitEntry(b)&&p===b?p:c;
+          if(b!==o&&p===o&&effectiveC!==b)missingBase.push(name);
+          else if(p!==o&&b===o&&effectiveC!==p)missingPr.push(name);
+          else if(b!==o&&b===p&&effectiveC!==b)missingPr.push(name);
+          else if(b!==o&&p!==o&&b!==p&&(effectiveC===p||effectiveC===b||effectiveC===o||(effectiveC===undefined&&b!==undefined&&p!==undefined)))unmergedConflicts.push(name);
+        }
+        if(missingBase.length)return {ok:false,reason:'base_changes_missing',files:missingBase.slice(0,50),candidate_tree:candidateTree,...unlocked};
+        if(missingPr.length)return {ok:false,reason:'pr_changes_missing',files:missingPr.slice(0,50),candidate_tree:candidateTree,...unlocked};
+        if(unmergedConflicts.length)return {ok:false,reason:'conflicting_files_unmerged',files:unmergedConflicts.slice(0,50),candidate_tree:candidateTree,...unlocked};
+      }
+      return {ok:true,candidate_tree:candidateTree,git_merged:gitMerged,...unlocked};
+    });
+  }
   if(input.type==='workspace_restore'){
     if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_recovery_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;

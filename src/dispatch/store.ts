@@ -4,6 +4,7 @@ import { TaskError } from '../agent/common.js';
 import { captureTaskConfiguration, taskPermissions } from '../tasks/configuration.js';
 import { TaskRecords } from '../tasks/service.js';
 import { enqueue, enqueueRefusal } from '../review/queue.js';
+import { refreshBotPrWakeFacts } from '../review/bot-pr-wake.js';
 import { continueFinishedReview } from '../review/continuation.js';
 import { enqueueEventTask } from '../tasks/event-adapters.js';
 import { covers, projectCeiling, type Ceiling } from '../projects/ceiling.js';
@@ -453,8 +454,10 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   const marks = allKinds.map(() => '?').join(',');
   const objectType = event.object_type ? String(event.object_type) : (String(merge.kinds[0] || '').endsWith('.pr') ? 'pr' : 'issue');
   const preferDev = String(merge.kinds[0] || '').startsWith('development.');
-  const active = store.all(
-    `SELECT t.id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+  const allowReviews = merge.kinds.some((k: unknown) => String(k).startsWith('review.'));
+  const onlyDev = merge.kinds.every((k: unknown) => String(k).startsWith('development.'));
+  const rawActive = store.all(
+    `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
      WHERE t.repository_id=? AND t.object_number=? AND t.kind IN (${marks})
      AND (t.kind<>'task.request' OR json_extract(t.input,'$.target.type') IS NULL OR json_extract(t.input,'$.target.type')=?)
      AND t.status IN (${activeStates.map(() => '?').join(',')})
@@ -462,12 +465,15 @@ export function continuations(store: Store, event: Record<string, any>): Continu
        (SELECT claimed_at FROM task_claims WHERE task_id=t.id) DESC,t.created_at DESC,t.rowid DESC`,
     repo, objectNumber, ...allKinds, objectType, ...activeStates,
   );
+  const active = onlyDev
+    ? rawActive.filter(t => t.kind !== 'task.request' || taskPermissions(store, t).writes.some((w: string) => w === 'pull_request' || w === 'actions_rerun'))
+    : rawActive;
   const seenIds = new Set(active.map(t => String(t.id)));
   if (objectType === 'pr') {
     const rootIssue = rootIssueOfBotPr(store, repo, objectNumber);
     if (rootIssue) {
       const linkedIssueDev = store.all(
-        `SELECT t.id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
          WHERE t.repository_id=? AND t.object_number=?
          AND (t.kind='development.issue' OR (t.kind='task.request' AND json_extract(t.input,'$.target.type')='issue'
            AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))))
@@ -482,7 +488,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
     if (botPrs.length) {
       const prMarks = botPrs.map(() => '?').join(',');
       const linkedPrDev = store.all(
-        `SELECT t.id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
          WHERE t.repository_id=? AND t.object_number IN (${prMarks})
          AND (t.kind='development.pr' OR (t.kind='task.request' AND json_extract(t.input,'$.target.type')='pr'
            AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))))
@@ -506,7 +512,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   const running = (task: Row) => ['running', 'preparing', 'implementing', 'validating', 'publishing', 'result_ready'].includes(String(task.status));
   const latest = active.find(running);
   const joinable = [...(latest ? [latest] : []), ...active.filter(task => !running(task))].slice(0, 5);
-  if (!joinable.length) {
+  if (!joinable.length && allowReviews) {
     const finished = store.get(
       `SELECT t.id,t.kind,t.status,t.summary,t.created_at FROM tasks t
        WHERE t.repository_id=? AND t.object_number=? AND t.status='succeeded'
@@ -578,10 +584,11 @@ export function dispatchContext(store: Store, event: Row): DispatchContext {
     : [];
   const tKey = threadKey(store, event);
   const subscriptions = activeRepositorySubscriptions(store, String(event.repository_id));
+  const facts = refreshBotPrWakeFacts(store, event, JSON.parse(event.facts));
   return {
     event,
     thread: readDispatchThread(store, tKey, String(event.repository_id)),
-    facts: JSON.parse(event.facts),
+    facts,
     options,
     unavailable,
     continuations: joinable,
@@ -1140,7 +1147,13 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
       const headMove = task.kind === 'task.request' && input.target?.type === 'pr' && pushedHead && pushedHead !== task.head_sha
         ? { move_to_sha: pushedHead, target: { ...input.target, ref: pushedHead } }
         : {};
-      store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, ...revision, ...headMove, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
+      const conflictBase = merge.data?.wake_type === 'pull_request.conflicted' && typeof merge.data?.base_sha === 'string' && /^[a-f0-9]{40}$/.test(merge.data.base_sha)
+        ? { conflict_base_sha: merge.data.base_sha, ...(typeof merge.data.base_ref === 'string' ? { conflict_base_ref: merge.data.base_ref } : {}) }
+        : {};
+      const wakeEvents = merge.data?.wake_type
+        ? { wake_events: [...(Array.isArray(input.wake_events) ? input.wake_events : []).slice(-19), merge.data] }
+        : {};
+      store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, ...revision, ...headMove, ...conflictBase, ...wakeEvents, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
       if (request) {
         const prNumber = event.object_type === 'pr' && event.object_number ? Number(event.object_number) : Number(task.object_number);
         store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)

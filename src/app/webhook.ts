@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
 import { pullRequestNeeded, queueWebhook } from '../review/queue.js';
+import { botWakePreflightPlan, collectBotWakePreflight, type BotWakePreflight } from '../review/bot-pr-wake.js';
 import { GitHub } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import { recordInstallationEvent } from './installations.js';
@@ -113,13 +114,19 @@ export async function ingest(
   const safeHeaders = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key,
     /authorization|cookie|token|secret|signature|key/i.test(key) ? '[REDACTED]' : value]));
   let currentPullRequest: Json | undefined;
+  let botWakePreflight: BotWakePreflight | undefined;
+  const freshDelivery = status === 200 && !!owner && !!payload
+    && !store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId);
   // A PR conversation comment (a mention or an update) is reviewed at the PR's current head, which the comment does not carry.
-  if (status === 200 && owner && payload && pullRequestNeeded(store, repoId, event, payload)
-    && !store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId)) {
+  if (freshDelivery && pullRequestNeeded(store, repoId, event, payload!)) {
     // Read before the synchronous archive transaction; actor lookup is unnecessary for this read-only request.
-    const github = new GitHub(store, owner, new Redactor(), async () => {}, githubUrl);
+    const github = new GitHub(store, owner!, new Redactor(), async () => {}, githubUrl);
     await github.connect(false, { pull_requests: 'read' }, undefined, false);
-    currentPullRequest = await github.object('review.pr', Number((payload.issue as Json).number));
+    currentPullRequest = await github.object('review.pr', Number((payload!.issue as Json).number));
+  }
+  const wakePlan = freshDelivery ? botWakePreflightPlan(store, repoId, event, payload!) : null;
+  if (wakePlan) {
+    botWakePreflight = await collectBotWakePreflight(store, owner!, wakePlan, githubUrl, deliveryId);
   }
   return store.transaction(() => {
     const duplicate = status === 200 && (!!store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId)
@@ -191,7 +198,7 @@ export async function ingest(
       if (subscriptionMatch.matched.length) {
         Object.assign(response, { subscriptions_matched: subscriptionMatch.matched.length, tasks_woken: subscriptionMatch.tasksWoken.length });
       }
-      response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest);
+      response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest, botWakePreflight);
       if (
         policy?.enabled &&
         !subscriptionMatch.matched.length &&

@@ -106,6 +106,9 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
     h.store.run(`INSERT INTO worktree_bindings(repository_id,worktree_id,task_id,workspace_id,mode,head_sha,tree_sha,bound_at) VALUES(?,?,?,?,'read',?,?,?)`, repo, repo.repeat(16), repo === '101' ? 'done-101' : 'done-202', 'c'.repeat(48), 'a'.repeat(40), 'b'.repeat(40), now);
   }
   h.store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('101',6,'pr','1','101','bot/issue-5','abc','done-101')");
+  for (const repoId of ['101', '202']) {
+    h.store.run("INSERT INTO bot_pr_states(repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at) VALUES(?,6,'open',0,'main',?,?,1,'clean','Bot PR',NULL,?)", repoId, 'a'.repeat(40), 'b'.repeat(40), now);
+  }
   h.store.run("INSERT INTO automation_runs VALUES('automation-101','101',NULL,'issues','issues.opened',1,'[]','[]',?)", now);
   h.store.run("INSERT INTO external_clients(id,repository_id,name,auth_type,trust,created_at) VALUES('client-101','101','Fixture','private_key_jwt','{}',?)", now);
   h.store.run("INSERT INTO external_grants(id,client_id,request_id,created_at,state) VALUES('grant-101','client-101','request-101',0,'issued')");
@@ -140,7 +143,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   assert.ok(github.requests.includes('GET /repositories/101'));
   // Nothing that names 101 is left except the audit, which keeps its records.
   for (const table of tablesWith(h.store, 'repository_id').filter(name => name !== 'audit')) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE repository_id='101'`).n, 0, table);
-  for (const table of ['worktrees', 'worktree_bindings', 'github_repository_member_cache', 'github_repository_collaborators', 'github_repository_assignees', 'event_subscriptions']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE repository_id='202'`).n, 1, table);
+  for (const table of ['worktrees', 'worktree_bindings', 'bot_pr_states', 'github_repository_member_cache', 'github_repository_collaborators', 'github_repository_assignees', 'event_subscriptions']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE repository_id='202'`).n, 1, table);
   for (const table of ['task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE task_id LIKE '%-101'`).n, 0, table);
   for (const table of ['external_grants', 'external_subscriptions', 'external_event_cursors']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE client_id='client-101'`).n, 0, table);
   for (const table of ['models', 'model_pricing', 'model_projects']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE ${table === 'models' ? 'id' : 'model_id'}=?`, own.id).n, 0, table);

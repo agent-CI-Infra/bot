@@ -2,6 +2,7 @@ import {submissionFeedback} from '../roles/submission-feedback.js';
 import {managedSession} from '../harness/session.js';
 import { resultSpec, type ResultSession } from './tool-results.js';
 import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
+import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 import { beginRun, endRun, traceEvent, traceSnapshot, withRunTraceScope } from '../tasks/trace.js';
 import { insertTaskLog } from '../storage/payloads.js';
 import type { Store, Row } from '../storage/database.js';
@@ -240,6 +241,10 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
     if(JSON.stringify(updates)!==JSON.stringify(instructions)){
       messages.push({role:'user',content:'Additional user instructions for subsequent steps; the recorded contract and authority remain binding:\n'+JSON.stringify(updates)});
       instructions.splice(0,instructions.length,...updates);
+    }
+    const continuedUpdates=turn>0&&spec.task.id?consumePendingTaskUpdates(spec.store,String(spec.task.id)):[];
+    if(continuedUpdates.length){
+      messages.push({role:'user',content:'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n'+JSON.stringify(spec.redactor.clean(continuedUpdates))});
     }
     const reserve=finalizationReserve(maxTurns);
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;

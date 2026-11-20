@@ -42,6 +42,7 @@ import { dueProgress, milestoneToolName, reportMilestone, settleProgress, startP
 import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, developmentApproved, carryRevisionRequests,
   ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, type DevelopmentOffer, type GoAhead } from '../review/development.js';
+import { BotPrWakeScanner, carryUnconsumedTaskUpdates } from '../review/bot-pr-wake.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
@@ -123,9 +124,10 @@ export class TaskEngine {
   readonly rules:RuleService;readonly coordinator:CoordinationWorker;
   // #713: moves tasks nobody needs to act on out of 待处理; main.ts runs it in the background, run() for its own work.
   readonly obsolete:ObsoleteSweep;
+  readonly botPrWake:BotPrWakeScanner;
   // Decides the Manager events in the background; a decided event's new tasks start on the next tick.
   readonly dispatcher:Dispatcher;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.obsolete=new ObsoleteSweep(store);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl,manager),()=>queueMicrotask(()=>this.tick()));}
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.obsolete=new ObsoleteSweep(store);this.botPrWake=new BotPrWakeScanner(store,githubUrl);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl,manager),()=>queueMicrotask(()=>this.tick()));}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
@@ -213,7 +215,7 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;onSubscriptionWake(null);if(this.timer)clearInterval(this.timer);await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;await this.coordinator.close();}
+  async close(){this.closing=true;onSubscriptionWake(null);if(this.timer)clearInterval(this.timer);await this.botPrWake.close();await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;await this.coordinator.close();}
   // Issues whose development is not shown as it is (#1047): a write to retry, or a development that ended or paused outside a
   // run (a person cancelled it, the Issue was closed). A running development settles its Issue itself. One sweep at a time,
   // with one GitHub client per project.
@@ -549,8 +551,9 @@ export class TaskEngine {
         const summary=pullRequestSummaryForProgress(candidate);
         if(task.kind!=='development.issue')await publisher.discussion('development-result',`${asked?`Revised as requested by ${asked}.\n\n`:''}Implemented in ${pr.html_url}\n\n${summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
         update({result:JSON.stringify({summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
-        // Requests continued into this revision after it prepared go back to the Manager (#1104).
+        // Requests and wake updates continued into this revision after it prepared go back to the Manager (#1104, #1167).
         carryRevisionRequests(this.store,task,input.revision?.requests||[],commit);
+        carryUnconsumedTaskUpdates(this.store,String(task.id),commit);
         await issueProgress();
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
@@ -822,7 +825,7 @@ export class TaskEngine {
             if(development&&task.kind==='development.pr'&&requestedBy())await new Publisher(this.store,github,task,validate,undefined,log)
               .discussion('development-result',`Answering ${requestedBy()}: no code change.\n\n${summary}`);
             if(development)update({result:JSON.stringify({...args,summary,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
-            if(development)carryRevisionRequests(this.store,task,input.revision?.requests||[],task.head_sha);
+            if(development){carryRevisionRequests(this.store,task,input.revision?.requests||[],task.head_sha);carryUnconsumedTaskUpdates(this.store,String(task.id),task.head_sha?String(task.head_sha):null);}
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }
           await validate();
@@ -995,9 +998,10 @@ export class TaskEngine {
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
       // The module of event work hears that its task ended without a result (a waiting or retried task has not ended).
       if(event&&current?.claim_token===token&&['failed','cancelled','superseded','needs_replan'].includes(state))event.ended?.(this.store,task,failure.code,redactor.text(String(failure.detail||'')));
-      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:subscriptionAlreadyWoken?null:failure.code,retry_count:retries,wait_count:subscriptionAlreadyWoken?0:waits,
+      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)){update({status:state,error_code:subscriptionAlreadyWoken?null:failure.code,retry_count:retries,wait_count:subscriptionAlreadyWoken?0:waits,
         retry_error_code:counted?failure.code:retrying&&!headMoved?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay,...(subscriptionAlreadyWoken?{attempt:task.attempt+1}:{})});
+        if(state==='failed')carryUnconsumedTaskUpdates(this.store,String(task.id),task.head_sha?String(task.head_sha):null);}
       // A development whose go-ahead no longer holds goes back to the Manager to answer the person (#815), not to a retry button.
       if(failure.code==='development_not_approved'&&task.kind==='development.issue'&&state==='waiting_permission'&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))
         developmentStopped(this.store,{...task,input:this.store.get('SELECT input FROM tasks WHERE id=?',id)?.input??task.input},redactor.text(String(failure.detail||'')));
