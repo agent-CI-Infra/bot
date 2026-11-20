@@ -21,8 +21,8 @@
 - **通用检出目标（`target`）**：`POST /api/tasks`、`task.create`、`create_task`、`create_project_task` 与 Manager 分派均支持绑定 `target: { type: 'issue' | 'pr' | 'branch' | 'commit', number?, ref? }`。绑定 PR 时自动检出 `refs/pull/<n>/head` 与基准分支，并在 `../context/` 准备 `object.json`、`files.json`、`comments.json`、`reviews.json`、`review_comments.json`、`repository_labels.json`；绑定 Issue 且存在关联 bot PR 并持有 `pull_request` 授权时自动续接该 bot PR 分支。
 - **正式检视（`post_review`）**：要求 `review` 授权与至少 `comment` 能力上限；发布前对行内评论执行 diff 锚点预检（越界行号在任何 GitHub 请求前拒绝，0 次 GitHub 写入，绝不向 GitHub 发送 422 请求），通过轻量守门人 QA 后复用 `Publisher.review` 原位更新同一条总结评论（`review_summaries`）、关闭已修复的行内讨论串（`resolveFixed`）并按策略添加检视与分类标签。
 - **分支与 PR 交付（`open_pull_request`）**：要求 `pull_request` 授权与 `develop` 能力上限；强制通过项目 `test_command` 与独立 `qa` 验收，仅向登记的 `bot/*` 分支非强推提交并创建或更新 bot PR，严禁强推他人分支；触碰 `.github/workflows/` 仍需管理员显式确认（`workflow_changes`）。
-- **PR 正文媒体**：PR 交付工具的可选 `media` 列出本次明确选中的文件，例如 `[".tmp/result.png", ".tmp/demo.webm"]`。正文用 `![结果](workspace:.tmp/result.png)` 内嵌图片，用 `[录屏](workspace:.tmp/demo.webm)` 链接视频。文件可位于检出目录的 Git 忽略路径，浏览器证据也可用当前任务的 `../browser/evidence/<文件名>`。支持 PNG、JPEG、GIF、WebP（每张 5 MiB），以及 MP4、WebM（每段 20 MiB），每次最多 8 个文件、合计 30 MiB。选中前应检查画面和音轨中的敏感信息。
-- PR 媒体和代码一起通过交付门禁。Bot 把媒体保存到本机数据卷，以已配置的公网 HTTPS 地址提供随机文件链接，确认文件入库后再用目标仓的 GitHub App 发布正文。图片可在公开和私有 PR 内嵌，录屏通过链接下载。视频和图片属于其来源项目，移除项目或撤销应用安装后，托管入口停止提供相应文件。
+- **PR 正文媒体**：PR 交付工具的可选 `media` 列出本次明确选中的文件，例如 `[".tmp/result.png", ".tmp/demo.webm"]`。正文用 `![结果](workspace:.tmp/result.png)` 内嵌图片，用 `[录屏](workspace:.tmp/demo.webm)` 链接视频。文件可位于检出目录的 Git 忽略路径。内置浏览器工具为当前任务保存的截图可通过 `../browser/evidence/step-1.png` 之类的引用选中。支持 PNG、JPEG、GIF、WebP（每张 5 MiB），以及 MP4、WebM（每段 20 MiB），每次最多 8 个文件、合计 30 MiB。选中前应检查画面和音轨中的敏感信息。
+- PR 媒体和代码一起通过交付门禁。Bot 把媒体保存到本机数据卷，以已配置的公网 HTTPS 地址提供随机文件链接，确认文件入库后再用目标仓的 GitHub App 发布正文。图片可在公开和私有 PR 内嵌，录屏通过链接下载。托管副本计入来源项目的存储用量，适用单次交付的大小和数量限制，随来源项目移除。Bot 确认应用安装撤销后，源站停止提供相应文件。
 - 每条文件链接含 256 位随机访问凭证，服务只提供单文件读取。包括私有仓在内，获得链接的人和 GitHub 的图片代理均可读取相应文件。链接转发也会转移读取能力。请只选择允许按这种方式分享的媒体。
 - **Actions 单次重跑（`rerun_failed_run`）**：要求 `actions_rerun` 授权与至少 `comment` 能力上限，受单次 run 重跑预算与幂等账本保护。
 

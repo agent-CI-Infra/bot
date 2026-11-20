@@ -8,7 +8,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_installation_access_revoked','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
-    'actions_app_required','actions_permission_missing','actions_workflow_run_subscription_missing','pull_request_media_permission'] },
+    'actions_app_required','actions_permission_missing','actions_workflow_run_subscription_missing','pull_request_media_permission','pull_request_media_origin_missing'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['agent_compaction_failed','harness_model_transport_invalid','harness_direct_protocol_unsupported','role_nomination_stages_incomplete','role_submission_required','acp_submission_required','codex_submission_required','codex_authentication_failed','codex_model_unavailable','codex_model_mismatch','codex_model_rerouted','codex_resume_incompatible','codex_turn_failed','codex_subagent_refused','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','service_role_model_not_configured','channel_service_model_unavailable','service_role_unavailable','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','review_inline_out_of_diff','model_url_insecure','create_pull_request_required','create_pull_request_not_allowed','pull_request_labels_refused','delivery_refused',
@@ -26,7 +26,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // #705: read-only /opt/agent-tools CLI volume availability, compatibility and archive integrity.
     'agent_tools_volume_missing','cli_not_installed','cli_version_incompatible','platform_arch_unsupported','agent_tool_invalid','agent_tool_hash_mismatch','agent_tool_archive_invalid'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
-    'unsupported_blob_encoding','unsafe_skill_file','pull_request_file_limit','agent_context_too_large','github_pagination_limit','pull_request_media_invalid','pull_request_media_origin_missing',
+    'unsupported_blob_encoding','unsafe_skill_file','pull_request_file_limit','agent_context_too_large','github_pagination_limit','pull_request_media_invalid',
     // The repository's .agents/skills/ are the repository's to fix.
     'too_many_bot_skills','invalid_skill_file','invalid_rule_content',
     // Raised only by versions that still read .bot/ files (before #935) or limited their sizes; tasks may still wait on them.

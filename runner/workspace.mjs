@@ -87,10 +87,8 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     return {sha,size:data.length};
   };
   if(input.type==='workspace_export'&&input.mode==='pull_request_media'){
-    const prefix='../browser/evidence/',evidence=typeof input.path==='string'&&input.path.startsWith(prefix);
-    const name=safe(evidence?input.path.slice(prefix.length):input.path);
-    if(evidence&&name.includes('/'))throw new Error('invalid_media_path');
-    const target=resolve(evidence?root+'/browser/evidence':await base(),name);
+    const name=safe(input.path);
+    const target=resolve(await base(),name);
     if(await realpath(dirname(target))!==dirname(target))throw new Error('invalid_media_path');
     return exportFile(target,true);
   }
