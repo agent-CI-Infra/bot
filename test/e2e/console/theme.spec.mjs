@@ -261,8 +261,7 @@ const DARK_TASK_DETAIL = [
   '.live', '.task-metrics', '.task-cancel-btn',
   '.step-fold-title', '.step-fold-num', '.step-fold-meta', '.step-fold-summary',
   '.role-run-title-row', '.role-run-meta', '.role-run-summary',
-  // Review of 5084b13c: the role run fold body and its findings were never repainted in dark, and neither were the
-  // links of the capability card that main added after this branch started.
+  // Review of 5084b13c: the role run fold body and its findings were never repainted in dark.
   '.role-run-fold', '.role-run-fold .role-step-toolbar > .muted', '.role-run-fold .role-empty-steps', '.role-run-findings',
 ];
 
@@ -311,7 +310,7 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       const pages = [
         ['#/tasks/t-750', DARK_TASK_DETAIL],
         ['#/projects', width >= 1280 ? [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar'] : ['.project-owner-bar']],
-        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line', '.role-board-row', '.capability-tile:not([data-state=off]) .capability-links a', '.capability-tile[data-state=off] .capability-links a', ...(width === 390 ? ['.role-mobile-label'] : [])]],
+        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line', '.role-board-row', ...(width === 390 ? ['.role-mobile-label'] : [])]],
       ];
       for (const [hash, selectors] of pages) {
         await page.goto(h.admin + '/' + hash);
@@ -555,6 +554,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
 // table covers every rule whose painted value can be read in a resting state. `::before` parts are read through
 // getComputedStyle(el, '::before'); the background of a text element is the surface it is painted on, resolved through
 // its ancestors, because a transparent computed background says nothing about what a reader sees.
+// `main` removed the overview capability card in #1123 (`e431a703`, after this branch started), so the two
+// `.capability-links a` rows are gone from both tables and their two dark overrides left `static/views.css`: on the
+// merge base those elements no longer exist, and a row that can only be measured on the old base pins nothing.
 const PIN_ROWS = [
   ['task', '.step'], ['task', '.task-side'], ['task', '.task-archive-body'], ['task', 'pre.output'],
   ['task', '.task-goal-box'], ['task', '.role-run-conclusion'], ['task', '.role-run-summary'],
@@ -573,8 +575,6 @@ const PIN_ROWS = [
   ['overview', '.workbench-tab[aria-current=page]'], ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count'],
   ['overview', '.workbench-quick-link'], ['overview', '.workbench-live-stats'], ['overview', '.role-backend-line'], ['overview', '.role-board-table'],
   ['overview', '.role-chip-ref'], ['overview', '.role-chip-summary'],
-  ['overview', '.capability-tile:not([data-state=off]) .capability-links a'],
-  ['overview', '.capability-tile[data-state=off] .capability-links a'],
   ['tasks', '.workbench-filter-pill'], ['tasks', '.workbench-filter-pill[aria-current=page]'],
   ['settings', '.settings-body'], ['settings', '.project-nav'], ['settings', '.settings-rows'],
   ['audit', '.audit-filters button[aria-pressed=true]'],
@@ -634,8 +634,6 @@ const PIN_TABLE = [
   ['overview', '.role-board-table', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
   ['overview', '.role-chip-ref', ['rgb(150, 180, 255)', 'rgb(22, 35, 58)'], ['rgb(30, 58, 138)', 'rgb(239, 246, 255)']],
   ['overview', '.role-chip-summary', ['rgb(231, 237, 246)', 'rgb(22, 35, 58)'], ['rgb(23, 36, 59)', 'rgb(239, 246, 255)']],
-  ['overview', '.capability-tile:not([data-state=off]) .capability-links a', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
-  ['overview', '.capability-tile[data-state=off] .capability-links a', ['rgb(150, 180, 255)', 'rgb(27, 36, 48)'], ['rgb(36, 93, 224)', 'rgb(248, 250, 252)']],
   ['tasks', '.workbench-filter-pill', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(51, 65, 85)', 'rgb(255, 255, 255)']],
   ['tasks', '.workbench-filter-pill[aria-current=page]', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(237, 242, 255)']],
   ['settings', '.settings-body', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)'], 'rgb(85, 104, 138)', 'rgb(227, 234, 240)'],
@@ -743,6 +741,12 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
           await page.waitForTimeout(150);
         }
         if (name === 'settings') await page.evaluate(() => { const host = document.querySelector('.settings-body'); const probe = document.createElement('div'); probe.className = 'settings-rows'; host?.append(probe); });
+        // A pointer left where the confirmation dialog's button was clicked keeps its screen position across
+        // navigations. At 768 it landed on `.workbench-tab`, `:hover` repainted that tab with --color-hover
+        // (rgb(29, 39, 51)) instead of the surface this table had measured, and e2e run 44710842421 went red on
+        // `overview .workbench-tab dark background at 768` while the same table passed locally. Every value below is a
+        // resting-state measurement, so the pointer is parked in the corner before the values are read.
+        await page.mouse.move(0, 0);
         await page.waitForTimeout(300);
         Object.assign(values, await pinValues(page, PIN_ROWS.filter(([p]) => p === name)));
       }
