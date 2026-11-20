@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 // #527 slice: the project list itself. Its columns already come from the dictionary (project-columns-i18n.spec.mjs),
@@ -123,10 +123,6 @@ async function signIn(page, h, username, password) {
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
 }
-const capture = async (page, name, width, height) => {
-  await page.setViewportSize({ width, height });
-  await page.screenshot({ path: `.tmp/527-project-list-states/${name}-${width}.png`, fullPage: true });
-};
 
 test('English 界面：项目管理员看到待接入分组、权限占位和没有账号/隐藏控件的筛选行', async ({ page }) => {
   const h = await harness(), errors = [];
@@ -189,9 +185,6 @@ test('English 界面：项目管理员看到待接入分组、权限占位和没
     await expect(empty).toBeVisible();
     await expect(empty).toHaveText('No repository waiting to be set up has "missing" in its name');
 
-    mkdirSync('.tmp/527-project-list-states', { recursive: true });
-    await capture(page, 'project-admin-pending', 1440, 900);
-    await capture(page, 'project-admin-pending', 390, 844);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'pending group overflow at 390px').toBe(true);
 
     // Choosing a filter sets the fold summary and hides the unfiltered pending group.
@@ -232,9 +225,6 @@ test('English 界面：已隐藏仓库视图的计数、徽章和恢复按钮', 
     await expect(row).toContainText('Hidden');
     await expect(row).not.toContainText('undefined');
     await expect(row.getByRole('button', { name: 'Restore', exact: true })).toBeVisible();
-    mkdirSync('.tmp/527-project-list-states', { recursive: true });
-    await capture(page, 'hidden-repositories', 1440, 900);
-    await capture(page, 'hidden-repositories', 390, 844);
     await page.setViewportSize({ width: 1440, height: 900 });
     await row.getByRole('button', { name: 'Restore', exact: true }).click();
     await expect(page.locator('#rows .row')).toHaveCount(0);
@@ -278,9 +268,6 @@ test('English 界面：全局项目表的开关、预览、功能区与权限占
     await expect(placeholder).toHaveText('—');
     await expect(placeholder).toHaveAttribute('title', 'An administrator checks repository permissions in the installation list');
     await expect(placeholder).toHaveAttribute('aria-label', 'An administrator checks repository permissions in the installation list');
-    mkdirSync('.tmp/527-project-list-states', { recursive: true });
-    await capture(page, 'settings-global-projects', 1440, 900);
-    await capture(page, 'settings-global-projects', 390, 844);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'global project table overflow at 390px').toBe(true);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
