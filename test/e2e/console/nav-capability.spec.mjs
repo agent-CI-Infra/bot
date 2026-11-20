@@ -51,7 +51,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     const read102 = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && new URL(response.url()).searchParams.get('repository_id') === '102');
     await switchConsoleProject(page, '102');
     await expect(page.locator('#console-context')).toContainText('beta / project-102');
-    await expect(page.locator('#console-project-header .workbench-tabs')).toHaveAttribute('data-project-id', '102');
+    await expect(page.locator('.workbench-top .workbench-tabs')).toHaveAttribute('data-project-id', '102');
     expect(await page.locator('#console-project-header [data-permission]').count()).toBe(0);
     await read102;
     expect(await page.evaluate(() => window.navCapabilityTransitions.transitions)).toContain(false);

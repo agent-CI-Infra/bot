@@ -125,8 +125,8 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await expect(page.locator('[data-workbench-view="roles"]')).toHaveAttribute('aria-current', 'page');
     const roleBoard = page.getByTestId('project-role-board');
     await expect(roleBoard).toBeVisible();
-    await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
-    await expect(page.locator('.workbench-top .workbench-tabs')).toHaveCount(0);
+    await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
+    await expect(page.locator('#console-project-header .workbench-tabs')).toHaveCount(0);
     // No inline configuration forms mixed into Role View
     expect(await roleBoard.locator('select, textarea, input').count()).toBe(0);
 
@@ -274,7 +274,7 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await detail.locator('#task-back-link').click();
     await expect(page).toHaveURL(/#\/projects\/101\/overview\/tasks$/);
     await expect(page.locator('.workbench-task-row[data-task-id="t-952"]')).toBeVisible();
-    await expect(page.locator('#console-project-header [data-workbench-view="tasks"]')).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('.workbench-top [data-workbench-view="tasks"]')).toHaveAttribute('aria-current', 'page');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator('.workspace-overview').evaluate(el => el.querySelectorAll('[style]').length)).toBe(0);
     await page.screenshot({ path: '.tmp/compact-project-nav/tasks-390.png', fullPage: true });
@@ -282,7 +282,7 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await page.locator('[data-workbench-view="roles"]').click();
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     await expect(page.locator('[data-role-row="dev"]')).toContainText('gpt-5.4');
-    await expect(page.locator('#console-project-header [data-workbench-view="roles"]')).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('.workbench-top [data-workbench-view="roles"]')).toHaveAttribute('aria-current', 'page');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/compact-project-nav/roles-390.png', fullPage: true });
 

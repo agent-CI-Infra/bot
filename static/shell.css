@@ -44,7 +44,7 @@ header .quiet { color: var(--color-text); border-color: var(--color-border); bac
 .console-ready #console-project-header .project-head h1 { font-size: var(--font-size-title); letter-spacing: 0; }
 .console-ready #console-project-header .project-head .actions { flex: none; }
 .console-ready #console-project-header .project-head .btn-secondary { min-height: 36px; padding: 4px 8px; font-size: var(--font-size-1); white-space: nowrap; }
-#console-project-header .workbench-tabs, #console-project-header .console-permission { flex: none; margin: 0; }
+#console-project-header .console-permission { flex: none; margin: 0; }
 #console-project-header .status { white-space: nowrap; }
 body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--space-6) var(--space-8) var(--space-10); min-width: 0; }
 #main-content:focus { outline: none; }
