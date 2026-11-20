@@ -15,9 +15,18 @@ test('binding a group, raising its level or changing its repositories tells it w
   await until(() => notices(f).length === 1 || null);
   assert.match(notices(f)[0], /档位：只读问答/);
   assert.match(notices(f)[0], /admin-fixture-101（项目能力上限：可开发并开 PR）/);
-  assert.match(notices(f)[0], /可以：代码仓问答与调研、CI 失败与定时主动发现/);
+  // The project does not watch Actions failures, so the group is offered on-demand investigation, not automatic discovery.
+  assert.match(notices(f)[0], /可以：代码仓问答与调研、CI 失败原因排查（按需）/);
   assert.match(notices(f)[0], /特性开发与缺陷修复（本群档位不支持）/);
   assert.match(notices(f)[0], /试试：/);
+  // The card's delivery is recorded like any group message (#1157 review F1): sent, with its remote id, in the binding's scope
+  // and the fence of the revision it describes.
+  const first = await until(() => h.store.get("SELECT * FROM channel_outbox WHERE idempotency_key LIKE 'binding-notice:%'"), row => row?.state === 'sent');
+  assert.ok(first.remote_message_id);
+  const binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  const scope = h.store.get('SELECT * FROM channel_message_scopes WHERE chat_id=? AND message_id=?', chat.id, first.remote_message_id);
+  assert.equal(scope.project_id, 'binding:' + binding.id); assert.equal(scope.fence, f.service.serviceBindings.fence(chat.id));
+  assert.equal(h.store.get('SELECT last_error FROM channel_connectors WHERE id=?', f.id).last_error, null);
 
   const save = async change => {
     const binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
@@ -27,6 +36,8 @@ test('binding a group, raising its level or changing its repositories tells it w
   // A new level: a new notice with what dispatching adds.
   await save({ level: 'dispatch' });
   await until(() => notices(f).length === 2 || null);
+  // A new revision has a new fence: the first card no longer belongs to what the group reads as context.
+  assert.notEqual(f.service.serviceBindings.fence(chat.id), scope.fence);
   assert.match(notices(f)[1], /档位：可派活/);
   assert.match(notices(f)[1], /可以：[^\\]*特性开发与缺陷修复/);
   // The same level and repositories, another participation mode: no notice.
@@ -34,6 +45,7 @@ test('binding a group, raising its level or changing its repositories tells it w
   await save({ level: 'dispatch', scope: { kind: 'repositories', repositories: ['101', '102'] } });
   await until(() => notices(f).length === 3 || null);
   assert.match(notices(f)[2], /admin-fixture-102/);
+  await until(() => h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE 'binding-notice:%' AND state='sent'").n === 3 || null);
   assert.equal(h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE 'binding-notice:%'").n, 3);
 });
 
