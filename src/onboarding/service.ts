@@ -202,7 +202,7 @@ export class Onboarding {
       // console it started from.
       const manifest = { name, url: address.origin, redirect_url: consoleOrigin + registrationPath, setup_url: address.origin + setupPath, public: input.public===true,
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
-        default_permissions: { ...appPermissions, members: 'read' }, default_events: [...appEvents, 'check_run', 'status', 'organization', 'member', 'membership', 'team'] };
+        default_permissions: { ...appPermissions }, default_events: [...appEvents, 'check_run', 'status'] };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/installation') { fields(input, ['skip']); if (typeof input.skip !== 'boolean') fail(400, 'invalid_skip'); this.save('installation_skipped', input.skip); return { skipped: input.skip }; }

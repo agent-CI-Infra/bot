@@ -54,7 +54,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ['DELETE FROM onboarding_requests WHERE repository_id=?', 1], ['DELETE FROM onboarding_receipts WHERE application_id IN (SELECT id FROM onboarding_applications WHERE repository_id=?)', 1],
     ['DELETE FROM onboarding_applications WHERE repository_id=?', 1], ['DELETE FROM onboarding_plans WHERE repository_id=?', 1], ['DELETE FROM onboarding_sessions WHERE repository_id=?', 1],
     ['DELETE FROM project_admin_assignments WHERE repository_id=?', 1], ['DELETE FROM repo_integrations WHERE repository_id=?', 1],
-    ['DELETE FROM github_repository_collaborators WHERE repository_id=?', 1], ['DELETE FROM github_repository_member_cache WHERE repository_id=?', 1],
+    ['DELETE FROM github_repository_collaborators WHERE repository_id=?', 1], ['DELETE FROM github_repository_assignees WHERE repository_id=?', 1], ['DELETE FROM github_repository_member_cache WHERE repository_id=?', 1],
     ['DELETE FROM public_board_settings WHERE repository_id=?', 1], ['DELETE FROM public_board_consents WHERE repository_id=?', 1], ['DELETE FROM public_board_jobs WHERE repository_id=?', 1], ['DELETE FROM installed_repositories WHERE repository_id=?', 1], ['DELETE FROM repositories WHERE id=?', 1]];
   for (const [sql, count] of statements) {
     const table = /^(?:DELETE FROM|UPDATE) (\w+)/.exec(sql)![1]!;
@@ -108,6 +108,7 @@ export class ProjectRemoval {
         ['onboarding_plans', 'DELETE FROM onboarding_plans WHERE repository_id=?'],
         ['onboarding_sessions', 'DELETE FROM onboarding_sessions WHERE repository_id=?'],
         ['github_repository_collaborators', 'DELETE FROM github_repository_collaborators WHERE repository_id=?'],
+        ['github_repository_assignees', 'DELETE FROM github_repository_assignees WHERE repository_id=?'],
         ['github_repository_member_cache', 'DELETE FROM github_repository_member_cache WHERE repository_id=?'],
       ] as const) if (this.store.hasTable(table)) this.store.run(sql, id);
       this.store.run('DELETE FROM installed_repositories WHERE repository_id=?', id); dropUninstalledIntegrations(this.store);

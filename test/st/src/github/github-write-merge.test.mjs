@@ -20,7 +20,7 @@ async function fixture(t) {
   // #8 is the bot's own pull request; #7 someone else's; #9 targets a branch whose ruleset requires a merge queue.
   store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('r',8,'PR_8','900','r','bot/issue-1',?,'t')", head);
   // The platform's collaborator cache (#1158): 501 writes, 502 only reads.
-  store.run("INSERT INTO github_repository_collaborators VALUES('i','r','501','maintainer','write'),('i','r','502','reader','read')");
+  store.run("INSERT INTO github_repository_collaborators(installation_ref,repository_id,github_user_id,login,role) VALUES('i','r','501','maintainer','write'),('i','r','502','reader','read')");
   // Platform people: u1 administers the project (tasks.write), u2 has no grant there.
   store.run("INSERT INTO users(id,username,password_hash,role) VALUES('u1','maintainer','x','project_admin'),('u2','visitor','x','project_admin')");
   store.run("INSERT INTO project_admin_assignments VALUES('u1','r')");

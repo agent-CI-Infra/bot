@@ -20,7 +20,7 @@ Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹�
 
 优先使用已有 GitHub App。选择「使用此 App」会检查 App 和安装，并将 webhook 更新到验证过的域名及该账号已登记的 webhook 路径。凭据不会返回浏览器。
 
-没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 4 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 与 Members 读（之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面只列出 App 定义缺少的权限和未订阅的事件，保留 App 的 Permissions & events 链接；安装未接受的权限和事件在项目列表对应仓库行显示，悬浮徽章可查看缺项；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment、check_run、status、organization、member、membership、team。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment（触发评论和检视跟进）以及 Check run、Status（实时推送控制台任务列表与详情的 GitHub Actions 和提交检查状态）并保存，需要成员与团队变更实时刷新本地协作者缓存时一并勾选 Member、Membership、Team；代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
+没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 4 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读，默认不申请组织级权限（仓库管理员可直接将 App 安装到自己管理的仓库，无需组织所有者审批；之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面只列出 App 定义缺少的权限和未订阅的事件，保留 App 的 Permissions & events 链接；安装未接受的权限和事件在项目列表对应仓库行显示，悬浮徽章可查看缺项；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment、check_run 和 status。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment（触发评论和检视跟进）以及 Check run、Status（实时推送控制台任务列表与详情的 GitHub Actions 和提交检查状态）并保存；代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
 GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥和 webhook secret 只在控制面加密保存，不回读到浏览器。回调成功后，浏览器打开向导第 3 步「GitHub 登录」，使用独立 OAuth App 配置登录，不复用仓库 App 的 Client ID／Client secret；保存并启用前仍可使用本地登录。
 
@@ -46,7 +46,7 @@ GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管
 
 登录明确请求空 `scope`，只读取公开 GitHub 身份，不申请 `repo`、`read:org` 或其他额外权限。若这个 OAuth App 曾获得额外权限，GitHub 仍返回带额外 scope 的令牌，Bot 会拒绝登录；用户应在 Settings → Applications → Authorized OAuth Apps 撤销该 App 的旧授权后重试，或由管理员使用专用于登录的新 OAuth App。授权页由 GitHub 控制，具体文案以实际页面为准。
 
-组织和仓库管理权限由仓库 GitHub App 的只读安装令牌查询，查询后撤销临时令牌。组织 owner 识别需要仓库 App 的 **Organization permissions → Members: Read-only** 和 `organization` 事件；向导新建 App 已包含，已有 App 由所有者补齐并在安装处接受新增权限。此权限不在登录 OAuth App 上配置。仓库 App 的所有者和设置入口在第 2 步显示，缺少信息时可原地刷新。
+仓库协作者和管理员权限由仓库 GitHub App 的只读安装令牌按仓库级权限查询，查询后撤销临时令牌；默认不申请组织级 `Members` 权限（已有 App 若已授予 **Organization permissions → Members: Read-only**，也会自动读取组织级 owner 与订阅的成员变更事件）。此权限不在登录 OAuth App 上配置。仓库 App 的所有者和设置入口在第 2 步显示，缺少信息时可原地刷新。
 
 「GitHub 地址及用途」列出登录 Callback URL、仓库 App 的安装 Setup URL `/onboarding/github/setup`、注册回调 `/onboarding/github/callback` 和 Webhook URL。登录回调只填入 OAuth App；其余地址用于仓库 GitHub App，不能互相替代。公网地址变化后，在 OAuth App 更新登录回调，在仓库 App 更新 Setup URL；Webhook 可由重新检查写入。没有公网地址时，页面给出本机回环地址，仅适用于本机测试。
 

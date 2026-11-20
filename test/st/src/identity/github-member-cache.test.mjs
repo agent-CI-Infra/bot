@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
+import { repository } from '../../../fixtures/helpers.mjs';
 import { session } from '../../../../dist/app/auth.js';
 import { authorize, listEffectiveScopes, resolveActor } from '../../../../dist/identity/authorization.js';
 import { GitHubRefresh } from '../../../../dist/identity/github-refresh.js';
@@ -239,9 +240,148 @@ test('member, team, membership and organization webhooks incrementally refresh c
   assert.equal(rev(), r0 + 2);
 });
 
-test('installations without Members: read degrade cleanly to repository collaborator roles and record diagnostic reason (#1158)', async t => {
+test('repository-only Organization installations (no Members: read) resolve concealed org members via /assignees + /permission, block public outsiders, and keep status active (#1158)', async t => {
+  const f = await identityFixture(t), { h, state, admin } = f;
+  // 101 is a started Public repo; 102 is a started Private repo; 103 is an unstarted Private repo.
+  const nowIso = new Date().toISOString();
+  await repository(admin, f.a.id, '102');
+  h.store.run("UPDATE repositories SET owner_id='10',full_name='fixture/project-102' WHERE id='102'");
+  h.store.run("UPDATE installation_repositories SET private=0 WHERE repository_id='101'");
+  h.store.run("INSERT OR REPLACE INTO installation_repositories VALUES('github.com/123/77','102','fixture/project-102','10','fixture',1,1,?)", nowIso);
+  h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
+    VALUES(?, '103', '77', 'fixture/project-103', '10', 'fixture', 1, 1, ?)`, f.a.id, nowIso);
+  h.store.run("INSERT OR REPLACE INTO installation_repositories VALUES('github.com/123/77','103','fixture/project-103','10','fixture',1,1,?)", nowIso);
+
+  state.membersPermission = false;
+  state.issuesPermission = 'write';
+  state.concealedOrgMembers = true;
+  state.publicRepos = ['101'];
+  state.accessible = ['101', '102', '103'];
+  // Real GitHub omits concealed org members from `/collaborators` without `Members: read`, while direct/outside collaborators
+  // (including outside Read collaborators on public and private repos who are not assignable) still appear in `/collaborators`.
+  state.collaborators = {
+    101: [{ id: 74, login: 'outside-public-reader', role_name: 'read', outside: true }],
+    102: [{ id: 73, login: 'outside-private-reader', role_name: 'read', outside: true }],
+    103: [],
+  };
+  state.concealedMembers = {
+    101: [
+      { id: 70, login: 'concealed-owner', role_name: 'admin' },
+      { id: 71, login: 'concealed-writer', role_name: 'write' },
+      { id: 72, login: 'concealed-reader', role_name: 'read' },
+    ],
+    102: [
+      { id: 70, login: 'concealed-owner', role_name: 'admin' },
+    ],
+    103: [
+      { id: 70, login: 'concealed-owner', role_name: 'admin' },
+      { id: 71, login: 'concealed-writer', role_name: 'write' },
+    ],
+  };
+
+  const signInAs = async (id, login) => {
+    state.id = id; state.login = login;
+    return (await f.login()).result;
+  };
+
+  state.requests.length = 0;
+  const owner = await signInAs(70, 'concealed-owner');
+  assert.equal(state.requests.some(r => r.path.startsWith('/orgs/')), false, 'never calls /orgs/ without Members: read');
+  assert.deepEqual(state.requests.find(r => r.path.endsWith('/access_tokens')).body.permissions, { metadata: 'read', issues: 'read' });
+
+  // Owner gets project_admin on started 101 & 102, sees unstarted 103 in pending_repositories, and identity status is active (never stuck on pending_verification!).
+  const ownerSession = session(h.store, owner.principal_id, owner.identity_id);
+  const ownerView = await (await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + ownerSession.token } })).json();
+  assert.equal(ownerView.github_connection.state, 'connected');
+  assert.deepEqual(ownerView.github_connection.repositories.map(r => r.id).sort(), ['101', '102']);
+  assert.deepEqual(ownerView.github_connection.pending_repositories.map(r => r.id), ['103']);
+  assert.equal(h.store.get("SELECT owners_uncertain FROM github_installation_member_cache WHERE installation_ref='github.com/123/77'").owners_uncertain, null);
+  assert.equal(h.store.get('SELECT status,verification_issues FROM external_identities WHERE id=?', owner.identity_id).status, 'active');
+  assert.equal(h.store.get('SELECT verification_issues FROM external_identities WHERE id=?', owner.identity_id).verification_issues, null);
+
+  // Manual reverify (`POST /api/identity/refresh`) returns `{ ok: true, status: 'active' }` and sends conditional If-None-Match on both `/assignees` and `/permission`.
+  state.requests.length = 0;
+  const refreshRes = await (await fetch(h.admin + '/api/identity/refresh', {
+    method: 'POST',
+    headers: { Cookie: 'bot_session=' + ownerSession.token, 'X-CSRF-Token': ownerSession.csrf, 'Content-Type': 'application/json' },
+    body: '{}',
+  })).json();
+  assert.deepEqual(refreshRes, { ok: true, status: 'active' });
+  assert.ok(state.requests.find(r => r.path === '/repos/fixture/project-101/assignees')?.ifNoneMatch);
+  assert.ok(state.requests.find(r => r.path === '/repos/fixture/project-101/collaborators/concealed-owner/permission')?.ifNoneMatch);
+
+  // Outside Read collaborators already in `/collaborators` (74 on public 101, 73 on private 102) already have their role cached
+  // on that repo (no `/permission` call ever needed for them); concealed members (71, 72) resolve via `/assignees` + `/permission`.
+  state.requests.length = 0;
+  const outsidePublicReader = await signInAs(74, 'outside-public-reader');
+  assert.equal(state.requests.some(r => r.path === '/repos/fixture/project-101/collaborators'), false, '101 already cached user 74 from /collaborators');
+  assert.equal(state.requests.some(r => r.path.includes('outside-public-reader/permission')), false, 'never calls /permission for direct /collaborators entry');
+  const outsidePrivateReader = await signInAs(73, 'outside-private-reader');
+  assert.deepEqual(activeGrants(h.store, outsidePublicReader.principal_id).map(g => [g.project_id, g.role]), [['101', 'project_reader']]);
+  assert.deepEqual(activeGrants(h.store, outsidePrivateReader.principal_id).map(g => [g.project_id, g.role]), [['102', 'project_reader']]);
+
+  const writer = await signInAs(71, 'concealed-writer');
+  const publicReader = await signInAs(72, 'concealed-reader');
+  assert.deepEqual(activeGrants(h.store, writer.principal_id).map(g => [g.project_id, g.role]), [['101', 'project_member']]);
+  assert.deepEqual(activeGrants(h.store, publicReader.principal_id).map(g => [g.project_id, g.role]), [['101', 'project_reader']]);
+
+  // (b) Newly invited outside Read collaborator on public repo 101 (added after cache was warm, without webhook) gets
+  // project_reader at sign-in via conditional ETag revalidation (`304` on `/assignees`, `200` on `/collaborators`).
+  state.collaborators[101] = [
+    { id: 74, login: 'outside-public-reader', role_name: 'read', outside: true },
+    { id: 75, login: 'newly-invited-public-reader', role_name: 'read', outside: true },
+  ];
+  const newlyInvitedPublicReader = await signInAs(75, 'newly-invited-public-reader');
+  assert.deepEqual(activeGrants(h.store, newlyInvitedPublicReader.principal_id).map(g => [g.project_id, g.role]), [['101', 'project_reader']]);
+
+  // Public outsider signing in gets 0 grants, `status = 'active'` (`no_repositories`), and verifyInstallation denies access on public 101.
+  const outsider = await signInAs(99, 'public-stranger');
+  assert.deepEqual(activeGrants(h.store, outsider.principal_id), []);
+  const outsiderRow = h.store.get('SELECT status,verification_issues FROM external_identities WHERE id=?', outsider.identity_id);
+  assert.equal(outsiderRow.status, 'active');
+  assert.equal(outsiderRow.verification_issues, null);
+  const outsiderSession = session(h.store, outsider.principal_id, outsider.identity_id);
+  const outsiderView = await (await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + outsiderSession.token } })).json();
+  assert.equal(outsiderView.github_connection.state, 'no_repositories');
+  assert.equal(await f.identity.verifyInstallation(outsiderSession.token, { github_host: 'github.com', app_id: '123', installation_id: '77' }), null);
+  assert.deepEqual((await f.identity.verifyInstallation(ownerSession.token, { github_host: 'github.com', app_id: '123', installation_id: '77' })).repository_ids.sort(), ['101', '102', '103']);
+
+  // (c) verifyInstallation recognizes genuine outside Read collaborators on public repo 101 via `/collaborators` (even though absent from `/assignees`).
+  const outsidePublicSession = session(h.store, outsidePublicReader.principal_id, outsidePublicReader.identity_id);
+  const newlyInvitedSession = session(h.store, newlyInvitedPublicReader.principal_id, newlyInvitedPublicReader.identity_id);
+  const verifiedOutside = await f.identity.verifyInstallation(outsidePublicSession.token, { github_host: 'github.com', app_id: '123', installation_id: '77' });
+  const verifiedNewlyInvited = await f.identity.verifyInstallation(newlyInvitedSession.token, { github_host: 'github.com', app_id: '123', installation_id: '77' });
+  assert.deepEqual([verifiedOutside.github_user_id, verifiedOutside.target_id, verifiedOutside.repository_ids, verifiedOutside.can_manage], ['74', '10', ['101'], false]);
+  assert.deepEqual([verifiedNewlyInvited.github_user_id, verifiedNewlyInvited.target_id, verifiedNewlyInvited.repository_ids, verifiedNewlyInvited.can_manage], ['75', '10', ['101'], false]);
+
+  // (a) Across a second `checkAll` conditional round where both `/assignees` and `/collaborators` return `304 Not Modified`,
+  // outside Read collaborators on public repo 101 keep `project_reader`, and `/permission` is only called for actual assignees
+  // (never for outside collaborators or non-members on private repo 102).
+  state.requests.length = 0;
+  await f.identity.syncMemberCache({ checkAll: true, bypassBackoff: true });
+  assert.deepEqual(activeGrants(h.store, outsidePublicReader.principal_id).map(g => [g.project_id, g.role]), [['101', 'project_reader']]);
+  assert.deepEqual(activeGrants(h.store, newlyInvitedPublicReader.principal_id).map(g => [g.project_id, g.role]), [['101', 'project_reader']]);
+  assert.deepEqual(activeGrants(h.store, outsidePrivateReader.principal_id).map(g => [g.project_id, g.role]), [['102', 'project_reader']]);
+  assert.deepEqual(activeGrants(h.store, outsider.principal_id), []);
+  const permPaths = state.requests.filter(r => /\/collaborators\/[^/]+\/permission$/.test(r.path)).map(r => r.path);
+  assert.equal(permPaths.some(p => p.includes('outside-public-reader') || p.includes('newly-invited-public-reader') || p.includes('public-stranger')), false);
+  assert.deepEqual(permPaths.filter(p => p.includes('/project-102/')), ['/repos/fixture/project-102/collaborators/concealed-owner/permission']);
+
+  // Repeat sign-in of every user (including outside Read collaborators and public stranger) hits warm SQLite with 0 installation calls.
+  const callsBeforeWarm = state.requests.filter(r => r.path.startsWith('/app/installations/')).length;
+  await signInAs(70, 'concealed-owner');
+  await signInAs(72, 'concealed-reader');
+  await signInAs(74, 'outside-public-reader');
+  await signInAs(75, 'newly-invited-public-reader');
+  await signInAs(99, 'public-stranger');
+  assert.equal(state.requests.filter(r => r.path.startsWith('/app/installations/')).length, callsBeforeWarm);
+});
+
+test('degraded metadata-only Organization installations preserve existing public-read grants as pending without granting outsiders (#1158)', async t => {
   const f = await identityFixture(t), { h, state } = f;
   state.membersPermission = false;
+  state.publicRepos = ['101'];
+  h.store.run("UPDATE installation_repositories SET private=0 WHERE repository_id='101'");
   state.collaborators = [{ id: 42, login: 'repo-admin', role_name: 'admin' }];
   state.requests.length = 0;
 
@@ -251,6 +391,27 @@ test('installations without Members: read degrade cleanly to repository collabor
   assert.deepEqual(activeGrants(h.store, p).map(g => [g.project_id, g.role]), [['101', 'project_admin']]);
   const cache = h.store.get("SELECT owners_uncertain FROM github_installation_member_cache WHERE installation_ref='github.com/123/77'");
   assert.equal(cache.owners_uncertain, 'membership_unreadable');
+
+  // Seed an existing confirmed `repository_read` grant for user 80 on public 101; when `/collaborators` is empty under degraded
+  // metadata-only permissions, ambiguous public `read` holds 80's grant pending (`revoked_at IS NULL`) instead of revoking it,
+  // while stranger 81 receives no grant at all.
+  state.collaborators = [];
+  h.store.run("INSERT INTO users(id,username,password_hash,role) VALUES('existing-reader','github:80:reader','!external-only','project_admin')");
+  h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,credentials,status,verified_at)
+    VALUES('id-80','existing-reader','github','github.com','','','80','concealed-reader-80',?,'active',?)`,
+    h.store.secrets.seal({ access_token: 'fixture-user-80' }, 'identity:id-80'), Date.now());
+  h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at,expires_at,installation_ref,installation_revision)
+    VALUES('github:existing-reader:github.com/123/77:101','existing-reader','github.com:10','101','project','project_reader','["tasks.read"]','github_derived','current_github','repository_read',?,NULL,'github.com/123/77',1)`,
+    Date.now());
+
+  state.id = 81; state.login = 'stranger-81';
+  const stranger = (await f.login()).result;
+  await f.identity.syncMemberCache({ checkAll: true, bypassBackoff: true });
+
+  const held = h.store.get("SELECT revoked_at,expires_at FROM scoped_grants WHERE id='github:existing-reader:github.com/123/77:101'");
+  assert.equal(held.revoked_at, null, 'existing reader grant is held pending rather than revoked under degraded visibility');
+  assert.ok(held.expires_at !== null && held.expires_at <= Date.now());
+  assert.equal(h.store.get("SELECT count(*) n FROM scoped_grants WHERE principal_id=?", stranger.principal_id).n, 0, 'stranger receives zero grants');
 });
 
 test('collaborator pagination beyond 100 entries, >30-minute warm writes without GitHub calls, and rename/transfer repository ID verification (#1158)', async t => {
