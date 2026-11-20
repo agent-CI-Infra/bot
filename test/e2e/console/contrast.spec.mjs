@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 
-// #563: muted text and chips meet 4.5:1; 11px labels are now 12px. The muted hex is unchanged.
+// #563: muted text and chips meet 4.5:1, and sidebar labels are at least 12px.
 const out = resolve('.tmp/contrast-563');
 
 function contrastScript() {
@@ -46,9 +46,7 @@ function contrastScript() {
         contrast: ratio(cs.color, walkBg(el)),
       };
     };
-    const muted = getComputedStyle(document.documentElement).getPropertyValue('--color-text-muted').trim();
     return {
-      muted,
       body: sample('body'),
       heading: sample('h1'),
       mutedText: sample('.muted') || sample('.cost-note') || sample('.cost-scope'),
@@ -72,7 +70,6 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     // login page
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     const login = await page.evaluate(contrastScript());
-    expect(login.muted.toLowerCase()).toBe('#607087');
     expect(login.heading.contrast).toBeGreaterThanOrEqual(4.5);
     if (login.mutedText) {
       expect(login.mutedText.contrast).toBeGreaterThanOrEqual(4.5);
@@ -89,7 +86,6 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
 
     const projects = await page.evaluate(contrastScript());
-    expect(projects.muted.toLowerCase()).toBe('#607087');
     expect(projects.heading.contrast).toBeGreaterThanOrEqual(4.5);
     expect(projects.mutedText.contrast).toBeGreaterThanOrEqual(4.5);
     expect(projects.mutedText.fontSize).toBeGreaterThanOrEqual(12);

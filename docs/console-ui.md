@@ -56,7 +56,7 @@
 
 按钮的四种用法是 `.btn-primary`（每页默认最多一个启用的主操作）、`.btn-secondary`（与 `.quiet` 同外观）、`.btn-danger`（与 `.quiet.destructive` 同外观）和 `.btn-text`（工具栏文字操作；行内链接仍用 `.linkish`）。`.card` 与 `.side-card` 共用内边距、圆角、边框和阴影；列表容器 `.card.list-panel` 去掉内边距以便行贴边。
 
-`test/ut/static/console-tokens.test.mjs` 同时检查变量声明与跨模块固定值。契约覆盖的模块样式新增公共变量引用时，在 `SHARED` 中登记 `static/shell.css` 的实际值，并运行主题契约测试；变量已声明并不代表其固定值已登记。
+`test/ut/static/console-tokens.test.mjs` 检查只有 `shell.css` 在 `:root` 声明自定义属性，每个 `var()` 都有声明、运行时写入或自身 fallback，`board.css` 不再写死十六进制颜色和 `font-size: Npx`，旧青绿硬编码色不再出现，以及中性徽章和看板空状态的对比度至少 4.5:1。对比度按 `shell.css` 里的声明现算，测试不再另抄一份色值。模块样式新增公共变量时，把声明写进 `shell.css`。
 
 | 入口 | 用法 |
 | --- | --- |

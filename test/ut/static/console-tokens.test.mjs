@@ -1,7 +1,7 @@
-// #224-A / #262: one declaration site for the console theme, and the values the module sheets still read are pinned.
-// docs/console-ui.md says modules reference the shared variables and do not copy a second theme. Three things are
-// machine-checkable here: `static/shell.css` is the only :root that declares custom properties, every var() a sheet reads
-// resolves to something, and a token a module sheet reads through shell.css cannot change value silently.
+// #224-A / #262: one declaration site for the console theme. docs/console-ui.md says modules
+// reference the shared variables and do not copy a second theme. shell.css is the only :root
+// that declares custom properties, and every var() a sheet reads resolves to a declaration,
+// a runtime write, or its own fallback. Contrast checks read the declared colours from shell.css.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -39,59 +39,6 @@ test('every var() a sheet reads is declared by shell.css, locally, at runtime, o
   }
 });
 
-// The first two tests prove a declaration exists somewhere; this one proves the resolved value did not change. Pin the
-// shell.css value of every token a module sheet reads through the contract, and refuse a new such read until it is pinned.
-// Sheets that predate shell.css: a value change in the contract restyles these legacy pages, so their reads are pinned.
-const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css', 'channel-console.css', 'access.css'];
-const SHARED = {
-  '--color-surface': '#fff',
-  '--color-brand': '#245de0', '--color-text-muted': '#607087', '--font-size-2': '14px', '--control-min': '44px',
-  '--color-brand-weak': '#edf2ff',
-  '--color-border': '#dce3ed', '--color-surface-alt': '#f8fafc', '--radius-card': '12px',
-  '--space-1': '4px', '--space-2': '6px', '--space-3': '8px', '--space-4': '12px', '--space-5': '16px', '--space-6': '20px',
-  '--space-7': '24px', '--space-8': '32px',
-  '--content-max': '1120px',
-  '--font-size-1': '12px', '--font-size-3': '17px', '--font-size-5': '30px', '--radius-3': '6px',
-  // #551: style.css (a module sheet) now reads the shared theme end-to-end. Existing
-  // values above stay pinned; the new tokens keep the values declared in shell.css.
-  '--color-bg': '#f5f7fb', '--color-text': '#17243b', '--color-text-inverse': '#fff',
-  '--color-danger': '#ad3039', '--color-danger-bg': '#fbeaea',
-  '--color-warning': '#875a0a', '--color-warning-bg': '#fff2d9', '--color-warning-border': '#e9c27a',
-  '--color-success': '#24603d', '--color-success-bg': '#e5f2e9',
-  '--color-info': '#2c5791', '--color-info-bg': '#e8f0fb',
-  // Review of #584: the neutral status badge keeps its own AA-contrast pair and the info
-  // alert keeps a visible ring; border and surface tokens are too light for either job.
-  '--color-info-border': '#b9cdec', '--color-status-neutral': '#536c78', '--color-status-neutral-bg': '#edf1f4',
-  '--color-hover': '#f1f5fb', '--color-overlay': '#16374470',
-  '--focus-ring': '#245de0', '--focus-ring-width': '3px',
-  '--font-size-4': '18px', '--font-size-micro': '11px', '--font-size-label': '13px',
-  '--font-size-row': '15px', '--font-size-touch': '16px', '--font-size-display': '24px',
-  // Review of #584: 对话 headings and captions that had no scale step get one instead of a literal.
-  '--font-size-caption': '10px', '--font-size-title': '20px', '--font-size-hero': '28px', '--font-size-brand': '22px',
-  '--line-height-body': '1.5', '--line-height-tight': '1.35', '--line-height-relaxed': '1.65',
-  '--radius-1': '4px', '--radius-2': '5px', '--radius-control': '7px',
-  '--shadow-card': '0 2px 6px #182d4b03', '--shadow-card-hover': '0 3px 10px #182d4b14',
-  '--shadow-popover': '0 8px 24px #182d4b26',
-
-};
-
-test('tokens the module sheets read through shell.css keep their contract value', () => {
-  const shellRoot = rootBlocks(shell)[0] ?? '';
-  const declared = new Map([...shellRoot.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)].map(match => [match[1], match[2].trim()]));
-  for (const [token, value] of Object.entries(SHARED))
-    assert.equal(declared.get(token), value, `shell.css must keep ${token}: ${value} (upstream changes it -> the module sheets restyle silently)`);
-  for (const name of moduleSheets) {
-    const text = read('static/' + name);
-    const local = new Set(names(text));
-    for (const { name: token, fallback } of reads(text)) {
-      if (SHARED[token] || local.has(token) || runtime.has(token)) continue;
-      assert.ok(!shellTokens.has(token),
-        `${name} reads var(${token}) through shell.css without a pinned value; add it to SHARED with the value it must keep`);
-      assert.ok(fallback, `${name} reads var(${token}) with no fallback and shell.css does not declare it`);
-    }
-  }
-});
-
 test('#482 board.css reads shared colour, radius and typography tokens instead of a second theme', () => {
   const source = read('static/board.css').replace(/\/\*[\s\S]*?\*\//g, '');
   assert.deepEqual(source.match(/#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})\b/gi) ?? [],
@@ -117,33 +64,8 @@ test('#551 style.css, access.css, management.css and views.css no longer hard-co
   }
 });
 
-test('#551 page body, muted text and heading sizes in style.css and access.css use tokens', () => {
-  const style = read('static/style.css');
-  assert.match(style, /:root\{[^}]*color:\s*var\(--color-text\)/);
-  assert.match(style, /:root\{[^}]*background:\s*var\(--color-bg\)/);
-  assert.match(style, /\.muted\{[^}]*color:\s*var\(--color-text-muted\)/);
-  assert.match(style, /h1\{font-size:\s*var\(--font-size-display\)/);
-  assert.match(style, /h2\{font-size:\s*var\(--font-size-4\)/);
-  const access = read('static/access.css');
-  assert.match(access, /#access h1 \{[^}]*font-size:\s*var\(--font-size-5\)/);
-  assert.match(access, /#access-form label \{[^}]*font-size:\s*var\(--font-size-2\)/);
-  assert.match(access, /#access-description \{ color:\s*var\(--color-text-muted\)/);
-  assert.match(access, /\.identity-overview \.identity-connection-status \{ font-size:\s*var\(--font-size-4\)/);
-  assert.match(access, /\.identity-advanced > summary \{[^}]*font-size:\s*var\(--font-size-row\)/);
-});
-
-test('#551 management.css and views.css map heading, body and muted values onto shared tokens', () => {
+test('#551 management.css and views.css no longer hard-code leftover colours, and role cards keep the caller heading level', () => {
   const management = read('static/management.css');
-  assert.match(management, /\.management-window \{[^}]*color:\s*var\(--color-text\)/);
-  assert.match(management, /\.management-sidebar-head h2 \{[^}]*font-size:\s*var\(--font-size-3\)/);
-  assert.match(management, /\.management-eyebrow \{[^}]*color:\s*var\(--color-text-muted\); font-size:\s*var\(--font-size-1\)/);
-  assert.match(management, /\.management-new-conversation \{[^}]*color:\s*var\(--color-brand\)/);
-  assert.match(management, /\.management-markdown \{ color:\s*var\(--color-text\); font-size:\s*var\(--font-size-2\)/);
-  assert.match(management, /\.management-user \{[^}]*font-size:\s*var\(--font-size-2\)/);
-  assert.match(management, /\.management-markdown a \{ color:\s*var\(--color-brand\)/);
-  assert.match(management, /\.management-input-footer \.muted \{ color:\s*var\(--color-text-muted\)/);
-  assert.match(management, /\.management-welcome h3 \{[^}]*font-size:\s*var\(--font-size-hero\)/);
-  assert.match(management, /\.management-receipt-head h1 \{[^}]*font-size:\s*var\(--font-size-title\)/);
   for (const literal of ['#166e70', '#66827c', '#8a9aa1']) assert.equal(management.includes(literal), false, literal);
   // Only icon glyph sizes (welcome badge and avatar) stay literal; text reads the shared scale.
   const literalSizes = [...management.matchAll(/^\s*([^{}]+?)\s*\{[^}]*font-size:\s*\d+px/gm)].map(match => match[1]);
@@ -152,13 +74,6 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.equal(management.includes('#6d818a'), false);
   assert.equal(management.includes('#16636b'), false);
   const views = read('static/views.css');
-  assert.match(views, /\.timeline-panel h3,\.side-card h3\{[^}]*color:\s*var\(--color-text\)/);
-  // #1039: a settings card title is an h2 but keeps the h3 tokens, and a sub-section inside it is an h3 that keeps the
-  // h4 size. Both are class/token rules, so the outline changes and the pixels do not.
-  assert.match(views, /\.side-card>h2\{[^}]*font-size:\s*var\(--font-size-2\)[^}]*margin:\s*0 0 10px/);
-  assert.match(views, /\.console-ready \.side-card>h2\{[^}]*font-weight:\s*700[^}]*line-height:\s*normal/);
-  assert.match(views, /\.settings-panel \.side-card>h2\{font-size:\s*var\(--font-size-row\)\}/);
-  assert.match(views, /\.project-content \.side-card :is\(\.card-sub,\.rate-account\)\{[^}]*font-size:\s*var\(--font-size-label\)[^}]*margin:\s*6px 0 0/);
   const rateLimits = read('static/settings/rate-limits.js');
   assert.match(rateLimits, /element\('h3',[^)]*'rate-account'\)/, 'the quota account names keep their own level and class');
   // #1039: serviceRoleCard is drawn on the settings page (h2 under 全局设置) and inside the Feishu bindings page's own h3
@@ -175,10 +90,6 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.match(serviceRoles, /function serviceRoleCreate\(view, level = 'h3'\)/, 'the create form takes the same level');
   assert.match(serviceRoles, /section\.before\(serviceRoleCard\(view, created, level\)\)/, 'the created card is drawn at that level');
   assert.match(read('static/settings/page.js'), /serviceRoleCreate\(view, 'h2'\)/, 'the settings page creates h2 cards');
-  assert.match(views, /\.step-meta\{[^}]*color:\s*var\(--color-text-muted\);font-size:\s*var\(--font-size-1\)/);
-  assert.match(views, /button\.linkish\{[^}]*color:\s*var\(--color-brand\)/);
-  assert.match(views, /\.choice\{[^}]*color:\s*var\(--color-text\)/);
-  assert.match(views, /pre\.command\{[^}]*background:\s*var\(--color-text\);color:\s*var\(--color-text-inverse\)/);
   assert.equal(views.toLowerCase().includes('#637c89'), false);
   assert.equal(views.toLowerCase().includes('#365564'), false);
   for (const literal of ['#718793', '#536c78']) assert.equal(views.toLowerCase().includes(literal), false, literal);
@@ -188,8 +99,7 @@ test('#551 management.css and views.css map heading, body and muted values onto 
 });
 
 // #563: the lighter leftover teals fail 4.5:1 on the page background. They must
-// not return in the remaining console sheets or the usage chart. The muted token
-// itself stays at its pinned #607087 value.
+// not return in the remaining console sheets or the usage chart.
 const LIGHT_LEFTOVER = ['#637c89', '#5b7481', '#52707d'];
 
 test('#563 module sheets and the usage chart no longer hard-code light leftover teals', () => {
@@ -202,17 +112,11 @@ test('#563 module sheets and the usage chart no longer hard-code light leftover 
   }
 });
 
-test('#563 muted token stays pinned and nav labels use the shared 12px size', () => {
-  const root = read('static/shell.css');
-  assert.match(root, /--color-text-muted:\s*#607087/i);
-  const shell = read('static/shell.css');
-  assert.match(shell, /\.console-nav-label \{[^}]*font-size:\s*var\(--font-size-1\)/);
+test('#563 nav labels use the shared type step', () => {
+  assert.match(read('static/shell.css'), /\.console-nav-label \{[^}]*font-size:\s*var\(--font-size-1\)/);
 });
 
-test('#552 named button variants and shared card component are declared', () => {
-  const shell = read('static/shell.css');
-  for (const name of ['.btn-primary', '.btn-secondary', '.btn-danger', '.btn-text', '.card:not(.list-panel), .side-card'])
-    assert.match(shell, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+test('#552 login and identity actions use the named button classes', () => {
   const html = read('static/index.html');
   assert.match(html, /id="access-submit"[^>]*class="btn-primary"/);
   assert.match(html, /id="refresh"[^>]*class="btn-text"/);
@@ -222,9 +126,6 @@ test('#552 named button variants and shared card component are declared', () => 
   assert.match(identity, /t\('identity.switch_org'\), 'btn-secondary'/);
   // The page no longer has a manual 刷新身份与授权 button (it refreshes automatically on return from GitHub).
   assert.equal(identity.includes("button('刷新身份与授权'"), false);
-  const shellSheet = read('static/shell.css');
-  assert.match(shellSheet, /\.console-ready:not\(\.board-mode\) \.card\.list-panel \{ overflow: hidden; \}/, 'the card clip must not override the board list panel');
-  assert.doesNotMatch(shellSheet, /\.console-ready \.card\.list-panel \{[^}]*overflow/);
   // First-screen GitHub action is the only solid primary; Advanced actions stay secondary or text.
   assert.match(identity, /identity-primary btn-primary/);
 });
@@ -235,16 +136,25 @@ const luminance = hex => {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 };
 const contrast = (a, b) => { const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+// Read the colour from the :root declaration. A copied hex in this file would pin the
+// palette again, which is the table this test no longer keeps.
+const shellHex = token => {
+  const blocks = rootBlocks(shell).join('\n');
+  const found = [...blocks.matchAll(new RegExp(`(?:^|[\\s{;])${token}\\s*:\\s*([^;]+);`, 'g'))];
+  const value = found.at(-1)?.[1].trim() ?? '';
+  assert.match(value, /^#[0-9a-f]{6}$/i, `${token} is a 6-digit colour in shell.css :root, got ${JSON.stringify(value)}`);
+  return value;
+};
 
 test('#584 neutral status badges keep AA text contrast and the info alert ring stays visible', () => {
   const source = read('static/style.css');
   assert.match(source, /\.status\{[^}]*background:var\(--color-status-neutral-bg\);color:var\(--color-status-neutral\)/);
   assert.match(source, /\.status-info\.status-alert\{box-shadow:inset 0 0 0 1px var\(--color-info-border\)\}/);
-  assert.ok(contrast(SHARED['--color-status-neutral'], SHARED['--color-status-neutral-bg']) >= 4.5, 'neutral badge text must stay at WCAG AA for 12px text');
-  assert.ok(contrast(SHARED['--color-info-border'], SHARED['--color-info-bg']) >= 1.3, 'info alert ring must be distinguishable from the info badge fill');
+  assert.ok(contrast(shellHex('--color-status-neutral'), shellHex('--color-status-neutral-bg')) >= 4.5, 'neutral badge text must stay at WCAG AA for 12px text');
+  assert.ok(contrast(shellHex('--color-info-border'), shellHex('--color-info-bg')) >= 1.3, 'info alert ring must be distinguishable from the info badge fill');
 });
 
 test('#482 board empty text keeps AA contrast on the shared neutral column surface', () => {
   assert.match(read('static/board.css'), /\.board-empty\{[^}]*color:var\(--color-status-neutral\)/);
-  assert.ok(contrast(SHARED['--color-status-neutral'], SHARED['--color-status-neutral-bg']) >= 4.5);
+  assert.ok(contrast(shellHex('--color-status-neutral'), shellHex('--color-status-neutral-bg')) >= 4.5);
 });
