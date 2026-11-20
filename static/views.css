@@ -1074,6 +1074,10 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root:not([data-theme="light"]) .settings-body { border-top-color: var(--color-border); }
   :root:not([data-theme="light"]) .settings-rows { border-top-color: var(--color-border); }
   :root:not([data-theme="light"]) .audit-filters button[aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
+  /* This head still renders the overview capability card from its base; main removes the card in #1123, so after
+     the merge this override is dead code. Kept rather than dropped: on this head it is the difference between
+     brand blue on a dark card and the readable link colour. */
+  :root:not([data-theme="light"]) .capability-links a { color: var(--color-brand-text); }
   :root:not([data-theme="light"]) .role-run-fold { background: var(--color-surface); border-color: var(--color-border); }
   :root:not([data-theme="light"]) .role-run-fold.role-run-running { border-color: var(--color-info-border); }
   :root:not([data-theme="light"]) .role-run-fold.role-run-returned, :root:not([data-theme="light"]) .role-run-fold.role-run-paused { border-color: var(--color-warning-border); }
@@ -1117,6 +1121,10 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root[data-theme="dark"] .settings-body { border-top-color: var(--color-border); }
   :root[data-theme="dark"] .settings-rows { border-top-color: var(--color-border); }
   :root[data-theme="dark"] .audit-filters button[aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
+  /* This head still renders the overview capability card from its base; main removes the card in #1123, so after
+     the merge this override is dead code. Kept rather than dropped: on this head it is the difference between
+     brand blue on a dark card and the readable link colour. */
+  :root[data-theme="dark"] .capability-links a { color: var(--color-brand-text); }
   :root[data-theme="dark"] .role-run-fold { background: var(--color-surface); border-color: var(--color-border); }
   :root[data-theme="dark"] .role-run-fold.role-run-running { border-color: var(--color-info-border); }
   :root[data-theme="dark"] .role-run-fold.role-run-returned, :root[data-theme="dark"] .role-run-fold.role-run-paused { border-color: var(--color-warning-border); }
