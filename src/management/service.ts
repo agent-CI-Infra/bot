@@ -15,6 +15,7 @@ import { TaskRecords } from '../tasks/service.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
 import { queries as taskQueries, redactEgress } from '../app/queries.js';
 import { updatePolicy } from '../app/management.js';
+import { autoMergePolicy } from '../github/merge-policy.js';
 import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
 import { installationExecutionDenied } from '../installations/archive.js';
@@ -172,7 +173,7 @@ export class ManagementService {
     // Whether this person may confirm a development as a CI change (#931): project configuration rights.
     if(taskCreation.allowed){try{authorize(actor,'config.write',{project_id:project});taskCreation.workflow_changes=true;}catch{taskCreation.workflow_changes=false;}}
     const roles=roleApi(this.store,this.user(actor),'GET',new URL('http://local/api/repositories/'+project+'/roles'),{}) as {configuration:any;preview:{error?:string}[]};
-    return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,
+    return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,auto_merge_policy:autoMergePolicy(this.store,project),
       manager:{capability_ceiling:manager.capability_ceiling,prompt:manager.prompt,standing_rules:manager.standing_rules,events:manager.events,rules:manager.rules,migration:manager.migration},
       roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:roles.configuration.follows_default?'builtin':'console'}))},
       skills:rules.files.filter((f:any)=>f.path.startsWith('.agents/skills/')).map((f:any)=>({path:f.path,source:f.source,version:sources.sha,content:f.effective})),

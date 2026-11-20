@@ -7,6 +7,12 @@ import { applicationVisible } from './applications.js';
 
 export const externalSubject = (e: ChannelEvent): ExternalSubject => ({ provider: e.provider, host: 'open.feishu.cn',
   connector: e.connector_id + ':' + e.app_id, external_tenant: e.actor_tenant, external_actor: e.actor_id });
+/** The platform account the sender of a Feishu message linked (an active, unexpired identity), or null. */
+export function feishuPrincipal(store: Store, e: ChannelEvent): string | null {
+  const s = externalSubject(e);
+  return store.get(`SELECT principal_id FROM external_identities WHERE provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=?
+    AND status='active' AND (expires_at IS NULL OR expires_at>?)`, s.provider, s.host, s.connector, s.external_tenant, s.external_actor, Date.now())?.principal_id ?? null;
+}
 export class ChannelBindings {
   readonly identities: ExternalBindings;
   private readonly proofs = new WeakMap<object, VerifiedExternalProof>();

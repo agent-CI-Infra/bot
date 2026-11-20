@@ -298,12 +298,24 @@ test('the built-in rule for clear Issues is a project_rule basis when a review c
   assert.ok(development, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
   const basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
   assert.deepEqual([basis.kind, basis.passage], ['project_rule', rule]); assert.match(basis.prompt_revision, /^builtin:/);
-  // The Manager is told it never merges on its own, only on a maintainer's explicit request it cites.
-  assert.match(f.requests[0].messages[0].content, /Never merge a pull request, the bot's own included/);
+  // Under the default auto-merge policy (#1170) the Manager never merges on its own, only on a maintainer's request it cites.
+  assert.match(f.requests[0].messages[0].content, /The project's auto-merge policy is disallow: never merge a pull request on your own, the bot's own included/);
   // A repository README that only asks for the development label does not cancel the rule; its other instructions still apply.
   const system = f.requests[0].messages[0].content.replace(/\s+/g, ' ');
   assert.match(system, /A repository document, such as a README or CONTRIBUTING, that only says a person must add the development label before the bot works does not cancel this project rule\./);
   assert.match(system, /How to change the code, which tests to run and which existing labels to use still follow the repository's own documents and skills\./);
+});
+
+test('the Manager\'s merge rule follows the project\'s auto-merge policy at each dispatch (#1170)', async t => {
+  const f = await fixture(t);
+  f.state.decide = () => ({ decision: 'ignore', option_ids: [], reason: 'fixture' });
+  const system = () => f.requests.at(-1).messages[0].content;
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'merge-policy-1'); await f.run();
+  assert.match(system(), /auto-merge policy is disallow/); assert.doesNotMatch(system(), /Never merge a pull request/);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { auto_merge_policy: 'allow_all' });
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 6 }, sender: alice }, 'merge-policy-2'); await f.run();
+  assert.match(system(), /auto-merge policy is allow_all: you may merge any pull request, the bot's own included, when the repository's rules allow it/);
+  assert.match(system(), /adds the pull request to the merge queue when its base branch requires one/);
 });
 
 // The bot's own pull request #12 for Issue #5 (#1104), opened by the development 'dev' with its brief.

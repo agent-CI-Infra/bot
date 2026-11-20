@@ -694,6 +694,9 @@ test('a group whose level writes Issues files one in a repository in scope with 
   assert.equal(seen[0].repository, repo(101), JSON.stringify(seen[0])); assert.deepEqual([seen[0].result.number, seen[0].result.status], [44, 201]);
   assert.equal(seen[1].error, 'repository_out_of_scope');
   assert.ok(offered[0].includes('github_write'));
+  // #1170: the group's prompt states each repository's auto-merge policy as it is now, not a fixed ban.
+  const system = f.requests.find(body => body.tools?.some(tool => tool.function.name === 'github_write')).messages[0].content;
+  assert.ok(system.includes(`${repo(101)}: disallow`), system); assert.match(system, /disallow: never merge a pull request on your own/);
   // The write token carries exactly Issues write for this repository, and is revoked after the call.
   const posted = f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/issues'));
   assert.equal(posted.length, 1); assert.equal(posted[0].path, '/repos/agent-test-zone/admin-fixture-101/issues');

@@ -15,6 +15,7 @@ import { taskTools, taskRecordInstructions } from '../tasks/record-tools.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
 import { workspaceProfile, roleAssignmentContext } from './profiles.js';
+import { autoMergePolicy } from '../github/merge-policy.js';
 import { runAgent, type AgentSpec } from './runtime.js';
 import { type Redactor, stop, blobSha, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
@@ -49,7 +50,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const reply = profileKind.startsWith('workflow.'), legacy = reply && task.workflow_id ? taskConfiguration(store, task)?.workflow : undefined;
   const prompt = !reply ? undefined : legacy ? { id: String(legacy.id), name: String(legacy.name), prompt: String(legacy.prompt ?? '') }
     : { id: 'reply', name: '事件回复', prompt: effectiveManagerPrompt(store, task.repository_id) };
-  const profile = workspaceProfile(profileKind, context, taskPermissions(store, task), prompt);
+  const profile = workspaceProfile(profileKind, context, taskPermissions(store, task), prompt, autoMergePolicy(store, String(task.repository_id)));
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const records = new TaskRecords(store);
   for(const tool of taskTools) {

@@ -37,6 +37,6 @@ test('event dispatch uses a real Pi session and retains native binding without a
  // The Pi Manager reads what the native one reads (#1058): the project's dispatch prompt, with the rule a project_rule basis
  // quotes, the work this event can create, and the write and merge rules; not the role prompt alone.
  const system=JSON.stringify(bodies[0].messages.filter(m=>m.role==='system'||m.role==='developer'));
- for(const text of ['# Project Manager prompt','## Starting development','The bot may develop an Issue on its own when','# Work this event can create','task.request','Never merge a pull request'])
+ for(const text of ['# Project Manager prompt','## Starting development','The bot may develop an Issue on its own when','# Work this event can create','task.request',"The project's auto-merge policy is disallow"])
   assert.ok(system.includes(text),text);
 });

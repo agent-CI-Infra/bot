@@ -45,6 +45,16 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     await development.check(); await page.getByRole('button', { name: '保存能力上限', exact: true }).click();
     await expect(page.locator('.flash')).toHaveText('已保存');
     expect((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling).toBe('develop');
+    // #1170: the auto-merge policy has its own card, disallow by default, saved on its own.
+    const autoMerge = page.getByRole('heading', { name: '自动合并', exact: true });
+    const disallow = page.getByLabel('不允许自动合并', { exact: true }), nonBot = page.getByLabel('不自动合并 bot 开发的 PR', { exact: true });
+    await expect(disallow).toBeChecked(); await expect(nonBot).not.toBeChecked(); await expect(page.getByLabel('允许所有自动合并', { exact: true })).not.toBeChecked();
+    await nonBot.check(); await page.getByRole('button', { name: '保存自动合并策略', exact: true }).click();
+    await expect(page.locator('.flash')).toHaveText('已保存');
+    expect((await admin('/api/repositories/101/policy')).value.policy.auto_merge_policy).toBe('non_bot_only');
+    await expect(nonBot).toBeChecked(); await expect(disallow).not.toBeChecked();
+    expect((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling).toBe('develop');
+    await expect(autoMerge).toBeVisible(); await screenshots(page, role, 'auto-merge', nonBot);
     const actions = page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true });
     await expect(actions).not.toBeChecked(); await actions.check();
     await page.getByLabel('PR 推送新提交', { exact: true }).uncheck();

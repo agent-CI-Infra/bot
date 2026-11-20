@@ -13,7 +13,7 @@ function projectTriggersSection() {
       if (!live()) return;
       const intro = card('监听与触发');
       intro.append(note('这些设置决定项目整体接收哪些事件、允许启动哪些自动任务。接收后由 Manager 安排处理；关闭的来源保持关闭，项目启停、权限、预算及独立 QA 和发布检查继续生效。'));
-      holder.replaceChildren(intro, projectWorkPolicyCard(), projectEventFiltersCard(manager, target, live), message);
+      holder.replaceChildren(intro, projectWorkPolicyCard(), projectAutoMergeCard(), projectEventFiltersCard(manager, target, live), message);
       message.textContent = '';
     } catch (err) {
       if (!live()) return;
@@ -45,6 +45,24 @@ function projectWorkPolicyCard() {
     async form => { const level = form.elements.capability_ceiling.value, gated = form.elements.pull_request_qa.checked;
       if (level !== saved || gated !== qa) await api(`/api/repositories/${id}/policy`, 'PATCH', { ...(level !== saved ? { capability_ceiling: level } : {}), ...(gated !== qa ? { delivery_gates: { pull_request_qa: gated } } : {}) }); },
     { editable: target.canConfigure !== false, draftKey: 'automation', caption: '保存能力上限' });
+}
+
+// #1170: whether agents may merge (or enqueue) pull requests on their own. The control plane refuses what this level does
+// not allow; which checks, approvals or labels a merge needs stays with the repository's own rules.
+function projectAutoMergeCard() {
+  const target = current, policy = target.policy, id = target.id, saved = policy.auto_merge_policy || 'disallow';
+  const choices = element('fieldset', '', 'project-auto-merge-choices'); choices.append(element('legend', 'Agent 能否自行合并 PR'));
+  for (const [level, title, detail] of projectAutoMergeOptions) {
+    const label = element('label', '', 'check'); label.append(input('auto_merge_policy', level, { type: 'radio', checked: level === saved }), ' ' + title);
+    choices.append(label, note(detail));
+  }
+  const nodes = [choices,
+    note('合并和送入合并队列是同一个动作：目标分支要求合并队列时送入队列，否则直接合并。需要能力上限为「可开发并开 PR」，并且执行的角色（默认是 Manager）对 Contents 和 Pull Request 都有读写。'),
+    note('需要哪些检查、批准或标签由仓库的分支保护、规则集和项目提示词决定；平台只拦下违反本策略的合并，并把当前档位写进 Manager、工作角色和助手的提示词。')];
+  if (projectCeilingOf(policy) !== 'develop') nodes.push(note('当前能力上限低于「可开发并开 PR」，Agent 现在不能合并任何 PR；调高上限后按这里的策略执行。'));
+  return settingsForm('自动合并', nodes,
+    async form => { const level = form.elements.auto_merge_policy.value; if (level !== saved) await api(`/api/repositories/${id}/policy`, 'PATCH', { auto_merge_policy: level }); },
+    { editable: target.canConfigure !== false, draftKey: 'auto-merge', caption: '保存自动合并策略' });
 }
 
 function projectEventFiltersCard(manager, target, live) {

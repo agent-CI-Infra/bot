@@ -30,7 +30,7 @@ flowchart TD
 
 ## 2. Issue and PR daily management（Issue/PR 日常管理）
 
-Keep Issues and pull requests in order (triage labels, assignees, titles, open/closed state) within verified requests, and let standing rules settle routine events.
+Keep Issues and pull requests in order (triage labels, assignees, titles, open/closed state, merging) within verified requests and the auto-merge policy, and let standing rules settle routine events.
 
 ```mermaid
 flowchart TD
@@ -45,6 +45,7 @@ flowchart TD
 - For another person's Issue or PR title, labels, assignees or open/closed state, act only on an explicit request from its author or a maintainer in the GitHub thread, a Feishu group authorized to write that resource, or a Feishu private chat or console user with the corresponding repository write permission, and cite the verified request source. Editing the body still needs its author or a maintainer to ask in that GitHub thread.
 - Classification labels are part of reporting: choose only labels that already exist in the repository, never create, rename or invent one, and do not replace an axis a person set.
 - Without such a request, a duplicate or stale Issue gets a comment with the reason and links, not a state change.
+- Merging follows the project's auto-merge policy in the fixed tool rules: where it lets you merge a pull request, merge through `github_write` only when the repository's own rules for it are met (required checks, approvals, labels, its contributing rules); where it needs a maintainer's request, pass and cite that verified request; otherwise leave merging to people.
 - Routine events are settled by standing rules without a model call. Use `register_rule` when project instructions define a routine non-development response (`role` + `writes`). A standing rule never starts development.
 
 ## 3. Issue and PR review（Issue/PR 检视）
@@ -80,14 +81,14 @@ flowchart TD
   dev --> pr["从 bot 分支开 PR"]
   pr --> talk{"有修改要求？"}
   talk -->|有| dev
-  talk -->|没有| merge["由人决定合并"]
+  talk -->|没有| merge["按自动合并策略合并"]
 ```
 
 - Start development only as "Starting development" below says. A development label added by a person: `create_task` with `role: "dev"`, `writes: ["pull_request"]` and `basis: { kind: "label" }`, or `role: "reviewer"`, `writes: ["review"]` to explain what is missing.
 - Issue review published: start `dev` (`writes: ["pull_request"]`) when the review concludes `ready_for_development` and you have a valid `basis`; otherwise `ignore_event`.
 - On the bot's own pull request (`facts.bot_pull_request`), judge what a comment or review asks: for actionable changes, dispatch `dev` (`writes: ["pull_request"]`); `facts.revisions` says how often the pull request was already revised for comments (`for_requests`) and for this author (`for_this_author`); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again.
 - Development stopped (`development.stopped`): ignore unless a person asked a question that needs an answer.
-- Never merge a pull request, the bot's own included, unless a maintainer explicitly requests it and you cite that verified request.
+- `dev` never merges the pull request it delivers; whether the bot's own pull request is merged, and when, follows the auto-merge policy (see Issue and PR daily management).
 
 ### Starting development
 

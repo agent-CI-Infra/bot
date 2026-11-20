@@ -93,7 +93,7 @@ bot 开 PR 之前，开发任务已经让独立的检视 agent 看过改动、�
 
 每次修改仍要通过项目的测试命令才会推送。这些修改只在 bot 分支上追加提交，不批准、不合并，也不会强推。
 
-合并不在这个流程里，但不是只有人能做：GitHub 上合并 PR 属于 Contents 写，Manager 默认有 Pull Request 和 Contents 写权限，可以经 `github_write` 批准或合并 PR、写分支（包括默认分支）；其他角色、群助手和管理助手按各自的 Contents 写权限。权限保留，靠提示词约束（#1026）：Manager 分派、各类任务、开发规则、管理助手和群助手的系统提示词都要求不合并 PR（包括 bot 自己的）、不推送到别人的分支或默认分支；人在 GitHub 评论、飞书或对话里明确要求合并时才合并，并引用这条要求（Manager 只认 write 以上权限的人）。这类写入不经过控制面的合并校验，也不限制目标分支，能不能合入由仓库的分支保护（或规则集）和必需检查决定，所以接入的仓库应打开这两项，见[接入指南](onboarding-guide.md#4-需要你亲手确认的事项)。不希望 Manager 合并时，在「角色 → Manager」把 Contents 改成只读。人在控制台合并走带校验的 `POST /api/tasks/:id/merge`，见[角色池](role-pool.md#authorized-merge)。
+合并不在这个流程里，但不是只有人能做：Manager 默认有 Pull Request 和 Contents 写权限，可以经 `github_write` 批准 PR、写分支（包括默认分支），也可以合并 PR（目标分支要求 merge queue 时送入队列）；其他角色、群助手和管理助手按各自的 Contents 和 Pull Request 写权限。能否自行合并由项目的[自动合并策略](workflows.md#项目自动合并策略)决定（#1170）：默认 `disallow` 下只有维护者明确要求合并某条 PR 才合并，控制面核实请求来源后才发出；`non_bot_only` 和 `allow_all` 放开别人的或全部 PR。系统提示词按当前档位写合并边界。推送仍靠提示词约束（#1026）：不推送到别人的分支或默认分支，人明确要求时才推送并引用这条要求。这类写入不经过控制面的合并校验（候选、QA、检查），也不限制目标分支，能不能合入由仓库的分支保护（或规则集）和必需检查决定，所以接入的仓库应打开这两项，见[接入指南](onboarding-guide.md#4-需要你亲手确认的事项)。不希望 Manager 合并时，在「角色 → Manager」把 Contents 改成只读。人在控制台合并走带校验的 `POST /api/tasks/:id/merge`，见[角色池](role-pool.md#authorized-merge)。
 
 ## 机器配置
 

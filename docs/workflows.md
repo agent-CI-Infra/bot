@@ -4,7 +4,7 @@
 
 ## 项目监听与触发
 
-项目设置中的「监听与触发」（`#/projects/<id>/triggers`）集中管理项目的能力上限、事件来源和标签触发。Manager 提示词、常设规则与分派记录在「角色 → Manager」维护（提示词卡片默认是阅读视图，按 Markdown 排版并把 ` ```mermaid ` 代码块画成流程图，「编辑源码」显示保存的原文和实时预览，#1123）；各角色（含 Manager）的模型与 Agent 后端在「角色」页配置，项目默认模型在「模型」页配置。
+项目设置中的「监听与触发」（`#/projects/<id>/triggers`）集中管理项目的能力上限、自动合并策略、事件来源和标签触发。Manager 提示词、常设规则与分派记录在「角色 → Manager」维护（提示词卡片默认是阅读视图，按 Markdown 排版并把 ` ```mermaid ` 代码块画成流程图，「编辑源码」显示保存的原文和实时预览，#1123）；各角色（含 Manager）的模型与 Agent 后端在「角色」页配置，项目默认模型在「模型」页配置。
 
 ## 项目能力上限
 
@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `read` 只读问答 | 在飞书和控制台里回答、拉分支跑测试诊断 | 无 |
 | `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视（`post_review`）、维护开发进度评论（`report_development_milestone`）、重跑失败 Actions（`rerun_failed_run`）与触发工作流；不改代码 | Issues、Pull requests、Actions |
-| `develop` 可开发并开 PR | 还可以改代码、推送 bot 分支并创建或更新 bot PR（`open_pull_request`） | 再加 Contents（文件、分支和引用、合并 PR） |
+| `develop` 可开发并开 PR | 还可以改代码、推送 bot 分支并创建或更新 bot PR（`open_pull_request`） | 再加 Contents（文件、分支和引用；合并 PR 另按[自动合并策略](#项目自动合并策略)） |
 
 所有写入工具（`post_review`、`open_pull_request`、`report_development_milestone`、`rerun_failed_run`、`github_write`）均受 `capability_ceiling`、任务写入授权 `task_write_grants`（`pull_request`、`review`、`github`、`actions_rerun`）与来源策略三重约束：
 
@@ -24,6 +24,29 @@
 - **Actions 单次重跑（`rerun_failed_run`）**：要求 `actions_rerun` 授权与至少 `comment` 能力上限，受单次 run 重跑预算与幂等账本保护。
 
 调低能力上限不会取消任务：需要更高档位的操作会被拒绝或以 `capability_ceiling_lowered` 进入 `waiting_permission` 并保留现场，调回后可重试。
+
+## 项目自动合并策略
+
+项目策略字段 `auto_merge_policy`（#1170，`src/github/merge-policy.ts`）决定 Agent 能否自行合并 PR，共三档，默认 `disallow`：
+
+| 档位 | 含义 |
+| --- | --- |
+| `disallow` 不允许自动合并 | 包括 bot 自己的 PR 在内都不自行合并；只有对仓库有写权限的维护者在 GitHub 评论、飞书或管理会话里明确要求合并某条 PR 时才合并 |
+| `non_bot_only` 不自动合并 bot 开发的 PR | bot 开的 PR（`bot_pull_requests`）仍要维护者明确要求；其他 PR 满足仓库规则时可以自动合并 |
+| `allow_all` 允许所有自动合并 | 包括 bot 自己的 PR，满足仓库规则时都可以自动合并 |
+
+档位在「监听与触发」页的「自动合并」卡片、`PATCH /api/repositories/:id/policy` 或管理命令 `project.update` 里设置，`get_effective_config` 返回当前档位；改变档位记一条审计 `policy.auto_merge`。
+
+合并只有一个入口：`github_write` 的 `PUT /pulls/{n}/merge`。控制面先用只读令牌读 PR 和目标分支的规则（与 `POST /api/tasks/:id/merge` 共用 `src/github/merge-queue.ts`）：目标分支要求 merge queue 时改用 GraphQL `enqueuePullRequest` 送入队列，按 Agent 给的 `sha` 或读到的 head 固定，合并方式由队列设置决定，回执带 `queued: true` 和队列条目；否则直接合并。两种方式同一道闸门：能力上限 `develop`、调用方角色对 Contents 和 Pull requests 都有写权限，以及本策略；写令牌只含这两项写权限。回执的 `via` 写明是 `merge` 还是 `merge_queue`。
+
+档位要求维护者请求时（`disallow` 下的所有 PR、`non_bot_only` 下 bot 的 PR），调用要带 `merge_request`，控制面核实请求的来源，而不是相信模型的转述：
+
+- **GitHub 链接**：这条 PR 上的普通评论（`#issuecomment-…`）、检视（`#pullrequestreview-…`）或行内评论（`#discussion_r…`）。作者不能是 bot（App 账号、本 bot 的账号或带 bot 标记的内容），并且在平台的仓库协作者缓存（#1158）里是 write、maintain 或 admin，或是安装所有者。
+- **`current_message`**：管理助手或群聊助手正在回答的这条消息。管理会话看登录的这个人；飞书群看发这条消息的人自己关联的平台账号，不是群绑定的配置人。这个人要在该项目有写任务的权限（仓库写权限或项目管理员给的）。Manager 分派和任务里没有这样的消息，只能引用 GitHub 链接。
+
+请求的文字是不是真的要求合并这条 PR，由 Agent 判断并在回报时引用；批准、"LGTM" 或检查通过都不算。没有核实的请求时返回 `auto_merge_not_allowed`（带 `policy`、`bot_pull_request` 和原因），不签发写令牌、不发送，账本和审计记下这次拒绝；准备合并期间档位被调严，发送前同样拒绝。档位不要求请求时，`merge_request` 不核对也不影响合并。
+
+平台不替仓库决定合并前要满足什么：必需检查、批准和确认标签（例如仓库自定义的 `committer_confirm`）由 GitHub 分支保护或规则集，以及仓库文档和项目提示词决定。Manager 分派、任务里的 Agent、管理助手和群聊助手的系统提示词按当前档位生成合并边界，不再一律写「绝不合并」；团队里的工作角色用自己的角色提示词，同一段边界写在它拿到的 `github_write` 工具说明里。开发角色仍不合并自己交付的 PR，合不合并交给之后的 Manager 或人。人在控制台合并走带校验的 `POST /api/tasks/:id/merge`，是人的明确操作，不受本策略限制，见[角色池](role-pool.md#authorized-merge)。
 
 ## 事件过滤与单对象持久 Manager 线程
 

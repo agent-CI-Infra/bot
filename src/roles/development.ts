@@ -14,7 +14,8 @@ import {randomId} from '../core/security.js';
 import {traceEvent} from '../tasks/trace.js';
 import {stop,blobSha,validWorkspaceToolPath} from '../agent/common.js';
 import type {AgentSpec} from '../agent/runtime.js';
-import {githubWriteTool} from '../github/write.js';
+import {githubWriteTool,withMergePolicy} from '../github/write.js';
+import {autoMergePolicy} from '../github/merge-policy.js';
 import {pullRequestLabelsSchema} from '../github/pull-request-labels.js';
 import {pullRequestSummaryRules} from '../github/text.js';
 import {milestoneTool,milestoneToolName} from '../review/progress.js';
@@ -36,7 +37,7 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
   const cmdBudget=resolveCommandTimeout(store,task,'dev',180);
   const spec:AgentSpec<any>={store,task,redactor,guard,system:system.replace(/When ready, call create_pull_request:[\s\S]*?ends development\./,'When ready, call submit_delivery with PR metadata; framework QA and publication follow. Never call create_pull_request yourself.'),prompt:JSON.stringify({original:prompt,version_context:await versionTool(store,task,spaces.current,'read_version_context',{},remote)}),maxTurns:64,maxOutputTokens:16384,tools:[...(access.read?[tool('read_file','Read text from this shared workspace, ../notes, ../context, or /tmp',{path:{type:'string'}},['path'])]:[]),...(access.write?[tool('write_file','Write text to the repository, ../notes, or /tmp',{path:{type:'string'},content:{type:'string'}},['path','content'])]:[]),...(access.shell?[commandTool(cmdBudget.defaultSeconds,'Run verification/implementation commands without publication or credentials.',cmdBudget.maxSeconds)]:[]),submit,...versionTools,...readTools,...taskTools,...memoryTools,
   // Kept by runRole only for roles whose GitHub permissions write (#381).
-  ...(githubWrite?[githubWriteTool]:[]),
+  ...(githubWrite?withMergePolicy([githubWriteTool],autoMergePolicy(store,String(task.repository_id))):[]),
   // An Issue's development reports its milestones on the Issue's status comment (#1047).
   ...(milestone?[milestoneTool]:[])],finish:{name:'submit_delivery',validate},finalizationTools:['submit_delivery'],validate:content=>validate(JSON.parse(content)),execute:async(name,args)=>{
    if(versionTools.some(t=>t.function.name===name))return versionTool(store,task,spaces.current,name,args,remote);
