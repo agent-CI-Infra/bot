@@ -8,8 +8,11 @@ function repositoryOnboardingPrompt(repo) {
 }
 function queueRepositoryOnboarding(repo) {
   if (!me || !repo?.id) return;
-  pendingRepositoryOnboarding = { user: me.id, id: String(repo.id), full_name: repo.full_name || null, started: !!repo.started };
+  pendingRepositoryOnboarding = { user: me.id, id: String(repo.id), full_name: repo.full_name || null, started: !!repo.started, prompt: typeof repo.prompt === 'string' ? repo.prompt : null };
 }
+// #1123: a project page opens the project's assistant with its own request in the composer; nothing is sent until the
+// person finishes the sentence and sends it.
+function openManagementRequest(projectId, prompt) { return openRepositoryOnboarding({ id: projectId, started: true, prompt }); }
 function peekRepositoryOnboarding() {
   if (!pendingRepositoryOnboarding || pendingRepositoryOnboarding.user !== me?.id) { pendingRepositoryOnboarding = null; return null; }
   return pendingRepositoryOnboarding;

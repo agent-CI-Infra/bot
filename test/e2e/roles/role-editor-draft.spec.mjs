@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -14,7 +15,7 @@ async function prepared(page) {
     expect(result.status).toBe(200);
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.getByLabel('角色提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, '角色提示词')).toBeVisible();
     return { h, admin, revision: result.value.configuration.revision };
   } catch (error) { await h.stop(); throw error; }
 }
@@ -23,7 +24,7 @@ const draftPrompt = page => page.getByLabel('角色提示词', { exact: true });
 test('role sections keep one editable draft, version and save operation reachable at six widths', async ({ page }) => {
   const { h, admin, revision } = await prepared(page), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
-    await draftPrompt(page).fill('Keep the reproduction and evidence.');
+    await (await promptEditor(page, '角色提示词')).fill('Keep the reproduction and evidence.');
     await expect(page.locator('[data-role-version]')).toHaveText(`有未保存的更改`);
     await openRoleFormAdvanced(page);
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
@@ -48,7 +49,7 @@ test('role sections keep one editable draft, version and save operation reachabl
 test('a role conflict merges independent changes and requires a deliberate choice for the overlapping prompt', async ({ page }) => {
   const { h, admin, revision } = await prepared(page);
   try {
-    await draftPrompt(page).fill('My new prompt');
+    await (await promptEditor(page, '角色提示词')).fill('My new prompt');
     const role = (await admin('/api/repositories/101/roles')).value.configuration.roles.find(row => row.role_id === 'dev');
     const draft = await page.evaluate(role => editableRole(role), role);
     const changed = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ ...draft, name: 'Server name', persona_prompt: 'Server prompt', permissions: { ...draft.permissions, computer: 'deny' } }] });
@@ -70,7 +71,7 @@ test('a role conflict merges independent changes and requires a deliberate choic
 test('role read errors expose a read-only retry and permission loss clears the retained draft', async ({ page }) => {
   const { h } = await prepared(page);
   try {
-    await draftPrompt(page).fill('Sensitive unsaved draft');
+    await (await promptEditor(page, '角色提示词')).fill('Sensitive unsaved draft');
     await page.route('**/api/repositories/101/roles', route => route.request().method() === 'GET' ? route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"unavailable"}' }) : route.continue());
     await page.goto(h.admin + '/#/projects/101/roles'); await expect(page.getByText('角色配置读取失败，当前状态未知。保留的草稿尚未提交。', { exact: true })).toBeVisible(); await expect(consoleSave(page)).toHaveCount(0);
     await page.unroute('**/api/repositories/101/roles'); await page.getByRole('button', { name: '重试读取角色配置', exact: true }).click();
@@ -84,11 +85,11 @@ test('role read errors expose a read-only retry and permission loss clears the r
 test('a late role comparison cannot replace a different project editor', async ({ page }) => {
   const { h } = await prepared(page); let release;
   try {
-    await draftPrompt(page).fill('Project 101 only');
+    await (await promptEditor(page, '角色提示词')).fill('Project 101 only');
     const gate = new Promise(resolve => { release = resolve; }); let entered; const seen = new Promise(resolve => { entered = resolve; });
     await page.route('**/api/repositories/101/roles', async route => { const response = await route.fetch(); entered(); await gate; await route.fulfill({ response }); });
     await compareWithServer(page); await seen;
-    await page.goto(h.admin + '/#/projects/102/roles/dev'); await expect(draftPrompt(page)).toBeVisible(); release();
+    await page.goto(h.admin + '/#/projects/102/roles/dev'); await expect(promptReading(page, '角色提示词')).toBeVisible(); release();
     await expect(page).toHaveURL(/projects\/102\/roles\/dev$/); await expect(draftPrompt(page)).not.toHaveValue('Project 101 only'); await expect(page.getByRole('heading', { name: '比较角色配置', exact: true })).toHaveCount(0);
   } finally { release?.(); await h.stop(); }
 });
@@ -96,7 +97,7 @@ test('a late role comparison cannot replace a different project editor', async (
 test('finishing a comparison after switching roles releases the shared draft lock without replacing that role', async ({ page }) => {
   const { h } = await prepared(page); let release;
   try {
-    await draftPrompt(page).fill('Retained while navigating'); let entered; const seen = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; }); let held = false;
+    await (await promptEditor(page, '角色提示词')).fill('Retained while navigating'); let entered; const seen = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; }); let held = false;
     await page.route('**/api/repositories/101/roles', async route => { if (held) return route.continue(); held = true; const response = await route.fetch(); entered(); await gate; await route.fulfill({ response }); });
     await compareWithServer(page); await seen;
     await goRolePage(page, { role: 'Test' }); await expect(page.getByRole('heading', { name: 'Tester 设置', exact: true })).toBeVisible(); await expect(draftPrompt(page)).toBeDisabled();
@@ -122,9 +123,9 @@ test('choosing the latest edited role after a delete conflict also removes its p
 test('a forbidden project read clears its role draft before the role endpoint is reached', async ({ page }) => {
   const { h } = await prepared(page);
   try {
-    await draftPrompt(page).fill('Discard on project revocation');
+    await (await promptEditor(page, '角色提示词')).fill('Discard on project revocation');
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"repository_forbidden"}' }));
     await page.goto(h.admin + '/#/projects/101/roles'); await expect(page.locator('#project-page')).toContainText('repository_forbidden'); await expect(draftPrompt(page)).toHaveCount(0);
-    await page.unroute('**/api/repositories/101'); await page.goto(h.admin + '/#/projects/101/roles/dev'); await expect(draftPrompt(page)).toBeVisible(); await expect(draftPrompt(page)).not.toHaveValue('Discard on project revocation');
+    await page.unroute('**/api/repositories/101'); await page.goto(h.admin + '/#/projects/101/roles/dev'); await expect(page.getByTestId('role-form')).toBeVisible(); await expect(draftPrompt(page)).not.toHaveValue('Discard on project revocation');
   } finally { await h.stop(); }
 });

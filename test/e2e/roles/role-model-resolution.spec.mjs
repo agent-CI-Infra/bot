@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor } from '../helpers/prompt-editor.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -32,7 +33,7 @@ test('project default inheritance and explicit role models use saved configurati
   try {
     const before = h.store.get('SELECT COUNT(*) AS n FROM role_snapshots').n;
     await read(page).click(); await expect(fact(page, '模型来源')).toHaveText('项目默认'); await expect(fact(page, '模型名称')).toHaveText('Project base');
-    await page.getByLabel('角色提示词', { exact: true }).fill('Retain the local unsaved prompt.');
+    await (await promptEditor(page, '角色提示词')).fill('Retain the local unsaved prompt.');
     await page.getByLabel('dev 模型', { exact: true }).selectOption(models[1].id);
     await read(page).click(); await expect(fact(page, '模型名称')).toHaveText('Project base');
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('Retain the local unsaved prompt.');
@@ -58,7 +59,7 @@ test('withdrawn role models and changed configuration do not show a substitute o
     await read(page).click(); await expect(panel(page).getByRole('status')).toContainText('解析失败，当前结果未知'); await expect(panel(page).locator('dd')).toHaveCount(0);
     await goRolePage(page, { role: 'dev' }); await openRoleFormAdvanced(page);
     await read(page).click(); await expect(fact(page, '模型名称')).toHaveText('Project base');
-    await page.getByLabel('角色提示词', { exact: true }).fill('Still my draft');
+    await (await promptEditor(page, '角色提示词')).fill('Still my draft');
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ role_id: 'dev', name: 'New saved name' }, { role_id: 'reviewer', model_profile_ref: null }] })).status).toBe(200);
     await read(page).click(); await expect(panel(page).getByRole('status')).toContainText('配置版本已变化'); await expect(panel(page).locator('dd')).toHaveCount(0);
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('Still my draft');
@@ -90,7 +91,7 @@ test('late resolutions cannot replace another project and a forbidden preview cl
     await read(page).click(); await seen; await page.goto(h.admin + '/#/projects/102/roles/dev'); await openRoleFormAdvanced(page); await expect(panel(page)).toBeVisible(); release();
     await expect(panel(page).locator('dd')).toHaveCount(0); await expect(panel(page).getByRole('status')).toContainText('尚未读取');
     await page.unroute('**/api/repositories/101/roles/resolve'); await page.goto(h.admin + '/#/projects/101/roles/dev');
-    await page.getByLabel('角色提示词', { exact: true }).fill('Private local draft');
+    await (await promptEditor(page, '角色提示词')).fill('Private local draft');
     await openRoleFormAdvanced(page);
     await page.route('**/api/repositories/101/roles/resolve', route => route.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"repository_forbidden"}' }));
     await read(page).click(); await expect(page.getByText('当前身份无权读取或修改角色配置，已清空本页草稿。', { exact: true })).toBeVisible();

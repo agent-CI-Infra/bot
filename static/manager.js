@@ -40,10 +40,16 @@ function managerPromptCard(manager, refresh) {
   const editor = textarea('prompt', draft.value, { rows: 24, spellcheck: false });
   editor.addEventListener('input', () => { draft.value = editor.value; draft.dirty = true; });
   editor.setAttribute('aria-label', 'Manager 提示词');
-  section.append(note('这是 Manager 实际读取的完整分派提示词。直接编辑整份内容，无需章节编号或特殊格式。它决定新建任务、续接任务或不再分派；分派中可使用角色已授权的工具，修改提示词不会增加权限。'));
-  current.managerEditor = { editor, initial: manager.prompt.content };
+  section.append(note('这是 Manager 实际读取的完整分派提示词，流程图（```mermaid 代码块）也是它读取的内容。它决定新建任务、续接任务或不再分派；分派中可使用角色已授权的工具，修改提示词不会增加权限。'));
+  const reader = promptReader(field('完整提示词', editor), editor, { label: 'Manager 提示词', mode: draft.dirty ? 'edit' : current.managerPromptMode || 'read',
+    onMode: mode => { current.managerPromptMode = mode; },
+    assistant: typeof openManagementRequest === 'function' ? async () => {
+      if (draft.dirty && !await askConfirm({ title: '先离开未保存的提示词？', body: ['管理助手读取的是已保存的 Manager 提示词，这里未保存的修改不会带过去。'], action: '打开管理助手' })) return;
+      await openManagementRequest(current.id, '我想调整 Manager 提示词里的协作流程。请先读取当前 Manager 提示词，用 Mermaid 流程图画出相关场景现在的流程；我说明要改的地方后，再画出修改后的流程图并列出变更要点，等我确认后再保存。要调整的是：');
+    } : null });
+  current.managerEditor = { editor, initial: manager.prompt.content, reader };
   const submit = element('button', '保存 Manager 提示词'); submit.type = 'submit';
-  form.append(field('完整提示词', editor), message, submit);
+  form.append(reader, message, submit);
   form.addEventListener('submit', async event => {
     event.preventDefault(); submit.disabled = true;
     try { await api(`/api/repositories/${current.id}/manager`, 'PUT', { expected_revision: draft.revision, prompt: editor.value }); current.managerDraft = null; await refresh('已保存 Manager 提示词'); }
@@ -90,7 +96,7 @@ async function managerChanged() {
   try {
     const { manager } = await api(`/api/repositories/${id}/manager`); if (current?.id !== id) return;
     current.manager = manager; const held = current.managerEditor;
-    if (held && held.editor.value === held.initial) { held.editor.value = manager.prompt.content; held.initial = manager.prompt.content; Object.assign(current.managerDraft, { value: manager.prompt.content, revision: manager.prompt.revision, dirty: false }); }
+    if (held && held.editor.value === held.initial) { held.editor.value = manager.prompt.content; held.initial = manager.prompt.content; Object.assign(current.managerDraft, { value: manager.prompt.content, revision: manager.prompt.revision, dirty: false }); held.reader.refresh(); }
   } catch { /* The next visit reads it again. */ }
 }
 // This reader belongs to one mounted project page; a newer permission error invalidates every older response.

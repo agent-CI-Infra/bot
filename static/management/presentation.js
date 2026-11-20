@@ -1,11 +1,16 @@
 // Model text is untrusted. Parse Markdown, then allow only document markup before attaching it to the live page.
+// ```mermaid blocks become flow diagrams (diagrams.js); `class` survives only as that block's language marker.
 function renderManagementMarkdown(node, text) {
   const fragment = DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }), {
     RETURN_DOM_FRAGMENT: true,
     ALLOWED_TAGS: ['p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 'del', 'blockquote', 'ul', 'ol', 'li', 'pre', 'code', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'input'],
-    ALLOWED_ATTR: ['href', 'title', 'start', 'align', 'type', 'checked', 'disabled'],
+    ALLOWED_ATTR: ['href', 'title', 'start', 'align', 'type', 'checked', 'disabled', 'class'],
     ALLOW_DATA_ATTR: false, ALLOW_ARIA_ATTR: false
   });
+  for (const el of fragment.querySelectorAll('[class]')) {
+    if (!(el.localName === 'code' && el.className === 'language-mermaid' && el.parentElement?.localName === 'pre')) el.removeAttribute('class');
+  }
+  mountDiagrams(fragment);
   for (const input of fragment.querySelectorAll('input')) {
     if (input.type !== 'checkbox') input.remove(); else input.disabled = true;
   }
@@ -21,7 +26,7 @@ function renderManagementMarkdown(node, text) {
     const wrap = element('div', '', 'management-table'); table.replaceWith(wrap); wrap.append(table);
     wrap.tabIndex = 0; wrap.setAttribute('role', 'region'); wrap.setAttribute('aria-label', '回答中的表格');
   }
-  node.replaceChildren(fragment);
+  retireDiagrams(node); node.replaceChildren(fragment);
 }
 const managementOperationLabels = {
   list_projects: '查询项目', list_tasks: '查询任务', get_task: '读取任务状态', get_effective_config: '读取项目配置',

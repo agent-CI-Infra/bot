@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor } from '../helpers/prompt-editor.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -29,7 +30,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page).toHaveURL(/\/roles\/dev$/);
     await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
     await page.getByLabel('dev 模型', { exact: true }).selectOption(model.id);
-    await page.getByLabel('角色提示词', { exact: true }).fill('先读复现，再修改代码并验证。');
+    await (await promptEditor(page, '角色提示词')).fill('先读复现，再修改代码并验证。');
     await expect(page.getByLabel('系统提示词', { exact: true })).toHaveAttribute('readonly', '');
     await expect(page.getByText('查看固定职责与任务记录规则', { exact: true })).toHaveCount(0);
     await expect(page.getByText('能力策略', { exact: true })).toHaveCount(0);
@@ -116,7 +117,7 @@ test('新增角色、删除内置角色（含 Coordinator）并重载，只有 M
     await page.getByLabel('新角色标识', { exact: true }).fill('security');
     await page.getByRole('button', { name: '添加角色', exact: true }).click();
     await goRolePage(page, { role: 'security' });
-    await page.getByLabel('角色提示词', { exact: true }).fill('检查输入边界并记录证据。');
+    await (await promptEditor(page, '角色提示词')).fill('检查输入边界并记录证据。');
     await openRoleFormAdvanced(page);
     await page.getByLabel('security 使用虚拟电脑权限', { exact: true }).selectOption('deny');
     await consoleSave(page).click();

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
@@ -40,7 +41,7 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
     await expect(page.getByText(/^章节与内置文本/)).toHaveCount(0);
     await expect(page.getByText('工作类型：开关、写入与设置',{exact:true})).toHaveCount(0);
     const plain='按项目目标安排任务。\n\n## 普通标题 `custom.heading`\n遇到重复请求时续接。';
-    await prompt.fill(plain);
+    await (await promptEditor(page,'Manager 提示词')).fill(plain);
     await goRolePage(page, { role: 'Dev' });
     await goRolePage(page, { role: 'Manager' });
     await expect(prompt).toHaveValue(plain);
@@ -82,7 +83,7 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/roles/manager');
-    await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, 'Manager 提示词')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
     await page.screenshot({ path: '.tmp/manager-207/manager-mobile.png', fullPage: true });
     expect(errors).toEqual([]);

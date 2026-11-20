@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptReading } from '../helpers/prompt-editor.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -17,7 +18,7 @@ async function prepared(page) {
     add('created', { decision: 'create', type: 'review.published' }); add('failed', { state: 'failed', decision: null });
     await page.goto(h.admin + '/#/projects/101/roles/manager');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, 'Manager 提示词')).toBeVisible();
     const reader = page.getByRole('region', { name: 'Manager 分派记录', exact: true }); await expect(reader.locator('[data-dispatch-event]')).toHaveCount(20);
     return { h, admin, add, reader };
   } catch (error) { await h.stop(); throw error; }

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -55,9 +56,9 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     // Manager keeps its own prompt/role settings and links to the project-level listener page.
     await page.getByRole('navigation', { name: '项目设置类别' }).getByRole('link', { name: '角色', exact: true }).click();
     await page.getByTestId('role-list-manager').click();
-    await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, 'Manager 提示词')).toBeVisible();
     await expect(actions).toHaveCount(0); await expect(readOnly).toHaveCount(0); await expect(development).toHaveCount(0);
-    await page.getByLabel('Manager 提示词', { exact: true }).fill('Choose useful work within the project authority.');
+    await (await promptEditor(page, 'Manager 提示词')).fill('Choose useful work within the project authority.');
     await page.getByRole('button', { name: '保存 Manager 提示词', exact: true }).click();
     await expect(page.getByText('已保存 Manager 提示词', { exact: true })).toBeVisible();
     await page.getByLabel('职责', { exact: true }).fill('Coordinate the task.'); await consoleSave(page).click();
