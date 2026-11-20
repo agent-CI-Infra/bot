@@ -19,6 +19,18 @@ test('binding a group, changing its level or its repositories posts nothing into
   assert.equal(h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE 'binding-notice:%'").n, 0);
 });
 
+// A card queued under the old behaviour (before this change) is refused at delivery and never reaches the group (#1165 review).
+test('a capability card still queued from before is dropped at delivery, not sent', async t => {
+  const f = await channelFixture(t), { h } = f;
+  await repositoryAssistant(f);
+  const chat = await boundGroup(f, ['101']), binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  const id = f.service.post(chat, '本群已接入 bot，档位：只读问答。', `binding-notice:${binding.id}:${binding.revision}`, `binding-notice:${binding.id}`,
+    { kind: 'service_binding_notice', chat_id: chat.id, binding_id: binding.id, binding_revision: binding.revision });
+  const row = await until(() => h.store.get('SELECT * FROM channel_outbox WHERE id=?', id), r => r?.state === 'failed');
+  assert.equal(row.last_error, 'conversation_source_changed');
+  assert.equal(f.wire.sent.length, 0);
+});
+
 
 test('describe_capabilities answers for this group: its level narrows the project, and examples are only what it can use', async t => {
   const f = await channelFixture(t), { h } = f;
