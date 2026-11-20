@@ -53,3 +53,30 @@ test('the capability card follows the ceiling, the event switches, bound groups 
   assert.ok([403, 404].includes((await outsider.client('/api/repositories/101/capabilities')).status));
   assert.equal((await f.admin('/api/repositories/101/capabilities', 'POST', {})).status, 405);
 });
+
+// Review of #1156: a custom binding counts for what its items allow, through the real binding API.
+test('a custom group counts only for what its items allow', async t => {
+  const f = await channelFixture(t, { schedules: { automatic: false } }), read = async () => (await f.admin('/api/repositories/101/capabilities')).value;
+  await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'comment' });
+  const manager = (await f.admin('/api/repositories/101/manager')).value.manager;
+  assert.equal((await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision, events: { 'issue.mention': false, 'pull_request.mention': false } })).status, 200);
+  const chat = await boundGroup(f, ['101']);
+  const items = async permissions => {
+    const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+    const result = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: binding.revision, permissions });
+    assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value.level;
+  };
+  // Read preset plus Contents write: custom, reads the repository, cannot comment, label or create tasks.
+  assert.equal(await items({ github_contents: 'write' }), 'custom');
+  let card = await read();
+  assert.deepEqual(card.groups, { custom: 1 });
+  assert.deepEqual(Object.fromEntries(card.scenarios.filter(c => ['qa', 'triage', 'testing'].includes(c.id)).map(c => [c.id, c.state])), { qa: 'ready', triage: 'off', testing: 'off' });
+  // Issue write as well: now it can triage.
+  await items({ github_issues: 'write' });
+  card = await read();
+  assert.equal(card.scenarios.find(c => c.id === 'triage').state, 'ready');
+  assert.match(card.scenarios.find(c => c.id === 'triage').detail, /1 个可写的飞书群/);
+  // Visible tasks without task creation still cannot ask for tests.
+  await items({ project_tasks: 'read' });
+  assert.equal((await read()).scenarios.find(c => c.id === 'testing').state, 'off');
+});
