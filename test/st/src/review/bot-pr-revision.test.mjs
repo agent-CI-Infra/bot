@@ -20,7 +20,8 @@ test('a revision people asked for runs without review findings, sees their comme
       if (request.type === 'workspace_agent_poll') {
         // The revision decides the comment is a question: it answers in its summary and leaves the tree unchanged.
         if (!h.answered) { h.answered = true; return { ok: true, result: { state: 'running', tool_requests: [{ id: 'd'.repeat(48), kind: 'pull_request', name: 'create_pull_request',
-          arguments: { summary: 'An empty line ends the record by design (README, "Records"); no change.', test_command: 'node --test' } }] } }; }
+          arguments: { summary: 'An empty line ends the record by design (README, "Records"); no change.\n\n![Example](workspace:.tmp/example.png)',
+            media: ['.tmp/example.png'], test_command: 'node --test' } }] } }; }
         return { ok: true, result: { state: 'completed', result: { summary: 'Answered.' } } };
       }
       if (request.type === 'workspace_finalize') return { ok: true, result: { tree_sha: 'b'.repeat(40), files: [] } };
@@ -43,6 +44,9 @@ test('a revision people asked for runs without review findings, sees their comme
   // The answer reaches the person on the pull request (the fixture serves the conversation of #1).
   assert.equal(h.comments.length, 1);
   assert.match(h.comments[0].body, /^Answering @alice \(https:\/\/github\.invalid\/pull\/1#issuecomment-301\): no code change\.\n\nAn empty line ends the record by design/);
+  assert.match(h.comments[0].body, /\n\nExample(?:\n|$)/);
+  assert.doesNotMatch(h.comments[0].body, /workspace:/);
+  assert.match(JSON.parse(task.result).summary, /\n\nExample$/);
 });
 
 test('a comment continued into a revision after it prepared goes back to the Manager when the revision ends (#1104 review)', async t => {

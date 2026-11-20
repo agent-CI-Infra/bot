@@ -818,7 +818,7 @@ export class TaskEngine {
             // A revision that changes nothing (a question, a request it judged wrong) still answers the people who asked (#1104).
             if(development&&task.kind==='development.pr'&&requestedBy())await new Publisher(this.store,github,task,validate,undefined,log)
               .discussion('development-result',`Answering ${requestedBy()}: no code change.\n\n${summary}`);
-            if(development)update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
+            if(development)update({result:JSON.stringify({...args,summary,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
             if(development)carryRevisionRequests(this.store,task,input.revision?.requests||[],task.head_sha);
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }

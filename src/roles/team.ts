@@ -47,6 +47,8 @@ export interface TeamEnvironment {
  entry?:string;
  /** The task's workspace (#769). While it holds no worktree, the controller chooses one for the task, or none. */
  workspace?:Workspace;
+ /** Entry-specific checks for a Dev result after the controller has applied its description overrides. */
+ validateOwnNomination?:(result:any)=>Promise<void>;
 }
 /** The controller has no executor callback, publication tool or completion authority. */
 export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):Promise<T>{
@@ -119,6 +121,7 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
   const supporting=(args?.supporting_refs??[]).map((ref:unknown)=>nominationSource(s,task,ref));
   if(JSON.parse(task.input||'{}').integration&&source.own){const run=s.get("SELECT r.attempt FROM task_history h JOIN task_runs r ON r.id=h.run_id WHERE h.task_id=? AND 'task_history:'||h.id=?",task.id,args.result_ref);if(run?.attempt!==task.attempt)throw new SubmissionError('role_nomination_stale',{reason:'integration_attempt_mismatch',submitted_ref:args.result_ref,expected_attempt:task.attempt,observed_attempt:run?.attempt??null,discovery:{tool:'read_version_context',arguments:{}}});}
   const nominated={...source.result,...(args.summary?{summary:args.summary}:{}),...(args.change_title?{change_title:args.change_title}:{})};
+  if(source.own)await environment.validateOwnNomination?.(nominated);
   // Another task's result never saw this review's updates: without the stamp the entry's validation adds, it covers what
   // the round started with (src/review/sessions.ts).
   const result=source.own?nominated:reviewUpdates?{...await validateNominationResult(spec,nominated),updates_through:undefined}:await validateNominationResult(spec,nominated);

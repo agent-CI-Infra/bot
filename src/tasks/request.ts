@@ -40,7 +40,7 @@ import type { GitCache } from '../agent/git-cache.js';
 import { GitHub } from '../github/client.js';
 import { Workspace } from '../agent/workspace.js';
 import { Redactor, stop, sha, validWorkspaceToolPath, TaskError, blobSha } from '../agent/common.js';
-import { runAgent } from '../agent/runtime.js';
+import { runAgent, type AgentSpec } from '../agent/runtime.js';
 import { taskTools, taskRecordInstructions } from './record-tools.js';
 import { TaskRecords, type Verdict } from './service.js';
 import { evaluateDelivery, shouldRunQa, skipQa } from './acceptance.js';
@@ -91,10 +91,10 @@ export async function runRequest(
   if (software() && (!generic || ['acceptance', 'publish'].includes(String(task.phase)))) assertRequestPullRequest(store, task);
 
   // Single-role execution (`reviewer`, `test`, `dev`) runs directly without a redundant Task Manager hop (#1122).
-  const executeAgent: typeof runAgent = ownRole
+  const executeAgent: <T>(spec: AgentSpec<T>, validateOwnNomination: (result: T) => Promise<void>) => Promise<T> = ownRole
     ? async spec => spaces.withRole(ownRole, async () => (await runRole(spec, ownRole, undefined, undefined, { prepare: spaces.worker })).result)
     : controlled(store, task, entry)
-      ? async spec => runTeam(spec, { ...spaces, entry, workspace })
+      ? async (spec, validateOwnNomination) => runTeam(spec, { ...spaces, entry, workspace, validateOwnNomination })
       : runAgent;
 
   const roleRuns = executeAgent !== runAgent;
@@ -443,12 +443,13 @@ export async function runRequest(
           return redactor.clean(value);
         };
         let checkedMedia: { selection: string; files: CandidateMedia['media'] } | undefined;
-        const validateMedia = async (value: any) => {
+        const validateMedia = async (value: any, reuseChecked = false) => {
           const { paths } = planPullRequestMedia(value.summary, value.media);
-          if (!paths.length) return;
+          const selection = JSON.stringify(paths);
+          if (!paths.length || reuseChecked && checkedMedia?.selection === selection) return;
           const snapshot = await spaces.current.artifact(`request:media:${randomId()}`);
           assertMediaOutsideCode(paths, snapshot.files, blobValue(store, input.snapshot_files) ?? []);
-          checkedMedia = { selection: JSON.stringify(paths), files: await collectPullRequestMedia(spaces.current, paths) };
+          checkedMedia = { selection, files: await collectPullRequestMedia(spaces.current, paths) };
         };
         const writable = covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
         const execution = randomId();
@@ -659,6 +660,8 @@ export async function runRequest(
             if (software()) await validateMedia(validated);
             return validated;
           },
+        }, async result => {
+          if (generic ? result.delivery === 'pull_request' : software()) await validateMedia(result, true);
         });
 
         if (generic) {
