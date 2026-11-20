@@ -45,16 +45,6 @@ function basicSection() {
     ['可见性', installed ? installed.private ? '私有' : '公开' : null],
     ['项目状态', policy.enabled ? '已启用' : '已禁用']]));
   if (target.rules?.retired_files?.length) info.append(retiredRulesNotice(target.rules));
-  // #934, #1133: opens the project's management assistant conversation with an onboarding review prompt prefilled.
-  if (editable) {
-    const onboard = consoleLink(`#/projects/${id}/management`, '仓库接入', '在管理助手对照当前设置分析仓库，确认后再调整配置');
-    onboard.addEventListener('click', event => {
-      if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || typeof openRepositoryOnboarding !== 'function') return;
-      event.preventDefault();
-      Promise.resolve(openRepositoryOnboarding({ id, full_name: repository.full_name, started: true })).catch(error);
-    });
-    info.append(onboard);
-  }
   const summary = card('当前配置一览');
   const machineSize = current.rules?.computer?.cpus
     ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB`

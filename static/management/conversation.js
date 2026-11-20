@@ -40,7 +40,13 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   layout.append(sidebar, main); panel.append(layout);
   const feed = element('div', '', 'management-feed'); feed.setAttribute('aria-label', '管理会话记录'); feed.setAttribute('role', 'log'); feed.setAttribute('aria-live', 'polite');
   const welcome = element('div', '', 'management-welcome');
-  welcome.append(element('span', '✦', 'management-welcome-icon'), element('p', '你的项目工作台', 'management-eyebrow'), element('h3', '一起推进下一步'), element('p', '查进展、找原因、调整配置。执行过程和结果都会在这里实时呈现。', 'muted'));
+  const welcomeRecommendations = element('div', '', 'management-recommendations');
+  welcomeRecommendations.dataset.testid = 'management-recommendations';
+  const welcomeRecommendationList = document.createElement('ul');
+  welcomeRecommendationList.className = 'management-recommendation-list';
+  welcomeRecommendationList.setAttribute('aria-label', '推荐列表');
+  welcomeRecommendations.append(element('p', '推荐列表', 'management-recommendations-label'), welcomeRecommendationList);
+  welcome.append(element('span', '✦', 'management-welcome-icon'), element('p', '你的项目工作台', 'management-eyebrow'), element('h3', '一起推进下一步'), element('p', '查进展、找原因、调整配置。执行过程和结果都会在这里实时呈现。', 'muted'), welcomeRecommendations);
   feed.append(welcome);
   const feedWrap = element('div', '', 'management-feed-wrap'), latest = button('↓ 回到最新消息', () => { flushMarkdown(true); scrollOutput(true); }, 'quiet management-latest');
   latest.addEventListener('pointerdown', event => event.preventDefault());
@@ -50,17 +56,64 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const reconnect = button('重新连接', () => read(), 'quiet'); reconnect.hidden = true; statusBar.append(status, reconnect); main.append(statusBar);
   const input = document.createElement('form'), message = textarea('management-message', '', { rows: 3, placeholder: '发消息，或告诉我你想推进什么…' });
   input.className = 'management-input'; message.setAttribute('aria-label', '管理消息'); message.maxLength = 16000;
+  const recommendationBar = document.createElement('ul');
+  recommendationBar.className = 'management-recommendation-bar';
+  recommendationBar.dataset.testid = 'management-recommendation-bar';
+  recommendationBar.setAttribute('aria-label', '推荐列表');
+  recommendationBar.hidden = true;
   const send = element('button', '发送', 'management-send btn-primary'), stopButton = button('停止', async () => {
     const id = active, owner = conversation; if (!id) return;
     try { await api(endpoint + '/conversations/' + owner + '/messages/' + id + '/stop', 'POST', {}); } catch (err) { showError(err); }
   }, 'quiet');
   send.type = 'submit'; send.disabled = true; stopButton.hidden = true;
   const footer = element('div', '', 'management-input-footer'), controls = element('div', '', 'actions');
-  controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); main.append(input);
+  controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(recommendationBar, message, footer); main.append(input);
   let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null;
   let disposed = false, opening = false, submitting = false, historyReady = false, followOutput = true, unseenOutput = false, renderFrame = 0;
-  const pendingMarkdown = new Set(), confirmButtons = new Set();
+  let dynamicRecommendations = null;
+  const pendingMarkdown = new Set(), confirmButtons = new Set(), recommendationButtons = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
+  function pickRecommendation(item) {
+    if (opening || !conversation) return;
+    message.value = item.prompt;
+    drafts.set(conversation, item.prompt);
+    message.focus();
+    try { message.setSelectionRange(item.prompt.length, item.prompt.length); } catch { /* Selection range unsupported. */ }
+  }
+  function syncRecommendationVisibility() {
+    welcomeRecommendations.hidden = !welcomeRecommendationList.childElementCount;
+    recommendationBar.hidden = !welcome.hidden || !accessSlot.hidden || !recommendationBar.childElementCount;
+  }
+  function syncRecommendations(nextDynamic = undefined) {
+    if (nextDynamic !== undefined) dynamicRecommendations = Array.isArray(nextDynamic) && nextDynamic.length ? nextDynamic : null;
+    const items = dynamicRecommendations || (typeof managementRecommendations === 'function'
+      ? managementRecommendations({ scope, project: scope === 'platform' ? null : scopeProject(scope), projects, pendingRepositories })
+      : []);
+    recommendationButtons.clear();
+    const disabled = opening || !conversation;
+    welcomeRecommendationList.replaceChildren(...items.map(item => {
+      const li = document.createElement('li');
+      const choose = button('', () => pickRecommendation(item), 'quiet management-recommendation');
+      choose.dataset.recommendation = item.id;
+      choose.disabled = disabled;
+      choose.append(element('strong', item.title, 'management-recommendation-title'),
+        element('span', item.description || '', 'management-recommendation-desc'));
+      recommendationButtons.add(choose);
+      li.append(choose);
+      return li;
+    }));
+    recommendationBar.replaceChildren(...items.map(item => {
+      const li = document.createElement('li');
+      const choose = button(item.title, () => pickRecommendation(item), 'quiet management-recommendation-chip');
+      choose.dataset.recommendation = item.id;
+      choose.title = item.description ? `${item.title}：${item.description}` : item.title;
+      choose.disabled = disabled;
+      recommendationButtons.add(choose);
+      li.append(choose);
+      return li;
+    }));
+    syncRecommendationVisibility();
+  }
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
   const showStatus = (text = status.textContent) => { if (disposed) return; status.classList.remove('view-error'); status.setAttribute('role', 'status'); status.textContent = text; };
   const showError = err => { if (!disposed) { status.textContent = readErrorText(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
@@ -68,6 +121,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     accessSlot.hidden = true; accessSlot.replaceChildren();
     statusBar.hidden = false; sidebar.hidden = false; sessionToolbar.hidden = false; feedWrap.hidden = false; input.hidden = false;
     fresh.removeAttribute('title'); fresh.removeAttribute('aria-describedby');
+    syncRecommendationVisibility();
   };
   const showAccessError = err => {
     if (disposed) return;
@@ -80,6 +134,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     statusBar.hidden = true; sidebar.hidden = true; sessionToolbar.hidden = true;
     feedWrap.hidden = true; accessSlot.replaceChildren(empty); accessSlot.hidden = false; input.hidden = true;
     fresh.setAttribute('title', '恢复管理会话后才能新建会话。'); fresh.setAttribute('aria-describedby', 'management-access-reason');
+    syncRecommendationVisibility();
   };
   const selectedWithin = node => {
     const selection = window.getSelection();
@@ -113,10 +168,13 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   document.addEventListener('selectionchange', selectionChanged);
   const queueMarkdown = answer => { pendingMarkdown.add(answer); scheduleMarkdown(); };
   const updateBusy = () => {
-    message.disabled = opening || !conversation;
+    const composerDisabled = opening || !conversation;
+    message.disabled = composerDisabled;
+    for (const choose of recommendationButtons) choose.disabled = composerDisabled;
     send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active;
     fresh.disabled = opening || submitting || !conversation; sessionToggle.disabled = opening || !conversation;
     for (const sync of confirmButtons) sync();
+    syncRecommendationVisibility();
     input.classList.toggle('is-running', !!active); onActivity(!!active);
   };
   // Receipt rollbacks use the same preview and explicit confirmation as other writes.
@@ -171,7 +229,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   const turn = id => {
     if (turns.has(id)) return turns.get(id);
-    welcome.hidden = true;
+    welcome.hidden = true; syncRecommendationVisibility();
     const record = messages.get(id), item = element('article', '', 'management-turn'), request = record?.input;
     if (request) {
       const userMessage = element('div', '', 'management-user');
@@ -332,6 +390,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       const ownStep = ['start_own_task', 'continue_own_task', 'list_own_tasks'].includes(step.name);
       if (step.name === 'start_repository' && receipt?.state === 'started' && receipt.repository?.id) {
         if (!projects.some(p => String(p.id) === String(receipt.repository.id))) projects.push({ id: String(receipt.repository.id), full_name: receipt.repository.full_name, enabled: true, configuration_gaps: [] });
+        const pendingIndex = pendingRepositories.findIndex(r => String(r.id) === String(receipt.repository.id));
+        if (pendingIndex >= 0) pendingRepositories.splice(pendingIndex, 1);
+        syncRecommendations();
         api('/api/repositories').then(list => {
           if (me?.id === user && Array.isArray(list?.repositories)) { repositories = list.repositories; if (typeof syncScopePicker === 'function') syncScopePicker(); }
         }).catch(() => {});
@@ -445,8 +506,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
-    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; confirmButtons.clear(); updateBusy();
+    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; confirmButtons.clear(); dynamicRecommendations = null;
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
+    syncRecommendations(); updateBusy();
     // The list on screen is the previous scope's (or the previous pick) until the new one arrives: none of it is current now.
     for (const choose of conversations.querySelectorAll('[aria-current]')) choose.removeAttribute('aria-current');
     showStatus('正在读取会话…');
@@ -514,7 +576,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     focus() { message.focus(); },
     // Puts a prepared request in the composer for the person to read and send.
     draft(text) { message.value = text; if (conversation) drafts.set(conversation, text); message.focus(); },
+    setRecommendations(items) { syncRecommendations(items); },
     applyOnboarding() { return applyQueuedOnboarding(); },
-    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); confirmButtons.clear(); drafts.clear(); }
+    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); confirmButtons.clear(); recommendationButtons.clear(); drafts.clear(); }
   };
 }

@@ -458,7 +458,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 /* Role editing keeps one mounted form and one draft while navigating its named sections. */
 /* Keep rounded clipping without making the project a separate scrolling ancestor for the toolbar. */
 /* #569: do not clip the shell; let the role page use the content column. */
-.project-page:has(.roles-page){overflow:visible}
+.project-page:has(.roles-page,.console-save-bar){overflow:visible}
 .project-page:has(.roles-page) .project-content{max-width:none;width:100%}
 .roles-page .project-table{width:100%;table-layout:auto}
 .roles-page .project-table td{min-width:0;vertical-align:top;overflow-wrap:anywhere}
