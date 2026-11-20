@@ -68,6 +68,32 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const parent=await realpath(dirname(target));if(parent!==inside&&!parent.startsWith(inside+sep))throw new Error('invalid_parent');return target;
   };
   const outsideRepo=value=>typeof value==='string'&&(value.startsWith('/')||value.startsWith('../')||value.includes('/../'));
+  const exportFile=async(target,media=false)=>{
+    const handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+    let data;
+    try{
+      const info=await handle.stat(),max=30*1024*1024;
+      if(!info.isFile())throw new Error('artifact_regular_file_required');
+      // Check the opened file before reading. A task can rename or swap a parent directory after path validation.
+      if(media&&(info.nlink!==1||await readlink(`/proc/self/fd/${handle.fd}`)!==target))throw new Error('invalid_media_path');
+      if(info.size<1||info.size>max)throw new Error('artifact_size_limit');
+      const buffer=Buffer.alloc(info.size+1);let size=0;
+      while(size<buffer.length){const part=await handle.read(buffer,size,buffer.length-size,size);if(!part.bytesRead)break;size+=part.bytesRead;}
+      if(size!==info.size)throw new Error('artifact_changed');data=buffer.subarray(0,size);
+    }finally{await handle.close();}
+    await mkdir(root,{recursive:true});
+    const sha=createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex'),cache=root+'/blob-'+sha;
+    try{await writeFile(cache,data,{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}
+    return {sha,size:data.length};
+  };
+  if(input.type==='workspace_export'&&input.mode==='pull_request_media'){
+    const prefix='../browser/evidence/',evidence=typeof input.path==='string'&&input.path.startsWith(prefix);
+    const name=safe(evidence?input.path.slice(prefix.length):input.path);
+    if(evidence&&name.includes('/'))throw new Error('invalid_media_path');
+    const target=resolve(evidence?root+'/browser/evidence':await base(),name);
+    if(await realpath(dirname(target))!==dirname(target))throw new Error('invalid_media_path');
+    return exportFile(target,true);
+  }
   const computerPath=async(value,create=false)=>{
     if(typeof value!=='string'||!value||value.length>2048||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>p.toLowerCase()==='.git'||p==='.runner-journal'))throw new Error('invalid_path');
     const volumeRoot=resolve(workspaceRoot).endsWith(sep+'tasks')?dirname(resolve(workspaceRoot)):resolve(workspaceRoot);
@@ -287,20 +313,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);await handle.sync();}finally{await handle.close();}
       return {written:true};
     }
-    const target=await computerPath(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
-    let data;
-    try{
-      const info=await handle.stat(),max=30*1024*1024;
-      if(!info.isFile())throw new Error('artifact_regular_file_required');
-      if(info.size<1||info.size>max)throw new Error('artifact_size_limit');
-      const buffer=Buffer.alloc(info.size+1);let size=0;
-      while(size<buffer.length){const part=await handle.read(buffer,size,buffer.length-size,size);if(!part.bytesRead)break;size+=part.bytesRead;}
-      if(size!==info.size)throw new Error('artifact_changed');data=buffer.subarray(0,size);
-    }finally{await handle.close();}
-    await mkdir(root,{recursive:true});
-    const sha=createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex'),cache=root+'/blob-'+sha;
-    try{await writeFile(cache,data,{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}
-    return {sha,size:data.length};
+    return exportFile(await computerPath(input.path));
   }
   await base();
   if(input.type==='workspace_write'){
@@ -380,21 +393,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }
   // Snapshot one regular private-workspace file; later chunks read this immutable blob, never a live mutable path.
-  if(input.type==='workspace_export'){
-    const target=await path(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
-    let data;
-    try{
-      const info=await handle.stat(),max=30*1024*1024;
-      if(!info.isFile())throw new Error('artifact_regular_file_required');
-      if(info.size<1||info.size>max)throw new Error('artifact_size_limit');
-      const buffer=Buffer.alloc(info.size+1);let size=0;
-      while(size<buffer.length){const part=await handle.read(buffer,size,buffer.length-size,size);if(!part.bytesRead)break;size+=part.bytesRead;}
-      if(size!==info.size)throw new Error('artifact_changed');data=buffer.subarray(0,size);
-    }finally{await handle.close();}
-    const sha=createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex'),cache=root+'/blob-'+sha;
-    try{await writeFile(cache,data,{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}
-    return {sha,size:data.length};
-  }
+  if(input.type==='workspace_export')return exportFile(await path(input.path));
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
   if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id,backgroundDirectory:root+'/logs'});
   if(input.type==='workspace_finalize')return withWorkspaceLock(root+'/finalize.lock',async()=>{

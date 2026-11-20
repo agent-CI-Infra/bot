@@ -56,6 +56,7 @@ import { registerScheduledChecks } from './dispatch/schedule.js';
 import { migrateDailyReports } from './schedules/migration.js';
 import type { StallMonitor } from './core/stalls.js';
 import { loginBucket } from './core/client-address.js';
+import { invokesHostedMedia, serveHostedMedia } from './github/hosted-pr-media.js';
 import { AssistantComputerService, assistantComputersApi } from './service-roles/assistant-computers.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
@@ -175,7 +176,8 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
   const wrap = (fn: (req: IncomingMessage, res: ServerResponse) => Promise<void>) => async (req: IncomingMessage, res: ServerResponse) => {
-    const done = options.stalls?.request(req.method || 'GET', req.url); if (done) res.on('close', done);
+    const done = options.stalls?.request(req.method || 'GET', req.url?.includes('/pr-media') ? '/pr-media' : req.url);
+    if (done) res.on('close', done);
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https://avatars.githubusercontent.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com");
     try { await fn(req, res); }
@@ -189,6 +191,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   // authenticates itself (signature, token or published board) and never needs a browser session, Origin or CSRF token.
   // The console, OAuth and App callbacks follow with their own checks; manager and tunnel interfaces are never served here.
   const server = createServer(wrap(async (req, res) => {
+    if (invokesHostedMedia(req.url || '')) return serveHostedMedia(store, req, res);
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
     if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '')); return; }
     if (options.boards && /^\/(dashboard|boards)(\/|$)/.test(path)) {

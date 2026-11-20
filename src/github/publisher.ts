@@ -7,6 +7,8 @@ import { implementationText, reviewLanguage, reviewText, summaryComment, humanIt
 import { inlineLocation } from '../review/findings.js';
 import { applyPullRequestLabels } from './pull-request-labels.js';
 import { assertTaskExternalEffect } from '../tasks/management.js';
+import { planPullRequestMedia, publishPullRequestMedia, type CandidateMedia } from './pull-request-media.js';
+import { hostedMediaUrl } from './hosted-pr-media.js';
 
 /**
  * A bot pull request now at `sha`. Only a confirmed head and its refreshed description count, once across retries. `revisions`
@@ -74,7 +76,13 @@ export class Publisher {
   }
   private pullRequestText(candidate:any,issue:number|null){
     const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',this.task.repository_id)?.review_language;
-    return this.published(implementationText(candidate,issue,reviewLanguage(setting,String(candidate.summary??''))));
+    const prepared: CandidateMedia = candidate;
+    const media = prepared.media;
+    const summary = media?.length ? planPullRequestMedia(prepared.summary, media.map(file => file.source)).render(source => {
+      const file = media.find(file => file.source === source)!;
+      return hostedMediaUrl(prepared.hosted_media, file.path)!;
+    }) : candidate.summary;
+    return this.published(implementationText({ ...candidate, summary },issue,reviewLanguage(setting,String(candidate.summary??''))));
   }
   async discussion(key:string,body:string,targetOverride?:{type:'issue'|'pr';number:number}){
     const target=this.resolveTarget(targetOverride);
@@ -225,11 +233,19 @@ export class Publisher {
     const direct=this.store.get("SELECT 1 FROM tasks WHERE id=? AND repository_id=? AND kind IN ('task.request','task.development')",candidate.owner_task_id,this.task.repository_id)&&candidate.branch==='bot/task-'+candidate.owner_task_id;
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-')&&!direct)stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
+    const save=()=>this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
+    if(candidate.media?.length&&!candidate.hosted_media){
+      this.store.transaction(()=>{
+        assertTaskExternalEffect(this.store,this.task,'pull_request');
+        this.github.beforeWrite?.(); this.beforeWrite?.();
+        candidate.hosted_media=publishPullRequestMedia(this.github,candidate.media);
+        save();
+      });
+    }
     // Operation identity belongs to this exact candidate, not a task attempt or a previous QA revision.
     const expected=(candidate.skipped_files||[]).length?treeSha([...candidate.files,...candidate.skipped_files]):candidate.tree_sha;
     const identity=sha(JSON.stringify({branch:candidate.branch,tree:expected,base:candidate.base_sha,previous:candidate.expected_sha??null,title:implementationText(candidate,this.task.object_number).title,date:candidate.date}));
     const key='branch:v2:'+identity;
-    const save=()=>this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
     const observe=async()=>{const ref=await this.github.ref(candidate.branch);publicationFact(this.store,this.task,'branch_observed',{operation_key:key,branch:candidate.branch,expected_sha:candidate.expected_sha??null,target_sha:candidate.created_commit_sha??null,observed_sha:ref?.object?.sha??null});return ref;};
     // Legacy remote_sha can mean only "commit created". It is not evidence of a confirmed branch update.
     if(candidate.publication_identity!==identity){candidate.publication_identity=identity;delete candidate.created_commit_sha;delete candidate.remote_sha;delete candidate.branch_confirmed;delete candidate.published_tree_sha;save();}
@@ -292,6 +308,8 @@ export class Publisher {
     return commit.sha;
   }
   async pullRequest(candidate:any,sha:string){
+    if(candidate.media?.some((file: { path: string })=>!hostedMediaUrl(candidate.hosted_media,file.path)))
+      stop('pull_request_media_unconfirmed','retry_wait','The pull request media has no confirmed hosted URL.');
     if(candidate.pr_number){
       const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',this.task.repository_id,candidate.pr_number);
       let pr:any;

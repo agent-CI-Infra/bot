@@ -34,6 +34,7 @@ import { GitHub } from '../github/client.js';
 import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { checkPullRequestLabels } from '../github/pull-request-labels.js';
+import { assertMediaOutsideCode, collectPullRequestMedia, mediaPublicationError, planPullRequestMedia, pullRequestSummaryForProgress } from '../github/pull-request-media.js';
 import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
 import { assigneesOf, developmentReady } from '../review/queue.js';
 import { issueClaims } from '../review/claims.js';
@@ -544,8 +545,9 @@ export class TaskEngine {
         // An Issue's development reports its pull request in its status comment (#1047); a revision of the bot's own pull
         // request still says so on that pull request.
         const asked=requestedBy();
-        if(task.kind!=='development.issue')await publisher.discussion('development-result',`${asked?`Revised as requested by ${asked}.\n\n`:''}Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
-        update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
+        const summary=pullRequestSummaryForProgress(candidate);
+        if(task.kind!=='development.issue')await publisher.discussion('development-result',`${asked?`Revised as requested by ${asked}.\n\n`:''}Implemented in ${pr.html_url}\n\n${summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
+        update({result:JSON.stringify({summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         // Requests continued into this revision after it prepared go back to the Manager (#1104).
         carryRevisionRequests(this.store,task,input.revision?.requests||[],commit);
         await issueProgress();
@@ -804,11 +806,18 @@ export class TaskEngine {
           }
           // Fix the only candidate snapshot before any policy command can create or modify files.
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
+          let media, summary;
+          try {
+            const plan=planPullRequestMedia(args.summary,args.media);
+            summary=plan.render();
+            assertMediaOutsideCode(plan.paths,snapshot.files,blobValue(this.store,input.snapshot_files)??[]);
+            if(snapshot.tree_sha!==input.snapshot_tree)media=await collectPullRequestMedia(workspace!,plan.paths);
+          } catch(error) { return mediaPublicationError(error); }
           if(snapshot.tree_sha===input.snapshot_tree){
             const checked=await accept({...args,status:'no_changes',tree_sha:snapshot.tree_sha});if(checked.error)return checked;
             // A revision that changes nothing (a question, a request it judged wrong) still answers the people who asked (#1104).
             if(development&&task.kind==='development.pr'&&requestedBy())await new Publisher(this.store,github,task,validate,undefined,log)
-              .discussion('development-result',`Answering ${requestedBy()}: no code change.\n\n${String(args.summary||'')}`);
+              .discussion('development-result',`Answering ${requestedBy()}: no code change.\n\n${summary}`);
             if(development)update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
             if(development)carryRevisionRequests(this.store,task,input.revision?.requests||[],task.head_sha);
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
@@ -827,7 +836,7 @@ export class TaskEngine {
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,labels:labels.labels,
+          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,labels:labels.labels,...(media?{media}:{}),
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             publication_key:input.publication_key||input.integration?.id,...(input.integration?{integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
