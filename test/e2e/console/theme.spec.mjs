@@ -357,7 +357,7 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       await page.waitForSelector('.role-board-row');
       await page.waitForLoadState('networkidle').catch(() => {});
       await page.waitForTimeout(400);
-      for (const sample of await colours(page, ['.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.role-board-row'])) {
+      for (const sample of await colours(page, ['.workbench-tab:not([aria-current=page])', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.role-board-row'])) {
         rendered(sample, `project detail ${sample.selector} ${width}`);
         readable(sample, 4.5, `project detail ${sample.selector} ${width}`);
         darkCard(sample, `project detail ${sample.selector} ${width}`);
@@ -430,12 +430,13 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     await page.waitForSelector('.role-board-row');
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(400);
-    for (const sample of await colours(page, ['.workbench-tab', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line'])) {
+    for (const sample of await colours(page, ['.workbench-tab:not([aria-current=page])', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line'])) {
       rendered(sample, `light project detail ${sample.selector}`);
-      // The fixture has a single tab and it is the current one, so it paints --color-brand; the non-current tab keeps
-      // its own colour and is pinned by this file's PIN_TABLE (`overview .workbench-tab`). `.role-backend-line` carries the
-      // `muted` class, and `shell.css`'s `.console-ready .muted` wins over workspace.css in both themes.
-      const expected = { '.workbench-tab': 'rgb(36, 93, 224)', '.workbench-quick-link': 'rgb(36, 93, 224)', '.workbench-live-stats': 'rgb(71, 85, 105)', '.role-backend-line': 'rgb(96, 112, 135)' }[sample.selector];
+      // The tab strip renders both views, so the strip is measured in both states: the one without `aria-current` keeps
+      // `#334155` (workspace.css, not a token) and is its own PIN_TABLE row; the current one paints --color-brand.
+      // `.role-backend-line` carries the `muted` class, and `shell.css`'s `.console-ready .muted` wins over workspace.css
+      // in both themes.
+      const expected = { '.workbench-tab:not([aria-current=page])': 'rgb(51, 65, 85)', '.workbench-tab[aria-current=page]': 'rgb(36, 93, 224)', '.workbench-quick-link': 'rgb(36, 93, 224)', '.workbench-live-stats': 'rgb(71, 85, 105)', '.role-backend-line': 'rgb(96, 112, 135)' }[sample.selector];
       expect(sample.color, `light project detail ${sample.selector} keeps its base colour`).toBe(expected);
     }
     await page.locator('.role-board-row').first().hover();
@@ -554,9 +555,10 @@ test('#750 dark theme keeps the task detail, project head and project page reada
 // table covers every rule whose painted value can be read in a resting state. `::before` parts are read through
 // getComputedStyle(el, '::before'); the background of a text element is the surface it is painted on, resolved through
 // its ancestors, because a transparent computed background says nothing about what a reader sees.
-// `main` removed the overview capability card in #1123 (`e431a703`, after this branch started), so the two
-// `.capability-links a` rows are gone from both tables and their two dark overrides left `static/views.css`: on the
-// merge base those elements no longer exist, and a row that can only be measured on the old base pins nothing.
+// `main` removed the overview capability card in #1123 (`e431a703`, after this branch started). The two
+// `.capability-links a` rows are gone from both tables, but the two dark overrides stay in `static/views.css`
+// (`:1079-1082`, `:1124-1127`) on purpose: this head's own base still renders the card, so deleting the overrides would
+// regress the head itself. Pin rows removed, overrides retained -- after the merge they are dead code.
 const PIN_ROWS = [
   ['task', '.step'], ['task', '.task-side'], ['task', '.task-archive-body'], ['task', 'pre.output'],
   ['task', '.task-goal-box'], ['task', '.role-run-conclusion'], ['task', '.role-run-summary'],
@@ -571,7 +573,7 @@ const PIN_ROWS = [
   ['task', '.live::before'], ['overview', '.role-chip-time'],
   ['task', '.step-fold-title::before'], ['task', '.role-run-title-row::before'], ['task', '.task-archive-fold > summary::before'],
   ['projects', '.project-owner-bar'], ['projects', '.project-table-head'],
-  ['overview', '.project-page'], ['overview', '.workbench-tab'],
+  ['overview', '.project-page'], ['overview', '.workbench-tab:not([aria-current=page])'],
   ['overview', '.workbench-tab[aria-current=page]'], ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count'],
   ['overview', '.workbench-quick-link'], ['overview', '.workbench-live-stats'], ['overview', '.role-backend-line'], ['overview', '.role-board-table'],
   ['overview', '.role-chip-ref'], ['overview', '.role-chip-summary'],
@@ -625,7 +627,7 @@ const PIN_TABLE = [
   ['projects', '.project-owner-bar', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(243, 247, 249)']],
   ['projects', '.project-table-head', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(251, 253, 254)']],
   ['overview', '.project-page', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
-  ['overview', '.workbench-tab', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
+  ['overview', '.workbench-tab:not([aria-current=page])', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(51, 65, 85)', 'rgb(248, 250, 252)']],
   ['overview', '.workbench-tab[aria-current=page]', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
   ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(237, 242, 255)']],
   ['overview', '.workbench-quick-link', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
