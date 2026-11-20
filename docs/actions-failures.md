@@ -1,6 +1,6 @@
 # Actions 失败分类与提报
 
-Actions 失败处理由 Manager 分派：默认分支或版本标签的运行失败成为 `actions.run_failed` 事件，排查任务的种类是 `actions.failures`（#1122 起不再是固定工作类型）。它的开关就是每个仓库的 `actions_failures_enabled`。经 GitHub App 安装首次启动、能力上限至少为 `comment` 的新项目默认打开（#851）：只分析、每个失败的运行最多重跑一次、提报 Issue，不会自己开始开发；机器人账号的项目和以 `read` 启动的项目默认关闭，再次启用已禁用的项目保留原来的选择。在「项目设置 → 监听与触发」中开关「接收默认分支和版本标签的 Actions 失败事件」并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，提示词是 Manager 提示词的「Actions 失败处理」章节；它和所有工作类型一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。它还要求项目能力上限至少为 `comment`（见[项目能力上限](workflows.md#项目能力上限)），上限为 `read` 时开关打开也不会运行。关闭后不再为本功能重跑、提报或启动开发；上限为 `comment`（没有开发）时仍处理分类、重跑和提报。
+Actions 失败处理由 Manager 分派：默认分支或版本标签的运行失败成为 `actions.run_failed` 事件，排查任务的种类是 `actions.failures`（#1122 起不再是固定工作类型）。它的开关就是每个仓库的 `actions_failures_enabled`。经 GitHub App 安装首次启动、能力上限至少为 `comment` 的新项目默认打开（#851）：只分析、每个失败的运行最多重跑一次、提报 Issue，不会自己开始开发；机器人账号的项目和以 `read` 启动的项目默认关闭，再次启用已禁用的项目保留原来的选择。在「项目设置 → 监听与触发」中开关「接收默认分支和版本标签的 Actions 失败事件」并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，排查任务的提示词是 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md)；项目改写过 Manager 提示词时，整份 Manager 提示词接在它后面一起交给排查任务。排查任务能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。它还要求项目能力上限至少为 `comment`（见[项目能力上限](workflows.md#项目能力上限)），上限为 `read` 时开关打开也不会运行。关闭后不再为本功能重跑、提报或启动开发；上限为 `comment`（没有开发）时仍处理分类、重跑和提报。
 
 ## 配置前提
 
