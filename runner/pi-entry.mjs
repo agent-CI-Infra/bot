@@ -204,10 +204,13 @@ try{
   // A Pi session from one configuration: its system prompt and its tools. Pi's own settings apply, compaction and retry
   // included; a session without native access reads no repository settings, as it loads none of its other resources.
   async function createSession(cfg,agent){
-    await mkdir(nativeDir,{recursive:true,mode:0o700});
+    await mkdir(join(nativeDir,'skills'),{recursive:true,mode:0o700});
+    if(native)await stageSessionSkills(nativeDir,cfg.resources);
     const settingsManager=SettingsManager.create(cwd,nativeDir,{projectTrusted:!!native});
-    const loader=native?new DefaultResourceLoader({cwd,agentDir:nativeDir,settingsManager,appendSystemPrompt:[cfg.system]}):{getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
-    if(native){await stageSessionSkills(nativeDir,cfg.resources);await loader.reload();}
+    // Load only control-plane staged skills (plus explicit `.pi/skills` when present); never load `.agents/skills` from an untrusted checkout.
+    const skillDirs=[join(nativeDir,'skills'),...(existsSync(join(cwd,'.pi','skills'))?[join(cwd,'.pi','skills')]:[])];
+    const loader=native?new DefaultResourceLoader({cwd,agentDir:nativeDir,settingsManager,noSkills:true,additionalSkillPaths:skillDirs,appendSystemPrompt:[cfg.system]}):{getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
+    if(native)await loader.reload();
     const guard={check:async(_id,_name,value)=>value},tools=makeTools(cfg,agent,guard);
     const {manager:sessionManager,mode}=openSession(agent);
     if(!agent){nativeSessionId=sessionManager.getSessionId();recovery=mode;}

@@ -54,7 +54,7 @@ import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest, projectLabels, developingLabel } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, skillFilePath, computerRequest, projectLabels, developingLabel } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { pendingReviewUpdates, resultCoverage, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
 import { continueFinishedReview, continuationContext, continuationUpdates, resumeFinishedReviews } from '../review/continuation.js';
@@ -330,6 +330,7 @@ export class TaskEngine {
       }
       if(requestMode){
         await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache,{
+          rules:this.rules,
           onReviewPublished:async(gh,publishedTask,publishedInput,publishedResult)=>{
             const number=Number(publishedInput?.target?.number??publishedTask.object_number??0);
             if(publishedInput?.target?.type!=='issue'||!Number.isSafeInteger(number)||number<1)return;
@@ -558,8 +559,10 @@ export class TaskEngine {
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         await validate();
         const target=await event.prepare(this.store,github,task,input,redactor);
-        const ruleSha=(await github.ref(github.defaultBranch))?.object?.sha||target.sha;
-        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
+        const eventPolicy=taskConfiguration(this.store,task)?.policy??this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
+        const eventRuleBranch=String(eventPolicy?.base_branch||'').trim()||github.defaultBranch;
+        const ruleSha=(await github.ref(eventRuleBranch))?.object?.sha||target.sha;
+        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${eventRuleBranch}`]}):undefined;
         let effectiveRules:ReturnType<typeof resolveRules>;
         try{
           const ruleFiles=await this.rules.fetch(github,ruleSha,mirror,task.repository_id);this.rules.cache(task.repository_id,ruleSha,ruleFiles);
@@ -579,9 +582,9 @@ export class TaskEngine {
           environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         }
         const skills=skillIndex(effectiveRules.files);
-        await workspace.context({...target.files,...Object.fromEntries(skills.map(skill=>[skill.file,skill.content]))});
+        await workspace.context({...target.files,...Object.fromEntries(effectiveRules.files.filter((f:any)=>skillFilePath(f.path)).map((f:any)=>['skills/'+f.path.slice('.agents/skills/'.length),f.effective]))});
         input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
-          context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
+          context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path,support_files})=>({name,description,path,...(support_files?{support_files}:{})})),
             ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:target.sha,mode:'read'})}:{}),
             effective_rules:effectiveRules,computer:computerSummary(environment.computer),...managerContext(input),...target.context}};
         update({input:storedInput(this.store,redactor.clean(input),task.repository_id),head_sha:target.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:target.sha});
@@ -617,9 +620,9 @@ export class TaskEngine {
           const owned=this.owned(github,task,object);
           if(owned.sha!==task.head_sha){const compare=await github.request('GET',github.path('/compare/'+owned.sha+'...'+task.head_sha));if(!['ahead','identical'].includes(compare.status))stop('bot_branch_history_changed','needs_replan',`分支 ${owned.branch} 的提交历史已变化，比较状态=${compare.status}，需要重新规划。`);}
         }
-        // Rules never come from a pull request's own commits: PR tasks read the default branch, an Issue development that
-        // continues the bot's PR reads that PR's base branch, and other Issue tasks read the commit they check out.
-        const ruleBranch=task.kind.endsWith('.pr')?github.defaultBranch:input.bot_pr?baseBranch:null;
+        // Rules never come from an external pull request's own commits: PR tasks read the project's configured base branch
+        // (or default branch), an Issue development continuing the bot's PR reads that PR's base branch, and other Issue tasks read the commit they check out.
+        const ruleBranch=task.kind.endsWith('.pr')?(String(policy.base_branch||'').trim()||github.defaultBranch):input.bot_pr?baseBranch:null;
         const ruleSha=ruleBranch?(await github.ref(ruleBranch))?.object.sha:ref.object.sha;
         // The repository's mirror is brought up to both commits first; rules and files are then read at those commits.
         // A pull request's base comes into the mirror too, so the agent can compare base and head with git.
@@ -665,7 +668,7 @@ export class TaskEngine {
         const skills=skillIndex(effectiveRules.files),json=(value:unknown)=>JSON.stringify(value,null,2);
         await workspace.context({'object.json':json(object),'comments.json':json(comments),
           ...(pr?{'files.json':json(files),'reviews.json':json(reviews),'review_comments.json':json(reviewComments)}:{}),
-          ...Object.fromEntries(skills.map(skill=>[skill.file,skill.content]))});
+          ...Object.fromEntries(effectiveRules.files.filter((f:any)=>skillFilePath(f.path)).map((f:any)=>['skills/'+f.path.slice('.agents/skills/'.length),f.effective]))});
         const kind=pr?'pull request':'Issue',contextFiles=[
           {path:'../context/object.json',content:`The ${kind} as GitHub returns it: title, full body, author, labels${pr?', base and head':''}`},
           {path:'../context/comments.json',content:`All ${comments.length} conversation comments, oldest first`},
@@ -683,7 +686,7 @@ export class TaskEngine {
               ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},...(claims?{claims}:{}),
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
-            context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
+            context_files:contextFiles,skills:skills.map(({name,description,path,support_files})=>({name,description,path,...(support_files?{support_files}:{})})),
             ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:ref.object.sha,mode:review?'read':'write'})}:{}),
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,
             // What a development started on (#815): the PR description names it.

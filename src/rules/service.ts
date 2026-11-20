@@ -28,14 +28,21 @@ export const defaults: Record<string, string> = {
 };
 /** Paths whose change changes how the bot works on this repository: its skills. .bot/ is no longer read (#935). */
 export const behaviorPath = (path: string) => path === '.agents/skills' || path.startsWith('.agents/skills/');
-const skillPath = (path: string) => /^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path);
+export const maxSkillCount = 32, maxSkillFiles = 256, maxSkillFileBytes = 512 * 1024, maxSkillTotalBytes = 1024 * 1024;
+export const safeSkillSubpath = (sub: string) =>
+  sub.length > 0 && sub.length <= 220 && !sub.startsWith('/') && !sub.endsWith('/') && !sub.includes('\\') && !sub.includes('\0')
+  && !sub.split('/').some(part => !part || part === '.' || part === '..');
+export const skillEntryPath = (path: string) =>
+  path.startsWith('.agents/skills/') && safeSkillSubpath(path.slice('.agents/skills/'.length)) && /^(?:[^/]+\/)+SKILL\.md$/.test(path.slice('.agents/skills/'.length));
+export const skillFilePath = (path: string) =>
+  path.startsWith('.agents/skills/') && safeSkillSubpath(path.slice('.agents/skills/'.length)) && path.slice('.agents/skills/'.length).includes('/');
 /** A retired .bot/ file: listed (never read) so the project page can say it was imported and can be deleted. */
 export const retiredPath = (path: string) => path.startsWith('.bot/');
-// Skills and rule texts have no size limit of their own: they are sent with the task as written. A skill error names
-// the file, so the person who has to fix it knows which one.
+// Skills and rule texts are sent with the task as written, within per-file and bundle bounds so runner startup payloads stay bounded.
+// A skill error names the file, so the person who has to fix it knows which one.
 const ruleError = (code: string, detail: string): never => { throw Object.assign(new HttpError(400, code), { detail }); };
 // Skill errors a person has to fix; a task that meets one waits for configuration instead of failing.
-export const ruleErrors = new Set(['invalid_skill_file', 'invalid_rule_content', 'too_many_bot_skills', 'unsafe_skill_file']);
+export const ruleErrors = new Set(['invalid_skill_file', 'invalid_rule_content', 'too_many_bot_skills', 'unsafe_skill_file', 'skill_file_too_large']);
 // The fields of the project computer spec (and of the .bot/computer.yaml files imported into it).
 export const computerKeys = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress', 'packages', 'env', 'setup_script'];
 // The resource values that were fixed before a super administrator could change the defaults.
@@ -67,25 +74,57 @@ export function computerRequest(effective: Record<string, unknown>, live: any): 
   return changed ? { ...effective, ...Object.fromEntries(dropped.map(key => [key, null])) } : null;
 }
 // The project's skills as the agent finds them: a name, what the skill is for (its front matter description, or its first
-// line), and where its full text is in the task context. The agent reads a skill when it does the job the skill describes.
+// line), and where its full text and any companion files are in the task context.
+export function parseSkillDescription(markdown: string): string {
+  const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(markdown)?.[1] || '';
+  let description = '';
+  try { const value = parse(front, { maxAliasCount: 0 }); if (value && typeof value.description === 'string') description = value.description.trim(); } catch {}
+  description ||= markdown.replace(/^---[\s\S]*?\n---/, '').split('\n').map(line => line.replace(/^#+\s*/, '').trim()).find(Boolean) || '';
+  return description.slice(0, 500);
+}
 export function skillIndex(rows: { path: string, source: string, effective: string }[]) {
-  return rows.filter(row => skillPath(row.path)).map(row => {
-    const name = row.path.slice('.agents/skills/'.length, -'/SKILL.md'.length), front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(row.effective)?.[1] || '';
-    let description = ''; try { const value = parse(front, { maxAliasCount: 0 }); if (value && typeof value.description === 'string') description = value.description; } catch {}
-    description ||= row.effective.replace(/^---[\s\S]*?\n---/, '').split('\n').map(line => line.replace(/^#+\s*/, '').trim()).find(Boolean) || '';
-    return { name, description: description.slice(0, 500), file: `skills/${name}/SKILL.md`, path: `../context/skills/${name}/SKILL.md`, content: row.effective };
+  const allFiles = rows.filter(row => skillFilePath(row.path));
+  return rows.filter(row => skillEntryPath(row.path)).map(row => {
+    const dir = row.path.slice(0, -'/SKILL.md'.length);
+    const name = row.path.slice('.agents/skills/'.length, -'/SKILL.md'.length);
+    const supportFiles = allFiles
+      .filter(other => other.path !== row.path && other.path.startsWith(dir + '/'))
+      .map(other => other.path.slice(dir.length + 1))
+      .sort();
+    return {
+      name,
+      description: parseSkillDescription(row.effective),
+      file: `skills/${name}/SKILL.md`,
+      path: `../context/skills/${name}/SKILL.md`,
+      content: row.effective,
+      ...(supportFiles.length ? { support_files: supportFiles } : {}),
+    };
   });
 }
 /**
  * The rules a task works with: each rule's console text (its Manager section) or the built-in text, the project
- * computer, the project's skills from the default branch, and the labels from the project settings. `files` are the
- * repository files read for the task: its skills, and the names of retired .bot/ files, which are never content.
+ * computer, the project's skills from the trusted base branch, and the labels from the project settings. `files` are the
+ * repository files read for the task: its `.agents/skills/` files, and the names of retired .bot/ files, which are never content.
  */
 export function resolveRules(policy: Row, files: Record<string, string>, computer: any = {}, labels: Labels = defaultLabels) {
-  const skills=Object.keys(files).filter(skillPath).length;if(skills>32)ruleError('too_many_bot_skills',`.agents/skills/ 下共有 ${skills} 份 SKILL.md，最多 32 份`);
+  const skillEntries = Object.entries(files).filter(([path]) => behaviorPath(path));
+  for (const [path] of skillEntries) {
+    if (!skillFilePath(path)) ruleError('invalid_skill_file', `${path} 不是合法的 .agents/skills/ 文件路径`);
+  }
+  const skills = skillEntries.filter(([path]) => skillEntryPath(path)).length;
+  if (skills > maxSkillCount) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${skills} 份 SKILL.md，最多 ${maxSkillCount} 份`);
+  if (skillEntries.length > maxSkillFiles) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${skillEntries.length} 个技能文件，最多 ${maxSkillFiles} 个`);
   // A NUL byte means the file is not text; it is rejected, not read as missing, also when an older version cached it.
-  const binary=Object.entries(files).find(([path,content])=>skillPath(path)&&content.includes('\0'));if(binary)ruleError('invalid_rule_content',`${binary[0]} 不是文本文件（含 NUL 字节）`);
-  const overrides = JSON.parse(policy.rule_overrides || '{}'), rows: any[] = [];
+  const binary = skillEntries.find(([, content]) => content.includes('\0'));
+  if (binary) ruleError('invalid_rule_content', `${binary[0]} 不是文本文件（含 NUL 字节）`);
+  let totalBytes = 0;
+  for (const [path, content] of skillEntries) {
+    const size = Buffer.byteLength(content);
+    if (size > maxSkillFileBytes) ruleError('skill_file_too_large', `${path} 超过单文件 512 KiB 上限`);
+    totalBytes += size;
+    if (totalBytes > maxSkillTotalBytes) ruleError('skill_file_too_large', '.agents/skills/ 文件总大小超过 1 MiB 上限');
+  }
+  const overrides = JSON.parse(policy?.rule_overrides || '{}'), rows: any[] = [];
   // The existing manager computer is the console layer, not a new resource system.
   const consoleComputer = Object.fromEntries(computerKeys.filter(key => computer[key] !== undefined).map(key => [key, computer[key]]));
   const computerSources: Record<string, string> = Object.fromEntries(Object.keys(consoleComputer).map(key => [key, 'console']));
@@ -95,7 +134,9 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
     else if (Object.hasOwn(overrides, path)) layers.push({ source: 'console', content: overrides[path]! });
     rows.push({ path, layers, source: layers.at(-1)!.source, effective: layers.at(-1)!.content });
   }
-  for (const [path, content] of Object.entries(files).filter(([path]) => skillPath(path))) rows.push({ path, source: 'repository', layers: [{ source: 'repository', content }], effective: content });
+  for (const [path, content] of skillEntries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    rows.push({ path, source: 'repository', layers: [{ source: 'repository', content }], effective: content });
+  }
   return { files: rows, computer: consoleComputer, computer_sources: computerSources, review_label: labels.review_label, development_label: labels.development_label,
     retired_files: Object.keys(files).filter(retiredPath).sort() };
 }
@@ -206,11 +247,24 @@ export class RuleService {
       importRepository(this.store, repositoryId, sha, contents);
     }
     const files: Record<string, string> = Object.fromEntries(retired.slice(0, 50).map((f: any) => [f.path, '']));
-    const entries = tree.tree.filter((f: any) => skillPath(f.path));
-    if (entries.length > 32) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${entries.length} 份 SKILL.md，最多 32 份`);
-    for (const file of entries) {
+    // Strictly inspect only .agents/skills/: never scan or load SKILL.md files from other project directories.
+    const underSkills = tree.tree.filter((f: any) => f.type !== 'tree' && behaviorPath(String(f.path ?? '')));
+    for (const file of underSkills) {
       if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) ruleError('invalid_skill_file', `${file.path} 不是普通文件（符号链接或子模块）`);
+      if (file.path === '.agents/skills' || !safeSkillSubpath(String(file.path).slice('.agents/skills/'.length))) ruleError('invalid_skill_file', `${file.path} 不是合法的 .agents/skills/ 文件路径`);
+    }
+    const skillRoots = underSkills.filter((f: any) => skillEntryPath(f.path));
+    if (skillRoots.length > maxSkillCount) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${skillRoots.length} 份 SKILL.md，最多 ${maxSkillCount} 份`);
+    const skillDirs = skillRoots.map((f: any) => String(f.path).slice(0, -'/SKILL.md'.length));
+    const entries = underSkills.filter((f: any) => skillDirs.some(dir => String(f.path).startsWith(dir + '/')));
+    if (entries.length > maxSkillFiles) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${entries.length} 个技能文件，最多 ${maxSkillFiles} 个`);
+    let totalBytes = 0;
+    for (const file of entries) {
+      if (typeof file.size === 'number' && file.size > maxSkillFileBytes) ruleError('skill_file_too_large', `${file.path} 超过单文件 512 KiB 上限`);
       const data = await read(file);
+      if (data.length > maxSkillFileBytes) ruleError('skill_file_too_large', `${file.path} 超过单文件 512 KiB 上限`);
+      totalBytes += data.length;
+      if (totalBytes > maxSkillTotalBytes) ruleError('skill_file_too_large', '.agents/skills/ 文件总大小超过 1 MiB 上限');
       if (data.includes(0)) ruleError('invalid_rule_content', `${file.path} 不是文本文件（含 NUL 字节）`);
       files[file.path] = data.toString('utf8');
     }
@@ -231,8 +285,10 @@ export class RuleService {
     if (method === 'PUT' && !match[2]) throw Object.assign(new HttpError(410, 'rules_update_removed'), { detail: rulesUpdateRemoved });
     if (method === 'POST' && match[2] === 'refresh') {
       fields(input, []); const repo = this.store.get('SELECT * FROM repositories WHERE id=?', id)!;
+      const policy = this.store.get('SELECT base_branch FROM policies WHERE repository_id=?', id);
       const github = new GitHub(this.store, repo, new Redactor(), async () => {}, this.githubUrl); await github.connect(false);
-      const ref = await github.ref(github.defaultBranch); if (!ref) fail(409, 'repository_has_no_commit');
+      const branch = String(policy?.base_branch || '').trim() || github.defaultBranch;
+      const ref = await github.ref(branch); if (!ref) fail(409, 'repository_has_no_commit');
       this.cache(id, ref.object.sha, await this.fetch(github, ref.object.sha, undefined, id)); return { rules: await this.view(id) };
     }
     // Applying .bot/computer.yaml at once went with the file (#935): the machine page saves the project computer directly.

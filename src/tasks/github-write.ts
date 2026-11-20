@@ -9,7 +9,7 @@ import { scheduledIssueOperationAllowed } from './schedule-write.js';
 import { Publisher, publicationScope } from '../github/publisher.js';
 import { inlineLocation, reviewConclusions } from '../review/findings.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
-import { projectLabels } from '../rules/service.js';
+import { behaviorPath, projectLabels } from '../rules/service.js';
 import { reviewLanguage } from '../github/text.js';
 import { covers, projectCeiling, ceilingMessage } from '../projects/ceiling.js';
 
@@ -363,6 +363,17 @@ export async function publishReviewDelivery(
     const scope = normalized.key ? `${publicationScope(task)}:review:${normalized.key}` : publicationScope(task);
     const publisher = new Publisher(store, github, task, guard, undefined, log, undefined, scope);
 
+    const behaviorChanges =
+      normalized.target.type === 'pr'
+        ? [
+            ...new Set([
+              ...(Array.isArray(taskInput.behavior_changes) ? taskInput.behavior_changes.map(String) : []),
+              ...files
+                .filter((f: any) => behaviorPath(String(f.filename ?? '')) || (f.previous_filename && behaviorPath(String(f.previous_filename))))
+                .map((f: any) => String(f.filename)),
+            ]),
+          ]
+        : [];
     const reviewPayload = {
       summary: normalized.summary,
       findings: normalized.findings,
@@ -372,6 +383,7 @@ export async function publishReviewDelivery(
       coverage: normalized.target.type === 'pr'
         ? [`PR #${normalized.target.number}`, `${files.length} changed file(s)`]
         : [`Issue #${normalized.target.number}`],
+      ...(behaviorChanges.length ? { behavior_changes: behaviorChanges } : {}),
       ...(normalized.recommendation ? { recommendation: normalized.recommendation } : {}),
       ...(normalized.conclusion ? { conclusion: normalized.conclusion } : {}),
     };

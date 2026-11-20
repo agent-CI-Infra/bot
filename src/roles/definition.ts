@@ -9,7 +9,7 @@ import { harnesses } from './harness.js';
 import { defaultPermissions, migratePermissions, normalizePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
-import { cachedRuleFiles } from '../rules/service.js';
+import { cachedRuleFiles, maxSkillFiles, skillFilePath } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
 import {roleSkills} from './skill-defaults.js';
 
@@ -447,7 +447,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
   } else if (source.type === 'repository') {
     // Repository skills come from the rule cache at exactly the named commit; a moved branch never changes a pinned bundle.
     if (typeof source.commit !== 'string' || !/^[a-f0-9]{40}$/.test(source.commit)) invalid('invalid_skill_source', field + '.source.commit');
-    if (!Array.isArray(source.paths) || !source.paths.length || source.paths.length > 32 || source.paths.some((p: any) => typeof p !== 'string')) invalid('invalid_skill_source', field + '.source.paths');
+    if (!Array.isArray(source.paths) || !source.paths.length || source.paths.length > maxSkillFiles || source.paths.some((p: any) => typeof p !== 'string')) invalid('invalid_skill_source', field + '.source.paths');
     const cached = cachedRuleFiles(s, repositoryId);
     if (!cached || cached.sha !== source.commit) {
       // Re-saving an unchanged pinned source must not follow a moving rule cache. Only this configuration's exact
@@ -458,7 +458,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
       files = JSON.parse(String(stored!.files)).map((file: { path: string; content: string }) => ({ path: file.path, content: file.content }));
     } else {
       const available = cached.files;
-      for (const path of source.paths) { if (!/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path) || !Object.hasOwn(available, path)) invalid('skill_file_not_found', field + '.source.paths'); files.push({ path, content: available[path]! }); }
+      for (const path of source.paths) { if (!skillFilePath(path) || !Object.hasOwn(available, path)) invalid('skill_file_not_found', field + '.source.paths'); files.push({ path, content: available[path]! }); }
     }
     descriptor = { type: 'repository', path_root: '.agents/skills', commit: source.commit, paths: [...source.paths].sort() };
   } else if (source.type === 'inline') {
@@ -684,7 +684,9 @@ export function rolePrompt(definition: RoleDefinitionV2) {
 export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean; entryExecutor?: boolean;
   configuration?: RoleConfiguration; fallbackModel?:()=>{model:ReturnType<typeof openModel>;source:'workflow'|'project'};
   /** The task is a CI change a project administrator confirmed (#931): its planning and writing roles get the CI gate skill. */
-  ciChange?: boolean } = {}) {
+  ciChange?: boolean;
+  /** Trusted base-branch `.agents/skills/` snapshot for this task; `undefined` reads the project's rule cache. */
+  repositorySkills?: { sha: string | null; files: Record<string, string> } | null } = {}) {
   const config = roleConfiguration(s, repositoryId, options.configuration);
   if (options.expectedRevision !== undefined && options.expectedRevision !== config.revision) stop('role_configuration_changed', 'retry_wait', `角色配置已更新到 revision ${config.revision}，请求的是 ${options.expectedRevision}。`);
   const definition = config.roles.find(r => r.role_id === roleId), field = `roles.${roleId}`;
@@ -735,7 +737,10 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   const bundle = definition.skill_bundle_ref ? config.skills.find(b => b.id === definition.skill_bundle_ref!.id && b.revision === definition.skill_bundle_ref!.revision) : undefined;
   const projectFiles=definition.skill_bundle_ref?skillFiles(s,repositoryId,definition.skill_bundle_ref):[];
   const configuredSkills=bundle?{id:bundle.id,revision:bundle.revision,content_hash:bundle.content_hash,source:bundle.source,files:bundle.files}:null;
-  const skills=roleSkills(s,repositoryId,{id:roleId,kind:definition.kind},configuredSkills,projectFiles,options.persist!==false,!!options.ciChange);
+  const repositorySource=options.repositorySkills===undefined
+    ? (()=>{const cached=cachedRuleFiles(s,repositoryId);return cached?{sha:cached.sha,files:cached.files}:null;})()
+    : options.repositorySkills;
+  const skills=roleSkills(s,repositoryId,{id:roleId,kind:definition.kind},configuredSkills,projectFiles,options.persist!==false,!!options.ciChange,repositorySource);
   const system = rolePrompt(definition);
   const snapshot: RoleSnapshot = { schema: 2, repository_id: repositoryId, role_id: roleId, kind: definition.kind, role_revision: definition.revision, config_revision: config.revision, legacy: !!config.legacy,
     name: definition.name, responsibility: definition.responsibility,
