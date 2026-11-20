@@ -268,7 +268,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
         await page.waitForTimeout(600);
         const measured = await colours(page, selectors);
         for (const sample of measured) {
-          if (sample.missing) continue;
+          // Review of 2b72ab49: skipping a missing selector let the task case pass without measuring the step and
+          // output blocks it is supposed to cover. Every selector named here must exist on its page.
+          expect(sample.missing, `${hash} ${sample.selector} ${width} must render`).toBeFalsy();
           readable(sample, 4.5, `${hash} ${sample.selector} ${width}`);
         }
         // Nothing in dark may sit on a white card: every measured background has to be one of the dark tokens.
@@ -280,5 +282,25 @@ test('#750 dark theme keeps the task detail, project head and project page reada
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), `${hash} ${width} overflow`).toBeLessThanOrEqual(0);
       }
     }
+
+    // Review of 2b72ab49: the row, switch and preview hover fills stayed light, so the row name read 1.14:1 and the
+    // preview link 1.99:1 on hover. Hover for real and measure what a reader sees.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(h.admin + '/#/projects/');
+    await page.waitForSelector('#rows .project-list-row');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(400);
+    await page.locator('#rows .project-list-row').first().hover();
+    await page.waitForTimeout(250);
+    const hovered = await colours(page, ['.project-list-row', '.project-cell strong', '.project-task-preview']);
+    for (const sample of hovered) {
+      expect(sample.missing, `hover ${sample.selector} must render`).toBeFalsy();
+      readable(sample, 4.5, `hover ${sample.selector}`);
+      const [r, g, b] = rgb(sample.background);
+      expect(r + g + b, `hover ${sample.selector} background ${sample.background}`).toBeLessThan(200);
+    }
+    await page.locator('#rows .project-task-preview').first().hover();
+    await page.waitForTimeout(250);
+    readable((await colours(page, ['.project-task-preview']))[0], 4.5, 'hover .project-task-preview');
   } finally { await h.stop(); }
 });
