@@ -70,7 +70,11 @@ const englishFailures = [
     wording: 'your permissions changed; refresh the page and retry with your current permissions' },
   // A code the page does not know keeps the status and the service's own ASCII code, and never its untranslated prose.
   { name: 'unknown code', fulfill: route => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"internal"}' }),
-    wording: 'the service answered 500 · internal' }
+    wording: 'the service answered 500 · internal' },
+  // The service's `error` can itself be prose in the service's language: repeating it would put Chinese back inside the
+  // English sentence, so only a short ASCII identifier is repeated and anything else becomes an em dash.
+  { name: 'prose code', fulfill: route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '服务暂时不可用，请联系管理员' }) }),
+    wording: 'the service answered 500 · —' }
 ];
 for (const failure of englishFailures) {
   test(`English 界面：安装详情读取失败（${failure.name}）的文案不含中文`, async ({ page }) => {
@@ -140,6 +144,15 @@ test('中文界面：不可解析内容的原文与今天逐字相同', async ({
 // The one place the Chinese words are meant to change: a status with no service code used to print the JavaScript word
 // "undefined" (`500 · undefined`), and now prints an em dash. The case pins that on purpose, so a later reader can tell
 // it apart from the branches that must stay byte for byte.
+test('中文界面：服务端 code 是散文时显示破折号', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const strip = await readFailure(page, f, route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '服务暂时不可用，请联系管理员' }) }), 'zh-CN');
+    await expect(strip).toHaveText('读不到这条安装：500 · —');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
 test('中文界面：无字符串 code 的状态错误显示破折号', async ({ page }) => {
   const f = await identityFixture(), errors = [];
   page.on('pageerror', error => errors.push(error.message));

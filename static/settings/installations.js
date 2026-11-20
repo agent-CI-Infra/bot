@@ -23,7 +23,8 @@ const installationPerson = (value, absentKey = 'not_provided') => value
 // #527: the archive's two failure sentences are built from this page's own phrases, never from readErrorText — that helper
 // answers in the console's source prose, so interpolating it into an English sentence produced "Cannot read this
 // installation: 网络连接失败，请稍后重试". A kind this page can name is a dictionary phrase; anything else keeps the status
-// and the service's code, which are ASCII, and never its prose. The phrase ends the sentence the caller already opened.
+// and — only when it is a short ASCII identifier — the service's code, never its prose. The phrase ends the sentence the
+// caller already opened.
 function installationErrorText(err) {
   const name = err && err.name, message = err?.message || '';
   if (name === 'AbortError') return t('settings.installations.error_cancelled');
@@ -35,7 +36,11 @@ function installationErrorText(err) {
   if (err && err.code === 'response_not_json')
     return t(err.status >= 200 && err.status < 300 ? 'settings.installations.error_unreadable' : 'settings.installations.error_gateway', { status: err.status });
   if (err && err.code === 'authorization_changed') return t('settings.installations.error_authorization_changed');
-  if (err && err.status) return t('settings.installations.error_status', { status: err.status, code: err.code || '—' });
+  // The service's code is repeated verbatim, so it has to be a short ASCII identifier: the service can answer 500 with an
+  // `error` that is itself prose ("服务暂时不可用，请联系管理员"), and repeating that would put Chinese back inside the
+  // English sentence this page is fixing. Anything else becomes an em dash and the status stays.
+  const safeCode = typeof err?.code === 'string' && /^[A-Za-z0-9._:-]{1,64}$/.test(err.code) ? err.code : '—';
+  if (err && err.status) return t('settings.installations.error_status', { status: err.status, code: safeCode });
   return t('settings.installations.error_unknown');
 }
 async function installationDetail(request, ref) {
