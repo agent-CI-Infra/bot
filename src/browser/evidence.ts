@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { constants, existsSync, readFileSync, realpathSync } from 'node:fs';
+import { open, readlink, realpath } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Store } from '../storage/database.js';
 import { type Actor, scope } from '../app/auth.js';
@@ -25,7 +27,7 @@ export type BrowserEvidenceList = {
   }>;
 };
 
-const screenshotName = /^step-\d+\.png$/;
+export const isBrowserScreenshotName = (name: string) => /^step-\d+\.png$/.test(name);
 const maxListedSteps = 80;
 
 function safeDecode(value: string): string | null {
@@ -33,14 +35,15 @@ function safeDecode(value: string): string | null {
   catch { return null; }
 }
 
+function recordedSteps(dir: string): any[] {
+  try {
+    const { steps } = JSON.parse(readFileSync(join(dir, 'steps.json'), 'utf8'));
+    return Array.isArray(steps) ? steps : [];
+  } catch { return []; }
+}
+
 export function listBrowserEvidence(store: Store, taskId: string): BrowserEvidenceList {
-  const dir = browserEvidenceDir(browserEvidenceRoot(store), taskId);
-  const stepsFile = join(dir, 'steps.json');
-  const empty: BrowserEvidenceList = { task_id: taskId, total_steps: 0, truncated: false, steps: [] };
-  if (!existsSync(stepsFile)) return empty;
-  let parsed: any;
-  try { parsed = JSON.parse(readFileSync(stepsFile, 'utf8')); } catch { return empty; }
-  const all = Array.isArray(parsed?.steps) ? parsed.steps : [];
+  const all = recordedSteps(browserEvidenceDir(browserEvidenceRoot(store), taskId));
   const truncated = all.length > maxListedSteps;
   const steps = truncated ? all.slice(-maxListedSteps) : all;
   return redactBrowserValue({
@@ -48,7 +51,7 @@ export function listBrowserEvidence(store: Store, taskId: string): BrowserEviden
     total_steps: all.length,
     truncated,
     steps: steps.map((step: any) => {
-      const file = typeof step?.screenshot?.file === 'string' && screenshotName.test(basename(step.screenshot.file)) ? basename(step.screenshot.file) : null;
+      const file = typeof step?.screenshot?.file === 'string' && isBrowserScreenshotName(basename(step.screenshot.file)) ? basename(step.screenshot.file) : null;
       return {
         id: String(step.id || ''),
         n: Number(step.n) || 0,
@@ -65,7 +68,7 @@ export function listBrowserEvidence(store: Store, taskId: string): BrowserEviden
 }
 
 export function resolveEvidenceFile(store: Store, taskId: string, name: string): string | null {
-  if (!screenshotName.test(name)) return null;
+  if (!isBrowserScreenshotName(name)) return null;
   const listed = listBrowserEvidence(store, taskId).steps.some(step => step.screenshot?.file === name);
   if (!listed) return null;
   const dir = browserEvidenceDir(browserEvidenceRoot(store), taskId);
@@ -75,6 +78,33 @@ export function resolveEvidenceFile(store: Store, taskId: string, name: string):
   const real = realpathSync(path);
   if (real !== join(root, name) && !real.startsWith(root + '/')) return null;
   return real;
+}
+
+/** An explicitly selected screenshot must still match the evidence recorded for this task. */
+export async function readBrowserScreenshot(store: Store, taskId: string, name: string, maxBytes: number): Promise<Buffer | null> {
+  if (!isBrowserScreenshotName(name)) return null;
+  const root = resolve(browserEvidenceRoot(store)), dir = browserEvidenceDir(root, taskId);
+  try {
+    if (dirname(dir) !== root || await realpath(dir) !== dir) return null;
+    const shot = recordedSteps(dir).find(step => step?.screenshot?.file === name)?.screenshot;
+    if (!Number.isSafeInteger(shot?.bytes) || shot.bytes < 1 || shot.bytes > maxBytes) return null;
+    const path = join(dir, name);
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await handle.stat();
+      // Confirm the opened file as well, in case its parent was replaced after the directory check.
+      if (!info.isFile() || info.nlink !== 1 || info.size !== shot.bytes || await readlink(`/proc/self/fd/${handle.fd}`) !== path) return null;
+      const buffer = Buffer.alloc(info.size + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      const bytes = buffer.subarray(0, length);
+      return length === info.size && createHash('sha256').update(bytes).digest('hex') === shot.sha256 ? bytes : null;
+    } finally { await handle.close(); }
+  } catch { return null; }
 }
 
 /** Authenticated GET for the step list (JSON) or one PNG. Returns true when this request was handled. */
