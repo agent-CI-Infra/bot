@@ -39,10 +39,6 @@ test('list and columns share filters, grouping and counts at six widths without 
       await page.setViewportSize({ width, height: 1000 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await expect(page.locator('.board-card[draggable=true]')).toHaveCount(0);
-      if ([390, 1440].includes(width)) {
-        mkdirSync('.tmp/board-list-227', { recursive: true });
-        await page.screenshot({ path: `.tmp/board-list-227/list-${width}.png` });
-      }
       await expect(page.getByLabel('工作类型', { exact: true })).toHaveValue('review.issue');
     }
     await layout(page, '切换为分栏'); await expect(page.locator('#board-columns')).not.toHaveClass(/board-list-layout/);
