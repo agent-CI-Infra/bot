@@ -217,9 +217,11 @@ test('#750 dark theme paints login, project list, global settings and the confir
   } finally { await h.stop(); }
 });
 
-// Review of the first version: dark tokens were in place, but the task detail, the project list head and the project
-// page still painted their own light values, so dark text landed on a white card (1.09:1 – 2.09:1). These surfaces
-// now read the same tokens in dark; the light baseline is untouched and stays covered by the shots in the PR.
+// The first review found dark tokens in place while the task detail, the project list head and the project page still
+// painted their own light values (1.09 – 2.09:1). The next ones found the same on the task goal box, the step and role
+// folds, the cancel button and the project detail tabs. Every one of those rules keeps its light value and is repainted
+// from the two dark blocks in static/views.css, so this test measures both halves: the dark reads at 390 and 1440, and
+// the light values that must stay exactly as they were at the base.
 async function colours(page, selectors) {
   return page.evaluate((list) => {
     const parse = (c) => c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)?.slice(1).map(Number) || null;
@@ -234,10 +236,32 @@ async function colours(page, selectors) {
       const el = document.querySelector(selector);
       if (!el) return { selector, missing: true };
       const style = getComputedStyle(el);
-      return { selector, color: style.color, background: paint(el) };
+      const box = el.getBoundingClientRect();
+      // Review of 10892948: a hidden skeleton used to count as covered. An element only counts when the reader
+      // could actually see it, so a hidden one fails the same way a missing one does.
+      const visible = !!el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) && box.width > 1 && box.height > 1;
+      return { selector, color: style.color, background: paint(el), visible };
     });
   }, selectors);
 }
+
+function rendered(sample, label) {
+  expect(sample.missing, `${label} must exist`).toBeFalsy();
+  expect(sample.visible, `${label} must be visible, not hidden markup`).toBe(true);
+}
+
+function darkCard(sample, label) {
+  const [r, g, b] = rgb(sample.background);
+  expect(r + g + b, `${label} background ${sample.background}`).toBeLessThan(200);
+}
+
+const DARK_TASK_DETAIL = [
+  'pre.output', '.step', '.task-side', '.task-archive-body', '.back-link',
+  '.task-goal-box', '.task-goal-line', '.task-next-text', '.task-ext-label', '.task-archive-fold > summary',
+  '.live', '.task-metrics', '.task-cancel-btn',
+  '.step-fold-title', '.step-fold-num', '.step-fold-meta', '.step-fold-summary',
+  '.role-run-title-row', '.role-run-meta', '.role-run-summary',
+];
 
 test('#750 dark theme keeps the task detail, project head and project page readable', async ({ page }) => {
   test.setTimeout(120000);
@@ -251,40 +275,40 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,result,created_at,updated_at) VALUES('t-750','101','development.issue','running','P1','控制台深色主题：跟随系统与手动三态',750,'model',?,'2026-11-18T08:00:00Z','2026-11-18T08:12:00Z')",
       JSON.stringify({ pr_number: 1067, branch: 'feat/theme-750', sha: '4'.repeat(40) }),
     );
+    // Review of 10892948: .step and the step/role folds only exist once a run has receipts, so the fixture used to leave
+    // them hidden and the test passed without measuring them. One finished run with one tool log renders the real folds.
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role) VALUES('run-1','t-750','execution',1,1,'2026-11-18T08:00:00Z','2026-11-18T08:10:00Z','done','{}','{}','dev')");
+    h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750','t-750',?,?, 'run-1','dev')",
+      JSON.stringify({ type: 'tool', name: 'read', summary: '读取 static/views.css', ok: true }), '2026-11-18T08:05:00Z');
     await page.emulateMedia({ colorScheme: 'dark' });
     await signIn(page, h, password, '');
 
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       const pages = [
-        ['#/tasks/t-750', ['pre.output', '.step', '.task-side', '.task-archive-body', '.back-link', '.task-goal-box', '.task-goal-line', '.task-next-text', '.task-ext-label', '.task-archive-fold > summary', '.live', '.task-metrics']],
-        ['#/projects', [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar']],
-        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link']],
+        ['#/tasks/t-750', DARK_TASK_DETAIL],
+        ['#/projects', width === 390 ? ['.project-owner-bar'] : [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar']],
+        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line', '.role-board-row', ...(width === 390 ? ['.role-mobile-label'] : [])]],
       ];
       for (const [hash, selectors] of pages) {
         await page.goto(h.admin + '/' + hash);
         await page.waitForFunction(() => (document.getElementById('console-page')?.innerText || document.querySelector('#workspace')?.innerText || '').trim().length > 0);
         await page.waitForLoadState('networkidle').catch(() => {});
+        // The folds are closed by default; opening them is what a reader does before the step text is on screen.
+        await page.evaluate(() => document.querySelectorAll('details').forEach((node) => { node.open = true; }));
         await page.waitForTimeout(600);
         const measured = await colours(page, selectors);
         for (const sample of measured) {
-          // Review of 2b72ab49: skipping a missing selector let the task case pass without measuring the step and
-          // output blocks it is supposed to cover. Every selector named here must exist on its page.
-          expect(sample.missing, `${hash} ${sample.selector} ${width} must render`).toBeFalsy();
+          rendered(sample, `${hash} ${sample.selector} ${width}`);
           readable(sample, 4.5, `${hash} ${sample.selector} ${width}`);
-        }
-        // Nothing in dark may sit on a white card: every measured background has to be one of the dark tokens.
-        for (const sample of measured) {
-          if (sample.missing) continue;
-          const [r, g, b] = rgb(sample.background);
-          expect(r + g + b, `${hash} ${sample.selector} ${width} background ${sample.background}`).toBeLessThan(200);
+          darkCard(sample, `${hash} ${sample.selector} ${width}`);
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), `${hash} ${width} overflow`).toBeLessThanOrEqual(0);
       }
     }
 
-    // Review of 2b72ab49: the row, switch and preview hover fills stayed light, so the row name read 1.14:1 and the
-    // preview link 1.99:1 on hover. Hover for real and measure what a reader sees.
+    // The row, switch and preview hover fills stayed light, so the row name read 1.14:1 and the preview link 1.99:1 on
+    // hover. Hover for real and measure what a reader sees.
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(h.admin + '/#/projects/');
     await page.waitForSelector('#rows .project-list-row');
@@ -294,18 +318,17 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     await page.waitForTimeout(250);
     const hovered = await colours(page, ['.project-list-row', '.project-cell strong', '.project-task-preview']);
     for (const sample of hovered) {
-      expect(sample.missing, `hover ${sample.selector} must render`).toBeFalsy();
+      rendered(sample, `hover ${sample.selector}`);
       readable(sample, 4.5, `hover ${sample.selector}`);
-      const [r, g, b] = rgb(sample.background);
-      expect(r + g + b, `hover ${sample.selector} background ${sample.background}`).toBeLessThan(200);
+      darkCard(sample, `hover ${sample.selector}`);
     }
     await page.locator('#rows .project-task-preview').first().hover();
     await page.waitForTimeout(250);
     readable((await colours(page, ['.project-task-preview']))[0], 4.5, 'hover .project-task-preview');
 
-    // Review at 20c9066e: the project detail tabs, the current tab, the footer link and the role-board row hover were
-    // still the light values, so dark text/links sat on near-white chips (1.51 / 1.59 / 1.14 / 3.00:1). Measure the
-    // computed pairs at both layouts, and hover the row for real because its fill only changes on hover.
+    // The project detail tabs, the current tab, the footer link and the role-board row hover kept their light values
+    // (1.51 / 1.59 / 1.14 / 3.00:1). Measure the computed pairs at both layouts, and hover the row for real because its
+    // fill only changes on hover.
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       await page.goto(h.admin + '/#/projects/101/overview');
@@ -313,19 +336,59 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       await page.waitForLoadState('networkidle').catch(() => {});
       await page.waitForTimeout(400);
       for (const sample of await colours(page, ['.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.role-board-row'])) {
-        expect(sample.missing, `project detail ${sample.selector} ${width} must render`).toBeFalsy();
+        rendered(sample, `project detail ${sample.selector} ${width}`);
         readable(sample, 4.5, `project detail ${sample.selector} ${width}`);
-        const [r, g, b] = rgb(sample.background);
-        expect(r + g + b, `project detail ${sample.selector} ${width} background ${sample.background}`).toBeLessThan(200);
+        darkCard(sample, `project detail ${sample.selector} ${width}`);
       }
       await page.locator('.role-board-row').first().hover();
       await page.waitForTimeout(250);
       for (const sample of await colours(page, ['.role-board-row', '.role-board-row .role-title-line'])) {
-        expect(sample.missing, `project detail hover ${sample.selector} ${width} must render`).toBeFalsy();
+        rendered(sample, `project detail hover ${sample.selector} ${width}`);
         readable(sample, 4.5, `project detail hover ${sample.selector} ${width}`);
-        const [r, g, b] = rgb(sample.background);
-        expect(r + g + b, `project detail hover ${sample.selector} ${width} background ${sample.background}`).toBeLessThan(200);
+        darkCard(sample, `project detail hover ${sample.selector} ${width}`);
       }
+    }
+
+    // The other half of the contract: in light every one of those rules paints the value it painted at the base. This
+    // is the check behind "the light baseline does not move"; the before/after shots carry the pixel proof.
+    await page.emulateMedia({ colorScheme: 'light' });
+    await page.goto(h.admin + '/#/projects/101/overview');
+    await page.waitForSelector('.role-board-row');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(400);
+    for (const sample of await colours(page, ['.workbench-tab', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line'])) {
+      rendered(sample, `light project detail ${sample.selector}`);
+      // The fixture has a single tab and it is the current one, so it paints --color-brand; the non-current tab keeps
+      // #334155 and is pinned in test/ut/static/console-tokens.test.mjs instead. `.role-backend-line` carries the
+      // `muted` class, and `shell.css`'s `.console-ready .muted` wins over workspace.css in both themes.
+      const expected = { '.workbench-tab': 'rgb(36, 93, 224)', '.workbench-quick-link': 'rgb(36, 93, 224)', '.workbench-live-stats': 'rgb(71, 85, 105)', '.role-backend-line': 'rgb(96, 112, 135)' }[sample.selector];
+      expect(sample.color, `light project detail ${sample.selector} keeps its base colour`).toBe(expected);
+    }
+    await page.locator('.role-board-row').first().hover();
+    await page.waitForTimeout(250);
+    expect((await colours(page, ['.role-board-row']))[0].background, 'light role board hover keeps #fafcfe').toBe('rgb(250, 252, 254)');
+    await page.goto(h.admin + '/#/tasks/t-750');
+    await page.waitForSelector('.task-next-text');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.evaluate(() => document.querySelectorAll('details').forEach((node) => { node.open = true; }));
+    await page.waitForTimeout(500);
+    const light = await colours(page, ['.task-next-text', '.task-ext-label', '.task-archive-fold > summary', '.step-fold-num', '.step-fold-meta', '.task-goal-box', '.live', '.task-metrics', '.task-cancel-btn']);
+    const LIGHT_VALUES = {
+      '.task-next-text': ['color', 'rgb(71, 85, 105)'],
+      '.task-ext-label': ['color', 'rgb(71, 85, 105)'],
+      '.task-archive-fold > summary': ['color', 'rgb(71, 85, 105)'],
+      '.step-fold-num': ['color', 'rgb(71, 85, 105)'],
+      '.step-fold-meta': ['color', 'rgb(71, 85, 105)'],
+      '.task-goal-box': ['background', 'rgb(248, 250, 252)'],
+      '.live': ['color', 'rgb(44, 87, 145)'],
+      '.task-metrics': ['color', 'rgb(82, 110, 124)'],
+      // The cancel button is `.quiet`, so `button.quiet` paints --color-text in light; its red is a dark-only value.
+      '.task-cancel-btn': ['color', 'rgb(23, 36, 59)'],
+    };
+    for (const sample of light) {
+      rendered(sample, `light task detail ${sample.selector}`);
+      const [key, value] = LIGHT_VALUES[sample.selector];
+      expect(sample[key], `light task detail ${sample.selector} keeps ${value}`).toBe(value);
     }
   } finally { await h.stop(); }
 });
