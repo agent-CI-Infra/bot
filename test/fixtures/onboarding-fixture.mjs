@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { settled } from './management-fixture.mjs';
+import { isTitleRequest, replyWithTitle, settled } from './management-fixture.mjs';
 import { session } from '../../dist/app/auth.js';
 
 export const client = (f, credentials) => async (path, method = 'GET', body) => {
@@ -47,7 +47,9 @@ export async function provider(t, script) {
   const requests = [], state = { gate: null };
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (isTitleRequest(body)) return replyWithTitle(res, '分析仓库接入');
+    requests.push(body);
     if (state.gate) await state.gate;
     const context = JSON.parse(body.messages[1].content), steps = body.messages.filter(m => m.role === 'assistant').length;
     const messages = script(context, body);

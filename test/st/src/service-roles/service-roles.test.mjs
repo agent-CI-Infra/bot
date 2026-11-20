@@ -20,6 +20,7 @@ async function web(f,content,client=f.admin){
   const conversation=(await client('/api/management/conversations','POST',{scope:'platform'})).value.conversation.id;
   const message=(await client('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'service-role-'+Math.random(),content})).value;
   const history=await settled(client,conversation,message.id);
+  if(history.title_pending)await until(async()=>(await client('/api/management/conversations/'+conversation)).value,p=>p.title_pending===false);
   return {conversation,message:history.messages.find(m=>m.id===message.id),events:history.events.filter(e=>e.message_id===message.id)};
 }
 
@@ -79,11 +80,15 @@ test('the management assistant uses its own model and ledger even when the first
   await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,prompt:'Only answer about authorized projects.'});
   h.store.run("UPDATE policies SET model_id=NULL");
   const greeting=await web(f,'你好');assert.equal(greeting.message.state,'completed',JSON.stringify(greeting.events));
-  assert.deepEqual(h.store.all('SELECT repository_id,service_role_id,model_id FROM model_requests').map(r=>({...r})),[{repository_id:null,service_role_id:'management-assistant',model_id:f.assistantModel.id}]);
+  const billed=h.store.all('SELECT request_id,repository_id,service_role_id,model_id FROM model_requests ORDER BY rowid');
+  assert.deepEqual(billed.map(r=>[r.request_id.split(':')[0],r.repository_id,r.service_role_id,r.model_id]),[
+    ['management.agent',null,'management-assistant',f.assistantModel.id],
+    ['management.title',null,'management-assistant',f.assistantModel.id],
+  ]);
   // Project statistics never include the assistant; the service role page does.
   const costs=(await admin('/api/costs')).value;assert.equal(costs.summary.requests,0);
   const usage=(await role(admin,'management-assistant')).usage;
-  assert.deepEqual([usage.requests,usage.input_tokens,usage.output_tokens,usage.unpriced_requests],[1,12,6,1]);
+  assert.deepEqual([usage.requests,usage.input_tokens,usage.output_tokens,usage.unpriced_requests],[2,24,12,2]);
 
   // A project's own model is never borrowed: without the assistant's model the turn stops and says where to configure it.
   h.store.run("UPDATE service_roles SET model_id=NULL WHERE id='management-assistant'");
@@ -102,8 +107,8 @@ test('legacy service role monetary budgets never block unpriced, over-limit or d
   assert.equal((await admin('/api/models/'+f.assistantModel.id,'PATCH',{version:model.version,pricing:{currency:'USD',input_per_million:1000,output_per_million:1000,cache_per_million:1000}})).status,200);
   h.store.run('UPDATE service_roles SET budget=? WHERE id=?',JSON.stringify({currency:'CNY',limit_amount:0.001}),'management-assistant');
   for(const request of ['超过旧限额','跨币种继续'])assert.equal((await web(f,request)).message.state,'completed');
-  assert.equal(h.store.get("SELECT round(sum(cost),6) cost FROM model_requests WHERE service_role_id='management-assistant'").cost,0.036);
-  const usage=(await role(admin,'management-assistant')).usage;assert.equal(usage.unpriced_requests,1);assert.deepEqual(usage.costs,[{currency:'USD',amount:0.036}]);
+  assert.equal(h.store.get("SELECT round(sum(cost),6) cost FROM model_requests WHERE service_role_id='management-assistant'").cost,0.072);
+  const usage=(await role(admin,'management-assistant')).usage;assert.equal(usage.unpriced_requests,2);assert.deepEqual(usage.costs,[{currency:'USD',amount:0.072}]);
 });
 
 test('a budgeted assistant retries a failed model request: a request that returned nothing costs nothing and never blocks the budget',async t=>{
@@ -116,7 +121,7 @@ test('a budgeted assistant retries a failed model request: a request that return
   f.modelState.respond=async(_body,res)=>{calls++;if(calls===1){res.writeHead(503,{'Content-Type':'application/json'});res.end('{"error":"busy"}');return;}if(calls===2){res.socket.destroy();return;}reply(res,'重试后的回答');};
   let result=await web(f,'你好');assert.equal(result.message.state,'completed',JSON.stringify(result.events));
   assert.deepEqual(h.store.all("SELECT state,cost FROM model_requests WHERE service_role_id='management-assistant' ORDER BY rowid").map(r=>[r.state,r.cost]),
-    [['http_error',0],['transport_error',0],['received',0.018]]);
+    [['http_error',0],['transport_error',0],['received',0.018],['received',0.018]]);
   assert.equal((await web(f,'再问一次')).message.state,'completed');
   // A request that failed after streaming part of an answer may have been charged: its cost stays unknown, and the budget stops.
   calls=0;f.modelState.respond=async(_body,res)=>{if(++calls===1){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: '+JSON.stringify({choices:[{index:0,delta:{content:'半截'}}]})+'\n\n');setTimeout(()=>res.socket.destroy(),20);return;}reply(res,'不会发出');};

@@ -70,7 +70,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(recommendationBar, message, footer); main.append(input);
   let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null;
   let disposed = false, opening = false, submitting = false, historyReady = false, followOutput = true, unseenOutput = false, renderFrame = 0;
-  let dynamicRecommendations = null;
+  let dynamicRecommendations = null, sessionItems = [];
   const pendingMarkdown = new Set(), confirmButtons = new Set(), recommendationButtons = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const conversationIdle = () => !!conversation && historyReady && !opening && !submitting && !active;
@@ -478,6 +478,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
           streamController = new AbortController();
           const page = await api(endpoint + '/conversations/' + id + '/events?after=' + cursor, 'GET', undefined, { signal: streamController.signal });
           if (!alive(generation) || conversation !== id) return;
+          updateConversationItem(page.conversation);
           for (const message of page.messages) messages.set(message.id, message);
           for (const row of page.events) event(row);
           const pending = page.messages.find(message => ['pending', 'running'].includes(message.state));
@@ -487,8 +488,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
             const value = turn(message.id);
             if (!['pending', 'running'].includes(message.state)) finishTurn(value, message.state, message.updated_at);
           }
-          if (!pending) { showStatus('就绪 · 操作结果可在执行进展中核对'); break; }
-          showStatus('处理中 · 可以继续写草稿，离开助手页后仍会继续');
+          if (pending) showStatus('处理中 · 可以继续写草稿，离开助手页后仍会继续');
+          else showStatus('就绪 · 操作结果可在执行进展中核对');
+          if (!pending && !page.title_pending) break;
           streamController = new AbortController();
           const response = await fetch(endpoint + '/conversations/' + id + '/events?stream=1&after=' + cursor, { signal: streamController.signal });
           if (!response.ok) throw new Error('读取运行流失败，请重新连接。');
@@ -504,15 +506,33 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     reading = work;
     try { await work; } finally { if (reading === work) reading = null; if (!disposed && generation !== scopeGeneration && conversation) void read(); }
   }
+  function updateConversationItem(item) {
+    if (!item) return;
+    const at = sessionItems.findIndex(existing => existing.id === item.id);
+    const previous = sessionItems[at];
+    if (!previous || (previous.title === item.title && previous.last_activity_at === item.last_activity_at)) return;
+    sessionItems[at] = item;
+    sessionItems.sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at) || b.created_at.localeCompare(a.created_at));
+    renderConversations(sessionItems);
+  }
   function renderConversations(all) {
+    sessionItems = all;
+    const focused = conversations.contains(document.activeElement) ? document.activeElement.dataset.conversationId : null;
+    let restoreFocus;
     conversations.replaceChildren(...all.map(item => {
       const entry = document.createElement('li');
       const choose = button('', () => { setSessionsOpen(false); openConversation(false, item.id).catch(showAccessError); }, 'quiet management-conversation');
       choose.dataset.conversationId = item.id;
       if (item.id === conversation) choose.setAttribute('aria-current', 'true');
-      choose.append(element('strong', timestamp(item.created_at) || '新会话'), element('small', '#' + item.id.slice(0, 8)));
+      const title = element('strong', item.title || '新会话');
+      title.title = title.textContent;
+      const time = element('time', '最后活动 ' + timeText(item.last_activity_at));
+      time.dateTime = item.last_activity_at;
+      choose.append(title, time);
+      if (focused === item.id) restoreFocus = choose;
       entry.append(choose); return entry;
     }));
+    restoreFocus?.focus({ preventScroll: true });
   }
   function applyQueuedOnboarding() {
     const queued = typeof peekRepositoryOnboarding === 'function' ? peekRepositoryOnboarding() : null;
@@ -550,7 +570,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
           return;
         }
         const result = await api(endpoint + '/conversations', 'POST', { scope: scope }); if (!alive(generation)) return;
-        conversation = result.conversation.id; all.unshift({ ...result.conversation, created_at: new Date().toISOString() });
+        conversation = result.conversation.id; all.unshift(result.conversation);
       } else conversation = all.find(item => item.id === (selected || stored(conversationKey())))?.id ?? all[0].id;
       renderConversations(all); remember(conversationKey(), conversation); message.value = drafts.get(conversation) ?? '';
       applyQueuedOnboarding();

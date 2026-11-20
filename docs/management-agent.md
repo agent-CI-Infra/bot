@@ -67,6 +67,8 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 ## 会话、停止和执行
 
+控制台会话列表显示标题和浏览器时区中的最后活动时间，最近更新的会话排在最上方。空会话以创建时间排序，收到消息及结束处理时更新时间。管理助手完成一轮自然语言对话后，用自己的模型根据本授权版本中的首条消息生成简短标题，每个会话保留同一授权版本中首次生成的标题。生成期间可以继续对话，标题未生成时显示「新会话」，旧会话在下一次成功对话后也会生成标题。
+
 `/api/management/conversations` 创建与列出本人会话，scope 为 `platform`、`tenant:<tenant id>` 或 `project:<project id>`（历史 `onboarding:<id>` 会话范围已随仓库接入合并退役，创建返回 400 `onboarding_scope_reserved`，读取返回 410 `repository_onboarding_merged`），其中 `platform` 表示全部当前有权范围：会话若已选定组织或项目，就是该范围内有权的项目与待接入仓库，而不是拒绝（403）。项目管理员除了在已启动项目上使用管理助手外，名下有已安装未启动仓库（`pending_repositories`）时也可以直接打开 `platform` 或对应 `tenant:<tenant id>` 会话并挂载本人助手电脑；既没有已启动项目也没有待接入仓库的普通用户在界面会看到明确原因与重试提示。会话由 principal、tenant 和 scope 隔离；授权修订后隐藏旧权限下的消息，范围撤回后旧会话不可访问。
 
 `POST /conversations/:id/messages` 接受一个自然语言 content、结构化 query 或 command，以及唯一 `source_message`。消息先持久化再运行，重复消息不会再次执行。`GET /conversations/:id/events?after=<sequence>&stream=1` 输出 NDJSON；重连只读事件。阶段消息是 `message` 事件，数据为 `{text,sequence,remaining}`；最终回答仍是 `reply` 事件。`POST /conversations/:id/messages/:message/stop` 停止后续模型/工具调用，已提交命令保留回执。重启将未完成消息标记为 interrupted，不能自动重放外部写入。
