@@ -119,7 +119,7 @@ test('an overview permission change replaces the old project header with the sha
       await page.setViewportSize({ width, height: 900 });
       if (width === 390) await page.reload();
       else await page.goto(h.admin + '/#/projects/101/overview');
-      const tabs = page.locator('#console-project-header .workbench-tabs');
+      const tabs = page.locator('.workbench-top .workbench-tabs');
       await expect(tabs).toBeVisible();
       await expect(tabs.locator('.workbench-tab-count').first()).toHaveText(/\d+/);
       await page.route('**/api/repositories/101/role-board', route => route.fulfill({ status: 403, json: { error: 'repository_forbidden' } }));

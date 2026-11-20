@@ -18,7 +18,7 @@ test('overview owns the project heading and GitHub action; work and settings pag
         return Math.abs(title.y + title.height / 2 - marker.y - marker.height / 2);
       });
       expect(offset).toBeLessThanOrEqual(1);
-      await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
+      await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
       await expect(page.locator('#console-project-header')).toBeVisible();
       await expect(page.locator('#console-location')).toBeHidden();
       if(width>=768) await expect(page.locator('#console-section-region')).toBeHidden();
@@ -26,7 +26,7 @@ test('overview owns the project heading and GitHub action; work and settings pag
         await expect(page.locator('#console-section-region')).toBeVisible();
         await expect(page.getByLabel('当前页面',{exact:true})).toBeVisible();
       }
-      await expect(page.locator('.workbench-top .workbench-tabs')).toHaveCount(0);
+      await expect(page.locator('#console-project-header .workbench-tabs')).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: `.tmp/compact-project-nav/overview-${width}.png`, fullPage: true });
       await expect(page.locator('.project-head').getByRole('link', { name: '在 GitHub 打开', exact: true })).toHaveText(['GitHub']);

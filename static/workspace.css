@@ -14,7 +14,7 @@
 .project-member .facts { margin-top: var(--space-4); }
 .console-ready .project-content:has(.workspace-overview) { max-width: none; }
 
-/* View tabs sit in the global project header; this row keeps live capacity and actions. */
+/* View tabs stay with live capacity and actions in this row. */
 .workbench-top {
   display: flex;
   align-items: center;

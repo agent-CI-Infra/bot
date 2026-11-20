@@ -75,7 +75,7 @@ test('desktop keeps one sticky header over the workspace beside a full-height ra
     await page.goto(h.admin + '/#/projects/101/overview');
     await expect(page.locator('.workspace-overview')).toBeVisible();
     await expect(page.locator('#console-location')).toBeHidden();
-    await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
+    await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
     await desktopFrame(page);
     await page.screenshot({ path: `${out}/overview-1440.png`, fullPage: true });
 
@@ -124,7 +124,7 @@ test('mobile keeps the header fixed and navigation reachable without a second lo
       await page.goto(h.admin + '/#/projects/101/overview');
       await expect(page.locator('.workspace-overview')).toBeVisible();
       await expect(page.locator('#console-location')).toBeHidden();
-      await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
+      await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
       await unifiedHeader(page);
       await page.screenshot({ path: `${out}/overview-${width}.png`, fullPage: true });
       const mobileHeaderHeight = Math.round((await page.locator('body > header').boundingBox()).height);

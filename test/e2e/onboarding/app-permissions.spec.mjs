@@ -120,7 +120,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(page.getByTestId('project-role-board')).toBeVisible();
     await expect(page.locator('#console-permission [data-permission]')).toHaveText('事件未订阅');
     await expect(page.locator('.project-head [data-permission]')).toHaveCount(0);
-    await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
+    await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
     await expect(page.locator('.workbench-tab-count').first()).toHaveText(/\d+/);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });

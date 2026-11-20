@@ -305,7 +305,7 @@ function workspaceOverview() {
   const root = element('section', '', 'workspace-overview');
   const alive = () => root.isConnected && me?.id === owner && current?.id === id && current.section === 'overview' && location.hash === routeKey;
 
-  // View tabs move into the global project header; this row keeps live capacity and actions.
+  // View tabs stay with live capacity and actions in this row.
   const topBar = element('div', '', 'workbench-top');
   const viewTabs = element('nav', '', 'workbench-tabs');
   viewTabs.setAttribute('aria-label', '项目工作台视图');

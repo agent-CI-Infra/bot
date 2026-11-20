@@ -26,6 +26,8 @@ test('project defaults to role view and switches cleanly to task view with real 
     // Default project view is Role View (#952)
     await expect(page.locator('[data-workbench-view="roles"]')).toHaveAttribute('aria-current','page');
     await expect(page.getByTestId('project-role-board')).toBeVisible();
+    await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
+    await expect(page.locator('#console-project-header .workbench-tabs')).toHaveCount(0);
     await expect(page.locator('[data-role-row="manager"]')).toContainText('排队 12');
 
     // Switch to Task View
@@ -84,6 +86,13 @@ test('overview deep links, live permissions and late responses retain scope acro
     }
     await page.setViewportSize({width:390,height:844});
     await page.locator('[data-workbench-view="tasks"]').click();
+    await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
+    await page.evaluate(()=>scrollTo(0,0));
+    await page.screenshot({path:'.tmp/project-overview/tasks-390.png'});
+    await page.setViewportSize({width:1440,height:900});
+    await page.evaluate(()=>scrollTo(0,0));
+    await page.screenshot({path:'.tmp/project-overview/tasks-1440.png'});
+    await page.setViewportSize({width:390,height:844});
     await page.locator('[data-task-group=attention]').click();
     await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(2);await expect(page.locator('.workspace-task-rows')).not.toContainText('foreign-private');
     await page.locator('[data-task-id=blocked] button').click();await expect(page.locator('#task-view')).toBeVisible();await page.keyboard.press('Escape');

@@ -252,10 +252,6 @@ function syncConsoleShell() {
   const nextHead = activeProject ? $('project-page').querySelector('.project-head') : null;
   if (nextHead && nextHead !== existingHead) { existingHead?.remove(); globalHeader.prepend(nextHead); }
   else if (!nextHead && (!activeProject || existingHead?.dataset.projectId !== String(project.id))) existingHead?.remove();
-  const existingTabs = globalHeader.querySelector('.workbench-tabs');
-  const tabs = activeOverview ? $('project-page').querySelector('.workbench-tabs') : null;
-  if (tabs && tabs !== existingTabs) { existingTabs?.remove(); globalHeader.append(tabs); }
-  else if (!tabs && (!activeOverview || existingTabs?.dataset.projectId !== String(project.id))) existingTabs?.remove();
   globalHeader.append(permission);
   globalHeader.hidden = false;
   globalHeader.dataset.overview = String(activeOverview);
