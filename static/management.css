@@ -40,6 +40,15 @@ body.management-page-mode { overflow: hidden; }
 .management-assistant-content { flex: 1; min-width: 0; }
 .management-assistant-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 28px; margin-bottom: 10px; font-size: var(--font-size-1); }
 .management-assistant-meta > strong { color: #244a56; font-weight: 600; }
+.console-ready .management-window button.management-copy-turn.btn-text { position: relative; width: 26px; height: 26px; min-height: 26px; margin-inline-start: auto; padding: 0; color: var(--color-text-muted); }
+.management-copy-turn::before, .management-copy-turn::after { content: ''; position: absolute; width: 9px; height: 11px; border: 1px solid currentColor; border-radius: 2px; }
+.management-copy-turn::before { top: 5px; left: 10px; }
+.management-copy-turn::after { top: 8px; left: 6px; background: var(--color-surface); }
+.management-copy-turn[data-copied]::before { display: none; }
+.management-copy-turn[data-copied]::after { content: '✓'; inset: 0; width: auto; height: auto; border: 0; background: transparent; color: #34776a; line-height: 24px; }
+@media (hover: hover) {
+  .management-assistant:not(:hover) .management-copy-turn:not(:focus-visible) { opacity: 0; pointer-events: none; }
+}
 .management-turn-state { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-muted); font-size: var(--font-size-1); }
 .management-turn-state[data-state=running]::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #41877b; animation: management-pulse 1.5s ease-in-out infinite; }
 .management-turn-state[data-state=failed], .management-step[data-state=failed] .management-step-status { color: #ab4941; }
@@ -47,7 +56,7 @@ body.management-page-mode { overflow: hidden; }
 .management-elapsed { color: var(--color-text-muted); font-size: var(--font-size-1); }
 .management-progress { margin-bottom: 16px; border: 1px solid #e2e9e9; border-radius: 10px; background: #f7f9f9; font-size: var(--font-size-1); }
 .management-progress > summary { padding: 10px 12px; color: #607980; cursor: pointer; }
-.management-steps { padding: 0 10px 6px; }
+.management-steps { max-height: min(260px, 32dvh); overflow-y: auto; scrollbar-width: thin; padding: 0 10px 6px; }
 .management-step + .management-step { border-top: 1px solid #e7eded; }
 .management-step-summary { display: flex; align-items: center; gap: 8px; padding: 9px 2px; color: #4a6671; cursor: pointer; list-style: none; }
 .management-step-summary::-webkit-details-marker { display: none; }
@@ -59,7 +68,11 @@ body.management-page-mode { overflow: hidden; }
 .management-step:is([data-state=failed],[data-state=rejected]) .management-step-indicator::after { content: '×'; color: #ab4941; }
 .management-step:is([data-state=unknown],[data-state=executing],[data-state=interrupted]) .management-step-indicator::after { content: '·'; }
 .management-step-caption { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.management-step-status { color: var(--color-text-muted); font-size: var(--font-size-1); white-space: nowrap; }
+.management-step-summary:has(.management-step-preview) .management-step-caption { flex: 0 1 auto; max-width: 50%; }
+.management-step-summary:has(.management-step-preview) .management-step-caption,
+.management-step-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.management-step-preview { flex: 1; min-width: 0; color: var(--color-text-muted); }
+.management-step-status { margin-inline-start: auto; color: var(--color-text-muted); font-size: var(--font-size-1); white-space: nowrap; }
 .management-step-detail { min-width: 0; padding: 0 0 8px 24px; }
 .management-step-arguments { color: var(--color-text-muted); font-size: var(--font-size-1); }
 .management-step-arguments > summary { padding: 6px 0; cursor: pointer; }
@@ -74,13 +87,10 @@ body.management-page-mode { overflow: hidden; }
 .management-receipt details { margin-top: 8px; }
 .management-receipt details summary { cursor: pointer; }
 .management-answer { min-width: 0; }
-.management-answer-actions { display: flex; margin-top: 9px; }
 .management-progress-message { padding-left: 10px; border-left: 2px solid #c5d8d2; }
 .management-progress-label { display: block; margin-bottom: 4px; color: var(--color-text-muted); font-size: var(--font-size-1); }
-.management-answer-actions button { min-height: 26px; padding: 3px 7px; border-color: transparent; background: transparent; color: var(--color-text-muted); font-size: var(--font-size-1); font-weight: 400; }
-.management-stream .management-answer-actions { display: none; }
-.management-stream .management-markdown::after { content: ''; display: inline-block; width: 7px; height: 14px; margin-left: 4px; border-radius: 2px; background: #4d897b; animation: management-pulse 1s ease-in-out infinite; }
-.management-markdown { color: var(--color-text); font-size: var(--font-size-2); line-height: 1.85; overflow-wrap: anywhere; }
+.management-stream .management-markdown::after { content: ''; position: absolute; inset: 100% auto auto 4px; width: 7px; height: 14px; margin-top: 2px; border-radius: 2px; background: #4d897b; animation: management-pulse 1s ease-in-out infinite; }
+.management-markdown { position: relative; color: var(--color-text); font-size: var(--font-size-2); line-height: 1.85; overflow-wrap: anywhere; }
 .management-markdown > :first-child { margin-top: 0; }
 .management-markdown > :last-child { margin-bottom: 0; }
 .management-markdown :is(h1,h2,h3,h4,h5,h6) { margin: 22px 0 10px; color: var(--color-text); line-height: 1.5; }

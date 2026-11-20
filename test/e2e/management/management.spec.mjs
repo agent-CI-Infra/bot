@@ -428,9 +428,12 @@ test('项目管理员在没有已启动项目或接口 403 时看到原因和重
   } finally { await f.close(); }
 });
 
-test('管理助手在空会话展示推荐列表、在已有对话展示紧凑推荐条，并随项目范围填入对应提示词', async ({ page }) => {
+test('管理助手空闲时提供符合项目范围的推荐，发送和执行期间隐藏', async ({ page }) => {
   test.setTimeout(60000);
   const f = await managementFixture(), errors = [];
+  let releaseSend, releaseModel;
+  const sendGate = new Promise(resolve => { releaseSend = resolve; });
+  const modelGate = new Promise(resolve => { releaseModel = resolve; });
   page.on('pageerror', error => errors.push(error.message));
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -491,6 +494,34 @@ test('管理助手在空会话展示推荐列表、在已有对话展示紧凑�
       }
     }
 
+    f.modelState.gate = modelGate;
+    await page.route('**/api/management/conversations/*/messages', async route => {
+      await sendGate;
+      await route.continue();
+    }, { times: 1 });
+    await composer.fill('再次检查任务状态');
+    await send.click();
+    const stop = chat.getByRole('button', { name: '停止', exact: true });
+    await expect(send).toBeDisabled();
+    await expect(stop).toBeHidden();
+    await expect(compactBar).toBeHidden();
+    releaseSend();
+    await expect(stop).toBeVisible();
+    await expect(composer).toHaveValue('');
+    mkdirSync('.tmp/management-recommendations', { recursive: true });
+    for (const [device, viewport] of [['desktop', { width: 1440, height: 1000 }], ['mobile', { width: 390, height: 844 }]]) {
+      await page.setViewportSize(viewport);
+      await expect(compactBar).toBeHidden();
+      await expect(composer).toBeInViewport();
+      await page.screenshot({ path: `.tmp/management-recommendations/running-${device}.png` });
+    }
+    await composer.fill('下一条草稿');
+    releaseModel();
+    await expect(send).toBeEnabled();
+    await expect(compactBar).toBeVisible();
+    await expect(composer).toHaveValue('下一条草稿');
+    await page.screenshot({ path: '.tmp/management-recommendations/idle-mobile.png' });
+
     // Starting a fresh conversation brings back the welcome recommendation cards and hides the compact bar.
     await page.setViewportSize({ width: 390, height: 844 });
     await chat.getByRole('button', { name: '会话记录', exact: true }).click();
@@ -499,5 +530,5 @@ test('管理助手在空会话展示推荐列表、在已有对话展示紧凑�
     await expect(compactBar).toBeHidden();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     expect(errors).toEqual([]);
-  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+  } finally { releaseSend(); releaseModel(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
