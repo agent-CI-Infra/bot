@@ -1,0 +1,43 @@
+/* Mermaid flow diagrams (#1123). Mermaid's own <style> and style attributes never reach the page (management/diagrams.js),
+   so every colour, line and type size of a diagram is set here from the shared tokens. The measuring host uses the same
+   type as the canvas: Mermaid sizes each box from the text it measured there. */
+.diagram { margin: var(--space-5) 0; min-width: 0; }
+.diagram-canvas { max-width: 100%; overflow-x: auto; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); }
+.diagram-canvas:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 2px; }
+.diagram-canvas svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+.diagram-measure { position: fixed; top: 0; left: -10000px; width: 1600px; visibility: hidden; pointer-events: none; }
+:is(.diagram-canvas, .diagram-measure) svg { font-family: inherit; font-size: var(--font-size-2); }
+:is(.diagram-canvas, .diagram-measure) svg text { fill: var(--color-text); font-size: var(--font-size-2); }
+.diagram-canvas svg .node .label text { text-anchor: middle; }
+.diagram-canvas svg .node :is(rect, circle, ellipse, polygon, path) { fill: var(--color-brand-weak); stroke: var(--color-brand); stroke-width: 1px; }
+.diagram-canvas svg :is(.flowchart-link, .edgePaths .path) { fill: none; stroke: var(--color-text-muted); stroke-width: 1.5px; }
+.diagram-canvas svg .edge-thickness-thick { stroke-width: 3px; }
+.diagram-canvas svg .edge-thickness-invisible { stroke-width: 0; }
+.diagram-canvas svg .edge-pattern-dashed { stroke-dasharray: 3; }
+.diagram-canvas svg .edge-pattern-dotted { stroke-dasharray: 2; }
+.diagram-canvas svg .marker, .diagram-canvas svg .marker .arrowMarkerPath { fill: var(--color-text-muted); stroke: var(--color-text-muted); }
+.diagram-canvas svg .marker.cross .arrowMarkerPath { fill: none; stroke-width: 2px; }
+.diagram-canvas svg .edgeLabel rect.background, .diagram-canvas svg .edgeLabel rect { fill: var(--color-surface); stroke: none; }
+.diagram-canvas svg .edgeLabel text { fill: var(--color-text-muted); }
+.diagram-canvas svg .node .label rect { fill: none; stroke: none; }
+.diagram-canvas svg .cluster rect { fill: var(--color-surface-alt); stroke: var(--color-border); stroke-width: 1px; }
+.diagram-canvas svg .cluster-label text, .diagram-canvas svg .cluster text { fill: var(--color-text-muted); }
+.diagram-status { margin: 0 0 var(--space-2); }
+.diagram-source > summary { cursor: pointer; color: var(--color-text-muted); font-size: var(--font-size-1); }
+.diagram-source > pre { margin-top: var(--space-2); }
+.diagram[data-diagram=ready] .diagram-source { margin-top: var(--space-2); }
+
+/* Prompt cards (#1123): a reading view by default; 编辑源码 shows the textarea the form saves next to a live preview. */
+.prompt-reader { display: grid; gap: var(--space-4); min-width: 0; }
+.prompt-reader-bar { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+.prompt-reader-bar [aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand); }
+.prompt-reading, .prompt-preview { min-width: 0; padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface-alt); }
+.prompt-reading:focus-visible, .prompt-preview:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 2px; }
+.prompt-source { display: grid; gap: var(--space-4); min-width: 0; }
+.prompt-source[hidden], .prompt-reading[hidden] { display: none; }
+.prompt-source textarea { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-size-label); }
+.prompt-preview-title { margin: 0 0 var(--space-3); color: var(--color-text-muted); font-size: var(--font-size-1); }
+@media (min-width: 1100px) {
+  .prompt-source { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .prompt-source .prompt-preview { position: sticky; top: var(--space-5); max-height: 80vh; overflow: auto; }
+}

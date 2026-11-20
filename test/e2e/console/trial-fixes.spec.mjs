@@ -1,4 +1,5 @@
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
+import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { openModelCatalog } from '../helpers/open-model-folds.mjs';
 import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../../fixtures/helpers.mjs';import{RuleService}from'../../../dist/rules/service.js';import{managerPrompt,saveManager}from'../../../dist/dispatch/settings.js';import{TaskEngine}from'../../../dist/agent/engine.js';import{Onboarding}from'../../../dist/onboarding/service.js';
 
@@ -28,7 +29,7 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await page.goto(h.admin+'/#/projects/101/roles/manager');
   await expect(page.locator('#project-page')).not.toContainText('项目检视指引');
   await expect(prompt).toHaveValue(/Console-only directive/);
-  await prompt.fill((await prompt.inputValue()).replace('Console-only directive','Edited console directive'));await savePrompt.click();
+  await promptEditor(page,'Manager 提示词');await prompt.fill((await prompt.inputValue()).replace('Console-only directive','Edited console directive'));await savePrompt.click();
   await expect(page.getByText('已保存 Manager 提示词',{exact:true})).toBeVisible();
   expect(JSON.parse(h.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/rules/issue-review.md']).toBe('Console-only directive');
   await page.route('**/api/repositories/101/manager',route=>route.fulfill({status:400,contentType:'application/json',body:'{"error":"invalid_manager_prompt"}'}));
@@ -56,7 +57,7 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await page.reload();await expect(skillRow(releaseSkill)).toBeVisible();
   await page.route('**/api/repositories/101/manager',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await page.reload();
   await expect(page.locator('#project-page')).toContainText('503 · github_unavailable');await expect(prompt).toHaveCount(0);
-  await page.unroute('**/api/repositories/101/manager');await page.reload();await expect(prompt).toBeVisible();
+  await page.unroute('**/api/repositories/101/manager');await page.reload();await expect(promptReading(page,'Manager 提示词')).toBeVisible();
   mkdirSync('.tmp/trial-ui',{recursive:true});await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/trial-ui/tasks-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await skillRow(releaseSkill).getByRole('button',{name:'查看内容',exact:true}).click();await expect(page.locator('#project-detail .rule-card')).toContainText('Refreshed release notes');await page.screenshot({path:'.tmp/trial-ui/tasks-mobile.png',fullPage:true});
   const sectionPicker=page.getByLabel('当前页面',{exact:true});await expect(sectionPicker).toBeVisible();

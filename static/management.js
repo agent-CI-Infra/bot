@@ -1,4 +1,5 @@
 /** @console-modules
+ * management/diagrams.js
  * management/presentation.js
  * management/window.js
  * management/receipts.js

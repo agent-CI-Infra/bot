@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptReading } from '../helpers/prompt-editor.mjs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
@@ -14,7 +15,7 @@ async function prepared(page) {
     expect(result.status).toBe(200);
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.getByLabel('角色提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, '角色提示词')).toBeVisible();
     await openRoleFormAdvanced(page);
     return { h, admin };
   } catch (error) { await h.stop(); throw error; }

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
@@ -38,7 +39,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(page.getByRole('heading', { name: 'Agent 与模型', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: '提示词', exact: true })).toBeVisible();
     await expect(page.getByLabel('dev Agent 后端', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('角色提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, '角色提示词')).toBeVisible();
     const advanced = page.getByTestId('role-form-advanced');
     await expect(advanced).toBeVisible();
     expect(await advanced.evaluate(el => el.open)).toBe(false);
@@ -49,7 +50,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Developer', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Project controller', exact: true })).toHaveCount(0);
     await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
-    await page.getByLabel('角色提示词', { exact: true }).fill('先读复现，再改代码。');
+    await (await promptEditor(page, '角色提示词')).fill('先读复现，再改代码。');
     const save = consoleSave(page);
     await expect(save).toBeVisible();
     await page.screenshot({ path: `${out}/form-1440.png`, fullPage: true });

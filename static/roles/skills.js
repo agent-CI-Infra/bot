@@ -91,7 +91,16 @@ function roleSettingsCard(role, state, redraw, access) {
   const prompts = group('prompts', rolePageText('prompts'));
   const system = textarea('system_prompt', state.data.system_prompt, { rows: 6, readOnly: true }); system.setAttribute('aria-label', '系统提示词'); system.readOnly = true;
   prompts.append(field('系统提示词', system), note(rolePageText('systemNote')));
-  prompts.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), note(rolePageText('promptNote')), button('恢复角色模板', async () => {
+  // #1123: the role prompt opens in its reading view; the view a person picked stays while they are on this project,
+  // through redraws, a discarded draft and a re-read configuration.
+  const personaField = roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), promptModes = current.rolePromptModes ??= {};
+  const persona = promptReader(personaField, personaField.querySelector('textarea'), { label: '角色提示词', mode: promptModes[role.role_id] || 'read',
+    onMode: mode => { promptModes[role.role_id] = mode; },
+    assistant: typeof openManagementRequest === 'function' ? async () => {
+      if (state.dirty && !await askConfirm({ title: '先离开未保存的角色配置？', body: ['管理助手读取的是已保存的角色配置，这里未保存的修改不会带过去。'], action: '打开管理助手' })) return;
+      await openManagementRequest(current.id, `我想调整角色「${roleConfigName(role)}」（${role.role_id}）提示词里的工作流程。请先读取这个角色当前的提示词，用 Mermaid 流程图画出现在的流程；我说明要改的地方后，再画出修改后的流程图并列出变更要点，等我确认后再保存。要调整的是：`);
+    } : null });
+  prompts.append(persona, note(rolePageText('promptNote')), button('恢复角色模板', async () => {
     if (!await askConfirm({ title: '恢复角色模板？', body: ['当前角色提示词将替换为默认模板，保存后生效。'], action: '恢复模板' })) return;
     role.persona_prompt = (Object.hasOwn(state.data.role_templates, role.role_id) ? state.data.role_templates[role.role_id] : state.data.role_templates.observer); markRoleDirty(state); redraw();
   }));

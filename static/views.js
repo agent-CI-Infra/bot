@@ -3,6 +3,7 @@
  * views/widgets.js
  * views/role-flow.js
  * views/save-bar.js
+ * views/prompt-reader.js
  * views/task-session.js
  * views/timeline.js
  * views/task-records.js

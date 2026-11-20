@@ -438,7 +438,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       if (applyScope(expectedScope)) { void openConversation().catch(showAccessError); return true; }
     }
     clearRepositoryOnboarding();
-    const prompt = repositoryOnboardingPrompt({ id: queued.id, full_name: fullName, started });
+    const prompt = queued.prompt || repositoryOnboardingPrompt({ id: queued.id, full_name: fullName, started });
     message.value = prompt; drafts.set(conversation, prompt);
     message.focus();
     return true;

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
@@ -46,7 +47,7 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     await expect(consoleSave(page)).toBeHidden();
     await expect(page.getByRole('button', { name: '读取最新版本并比较', exact: true })).toBeVisible();
     await expect(page.getByTestId('console-save-advanced')).toHaveCount(0);
-    const prompt = page.getByLabel('角色提示词', { exact: true });
+    const prompt = await promptEditor(page, '角色提示词');
     const previous = await prompt.inputValue();
     await prompt.fill('统一保存栏提示词');
     await expect(consoleSaveStatus(page)).toContainText('有未保存的更改');
@@ -160,7 +161,7 @@ test('Manager 角色页通过统一保存栏按角色设置模型，不再展示
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginAs(page, h.admin + '/#/projects/101/roles/manager', 'administrator', password);
-    await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
+    await expect(promptReading(page, 'Manager 提示词')).toBeVisible();
     await expect(page.locator('.task-model-editor')).toHaveCount(0);
     await page.getByLabel('manager 模型', { exact: true }).selectOption(other.id);
     await consoleSave(page).click();
