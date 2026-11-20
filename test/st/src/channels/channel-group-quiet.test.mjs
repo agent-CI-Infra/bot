@@ -1,6 +1,5 @@
-// #1123: a Feishu group learns what it can use by asking. 「你能干什么」 is answered from describe_capabilities, which narrows each
-// project's capabilities by the group's own level. The bot never posts into a group on its own when the binding changes: it speaks
-// in a group only when someone there addresses it.
+// #1123: the bot never posts into a group on its own when the binding changes, and it has no fixed capability card: it speaks in
+// a group only when someone there addresses it, and answers 「你能干什么」 like any other question, from the tools it really has.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, boundGroup, repositoryAssistant, scriptedModel, post, inGroup, finished, until } from '../../../fixtures/channel-fixture.mjs';
@@ -31,24 +30,16 @@ test('a capability card still queued from before is dropped at delivery, not sen
   assert.equal(f.wire.sent.length, 0);
 });
 
-
-test('describe_capabilities answers for this group: its level narrows the project, and examples are only what it can use', async t => {
+test('asking a group what the bot can do gets the assistant\'s own answer, with no fixed capability tool or template', async t => {
   const f = await channelFixture(t), { h } = f;
   await repositoryAssistant(f);
-  await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'develop' });
   await boundGroup(f, ['101']);
-  let seen = null;
-  scriptedModel(f, [['describe_capabilities', {}], done => { seen = done[0]; return '本群可以问答和查 CI。'; }]);
+  scriptedModel(f, [['list_projects', {}], () => '本群可以问 agent-test-zone/admin-fixture-101 的代码和讨论。']);
   const asked = await post(h, f.id, inGroup('你能干什么？', 'ou_bob')); await finished(h, asked.value.operation_id);
-  assert.ok(seen, 'the tool ran');
-  assert.equal(seen.group_level, 'read'); assert.equal(seen.group_level_title, '只读问答');
-  const repo = seen.repositories.find(r => r.repository === 'agent-test-zone/admin-fixture-101');
-  assert.equal(repo.ceiling, 'develop');
-  assert.deepEqual(Object.fromEntries(repo.capabilities.map(c => [c.id, c.state])),
-    { qa: 'ready', triage: 'level_limited', review: 'level_limited', development: 'level_limited', testing: 'level_limited', ci: 'ready' });
-  assert.equal(repo.examples.length, 3);
-  assert.ok(repo.examples.every(example => !/开发|检视|跑一下测试/.test(example)), repo.examples.join(' | '));
-  // The group assistant is told to read it before saying what it can do.
-  const system = f.requests.find(body => JSON.stringify(body.tools ?? []).includes('describe_capabilities'))?.messages[0].content ?? '';
-  assert.match(system, /what you can do, how you work or how to work with you, call describe_capabilities first/);
+  const request = f.requests.find(body => (body.tools ?? []).some(tool => tool.function?.name === 'list_projects'));
+  assert.ok(request, 'the group assistant was asked');
+  assert.ok(!request.tools.some(tool => tool.function?.name === 'describe_capabilities'), request.tools.map(tool => tool.function?.name).join(','));
+  assert.doesNotMatch(request.messages[0].content, /describe_capabilities|three requests from its examples/);
+  // The group gets the model's own words, not a card built from settings.
+  await until(() => f.wire.sent.find(sent => JSON.stringify(sent.content).includes('本群可以问 agent-test-zone/admin-fixture-101 的代码和讨论。')));
 });

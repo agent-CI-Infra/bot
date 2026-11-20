@@ -755,22 +755,16 @@ test('retried historical answer-round event exposes legacy evidence through reco
  await f.run();assert.equal(events(f.h)[0].state,'decided');assert.ok(!f.requests.at(-1).messages[0].content.includes('Deciding this event failed several times before'));
 });
 
-// #1123: a mention reaches the Manager with what the project can do now, so 「你能干什么」 on GitHub is answered from the
-// project's real ceiling, switches and roles; other events do not carry it.
-test('a mention carries the project capabilities and copyable requests; an opened Issue does not', async t => {
+// #1123: 「你能干什么」 on GitHub is answered from the project's own Manager prompt; a mention carries no fixed capability
+// projection from settings, which a customized prompt could contradict.
+test('a mention reaches the Manager without a fixed capabilities projection', async t => {
   const f = await fixture(t);
-  await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'comment' });
   f.state.decide = () => ({ decision: 'ignore', reason: '已回答' });
-  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'cap-opened'); await f.run();
-  assert.equal(JSON.parse(f.requests.at(-1).messages[1].content).capabilities, undefined);
   queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', issue, sender: alice,
     comment: { id: 77, body: '@bot 你能干什么？', author_association: 'CONTRIBUTOR', html_url: 'https://github.example/c/77', user: { login: 'alice' } } }, 'cap-mention');
   await f.run();
   const input = JSON.parse(f.requests.at(-1).messages[1].content);
   assert.equal(input.event.type, 'issue.mention');
-  const states = Object.fromEntries(input.capabilities.scenarios.map(s => [s.id, s.state]));
-  assert.equal(states.qa, '可以用'); assert.equal(states.development, '受项目能力上限约束');
-  assert.equal(input.capabilities.examples.length, 3);
-  assert.ok(input.capabilities.examples.every(example => !example.includes('开发')), input.capabilities.examples.join(' | '));
-  assert.match(f.requests.at(-1).messages[0].content, /answer from `capabilities` in the event/);
+  assert.equal(input.capabilities, undefined);
+  assert.doesNotMatch(f.requests.at(-1).messages[0].content, /`capabilities` in the event/);
 });
