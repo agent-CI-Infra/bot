@@ -14,6 +14,7 @@ import { operationRequestText, operationResult } from '../storage/payloads.js';
 import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.js';
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
 import { sanitizeBrowserTrajectory } from '../../runner/browser-policy.mjs';
+import { MAX_ARTIFACT_COMPRESSED_BYTES } from '../../runner/artifact-zip.mjs';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -46,7 +47,8 @@ function volumeFull(request:any,result:any):void{
 // What works before the task has a worktree (#769): the task context, its agent's mailbox and session, the project notes, the
 // computer's git store, and making, taking or inspecting worktrees. Everything else runs in the checkout.
 const aside=(request:any)=>/^(workspace_agent_|workspace_harness_|git_)/.test(request.type)
-  ||['workspace_context','workspace_init','workspace_checkout','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect'].includes(request.type)
+  ||['workspace_context','workspace_artifact_stage','workspace_init','workspace_checkout','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect'].includes(request.type)
+  ||request.type==='workspace_artifact_extract'&&typeof request.path==='string'&&(request.path.startsWith('../')||request.path.startsWith('/tmp/')||request.path.startsWith('/workspace/'))
   ||['workspace_read','workspace_write'].includes(request.type)&&!request.sha&&!request.snapshot&&typeof request.path==='string'&&(request.path.startsWith('../')||request.path.startsWith('/tmp/')||request.path.startsWith('/workspace/'));
 // One binding or choice at a time per task workspace in this process, whichever Workspace object asks: a read that binds
 // the system's choice and the agent's own choice in the same turn must not both take a worktree.
@@ -399,6 +401,18 @@ export class Workspace {
         if(result.error)stop('workspace_write_failed','waiting_environment',`Could not write task context ${path} at offset ${offset}: ${result.detail||result.error}`);
       }
     }
+  }
+  async extractArtifact(artifactId:number,data:Buffer,targetPath=`../context/artifacts/${artifactId}`){
+    workspaceToolPath(targetPath);
+    if(data.length>MAX_ARTIFACT_COMPRESSED_BYTES)return {error:'github_artifact_too_large',detail:`Compressed artifact size ${data.length} exceeds ${MAX_ARTIFACT_COMPRESSED_BYTES} bytes.`};
+    if(!aside({type:'workspace_artifact_extract',path:targetPath})){const ready=await this.ensure();if(ready.error)return ready;}
+    const stageId=randomId();
+    for(let offset=0;offset<data.length||offset===0;offset+=45000){
+      const staged=await this.deliver({type:'workspace_artifact_stage',stage_id:stageId,base64:data.subarray(offset,offset+45000).toString('base64'),offset});
+      if(staged.error)return staged;
+      if(data.length===0)break;
+    }
+    return this.deliver({type:'workspace_artifact_extract',stage_id:stageId,path:targetPath});
   }
   // Copies the files of one fixed commit into this task's own workspace. With a mirror that holds the commit, the listing
   // and file contents come from it; otherwise (or for a blob the mirror lacks) from the GitHub API, as before.

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { browserEvidenceRoot } from '../browser/tools.js';
 import { browserEvidenceDir } from '../browser/runtime.js';
 import { pruneCommitChecks } from '../tasks/external-links.js';
+import { pruneEventSubscriptions } from '../tasks/event-subscriptions.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
 // by platform administrators (audited) and applied by a daily background job in bounded batches. A cleanup removes
@@ -175,8 +176,21 @@ export class RetentionCleanup {
         await this.pause(this.options.pauseMs ?? 20);
       }
     } catch (error) { commitChecks.failed = 1; this.failure('commit_checks', error); }
+    const eventSubscriptions = { count: 0, failed: 0 };
+    try {
+      for (const row of this.store.all('SELECT id FROM repositories')) {
+        const days = trajectoryDays(settings, String(row.id)) ?? 30;
+        const before = new Date(this.now() - days * day).toISOString();
+        while (!this.stopped) {
+          const removed = pruneEventSubscriptions(this.store, String(row.id), before);
+          eventSubscriptions.count += removed;
+          if (removed < 500) break;
+          await this.pause(this.options.pauseMs ?? 20);
+        }
+      }
+    } catch (error) { eventSubscriptions.failed = 1; this.failure('event_subscriptions', error); }
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, commit_checks: commitChecks, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, manager_window: manager, last_error: this.lastError });
   }
 
   /** Tells the manager its window when it reports another; null when the manager did not answer. */

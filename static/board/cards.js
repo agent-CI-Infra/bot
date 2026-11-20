@@ -100,6 +100,7 @@ function boardStopNote(item) {
 }
 // The next move is stated only when the recorded state names it; a status without one, or no status at all, stays silent.
 const boardNextSteps={waiting_configuration:'补齐配置后重试',waiting_environment:'修复环境后重试',waiting_permission:'处理权限后重试',
+  waiting_coordination:'等待协调返回后继续',waiting_event:'等待订阅事件或超时唤醒',
   waiting_pr_head:'等 PR 更新后继续',waiting_publication:'确认发布',retry_wait:'等待自动重试',needs_replan:'补充信息后重试',
   paused:'确认后继续',failed:'查看失败原因后重试',result_ready:'核对结果后发布'};
 function boardNextStep(item) {

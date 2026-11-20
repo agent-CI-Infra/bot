@@ -1,7 +1,8 @@
 import { configuredRedactor } from '../core/redaction.js';
 import { modelCatalogStorage } from '../models/catalog.js';
 import { sharedModelStorage } from '../models/sharing.js';
-import {childTaskStorage} from '../tasks/children.js';
+import { childTaskStorage } from '../tasks/children.js';
+import { eventSubscriptionStorage } from '../tasks/event-subscriptions.js';
 import {longExecutionStorage} from '../roles/long-execution.js';
 import {priorityStorage} from '../tasks/priority.js';
 import {coordinationStorage} from '../tasks/coordination.js';
@@ -269,6 +270,7 @@ export class Store {
     integrationStorage(this);
     coordinationStorage(this);
     childTaskStorage(this);
+    eventSubscriptionStorage(this);
     longExecutionStorage(this);
     roleStorage(this);
     // Task origin inheritance must remain available while another worker reopens this database.

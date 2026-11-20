@@ -25,7 +25,8 @@ import { eventAdapterId } from '../tasks/event-adapters.js';
 import { effectiveManagerPrompt } from '../dispatch/settings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
-import { RepositoryExplorer, repositoryTools } from './exploration.js';
+import { RepositoryExplorer, workspaceRepositoryTools } from './exploration.js';
+import { eventSubscriptionToolNames, eventSubscriptionTools, executeTaskSubscriptionTool, taskEventSubscriptionContext } from '../tasks/event-subscriptions.js';
 import { permissionTools } from '../roles/permissions.js';
 import { workspaceInstructions, workspaceTool, workspaceToolNames, workspaceTools } from './workspace-tools.js';
 import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
@@ -51,7 +52,12 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const prompt = !reply ? undefined : legacy ? { id: String(legacy.id), name: String(legacy.name), prompt: String(legacy.prompt ?? '') }
     : { id: 'reply', name: '事件回复', prompt: effectiveManagerPrompt(store, task.repository_id) };
   const profile = workspaceProfile(profileKind, context, taskPermissions(store, task), prompt, autoMergePolicy(store, String(task.repository_id)));
-  const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
+  const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length
+    ? new RepositoryExplorer(tokens, redactor, guard, {
+        extract: (artifactId, data, targetPath) => workspace.extractArtifact(artifactId, data, targetPath),
+        canWriteCheckout: () => profile.capabilities.workspace.write,
+      })
+    : null;
   const records = new TaskRecords(store);
   for(const tool of taskTools) {
     profile.tools.push(tool as any);
@@ -59,6 +65,13 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       const result=records.tool(task.id,tool.function.name,redactor.clean(args),taskTraceAccess(store,task));
       if(!('error' in result)&&tool.function.name==='record_progress'&&profile.capabilities.workspace.write)await checkpoint(store,task,workspace);
       return result;
+    };
+  }
+  for (const tool of eventSubscriptionTools) {
+    profile.tools.push(tool as any);
+    platform[tool.function.name] = async (_id, args) => {
+      await guard();
+      return executeTaskSubscriptionTool(store, task, tool.function.name, redactor.clean(args), { log: entry => workspace.log(entry) });
     };
   }
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},workspace);};}
@@ -75,7 +88,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const plan = workspace.plannedWorktree?.(), choosing = !team && !!plan && plan.state !== 'bound';
   if (choosing) profile.tools.push(...workspaceTools as any);
   const system = profile.system + '\n' + taskRecordInstructions + (choosing ? '\n' + workspaceInstructions : '');
-  context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
+  const subscriptionCtx = store.get('SELECT 1 FROM tasks WHERE id=?', task.id) ? taskEventSubscriptionContext(store, String(task.id)) : undefined;
+  context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null,...(subscriptionCtx?{event_subscriptions:subscriptionCtx}:{})};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
   if(!profile.tools.some(t=>t.function.name==='read_tool_result'))profile.tools.push(readToolResult);
   const entryBudget = resolveCommandTimeout(store, task, 'dev', null);
@@ -89,7 +103,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest, ensureWorkspace: async () => workspace.ensure?.() ?? {},
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
     repository: async (name, args) => {
-      const allowed = repositoryTools.some(tool => tool.function.name === name);
+      const allowed = workspaceRepositoryTools.some(tool => tool.function.name === name);
       // A living Pi may retain its read token across a control-plane restart; establish this executor's client too.
       const access = allowed && explorer ? await explorer.execute('github_read_token', {}) : null;
       return !allowed ? { error: 'tool_not_allowed' } : !explorer ? { error: 'github_read_token_unavailable' } : access?.error ? access : explorer.execute(name, args);
@@ -127,7 +141,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
           : spaces.current.call('stage-observation:' + randomId(), { type: 'workspace_read', path: args?.path });
       }
       if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
-      if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
+      if (workspaceRepositoryTools.some(t => t.function.name === name)) return repository!(name, args);
       if (name === 'github_read_token') {
         // Native backends use structured repository tools; a provider credential must never become tool output.
         const access = await token!();
@@ -154,7 +168,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     return runTeam({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, repairInvalid, prompt: config.prompt, tools: profile.tools, model: conversation?.model,
       execute: async (name, args) => {
         try { return await execute(name, args); }
-        catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
+        catch (error) { if (error instanceof TaskError && error.state !== 'waiting_event') return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
       { entry, workspace, observerTools: profile.tools.map(t => t.function.name === 'run_command' ? retimeCommandTool(t, observerBudget.defaultSeconds, observerBudget.maxSeconds) : t),
         prepare: async (role: string) => profile.capabilities.workspace.write || role !== 'dev' ? spaces.prepare(role) : undefined,
@@ -181,10 +195,11 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // in the runner receipt so a control-plane restart can validate it again without publishing anything twice.
   const complete=session.complete;
   let submitted:{value:any}|undefined;
-  // The milestone tool is a control tool: the runner forwards it through the mailbox like a finish tool, without ending.
-  Object.assign(config,{control_tools:[...profile.finishTools,...choosing?workspaceToolNames:[],...platform[milestoneToolName]?[milestoneToolName]:[]].filter(name=>initial.includes(name))});
+  // The milestone tool and event subscription tools are control tools: the runner forwards them through the mailbox without ending.
+  Object.assign(config,{control_tools:[...profile.finishTools,...choosing?workspaceToolNames:[],...eventSubscriptionToolNames,...platform[milestoneToolName]?[milestoneToolName]:[]].filter(name=>initial.includes(name))});
   session.control=async(name,args,meta)=>{
     if(choosing&&workspaceToolNames.includes(name))return {result:redactor.clean(await workspaceTool(workspace,name,redactor.clean(args),'agent',meta?.id))};
+    if(eventSubscriptionToolNames.includes(name)&&platform[name])return {result:redactor.clean(await platform[name]!(meta?.id??randomId(),args))};
     if(name===milestoneToolName&&platform[name])return {result:redactor.clean(await platform[name]!(meta?.id??randomId(),args))};
     if(!profile.finishTools.includes(name))return {result:{error:'tool_not_allowed'}};
     try {const value=await complete({result:args},null);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}

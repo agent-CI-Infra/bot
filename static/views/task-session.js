@@ -529,14 +529,15 @@ function renderTaskSummaryBody(task, detail) {
   // 2. Active Fault Callout (visible without opening details)
   const faultBox = $('task-fault-box');
   if (faultBox) {
-    const showFault = !['succeeded', 'pr_opened', 'completed', 'running', 'queued'].includes(task.status) && (task.error_code || task.error_detail);
+    const showFault = !['succeeded', 'pr_opened', 'completed', 'running', 'queued', 'waiting_event'].includes(task.status) && (task.error_code || task.error_detail);
     if (!showFault) {
       faultBox.hidden = true;
       faultBox.replaceChildren();
     } else {
       const detailText = task.error_detail || (task.error_code === 'pr_head_pending' ? 'PR 尚未指向刚推送的提交' : ownershipErrors[task.error_code] || taskErrorText(task.error_code));
+      const waitingEvent = task.status === 'waiting_event' || task.error_code === 'event_subscription_pending';
       faultBox.replaceChildren(
-        element('strong', task.error_code === 'repository_has_no_commit' ? '等待原因：' : '异常原因：'),
+        element('strong', waitingEvent ? '等待事件订阅：' : task.error_code === 'repository_has_no_commit' ? '等待原因：' : '异常原因：'),
         element('span', detailText || task.error_code || ''),
         ...(task.error_cause?.action ? [element('span', ' · 处理建议：' + task.error_cause.action, 'muted')] : []),
       );
@@ -548,9 +549,10 @@ function renderTaskSummaryBody(task, detail) {
   const extBar = $('task-external-bar');
   if (extBar) {
     const ext = task.external || {};
+    const subs = Array.isArray(detail?.event_subscriptions) ? detail.event_subscriptions : [];
     const sourceDelivery = task.structured?.contract?.source?.delivery_id || task.source_delivery_id || null;
     const originText = task.origin && typeof taskOriginCaption === 'function' ? taskOriginCaption(task.origin) : '';
-    const extSig = JSON.stringify([ext, sourceDelivery, originText, githubUrl(task)]);
+    const extSig = JSON.stringify([ext, subs, detail?.can_manage, task.status, sourceDelivery, originText, githubUrl(task)]);
     if (extBar.dataset.signature !== extSig) {
       extBar.dataset.signature = extSig;
       extBar.replaceChildren();
@@ -652,6 +654,39 @@ function renderTaskSummaryBody(task, detail) {
         srcItem.append(element('span', '来源投递', 'task-ext-label'));
         srcItem.append(button('查看投递', () => openTaskDelivery(sourceDelivery).catch(error), 'quiet linkish'));
         extBar.append(srcItem);
+      }
+
+      // Active or resolved webhook event subscriptions (#1168)
+      if (subs.length) {
+        const subItem = element('div', '', 'task-ext-item task-ext-subscriptions');
+        subItem.dataset.testid = 'task-subscriptions-bar';
+        subItem.append(element('span', '事件订阅', 'task-ext-label'));
+        const activeSub = subs.find(s => s.state === 'active') || subs[0];
+        const [subCaption, subTone] = ({ active: ['等待触发', 'info'], matched: ['已命中', 'success'], timed_out: ['超时唤醒', 'warning'], cancelled: ['已取消', ''] })[activeSub.state] || [activeSub.state, ''];
+        subItem.append(badge(subCaption, subTone));
+        const hintSummary = typeof formatSubscriptionHints === 'function' ? formatSubscriptionHints(activeSub.hints) : '';
+        const eventSummary = `${(activeSub.events || []).join('/')}${hintSummary ? ` (${hintSummary})` : ''}${activeSub.note ? ` · ${clipText(activeSub.note, 48)}` : ''}`;
+        subItem.append(element('span', eventSummary, 'task-ext-value'));
+        if (activeSub.state === 'active' && Number.isFinite(activeSub.timeout_at)) {
+          subItem.append(element('span', '超时唤醒 ' + timestamp(new Date(activeSub.timeout_at).toISOString()), 'muted'));
+        }
+        if (activeSub.state === 'active' && detail?.can_manage !== false && !terminalStates.includes(task.status)) {
+          const quickCancel = button('取消订阅', async event => {
+            const btn = event.currentTarget;
+            btn.disabled = true;
+            try {
+              await api(`/api/tasks/${encodeURIComponent(task.id)}/subscriptions/${encodeURIComponent(activeSub.id)}/cancel`, 'POST', {});
+              await refreshTask();
+            } catch (err) {
+              btn.disabled = false;
+              taskPollError = '';
+              notice('task-error', readErrorText(err));
+            }
+          }, 'btn-text task-ext-sublink');
+          quickCancel.dataset.testid = 'bar-cancel-subscription-' + activeSub.id;
+          subItem.append(quickCancel);
+        }
+        extBar.append(subItem);
       }
     }
   }

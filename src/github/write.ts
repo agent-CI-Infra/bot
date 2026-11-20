@@ -94,15 +94,22 @@ const routes: Route[] = [
   route('POST', '/git/blobs', 'contents', { base64: 'encoding' }), route('POST', '/git/(?:trees|commits|tags|refs)', 'contents'),
   route('PATCH|DELETE', '/git/refs/.+', 'contents', { move: 'ref' }),
   route('PUT', `/pulls/${n}/merge`, 'contents', { merge: true }), route('POST', '/merges', 'contents', { move: 'merges' }),
-  // Actions: start a workflow by its file name or id (#1072).
-  route('POST', `/actions/workflows/${segment}/dispatches`, 'actions', { dispatch: true })
+  // Actions: start a workflow by its file name or id (#1072), or rerun/cancel workflow runs and jobs (#1168).
+  route('POST', `/actions/workflows/${segment}/dispatches`, 'actions', { dispatch: true }),
+  route('POST', `/actions/runs/${n}/rerun`, 'actions'),
+  route('POST', `/actions/runs/${n}/rerun-failed-jobs`, 'actions'),
+  route('POST', `/actions/runs/${n}/rerun-pending-jobs`, 'actions'),
+  route('POST', `/actions/runs/${n}/cancel`, 'actions'),
+  route('POST', `/actions/runs/${n}/force-cancel`, 'actions'),
+  route('POST', `/actions/jobs/${n}/rerun`, 'actions'),
 ];
 
 const fn = (name: string, description: string, properties: any, required: string[]) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 const description = 'Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository (/repos/{owner}/{repo} is implied), with the REST JSON body. '
   + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}; '
-  + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked). '
+  + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked); '
+  + 'POST /actions/runs/99/rerun, POST /actions/runs/99/rerun-failed-jobs, POST /actions/runs/99/rerun-pending-jobs, POST /actions/runs/99/cancel, POST /actions/runs/99/force-cancel, or POST /actions/jobs/88/rerun manage Actions runs and jobs. '
   + 'PUT /pulls/7/merge {sha?, merge_method?} merges the pull request, or adds it to the merge queue when its base branch requires one (the answer says queued); it needs Contents and Pull requests write and is allowed only as the project\'s auto-merge policy says (your instructions state it). Writes that move the default branch without a pull request follow the same policy. '
   + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
   + 'Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
@@ -258,7 +265,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     const ceiling = projectCeiling(store, String(repository.id)), needed = resourceLevel(resource);
     return covers(ceiling, needed) ? null : refuse('capability_ceiling', `This project's capability ceiling is ${ceiling}; ${resourceName(resource)} writes need ${needed}. Nothing was sent; a project administrator can raise the ceiling.`, { needed, ceiling });
   };
-  if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges, workflow dispatches.`);
+  if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges, workflow dispatches, and Actions run/job reruns or cancellations.`);
   if (input.merge_request !== undefined && !entry.merge && !entry.move) return { error: 'invalid_arguments', detail: 'merge_request goes only with PUT /pulls/{n}/merge or a write that moves the default branch.' };
   // CI changes are bot pull requests that people review and merge (#931). github_write's token never has the Workflows
   // permission, so GitHub refuses a ref update that would change .github/workflows/; a file write there is refused here,

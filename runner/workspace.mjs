@@ -11,6 +11,7 @@ import {clearStaleGitLocks,lockGraceMs} from './git-locks.mjs';
 import { Notes } from './notes.mjs';
 import { tasksDirectory, worktreesDirectory, workspaceRoot as projectRoot } from './paths.mjs';
 import { runWorkspaceBrowser } from './browser-session.mjs';
+import { ArtifactArchiveError, extractArtifactZip, MAX_ARTIFACT_COMPRESSED_BYTES } from './artifact-zip.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
 const id48=/^[a-f0-9]{48}$/,names=buffer=>buffer.toString('utf8').split('\0').filter(Boolean);
@@ -228,6 +229,29 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
     try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);}finally{await handle.close();}
     return {written:true};
+  }
+  if(input.type==='workspace_artifact_stage'){
+    if(!/^[a-f0-9]{16,48}$/.test(String(input.stage_id||''))||typeof input.base64!=='string'||input.base64.length>61440||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_artifact_stage');
+    const data=Buffer.from(input.base64,'base64');
+    if(input.offset+data.length>MAX_ARTIFACT_COMPRESSED_BYTES)throw new Error('artifact_too_large');
+    await mkdir(root,{recursive:true,mode:0o700});
+    const stage=root+'/.artifact-stage-'+input.stage_id;
+    const handle=await open(stage,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
+    try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);}finally{await handle.close();}
+    return {staged:true};
+  }
+  if(input.type==='workspace_artifact_extract'){
+    if(!/^[a-f0-9]{16,48}$/.test(String(input.stage_id||''))||typeof input.path!=='string'||!input.path)throw new Error('invalid_artifact_extract');
+    const stage=root+'/.artifact-stage-'+input.stage_id;
+    try{
+      if(input.path.startsWith('../notes/')||resolve(input.path).startsWith(resolve(notesRoot)+sep))throw new Error('invalid_artifact_path');
+      const target=input.path.startsWith('../context/')?await contextPath(input.path.slice(11),true):outsideRepo(input.path)?await computerPath(input.path,true):(await base(),await path(input.path,true));
+      const archive=await readFile(stage);
+      return extractArtifactZip(archive,target);
+    }catch(error){
+      if(error instanceof ArtifactArchiveError)return {error:error.code,detail:error.detail};
+      throw error;
+    }finally{await unlink(stage).catch(()=>{});}
   }
   if(input.type.startsWith('workspace_agent_')||input.type.startsWith('workspace_harness_'))return agentOperation(input,root);
   const noteTarget=(value)=>{

@@ -203,8 +203,9 @@ test('GitHub 权限文案说明读写开放 github_write；默认只有 Manager 
     await expect(box).toContainText('读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。');
     await expect(box).toContainText('读写：还可以用 github_write 开 PR、修改 PR，评论，发检视（包括批准和要求修改）、请求检视人。合并 PR 需要 Contents 和 Pull Request 都是读写，并按项目的自动合并策略。');
     await expect(box).toContainText('读写：还可以用 github_write 提交文件、创建 Git 对象、分支和引用，可以直接推送到分支；合并 PR 另需 Pull Request 读写，并按项目的自动合并策略。');
-    await expect(box).toContainText('读写：还可以用 github_write 触发声明了 workflow_dispatch 的工作流。');
-    await expect(box).toContainText('「可评论和打标签」只到 Issue、Pull Request 和 Actions（触发工作流）');
+    await expect(box).toContainText('只读：查看工作流运行、job、日志并下载构建产物到任务工作区。');
+    await expect(box).toContainText('读写：还可以用 github_write 触发 workflow_dispatch、重跑或取消运行与 job。');
+    await expect(box).toContainText('「可评论和打标签」只到 Issue、Pull Request 和 Actions（触发工作流、重跑或取消运行与 job）');
     const actions = page.getByLabel('manager Actions权限', { exact: true });
     await expect(actions.locator('option')).toHaveText(['无权限', '只读', '读写']);
     mkdirSync('.tmp/role-settings-1072', { recursive: true });

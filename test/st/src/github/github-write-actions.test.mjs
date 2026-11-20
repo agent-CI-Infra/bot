@@ -29,6 +29,16 @@ async function fixture(t) {
       if (match[1] === 'push-only.yml') return send({ message: "Workflow does not have 'workflow_dispatch' trigger" }, 422);
       return send({ workflow_run_id: 77, run_url: 'https://api.github.com/repos/fixture/r/actions/runs/77', html_url: 'https://github.com/fixture/r/actions/runs/77' });
     }
+    const actionRun = /^\/repos\/fixture\/r\/actions\/runs\/(\d+)\/(rerun|rerun-failed-jobs|rerun-pending-jobs|cancel|force-cancel)$/.exec(path);
+    if (actionRun && req.method === 'POST') {
+      res.writeHead(actionRun[2].includes('cancel') ? 202 : 201, { 'Content-Type': 'application/json' });
+      return res.end('{}');
+    }
+    const actionJob = /^\/repos\/fixture\/r\/actions\/jobs\/(\d+)\/rerun$/.exec(path);
+    if (actionJob && req.method === 'POST') {
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      return res.end('{}');
+    }
     send({ message: 'Not Found' }, 404);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -38,12 +48,22 @@ async function fixture(t) {
   const write = args => githubWrite({ store, repository, redactor: new Redactor(), guard: async () => {}, apiUrl: 'http://127.0.0.1:' + server.address().port,
     scope: 'task:dispatch', actor: { kind: 'task', role: 'manager', task_id: 'dispatch' }, allowed: (resource, operation) => githubWriteAllowed(role, resource, operation) }, args);
   const dispatches = () => requests.filter(r => r.method === 'POST' && r.path.endsWith('/dispatches'));
-  return { store, write, dispatches, setRole: value => { role = value; }, setCeiling: level => store.run("UPDATE policies SET capability_ceiling=? WHERE repository_id='r'", level) };
+  const actionWrites = () => requests.filter(r => r.method === 'POST' && r.path.includes('/actions/'));
+  return { store, write, dispatches, actionWrites, setRole: value => { role = value; }, setCeiling: level => store.run("UPDATE policies SET capability_ceiling=? WHERE repository_id='r'", level) };
 }
 
-test('the dispatch route is an Actions write; Actions write is a role item that follows Issues write by default (#1072)', () => {
-  for (const path of ['/actions/workflows/nightly.yml/dispatches', '/actions/workflows/1234/dispatches']) assert.equal(writeRoute('POST', path)?.resource, 'actions', path);
-  for (const [method, path] of [['PUT', '/actions/workflows/nightly.yml/dispatches'], ['POST', '/actions/runs/7/rerun'], ['POST', '/actions/workflows/nightly.yml/enable']])
+test('Actions dispatch, rerun and cancel routes are Actions writes; Actions write follows Issues write by default (#1072, #1168)', () => {
+  for (const path of [
+    '/actions/workflows/nightly.yml/dispatches',
+    '/actions/workflows/1234/dispatches',
+    '/actions/runs/7/rerun',
+    '/actions/runs/7/rerun-failed-jobs',
+    '/actions/runs/7/rerun-pending-jobs',
+    '/actions/runs/7/cancel',
+    '/actions/runs/7/force-cancel',
+    '/actions/jobs/88/rerun',
+  ]) assert.equal(writeRoute('POST', path)?.resource, 'actions', path);
+  for (const [method, path] of [['PUT', '/actions/workflows/nightly.yml/dispatches'], ['DELETE', '/actions/runs/7'], ['POST', '/actions/workflows/nightly.yml/enable']])
     assert.equal(writeRoute(method, path), null, method + ' ' + path);
   const manager = defaultPermissions('manager', 'controller');
   assert.equal(manager.github_actions, 'write');
@@ -91,4 +111,27 @@ test('a workflow input carrying a self-identifying token reaches GitHub without 
   const started = await f.write({ method: 'POST', path: '/actions/workflows/nightly.yml/dispatches', key: 'token', body: { ref: 'main', inputs: { note: `use ${credentialExamples}.`, suite: 'ghs_prefix' } } });
   assert.equal(started.workflow_run_id, 77);
   assert.deepEqual(f.dispatches().map(r => r.body.inputs), [{ note: `use ${maskedExamples}.`, suite: 'ghs_prefix' }]);
+});
+
+test('github_write supports native Actions run and job reruns and cancellations with ceiling, permission and idempotency checks (#1168)', async t => {
+  const f = await fixture(t);
+  f.setCeiling('read');
+  assert.equal((await f.write({ method: 'POST', path: '/actions/runs/91/rerun-failed-jobs', key: 'rerun-91' })).error, 'capability_ceiling');
+  assert.equal(f.actionWrites().length, 0);
+
+  f.setCeiling('comment');
+  const rerunFailed = await f.write({ method: 'POST', path: '/actions/runs/91/rerun-failed-jobs', key: 'rerun-91', body: { enable_debug_logging: true } });
+  assert.deepEqual(rerunFailed, { status: 201 });
+  assert.deepEqual(await f.write({ method: 'POST', path: '/actions/runs/91/rerun-failed-jobs', key: 'rerun-91', body: { enable_debug_logging: true } }), { status: 201, replayed: true });
+  assert.equal((await f.write({ method: 'POST', path: '/actions/runs/91/rerun-failed-jobs', key: 'rerun-91', body: { enable_debug_logging: false } })).error, 'github_write_key_conflict');
+
+  assert.deepEqual(await f.write({ method: 'POST', path: '/actions/runs/91/rerun', key: 'rerun-all-91' }), { status: 201 });
+  assert.deepEqual(await f.write({ method: 'POST', path: '/actions/runs/91/rerun-pending-jobs', key: 'rerun-pending-91' }), { status: 201 });
+  assert.deepEqual(await f.write({ method: 'POST', path: '/actions/runs/91/cancel', key: 'cancel-91' }), { status: 202 });
+  assert.deepEqual(await f.write({ method: 'POST', path: '/actions/runs/91/force-cancel', key: 'force-cancel-91' }), { status: 202 });
+  assert.deepEqual(await f.write({ method: 'POST', path: '/actions/jobs/404/rerun', key: 'rerun-job-404' }), { status: 201 });
+  assert.equal(f.actionWrites().length, 6);
+
+  f.setRole(updatePermissions(defaultPermissions('manager', 'controller'), { github_actions: 'read' }));
+  assert.equal((await f.write({ method: 'POST', path: '/actions/runs/91/cancel', key: 'denied-cancel' })).error, 'github_resource_forbidden');
 });
