@@ -28,7 +28,7 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .step-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.step-head strong{font-size:var(--font-size-label)}
 .step-meta{display:flex;align-items:center;gap:6px;color:var(--color-text-muted);font-size:var(--font-size-1)}.step p{margin:5px 0 0;font-size:var(--font-size-label);overflow-wrap:anywhere}.say{white-space:pre-wrap}.fault-action{color:#24414f}
 pre.command{margin:7px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-text);color:var(--color-text-inverse);max-height:none}
-pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-code-bg);color:var(--color-code-text);border:1px solid #e3eaf0;max-height:340px}
+pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-code-bg);border:1px solid #e3eaf0;max-height:340px}
 .fold{margin-top:6px;font-size:var(--font-size-1);color:var(--color-text-muted)}.fold summary{cursor:pointer;width:fit-content}
 .snapshot-progress>summary{cursor:pointer;overflow-wrap:anywhere;font-size:var(--font-size-label)}.snapshot-progress>summary:focus-visible{outline:2px solid var(--color-brand);outline-offset:4px;border-radius:3px}
 .snapshot-heading{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px 10px;width:calc(100% - 20px);vertical-align:top}.snapshot-heading>time{margin-left:auto;color:var(--color-text-muted);font-size:var(--font-size-1)}

@@ -288,6 +288,11 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     // fallback and renders no badge). `result.bytes` is what the reviewer measured at 2.10:1 on the un-fixed dark block.
     h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750b','t-750',?,?, 'run-1','dev')",
       JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'static/views.css' }, result: { bytes: 61234 }, ok: true }), '2026-11-18T08:06:00Z');
+    // A `read_file` entry WITH content: the timeline renders it as `pre.output` inside the same fold body, and that
+    // node inherits the fold's muted colour in light. Test caught a light baseline move exactly there (the light
+    // `pre.output` rule briefly carried `color: var(--color-code-text)`), so it is pinned rather than left implicit.
+    h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750c','t-750',?,?, 'run-1','dev')",
+      JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'static/shell.css' }, result: { bytes: 41, content: ':root{--color-brand:#245de0}' }, ok: true }), '2026-11-18T08:07:00Z');
     // The project detail role board shows a chip only while a role run is running, so one live run keeps the row: the
     // review measured `button.role-task-chip` at 1.12:1 and the running fill at 1.08:1 on a surface that was still light.
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
@@ -554,7 +559,7 @@ const PIN_ROWS = [
   ['task', '.step'], ['task', '.task-side'], ['task', '.task-archive-body'], ['task', 'pre.output'],
   ['task', '.task-goal-box'], ['task', '.role-run-conclusion'], ['task', '.role-run-summary'],
   ['task', '.task-next-text'], ['task', '.task-ext-label'], ['task', '.step-fold-num'], ['task', '.step-fold-meta'], ['task', '.step-fold-stat'],
-  ['task', '.step-fold-body'], ['task', '.step-fold-body .muted'],
+  ['task', '.step-fold-body'], ['task', '.step-fold-body .muted'], ['task', '.step-fold-body pre.output'], ['task', '.task-archive-body pre.output'],
   ['task', '.role-run-brief'], ['task', '.role-run-meta'], ['task', '.task-archive-fold > summary'],
   ['task', '.task-metrics'], ['task', '.live'], ['task', '.task-cancel-btn'], ['task', '.task-elapsed-chip'],
   ['task', '.role-run-fold'], ['task', '.role-run-fold.role-run-running'],
@@ -645,10 +650,15 @@ const PIN_TABLE = [
   ['task', '.step-fold-body .muted', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(252, 253, 254)']],
   ['task', '.step-fold-stat', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(51, 65, 85)', 'rgb(241, 245, 249)']],
   ['confirm', '.confirm-status.progress', ['rgb(168, 198, 245)', 'rgb(22, 29, 39)'], ['rgb(44, 87, 145)', 'rgb(255, 255, 255)']],
+  ['task', '.step-fold-body pre.output', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(245, 248, 250)']],
+  ['task', '.task-archive-body pre.output', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(245, 248, 250)']],
 ];
 
 async function pinValues(page, rows) {
   return page.evaluate((rows) => {
+    // Open every fold in the same task as the read, so a streamed re-render cannot close a fold between "make it
+    // visible" and "measure it" — the raw-data fold's `pre.output` is only laid out while its ancestors are open.
+    document.querySelectorAll('details').forEach((node) => { node.open = true; });
     const painted = (el) => {
       for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
         const bg = getComputedStyle(n).backgroundColor;
@@ -695,6 +705,11 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
     // fallback and renders no badge). `result.bytes` is what the reviewer measured at 2.10:1 on the un-fixed dark block.
     h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750b','t-750',?,?, 'run-1','dev')",
       JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'static/views.css' }, result: { bytes: 61234 }, ok: true }), '2026-11-18T08:06:00Z');
+    // A `read_file` entry WITH content: the timeline renders it as `pre.output` inside the same fold body, and that
+    // node inherits the fold's muted colour in light. Test caught a light baseline move exactly there (the light
+    // `pre.output` rule briefly carried `color: var(--color-code-text)`), so it is pinned rather than left implicit.
+    h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750c','t-750',?,?, 'run-1','dev')",
+      JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'static/shell.css' }, result: { bytes: 41, content: ':root{--color-brand:#245de0}' }, ok: true }), '2026-11-18T08:07:00Z');
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id) VALUES('run-3','t-750','execution',1,1,'2026-11-18T08:12:00Z','2026-11-18T08:13:00Z','succeeded','{}','{}','reviewer','asg-750')");
     h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_handoff',?,'2026-11-18T08:11:30Z','run-3','role:manager')",
