@@ -1,6 +1,7 @@
 /**
  * Read-only display labels and historical `tasks.kind` groupings (#1122).
- * Fixed work types (`src/work/*`) are retired; all newly dispatched tasks run as `kind = 'task.request'`.
+ * Fixed work types (`src/work/*`) are retired; tasks the Manager creates for an object run as `kind = 'task.request'`, while
+ * domain events (release observation and notes, Actions failure analysis) still create their own kinds.
  * Historical finished rows retain their stored `kind` so board, task detail, activity and cost views stay readable.
  */
 export interface LegacyTaskCategory {

@@ -4,13 +4,13 @@
 
 | 要调整的行为 | 在哪里改 | 管理命令 |
 | --- | --- | --- |
-| 行为指南、检视 Issue、检视 PR、开发与跟进 bot PR、标签用法 | 「角色 → Manager」的 Manager 提示词，对应章节 `guide`、`review.issue`、`review.pr`、`development`、`labels` | `manager.update` |
+| 行为指南、检视 Issue、检视 PR、开发与跟进 bot PR、标签用法 | 内置规则是 [`docs/prompts/`](prompts/README.md) 的原文；项目自己的约定写在「角色」页 reviewer、dev 等角色的指令里，或写进 Manager 提示词（#1122 起 Manager 提示词是一整份，不再按章节覆盖） | `roles.update`、`manager.update` |
 | 各角色的提示词、模型、权限和预算 | 「角色」页的各个角色 | `roles.update` |
 | 检视标签、开发标签、开发中标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label`、`developing_label` |
 | 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 「机器配置」 | `POST /api/environments/:id/configure` |
 | 仓库自己的 skill | 仓库默认分支的 `.agents/skills/<名称>/SKILL.md` | 改仓库文件 |
 
-章节没写时用内置原文，就是 [`docs/prompts/`](prompts/README.md) 下的 Markdown，见[项目 Manager 与工作类型](workflows.md)。保存只影响之后新建的任务，已经开始的任务按开始时的配置做完。
+项目没有写自己的约定时用内置原文，就是 [`docs/prompts/`](prompts/README.md) 下的 Markdown，见[统一任务调度与对象 Manager](workflows.md)。保存只影响之后新建的任务，已经开始的任务按开始时的配置做完。
 
 ## 仓库里的 `.bot/` 文件不再读取
 

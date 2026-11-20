@@ -134,3 +134,19 @@ test('a group is told CI failures are investigated on request, and found automat
     assert.match(atRead.how, /会自动排查失败的 Actions 运行或按定时检查发现问题，但项目能力上限是「只读问答」，这项需要「可评论和打标签」，不会重跑或提报 Issue/);
   }
 });
+
+// Review of #1156: groups count by what their items allow, and a published Issue review starts development however it began.
+test('custom groups count by their items: no reads, no writes or no task creation are not counted for them', () => {
+  const noMentions = { 'issue.mention': false, 'pull_request.mention': false };
+  // A custom binding with Contents write only: it reads, but cannot comment or label, and cannot create tasks.
+  const contents = states({ events: noMentions, groups: { custom: 1 }, groupGates: { questions: 1, write: 0, dispatch: 0 } });
+  assert.deepEqual([contents.qa, contents.triage, contents.testing], ['ready', 'off', 'off']);
+  // Without groupGates (a caller with level counts only), a custom group stands for no item at all.
+  assert.deepEqual([states({ events: noMentions, groups: { custom: 1 } }).qa, states({ events: noMentions, groups: { custom: 1 } }).triage], ['off', 'off']);
+  assert.equal(states({ events: noMentions, groups: { custom: 1 }, groupGates: { questions: 1, write: 1, dispatch: 1 } }).testing, 'ready');
+});
+
+test('a published Issue review starts development under the project rule even with Issue-opened off', () => {
+  const development = scenario('development', { events: { 'issue.opened': false, 'issue.development_label': false } });
+  assert.equal(development.state, 'ready'); assert.match(development.detail, /检视结论为可开发/);
+});

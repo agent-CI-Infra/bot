@@ -4,14 +4,14 @@ import { eventFilters, type EventFilters } from '../dispatch/settings.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { bindingLevel, bindingPermissions, scopeProjects, type BindingLevel } from '../channels/service-bindings.js';
 import { scheduledCheck } from '../dispatch/schedule.js';
-import type { RolePermissions } from '../roles/permissions.js';
+import { githubReadScopes, type RolePermissions } from '../roles/permissions.js';
 
 /**
  * What the bot can do in a project right now (#1123): the six scenarios of the built-in Manager prompt, each projected from
  * settings that already exist — the capability ceiling, the event switches, the enabled roles, the Feishu groups bound to
  * the project with their level, and the project's scheduled checks. Nothing is stored; the projection is read again on
- * every call, so lowering the ceiling or switching an event shows at once. The same function describes a single chat
- * (`venue`), whose own level narrows what the project allows.
+ * every call, so lowering the ceiling or switching an event shows at once. chatCapabilities() narrows the same states
+ * for a single chat (a Feishu group's items, or a GitHub thread).
  *
  * States: ready — on, and the events or requests that start it reach the bot; mention_only — on, but only a mention or
  * request starts it (its automatic events are switched off); ceiling_limited — started, but the ceiling (or the chat's
@@ -34,8 +34,11 @@ export interface CapabilityInputs {
   /** Whether "@bot" mentions are recognized at all (BOT_MENTION_NAMES=off turns them off). */
   mentions: boolean;
   roles: string[];
-  /** Enabled Feishu groups bound to the project, by level. */
+  /** Enabled Feishu groups bound to the project, by level (for display; custom is any set of items). */
   groups: Partial<Record<BindingLevel, number>>;
+  /** The same groups counted by what their items allow (#1156 review): reading the repository, writing Issues or pull
+   * requests, creating tasks. Without it, the preset levels stand for their items and custom groups count for nothing. */
+  groupGates?: GroupGates;
   /** Active scheduled checks of the project. */
   schedules: number;
 }
@@ -49,6 +52,9 @@ export interface Capability {
   settings: SettingKey[];
 }
 
+export interface GroupGates { questions: number; write: number; dispatch: number }
+const presetGates = (groups: CapabilityInputs['groups']): GroupGates => ({
+  questions: groupCount(groups, ['read', 'comment', 'dispatch']), write: groupCount(groups, ['comment', 'dispatch']), dispatch: groupCount(groups, ['dispatch']) });
 const scenarioNeeds: Record<ScenarioId, Ceiling> = { qa: 'comment', triage: 'comment', review: 'comment', development: 'develop', testing: 'comment', ci: 'comment' };
 const roleTitles: Record<string, string> = { reviewer: 'reviewer（检视）', dev: 'dev（开发）', test: 'test（测试）' };
 const groupCount = (groups: CapabilityInputs['groups'], levels: BindingLevel[]) => levels.reduce((sum, level) => sum + (groups[level] ?? 0), 0);
@@ -59,8 +65,7 @@ export function capabilityStates(input: CapabilityInputs): Capability[] {
   const { ceiling, events } = input, has = (role: string) => input.roles.includes(role);
   const issueMention = input.mentions && events['issue.mention'], prMention = input.mentions && events['pull_request.mention'];
   const mentions = issueMention || prMention;
-  const groupsAny = groupCount(input.groups, ['read', 'comment', 'dispatch', 'custom']);
-  const groupsWrite = groupCount(input.groups, ['comment', 'dispatch', 'custom']), groupsDispatch = groupCount(input.groups, ['dispatch', 'custom']);
+  const gates = input.groupGates ?? presetGates(input.groups), groupsAny = gates.questions, groupsWrite = gates.write, groupsDispatch = gates.dispatch;
   const mentionText = mentions ? `GitHub 上 @bot（${join([issueMention ? 'Issue' : '', prMention ? 'PR' : ''])}）` : '';
   const result: Capability[] = [];
   // Every scenario links to its chapter of the Manager prompt last: that is how it runs.
@@ -100,7 +105,8 @@ export function capabilityStates(input: CapabilityInputs): Capability[] {
   // ④ Development starts on a person's label or a review that concludes "ready" (the prompt's project rule); a
   // maintainer's request in a comment needs a mention to reach the Manager.
   {
-    const auto = join([events['issue.development_label'] ? '有人加开发标签' : '', events['review.published.issue'] && events['issue.opened'] ? '检视结论为可开发（自主开发规则）' : '']);
+    // A published Issue review starts development under the prompt's project rule however the review was started (#1156 review).
+    const auto = join([events['issue.development_label'] ? '有人加开发标签' : '', events['review.published.issue'] ? '检视结论为可开发（自主开发规则）' : '']);
     if (!has('dev')) add('development', 'off', `${roleTitles.dev} 角色未启用。`, ['roles']);
     else if (!auto && !issueMention) add('development', 'off', '开发标签、Issue 检视发布和 Issue 提及的事件都关着。', ['triggers']);
     else if (!covers(ceiling, 'develop')) add('development', 'ceiling_limited', `${below('develop')}，不会开发或开 PR。`, ['triggers']);
@@ -136,17 +142,21 @@ export const mentionNames = () => {
 export function projectCapabilityInputs(store: Store, repositoryId: string): CapabilityInputs {
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   const roles = roleConfiguration(store, repositoryId).roles.filter((role: any) => role.enabled).map((role: any) => String(role.role_id));
-  const groups: CapabilityInputs['groups'] = {};
+  const groups: CapabilityInputs['groups'] = {}, groupGates: GroupGates = { questions: 0, write: 0, dispatch: 0 };
   if (store.hasTable('channel_service_bindings'))
     for (const binding of store.all('SELECT * FROM channel_service_bindings WHERE enabled=1'))
       if (scopeProjects(store, String(binding.principal_id)).includes(repositoryId)) {
-        const level = bindingLevel(bindingPermissions(binding));
+        const items = bindingPermissions(binding), level = bindingLevel(items), venue = groupVenue(items);
         groups[level] = (groups[level] ?? 0) + 1;
+        // What the group's tools allow, not its level's name: a custom binding may lack reads, writes or task creation.
+        if (githubReadScopes(items).length) groupGates.questions++;
+        if (venue.issues || venue.pulls) groupGates.write++;
+        if (venue.dispatch) groupGates.dispatch++;
       }
   const schedules = store.hasTable('schedules')
     ? store.all("SELECT spec FROM schedules WHERE project_id=? AND state='active'", repositoryId).filter(row => { try { return JSON.parse(String(row.spec)).workflow === scheduledCheck; } catch { return false; } }).length
     : 0;
-  return { enabled: !!policy?.enabled, ceiling: projectCeiling(store, repositoryId, policy), events: eventFilters(store, repositoryId, policy), mentions: mentionNames().length > 0, roles, groups, schedules };
+  return { enabled: !!policy?.enabled, ceiling: projectCeiling(store, repositoryId, policy), events: eventFilters(store, repositoryId, policy), mentions: mentionNames().length > 0, roles, groups, groupGates, schedules };
 }
 
 /** The project overview's capability card: the facts and the six scenarios. */

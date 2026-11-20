@@ -27,7 +27,8 @@ import { actionsDevelopmentAllowed } from '../actions/safety.js';
  *   `dev`, `test`, or `null` for team coordination), and `writes` (`pull_request`, `review`, `github`, `actions_rerun`),
  *   all bounded by `capability_ceiling` and `manager` role permissions.
  * - Domain event modules (`release.observe`, `release.notes`, `actions.failures`, `schedule.due`) still attach their
- *   lifecycle hooks via `options` and run as generic `task.request` tasks.
+ *   lifecycle hooks via `options`; their tasks keep the module's own kind (`spec.kind`), while a scheduled check's request
+ *   runs as `task.request`.
  */
 export function dispatchStorage(store: Store) {
   store.db.exec(`
