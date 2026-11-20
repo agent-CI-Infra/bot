@@ -4,13 +4,13 @@ import { applyIntegration } from './integration.js';
 import { blobValue, storedInput } from '../storage/payloads.js';
 import { assessRetryReport } from '../roles/retries.js';
 import { taskTraceAccess } from '../memory/access.js';
-import { executionModel, executionRuleFiles, taskConfiguration } from './configuration.js';
+import { executionModel, executionRuleFiles, taskConfiguration, trustedTaskRuleFiles } from './configuration.js';
 import { assertRequestPullRequest, genericTask, pullRequestRefusal, softwareRequest, requestPolicyHash, publishRequestPullRequest, workflowChanges } from './pull-request.js';
 import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRequestQaRequired, toolGrant } from './grants.js';
 import { checkPullRequestLabels, pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 import { pullRequestSummaryRules } from '../github/text.js';
 import { assertMediaOutsideCode, collectPullRequestMedia, planPullRequestMedia, pullRequestMediaSchema, type CandidateMedia } from '../github/pull-request-media.js';
-import { RuleService, behaviorPath, cachedRuleFiles, ownLabels, projectLabels, resolveRules, ruleErrors, skillIndex } from '../rules/service.js';
+import { RuleService, behaviorPath, ownLabels, projectLabels, resolveRules, ruleErrors, skillIndex, trustedCachedRuleFiles } from '../rules/service.js';
 import { skillFiles } from '../roles/definition.js';
 import { extractRepositorySkillFiles, pinRepositorySkillEntries, type PinnedRepositorySkills } from '../roles/skill-defaults.js';
 import { roleWorkspaces } from '../roles/workspace.js';
@@ -410,7 +410,8 @@ export async function runRequest(
       let targetSha: string | undefined;
       let trustedSkillSha: string | null | undefined;
       let baseRefSha: string | undefined;
-      const policyBase = String(store.get('SELECT base_branch FROM policies WHERE repository_id=?', task.repository_id)?.base_branch || '').trim();
+      const capturedPolicy = taskConfiguration(store, task)?.policy ?? store.get('SELECT * FROM policies WHERE repository_id=?', task.repository_id);
+      const policyBase = String(capturedPolicy?.base_branch || '').trim();
       let baseBranch = github.defaultBranch;
       const mirrorRefs = new Set<string>([`refs/heads/${github.defaultBranch}`]);
 
@@ -507,6 +508,11 @@ export async function runRequest(
         }
         if (!targetSha && !input.snapshot_sha && !inheritedBase) {
           targetSha = (await github.ref(baseBranch))?.object?.sha;
+          if (!targetSha && !input.bot_pr && baseBranch !== github.defaultBranch) {
+            baseBranch = github.defaultBranch;
+            mirrorRefs.add(`refs/heads/${baseBranch}`);
+            targetSha = (await github.ref(baseBranch))?.object?.sha;
+          }
           if (!input.bot_pr) trustedSkillSha = targetSha ?? null;
           if (!baseRefSha && /^[a-f0-9]{40}$/i.test(String(targetSha || ''))) baseRefSha = String(targetSha).toLowerCase();
         } else {
@@ -537,7 +543,6 @@ export async function runRequest(
         targetSha = branchRef.object.sha;
         baseBranch = refName;
         mirrorRefs.add(`refs/heads/${refName}`);
-        if (refName === (policyBase || github.defaultBranch)) trustedSkillSha = targetSha;
         targetSummaryMeta = { type: 'branch', ref: refName, sha: targetSha };
       } else if (targetSpec?.type === 'commit' && typeof targetSpec.ref === 'string') {
         const commitObj = /^[a-f0-9]{40}$/i.test(targetSpec.ref)
@@ -563,18 +568,53 @@ export async function runRequest(
 
       if (!targetSha) stop('repository_has_no_commit', 'waiting_configuration');
       // Repository skills come strictly from the trusted base branch (never an external PR head or untrusted branch/commit).
-      const trustedSkillBranch =
+      let trustedSkillBranch =
         (targetSpec?.type === 'issue' && input.bot_pr?.base?.ref ? String(input.bot_pr.base.ref).trim() : '') ||
         policyBase ||
         github.defaultBranch;
       mirrorRefs.add(`refs/heads/${trustedSkillBranch}`);
       if (trustedSkillSha === undefined) {
-        trustedSkillSha = (await github.ref(trustedSkillBranch))?.object?.sha ?? null;
-        if (!trustedSkillSha && targetSpec?.type === 'pr' && input.object?.base?.ref === trustedSkillBranch && /^[a-f0-9]{40}$/i.test(String(input.object?.base?.sha || ''))) {
+        trustedSkillSha =
+          targetSpec?.type === 'branch' && targetSummaryMeta?.ref === trustedSkillBranch
+            ? targetSha ?? null
+            : (await github.ref(trustedSkillBranch))?.object?.sha ?? null;
+        if (!trustedSkillSha && trustedSkillBranch !== github.defaultBranch) {
+          trustedSkillBranch = github.defaultBranch;
+          mirrorRefs.add(`refs/heads/${trustedSkillBranch}`);
+          trustedSkillSha =
+            targetSpec?.type === 'branch' && targetSummaryMeta?.ref === trustedSkillBranch
+              ? targetSha ?? null
+              : (await github.ref(trustedSkillBranch))?.object?.sha ?? null;
+        }
+        if (
+          !trustedSkillSha &&
+          targetSpec?.type === 'pr' &&
+          typeof input.object?.base?.ref === 'string' &&
+          input.object.base.ref.trim() &&
+          /^[a-f0-9]{40}$/i.test(String(input.object?.base?.sha || ''))
+        ) {
+          trustedSkillBranch = input.object.base.ref.trim();
+          mirrorRefs.add(`refs/heads/${trustedSkillBranch}`);
           trustedSkillSha = String(input.object.base.sha);
         }
       }
+      if (!trustedSkillSha) {
+        stop(
+          'repository_has_no_commit',
+          'waiting_configuration',
+          `可信基准分支 ${policyBase || github.defaultBranch} 没有可读取的提交，请先初始化仓库或检查基准分支配置。`,
+        );
+      }
       const resolvedSha = targetSha!;
+      // A commit SHA uniquely fixes the repository tree; any target other than a PR or unmerged bot PR/integration whose
+      // checkout SHA equals `trustedSkillSha` (including `branch` or `commit` pointing at the trusted base commit) is trusted.
+      const checkoutTrusted = Boolean(
+        trustedSkillSha &&
+        resolvedSha === trustedSkillSha &&
+        targetSpec?.type !== 'pr' &&
+        !input.bot_pr &&
+        !input.integration,
+      );
       const conflictExtraCommits = input.bot_pr && baseRefSha && baseRefSha !== resolvedSha ? [baseRefSha] : [];
       const mirrorCommits = [...new Set([resolvedSha, ...(trustedSkillSha ? [trustedSkillSha] : []), ...conflictExtraCommits])];
       const mirror =
@@ -582,14 +622,22 @@ export async function runRequest(
           ? await gitCache.open(task.repository_id, { url: github.cloneUrl, token: github.token, commits: mirrorCommits, refs: [...mirrorRefs] })
           : undefined;
       let pinnedSkillBundle: PinnedRepositorySkills | null = null;
+      let trustedAgentsMd: string | null = null;
+      let trustedClaudeMd: string | null = null;
       if (trustedSkillSha) {
         try {
           const ruleFiles = await ruleService.fetch(github, trustedSkillSha, mirror, task.repository_id);
           ruleService.cache(task.repository_id, trustedSkillSha, ruleFiles);
-          const policy = taskConfiguration(store, task)?.policy ?? store.get('SELECT * FROM policies WHERE repository_id=?', task.repository_id)!;
+          const policy = capturedPolicy ?? store.get('SELECT * FROM policies WHERE repository_id=?', task.repository_id)!;
           const fixedRuleFiles = executionRuleFiles(store, task, ruleFiles, trustedSkillSha);
           resolveRules(policy, fixedRuleFiles, {}, projectLabels(store, task.repository_id));
           pinnedSkillBundle = pinRepositorySkillEntries(store, task.repository_id, trustedSkillSha, fixedRuleFiles);
+          if (typeof fixedRuleFiles['AGENTS.md'] === 'string' && fixedRuleFiles['AGENTS.md'].trim()) {
+            trustedAgentsMd = fixedRuleFiles['AGENTS.md'];
+          }
+          if (typeof fixedRuleFiles['CLAUDE.md'] === 'string' && fixedRuleFiles['CLAUDE.md'].trim()) {
+            trustedClaudeMd = fixedRuleFiles['CLAUDE.md'];
+          }
         } catch (error) {
           if (error instanceof HttpError && ruleErrors.has(error.code)) {
             const detail = (error as HttpError & { detail?: string }).detail;
@@ -607,6 +655,9 @@ export async function runRequest(
         source_tree: snapshot.source_tree_sha,
         skipped_files: snapshot.skipped_files,
         base_branch: baseBranch,
+        checkout_trusted: checkoutTrusted,
+        trusted_agents_md: trustedAgentsMd,
+        trusted_claude_md: trustedClaudeMd,
         repository_skill_bundle: pinnedSkillBundle,
         ...(baseRefSha ? { base_ref_sha: baseRefSha } : {}),
         ...(Object.keys(targetContextFiles).length ? { context_files: { ...(input.context_files ?? {}), ...targetContextFiles } } : {}),
@@ -636,7 +687,7 @@ export async function runRequest(
       ? input.repository_skill_bundle
         ? Object.fromEntries(skillFiles(store, task.repository_id, input.repository_skill_bundle).map(f => [f.path, f.content]))
         : {}
-      : taskConfiguration(store, task)?.rule_files ?? cachedRuleFiles(store, task.repository_id)?.files ?? {};
+      : trustedTaskRuleFiles(store, task)?.files ?? trustedCachedRuleFiles(store, task.repository_id)?.files ?? {};
     const extractedRepoSkills = extractRepositorySkillFiles(pinnedSkillSource);
     const repoSkillContextFiles = Object.fromEntries(
       extractedRepoSkills.map(f => ['skills/' + f.path.slice('.agents/skills/'.length), f.content]),

@@ -14,6 +14,7 @@ import {assessRetryReport} from '../roles/retries.js';
 import {ObsoleteSweep} from '../tasks/obsolete.js';
 import {recordRetryFailure,resolveExecutionRetries,retryNeedsInvestigation} from '../tasks/retries.js';
 import { controlled,roleConfig,roleExecutionModel } from '../roles/run.js';
+import { pinRepositorySkillEntries, type PinnedRepositorySkills } from '../roles/skill-defaults.js';
 import { mergeApi } from '../roles/merge.js';
 import { roleApi, roleProbeApi } from '../roles/api.js';
 import { memoryApi } from '../memory/api.js';
@@ -563,13 +564,27 @@ export class TaskEngine {
         await validate();
         const target=await event.prepare(this.store,github,task,input,redactor);
         const eventPolicy=taskConfiguration(this.store,task)?.policy??this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-        const eventRuleBranch=String(eventPolicy?.base_branch||'').trim()||github.defaultBranch;
-        const ruleSha=(await github.ref(eventRuleBranch))?.object?.sha||target.sha;
+        const configuredEventBase=String(eventPolicy?.base_branch||'').trim();
+        let eventRuleBranch=configuredEventBase||github.defaultBranch;
+        let ruleSha=(await github.ref(eventRuleBranch))?.object?.sha;
+        if(!ruleSha&&configuredEventBase&&configuredEventBase!==github.defaultBranch){
+          eventRuleBranch=github.defaultBranch;
+          ruleSha=(await github.ref(eventRuleBranch))?.object?.sha;
+        }
+        if(!ruleSha)stop('repository_has_no_commit','waiting_configuration',`可信基准分支 ${configuredEventBase||github.defaultBranch} 没有可读取的提交，请先初始化仓库或检查基准分支配置。`);
         const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${eventRuleBranch}`]}):undefined;
         let effectiveRules:ReturnType<typeof resolveRules>;
+        let pinnedEventSkills:PinnedRepositorySkills|null=null;
+        let eventTrustedAgentsMd:string|null=null;
+        let eventTrustedClaudeMd:string|null=null;
+        const eventCheckoutTrusted=Boolean(target.sha===ruleSha&&!target.context?.pull_request);
         try{
           const ruleFiles=await this.rules.fetch(github,ruleSha,mirror,task.repository_id);this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-          effectiveRules=resolveRules(rulePolicy(this.store,task),executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer),projectLabels(this.store,task.repository_id));
+          const fixedEventRuleFiles=executionRuleFiles(this.store,task,ruleFiles,ruleSha);
+          effectiveRules=resolveRules(rulePolicy(this.store,task),fixedEventRuleFiles,this.rules.consoleComputer(task.repository_id,environment.computer),projectLabels(this.store,task.repository_id));
+          pinnedEventSkills=pinRepositorySkillEntries(this.store,task.repository_id,ruleSha,fixedEventRuleFiles);
+          if(typeof fixedEventRuleFiles['AGENTS.md']==='string'&&fixedEventRuleFiles['AGENTS.md'].trim())eventTrustedAgentsMd=fixedEventRuleFiles['AGENTS.md'];
+          if(typeof fixedEventRuleFiles['CLAUDE.md']==='string'&&fixedEventRuleFiles['CLAUDE.md'].trim())eventTrustedClaudeMd=fixedEventRuleFiles['CLAUDE.md'];
         }catch(error){
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库 skill 失败（${error.code}）${detail?'：'+detail:''}，请检查 .agents/skills/。`);}
           throw error;
@@ -587,6 +602,7 @@ export class TaskEngine {
         const skills=skillIndex(effectiveRules.files);
         await workspace.context({...target.files,...Object.fromEntries(effectiveRules.files.filter((f:any)=>skillFilePath(f.path)).map((f:any)=>['skills/'+f.path.slice('.agents/skills/'.length),f.effective]))});
         input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
+          checkout_trusted:eventCheckoutTrusted,trusted_agents_md:eventTrustedAgentsMd,trusted_claude_md:eventTrustedClaudeMd,repository_skill_bundle:pinnedEventSkills,
           context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path,support_files})=>({name,description,path,...(support_files?{support_files}:{})})),
             ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:target.sha,mode:'read'})}:{}),
             effective_rules:effectiveRules,computer:computerSummary(environment.computer),...managerContext(input),...target.context}};
@@ -616,8 +632,12 @@ export class TaskEngine {
             input.bot_pr=pr;update({head_sha:pr.head.sha});await validate();
           }
         }
-        const baseBranch=input.bot_pr?.base?.ref||policy.base_branch||github.defaultBranch;
-        const ref=!input.integration&&(task.kind.endsWith('.pr')||input.bot_pr)?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
+        let baseBranch=input.bot_pr?.base?.ref||String(policy.base_branch||'').trim()||github.defaultBranch;
+        let ref=!input.integration&&(task.kind.endsWith('.pr')||input.bot_pr)?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
+        if(!ref?.object?.sha&&!input.bot_pr&&baseBranch!==github.defaultBranch){
+          baseBranch=github.defaultBranch;
+          ref=await github.ref(baseBranch);
+        }
         if(!ref?.object?.sha)stop('repository_has_no_commit','waiting_configuration',`基础分支 ${baseBranch} 没有可读取的提交，请先初始化仓库或检查分支配置。`);
         if(development&&task.kind.endsWith('.pr')){
           const owned=this.owned(github,task,object);
@@ -625,8 +645,13 @@ export class TaskEngine {
         }
         // Rules never come from an external pull request's own commits: PR tasks read the project's configured base branch
         // (or default branch), an Issue development continuing the bot's PR reads that PR's base branch, and other Issue tasks read the commit they check out.
-        const ruleBranch=task.kind.endsWith('.pr')?(String(policy.base_branch||'').trim()||github.defaultBranch):input.bot_pr?baseBranch:null;
-        const ruleSha=ruleBranch?(await github.ref(ruleBranch))?.object.sha:ref.object.sha;
+        let ruleBranch=task.kind.endsWith('.pr')?(String(policy.base_branch||'').trim()||github.defaultBranch):input.bot_pr?baseBranch:null;
+        let ruleSha=ruleBranch?(await github.ref(ruleBranch))?.object?.sha:ref.object.sha;
+        if(!ruleSha&&(task.kind.endsWith('.pr')||input.bot_pr)&&ruleBranch&&ruleBranch!==github.defaultBranch){
+          ruleBranch=github.defaultBranch;
+          ruleSha=(await github.ref(ruleBranch))?.object?.sha;
+        }
+        if(!ruleSha)stop('repository_has_no_commit','waiting_configuration',`可信基准分支 ${ruleBranch||baseBranch} 没有可读取的提交，请先初始化仓库或检查基准分支配置。`);
         // The repository's mirror is brought up to both commits first; rules and files are then read at those commits.
         // A pull request's base comes into the mirror too, so the agent can compare base and head with git.
         const pr=task.kind.endsWith('.pr'),prBase=pr&&/^[a-f0-9]{40}$/.test(String(object.base?.sha||''))?String(object.base.sha):null;
@@ -635,10 +660,17 @@ export class TaskEngine {
         // Rules are checked before the workspace is written. A bad rule file waits for a person with its own code and
         // nothing is published; the retry after the fix then prepares the new commit without earlier writes in the way.
         let effectiveRules:ReturnType<typeof resolveRules>;
+        let pinnedSkills:PinnedRepositorySkills|null=null;
+        let trustedAgentsMd:string|null=null;
+        let trustedClaudeMd:string|null=null;
         try{
           const ruleFiles=await this.rules.fetch(github,ruleSha,mirror,task.repository_id);
           this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-          effectiveRules=resolveRules(rulePolicy(this.store,task),executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer),projectLabels(this.store,task.repository_id));
+          const fixedRuleFiles=executionRuleFiles(this.store,task,ruleFiles,ruleSha);
+          effectiveRules=resolveRules(rulePolicy(this.store,task),fixedRuleFiles,this.rules.consoleComputer(task.repository_id,environment.computer),projectLabels(this.store,task.repository_id));
+          pinnedSkills=pinRepositorySkillEntries(this.store,task.repository_id,ruleSha,fixedRuleFiles);
+          if(typeof fixedRuleFiles['AGENTS.md']==='string'&&fixedRuleFiles['AGENTS.md'].trim())trustedAgentsMd=fixedRuleFiles['AGENTS.md'];
+          if(typeof fixedRuleFiles['CLAUDE.md']==='string'&&fixedRuleFiles['CLAUDE.md'].trim())trustedClaudeMd=fixedRuleFiles['CLAUDE.md'];
         }catch(error){
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库 skill 失败（${error.code}）${detail?'：'+detail:''}，请检查 .agents/skills/。`);}
           throw error;
@@ -681,8 +713,10 @@ export class TaskEngine {
         // Classification is optional: a repository whose labels cannot be read is reviewed without them.
         const labeling=review||writes.includes('labels');
         const labels=!labeling?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
+        const checkoutTrusted=Boolean(!pr&&!input.bot_pr&&!input.integration&&ref.object.sha===ruleSha);
         input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
+          checkout_trusted:checkoutTrusted,trusted_agents_md:trustedAgentsMd,trusted_claude_md:trustedClaudeMd,repository_skill_bundle:pinnedSkills,
           files,...(pr?{heads:[...(input.heads||[]).filter((head:string)=>head!==ref.object.sha),ref.object.sha]}:{}),coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
             ...(!pr ? {actions_failure:this.store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?',task.repository_id,task.object_number)||null} : {}),
             object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),

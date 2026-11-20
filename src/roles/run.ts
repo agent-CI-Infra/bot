@@ -6,7 +6,8 @@ import { taskRecordContext } from '../tasks/record-tools.js';
 import {observeLongExecution,decideLongExecution} from './long-execution.js';
 import { artifactCandidate, deliveryType, latestRoleCandidate, candidateKey } from './schedule.js';
 import {executionBaseline} from '../agent/common.js';
-import { executionModel, taskConfiguration } from '../tasks/configuration.js';
+import { executionModel, taskConfiguration, trustedTaskRuleFiles } from '../tasks/configuration.js';
+import { trustedCachedRuleFiles } from '../rules/service.js';
 import { cleanRoleMessages } from './storage.js';
 import { workflowChanges } from '../tasks/pull-request.js';
 import { runAgent,type AgentSpec } from '../agent/runtime.js';
@@ -47,9 +48,29 @@ function taskRepositorySkills(s:Store,task:Row):{sha:string|null;files:Record<st
    return {sha:ref.sha??null,files:Object.fromEntries(pinned.map(f=>[f.path,f.content]))};
   }
  }catch{}
- const fixed=taskConfiguration(s,task);
- if(fixed?.rule_files)return {sha:fixed.rule_sha??null,files:fixed.rule_files};
- return undefined;
+ const fixed=trustedTaskRuleFiles(s,task);
+ if(fixed)return fixed;
+ const cached=trustedCachedRuleFiles(s,task.repository_id);
+ return cached?{sha:cached.sha,files:cached.files}:null;
+}
+export function taskCheckoutContext(s:Store,task:Row):{trustedCheckout:boolean;trustedAgentsMd:string|null;trustedClaudeMd:string|null}{
+ const kind=String(task.kind??'');
+ let input:any=null;
+ try{input=task.input?JSON.parse(String(task.input)):null;}catch{}
+ const fixedRules=trustedTaskRuleFiles(s,task)?.files;
+ const fixedAgents=fixedRules?.['AGENTS.md'];
+ const fixedClaude=fixedRules?.['CLAUDE.md'];
+ const trustedAgentsMd=typeof input?.trusted_agents_md==='string'&&input.trusted_agents_md.trim()
+  ?input.trusted_agents_md
+  :typeof fixedAgents==='string'&&fixedAgents.trim()?fixedAgents:null;
+ const trustedClaudeMd=typeof input?.trusted_claude_md==='string'&&input.trusted_claude_md.trim()
+  ?input.trusted_claude_md
+  :typeof fixedClaude==='string'&&fixedClaude.trim()?fixedClaude:null;
+ if(kind.endsWith('.pr')||input?.bot_pr||input?.integration)return {trustedCheckout:false,trustedAgentsMd,trustedClaudeMd};
+ if(typeof input?.checkout_trusted==='boolean')return {trustedCheckout:input.checkout_trusted,trustedAgentsMd,trustedClaudeMd};
+ if(input?.target?.type&&['pr','branch','commit'].includes(String(input.target.type)))return {trustedCheckout:false,trustedAgentsMd,trustedClaudeMd};
+ if(input?.context?.mode==='event')return {trustedCheckout:false,trustedAgentsMd,trustedClaudeMd};
+ return {trustedCheckout:true,trustedAgentsMd,trustedClaudeMd};
 }
 // Task defaults stay fixed; only an explicit role apply may move an existing instance to a newer V2 revision.
 function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,override?:RoleConfiguration,model?:AgentSpec<any>['model'],entryExecutor=false){
@@ -281,7 +302,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},
    harnessResources:snapshot.skills?skillFiles(s,task.repository_id,snapshot.skills).map(({path,content})=>({path,content})):[],
-   harnessAccess:harnessAccess(resolved.definition.permissions,Boolean(env.containerOptions?.egress),s.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:taskToolAllowed(s,task,role,'read_file'),write:taskToolAllowed(s,task,role,'write_file'),commands:taskToolAllowed(s,task,role,'run_command')}),
+   harnessAccess:(()=>{const checkout=taskCheckoutContext(s,task);return harnessAccess(resolved.definition.permissions,Boolean(env.containerOptions?.egress),s.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:taskToolAllowed(s,task,role,'read_file'),write:taskToolAllowed(s,task,role,'write_file'),commands:taskToolAllowed(s,task,role,'run_command'),trustedCheckout:checkout.trustedCheckout,trustedAgentsMd:checkout.trustedAgentsMd,trustedClaudeMd:checkout.trustedClaudeMd});})(),
    system:definition.prompt,
    screen:(name,args)=>{authority(name);spec.screen?.(name,args);},
    ...(spec.finish ? {finish:{...spec.finish,...(spec.finish.names?{names:spec.finish.names.filter(name=>!governed(name)||tools.some(tool=>tool.function.name===name))}:{}),validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),

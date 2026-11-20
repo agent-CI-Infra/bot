@@ -535,7 +535,7 @@ function providerReply(res, { id, content, args = {}, input = 5, output = 777, t
 // Real pinned native executable + synthetic Anthropic wire server over the container stdio MCP bridge and loopback model relay.
 test('pinned native Claude Code binary uses stream-json, native workspace tools, stdio MCP bridge and loopback model relay (synthetic provider)', async t => {
   let nativeToolCalls = 0, nativeRequests = 0;
-  let activeRepo = '',sawProjectInstructions=false,sawUserTool=false;
+  let activeRepo = '',sawProjectInstructions=false,sawTrustedReviewClaude=false,sawUserTool=false;
   const f = await claudeFixture(t, {
     native: true,
     respond: async (req, res) => {
@@ -546,7 +546,11 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
       assert.equal(body.model, model);
       const sysText = Array.isArray(body.system) ? body.system.map(c => c.text ?? '').join('\n') : String(body.system ?? '');
       const observing = sysText.includes('INDEPENDENT_REVIEW_PROBE');
-      if (observing) assert.ok(!raw.includes('DEV_PRIVATE_MARKER_170'));
+      if (observing) {
+        assert.ok(!raw.includes('DEV_PRIVATE_MARKER_170'));
+        assert.ok(!raw.includes('EVIL_UNTRUSTED_PR_CLAUDE_MD_1171'), 'untrusted PR checkout CLAUDE.md must never enter Claude Code requests');
+        if (sysText.includes('TRUSTED_BASE_CLAUDE_MD_1171')) sawTrustedReviewClaude = true;
+      }
       // Native project instructions are allowed, including on a resumed session.
       if(raw.includes('PROJECT_CONTEXT_834'))sawProjectInstructions=true;
       // Only the Bash tool result carries the user tool's output (#1024).
@@ -643,15 +647,20 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   assert.equal(measured.output_tokens, nativeRequests * 777);
   assert.equal(measured.unknown_requests, 0);
 
-  // Independent reviewer role runs in its own isolated repo checkout with fresh context.
+  // Independent reviewer role runs on an untrusted PR checkout (`review.pr`): checkout-owned `CLAUDE.md` is suppressed while trusted base `CLAUDE.md` is injected.
   const revWsId = '2'.repeat(48);
   const revRepo = join(f.config.stateDirectory, 'tasks', revWsId, 'repo');
   mkdirSync(revRepo, { recursive: true });
+  writeFileSync(join(revRepo, 'CLAUDE.md'), 'EVIL_UNTRUSTED_PR_CLAUDE_MD_1171\n');
   writeFileSync(join(revRepo, 'add.mjs'), 'export const add = (a, b) => a + b + 1;\n');
   writeFileSync(join(revRepo, 'add.test.mjs'), readFileSync(join(devRepo, 'add.test.mjs')));
   activeRepo = revRepo;
-  f.s.run("UPDATE tasks SET workspace_id=? WHERE id='t'", revWsId);
-  f.spec.task.workspace_id = revWsId;
+  f.s.run(
+    "UPDATE tasks SET kind='review.pr', workspace_id=?, input=? WHERE id='t'",
+    revWsId,
+    JSON.stringify({ checkout_trusted: false, trusted_claude_md: 'TRUSTED_BASE_CLAUDE_MD_1171' }),
+  );
+  f.spec.task = f.s.get("SELECT * FROM tasks WHERE id='t'");
 
   const fixedHash = contentHash(readFileSync(join(revRepo, 'add.mjs'), 'utf8'));
   const candidate = new TaskRecords(f.s).submit('t', [{ kind: 'file', reference: 'artifact:seeded-arithmetic', version: fixedHash, content: { path: 'add.mjs', content_hash: fixedHash } }], [], { fixture: true });
@@ -672,6 +681,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
     'claude_code',
   );
   assert.ok(review.result.findings.length);
+  assert.equal(sawTrustedReviewClaude, true, 'trusted base-branch CLAUDE.md must reach Claude Code reviewer');
   assert.notEqual(f.state('reviewer').sessionId, state.sessionId);
   const reviewRun = f.s.get("SELECT id FROM task_runs WHERE role='reviewer' ORDER BY rowid DESC LIMIT 1");
   assert.equal(roleRuns.events(f.s, reviewRun.id).events.at(-1).data.input_candidate_ref.ref, 'candidate:' + candidate.id);
@@ -803,4 +813,31 @@ test('operator extra env cannot inject runtime loaders, model routing or credent
   writeFileSync(process.env.BOT_CLAUDE_CODE_CONFIG,JSON.stringify({...original,env:{[name]:'fixture-injected'}}));
   assert.throws(()=>claudeConfiguration(),{code:'claude_configuration_invalid'},name);
  }
+});
+
+test('#1171 Claude Code explicitly strips inherited CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD on untrusted checkouts', async t => {
+  const prevKeys = process.env.BOT_PROJECT_ENV_KEYS;
+  const prevFlag = process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD;
+  process.env.BOT_PROJECT_ENV_KEYS = 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD';
+  process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1';
+  t.after(() => {
+    if (prevKeys === undefined) delete process.env.BOT_PROJECT_ENV_KEYS;
+    else process.env.BOT_PROJECT_ENV_KEYS = prevKeys;
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD;
+    else process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = prevFlag;
+  });
+
+  const f = await claudeFixture(t);
+  await runRole(f.spec, 'dev', undefined, 'claude_code');
+  const trustedLaunch = JSON.parse(readFileSync(join(f.cliHome(f.state('dev')), 'launch.json'), 'utf8'));
+  assert.ok(trustedLaunch.env_names.includes('CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD'));
+
+  f.s.run("UPDATE tasks SET kind='review.pr', input=? WHERE id='t'", JSON.stringify({ checkout_trusted: false }));
+  f.spec.task = f.s.get("SELECT * FROM tasks WHERE id='t'");
+  await runRole(f.spec, 'reviewer', undefined, 'claude_code');
+  const untrustedLaunch = JSON.parse(readFileSync(join(f.cliHome(f.state('reviewer')), 'launch.json'), 'utf8'));
+  assert.ok(
+    !untrustedLaunch.env_names.includes('CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD'),
+    'untrusted checkout must delete inherited CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD from childEnv',
+  );
 });

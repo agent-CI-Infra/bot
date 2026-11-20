@@ -28,9 +28,9 @@
 
 `.agents/skills/<名称>/` 目录（含入口 `SKILL.md` 及同目录引用的 `config.json`、`references/`、`scripts/`、`assets/` 等配套文本文件）是本仓库供协作 Agent 使用的仓库 skill，bot 在各类任务角色（`Pi`、`Native`、`Process`、`Codex`、`Claude Code`）与事件分派 Manager 中自动挂载并按需读取：
 
-- **可信分支与严格路径边界**：只从可信基准分支读取 `.agents/skills/`，绝不从外部 PR 分支或未受信任分支/提交加载：PR 检视和修订读项目的「基准分支」（没设时就是默认分支）；Issue 检视和 Issue 开发读「基准分支」；继续修改 bot 已经为 Issue 开的 PR 时读这条 PR 的基准分支。仓库其他业务目录（如 `tests/`、`plugins/`、`harness/`、`src/` 等）里的 `SKILL.md` 属于项目自身业务或测试资产，bot 不扫描、不校验，也不会当作本项目的协作 skill 加载。
-- **整目录挂载与按需读取**：任务准备阶段固定该次任务的可信分支 skill 快照并整目录挂载到角色技能目录（保持相对路径引用完整，无需每次仓库更新后在控制台手工重绑 `skill_bundle_ref`）；agent 先看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）、入口路径和配套文件列表，需要时再读取 `SKILL.md` 及配套文件；事件分派 Manager 也可用 `read_skill` 按需读取。只加载文本文件，最多 32 份 `SKILL.md`、总计最多 256 个文件，单文件不超过 512 KiB、总大小不超过 1 MiB。
-- PR 改动 `.agents/skills/` 下的文件（含移动、删除）时，检视上下文与总结会标明这些文件改变了 bot 的行为，需要人来决定。
+- **可信分支与严格路径边界**：只从可信基准分支读取 `.agents/skills/`，绝不从外部 PR 分支、未合并的 bot PR 分支或未受信任分支/提交加载（在检视 PR、续修未合并的 bot PR 或其他非受信任检出时，各后端如 `Pi`、`Codex`、`Claude Code` 同样禁用检出目录中的 `.pi/skills/` 与 `AGENTS.md`／`CLAUDE.md`，仅注入可信基准分支内容）：PR 检视和修订读项目的「基准分支」（没设时就是默认分支）；Issue 检视和 Issue 开发读「基准分支」；继续修改 bot 已经为 Issue 开的 PR 时读这条 PR 的基准分支。仓库其他业务目录（如 `tests/`、`plugins/`、`harness/`、`src/` 等）里的 `SKILL.md` 属于项目自身业务或测试资产，bot 不扫描、不校验，也不会当作本项目的协作 skill 加载。
+- **整目录挂载与按需读取**：任务准备阶段固定该次任务的可信分支 skill 快照并整目录挂载到角色技能目录（保持相对路径引用完整，无需每次仓库更新后在控制台手工重绑 `skill_bundle_ref`）；agent 先看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）、入口路径和配套文件列表，需要时再读取 `SKILL.md` 及配套文件；事件分派 Manager 在角色具备 Contents 读权限时也可用 `read_skill` 按需读取。只加载文本文件，最多 32 份 `SKILL.md`、总计最多 256 个文件，单文件不超过 512 KiB、总大小不超过 1 MiB。
+- PR 改动 `.agents/skills/`、`.pi/skills/` 或根目录 `AGENTS.md`／`CLAUDE.md`（含移动、删除）时，检视上下文与总结会标明这些文件改变了 bot 的行为，需要人来决定。
 - 「角色 → Manager」的「仓库 skill」列出基准分支（未设置时即默认分支）上的 skill，可以刷新和查看全文。
 
 **边界**：skill 只能指导与本仓库相关的工作，不能扩大权限或改变平台规则。系统提示词写明了这一点；下面这些照常由控制面拒绝并记录，不因 skill 的内容放开：

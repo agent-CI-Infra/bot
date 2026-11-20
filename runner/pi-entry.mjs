@@ -206,10 +206,12 @@ try{
   async function createSession(cfg,agent){
     await mkdir(join(nativeDir,'skills'),{recursive:true,mode:0o700});
     if(native)await stageSessionSkills(nativeDir,cfg.resources);
-    const settingsManager=SettingsManager.create(cwd,nativeDir,{projectTrusted:!!native});
-    // Load only control-plane staged skills (plus explicit `.pi/skills` when present); never load `.agents/skills` from an untrusted checkout.
-    const skillDirs=[join(nativeDir,'skills'),...(existsSync(join(cwd,'.pi','skills'))?[join(cwd,'.pi','skills')]:[])];
-    const loader=native?new DefaultResourceLoader({cwd,agentDir:nativeDir,settingsManager,noSkills:true,additionalSkillPaths:skillDirs,appendSystemPrompt:[cfg.system]}):{getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
+    const checkoutTrusted=Boolean(native&&native.trustedCheckout!==false);
+    const settingsManager=SettingsManager.create(cwd,nativeDir,{projectTrusted:checkoutTrusted});
+    // On untrusted checkouts (external PRs, untrusted branches/commits), never load checkout-owned `.pi/*`, `.agents/skills`, or `AGENTS.md`/`CLAUDE.md`.
+    const skillDirs=[join(nativeDir,'skills'),...(checkoutTrusted&&existsSync(join(cwd,'.pi','skills'))?[join(cwd,'.pi','skills')]:[])];
+    const trustedAgentsMd=typeof native?.trustedAgentsMd==='string'&&native.trustedAgentsMd.trim()?native.trustedAgentsMd:null;
+    const loader=native?new DefaultResourceLoader({cwd,agentDir:nativeDir,settingsManager,noExtensions:!checkoutTrusted,noPromptTemplates:!checkoutTrusted,noThemes:!checkoutTrusted,noSkills:true,noContextFiles:!checkoutTrusted,additionalSkillPaths:skillDirs,...(checkoutTrusted||!trustedAgentsMd?{}:{agentsFilesOverride:()=>({agentsFiles:[{path:'AGENTS.md',content:trustedAgentsMd}]})}),appendSystemPrompt:[cfg.system]}):{getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
     if(native)await loader.reload();
     const guard={check:async(_id,_name,value)=>value},tools=makeTools(cfg,agent,guard);
     const {manager:sessionManager,mode}=openSession(agent);

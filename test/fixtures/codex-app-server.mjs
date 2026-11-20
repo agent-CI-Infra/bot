@@ -145,6 +145,8 @@ const threadView = t => ({
   source: 'appServer',
 });
 
+const cliProjectDocZero = process.argv.some((arg, idx) => arg === '-c' && process.argv[idx + 1] === 'project_doc_max_bytes=0');
+
 // The applied policy echoes what the client asked for; SANDBOX_IGNORED and FEATURE_IGNORED model a server that did not apply it.
 const opened = t => ({
   thread: threadView(t),
@@ -160,7 +162,10 @@ const opened = t => ({
       : policy.sandbox === 'read-only'
         ? { type: 'readOnly' }
         : { type: 'workspaceWrite', writableRoots: [t.cwd] },
-  instructionSources: [],
+  instructionSources:
+    existsSync(join(t.cwd, 'AGENTS.md')) && (flag('IGNORE_PROJECT_DOC_LIMIT') || (policy.project_doc_max_bytes !== 0 && !cliProjectDocZero))
+      ? [join(t.cwd, 'AGENTS.md')]
+      : [],
 });
 
 const featureNames = ['shell_tool', 'unified_exec', 'view_image', 'multi_agent', 'apps', 'plugins', 'goals', 'sleep_tool', 'hooks', 'memories'];
@@ -171,7 +176,11 @@ const bind = params => {
     features: params.config?.features ?? {},
     web_search: params.config?.web_search ?? null,
   };
-  log('thread-params.jsonl', { method: params.threadId ? 'thread/resume' : 'thread/start', ...policy });
+  const projectDocMaxBytes = params.config?.project_doc_max_bytes ?? null;
+  policy.project_doc_max_bytes = projectDocMaxBytes;
+  const { project_doc_max_bytes: _omitted, ...legacyPolicy } = policy;
+  log('thread-params.jsonl', { method: params.threadId ? 'thread/resume' : 'thread/start', ...legacyPolicy });
+  log('doc-params.jsonl', { project_doc_max_bytes: projectDocMaxBytes, developerInstructions: params.developerInstructions ?? null });
   log('mcp-params.jsonl', { mcp_env_vars: params.config?.mcp_servers?.bot?.env_vars ?? null });
   stopMcpChild();
   mcpConfig = params.config.mcp_servers.bot;

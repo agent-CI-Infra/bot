@@ -408,12 +408,21 @@ export async function runClaudeCode<T>(
 
   const requestedSid = compatible ? String(previous.sessionId) : randomUUID();
   const egress = Boolean(spec.containerOptions?.egress);
+  const trustedClaudeDoc =
+    spec.harnessAccess?.trustedCheckout === false
+      ? (typeof spec.harnessAccess.trustedClaudeMd === 'string' && spec.harnessAccess.trustedClaudeMd.trim()
+          ? spec.harnessAccess.trustedClaudeMd
+          : typeof spec.harnessAccess.trustedAgentsMd === 'string' && spec.harnessAccess.trustedAgentsMd.trim()
+            ? spec.harnessAccess.trustedAgentsMd
+            : null)
+      : null;
   const systemPrompt =
     spec.system +
     '\nYou are running inside the isolated workspace container with cwd at the repository checkout. ' +
     'Use native file, search, edit, shell, and sub-agent tools directly on the repository checkout, and use the offered bot MCP tools (mcp__bot__*) for platform task records, memory, skills, and structured submission. ' +
     (platformTools.some(t => t.function.name === 'read_skill') ? 'Read pinned skills with mcp__bot__read_skill when applicable. ' : '') +
-    `Submit through mcp__bot__${spec.finish!.name}; a text reply alone is not a submission, and submission is followed by independent acceptance. Do not publish or push directly from shell.`;
+    `Submit through mcp__bot__${spec.finish!.name}; a text reply alone is not a submission, and submission is followed by independent acceptance. Do not publish or push directly from shell.` +
+    (trustedClaudeDoc ? '\n\n## Trusted Repository Instructions (CLAUDE.md)\n' + trustedClaudeDoc : '');
 
   let streamFailure: unknown = null;
   let initialized = false;

@@ -9,7 +9,7 @@ import { harnesses } from './harness.js';
 import { defaultPermissions, migratePermissions, normalizePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
-import { cachedRuleFiles, maxSkillFiles, skillFilePath } from '../rules/service.js';
+import { cachedRuleFiles, maxSkillFiles, skillFilePath, trustedCachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
 import {roleSkills} from './skill-defaults.js';
 
@@ -738,7 +738,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   const projectFiles=definition.skill_bundle_ref?skillFiles(s,repositoryId,definition.skill_bundle_ref):[];
   const configuredSkills=bundle?{id:bundle.id,revision:bundle.revision,content_hash:bundle.content_hash,source:bundle.source,files:bundle.files}:null;
   const repositorySource=options.repositorySkills===undefined
-    ? (()=>{const cached=cachedRuleFiles(s,repositoryId);return cached?{sha:cached.sha,files:cached.files}:null;})()
+    ? (()=>{const cached=trustedCachedRuleFiles(s,repositoryId);return cached?{sha:cached.sha,files:cached.files}:null;})()
     : options.repositorySkills;
   const skills=roleSkills(s,repositoryId,{id:roleId,kind:definition.kind},configuredSkills,projectFiles,options.persist!==false,!!options.ciChange,repositorySource);
   const system = rolePrompt(definition);

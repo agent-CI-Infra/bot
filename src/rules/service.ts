@@ -26,8 +26,11 @@ export const defaults: Record<string, string> = {
   '.bot/rules/issue-development.md': prompt('issue-development.md'),
   '.bot/computer.yaml': '{}\n'
 };
-/** Paths whose change changes how the bot works on this repository: its skills. .bot/ is no longer read (#935). */
-export const behaviorPath = (path: string) => path === '.agents/skills' || path.startsWith('.agents/skills/');
+/** Paths under `.agents/skills/` (the repository skill directory). */
+export const skillTreePath = (path: string) => path === '.agents/skills' || path.startsWith('.agents/skills/');
+/** Paths whose change alters how collaborating agents work on this repository once merged (.bot/ is no longer read, #935). */
+export const behaviorPath = (path: string) =>
+  skillTreePath(path) || path === '.pi/skills' || path.startsWith('.pi/skills/') || path === 'AGENTS.md' || path === 'CLAUDE.md';
 export const maxSkillCount = 32, maxSkillFiles = 256, maxSkillFileBytes = 512 * 1024, maxSkillTotalBytes = 1024 * 1024;
 export const safeSkillSubpath = (sub: string) =>
   sub.length > 0 && sub.length <= 220 && !sub.startsWith('/') && !sub.endsWith('/') && !sub.includes('\\') && !sub.includes('\0')
@@ -107,7 +110,7 @@ export function skillIndex(rows: { path: string, source: string, effective: stri
  * repository files read for the task: its `.agents/skills/` files, and the names of retired .bot/ files, which are never content.
  */
 export function resolveRules(policy: Row, files: Record<string, string>, computer: any = {}, labels: Labels = defaultLabels) {
-  const skillEntries = Object.entries(files).filter(([path]) => behaviorPath(path));
+  const skillEntries = Object.entries(files).filter(([path]) => skillTreePath(path));
   for (const [path] of skillEntries) {
     if (!skillFilePath(path)) ruleError('invalid_skill_file', `${path} 不是合法的 .agents/skills/ 文件路径`);
   }
@@ -199,6 +202,13 @@ export function cachedRuleFiles(store: Store, repositoryId: string): { sha: stri
   try { const files = JSON.parse(String(row.files)); return files && typeof files === 'object' && !Array.isArray(files) ? { sha: String(row.sha), files, updated_at: String(row.updated_at) } : null; }
   catch { return null; }
 }
+/** Returns cached repository rule files only when `RuleService.cache` explicitly recorded `sha` as a verified trusted base-branch snapshot. */
+export function trustedCachedRuleFiles(store: Store, repositoryId: string): { sha: string; files: Record<string, string>; updated_at: string } | null {
+  const cached = cachedRuleFiles(store, repositoryId);
+  if (!cached || !store.hasTable('settings')) return null;
+  const trusted = store.get("SELECT value FROM settings WHERE key='rules:trusted_sha:'||?", repositoryId);
+  return trusted && String(trusted.value) === cached.sha ? cached : null;
+}
 const importReport = (text: unknown) => { try { const value = JSON.parse(String(text)); return value && typeof value === 'object' ? value : {}; } catch { return {}; } };
 export class RuleService {
   constructor(readonly store: Store, readonly manager?: Manager, readonly githubUrl?: string) {
@@ -231,7 +241,11 @@ export class RuleService {
   }
   consoleComputer(id:string,live:any){return consoleComputer(this.store,id,live);}
   rememberComputer(id:string,live:any){rememberConsoleComputer(this.store,id,live);}
-  cache(id: string, sha: string, files: Record<string, string>) { this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), new Date().toISOString()); }
+  cache(id: string, sha: string, files: Record<string, string>) {
+    const now = new Date().toISOString();
+    this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), now);
+    this.store.run("INSERT INTO settings VALUES('rules:trusted_sha:'||?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", id, sha);
+  }
   // The repository's skills at a commit, and the names (never the contents) of retired .bot/ files. A mirror that holds
   // the commit supplies the listing and contents; the files and their checks are the same either way. `repositoryId`
   // names the project the files are read for: one that still waits for its .bot/ import (it had nothing cached at the
@@ -247,8 +261,15 @@ export class RuleService {
       importRepository(this.store, repositoryId, sha, contents);
     }
     const files: Record<string, string> = Object.fromEntries(retired.slice(0, 50).map((f: any) => [f.path, '']));
+    for (const docName of ['AGENTS.md', 'CLAUDE.md']) {
+      const rootDoc = tree.tree.find((f: any) => f.path === docName && f.type === 'blob' && ['100644', '100755'].includes(f.mode) && (typeof f.size !== 'number' || f.size <= maxSkillFileBytes));
+      if (rootDoc) {
+        const docData = await read(rootDoc);
+        if (docData.length <= maxSkillFileBytes && !docData.includes(0)) files[docName] = docData.toString('utf8');
+      }
+    }
     // Strictly inspect only .agents/skills/: never scan or load SKILL.md files from other project directories.
-    const underSkills = tree.tree.filter((f: any) => f.type !== 'tree' && behaviorPath(String(f.path ?? '')));
+    const underSkills = tree.tree.filter((f: any) => f.type !== 'tree' && skillTreePath(String(f.path ?? '')));
     for (const file of underSkills) {
       if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) ruleError('invalid_skill_file', `${file.path} 不是普通文件（符号链接或子模块）`);
       if (file.path === '.agents/skills' || !safeSkillSubpath(String(file.path).slice('.agents/skills/'.length))) ruleError('invalid_skill_file', `${file.path} 不是合法的 .agents/skills/ 文件路径`);
@@ -287,8 +308,14 @@ export class RuleService {
       fields(input, []); const repo = this.store.get('SELECT * FROM repositories WHERE id=?', id)!;
       const policy = this.store.get('SELECT base_branch FROM policies WHERE repository_id=?', id);
       const github = new GitHub(this.store, repo, new Redactor(), async () => {}, this.githubUrl); await github.connect(false);
-      const branch = String(policy?.base_branch || '').trim() || github.defaultBranch;
-      const ref = await github.ref(branch); if (!ref) fail(409, 'repository_has_no_commit');
+      const configuredBranch = String(policy?.base_branch || '').trim();
+      let branch = configuredBranch || github.defaultBranch;
+      let ref = await github.ref(branch);
+      if (!ref && configuredBranch && configuredBranch !== github.defaultBranch) {
+        branch = github.defaultBranch;
+        ref = await github.ref(branch);
+      }
+      if (!ref) fail(409, 'repository_has_no_commit');
       this.cache(id, ref.object.sha, await this.fetch(github, ref.object.sha, undefined, id)); return { rules: await this.view(id) };
     }
     // Applying .bot/computer.yaml at once went with the file (#935): the machine page saves the project computer directly.

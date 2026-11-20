@@ -66,6 +66,7 @@ function buildCodexConfigToml({ model, relayUrl, egress, nodeExec, mcpBridgePath
     `approval_policy = "never"`,
     `sandbox_mode = ${tomlString(access&&access.workspace!=='write'?'read-only':local ? 'workspace-write' : 'danger-full-access')}`,
     `web_search = ${tomlString(egress ? 'live' : 'disabled')}`,
+    ...(access?.trustedCheckout === false ? [`project_doc_max_bytes = 0`] : []),
     ``,
     `[features]`,
     `shell_tool = ${access?.commands!==false}`,
@@ -347,6 +348,9 @@ try {
       ...(actualResume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ];
 
+    if (rawConfig.execution_access?.trustedCheckout === false) {
+      delete childEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD;
+    }
     Object.assign(childEnv, {
       CLAUDE_CONFIG_DIR: claudeHome,
       XDG_CONFIG_HOME: `${homeDir}/.config`,
@@ -359,7 +363,7 @@ try {
       CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '3600000',
       ENABLE_TOOL_SEARCH: 'false',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
-      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      ...(rawConfig.execution_access?.trustedCheckout !== false ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
       DISABLE_AUTOUPDATER: '1',
       DISABLE_TELEMETRY: '1',
       DISABLE_ERROR_REPORTING: '1',
@@ -384,7 +388,8 @@ try {
       { mode: 0o600 },
     );
     const nativeProvider = nativeModel ? ['-c',`model_providers.bot_direct = { name = "Bot direct", base_url = ${tomlString(nativeModel.baseUrl)}, env_key = "BOT_NATIVE_MODEL_KEY", wire_api = "responses" }`] : [];
-    spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), ...nativeProvider, 'app-server'];
+    const untrustedDocFlag = rawConfig.execution_access?.trustedCheckout === false ? ['-c', 'project_doc_max_bytes=0'] : [];
+    spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), ...untrustedDocFlag, ...nativeProvider, 'app-server'];
     Object.assign(childEnv, {
       CODEX_HOME: codexHome,
       ...(gateway ? {CODEX_RELAY_URL: relay.url,OPENAI_BASE_URL: `${relay.url}/v1`,OPENAI_API_KEY: runToken}

@@ -10,14 +10,28 @@ export interface HarnessAccess {
   commands: boolean;
   network: boolean;
   github: { repository: string | null; scopes: string[] };
+  /** Whether the workspace checkout commit is the repository's trusted base branch (never an external PR head or untrusted ref). */
+  trustedCheckout?: boolean;
+  /** Trusted base-branch root `AGENTS.md` content supplied when `trustedCheckout` is false so untrusted checkout `AGENTS.md` is ignored. */
+  trustedAgentsMd?: string | null;
+  /** Trusted base-branch root `CLAUDE.md` content supplied when `trustedCheckout` is false so untrusted checkout `CLAUDE.md` is ignored. */
+  trustedClaudeMd?: string | null;
 }
-export function harnessAccess(permissions: RolePermissions, network: boolean, repository: string | null, ceiling?:{read:boolean;write:boolean;commands:boolean}): HarnessAccess {
+export function harnessAccess(
+  permissions: RolePermissions,
+  network: boolean,
+  repository: string | null,
+  ceiling?: { read: boolean; write: boolean; commands: boolean; trustedCheckout?: boolean; trustedAgentsMd?: string | null; trustedClaudeMd?: string | null },
+): HarnessAccess {
   const tools = new Set(permissionTools(permissions));
   const fileTools=tools.has('write_file') && ceiling?.write!==false ? 'write' : tools.has('read_file') && ceiling?.read!==false ? 'read' : 'none';
   const commands=tools.has('run_command') && ceiling?.commands!==false;
   return {
     workspace: commands ? 'write' : fileTools, fileTools, commands, network,
     github: { repository, scopes: githubReadScopes(permissions) },
+    ...(ceiling?.trustedCheckout !== undefined ? { trustedCheckout: ceiling.trustedCheckout } : {}),
+    ...(ceiling?.trustedAgentsMd ? { trustedAgentsMd: ceiling.trustedAgentsMd } : {}),
+    ...(ceiling?.trustedClaudeMd ? { trustedClaudeMd: ceiling.trustedClaudeMd } : {}),
   };
 }
 

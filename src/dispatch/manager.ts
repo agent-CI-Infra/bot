@@ -20,7 +20,7 @@ import { effectiveManagerPrompt, managerPrompt, saveManager } from './settings.j
 import { normalizeSavedRule, ruleActions, standingRules } from './rules.js';
 import { HttpError } from '../core/security.js';
 import { legacyKindName } from '../projects/legacy-kinds.js';
-import { RuleService, cachedRuleFiles, projectLabels, resolveRules, ruleErrors } from '../rules/service.js';
+import { RuleService, projectLabels, resolveRules, ruleErrors, trustedCachedRuleFiles } from '../rules/service.js';
 import {
   dispatchRecovery,
   checkDecision,
@@ -217,11 +217,16 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
       args,
     );
 
+  const canReadRepositorySkills = () => {
+    const p = live();
+    return permitsTool(p, 'read_skill') && githubReadScopes(p).includes('contents');
+  };
+
   const offered = () => {
     const p = live(), read = githubReadScopes(p);
     return [
       readToolResult,
-      ...(permitsTool(p, 'read_skill') && (read.includes('contents') || skillState.extracted.length > 0) ? [dispatchSkillTool] : []),
+      ...(canReadRepositorySkills() ? [dispatchSkillTool] : []),
       ...repositoryTools
         .filter(t => permitsTool(p, t.function.name) && read.length)
         .map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
@@ -233,7 +238,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   };
 
   const currentRepositorySkills = () => {
-    const cached = cachedRuleFiles(store, repositoryId);
+    const cached = trustedCachedRuleFiles(store, repositoryId);
     const extracted = cached ? extractRepositorySkillFiles(cached.files) : [];
     return {
       cached: !!cached,
@@ -246,14 +251,19 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   let skillState = currentRepositorySkills();
 
   const ensureRepositorySkills = async (): Promise<{ error: string; instruction?: string } | null> => {
+    if (!canReadRepositorySkills()) return { error: 'github_read_token_not_allowed' };
     if (skillState.cached) return null;
-    if (!scopes().includes('contents')) return { error: 'github_read_token_not_allowed' };
     const gh = new GitHub(store, repository, redactor, guard, githubUrl);
     try {
       await gh.connect(false, undefined, { contents: 'read', metadata: 'read' });
       const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
-      const trustedBranch = String(policy?.base_branch || '').trim() || gh.defaultBranch;
-      const ref = await gh.ref(trustedBranch);
+      const configuredBase = String(policy?.base_branch || '').trim();
+      let trustedBranch = configuredBase || gh.defaultBranch;
+      let ref = await gh.ref(trustedBranch);
+      if (!ref?.object?.sha && configuredBase && configuredBase !== gh.defaultBranch) {
+        trustedBranch = gh.defaultBranch;
+        ref = await gh.ref(trustedBranch);
+      }
       if (!ref?.object?.sha) return null;
       const service = new RuleService(store, manager, githubUrl);
       const files = await service.fetch(gh, ref.object.sha, undefined, repositoryId);
@@ -398,7 +408,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
         ...(context.subscriptions?.length ? { pending_subscriptions: context.subscriptions } : {}),
         capability_ceiling: ceiling,
         roles: workerRoles,
-        ...(skillState.summaries.length
+        ...(canReadRepositorySkills() && skillState.summaries.length
           ? {
               repository_skills: {
                 commit: skillState.sha,
@@ -444,7 +454,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
           system: messages[0].content,
           prompt: messages[1].content,
           tools: offered(),
-          ...(skillState.bundleFiles.length ? { harnessResources: skillState.bundleFiles.map(({ path, content }) => ({ path, content })) } : {}),
+          ...(canReadRepositorySkills() && skillState.bundleFiles.length ? { harnessResources: skillState.bundleFiles.map(({ path, content }) => ({ path, content })) } : {}),
           execute,
           finish: {
             name: decisionNames[0]!,

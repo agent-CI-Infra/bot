@@ -79,13 +79,39 @@ export function supplementalInstructions(store: Store, task: Row): string[] {
     .map(r => String(JSON.parse(r.data).instruction));
 }
 
-export function executionRuleFiles(store: Store, task: Row, files: Record<string, string>, sha: string): Record<string, string> {
+export function trustedTaskRuleFiles(store: Store, task: Row): { sha: string | null; files: Record<string, string> } | null {
+  const config = taskConfiguration(store, task);
+  if (!config?.rule_files || config.rule_trusted !== true) return null;
+  return { sha: config.rule_sha ?? null, files: config.rule_files };
+}
+
+export function executionRuleFiles(
+  store: Store,
+  task: Row,
+  files: Record<string, string>,
+  sha: string,
+): Record<string, string> {
   const config = taskConfiguration(store, task);
   if (!config) return files;
-  if (config.rule_files) return config.rule_files;
+  if (config.rule_files && config.rule_trusted === true) {
+    let updated = false;
+    const next = { ...config.rule_files };
+    for (const doc of ['AGENTS.md', 'CLAUDE.md']) {
+      if (!Object.hasOwn(next, doc) && typeof files[doc] === 'string') {
+        next[doc] = files[doc];
+        updated = true;
+      }
+    }
+    if (updated) {
+      config.rule_files = next;
+      store.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify(config), task.id);
+    }
+    return config.rule_files;
+  }
   resolveRules(config.policy, files);
   config.rule_files = files;
   config.rule_sha = sha;
+  config.rule_trusted = true;
   store.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify(config), task.id);
   return files;
 }

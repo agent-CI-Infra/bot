@@ -72,7 +72,7 @@ Secret 由管理员本人填写，不经聊天或 Issue 转发；输入框始终
 
 bot 在一个仓库里的行为只在项目配置里调整（#935）：检视、开发、标签和行为指南是「角色 → Manager」里 Manager 提示词的章节，检视标签、开发标签和开发中标签的名字在「项目设置 → 基本 → 标签」，电脑规格在「机器配置」。章节没写时使用 [`prompts/`](prompts/README.md) 下的内置原文。完整说明见[在角色配置里调整行为](rules.md)。
 
-仓库里只把可信基准分支的 `.agents/skills/<名称>/` 当作本项目的协作 skill 整目录读取（含入口 `SKILL.md` 及同目录引用的配套文本文件，最多 32 份 skill、256 个文件、单文件 512 KiB、总计 1 MiB；其他业务目录里的 `SKILL.md` 不当作仓库 skill 读取）。skill 只指导本仓库的工作，不能扩大权限或改变平台规则。PR 修改 `.agents/skills`（含移动、删除）时，检视总结会强制写明「这些文件改变了 bot 的行为，需要人来决定」；PR 新内容不会成为该次任务的 skill。
+仓库里只把可信基准分支的 `.agents/skills/<名称>/` 当作本项目的协作 skill 整目录读取（含入口 `SKILL.md` 及同目录引用的配套文本文件，最多 32 份 skill、256 个文件、单文件 512 KiB、总计 1 MiB；其他业务目录里的 `SKILL.md` 不当作仓库 skill 读取）。skill 只指导本仓库的工作，不能扩大权限或改变平台规则。PR 修改 `.agents/skills`、`.pi/skills` 或根目录 `AGENTS.md`／`CLAUDE.md`（含移动、删除）时，检视总结会强制写明「这些文件改变了 bot 的行为，需要人来决定」；未合入 PR 的新内容不会成为该次任务（含 PR 检视与续修未合入 bot PR）的 skill 或项目指令。
 
 仓库里的 `.bot/guide.md`、`.bot/rules/*.md` 和 `.bot/computer.yaml` 不再读取：升级时每个已有项目按当时生效的那一层一次性导入 Manager 章节、标签设置和机器配置，并在「角色 → Manager」留下导入记录；仓库还留着这些文件时，项目页提示可以删除。控制台覆盖层和 `PUT /api/repositories/:id/rules` 已删除（返回 410）。
 
