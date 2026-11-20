@@ -20,6 +20,23 @@ const installationGrantText = permissions => Object.entries(permissions || {})
 const installationPerson = (value, absentKey = 'not_provided') => value
   ? t('settings.installations.person', { login: value.login || t('settings.installations.name_unknown'), id: value.id })
   : t('settings.installations.' + absentKey);
+// #527: the archive's two failure sentences are built from this page's own phrases, never from readErrorText — that helper
+// answers in the console's source prose, so interpolating it into an English sentence produced "Cannot read this
+// installation: 网络连接失败，请稍后重试". A kind this page can name is a dictionary phrase; anything else keeps the status
+// and the service's code, which are ASCII, and never its prose. The phrase ends the sentence the caller already opened.
+function installationErrorText(err) {
+  const name = err && err.name, message = err?.message || '';
+  if (name === 'AbortError') return t('settings.installations.error_cancelled');
+  if (err instanceof TypeError || name === 'TypeError' || /failed to fetch|networkerror|network error|load failed|network request failed/i.test(message))
+    return t('settings.installations.error_network');
+  // A body the console could not parse is the gateway's own page when the status says the request failed, and unreadable
+  // content when it claimed success; neither carries a service code to name.
+  if (err && err.code === 'response_not_json')
+    return t(err.status >= 200 && err.status < 300 ? 'settings.installations.error_unreadable' : 'settings.installations.error_gateway');
+  if (err && err.code === 'authorization_changed') return t('settings.installations.error_authorization_changed');
+  if (err && err.status) return t('settings.installations.error_status', { status: err.status, code: err.code || '—' });
+  return t('settings.installations.error_unknown');
+}
 async function installationDetail(request, ref) {
   const section = settingsCard(t('settings.installations.detail_title')), content = element('div', ''), back = settingsLink('#/settings/installations', t('settings.installations.back'));
   section.append(back, content);
@@ -33,7 +50,7 @@ async function installationDetail(request, ref) {
       const [record, repositories, deliveries] = await Promise.all([api(base), api(base + '/repositories'), api(base + '/events')]);
       content.replaceChildren(...(notice ? [element('p', notice, tone)] : []),
         ...installationDetailBody(base, record.installation, repositories.repositories || [], deliveries.events || [], draw));
-    } catch (err) { content.replaceChildren(note(t('settings.installations.load_error', { message: readErrorText(err) }))); }
+    } catch (err) { content.replaceChildren(note(t('settings.installations.load_error', { message: installationErrorText(err) }))); }
   };
   await draw('');
   return [section];
@@ -110,7 +127,7 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
   const sync = button(t('settings.installations.resync'), async () => {
     sync.disabled = true;
     try { await api(base + '/sync', 'POST', {}); await redraw(t('settings.installations.resync_queued')); }
-    catch (err) { await redraw(t('settings.installations.resync_failed', { message: readErrorText(err) }), 'view-error'); }
+    catch (err) { await redraw(t('settings.installations.resync_failed', { message: installationErrorText(err) }), 'view-error'); }
     finally { sync.disabled = false; }
   });
   const actions = element('div', '', 'actions'); actions.append(sync); nodes.push(actions);
