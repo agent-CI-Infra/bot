@@ -137,6 +137,18 @@ test('中文界面：不可解析内容的原文与今天逐字相同', async ({
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
+// The one place the Chinese words are meant to change: a status with no service code used to print the JavaScript word
+// "undefined" (`500 · undefined`), and now prints an em dash. The case pins that on purpose, so a later reader can tell
+// it apart from the branches that must stay byte for byte.
+test('中文界面：无字符串 code 的状态错误显示破折号', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const strip = await readFailure(page, f, route => route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }), 'zh-CN');
+    await expect(strip).toHaveText('读不到这条安装：500 · —');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
 test('中文界面：重新同步失败的原文与今天逐字相同', async ({ page }) => {
   const f = await identityFixture(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
