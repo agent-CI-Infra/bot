@@ -280,6 +280,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role) VALUES('run-1','t-750','execution',1,1,'2026-11-18T08:00:00Z','2026-11-18T08:10:00Z','done','{}','{}','dev')");
     h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750','t-750',?,?, 'run-1','dev')",
       JSON.stringify({ type: 'tool', name: 'read', summary: '读取 static/views.css', ok: true }), '2026-11-18T08:05:00Z');
+    // The project detail role board shows a chip only while a role run is running, so one live run keeps the row: the
+    // review measured `button.role-task-chip` at 1.12:1 and the running fill at 1.08:1 on a surface that was still light.
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
     await page.emulateMedia({ colorScheme: 'dark' });
     await signIn(page, h, password, '');
 
@@ -349,6 +352,58 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       }
     }
 
+    // The rest of the project detail the review measured: the role task chip in its three states, the tab count badge,
+    // the filter pills and the task row hover. Each is measured at both layouts; the chip has to exist, so the fixture
+    // keeps one running role run (see the seed above) instead of letting a hidden element pass again.
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.goto(h.admin + '/#/projects/101/overview');
+      await page.waitForSelector('button.role-task-chip');
+      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.waitForTimeout(400);
+      const chipStates = await page.evaluate(() => {
+        const el = document.querySelector('button.role-task-chip');
+        const read = () => { const style = getComputedStyle(el); return { color: style.color, background: style.backgroundColor }; };
+        const running = read();
+        el.classList.remove('role-task-running');
+        const plain = read();
+        el.classList.add('role-task-running');
+        return { plain, running };
+      });
+      readable(chipStates.plain, 4.5, `chip plain ${width}`);
+      darkCard(chipStates.plain, `chip plain ${width}`);
+      readable(chipStates.running, 4.5, `chip running ${width}`);
+      darkCard(chipStates.running, `chip running ${width}`);
+      await page.locator('button.role-task-chip').first().hover();
+      await page.waitForTimeout(250);
+      const chipHover = (await colours(page, ['button.role-task-chip']))[0];
+      rendered(chipHover, `chip hover ${width}`);
+      readable(chipHover, 4.5, `chip hover ${width}`);
+      darkCard(chipHover, `chip hover ${width}`);
+      for (const sample of await colours(page, ['.role-chip-summary', '.workbench-tab[aria-current=page] .workbench-tab-count'])) {
+        rendered(sample, `chip row ${sample.selector} ${width}`);
+        readable(sample, 4.5, `chip row ${sample.selector} ${width}`);
+        darkCard(sample, `chip row ${sample.selector} ${width}`);
+      }
+      // The pills live in the tasks view: the plain one keeps --color-text-muted and the selected one brand-text on
+      // brand-weak. `tasks.active` selects the second pill, so both are on screen at once.
+      await page.goto(h.admin + '/#/projects/101/overview/tasks.active');
+      await page.waitForSelector('.workbench-filter-pill[aria-current=page]');
+      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.waitForTimeout(400);
+      for (const sample of await colours(page, ['.workbench-filter-pill', '.workbench-filter-pill[aria-current=page]', '.workbench-task-row'])) {
+        rendered(sample, `tasks ${sample.selector} ${width}`);
+        readable(sample, 4.5, `tasks ${sample.selector} ${width}`);
+        darkCard(sample, `tasks ${sample.selector} ${width}`);
+      }
+      await page.locator('.workbench-task-row').first().hover();
+      await page.waitForTimeout(250);
+      const rowHover = (await colours(page, ['.workbench-task-row']))[0];
+      rendered(rowHover, `task row hover ${width}`);
+      readable(rowHover, 4.5, `task row hover ${width}`);
+      darkCard(rowHover, `task row hover ${width}`);
+    }
+
     // The other half of the contract: in light every one of those rules paints the value it painted at the base. This
     // is the check behind "the light baseline does not move"; the before/after shots carry the pixel proof.
     await page.emulateMedia({ colorScheme: 'light' });
@@ -367,6 +422,39 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     await page.locator('.role-board-row').first().hover();
     await page.waitForTimeout(250);
     expect((await colours(page, ['.role-board-row']))[0].background, 'light role board hover keeps #fafcfe').toBe('rgb(250, 252, 254)');
+    await page.goto(h.admin + '/#/projects/101/overview');
+    await page.waitForSelector('button.role-task-chip');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(400);
+    const lightChip = await page.evaluate(() => {
+      const el = document.querySelector('button.role-task-chip');
+      const read = () => { const style = getComputedStyle(el); return { color: style.color, background: style.backgroundColor }; };
+      const running = read();
+      el.classList.remove('role-task-running');
+      const plain = read();
+      el.classList.add('role-task-running');
+      return { plain, running, badge: (() => { const b = document.querySelector('.workbench-tab[aria-current=page] .workbench-tab-count'); const style = getComputedStyle(b); return { color: style.color, background: style.backgroundColor }; })() };
+    });
+    // The chip is also `.quiet`, so `button.quiet` paints white in light and the module fill is a dark-only value.
+    expect(lightChip.plain.background, 'light chip keeps white').toBe('rgb(255, 255, 255)');
+    expect(lightChip.plain.color, 'light chip keeps --color-text').toBe('rgb(23, 36, 59)');
+    expect(lightChip.running.background, 'light running chip keeps #eff6ff').toBe('rgb(239, 246, 255)');
+    expect(lightChip.badge.color, 'light tab count keeps --color-brand').toBe('rgb(36, 93, 224)');
+    expect(lightChip.badge.background, 'light tab count keeps --color-brand-weak').toBe('rgb(237, 242, 255)');
+    await page.locator('button.role-task-chip').first().hover();
+    await page.waitForTimeout(250);
+    expect((await colours(page, ['button.role-task-chip']))[0].background, 'light chip hover keeps #f0f9ff').toBe('rgb(240, 249, 255)');
+    await page.goto(h.admin + '/#/projects/101/overview/tasks.active');
+    await page.waitForSelector('.workbench-filter-pill[aria-current=page]');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(400);
+    const lightPills = await colours(page, ['.workbench-filter-pill', '.workbench-filter-pill[aria-current=page]']);
+    expect(lightPills[0].color, 'light plain pill keeps #334155').toBe('rgb(51, 65, 85)');
+    expect(lightPills[1].color, 'light selected pill keeps --color-brand').toBe('rgb(36, 93, 224)');
+    expect(lightPills[1].background, 'light selected pill keeps --color-brand-weak').toBe('rgb(237, 242, 255)');
+    await page.locator('.workbench-task-row').first().hover();
+    await page.waitForTimeout(250);
+    expect((await colours(page, ['.workbench-task-row']))[0].background, 'light task row hover keeps #fafcfe').toBe('rgb(250, 252, 254)');
     await page.goto(h.admin + '/#/tasks/t-750');
     await page.waitForSelector('.task-next-text');
     await page.waitForLoadState('networkidle').catch(() => {});
