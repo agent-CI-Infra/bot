@@ -29,8 +29,9 @@ export class ChannelApi {
     if (owner && method === 'PUT') return this.service.serviceBindings.transfer(actor, owner[1]!, input);
     const binding = /^\/api\/channels\/chats\/([a-f0-9]{48})\/service-binding$/.exec(path);
     if (binding && method === 'PUT') {
+      const before = this.service.bindingSnapshot(binding[1]!);
       const result = await this.service.serviceBindings.configure(actor, binding[1]!, input);
-      if (input.enabled) this.service.ledger.resync(binding[1]!);
+      if (input.enabled) { this.service.ledger.resync(binding[1]!); this.service.bindingNotice(binding[1]!, before); }
       return result;
     }
     const employee = /^\/api\/channels\/chats\/([a-f0-9]{48})\/employee$/.exec(path);

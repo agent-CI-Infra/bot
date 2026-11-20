@@ -154,3 +154,100 @@ export function projectCapabilities(store: Store, repositoryId: string) {
   return { ceiling: inputs.ceiling, ceiling_title: ceilingTitles[inputs.ceiling], enabled: inputs.enabled, groups: inputs.groups, schedules: inputs.schedules,
     mentions: inputs.mentions, scenarios: capabilityStates(inputs) };
 }
+
+/**
+ * What one chat can use (#1123): a Feishu group, whose binding level narrows what the project allows, or a GitHub thread,
+ * where a mention reaches the Manager. The project's facts still apply (ceiling, enabled roles, a stopped project); the chat
+ * adds its own gate. State level_limited: the project could, but this group's level cannot ask for it.
+ */
+/** A Feishu group binding's level, as the console names it. */
+export const groupLevelTitles: Record<BindingLevel, string> = { read: '只读问答', comment: '可评论和打标签', dispatch: '可派活', custom: '逐项设置' };
+export type ChatState = 'ready' | 'ceiling_limited' | 'level_limited' | 'off';
+export const chatStateTitles: Record<ChatState, string> = { ready: '可以用', ceiling_limited: '受项目能力上限约束', level_limited: '本群档位不支持', off: '未开启' };
+export interface ChatVenue {
+  kind: 'feishu_group' | 'github';
+  /** Feishu group: Issue/PR write (comment level and up) and creating tasks through the Manager (dispatch). */
+  write?: boolean; dispatch?: boolean;
+}
+export interface ChatCapability { id: ScenarioId; title: string; state: ChatState; state_title: string; how: string; examples: string[] }
+
+/** Requests people can copy, per scenario; `<repo>` is replaced with the repository's full name. */
+const chatExamples: Record<ChatVenue['kind'], Record<ScenarioId, string[]>> = {
+  feishu_group: {
+    qa: ['@bot <repo> 里 README 写的本地测试命令是什么？', '@bot <repo> 最近合入的 3 个 PR 各改了什么？'],
+    triage: ['@bot 给 <repo> 的 Issue #12 加上仓库已有的 type/bug 标签'],
+    review: ['@bot 检视一下 <repo> 的 PR #34'],
+    development: ['@bot 开发 <repo> 的 Issue #56，完成后开 PR'],
+    testing: ['@bot 在 <repo> 的 PR #34 上跑一下测试，把结果发到群里'],
+    ci: ['@bot 看看 <repo> main 分支最近一次 CI 为什么失败'],
+  },
+  github: {
+    qa: ['@bot 这个函数还在哪些地方被调用？', '@bot 这个改动会影响哪些模块？'],
+    triage: ['@bot 请给这个 Issue 加上仓库已有的 type/bug 标签（作者或维护者提出）'],
+    review: ['@bot 请检视一下这个 PR'],
+    development: ['@bot 请开发这个 Issue，完成后开 PR（维护者提出）'],
+    testing: ['@bot 请在这个 PR 上跑一下测试，把结果回复在这里'],
+    ci: ['@bot 最近一次 main 上的 CI 为什么失败？'],
+  },
+};
+/** The order examples are picked in, so three examples show different kinds of work. */
+const exampleOrder: ScenarioId[] = ['qa', 'testing', 'review', 'development', 'triage', 'ci'];
+
+export function chatCapabilities(input: CapabilityInputs, venue: ChatVenue): ChatCapability[] {
+  const project = new Map(capabilityStates(input).map(c => [c.id, c])), has = (role: string) => input.roles.includes(role);
+  const group = venue.kind === 'feishu_group', write = !group || !!venue.write, dispatch = !group || !!venue.dispatch;
+  const out: ChatCapability[] = [];
+  const add = (id: ScenarioId, state: ChatState, how: string) =>
+    out.push({ id, title: scenarioTitles[id], state, state_title: chatStateTitles[state], how, examples: state === 'ready' ? chatExamples[venue.kind][id] : [] });
+  const ceilingNote = (needed: Ceiling) => `项目能力上限是「${ceilingTitles[input.ceiling]}」，这项需要「${ceilingTitles[needed]}」`;
+  if (!input.enabled) { for (const id of Object.keys(scenarioTitles) as ScenarioId[]) add(id, 'off', '项目已停用。'); return out; }
+  // ① In a group the assistant reads and answers itself; on GitHub the answer is a comment.
+  if (group) add('qa', 'ready', '@bot 提问，读代码、Issue、PR 和 Actions 记录后在群里回答。');
+  else add('qa', covers(input.ceiling, 'comment') ? 'ready' : 'ceiling_limited', covers(input.ceiling, 'comment') ? '@bot 提问，读代码和讨论后在这里回复。' : ceilingNote('comment') + '，GitHub 上不能回复。');
+  // ② Labels, assignees, titles and open/closed state: a group needs to write; the ceiling must cover comment.
+  if (!write) add('triage', 'level_limited', '本群是只读问答档位；改标签、指派或开关 Issue/PR 需要「可评论和打标签」或以上档位。');
+  else if (!covers(input.ceiling, 'comment')) add('triage', 'ceiling_limited', ceilingNote('comment') + '。');
+  else add('triage', 'ready', group ? '@bot 提出明确的整理请求，只用仓库已有的标签，回复里写明请求来源。' : 'Issue/PR 的作者或维护者 @bot 提出整理请求；只用仓库已有的标签。');
+  // ③④⑤ Work handed to the project's Manager: a group needs dispatch; the role must be enabled; GitHub writes need the ceiling.
+  const handed = (id: ScenarioId, role: string, needed: Ceiling | null, how: string) => {
+    if (!dispatch) add(id, 'level_limited', '把工作交给项目需要本群是「可派活」档位。');
+    else if (!has(role)) add(id, 'off', `项目没有启用 ${roleTitles[role] ?? role} 角色。`);
+    else if (needed && !covers(input.ceiling, needed)) add(id, 'ceiling_limited', ceilingNote(needed) + '。');
+    else add(id, 'ready', how);
+  };
+  handed('review', 'reviewer', 'comment', group ? '@bot 要求检视某个 PR 或 Issue，交给项目 Manager 派 reviewer，结果发到 GitHub 并通知本群。' : '@bot 要求检视，reviewer 发布一份结构化检视。');
+  handed('development', 'dev', 'develop', group ? '@bot 要求开发某个 Issue，Manager 核实依据后在 bot 分支开 PR；不会自行合并。' : '维护者 @bot 要求开发，Manager 核实依据后在 bot 分支开 PR；不会自行合并。');
+  handed('testing', 'test', group ? null : 'comment', group ? '@bot 要求在 PR、分支或提交上跑测试，test 检出运行后把命令和输出发回本群。' : '@bot 要求在这个 PR 上跑测试，test 检出运行后回复命令和输出。');
+  // ⑥ A group reads Actions itself; filing an Issue needs write. On GitHub, failures are handled when the project listens.
+  if (group) add('ci', 'ready', write && covers(input.ceiling, 'comment') ? '@bot 查 CI 失败原因，需要时提报 Issue；也可以让 bot 设定时检查。' : '@bot 查 CI 失败原因并在群里说明；提报 Issue 需要更高档位或能力上限。');
+  else { const c = project.get('ci')!; add('ci', c.state === 'ready' ? 'ready' : c.state === 'ceiling_limited' ? 'ceiling_limited' : 'off', c.detail); }
+  return out;
+}
+
+/** Three copyable requests from the ready scenarios, different kinds of work first. */
+export function chatExamplesFor(capabilities: ChatCapability[], repository: string, count = 3): string[] {
+  const ready = exampleOrder.map(id => capabilities.find(c => c.id === id)).filter((c): c is ChatCapability => !!c && c.state === 'ready');
+  const picked: string[] = [];
+  for (let round = 0; picked.length < count && ready.some(c => c.examples[round]); round++)
+    for (const c of ready) if (c.examples[round] && picked.length < count) picked.push(c.examples[round]!.replaceAll('<repo>', repository));
+  return picked;
+}
+
+/**
+ * The notice a group gets when its binding is saved with a new level or scope: what it can use per repository and three
+ * requests to try. Plain text, built from the same projection, so it never promises more than the group's tools allow.
+ */
+export function groupCapabilityNotice(levelTitle: string, projects: { full_name: string; inputs: CapabilityInputs }[], venue: ChatVenue): string {
+  const lines = [`本群已接入 bot，档位：${levelTitle}。下面是现在能用的范围（随项目设置变化，随时 @bot 问「你能干什么」可以再看）：`];
+  let examples: string[] = [];
+  for (const project of projects) {
+    const list = chatCapabilities(project.inputs, venue), ready = list.filter(c => c.state === 'ready'), held = list.filter(c => c.state !== 'ready');
+    lines.push('', `${project.full_name}（项目能力上限：${ceilingTitles[project.inputs.ceiling]}${project.inputs.enabled ? '' : '，已停用'}）`);
+    lines.push(`- 可以：${ready.length ? ready.map(c => c.title).join('、') : '暂无'}`);
+    if (held.length) lines.push(`- 暂不可以：${held.map(c => `${c.title}（${c.state_title}）`).join('、')}`);
+    if (examples.length < 3) examples = [...examples, ...chatExamplesFor(list, project.full_name, 3 - examples.length)];
+  }
+  if (!projects.length) lines.push('', '本群暂时没有可用的仓库：绑定范围内的项目都已暂停，请联系绑定本群的人。');
+  if (examples.length) lines.push('', '试试：', ...examples.map((example, index) => `${index + 1}. ${example}`));
+  return lines.join('\n');
+}

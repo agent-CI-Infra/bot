@@ -8,7 +8,8 @@ import { channelFixture, boundGroup } from '../../../fixtures/channel-fixture.mj
 const byId = card => Object.fromEntries(card.scenarios.map(c => [c.id, c.state]));
 
 test('the capability card follows the ceiling, the event switches, bound groups and scheduled checks, and members can read it', async t => {
-  const f = await channelFixture(t), read = async (client = f.admin, id = '101') => (await client(`/api/repositories/${id}/capabilities`)).value;
+  // The schedule worker stays off: it would pause the hand-written plans below (their owner is not a person) mid-test.
+  const f = await channelFixture(t, { schedules: { automatic: false } }), read = async (client = f.admin, id = '101') => (await client(`/api/repositories/${id}/capabilities`)).value;
   const start = await read();
   assert.equal(start.scenarios.length, 6);
   assert.deepEqual(start.groups, {}); assert.equal(start.schedules, 0);

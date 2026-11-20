@@ -16,7 +16,8 @@ import type { ChannelDelivery, ChannelEvent } from './types.js';
 import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
-import { bindingScope, ChannelServiceBindings } from './service-bindings.js';
+import { bindingLevel, bindingScope, ChannelServiceBindings } from './service-bindings.js';
+import { groupCapabilityNotice, groupLevelTitles, projectCapabilityInputs } from '../projects/capabilities.js';
 import { ChannelServiceSessions } from './service-session.js';
 import { ChannelSchedules } from './schedules.js';
 import { roleConfiguration } from '../roles/definition.js';
@@ -43,7 +44,9 @@ const personalResultReasons: Record<string, string> = {
   tenant_forbidden: '创建者已没有该仓库的读取权限', principal_inactive: '创建者的账号已停用' };
 /** The deployment's GitHub permission checks, as far as Feishu turns use them (#846). */
 export interface GitHubProofs { lapsed(principal: string): boolean; renewIfLapsed(principal: string): Promise<boolean> }
-export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined; }
+export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined;
+  /** Groups get a capability card when their binding changes (#1123); off only for fixtures that count every message they send. */
+  capabilityNotices?: boolean; }
 // A principal a Feishu turn just checked is not checked again for each of its next messages, whatever the check found.
 const renewalPause = 60_000;
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
@@ -414,6 +417,29 @@ export class ChannelService {
     return { provider: 'feishu', connector_id: c.id, connector_revision: c.revision, app_id: chat.app_id, installation_tenant: chat.installation_tenant, actor_tenant: '', actor_id: '',
       chat_id: chat.chat_id, chat_type: chat.chat_type, message_id: '', event_id: '', thread_id: '', created_at: Date.now(), kind: 'message', content: '' };
   }
+  /** What a group's notice compares (#1123): whether its binding is on, its level and the repositories it covers. */
+  bindingSnapshot(chat: string): { enabled: boolean; level: string; scope: string } | null {
+    const binding = this.serviceBindings.get(chat);
+    return binding ? { enabled: !!binding.enabled, level: bindingLevel(this.serviceBindings.permissions(binding)),
+      scope: JSON.stringify(this.serviceBindings.grants(binding).map(g => [g.scope, g.tenant_id, g.project_id])) } : null;
+  }
+  /**
+   * Tells a group what it can use (#1123) when its binding is turned on or its level or repositories change: a plain card from
+   * the same projection the assistant answers 「你能干什么」 with. Sent once per binding revision, and only while that revision
+   * is still the group's binding.
+   */
+  bindingNotice(chat: string, before: { enabled: boolean; level: string; scope: string } | null): string | null {
+    if (this.options.capabilityNotices === false) return null;
+    const binding = this.serviceBindings.active(chat), now = this.bindingSnapshot(chat);
+    if (!binding || !now || (before?.enabled && before.level === now.level && before.scope === now.scope)) return null;
+    try { this.serviceBindings.assertUsable(binding); } catch (error) { if (error instanceof HttpError) return null; throw error; }
+    const granted = this.serviceBindings.permissions(binding), level = bindingLevel(granted);
+    const venue = { kind: 'feishu_group' as const, write: granted.github_issues === 'write' || granted.github_pull_requests === 'write', dispatch: granted.delegation === 'allow' };
+    const projects = this.serviceBindings.reach(binding).projects.map(p => ({ full_name: p.full_name, inputs: projectCapabilityInputs(this.store, p.id) }));
+    const row = this.store.get('SELECT * FROM channel_chats WHERE id=?', chat)!;
+    return this.post(row, groupCapabilityNotice(groupLevelTitles[level], projects, venue), `binding-notice:${binding.id}:${binding.revision}`, `binding-notice:${binding.id}`,
+      { kind: 'service_binding_notice', chat_id: chat, binding_id: binding.id, binding_revision: binding.revision });
+  }
   /** Queues a card to a chat once per key; the protection is checked again right before sending. */
   post(chat: Row, message: string, key: string, source: string, protection: Json): string { return this.queue(this.chatEvent(chat), card(message), key, source, protection); }
   /**
@@ -660,7 +686,7 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
-    if(['employee','personal_conversation','personal_task','service_binding','service_task','channel_schedule','onboarding_request'].includes(protection?.kind)){
+    if(['employee','personal_conversation','personal_task','service_binding','service_binding_notice','service_task','channel_schedule','onboarding_request'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
         // A start request notice (#933): still the person's own chat, through an application allowed for the repository, and a
@@ -679,6 +705,13 @@ export class ChannelService {
           this.serviceBindings.assertUsable(binding!);
           if(!this.serviceBindings.reachable(binding!,protection.project_id,['tasks.read']))fail(403,'channel_service_scope_paused');
           const task=this.store.get('SELECT * FROM tasks WHERE id=?',protection.task_id);if(!task)fail(404,'task_not_found');this.resultAuthority(task!);
+          return;
+        }
+        // A capability notice (#1123) goes out only while the group still has the binding revision it describes.
+        if(protection.kind==='service_binding_notice'){
+          const binding=this.serviceBindings.get(protection.chat_id);
+          if(!binding||binding.id!==protection.binding_id||binding.revision!==protection.binding_revision)fail(409,'conversation_source_changed');
+          this.serviceBindings.assertUsable(binding!);
           return;
         }
         if(protection.kind==='service_binding'){

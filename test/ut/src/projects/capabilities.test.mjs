@@ -3,7 +3,7 @@
 // place to change it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilityStates } from '../../../../dist/projects/capabilities.js';
+import { capabilityStates, chatCapabilities, chatExamplesFor, groupCapabilityNotice } from '../../../../dist/projects/capabilities.js';
 
 const allEvents = {
   'issue.opened': true, 'issue.updated': true, 'issue.mention': true, 'issue.labels': [], 'issue.development_label': true,
@@ -64,4 +64,43 @@ test('CI failures need the Actions switch or a scheduled check, and a stopped pr
   assert.equal(states({ events: { 'actions.run_failed': false }, schedules: 2 }).ci, 'ready');
   assert.match(scenario('ci', { events: { 'actions.run_failed': false }, schedules: 2 }).detail, /2 个定时检查/);
   assert.deepEqual(Object.values(states({ enabled: false })), ['off', 'off', 'off', 'off', 'off', 'off']);
+});
+
+// The chat capability card (#1123): a Feishu group's level narrows what the project allows; a GitHub thread reaches the Manager.
+const chat = (venue, change = {}) => Object.fromEntries(chatCapabilities({ ...base, ...change, events: { ...allEvents, ...change.events } }, venue).map(c => [c.id, c.state]));
+const readGroup = { kind: 'feishu_group', write: false, dispatch: false }, commentGroup = { kind: 'feishu_group', write: true, dispatch: false }, dispatchGroup = { kind: 'feishu_group', write: true, dispatch: true };
+
+test('a read-only group answers questions and reads CI, and cannot ask for writes or work', () => {
+  assert.deepEqual(chat(readGroup), { qa: 'ready', triage: 'level_limited', review: 'level_limited', development: 'level_limited', testing: 'level_limited', ci: 'ready' });
+  assert.deepEqual(chat(commentGroup), { qa: 'ready', triage: 'ready', review: 'level_limited', development: 'level_limited', testing: 'level_limited', ci: 'ready' });
+  assert.deepEqual(chat(dispatchGroup), { qa: 'ready', triage: 'ready', review: 'ready', development: 'ready', testing: 'ready', ci: 'ready' });
+});
+
+test('the project still decides: its ceiling, its roles and a stopped project narrow every chat', () => {
+  // A dispatching group of a comment-level project cannot get development; tests report back to the group at any ceiling.
+  assert.deepEqual(chat(dispatchGroup, { ceiling: 'comment' }), { qa: 'ready', triage: 'ready', review: 'ready', development: 'ceiling_limited', testing: 'ready', ci: 'ready' });
+  assert.deepEqual(chat(dispatchGroup, { ceiling: 'read' }), { qa: 'ready', triage: 'ceiling_limited', review: 'ceiling_limited', development: 'ceiling_limited', testing: 'ready', ci: 'ready' });
+  assert.equal(chat(dispatchGroup, { roles: ['manager', 'reviewer', 'test'] }).development, 'off');
+  assert.deepEqual(Object.values(chat(dispatchGroup, { enabled: false })), ['off', 'off', 'off', 'off', 'off', 'off']);
+  // On GitHub every answer is a comment, so a read ceiling holds questions back too.
+  assert.deepEqual(chat({ kind: 'github' }, { ceiling: 'read' }), { qa: 'ceiling_limited', triage: 'ceiling_limited', review: 'ceiling_limited', development: 'ceiling_limited', testing: 'ceiling_limited', ci: 'ceiling_limited' });
+  assert.equal(chat({ kind: 'github' }, { events: { 'actions.run_failed': false } }).ci, 'off');
+});
+
+test('examples come only from what the chat can use, different kinds of work first', () => {
+  const read = chatExamplesFor(chatCapabilities(base, readGroup), 'acme/app');
+  assert.equal(read.length, 3);
+  assert.ok(read.every(example => example.includes('acme/app') && !/开发|检视|跑一下测试|标签/.test(example)), read.join(' | '));
+  const all = chatExamplesFor(chatCapabilities(base, dispatchGroup), 'acme/app');
+  assert.deepEqual(all.map(example => example.match(/README|测试|检视/)?.[0]), ['README', '测试', '检视']);
+  assert.ok(chatExamplesFor(chatCapabilities({ ...base, ceiling: 'read' }, { kind: 'github' }), '').length === 0);
+});
+
+test('the group notice says the level, what each repository allows and three requests to try', () => {
+  const text = groupCapabilityNotice('只读问答', [{ full_name: 'acme/app', inputs: { ...base, ceiling: 'comment' } }], readGroup);
+  assert.match(text, /^本群已接入 bot，档位：只读问答。/);
+  assert.match(text, /acme\/app（项目能力上限：可评论和打标签）\n- 可以：代码仓问答与调研、CI 失败与定时主动发现/);
+  assert.match(text, /- 暂不可以：Issue\/PR 日常管理（本群档位不支持）/);
+  assert.match(text, /试试：\n1\. @bot acme\/app[^\n]+\n2\. [^\n]+\n3\. [^\n]+$/);
+  assert.match(groupCapabilityNotice('可派活', [], dispatchGroup), /没有可用的仓库/);
 });
