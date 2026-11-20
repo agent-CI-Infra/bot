@@ -427,3 +427,77 @@ test('项目管理员在没有已启动项目或接口 403 时看到原因和重
     await expect(page.locator('.management-status')).not.toContainText('无法打开管理会话');
   } finally { await f.close(); }
 });
+
+test('管理助手在空会话展示推荐列表、在已有对话展示紧凑推荐条，并随项目范围填入对应提示词', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+
+    const chat = page.locator('#management-chat');
+    const composer = chat.getByLabel('管理消息', { exact: true });
+    const send = chat.getByRole('button', { name: '发送', exact: true });
+    const welcomeList = chat.getByTestId('management-recommendations');
+    const compactBar = chat.getByTestId('management-recommendation-bar');
+    await expect(send).toBeEnabled();
+    await expect(welcomeList).toBeVisible();
+    await expect(compactBar).toBeHidden();
+
+    // Platform scope with multiple started projects does not guess a single repository name.
+    await welcomeList.getByRole('button', { name: /运行仓库接入助手/ }).click();
+    await expect(composer).toHaveValue(/请先列出我当前可管理的仓库与待接入仓库/);
+    await expect(composer).toBeFocused();
+    await welcomeList.getByRole('button', { name: /优化门禁/ }).click();
+    await expect(composer).toHaveValue(/留空则先列出我可管理的仓库供选择/);
+
+    // Switching to project 101 updates recommendations to name agent-test-zone/admin-fixture-101.
+    await switchConsoleProject(page, '101');
+    await expect(send).toBeEnabled();
+    await expect(welcomeList).toBeVisible();
+    await expect(compactBar).toBeHidden();
+    await welcomeList.getByRole('button', { name: /运行仓库接入助手/ }).click();
+    await expect(composer).toHaveValue(/^请帮我核对并优化仓库 agent-test-zone\/admin-fixture-101 的接入配置：/);
+    await welcomeList.getByRole('button', { name: /分析 Actions 运行/ }).click();
+    await expect(composer).toHaveValue(/分析仓库 agent-test-zone\/admin-fixture-101 的 GitHub Actions 运行/);
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(0);
+
+    // Once the conversation has a turn, welcome hides and the compact recommendation bar appears above the composer.
+    await composer.fill('任务为什么没有继续？');
+    await send.click();
+    await expect(chat.getByRole('log', { name: '管理会话记录' })).toContainText('任务正在等待项目电脑');
+    await expect(welcomeList).toBeHidden();
+    await expect(compactBar).toBeVisible();
+    await compactBar.getByRole('button', { name: '分析 Issue', exact: true }).click();
+    await expect(composer).toHaveValue(/分析仓库 agent-test-zone\/admin-fixture-101 的 Issue #/);
+    await expect(composer).toBeFocused();
+
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await expect(compactBar).toBeVisible();
+      for (const title of ['运行仓库接入助手', '优化门禁', '分析 Actions 运行', '分析 Issue']) {
+        const chip = compactBar.getByRole('button', { name: title, exact: true });
+        await expect(chip).toBeInViewport({ ratio: 1 });
+        expect(await chip.evaluate(el => {
+          const r = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          return !!hit && el.contains(hit);
+        }), `${width}:${title}`).toBe(true);
+      }
+    }
+
+    // Starting a fresh conversation brings back the welcome recommendation cards and hides the compact bar.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await chat.getByRole('button', { name: '会话记录', exact: true }).click();
+    await chat.getByRole('button', { name: '新建会话', exact: true }).click();
+    await expect(welcomeList).toBeVisible();
+    await expect(compactBar).toBeHidden();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});

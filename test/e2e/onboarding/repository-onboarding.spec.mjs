@@ -1,8 +1,9 @@
 // #934, #1133: unified repository onboarding in the Management Assistant, at 1440 and at 390.
 // An administrator with zero started projects opens 开始接入 (and legacy #/onboarding/103), analyzes the unstarted
 // repository read-only in #/management, files a start request, has a super administrator approve in 待处理 (#/inbox),
-// applies confirmed settings, confirms a staged workflow_changes: true development task card in the console, and
-// re-enters onboarding from #/projects/103/basic. GitHub and the model are local fixtures.
+// applies confirmed settings, confirms a staged workflow_changes: true development task card in the console, verifies
+// project basic settings has no duplicate onboarding entry, and picks onboarding / gate / Actions / Issue prompts from
+// the assistant's recommendation list on #/projects/103/management. GitHub and the model are local fixtures.
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
@@ -173,14 +174,38 @@ for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手�
     await expect(chat).toContainText('这项修改 .github/workflows/ 的开发任务已在下方确认提交');
     await expect(chat.locator('.management-workflow-confirm').getByRole('button', { name: '确认执行' })).toHaveCount(0);
 
-    // Started project's settings offer 仓库接入, opening #/projects/103/management with review prompt prefilled.
+    // Started project's basic settings no longer duplicates 仓库接入; onboarding and common actions live in the assistant's recommendation list.
     await page.goto(f.h.admin + '/#/projects/103/basic');
-    const onboardLink = page.getByRole('link', { name: /仓库接入/ });
-    await expect(onboardLink).toHaveAttribute('href', '#/projects/103/management');
+    await expect(page.locator('#project-page')).toContainText('fixture/project-103');
+    await expect(page.getByRole('link', { name: /仓库接入/ })).toHaveCount(0);
+    await expect(page.locator('#project-page')).not.toContainText('仓库接入');
+    const overviewHeading = page.locator('#project-page').getByRole('heading', { name: '项目概况', exact: true });
+    await expect(overviewHeading).toBeVisible();
+    expect(await overviewHeading.evaluate(el => {
+      el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect(), hit = document.elementFromPoint(r.left + 8, r.top + r.height / 2);
+      return !!hit && el.contains(hit);
+    })).toBe(true);
     await shot(page, '08-project-basic');
-    await onboardLink.click();
+
+    await page.goto(f.h.admin + '/#/projects/103/management');
     await expect(page).toHaveURL(/#\/projects\/103\/management$/);
+    const welcomeList = chat.getByTestId('management-recommendations');
+    await expect(welcomeList).toBeVisible();
+    await expect(chat.getByTestId('management-recommendation-bar')).toBeHidden();
+    for (const title of ['运行仓库接入助手', '优化门禁', '分析 Actions 运行', '分析 Issue']) {
+      await expect(welcomeList.getByRole('button', { name: new RegExp(title) })).toBeVisible();
+    }
+    await shot(page, '09-project-recommendations');
+    await welcomeList.getByRole('button', { name: /运行仓库接入助手/ }).click();
     await expect(composer).toHaveValue(/^请帮我核对并优化仓库 fixture\/project-103 的接入配置：/);
+    await expect(composer).toBeFocused();
+    await welcomeList.getByRole('button', { name: /优化门禁/ }).click();
+    await expect(composer).toHaveValue(/评估并优化仓库 fixture\/project-103 的 CI 门禁.*layered-ci-gates/);
+    await welcomeList.getByRole('button', { name: /分析 Actions 运行/ }).click();
+    await expect(composer).toHaveValue(/分析仓库 fixture\/project-103 的 GitHub Actions 运行/);
+    await welcomeList.getByRole('button', { name: /分析 Issue/ }).click();
+    await expect(composer).toHaveValue(/分析仓库 fixture\/project-103 的 Issue #/);
 
     expect(errors).toEqual([]);
   } finally { await f.close(); for (const cleanup of cleanups.reverse()) await cleanup(); }
