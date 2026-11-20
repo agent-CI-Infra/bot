@@ -18,10 +18,11 @@ export function managementStorage(store: Store): void {
       approval_operations TEXT NOT NULL DEFAULT '[]',role_fields TEXT NOT NULL DEFAULT '["enabled","controller","roles","skills"]');
     DROP TABLE IF EXISTS management_budgets;
     CREATE TABLE IF NOT EXISTS management_conversations(id TEXT PRIMARY KEY,principal_id TEXT NOT NULL,tenant_id TEXT NOT NULL,
-      scope TEXT NOT NULL,created_at TEXT NOT NULL);
+      scope TEXT NOT NULL,created_at TEXT NOT NULL,title TEXT,title_revision INTEGER);
     CREATE TABLE IF NOT EXISTS management_messages(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES management_conversations(id),
       source_message TEXT NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,authorization_revision INTEGER NOT NULL,
       created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(conversation_id,source_message));
+    CREATE INDEX IF NOT EXISTS management_message_activity ON management_messages(conversation_id,authorization_revision,updated_at);
     CREATE TABLE IF NOT EXISTS management_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,message_id TEXT NOT NULL REFERENCES management_messages(id),
       type TEXT NOT NULL,data TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS task_execution_configs(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
@@ -30,6 +31,11 @@ export function managementStorage(store: Store): void {
   // Preserve retry identity even when two different inputs redact to the same stored text.
   if (!store.all('PRAGMA table_info(management_messages)').some(column => column.name === 'input_hash'))
     store.db.exec('ALTER TABLE management_messages ADD COLUMN input_hash TEXT');
+  const conversationColumns = store.all('PRAGMA table_info(management_conversations)');
+  if (!conversationColumns.some(column => column.name === 'title'))
+    store.db.exec('ALTER TABLE management_conversations ADD COLUMN title TEXT');
+  if (!conversationColumns.some(column => column.name === 'title_revision'))
+    store.db.exec('ALTER TABLE management_conversations ADD COLUMN title_revision INTEGER');
   retireAcpTaskExecutionConfigs(store);
   retireIsolatedEnvironmentProfiles(store);
   onboardingStorage(store);

@@ -12,6 +12,13 @@ export const toolResults = body => body.messages.filter(m => m.role === 'tool').
   return value?.truncated && value.fields ? { ...value.fields, ...value } : value;
 });
 
+export const isTitleRequest = body => body.messages[0]?.content?.startsWith('Generate a short conversation title');
+export function replyWithTitle(response, title = '查看项目任务状态') {
+  response.writeHead(200, { 'Content-Type': 'application/json' });
+  response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: title } }],
+    usage: { prompt_tokens: 12, completion_tokens: 6 } }));
+}
+
 export async function managementFixture(t,options={}) {
   const h=await harness(t,undefined,options),{admin,password}=await setup(h),a=await account(admin);
   await repository(admin,a.id,'101');await repository(admin,a.id,'102');await repository(admin,a.id,'201');
@@ -21,10 +28,16 @@ export async function managementFixture(t,options={}) {
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,error_code,created_at,updated_at) VALUES(?,?,'task.request','waiting_environment','prepare','Inspect task facts','environment_not_ready',?,?)",id,project,time,time);
     h.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)','log-'+id,id,JSON.stringify({type:'fault',code:'environment_not_ready',detail:'Project computer is stopped'}),time);
   }
-  const requests=[],modelState={gate:null,failure:0,configurationPrompt:null};
+  const requests=[],titleRequests=[],modelState={gate:null,failure:0,configurationPrompt:null};
   const provider=createServer(async(req,res)=>{
     // Whole-body decoding: a multibyte character may be split across chunks.
-    const chunks=[];for await(const b of req)chunks.push(b);const body=JSON.parse(Buffer.concat(chunks).toString());requests.push(body);
+    const chunks=[];for await(const b of req)chunks.push(b);const body=JSON.parse(Buffer.concat(chunks).toString());
+    if(isTitleRequest(body)){
+      titleRequests.push(body);
+      if(modelState.titleRespond){await modelState.titleRespond(body,res);return;}
+      return replyWithTitle(res);
+    }
+    requests.push(body);
     if(modelState.gate)await modelState.gate;
     if(modelState.respond){await modelState.respond(body,res);return;}
     if(modelState.failure){res.writeHead(modelState.failure,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Fixture model failure'}}));return;}
@@ -49,7 +62,7 @@ export async function managementFixture(t,options={}) {
     const password=testPassword(),created=await admin('/api/users','POST',{username:name,password,...grants}),client=h.client();
     await client('/api/auth/login','POST',{username:name,password});return {id:created.value.user.id,client,password};
   }
-  return {h,admin,password,a,model,assistantModel,requests,modelState,provider,member,close:async()=>{await h.stop();await new Promise(r=>{provider.close(r);provider.closeAllConnections();});}};
+  return {h,admin,password,a,model,assistantModel,requests,titleRequests,modelState,provider,member,close:async()=>{await h.stop();await new Promise(r=>{provider.close(r);provider.closeAllConnections();});}};
 }
 export const query=(client,operation,target={},args={})=>client('/api/management/query','POST',{operation,target,arguments:args});
 export async function command(client,operation,target,args={},key='command-'+Math.random(),revision){

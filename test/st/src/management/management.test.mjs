@@ -200,6 +200,51 @@ test('stopping a stream before a tool call prevents writes; model faults are exp
   const events=await settled(admin,conversation,failure.id);assert.equal(events.messages.find(m=>m.id===failure.id).state,'failed');assert.ok(events.events.some(e=>e.type==='error'&&e.data.error==='model_http_503'));
 });
 
+test('console conversation titles and activity stay within the current authorization revision', async t => {
+  const {h,member,titleRequests,modelState}=await managementFixture(t);
+  const reader=await member('title-reader',{repository_ids:['101']});
+  const collection='/api/management/conversations';
+  const first=(await reader.client(collection,'POST',{scope:'project:101'})).value.conversation;
+  const second=(await reader.client(collection,'POST',{scope:'project:101'})).value.conversation;
+  assert.equal(first.last_activity_at,first.created_at);
+  assert.equal(first.title,null);
+
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  t.after(release);
+  modelState.titleRespond=async(_body,res)=>{
+    await gate;
+    res.writeHead(200,{'Content-Type':'application/json'});
+    res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'  排查项目电脑状态  '}}]}));
+  };
+  const body={source_message:'first-question',content:'任务为什么没有继续？'};
+  const sent=(await reader.client(collection+'/'+first.id+'/messages','POST',body)).value;
+  const page=await settled(reader.client,first.id,sent.id);
+  assert.equal(page.messages.at(-1).state,'completed');
+  assert.equal(page.title_pending,true);
+  assert.equal(page.conversation.title,null);
+  assert.equal(page.conversation.last_activity_at,page.messages.at(-1).updated_at);
+  assert.deepEqual((await reader.client(collection)).value.conversations.map(c=>c.id),[first.id,second.id]);
+  assert.equal((await reader.client(collection+'/'+first.id+'/messages','POST',body)).value.replayed,true);
+
+  release();
+  const stream=await fetch(h.admin+collection+'/'+first.id+'/events?stream=1',{headers:{Cookie:reader.client.cookie()}});
+  assert.equal(stream.status,200);
+  await stream.text();
+  const named=(await reader.client(collection)).value.conversations[0];
+  assert.equal(named.title,'排查项目电脑状态');
+  assert.equal(named.last_activity_at,page.conversation.last_activity_at);
+  assert.equal(titleRequests.length,1);
+  assert.deepEqual(JSON.parse(titleRequests[0].messages[1].content),{request:body.content});
+  assert.equal(titleRequests[0].tools,undefined);
+
+  h.store.run('UPDATE principals SET authorization_revision=authorization_revision+1 WHERE id=?',reader.id);
+  const reopened=(await reader.client(collection+'/'+first.id)).value;
+  assert.deepEqual(reopened.messages,[]);
+  assert.equal(reopened.conversation.title,null);
+  assert.equal(reopened.conversation.last_activity_at,first.created_at);
+});
+
 test('read-only grants cannot write through either API or agent, and revocation hides old conversation facts',async t=>{
   const {h,admin,member}=await managementFixture(t),reader=await member('reader',{repository_ids:['101']});
   h.store.run("UPDATE scoped_grants SET capabilities='[\"tasks.read\"]' WHERE principal_id=?",reader.id);

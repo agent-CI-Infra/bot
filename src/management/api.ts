@@ -54,7 +54,7 @@ export class ManagementApi {
       assertCurrent(actor);
       const page=this.agent.history(actor,id,after);
       for(const event of page.events as Json[]){res.write(JSON.stringify(event)+'\n');after=Number(event.sequence);}
-      if(!(page.has_more)&&!(page.messages as Json[]).some(m=>['pending','running'].includes(String(m.state))))break;
+      if(!page.has_more&&!page.title_pending&&!(page.messages as Json[]).some(m=>['pending','running'].includes(String(m.state))))break;
       await new Promise(resolve=>setTimeout(resolve,200));
     }res.end();
   }
