@@ -295,6 +295,27 @@ button.role-task-chip:hover {
 .task-col-updated { text-align: right; }
 .task-updated-text { font-size: var(--font-size-1); white-space: nowrap; }
 
+/* 我们能干什么 (#1123): six scenario tiles, three per row on a wide screen, two on a tablet, one on a phone. */
+.capability-card { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); }
+.capability-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding: var(--space-4) var(--space-5); cursor: pointer; }
+.capability-title { margin: 0; font-size: var(--font-size-3); }
+.capability-summary::-webkit-details-marker { display: none; }
+.capability-summary::before { content: '▾'; color: var(--color-text-muted); }
+.capability-fold:not([open]) > .capability-summary::before { content: '▸'; }
+.capability-facts { color: var(--color-text-muted); font-size: var(--font-size-1); overflow-wrap: anywhere; }
+.capability-status { margin: 0 var(--space-5) var(--space-4); }
+.capability-grid { list-style: none; margin: 0; padding: 0 var(--space-5) var(--space-5); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
+.capability-tile { min-width: 0; display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-card); }
+.capability-tile[data-state=off] { background: var(--color-surface-alt); }
+.capability-tile-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.capability-tile-head strong { font-size: var(--font-size-2); overflow-wrap: anywhere; }
+.capability-detail { margin: 0; font-size: var(--font-size-1); color: var(--color-text-muted); line-height: var(--line-height-body); overflow-wrap: anywhere; }
+.capability-links { margin: auto 0 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--font-size-1); }
+.capability-links a { color: var(--color-brand); font-weight: 600; text-decoration: none; }
+.capability-links a:hover { text-decoration: underline; }
+@media (max-width: 1024px) { .capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 767px) { .capability-grid { grid-template-columns: minmax(0, 1fr); padding: 0 var(--space-4) var(--space-4); } .capability-summary { padding: var(--space-4); } }
+
 /* Workbench Footer */
 .workbench-footer {
   display: flex;
