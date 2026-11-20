@@ -135,7 +135,7 @@ test('PR comments, reviews, replies to review comments and description edits rev
 });
 
 // A bot pull request and the Issue development that opened it (#1104): what a review of it found that the bot can change is
-// offered to the Manager as a revision, with no budget; people's comments reach the Manager directly (dispatch.test.mjs).
+// offered to the Manager as a revision, with no budget; people's comments reach the Manager directly (dispatch-development.test.mjs).
 async function botPullRequest(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
