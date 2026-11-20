@@ -37,7 +37,8 @@ test('the regrouped prompt keeps the rules other code and older tasks rely on', 
   assert.match(flat, /This is a project rule: The bot may develop an Issue on its own when the latest published review concludes ready_for_development, confirmed the problem, recommends a bounded change that is clearly better than the alternatives, leaves no question for a person and finds no conflict with an existing feature, and nobody else has claimed the Issue\./);
   assert.match(text, /^### Starting development$/m);
   for (const rule of [
-    "Never merge a pull request, the bot's own included, unless a maintainer explicitly requests it",
+    "Merging follows the project's auto-merge policy in the fixed tool rules",
+    "`dev` never merges the pull request it delivers",
     'choose only labels that already exist in the repository, never create, rename or invent one',
     'A standing rule never starts development.',
     "The bot's own pull requests and its own pushes do not come here",

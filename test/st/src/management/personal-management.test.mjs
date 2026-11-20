@@ -23,6 +23,9 @@ test('multi-project greetings use the shared management agent and private histor
       ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','attach_message_resource','create_reply_file']:[]),'send_message']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);
+    // #1170: no fixed merge ban; merging follows each project's auto-merge policy, read from its effective configuration.
+    assert.match(body.messages[0].content,/Merging follows the project's auto-merge policy \(auto_merge_policy in get_effective_config\): disallow: never merge/);
+    assert.doesNotMatch(body.messages[0].content,/never merge a pull request, the bot's own included, or push/);
     reply(res,'你好！可以按项目名称查询任务和管理配置。');
   };
   const result=await im(f,'你好');assert.equal(result.row.state,'completed',result.row.error);

@@ -59,7 +59,7 @@ const devInstructions = `Implement or investigate the assigned goal within exist
 - Stay strictly within the recorded goal, acceptance criteria, and (on bot PR revisions) \`revision_requests\` / \`actionable_findings\`. Stop cleanly instead of guessing when a change requires a human product/contract decision or unauthorized workflow/dependency changes.
 - When \`report_development_milestone\` is offered on an Issue development task, report \`plan\` before editing code, \`completed\` once tests pass before opening the PR, or \`stopped\` with the concrete blocker.
 - Add or update meaningful executable regression tests that fail before the fix and pass after it; run the repository's real test/type/lint commands and cite actual results. Never invent test output or commit generated/note files (\`../notes/\` stays outside the git tree).
-- Deliver code changes through \`open_pull_request\` / \`create_pull_request\` when granted; never force-push, push to the default branch or another author's branch, or merge PRs.
+- Deliver code changes through \`open_pull_request\` / \`create_pull_request\` when granted; never force-push or push to the default branch or another author's branch, and never merge the pull request you deliver: merging follows the project's auto-merge policy, which github_write states and enforces.
 
 ## Actions Failure Investigation Rules
 - Inspect failed-step logs (\`read_job_log\`), workflow/source files at the failed SHA, and recent runs before filing or rerunning.

@@ -10,7 +10,7 @@
 
 当前提供多账号控制面、每仓库一个长期 Docker 环境，以及可读代码、运行命令和修改文件的检视／开发 Agent。没有内置账号或仓库；开启仓库检视后接收事件并创建任务，满足开发条件时自动实现、测试、发布 bot 分支和 PR。`/api/status` 的项目环境、检视、开发及模型调用能力均可用；具体任务缺配置或失败会显示故障状态。
 
-检视和开发由固定版本 Pi SDK 在项目长期容器内运行。能写 GitHub 的凭据和模型 Key 仅在控制面；Pi 的 loopback 模型入口通过任务专属 runner 邮箱请求控制面代理，没有跨项目共享服务或新增公网端口。模型需要自己读 GitHub 时（Issue、PR、评论、行内检视、Actions 运行、检查状态等），调用 `github_read_token` 经同一邮箱向控制面兑换只读令牌，见下文「任务只读令牌」。开发由模型在准备好时调用 `create_pull_request`：控制面立即固定唯一一次工作树快照，只在项目策略配置了非空测试命令时在快照之后运行它；模型提供的已执行测试命令只写入 PR 说明。策略测试失败、超时或输出截断时，工具返回 `validation_failed` 和输出，模型可修改后再次调用；成功只发布调用时的树，测试生成文件不进入 PR，无改动则正常结束且不创建 PR。控制面验证 diff 位置、head 和 bot 分支归属并负责推送与开 PR，同一 Issue 复用同一 bot 分支和 PR，Review 只允许 COMMENT，检视和开发流程不自动合并；Manager 默认有 Contents 写，可以另经 `github_write` 合并 PR，但提示词要求它和其他角色、助手都不自行合并（包括 bot 自己的 PR），人明确要求时才合并并引用这条要求（#1026），见[角色池](role-pool.md#authorized-merge)。
+检视和开发由固定版本 Pi SDK 在项目长期容器内运行。能写 GitHub 的凭据和模型 Key 仅在控制面；Pi 的 loopback 模型入口通过任务专属 runner 邮箱请求控制面代理，没有跨项目共享服务或新增公网端口。模型需要自己读 GitHub 时（Issue、PR、评论、行内检视、Actions 运行、检查状态等），调用 `github_read_token` 经同一邮箱向控制面兑换只读令牌，见下文「任务只读令牌」。开发由模型在准备好时调用 `create_pull_request`：控制面立即固定唯一一次工作树快照，只在项目策略配置了非空测试命令时在快照之后运行它；模型提供的已执行测试命令只写入 PR 说明。策略测试失败、超时或输出截断时，工具返回 `validation_failed` 和输出，模型可修改后再次调用；成功只发布调用时的树，测试生成文件不进入 PR，无改动则正常结束且不创建 PR。控制面验证 diff 位置、head 和 bot 分支归属并负责推送与开 PR，同一 Issue 复用同一 bot 分支和 PR，Review 只允许 COMMENT，检视和开发流程不自动合并；Manager 默认有 Contents 和 Pull Request 写，可以另经 `github_write` 合并 PR（目标分支要求 merge queue 时送入队列），能否自行合并由项目的[自动合并策略](workflows.md#项目自动合并策略)决定（#1170，默认只在维护者明确要求时合并，控制面核实请求来源），见[角色池](role-pool.md#authorized-merge)。
 
 ## 使用与权限
 

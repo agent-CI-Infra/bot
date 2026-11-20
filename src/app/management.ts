@@ -16,6 +16,7 @@ import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '..
 import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 import { isCeiling, legacySwitchCeiling, projectCeiling, setCeiling, type Ceiling } from '../projects/ceiling.js';
+import { autoMergePolicy, isAutoMergePolicy } from '../github/merge-policy.js';
 import { saveLabels, validLabel } from '../rules/service.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
@@ -349,8 +350,9 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','base_branch',
         'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','role_concurrency','command_timeout_seconds','delivery_gates',
-        'review_label','development_label','developing_label']);
+        'review_label','development_label','developing_label','auto_merge_policy']);
       for (const key of ['review_label', 'development_label', 'developing_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
+      if (body.auto_merge_policy !== undefined && !isAutoMergePolicy(body.auto_merge_policy)) fail(400, 'invalid_auto_merge_policy', 'auto_merge_policy');
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       const commandTimeout = body.command_timeout_seconds === undefined || body.command_timeout_seconds === null ? body.command_timeout_seconds
         : (Number.isSafeInteger(body.command_timeout_seconds) && (body.command_timeout_seconds as number) >= 10 && (body.command_timeout_seconds as number) <= 7200 ? body.command_timeout_seconds as number : fail(400, 'invalid_command_timeout', 'command_timeout_seconds'));
@@ -390,6 +392,11 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         syncEventFilters(store, id, body);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,base_branch=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.base_branch===undefined?previous.base_branch:String(body.base_branch),id);
+        // Whether agents may merge on their own (#1170); only a change is audited on its own, with both levels.
+        if (body.auto_merge_policy !== undefined && body.auto_merge_policy !== autoMergePolicy(store, id, previous)) {
+          store.run('UPDATE policies SET auto_merge_policy=? WHERE repository_id=?', body.auto_merge_policy as string, id);
+          store.audit(user.id, 'policy.auto_merge', `${autoMergePolicy(store, id, previous)} -> ${body.auto_merge_policy}`, id);
+        }
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
         if (commandTimeout !== undefined) store.run('UPDATE policies SET command_timeout_seconds=? WHERE repository_id=?', commandTimeout as number | null, id);
         if (body.review_label !== undefined || body.development_label !== undefined || body.developing_label !== undefined)

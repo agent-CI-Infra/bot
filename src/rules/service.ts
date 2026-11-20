@@ -19,7 +19,7 @@ import { importBotRules, importPending, importRepository, importedComputer } fro
 // They were imported once at the upgrade (see imported.ts); a repository that still has them is told they can go.
 const prompt = (name: string) => readFileSync(resolve(import.meta.dirname, '../../docs/prompts', name), 'utf8');
 export const defaults: Record<string, string> = {
-  '.bot/guide.md': 'Act on the stated Issue or PR. Inspect relevant code and tests. Keep conclusions concise and evidence-based. Never invent test results. GitHub publication and authorization belong to the control plane. Do not merge PRs or expose credentials.',
+  '.bot/guide.md': 'Act on the stated Issue or PR. Inspect relevant code and tests. Keep conclusions concise and evidence-based. Never invent test results. GitHub publication and authorization belong to the control plane. Merge PRs only as the auto-merge policy allows; never expose credentials.',
   '.bot/rules/labels.md': prompt('labels.md'),
   '.bot/rules/issue-review.md': prompt('issue-review.md'),
   '.bot/rules/pr-review.md': prompt('pr-review.md'),

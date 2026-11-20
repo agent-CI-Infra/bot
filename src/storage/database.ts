@@ -159,7 +159,7 @@ export class Store {
       for (const [name, type] of Object.entries(columns)) if (!names.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
     };
     extend('policies', { test_command: "TEXT NOT NULL DEFAULT ''", base_branch:"TEXT NOT NULL DEFAULT ''", max_revisions: 'INTEGER NOT NULL DEFAULT 3', review_label: "TEXT NOT NULL DEFAULT ''",
-      automation: "TEXT NOT NULL DEFAULT '{}'" });
+      automation: "TEXT NOT NULL DEFAULT '{}'", auto_merge_policy: "TEXT NOT NULL DEFAULT 'disallow'" });
     extend('tasks', { unique_key: 'TEXT', input: "TEXT NOT NULL DEFAULT '{}'", result: 'TEXT', phase: "TEXT NOT NULL DEFAULT 'prepare'",
       object_number: 'INTEGER', head_sha: 'TEXT', source_task_id: 'TEXT', source_delivery_id: 'TEXT', generation: 'INTEGER',
       workspace_id: 'TEXT', messages: 'TEXT', claim_token: 'TEXT', error_code: 'TEXT', attempt: 'INTEGER NOT NULL DEFAULT 1',

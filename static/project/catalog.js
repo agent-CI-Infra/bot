@@ -41,5 +41,10 @@ function parseEnv(text) {
 const projectCeilingOptions = [
   ['read', '只读问答', '在飞书和控制台里回答、检视讨论；不在 GitHub 上写任何内容。'],
   ['comment', '可评论和打标签', '在 GitHub 上写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视；Actions 失败可以重跑一次，也可以触发 Actions 工作流（例如定时触发 Nightly）。不改代码。'],
-  ['develop', '可开发并开 PR', '还可以改代码、交付 bot PR；Manager 默认还能合并 PR 和直接写分支（Contents 写）。']];
+  ['develop', '可开发并开 PR', '还可以改代码、交付 bot PR；Manager 默认还能直接写分支（Contents 写），合并 PR 按下方的自动合并策略。']];
+// The auto-merge policy (#1170): whether agents merge pull requests on their own. The API value is the first entry.
+const projectAutoMergeOptions = [
+  ['disallow', '不允许自动合并', 'Agent 不自行合并或送入合并队列，bot 自己的 PR 也一样；只有对仓库有写权限的维护者在 GitHub 评论、飞书或管理会话里明确要求合并某条 PR 时才合并。默认是这一档。'],
+  ['non_bot_only', '不自动合并 bot 开发的 PR', 'bot 开发的 PR 仍要维护者明确要求才合并；其他 PR 满足仓库规则时，Agent 可以自动合并。'],
+  ['allow_all', '允许所有自动合并', '包括 bot 自己的 PR，满足仓库规则时 Agent 都可以自动合并。']];
 const projectCeilingOf = policy => policy.capability_ceiling || (policy.development_enabled ? 'develop' : policy.review_enabled ? 'comment' : 'read');
