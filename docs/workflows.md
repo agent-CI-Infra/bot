@@ -57,9 +57,11 @@
 
 控制面先按安装范围、项目启停、防自循环、草稿/关闭状态及事件开关过滤事件（被过滤的人类事件记录为 `state = 'filtered'`）。通过过滤的事件进入对应对象的持久线程（`dispatch_threads`）：
 
-- 根 Issue 及其关联的 bot PR 共用 `<repo>:issue:<issueNumber>` 线程；
+- 根 Issue 及其关联的 bot PR 共用 `<repo>:issue:<issueNumber>` 线程（含 bot 自身开放非草稿 PR 的检查失败 `pull_request.checks_failed` 与合并冲突 `pull_request.conflicted` 自动唤醒，#1167）；
 - 独立 PR 使用 `<repo>:pr:<prNumber>` 线程；
 - 发版本、Actions 失败与定时检查按各自确定性键归入独立线程。
+
+对于登记在 `bot_pull_requests` 中的开放非草稿 PR，控制面通过基线 `pull_request`（含其他 PR 合入导致目标分支前进、冲突退队与状态变更）与 `check_run` 事件、开放 bot PR 后台巡检（`BotPrWakeScanner`，不依赖额外 `push` 或 `check_suite` 订阅，同时兼容已订阅的 `workflow_run` / `push` / `check_suite` 实时推送）检测检查失败与合并冲突：将同一运行/检查套件（`workflow_run`、`check_suite` 及多作业 `check_run`）聚合为单次 `(pr_number, head_sha, run_or_suite_id, attempt)` 唤醒，对同一 `(pr_number, head_sha, base_sha)` 的合并冲突严格单次去重，不设硬性修复次数上限，在 `facts.revisions` 中如实提供此前因检查失败或冲突触发的修订轮数、历次任务摘要结论及期间是否有新的人类评论；对象已有排队或运行中的修订任务时可通过 `continue_task` 并入（冲突基线自动同步至工作区并在双亲提交前校验基线变更实际合入），未消费的晚到失败、冲突或评论更新在任务收尾或终止失败时自动回交 Manager。
 
 同一 `thread_key` 的事件串行分派，并在 `object_thread` 中携带最近分派历史与滚动摘要，使后续评论、追加修改要求或飞书追问直接在同一对象上下文中决策，不再出现预计算选项集锁死（原 `dispatch_option_not_offered` 已移除）。Manager 可执行以下动作并给出理由：
 

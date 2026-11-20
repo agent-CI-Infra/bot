@@ -7,6 +7,7 @@ import { developmentLabel } from '../rules/service.js';
 import { actionsDevelopmentAllowed } from '../actions/safety.js';
 import { findActiveObjectDevelopment, recordEvent, recordFiltered, type CreateOption, type EventInput } from '../dispatch/store.js';
 import { eventFilters, labelDispatched, type EventFilters } from '../dispatch/settings.js';
+import { botPrWakeEvents, syncBotPullRequestState, type BotWakePreflight } from './bot-pr-wake.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue. Whether the Issue should be developed
@@ -410,10 +411,20 @@ function developmentOffer(store: Store, repositoryId: string, issue: any, number
 const developmentFacts = (offer: { assignees: string[]; review: Json | null }) => ({ assignees: offer.assignees, review: offer.review });
 
 /** Writes the Manager event of a webhook delivery. Closing and drafting still cancel work at once, without the Manager. */
-export function queueWebhook(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest?: Json): number {
+export function queueWebhook(
+  store: Store,
+  repositoryId: string,
+  event: string,
+  payload: Json,
+  delivery: string,
+  currentPullRequest?: Json,
+  botWakePreflight?: BotWakePreflight,
+): number {
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   const object = (event === 'issues' ? payload.issue : payload.pull_request) as Json | undefined;
   const number = Number(object?.number || payload.number), action = payload.action;
+  if (event === 'pull_request' && payload.pull_request) syncBotPullRequestState(store, repositoryId, payload.pull_request);
+  if (currentPullRequest) syncBotPullRequestState(store, repositoryId, currentPullRequest);
   if (object && Number.isSafeInteger(number) && number>0 && ['opened','reopened','closed'].includes(String(action))) reviewObjectState(store, repositoryId, event === 'issues' ? 'review.issue' : 'review.pr', number, action === 'closed');
   if (object && (action === 'closed' || action === 'converted_to_draft')) {
     const objType = event === 'issues' ? 'issue' : 'pr';
@@ -428,9 +439,15 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   if (!policy?.enabled) return filtered('project_disabled', '项目已停用，事件不交给 Manager。');
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number))
     return filtered('actions_failures_disabled', '这是 Actions 失败提报的 Issue，项目关闭了 Actions 失败处理。');
+  const wakeInputs = botPrWakeEvents(store, repositoryId, event, payload, delivery, botWakePreflight);
+  let wakeCreated = 0;
+  for (const w of wakeInputs) wakeCreated += recordEvent(store, w);
   const input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, eventFilters(store, repositoryId, policy));
-  if (isStopped(input)) return filtered(input.stopped.code, input.stopped.reason);
-  return input ? recordEvent(store, input) : 0;
+  if (isStopped(input)) {
+    if (!wakeCreated) filtered(input.stopped.code, input.stopped.reason);
+    return wakeCreated;
+  }
+  return wakeCreated + (input ? recordEvent(store, input) : 0);
 }
 
 /** The record of a filtered event: only what a person did on an Issue or pull request (#815). */

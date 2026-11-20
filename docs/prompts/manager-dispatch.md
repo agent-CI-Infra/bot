@@ -69,7 +69,7 @@ flowchart TD
 
 ## 4. Feature development and bug fixes（特性开发与缺陷修复）
 
-Implement Issues as pull requests from bot branches, and revise the bot's own pull requests when asked, only with a verified basis and at `capability_ceiling = "develop"`.
+Implement Issues as pull requests from bot branches, and revise the bot's own pull requests when asked or when checks fail or conflicts arise, only with a verified basis and at `capability_ceiling = "develop"`.
 
 ```mermaid
 flowchart TD
@@ -77,16 +77,16 @@ flowchart TD
   ceil -->|否| explain["reviewer<br>说明缺什么"]
   ceil -->|是| basis{"依据成立<br>且无人认领？"}
   basis -->|否| explain
-  basis -->|是| dev["派 dev 开发"]
-  dev --> pr["从 bot 分支开 PR"]
-  pr --> talk{"有修改要求？"}
-  talk -->|有| dev
-  talk -->|没有| merge["按自动合并策略合并"]
+  basis -->|是| dev["派 dev 开发、修订或重跑"]
+  dev --> pr["从 bot 分支开或更新 PR"]
+  pr --> talk{"评论、失败<br>或冲突？"}
+  talk -->|修订或重跑| dev
+  talk -->|就绪或留言待人| merge["按自动合并策略合并"]
 ```
 
 - Start development only as "Starting development" below says. A development label added by a person: `create_task` with `role: "dev"`, `writes: ["pull_request"]` and `basis: { kind: "label" }`, or `role: "reviewer"`, `writes: ["review"]` to explain what is missing.
 - Issue review published: start `dev` (`writes: ["pull_request"]`) when the review concludes `ready_for_development` and you have a valid `basis`; otherwise `ignore_event`.
-- On the bot's own pull request (`facts.bot_pull_request`), judge what a comment or review asks: for actionable changes, dispatch `dev` (`writes: ["pull_request"]`); `facts.revisions` says how often the pull request was already revised for comments (`for_requests`) and for this author (`for_this_author`); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again.
+- On the bot's own pull request (`facts.bot_pull_request`), judge what a comment or review asks: for actionable changes, dispatch `dev` (`writes: ["pull_request"]`); `facts.revisions` says how often the pull request was already revised for comments (`for_requests`) and for this author (`for_this_author`); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again. On check failures (`pull_request.checks_failed`) and merge conflicts (`pull_request.conflicted`), `continue_task` an active revision task in `work.continue`, or dispatch `dev` (`writes: ["pull_request"]`) to fix code or merge the base branch or `writes: ["actions_rerun"]` for transient infrastructure failures; `facts.revisions` (`for_checks_or_conflicts`, `rounds`, `has_new_human_comments`) sets no fixed retry cap—when repeated rounds fail on the same obstacle without progress and no new human comment arrived, explain the blocker on the PR (`github_write`) and `ignore_event` to wait for a person.
 - Development stopped (`development.stopped`): ignore unless a person asked a question that needs an answer.
 - `dev` never merges the pull request it delivers; whether the bot's own pull request is merged, and when, follows the auto-merge policy (see Issue and PR daily management).
 

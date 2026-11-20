@@ -20,6 +20,7 @@ import type { AgentSpec,AgentServices } from '../agent/runtime.js';
 import { TaskError, stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
 import { piAdapter,piRuntime } from '../agent/pi.js';
+import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 import type { RoleKind } from './catalog.js';
 import type { HarnessCapabilities } from './protocol.js';
 import { codexAppServer } from '../harness/app-server.js';
@@ -43,7 +44,14 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
    if(m.method==='checkpoint'){if(!Array.isArray(m.args)||Buffer.byteLength(JSON.stringify(m.args))>2*1024*1024)stop('agent_context_too_large','needs_replan');spec.session?.save(spec.redactor.clean(m.args));
     // A transcript whose every tool call has its result is a safe point to end this run (for example on a new role revision).
     if(spec.checkpoint&&completeTranscript(m.args))await spec.checkpoint();value={saved:true};}
-   else if(m.method==='model'){const response=await services.request(m.args,'worker:'+requests++);const message=response.value?.choices?.[0]?.message;value=spec.redactor.clean({role:'assistant',content:typeof message?.content==='string'?message.content:null,...(message?.tool_calls?{tool_calls:message.tool_calls}:{})});}
+   else if(m.method==='model'){
+    const turnIdx=requests++;
+    if(turnIdx>0&&spec.task.id&&Array.isArray(m.args?.messages)){
+     const continued=consumePendingTaskUpdates(spec.store,String(spec.task.id));
+     if(continued.length)m.args.messages.push({role:'user',content:'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n'+JSON.stringify(spec.redactor.clean(continued))});
+    }
+    const response=await services.request(m.args,'worker:'+turnIdx);const message=response.value?.choices?.[0]?.message;value=spec.redactor.clean({role:'assistant',content:typeof message?.content==='string'?message.content:null,...(message?.tool_calls?{tool_calls:message.tool_calls}:{})});
+   }
    else if(m.method==='tool'){
     // The worker presents its run token on every tool call; a revoked, expired or taken-over run is refused here.
     if(spec.runAccess){try{spec.runAccess.check(m.args?.token,'tools:invoke');}catch(error){value={error:(error as any).code??'run_token_invalid'};spec.onDenied?.(String(m.args?.name),(error as any).code??'run_token_invalid');child.stdin.write(JSON.stringify({id:m.id,result:value})+'\n');return;}}

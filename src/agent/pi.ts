@@ -8,6 +8,7 @@ import type { Store } from '../storage/database.js';
 import { finalizationReserve } from './tool-context.js';
 import { deliverMailboxToolReply } from '../roles/task-tools.js';
 import { modelTransport, nativeModelConnection } from '../harness/model-connection.js';
+import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
@@ -274,6 +275,15 @@ export function piAdapter<T>(session: PiSession<T>) {
               body.tools=(body.tools??[]).filter((tool:any)=>finishingNames.has(tool.function?.name));
               body.messages.push({role:'user',content:`Execution has ${session.maxRequests-turn} turns left. ${session.finalizationMessage??'Save the bounded artifact and submit the honest current result using the finish tool. Exploration tools are closed.'}`});
               if(turn===session.maxRequests-1){const names=(body.tools as any[]).map(tool=>tool.function.name);body.tool_choice=names.length===1?{type:'function',function:{name:names[0]}}:'required';}
+            }
+          }
+          if (!conversation && turn > 0 && taskId) {
+            const continuedUpdates = consumePendingTaskUpdates(store, taskId);
+            if (continuedUpdates.length) {
+              body.messages.push({
+                role: 'user',
+                content: 'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n' + JSON.stringify(redactor.clean(continuedUpdates)),
+              });
             }
           }
           store.run('UPDATE tasks SET model_started=1 WHERE id=?', taskId);

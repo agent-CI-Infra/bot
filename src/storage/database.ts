@@ -28,6 +28,7 @@ import { migrateRetireWorkTypes } from '../dispatch/migration.js';
 import { grantStorage } from '../tasks/grants.js';
 import { basisStorage } from '../dispatch/basis.js';
 import { progressStorage } from '../review/progress.js';
+import { botPrWakeStorage } from '../review/bot-pr-wake.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
 import { hostedMediaStorage } from '../github/hosted-pr-media.js';
@@ -283,6 +284,8 @@ export class Store {
     // What an Issue development shows on the Issue: its developing label and status comment (#1047).
     progressStorage(this);
     hostedMediaStorage(this);
+    // Open/draft/mergeable state tracking for PRs recorded in bot_pull_requests (#1167).
+    botPrWakeStorage(this);
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);

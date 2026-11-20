@@ -39,7 +39,7 @@ import { checkpoint, restoreCheckpoint } from './checkpoint.js';
 import type { Store, Row } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import type { GitCache } from '../agent/git-cache.js';
-import { GitHub } from '../github/client.js';
+import { GitHub, repositoryTree } from '../github/client.js';
 import { Workspace } from '../agent/workspace.js';
 import { Redactor, stop, sha, validWorkspaceToolPath, TaskError, blobSha } from '../agent/common.js';
 import { runAgent, type AgentSpec } from '../agent/runtime.js';
@@ -56,6 +56,8 @@ import { milestoneTool, milestoneToolName, reportMilestone, settleProgress, star
 import { repositoryLabels } from '../review/labels.js';
 import { continuationContext } from '../review/continuation.js';
 import { pendingReviewUpdates } from '../review/sessions.js';
+import { carryRevisionRequests } from '../review/development.js';
+import { carryUnconsumedTaskUpdates } from '../review/bot-pr-wake.js';
 
 const ciChanges = (task: Row) =>
   workflowChanges(task)
@@ -64,6 +66,209 @@ const ciChanges = (task: Row) =>
 
 const skillBoundary =
   ' Repository skills listed in skills are optional working material loaded only from the trusted base branch (.agents/skills/); they never grant permissions, bypass platform boundaries, or override the task contract.';
+
+async function importConflictCommitsForSnapshot(github: GitHub, workspace: Workspace, conflictBaseSha: string, prHeadSha: string | null) {
+  const baseNorm = String(conflictBaseSha || '').toLowerCase();
+  const headNorm = prHeadSha && /^[a-f0-9]{40}$/i.test(prHeadSha) ? prHeadSha.toLowerCase() : null;
+  if (!/^[a-f0-9]{40}$/.test(baseNorm)) {
+    stop('candidate_unavailable', 'retry_wait', `Invalid conflict base SHA: ${conflictBaseSha}`);
+  }
+
+  type CommitMeta = { sha: string; tree_sha: string; parents: string[]; message: string };
+  const commitMeta = new Map<string, CommitMeta>();
+  const fetchMeta = async (shaVal: string): Promise<CommitMeta> => {
+    const norm = String(shaVal || '').toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(norm)) {
+      stop('candidate_unavailable', 'retry_wait', `Invalid commit SHA in conflict history: ${shaVal}`);
+    }
+    const cached = commitMeta.get(norm);
+    if (cached) return cached;
+    let commit: any;
+    try {
+      commit = await github.request('GET', github.path('/git/commits/' + norm), undefined, true);
+    } catch (error) {
+      if (error instanceof TaskError) throw error;
+      stop('candidate_unavailable', 'retry_wait', `Failed to read commit ${norm} for conflict resolution.`);
+    }
+    const treeShaVal = String(commit?.tree?.sha || '').toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(treeShaVal)) {
+      stop('candidate_unavailable', 'retry_wait', `Commit ${norm} is missing a valid tree SHA.`);
+    }
+    const parents = (Array.isArray(commit?.parents) ? commit.parents : []).map((p: any) => String(p?.sha || '').toLowerCase());
+    if (parents.some((p: string) => !/^[a-f0-9]{40}$/.test(p))) {
+      stop('candidate_unavailable', 'retry_wait', `Commit ${norm} has an invalid parent SHA.`);
+    }
+    const meta: CommitMeta = { sha: norm, tree_sha: treeShaVal, parents, message: String(commit?.message || 'commit') };
+    commitMeta.set(norm, meta);
+    return meta;
+  };
+
+  const maxHistoryCommits = 256;
+  const selected = new Set<string>();
+  const boundarySet = new Set<string>();
+
+  if (!headNorm || headNorm === baseNorm) {
+    const m = await fetchMeta(baseNorm);
+    selected.add(baseNorm);
+    if (m.parents.length) boundarySet.add(baseNorm);
+  } else {
+    // Alternating BFS across all parents of `baseNorm` and `headNorm` until a verified common ancestor is found.
+    const seenBase = new Set<string>([baseNorm]);
+    const seenHead = new Set<string>([headNorm]);
+    const qBase: string[] = [baseNorm];
+    const qHead: string[] = [headNorm];
+    const common = new Set<string>();
+
+    while ((qBase.length || qHead.length) && !common.size) {
+      if (commitMeta.size >= maxHistoryCommits) {
+        stop('candidate_unavailable', 'retry_wait', `Conflict base ${baseNorm} and PR head ${headNorm} did not converge within ${maxHistoryCommits} commits.`);
+      }
+      if (qBase.length) {
+        const cur = qBase.shift()!;
+        const meta = await fetchMeta(cur);
+        if (seenHead.has(cur)) {
+          common.add(cur);
+        } else {
+          for (const p of meta.parents) {
+            if (!seenBase.has(p)) {
+              seenBase.add(p);
+              qBase.push(p);
+            }
+            if (seenHead.has(p)) common.add(p);
+          }
+        }
+      }
+      if (!common.size && qHead.length) {
+        const cur = qHead.shift()!;
+        const meta = await fetchMeta(cur);
+        if (seenBase.has(cur)) {
+          common.add(cur);
+        } else {
+          for (const p of meta.parents) {
+            if (!seenHead.has(p)) {
+              seenHead.add(p);
+              qHead.push(p);
+            }
+            if (seenBase.has(p)) common.add(p);
+          }
+        }
+      }
+    }
+
+    if (!common.size) {
+      stop('candidate_unavailable', 'retry_wait', `Conflict base ${baseNorm} and PR head ${headNorm} share no common ancestor.`);
+    }
+
+    // Expand common ancestors a few hops deeper so any merge side-branch between tips and LCA also closes cleanly onto `cut`.
+    const cut = new Set<string>(common);
+    const cutQueue = [...common];
+    while (cutQueue.length && cut.size < 32) {
+      const cur = cutQueue.shift()!;
+      const meta = await fetchMeta(cur);
+      for (const p of meta.parents) {
+        if (!cut.has(p) && cut.size < 32) {
+          cut.add(p);
+          cutQueue.push(p);
+        }
+      }
+    }
+
+    const work: string[] = [baseNorm, headNorm];
+    while (work.length) {
+      const cur = work.pop()!;
+      if (selected.has(cur)) continue;
+      if (selected.size >= maxHistoryCommits) {
+        stop('candidate_unavailable', 'retry_wait', `Conflict history subgraph exceeds ${maxHistoryCommits} commits.`);
+      }
+      selected.add(cur);
+      const meta = await fetchMeta(cur);
+      if (cut.has(cur)) {
+        if (meta.parents.length) boundarySet.add(cur);
+        continue;
+      }
+      for (const p of meta.parents) {
+        if (!selected.has(p)) work.push(p);
+      }
+    }
+  }
+
+  const blobCache = new Map<string, string>();
+  const treeCache = new Map<string, any[]>();
+  const loadTreeFiles = async (commitSha: string, treeShaVal: string): Promise<any[]> => {
+    const cachedTree = treeCache.get(treeShaVal);
+    if (cachedTree) return cachedTree;
+    const tree = await repositoryTree(github, treeShaVal);
+    if (!tree || !Array.isArray(tree.tree)) {
+      stop('candidate_unavailable', 'retry_wait', `Invalid tree listing for conflict commit ${commitSha} (${treeShaVal}).`);
+    }
+    const files: any[] = [];
+    for (const f of tree.tree) {
+      if (f.type === 'tree') continue;
+      const mode = String(f.mode || '');
+      const fSha = String(f.sha || '').toLowerCase();
+      const fPath = String(f.path || '');
+      if (f.type === 'commit' && mode === '160000' && /^[a-f0-9]{40}$/.test(fSha)) {
+        files.push({ path: fPath, mode: '160000', type: 'commit', sha: fSha });
+        continue;
+      }
+      if (f.type !== 'blob' || !['100644', '100755', '120000'].includes(mode) || !/^[a-f0-9]{40}$/.test(fSha)) {
+        stop('candidate_blob_unavailable', 'retry_wait', `Conflict commit ${commitSha} contains unsupported entry ${fPath} (${String(f.type)}/${mode}); refusing partial base import.`);
+      }
+      let encoded = blobCache.get(fSha);
+      if (encoded === undefined) {
+        const blob = await github.snapshotBlob(fSha);
+        if (!blob || blob.skipped || blob.encoding !== 'base64' || typeof blob.content !== 'string') {
+          stop('candidate_blob_unavailable', 'retry_wait', `Conflict commit ${commitSha} blob ${fPath} (${fSha}) could not be materialized (${String(blob?.skipped || 'unavailable')}).`);
+        }
+        const raw = Buffer.from(blob.content, 'base64');
+        const actualSha = blobSha(raw);
+        if (actualSha !== fSha) {
+          stop('github_blob_mismatch', 'retry_wait', `Blob SHA mismatch for ${fPath} in ${commitSha}: expected ${fSha}, got ${actualSha}.`);
+        }
+        encoded = raw.toString('base64');
+        blobCache.set(fSha, encoded);
+      }
+      files.push({ path: fPath, mode, sha: fSha, base64: encoded });
+    }
+    treeCache.set(treeShaVal, files);
+    return files;
+  };
+
+  const ordered: any[] = [];
+  const visited = new Set<string>();
+  const topo = async (s: string) => {
+    if (visited.has(s) || !selected.has(s)) return;
+    visited.add(s);
+    const meta = commitMeta.get(s)!;
+    if (!boundarySet.has(s)) {
+      for (const p of meta.parents) await topo(p);
+    } else {
+      for (const p of meta.parents) {
+        if (selected.has(p)) await topo(p);
+      }
+    }
+    const files = await loadTreeFiles(meta.sha, meta.tree_sha);
+    ordered.push({
+      sha: meta.sha,
+      tree_sha: meta.tree_sha,
+      parents: meta.parents,
+      message: meta.message,
+      files,
+      ...(boundarySet.has(s) ? { boundary_lca: true } : {}),
+    });
+  };
+  for (const s of selected) await topo(s);
+
+  const imported = await workspace.call(`conflict-import:${randomId()}`, {
+    type: 'workspace_import_commits',
+    commits: ordered,
+    conflict_base_sha: baseNorm,
+    ...(headNorm ? { pr_head_sha: headNorm } : {}),
+  });
+  if (imported?.error) {
+    stop('candidate_unavailable', 'retry_wait', `Failed to import conflict commits into workspace: ${String(imported.detail || imported.error)}`);
+  }
+}
 
 export interface TaskTarget {
   type: 'issue' | 'pr' | 'branch' | 'commit';
@@ -153,6 +358,19 @@ export async function runRequest(
     if (Number(changed.changes) !== 1) stop('task_claim_revoked', 'cancelled', '任务执行权已变化。');
     Object.assign(task, values);
   };
+  const syncConcurrentInput = () => {
+    const liveRow = store.get('SELECT input FROM tasks WHERE id=?', task.id);
+    if (!liveRow?.input) return;
+    try {
+      const live = JSON.parse(String(liveRow.input));
+      for (const key of ['revision', 'revision_requests', 'merged_updates', 'wake_events', 'conflict_base_sha', 'conflict_base_ref', 'move_to_sha'] as const) {
+        if (live[key] !== undefined) input[key] = live[key];
+      }
+      if (live.target?.ref && input.target && typeof input.target === 'object') {
+        input.target = { ...input.target, ref: live.target.ref };
+      }
+    } catch { /* ignore */ }
+  };
 
   if (input.contract && records.get(task.id).contract.completeness === 'unspecified') {
     records.contract(task.id, { ...input.contract, completeness: 'explicit' });
@@ -191,6 +409,7 @@ export async function runRequest(
 
       let targetSha: string | undefined;
       let trustedSkillSha: string | null | undefined;
+      let baseRefSha: string | undefined;
       const policyBase = String(store.get('SELECT base_branch FROM policies WHERE repository_id=?', task.repository_id)?.base_branch || '').trim();
       let baseBranch = github.defaultBranch;
       const mirrorRefs = new Set<string>([`refs/heads/${github.defaultBranch}`]);
@@ -208,6 +427,7 @@ export async function runRequest(
         baseBranch = pr.base?.ref || github.defaultBranch;
         mirrorRefs.add(`refs/heads/${baseBranch}`);
         mirrorRefs.add(`refs/pull/${targetSpec.number}/head`);
+        baseRefSha = /^[a-f0-9]{40}$/i.test(String(pr.base?.sha || '')) ? String(pr.base.sha).toLowerCase() : undefined;
         targetSha = input.move_to_sha || (Number(input.round) > 1 ? pr.head?.sha : undefined) || (targetSpec.ref && /^[a-f0-9]{40}$/i.test(targetSpec.ref) ? targetSpec.ref : pr.head?.sha);
         if (input.move_to_sha) {
           const prevHeads = Array.isArray(input.reviewed_heads) ? input.reviewed_heads : [];
@@ -218,6 +438,10 @@ export async function runRequest(
         const owned = store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?', task.repository_id, targetSpec.number!);
         if (owned && (grantedWrites(store, task.id) ?? []).includes('pull_request')) {
           input.bot_pr = pr;
+          const baseRefObj = await github.ref(baseBranch).catch(() => null);
+          if (/^[a-f0-9]{40}$/i.test(String(baseRefObj?.object?.sha || ''))) {
+            baseRefSha = String(baseRefObj.object.sha).toLowerCase();
+          }
         }
         const behaviorChanges = files
           .filter((f: any) => behaviorPath(String(f.filename ?? '')) || (f.previous_filename && behaviorPath(String(f.previous_filename))))
@@ -235,6 +459,8 @@ export async function runRequest(
           head_sha: pr.head?.sha,
           head_ref: pr.head?.ref,
           base_ref: baseBranch,
+          ...(baseRefSha ? { base_sha: baseRefSha } : {}),
+          ...(pr.mergeable !== undefined ? { mergeable: pr.mergeable } : {}),
           changed_files: files.length,
           bot_login: github.actorLogin || null,
           ...(behaviorChanges.length ? { behavior_changes: behaviorChanges } : {}),
@@ -265,8 +491,16 @@ export async function runRequest(
           const pr = await github.request('GET', github.path(`/pulls/${ownedIssuePr.number}`), undefined, true);
           if (pr && pr.state === 'open') {
             input.bot_pr = pr;
+            baseBranch = pr.base?.ref || baseBranch;
+            mirrorRefs.add(`refs/heads/${baseBranch}`);
             mirrorRefs.add(`refs/pull/${ownedIssuePr.number}/head`);
             if (pr.head?.ref) mirrorRefs.add(`refs/heads/${pr.head.ref}`);
+            const baseRefObj = await github.ref(baseBranch).catch(() => null);
+            baseRefSha = /^[a-f0-9]{40}$/i.test(String(baseRefObj?.object?.sha || ''))
+              ? String(baseRefObj.object.sha).toLowerCase()
+              : /^[a-f0-9]{40}$/i.test(String(pr.base?.sha || ''))
+                ? String(pr.base.sha).toLowerCase()
+                : undefined;
             targetSha = pr.head.sha;
             targetContextFiles['bot_pr.json'] = JSON.stringify(pr, null, 2);
           }
@@ -274,6 +508,7 @@ export async function runRequest(
         if (!targetSha && !input.snapshot_sha && !inheritedBase) {
           targetSha = (await github.ref(baseBranch))?.object?.sha;
           if (!input.bot_pr) trustedSkillSha = targetSha ?? null;
+          if (!baseRefSha && /^[a-f0-9]{40}$/i.test(String(targetSha || ''))) baseRefSha = String(targetSha).toLowerCase();
         } else {
           targetSha ??= input.snapshot_sha || inheritedBase;
         }
@@ -340,7 +575,8 @@ export async function runRequest(
         }
       }
       const resolvedSha = targetSha!;
-      const mirrorCommits = [...new Set([resolvedSha, ...(trustedSkillSha ? [trustedSkillSha] : [])])];
+      const conflictExtraCommits = input.bot_pr && baseRefSha && baseRefSha !== resolvedSha ? [baseRefSha] : [];
+      const mirrorCommits = [...new Set([resolvedSha, ...(trustedSkillSha ? [trustedSkillSha] : []), ...conflictExtraCommits])];
       const mirror =
         gitCache && github.cloneUrl
           ? await gitCache.open(task.repository_id, { url: github.cloneUrl, token: github.token, commits: mirrorCommits, refs: [...mirrorRefs] })
@@ -362,7 +598,8 @@ export async function runRequest(
           throw error;
         }
       }
-      const snapshot = (mirror ? await workspace.bind(github, resolvedSha, mirror, [], 'write') : null) || (await workspace.prepare(github, resolvedSha, mirror));
+      const snapshot = (mirror ? await workspace.bind(github, resolvedSha, mirror, conflictExtraCommits, 'write') : null) || (await workspace.prepare(github, resolvedSha, mirror));
+      syncConcurrentInput();
       Object.assign(input, {
         snapshot_sha: resolvedSha,
         snapshot_tree: snapshot.tree_sha,
@@ -371,6 +608,7 @@ export async function runRequest(
         skipped_files: snapshot.skipped_files,
         base_branch: baseBranch,
         repository_skill_bundle: pinnedSkillBundle,
+        ...(baseRefSha ? { base_ref_sha: baseRefSha } : {}),
         ...(Object.keys(targetContextFiles).length ? { context_files: { ...(input.context_files ?? {}), ...targetContextFiles } } : {}),
         ...(targetSummaryMeta ? { target_meta: targetSummaryMeta } : {}),
       });
@@ -381,6 +619,7 @@ export async function runRequest(
 
     if (software() && input.integration?.state === 'pending') {
       input.integration = await applyIntegration(store, task, workspace, task.head_sha, input.integration);
+      syncConcurrentInput();
       update({ input: storedInput(store, input, task.repository_id) });
     }
     if (parentSnapshot?.local_sha && !remoteParent && parent?.workspace_id) {
@@ -415,6 +654,49 @@ export async function runRequest(
     if (Object.keys(stagedContextFiles).length) await workspace.context(stagedContextFiles);
     if (controlled(store, task, entry) && !ownRole) await assessRetryReport(store, task, workspace, github, guard, redactor);
 
+    const transferredConflictBases = new Set<string>();
+    const activeConflictBaseSha = (): string | null => {
+      syncConcurrentInput();
+      if (/^[a-f0-9]{40}$/i.test(String(input.conflict_base_sha || ''))) return String(input.conflict_base_sha).toLowerCase();
+      if (input.bot_pr && (input.bot_pr.mergeable === false || String(input.bot_pr.mergeable_state || '').toLowerCase() === 'dirty')) {
+        const candidate = String(input.base_ref_sha || input.bot_pr.base?.sha || '');
+        if (/^[a-f0-9]{40}$/i.test(candidate)) return candidate.toLowerCase();
+      }
+      return null;
+    };
+    const ensureConflictBaseReady = async (): Promise<string | null> => {
+      const conflictSha = activeConflictBaseSha();
+      const prHeadSha = /^[a-f0-9]{40}$/i.test(String(input.bot_pr?.head?.sha || task.head_sha || ''))
+        ? String(input.bot_pr?.head?.sha || task.head_sha).toLowerCase()
+        : null;
+      if (!conflictSha || conflictSha === prHeadSha) return null;
+      if (transferredConflictBases.has(conflictSha)) return conflictSha;
+      const baseRefName = String(input.conflict_base_ref || input.base_branch || github.defaultBranch);
+      let packedViaMirror = false;
+      if (gitCache && github.cloneUrl) {
+        const mirror = await gitCache.open(task.repository_id, {
+          url: github.cloneUrl,
+          token: github.token,
+          commits: [conflictSha, ...(prHeadSha ? [prHeadSha] : [])],
+          refs: [`refs/heads/${baseRefName}`],
+        }).catch(() => null);
+        if (mirror) packedViaMirror = await workspace.transferCommits(mirror, [conflictSha]);
+      }
+      if (packedViaMirror) {
+        const refUpdated = await workspace.call(`conflict-ref:${randomId()}`, {
+          type: 'workspace_import_commits',
+          commits: [],
+          conflict_base_sha: conflictSha,
+        });
+        if (refUpdated?.error) packedViaMirror = false;
+      }
+      if (!packedViaMirror) {
+        await importConflictCommitsForSnapshot(github, workspace, conflictSha, prHeadSha);
+      }
+      transferredConflictBases.add(conflictSha);
+      return conflictSha;
+    };
+
     for (;;) {
       if (software() && task.phase === 'publish') {
         if (records.get(task.id).pending?.policy_hash !== requestPolicyHash(store, task)) {
@@ -429,6 +711,9 @@ export async function runRequest(
             update({ status: 'pr_opened', phase: 'done', result: JSON.stringify(result), error_code: null });
             records.history(task.id, 'delivery', result);
           });
+          syncConcurrentInput();
+          carryRevisionRequests(store, task, input.revision?.requests || [], result.sha);
+          carryUnconsumedTaskUpdates(store, String(task.id), result.sha);
           if (issueProgressActive()) await settleProgress(store, String(task.id), connectProgressClient).catch(() => false);
           log({ type: 'published', outputs: [{ html_url: result.pr_url, branch: result.branch, sha: result.sha }] });
           break;
@@ -559,6 +844,8 @@ export async function runRequest(
         const offered = (tools: any[]) => (roleRuns || !generic ? tools : tools.filter(t => offeredNow(t.function.name) !== false));
 
         const subscriptionCtx = taskEventSubscriptionContext(store, String(task.id));
+        let verifiedConflictMerge = null as { baseSha: string; gitMerged: boolean } | null;
+        await ensureConflictBaseReady();
         const result = await executeAgent({
           store,
           task,
@@ -582,10 +869,27 @@ export async function runRequest(
             ...(input.comment ? { trigger_comment: input.comment } : {}),
             ...(input.merged_updates?.length ? { merged_updates: input.merged_updates } : {}),
             ...(subscriptionCtx ? { event_subscriptions: subscriptionCtx } : {}),
+            ...(input.wake_event ? { wake_event: input.wake_event } : {}),
+            ...(input.wake_events?.length ? { wake_events: input.wake_events } : {}),
+            ...(input.conflict_base_sha || input.bot_pr?.mergeable === false || String(input.bot_pr?.mergeable_state || '').toLowerCase() === 'dirty'
+              ? {
+                  conflict_resolution: {
+                    base_branch: input.conflict_base_ref || input.base_branch,
+                    base_sha: input.conflict_base_sha || input.base_ref_sha || input.bot_pr?.base?.sha || null,
+                    pr_head_sha: input.bot_pr?.head?.sha || task.head_sha,
+                    instruction: `This bot pull request currently conflicts with ${input.conflict_base_ref || input.base_branch}. Integrate/merge commit ${input.conflict_base_sha || input.base_ref_sha || input.bot_pr?.base?.sha || input.base_branch} in this checkout, resolve conflicts preserving both changes, run project verification, and deliver via open_pull_request.`,
+                  },
+                }
+              : {}),
             ...(Number(input.round) > 1 ? { continuation: continuationContext(input, String(task.head_sha), targetSpec?.type === 'pr', false) } : {}),
             ...(() => {
+              syncConcurrentInput();
               const updates = pendingReviewUpdates(store, task);
-              return updates.length ? { pending_updates: updates.map(u => JSON.parse(u.data)) } : {};
+              if (!updates.length) return {};
+              const maxId = Number(updates.at(-1)!.id);
+              store.run('UPDATE tasks SET review_update_cursor=max(review_update_cursor,?) WHERE id=?', maxId, task.id);
+              task.review_update_cursor = Math.max(Number(task.review_update_cursor || 0), maxId);
+              return { pending_updates: updates.map(u => JSON.parse(u.data)) };
             })(),
             ...(input.revision_requests ? { revision_requests: input.revision_requests } : {}),
             version_context: await versionTool(store, task, spaces.current, 'read_version_context', {}, async () => github),
@@ -663,6 +967,35 @@ export async function runRequest(
               const validated = validateReport(value, pr);
               const delivered = generic ? { ...validated, delivery: pr ? 'pull_request' : 'report' } : validated;
               if (!pr) return delivered;
+              const conflictSha = await ensureConflictBaseReady();
+              if (conflictSha && input.bot_pr) {
+                const prHeadSha = String(input.bot_pr.head?.sha || task.head_sha || '').toLowerCase();
+                const verified = await workspace.call(`verify-merge:${execution}:${randomId()}`, {
+                  type: 'workspace_verify_merge',
+                  base_sha: conflictSha,
+                  head_sha: prHeadSha,
+                  head_tree_sha: String(input.snapshot_tree || ''),
+                });
+                if (verified?.error) {
+                  stop('candidate_unavailable', 'retry_wait', `Conflict merge verification failed in workspace: ${String(verified.detail || verified.error)}`);
+                }
+                if (!verified?.ok) {
+                  const baseRefName = String(input.conflict_base_ref || input.base_branch || github.defaultBranch);
+                  stop(
+                    'conflict_not_integrated',
+                    'retry_wait',
+                    JSON.stringify({
+                      error: 'conflict_not_integrated',
+                      reason: verified?.reason || 'merge_verification_failed',
+                      files: verified?.files || [],
+                      conflict_base_sha: conflictSha,
+                      base_branch: baseRefName,
+                      message: `Cannot publish pull request #${input.bot_pr.number} as a 2-parent merge on ${baseRefName} (${conflictSha}) because the workspace tree does not integrate both ${conflictSha} and PR head ${prHeadSha} (${verified?.reason || 'unverified'}${verified?.files?.length ? ': ' + verified.files.join(', ') : ''}). Merge commit ${conflictSha} (or branch bot-conflict-base) on top of PR head ${prHeadSha}, resolve all conflicts preserving both base and PR changes, run tests, and call open_pull_request again — or deliver diagnosis via submit_report if blocked.`,
+                    }),
+                  );
+                }
+                verifiedConflictMerge = { baseSha: conflictSha, gitMerged: Boolean(verified.git_merged) };
+              }
               const labels = await checkPullRequestLabels(github, validated.labels, ownLabels(store, task.repository_id));
               if ('error' in labels) return stop('pull_request_labels_refused', 'retry_wait', labels.message + ' Refused: ' + JSON.stringify(labels.refused));
               await validateMedia(validated);
@@ -670,7 +1003,7 @@ export async function runRequest(
             },
           },
           repairInvalid: error =>
-            error instanceof TaskError && ['pull_request_labels_refused', 'pull_request_media_invalid', 'delivery_refused', 'review_inline_out_of_diff'].includes(error.code) ? error.detail : undefined,
+            error instanceof TaskError && ['pull_request_labels_refused', 'pull_request_media_invalid', 'delivery_refused', 'review_inline_out_of_diff', 'conflict_not_integrated'].includes(error.code) ? error.detail : undefined,
           finalizationTools: offered(deliveryTools.filter(t => ['submit_report', 'open_pull_request', 'post_review', 'submit_delivery'].includes(t.function.name)))
             .map(t => t.function.name)
             .concat(writable ? ['write_file', 'record_progress'] : []),
@@ -727,6 +1060,7 @@ export async function runRequest(
               if (typeof args?.content !== 'string') return { error: 'invalid_artifact_content' };
             }
             if (name === 'run_command' && (typeof args?.command !== 'string' || !args.command.trim())) return { error: 'invalid_command' };
+            await ensureConflictBaseReady();
             const key = `request:${execution}:${randomId()}`;
             const beforeCommand = name === 'run_command' ? await spaces.current.artifact(key + ':source') : null;
             const result =
@@ -753,6 +1087,7 @@ export async function runRequest(
           if (generic ? result.delivery === 'pull_request' : software()) await validateMedia(result, true);
         });
 
+        syncConcurrentInput();
         if (generic) {
           input.delivery = (result as any).delivery === 'pull_request' ? 'pull_request' : (result as any).delivery === 'review' ? 'review' : 'report';
           update({ input: storedInput(store, input, task.repository_id) });
@@ -772,6 +1107,9 @@ export async function runRequest(
           const branch = input.bot_pr?.head?.ref || defaultBranchName;
           const existingBranchOwner = store.get('SELECT task_id FROM bot_branches WHERE repository_id=? AND branch=?', task.repository_id, branch)?.task_id;
           const ownerTaskId = existingBranchOwner ? String(existingBranchOwner) : String(task.id);
+          const candidateBaseSha = input.bot_pr && verifiedConflictMerge && verifiedConflictMerge.baseSha !== input.bot_pr.head?.sha
+            ? verifiedConflictMerge.baseSha
+            : task.head_sha;
           code = {
             ...snapshot,
             source_workspace_id: task.workspace_id,
@@ -785,7 +1123,7 @@ export async function runRequest(
             labels: result.labels,
             ...(media ? { media } : {}),
             implementation_goal: before.contract.goal,
-            base_sha: task.head_sha,
+            base_sha: candidateBaseSha,
             base_branch: input.base_branch,
             branch,
             owner_task_id: ownerTaskId,
@@ -794,7 +1132,7 @@ export async function runRequest(
             ...(input.integration ? { publication_key: input.integration.id, integration: input.integration } : {}),
             date: new Date(task.created_at).toISOString(),
             validation,
-            no_changes: snapshot.tree_sha === input.snapshot_tree,
+            no_changes: snapshot.tree_sha === input.snapshot_tree && !verifiedConflictMerge?.gitMerged,
           };
           store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING', task.repository_id, branch, ownerTaskId);
           store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data', task.id, JSON.stringify(code));
@@ -873,6 +1211,9 @@ export async function runRequest(
       records.decide(task.id, candidate.id, candidate.revision, verdict, 'completed', true, task.claim_token);
       Object.assign(task, store.get('SELECT * FROM tasks WHERE id=?', task.id));
       if (['pass', 'pass_with_issues'].includes(verdict.outcome)) {
+        syncConcurrentInput();
+        carryRevisionRequests(store, task, input.revision?.requests || [], task.head_sha ? String(task.head_sha) : null);
+        carryUnconsumedTaskUpdates(store, String(task.id), task.head_sha ? String(task.head_sha) : null);
         if (issueProgressActive()) await settleProgress(store, String(task.id), connectProgressClient).catch(() => false);
         break;
       }

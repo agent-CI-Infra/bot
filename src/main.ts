@@ -60,6 +60,7 @@ const gitCache = new GitCache(process.env.BOT_GIT_CACHE_DIR || resolve(dirname(d
 const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCache);engine.start();
 // Tasks in 待处理 that nobody needs to act on any more leave it in small batches (#713).
 engine.obsolete.start();
+engine.botPrWake.start();
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
 void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);

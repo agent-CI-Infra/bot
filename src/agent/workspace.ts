@@ -98,7 +98,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import'].includes(request.type)?0:request.type==='workspace_browser'? (Number(request.timeout_ms)>0?Number(request.timeout_ms)+120000:180000) :request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import'].includes(request.type)?0:request.type==='workspace_browser'? (Number(request.timeout_ms)>0?Number(request.timeout_ms)+120000:180000) :request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
     operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
@@ -362,6 +362,12 @@ export class Workspace {
     const leaked=await mirror.secrets(commitSha,this.redactor.values);
     if(leaked.length)stop('credential_in_repository',undefined,`Credential found in repository file: ${leaked[0]}`);
     return listing;
+  }
+  /** Packs extra commits from the mirror into the project computer's git store when a conflict base arrives mid-run. */
+  async transferCommits(mirror:Mirror,commits:string[]):Promise<boolean>{
+    const shas=[...new Set(commits.filter(s=>/^[a-f0-9]{40}$/.test(s)))];
+    if(!shas.length)return true;
+    return (await this.transfer(shas[0]!,mirror,shas.slice(1)))!==null;
   }
   // Sends the computer's git store what it lacks of these commits, as a pack. Returns the bytes sent, or null when this
   // way is not available.
