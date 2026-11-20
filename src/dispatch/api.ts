@@ -9,7 +9,6 @@ import { activateActions } from '../actions/storage.js';
 import { standingRules } from './rules.js';
 import { taskDispatch } from './store.js';
 import { dispatchList, dispatchDetail } from './view.js';
-import { mentionNames } from '../projects/capabilities.js';
 
 const json = (text: unknown, fallback: any) => { try { return JSON.parse(String(text)) ?? fallback; } catch { return fallback; } };
 
@@ -41,7 +40,9 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
     events: eventFilters(store, repositoryId, policy),
     rules: { sha: view.sha, updated_at: view.updated_at, needs_refresh: view.needs_refresh, development_label: view.development_label, review_label: view.review_label },
     migration: migration ? { migrated_at: migration.migrated_at, report: json(migration.report, {}) } : null,
-    mention_names: mentionNames(),
+    mention_names: (process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot').trim().toLowerCase() === 'off'
+      ? []
+      : (process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot').split(',').map(name => name.trim()).filter(Boolean),
   };
 }
 

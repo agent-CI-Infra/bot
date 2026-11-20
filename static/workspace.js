@@ -229,68 +229,6 @@ function renderWorkbenchTaskRow(row) {
   return item;
 }
 
-// #1123: 「我们能干什么」 — the six scenarios of the built-in Manager prompt, each with its live state projected by the server
-// from the ceiling, event switches, enabled roles, bound Feishu groups and scheduled checks (GET /api/repositories/:id/capabilities).
-const capabilityStateTones = { ready: 'success', mention_only: 'info', ceiling_limited: 'warning', off: '' };
-const capabilityNumbers = ['①', '②', '③', '④', '⑤', '⑥'];
-const capabilityGroupLevels = { read: '只读问答', comment: '可评论和打标签', dispatch: '可派活', custom: '逐项设置' };
-let capabilityCardClosed = false;
-function capabilitySettings(id) {
-  return {
-    triggers: [`#/projects/${id}/triggers`, '监听与触发'], roles: [`#/projects/${id}/roles`, '角色'], groups: ['#/identity/feishu?section=groups', '飞书群'],
-    schedules: [`#/projects/${id}/schedules`, '定时任务'], manager: [`#/projects/${id}/roles/manager`, '看流程'],
-  };
-}
-function capabilityCard(id) {
-  const root = element('section', '', 'capability-card');
-  root.setAttribute('aria-labelledby', 'capability-card-title');
-  const fold = element('details', '', 'capability-fold');
-  fold.open = !capabilityCardClosed;
-  fold.addEventListener('toggle', () => { capabilityCardClosed = !fold.open; });
-  const summary = element('summary', '', 'capability-summary');
-  const title = element('h2', '我们能干什么 · 实时能力速览', 'capability-title');
-  title.id = 'capability-card-title';
-  const facts = element('span', '正在读取…', 'capability-facts');
-  summary.append(title, facts);
-  const status = note('');
-  status.classList.add('capability-status'); status.hidden = true;
-  const grid = element('ul', '', 'capability-grid');
-  fold.append(summary, status, grid);
-  root.append(fold);
-  let signature = '';
-  const links = capabilitySettings(id);
-  return {
-    root,
-    show(data) {
-      status.hidden = true; status.classList.remove('view-error');
-      const groups = Object.entries(data.groups || {}).filter(([, n]) => n > 0);
-      facts.textContent = [`能力上限：${data.ceiling_title}`,
-        groups.length ? `飞书群 ${groups.reduce((s, [, n]) => s + n, 0)} 个（${groups.map(([level, n]) => `${capabilityGroupLevels[level] || level} ${n}`).join('、')}）` : '未绑定飞书群',
-        `定时检查 ${data.schedules} 个`, data.enabled ? '' : '项目已停用'].filter(Boolean).join(' · ');
-      const next = JSON.stringify(data.scenarios);
-      if (next === signature) return;
-      signature = next;
-      grid.replaceChildren(...data.scenarios.map((scenario, index) => {
-        const tile = element('li', '', 'capability-tile');
-        tile.dataset.capability = scenario.id; tile.dataset.state = scenario.state;
-        const head = element('div', '', 'capability-tile-head');
-        head.append(element('strong', `${capabilityNumbers[index] || ''} ${scenario.title}`), badge(scenario.state_title, capabilityStateTones[scenario.state]));
-        const actions = element('p', '', 'capability-links');
-        for (const key of scenario.settings) {
-          const [href, caption] = links[key] || [];
-          if (!href) continue;
-          const link = element('a', `${caption} →`); link.href = href;
-          link.setAttribute('aria-label', `${scenario.title}：${caption}`);
-          actions.append(link);
-        }
-        tile.append(head, element('p', scenario.detail, 'capability-detail'), actions);
-        return tile;
-      }));
-    },
-    fail(message) { status.hidden = false; status.classList.add('view-error'); status.setAttribute('role', 'alert'); status.textContent = message; },
-  };
-}
-
 function workspaceOverview() {
   const parsed = parseWorkbenchRoute(current.item);
   if (!parsed) return [pageNotFoundState(current.id)];
@@ -340,8 +278,6 @@ function workspaceOverview() {
   rightBar.append(liveSummary, refresh, newTaskBtn);
   topBar.append(viewTabs, rightBar);
   root.append(topBar);
-  const capabilities = capabilityCard(id);
-  root.append(capabilities.root);
 
   // Filter pills (rendered in Task View, and kept in DOM with counts updated so deep links & tests work seamlessly)
   const metrics = element('nav', '', 'workspace-metrics workbench-filter-pills');
@@ -431,7 +367,7 @@ function workspaceOverview() {
 
   root.append(roleSection, taskSection, footer);
 
-  let pending = false, lastRoles = null, lastTasks = null, lastHealth = null, lastCapabilities = null;
+  let pending = false, lastRoles = null, lastTasks = null, lastHealth = null;
   let roleSignature = '', signature = '', taskReqSeq = 0;
 
   const rowKey = row => JSON.stringify([row.id, row.repository_id, row.kind, row.object_number, row.status, row.priority, row.summary, row.error_code, row.updated_at, row.external, row.role_flow]);
@@ -577,22 +513,10 @@ function workspaceOverview() {
     }
   }
 
-  async function loadCapabilities() {
-    try {
-      const data = await api(`/api/repositories/${id}/capabilities`);
-      if (!alive()) return;
-      lastCapabilities = new Date().toISOString();
-      capabilities.show(data);
-    } catch (err) {
-      if (!alive() || revoke(err)) return;
-      capabilities.fail(`${readErrorText(err)}。${lastCapabilities ? '下面是 ' + timestamp(lastCapabilities) + ' 读到的状态，可能已过期。' : '暂时无法判断各项能力的状态。'}`);
-    }
-  }
-
   async function update() {
     if (!alive() || pending) return;
     pending = true; refresh.disabled = true;
-    try { await Promise.all([loadCapabilities(), loadRoleBoard(), tasks(), environment()]); }
+    try { await Promise.all([loadRoleBoard(), tasks(), environment()]); }
     finally { pending = false; refresh.disabled = false; }
   }
 

@@ -188,7 +188,6 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 群聊助手获得的工具都在服务端按绑定范围校验，一次请求可以跨多个仓库，不需要先选项目：
 
 - `list_projects`：当前可用的仓库全名和 GitHub 链接，不返回内部 ID；
-- `describe_capabilities`：本群现在能用什么（#1123），不受权限项控制：本群档位、每个仓库的能力上限、六大场景在本群的状态（可以用／受项目能力上限约束／本群档位不支持／未开启）和原因，以及 3 条只来自可用项的示例请求。有人问「你能干什么／怎么工作／怎么配合」时，系统提示要求助手先调用它，按本群的真实范围回答、给出一句流转说明和 3 条可照抄的示例，不推荐本群用不了的事；见下文「你能干什么」一节；
 - `list_chat_members`：本群成员的 open_id、已知姓名和是否外部成员，可按姓名或 open_id 过滤，不受权限项控制，见「回合中收到新消息」；
 - 当前会话（默认可用）：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
 - GitHub 各资源的读取权限：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
@@ -197,11 +196,9 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 - 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)；
 - 阶段消息：`send_message`，每轮最多 10 条，每并入一条新消息再多 1 条，不受权限项控制，见下文「阶段消息与停止回答」。
 
-#### 「你能干什么」（#1123）
+#### 不主动往群里发消息（#1123）
 
-本群能用什么由 `src/projects/capabilities.ts` 的 `chatCapabilities()` 算出：先按项目的能力上限、事件开关和启用角色得出项目能做什么（与项目总览的「我们能干什么」卡片同一套判定），再按本群档位收窄。只读问答档可以问答、查 CI 失败原因；可评论和打标签档另外可以整理 Issue/PR（只用仓库已有标签）；可派活档另外可以要求检视、开发和测试，测试结果发回本群，开发仍要项目能力上限为「可开发并开 PR」。高级设置（逐项）的群按实际权限项判断：Issue 写入和 PR 写入分开（只有 PR 写入的群只能整理 PR，也不能提报 Issue），能否派活看是否允许创建任务。CI 一项在群里总是可以按需查失败原因；只有项目打开了 Actions 失败事件或有启用的定时检查时才称为「CI 失败与定时主动发现」，否则写作「CI 失败原因排查（按需）」并说明不会自动发现；是否自动发现只看这两项设置，与能力上限无关，能力上限低于「可评论和打标签」时说明会自动排查但不会重跑或提报 Issue。
-
-平台不会因为群绑定启用或档位、绑定的仓库变化而主动往群里发消息；群里有人 @bot 问「你能干什么／怎么工作」时，助手读 `describe_capabilities` 后按本群的真实范围回答。
+平台不会因为群绑定启用或档位、绑定的仓库变化而主动往群里发消息，也不发固定的能力名片。群里有人 @bot 问「你能干什么／怎么工作」时，群助手和回答其他问题一样，按本群实际提供给它的工具和 `list_projects` 里的仓库回答。
 
 #### 派活
 
@@ -322,7 +319,7 @@ UTF-8 文本可分页读取；PNG/JPEG/GIF/WebP 可通过 `view_message_image` �
 
 `npm ci`、`npm run check`、`npm test` 是基础检查；`test/st/src/channels/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、权限档位（同一项目的两个群分别只读和可派活、无平台账号的成员派活、档位与逐项设置的校验）与升级迁移（档位和授权围栏不变）、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能指定角色）与结果回群、撤销派活后停止任务、群聊助手独立任务的运行时围栏检查、两个群的范围隔离、授权者失权、迁移和删除检查，`test/st/src/channels/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/st/src/channels/channel-stage-messages.test.mjs` 覆盖群聊、私聊、控制台和定时任务的阶段消息（运行中送达、顺序、每轮 10 条上限）、源消息撤回后不再发送、控制台停止的权限与结果，以及群聊助手、管理助手和独立任务不再有步数上限；`test/e2e/roles/stage-messages.spec.mjs` 在页面上验证管理助手显示阶段消息、群聊助手会话显示阶段消息并由负责人停止；`test/st/src/channels/channel-schedules.test.mjs` 覆盖私聊和群聊定时任务的管理权限、跨项目执行、范围与工具拒绝、撤权暂停、逻辑触发点去重和用量归属，以及两个群各自的定时任务由各自的群助手执行、回到各自的群，群里改时间只改本群的；`test/st/src/channels/channels.test.mjs` 覆盖项目面板直接选择会话作为目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、撤权、旧卡片、发送重试和重启恢复。`test/st/src/channels/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
-`test/st/src/channels/channel-capabilities.test.mjs` 验证绑定、改档位、改仓库都不会往群里发消息，以及 `describe_capabilities` 按本群档位收窄、示例只来自可用项；判定规则在 `test/ut/src/projects/capabilities.test.mjs`。
+`test/st/src/channels/channel-group-quiet.test.mjs` 验证绑定、改档位、改仓库都不会往群里发消息，撤除前已排队的能力名片在投递时被拒，群助手问「你能干什么」时没有固定的能力工具或回答模板。
 
 `test/e2e/channels/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
 
