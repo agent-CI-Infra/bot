@@ -267,22 +267,3 @@ export function chatExamplesFor(capabilities: ChatCapability[], repository: stri
     for (const c of ready) if (c.examples[round] && picked.length < count) picked.push(c.examples[round]!.replaceAll('<repo>', repository));
   return picked;
 }
-
-/**
- * The notice a group gets when its binding is saved with a new level or scope: what it can use per repository and three
- * requests to try. Plain text, built from the same projection, so it never promises more than the group's tools allow.
- */
-export function groupCapabilityNotice(levelTitle: string, projects: { full_name: string; inputs: CapabilityInputs }[], venue: ChatVenue): string {
-  const lines = [`本群已接入 bot，档位：${levelTitle}。下面是现在能用的范围（随项目设置变化，随时 @bot 问「你能干什么」可以再看）：`];
-  let examples: string[] = [];
-  for (const project of projects) {
-    const list = chatCapabilities(project.inputs, venue), ready = list.filter(c => c.state === 'ready'), held = list.filter(c => c.state !== 'ready');
-    lines.push('', `${project.full_name}（项目能力上限：${ceilingTitles[project.inputs.ceiling]}${project.inputs.enabled ? '' : '，已停用'}）`);
-    lines.push(`- 可以：${ready.length ? ready.map(c => c.title).join('、') : '暂无'}`);
-    if (held.length) lines.push(`- 暂不可以：${held.map(c => `${c.title}（${c.state_title}）`).join('、')}`);
-    if (examples.length < 3) examples = [...examples, ...chatExamplesFor(list, project.full_name, 3 - examples.length)];
-  }
-  if (!projects.length) lines.push('', '本群暂时没有可用的仓库：绑定范围内的项目都已暂停，请联系绑定本群的人。');
-  if (examples.length) lines.push('', '试试：', ...examples.map((example, index) => `${index + 1}. ${example}`));
-  return lines.join('\n');
-}
