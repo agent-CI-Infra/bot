@@ -306,6 +306,9 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const commit=(await git(['commit-tree',tree],Buffer.from('Prepare repository snapshot\n'))).toString().trim();await git(['update-ref','refs/heads/bot-local',commit]);
     return {tree_sha:tree,local_sha:commit,...unlocked};
   }
+  // The tree a finalize would record now, without a commit or a ref (#1121 review): acceptance compares it with the submitted
+  // candidate's tree before the project's test_command runs in this shared workspace.
+  if(input.type==='workspace_tree')return withWorkspaceLock(root+'/finalize.lock',async()=>{const unlocked=await unlock();await git(['add','--all']);return {tree_sha:(await git(['write-tree'])).toString().trim(),...unlocked};});
   if(input.type==='workspace_source'){
     const local_sha=(await git(['rev-parse','HEAD'])).toString().trim(),tree_sha=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
     if(input.tree_sha&&tree_sha!==input.tree_sha)throw new Error('source_snapshot_changed');return {local_sha,tree_sha};

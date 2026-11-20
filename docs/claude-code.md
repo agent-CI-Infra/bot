@@ -2,7 +2,7 @@
 
 模型连接默认直连：Claude 使用原生供应商客户端，provider 配置和凭据直接用于原生环境；也可省略 provider 并使用专用 `CLAUDE_CONFIG_DIR` 或显式认证环境变量。`modelTransport: "gateway"` / `BOT_HARNESS_MODEL_TRANSPORT=gateway` 才启用下述回环模型中转，平台 MCP 工具与会话管理在两种模式下保持相同。直连需要供应商网络可达，并允许 Harness 使用模型凭据。
 
-`claude_code` 支持 controller、writer、observer、evaluator，包括 Manager 与 Coordinator。该驱动在项目容器（`Workspace`）及隔离运行容器（`RunEnvironments`，声明 `isolation: run_environment`）内执行真实 Claude Code 二进制，不调用普通 Chat Completions 代替 CLI。RoleRun 仍是现有 `task_runs`、assignment、lease epoch、TaskToolGateway 和 Publisher；没有新增任务队列或阶段调度。
+`claude_code` 支持 controller、writer、observer、evaluator，包括 Manager 与 Coordinator。该驱动在项目容器（`Workspace`）内执行真实 Claude Code 二进制（每运行隔离容器已在 #1121 移除），不调用普通 Chat Completions 代替 CLI。RoleRun 仍是现有 `task_runs`、assignment、lease epoch、TaskToolGateway 和 Publisher；没有新增任务队列或阶段调度。
 
 ## 工具卷、版本与部署
 
@@ -51,7 +51,7 @@ CLI 工作目录固定为容器内任务仓库检出 `<task_dir>/repo`；`HOME` 
 - **原生资源与防仓库投毒**：使用 `--setting-sources ''`、`disableAllHooks: true` 与 `--strict-mcp-config` 禁用项目/local 可执行配置、hooks 及额外 MCP 服务；专用 HOME 不继承宿主私有设置与凭据。通过原生 `--add-dir` 和 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` 加载已授权仓库的 CLAUDE.md 指令文档，真实 CLI 回归验证文档进入模型请求而投毒 hook/MCP 不执行。第一版保留 `--disable-slash-commands`，不自动激活候选提供的 slash commands/Skills；技能文件仍可通过已授权的原生文件工具或平台 `read_skill` 按需读取，不扩大可用工具。候选原生技能自动激活的权限边界另行验证。
 - **公共轨迹**：记录原生工具活动、平台 MCP 调用回执、模型请求与公开消息摘要；不收集私有推理。
 
-CLI 报告或退出码不会自动成为验收通过；writer 的 `collect` 由控制面取得候选快照并运行既有 finish 校验器，observer 只检视已固定的 `role_candidate`，独立 QA 始终使用全新上下文与独立检出。
+CLI 报告或退出码不会自动成为验收通过；writer 的 `collect` 由控制面取得候选快照并运行既有 finish 校验器，observer 只检视已固定的 `role_candidate`，独立 QA 始终使用全新上下文，在共享任务工作区里抽查；运行项目检查命令前先核对工作区仍是提交的候选树，不一致时把候选退回，不把别的树的结果算作候选的证据。
 
 ## 流、恢复、取消与用量记账
 

@@ -1,6 +1,6 @@
 import { readToolResult } from './tool-results.js';
 import { submissionFeedback } from '../roles/submission-feedback.js';
-import { commandTool, resolveCommandTimeout, runCommand } from './command.js';
+import { resolveCommandTimeout, retimeCommandTool, runCommand } from './command.js';
 import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { taskConfiguration, taskPermissions } from '../tasks/configuration.js';
@@ -155,7 +155,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
-      { entry, workspace, observerTools: profile.tools.map(t => t.function.name === 'run_command' ? commandTool(observerBudget.defaultSeconds, undefined, observerBudget.maxSeconds) : t),
+      { entry, workspace, observerTools: profile.tools.map(t => t.function.name === 'run_command' ? retimeCommandTool(t, observerBudget.defaultSeconds, observerBudget.maxSeconds) : t),
         prepare: async (role: string) => profile.capabilities.workspace.write || role !== 'dev' ? spaces.prepare(role) : undefined,
         controller: spaces.controller, worker: spaces.worker,
         withRole: spaces.withRole, withObservers: spaces.withObservers, bindRun: spaces.bindRun,

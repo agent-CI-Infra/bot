@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commandTimeoutLimit, commandTool, runCommand } from '../../../../dist/agent/command.js';
+import { commandTimeoutLimit, commandTool, retimeCommandTool, runCommand } from '../../../../dist/agent/command.js';
 import { Store } from '../../../../dist/storage/database.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
@@ -202,7 +202,9 @@ for (const backend of ['native', 'pi']) test(`role development offers the dev ro
 
 test('#1121 configurable project and role command_timeout_seconds budgets override default 180s/120s and raise the timeout ceiling', async t => {
   const { management } = await import('../../../../dist/app/management.js');
+  const bodies = [];
   const f = await fixture(t, 'native', 'development.issue', body => {
+    bodies.push(body);
     if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
       const done = receipts(body).filter(r => r.result_ref || r.findings_ref || r.observation_ref);
       const deliveryRef = receipts(body).find(r => r.result_ref)?.result_ref;
@@ -229,4 +231,21 @@ test('#1121 configurable project and role command_timeout_seconds budgets overri
   assert.equal(result.pr.number, 1);
   const heavy = f.commands.filter(c => c.command === 'printf heavy');
   assert.deepEqual(heavy.map(c => c.timeout_ms), [900_000, 1_200_000]);
+  // The configured budget replaces only the timeout sentences: each entry keeps its own run_command text (#1121 review).
+  const runCommands = bodies.flatMap(body => body.tools.filter(t => t.function.name === 'run_command').map(t => t.function.description));
+  assert.ok(runCommands.some(d => d.startsWith('Run verification/implementation commands without publication or credentials.') && /default timeout is 900 seconds/.test(d)), runCommands.join('\n'));
+});
+
+test('#1121 review: a configured timeout keeps the entry description of QA, request and development run_command tools', () => {
+  for (const text of ['Run spot-check verification in the shared task workspace; do not modify source.',
+    'Run bounded implementation/verification commands in this shared task workspace. Never publish, push, merge or use host credentials.',
+    'Run verification/implementation commands without publication or credentials.']) {
+    for (const before of [commandTool(120, text), commandTool(null, text), commandTool(undefined, text)]) {
+      const after = retimeCommandTool(before, 900, 1800).function.description;
+      assert.ok(after.startsWith(text + ' The default timeout is 900 seconds.'), after);
+      assert.equal(after.split('Explicit timeouts are capped').length, 2, 'the old timeout sentences are replaced, not repeated');
+    }
+  }
+  // A description without the timeout sentences is kept whole.
+  assert.ok(retimeCommandTool({ function: { description: 'Custom shell.' } }, null, 600).function.description.startsWith('Custom shell. Without timeout_seconds'));
 });

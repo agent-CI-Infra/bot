@@ -60,6 +60,16 @@ export function commandTool(defaultSeconds: number | null, description = 'Run a 
       keep_background: { type: 'boolean', description: 'Keep servers and watchers available for later commands of this task; output is automatically written to the returned log_path. Kept processes stop when the task ends.' }
     }, required: ['command'], additionalProperties: false } } };
 }
+/**
+ * The same run_command tool with other timeout fields (#1121 review): the entry's own description (for example QA's "do not
+ * modify source", or a request's "never publish") is kept, and only the timeout sentences commandInstructions() appended are
+ * replaced. A tool built without them keeps its whole description.
+ */
+export function retimeCommandTool(tool: { function: { description?: string } }, defaultSeconds: number | null, maxSeconds: number) {
+  const description = String(tool.function.description ?? '');
+  const cut = description.search(/ (?:Default timeouts follow|Without timeout_seconds, this entry|The default timeout is )/);
+  return commandTool(defaultSeconds, (cut >= 0 ? description.slice(0, cut) : description) || undefined, maxSeconds);
+}
 export async function runCommand(workspace: Pick<Workspace, 'call'> & { store?: any; task?: any }, key: string, args: any, defaultSeconds: number | null, role?: string) {
   const budget = resolveCommandTimeout(workspace.store, workspace.task, role ?? workspace.task?.active_role, defaultSeconds);
   const options = commandOptions(args, budget.defaultSeconds, budget.maxSeconds);
