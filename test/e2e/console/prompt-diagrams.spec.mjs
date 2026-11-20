@@ -149,7 +149,8 @@ test('the built-in Manager prompt reads as six scenarios with a drawn flow each 
     const figures = reading.locator('figure.diagram');
     await expect(figures).toHaveCount(6);
     for (let i = 0; i < 6; i++) await expect(figures.nth(i)).toHaveAttribute('data-diagram', 'ready', { timeout: 20000 });
-    await expect(figures.nth(3).locator('svg text').filter({ hasText: '由人决定合并' })).toHaveCount(1);
+    // Merging follows the project's auto-merge policy (#1170), not a fixed hand-over to people.
+    await expect(figures.nth(3).locator('svg text').filter({ hasText: '按自动合并策略合并' })).toHaveCount(1);
     for (const [width, height] of [[1440, 1000], [768, 1024], [390, 844]]) {
       await page.setViewportSize({ width, height });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

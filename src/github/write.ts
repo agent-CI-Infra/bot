@@ -56,7 +56,9 @@ export interface WriteContext {
 // base64: whether body.content is base64 file content always (contents) or only with encoding base64 (blobs).
 // dispatch: a workflow_dispatch, whose body always asks GitHub to return the run it started.
 // merge: merging a pull request, gated by the project's auto-merge policy and adapted to the base branch's merge queue.
-interface Route { methods: string[]; pattern: RegExp; resource: WriteResource | 'shared' | 'comment'; operation?: WriteOperation; human?: 'text' | 'review'; base64?: 'always' | 'encoding'; dispatch?: boolean; merge?: boolean }
+// move: a write that can move a branch without a pull request (a file written on it, its ref, a merge into it); on the
+// default branch it is gated like merging the bot's own change (#1170).
+interface Route { methods: string[]; pattern: RegExp; resource: WriteResource | 'shared' | 'comment'; operation?: WriteOperation; human?: 'text' | 'review'; base64?: 'always' | 'encoding'; dispatch?: boolean; merge?: boolean; move?: 'contents' | 'ref' | 'merges' }
 const n = '([1-9]\\d{0,9})', segment = '[^/]+';
 const route = (methods: string, path: string, resource: Route['resource'], extra: Partial<Route> = {}): Route =>
   ({ methods: methods.split('|'), pattern: new RegExp('^' + path + '$'), resource, ...extra });
@@ -88,10 +90,10 @@ const routes: Route[] = [
   route('PUT', `/pulls/${n}/update-branch`, 'pull_requests'),
   // Contents: files, Git objects and refs, merges. Merging a pull request is a Contents write on GitHub; here it also needs
   // Pull requests write, which its merge queue takes (#1170).
-  route('PUT', '/contents/.+', 'contents', { base64: 'always' }), route('DELETE', '/contents/.+', 'contents'),
+  route('PUT', '/contents/.+', 'contents', { base64: 'always', move: 'contents' }), route('DELETE', '/contents/.+', 'contents', { move: 'contents' }),
   route('POST', '/git/blobs', 'contents', { base64: 'encoding' }), route('POST', '/git/(?:trees|commits|tags|refs)', 'contents'),
-  route('PATCH|DELETE', '/git/refs/.+', 'contents'),
-  route('PUT', `/pulls/${n}/merge`, 'contents', { merge: true }), route('POST', '/merges', 'contents'),
+  route('PATCH|DELETE', '/git/refs/.+', 'contents', { move: 'ref' }),
+  route('PUT', `/pulls/${n}/merge`, 'contents', { merge: true }), route('POST', '/merges', 'contents', { move: 'merges' }),
   // Actions: start a workflow by its file name or id (#1072).
   route('POST', `/actions/workflows/${segment}/dispatches`, 'actions', { dispatch: true })
 ];
@@ -101,13 +103,13 @@ const description = 'Write to GitHub through the control plane, exactly like the
   + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}; '
   + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked). '
-  + 'PUT /pulls/7/merge {sha?, merge_method?} merges the pull request, or adds it to the merge queue when its base branch requires one (the answer says queued); it needs Contents and Pull requests write and is allowed only as the project\'s auto-merge policy says (your instructions state it). '
+  + 'PUT /pulls/7/merge {sha?, merge_method?} merges the pull request, or adds it to the merge queue when its base branch requires one (the answer says queued); it needs Contents and Pull requests write and is allowed only as the project\'s auto-merge policy says (your instructions state it). Writes that move the default branch without a pull request follow the same policy. '
   + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
   + 'Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
   + 'Use github_read to check state before writing; write only what your task needs.';
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
   body: { type: 'object', description: 'The REST request body. Omit when the route takes none.' }, key: { type: 'string', maxLength: 120 },
-  merge_request: { type: 'string', maxLength: 500, description: 'Only with PUT /pulls/{n}/merge, when the auto-merge policy needs a maintainer\'s explicit request for this merge: the link to their comment, review or review comment on this pull request, or "current_message" when the message you are answering in a Feishu or management conversation asks for it. The control plane checks that the person has write access to the repository.' } };
+  merge_request: { type: 'string', maxLength: 500, description: 'Only with PUT /pulls/{n}/merge or a write that moves the default branch, when the auto-merge policy needs a maintainer\'s explicit request for it: the link to their comment, review or review comment on this pull request (for a default-branch write, on the Issue or pull request where they asked), or "current_message" when the message you are answering in a Feishu or management conversation asks for it. The control plane checks that the person has write access to the repository.' } };
 /** What an agent is told about github_write in one project; it applies only where the tool is among its tools. */
 export const githubWriteInstructions = (policy: AutoMergePolicy) => ' If github_write is among your tools, your role may write to this repository on GitHub through the control plane, shaped like the GitHub REST API. Use it only for what this task and its prompt ask for (for example a comment, a label or a follow-up Issue), read the current state with github_read first, keep one stable key per intended write and never use it to approve a pull request unless the task explicitly asks for that. Never push to another author\'s branch or to the default branch unless a person explicitly asked for that push (in a GitHub comment, in Feishu or in the task they created); then cite that request where you report the write. '
   + mergeBoundary(policy) + ' Your task\'s own result is still delivered by its finishing tool.';
@@ -257,7 +259,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     return covers(ceiling, needed) ? null : refuse('capability_ceiling', `This project's capability ceiling is ${ceiling}; ${resourceName(resource)} writes need ${needed}. Nothing was sent; a project administrator can raise the ceiling.`, { needed, ceiling });
   };
   if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges, workflow dispatches.`);
-  if (input.merge_request !== undefined && !entry.merge) return { error: 'invalid_arguments', detail: 'merge_request goes only with PUT /pulls/{n}/merge.' };
+  if (input.merge_request !== undefined && !entry.merge && !entry.move) return { error: 'invalid_arguments', detail: 'merge_request goes only with PUT /pulls/{n}/merge or a write that moves the default branch.' };
   // CI changes are bot pull requests that people review and merge (#931). github_write's token never has the Workflows
   // permission, so GitHub refuses a ref update that would change .github/workflows/; a file write there is refused here,
   // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
@@ -293,10 +295,11 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     { policy, bot_pull_request: own });
   const issued: GitHub[] = [];
   let sending = false;
-  const client = async (permissions: Record<string, string>, requested = false) => {
+  // identify: also learn the bot's own GitHub account (actorId), which tells the bot's pull requests apart.
+  const client = async (permissions: Record<string, string>, requested = false, identify = false) => {
     const github = new GitHub(store, repository, redactor, context.guard, context.apiUrl);github.purpose = 'github_write';
     issued.push(github);
-    await github.connect(false, requested ? undefined : { ...permissions, metadata: 'read' }, requested ? { ...permissions, metadata: 'read' } : undefined, false);
+    await github.connect(false, requested ? undefined : { ...permissions, metadata: 'read' }, requested ? { ...permissions, metadata: 'read' } : undefined, identify);
     return github;
   };
   try {
@@ -318,20 +321,32 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     // A merge (#1170): read the pull request, apply the auto-merge policy (checking the maintainer's request where it needs
     // one) and learn whether its base branch requires a merge queue, all before any write token exists.
     let merging: { number: number; pr: any; own: boolean; request: string | null; queued: boolean } | null = null;
+    // A write that moves the default branch without a pull request (#1170): gated like the bot's own merge.
+    let moving: { branch: string; request: string | null } | null = null;
     if (entry.merge) {
-      const reader = await client({ pull_requests: 'read', issues: 'read', contents: 'read' }, true), number = entry.number!;
+      const reader = await client({ pull_requests: 'read', issues: 'read', contents: 'read' }, true, true), number = entry.number!;
       const pr = await reader.request('GET', reader.path('/pulls/' + number), undefined, true);
       if (!pr) return refuse('github_write_target_missing', `Pull request #${number} was not found in this repository.`);
-      const own = isBotPullRequest(store, repositoryId, number), policy = autoMergePolicy(store, repositoryId);
+      const own = isBotPullRequest(store, repositoryId, number, pr.user ?? null, reader.actorId), policy = autoMergePolicy(store, repositoryId);
       let request: string | null = null;
       if (mergeNeedsRequest(policy, own)) {
         const checked = await verifyMergeRequest(context, reader, number, input.merge_request);
         if ('reason' in checked) return policyRefusal(policy, own, number, checked.reason);
         request = checked.source;
       }
-      const queue = await mergeQueue({ get: path => reader.request('GET', path, undefined, true), graphql: async (query, variables) => ({ data: await reader.graphql(query, variables) }) },
-        reader.fullName, String(pr.base?.ref ?? ''));
+      const base = String(pr.base?.ref ?? '');
+      const queue = await mergeQueue({ get: path => reader.request('GET', path, undefined, true), graphql: async (query, variables) => ({ data: await reader.graphql(query, variables) }) }, reader.fullName, base);
+      // Not knowing whether the base branch requires a queue never becomes a direct merge GitHub may refuse halfway.
+      if (queue.state === 'unknown') return refuse('merge_queue_unknown', `Could not read whether ${base} requires a merge queue (its rules, branch protection and GitHub's mergeQueue were unreadable with this installation's token). Nothing was sent; a person can merge it, or try again once the repository's rules can be read.`, { base });
       merging = { number, pr, own, request, queued: queue.state === 'enabled' };
+    } else if (entry.move) {
+      const reader = await client({ contents: 'read', issues: 'read', pull_requests: 'read' }, true);
+      const branch = movedBranch(entry, path, input.body, reader.defaultBranch), policy = autoMergePolicy(store, repositoryId);
+      if (branch === reader.defaultBranch && mergeNeedsRequest(policy, true)) {
+        const checked = await verifyMergeRequest(context, reader, null, input.merge_request);
+        if ('reason' in checked) return refuse('auto_merge_not_allowed', moveRefusal(policy, branch, checked.reason), { policy, default_branch: branch });
+        moving = { branch, request: checked.source };
+      } else if (branch === reader.defaultBranch) moving = { branch, request: null };
     }
     // Exactly the needed resources: GitHub refuses the token for anything else.
     const wanted = writing.length ? writing : [resource];
@@ -347,6 +362,10 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     if (merging && !merging.request) {
       const policy = autoMergePolicy(store, repositoryId);
       if (mergeNeedsRequest(policy, merging.own)) return policyRefusal(policy, merging.own, merging.number, 'The policy changed while the merge was prepared.');
+    }
+    if (moving && !moving.request) {
+      const policy = autoMergePolicy(store, repositoryId);
+      if (mergeNeedsRequest(policy, true)) return refuse('auto_merge_not_allowed', moveRefusal(policy, moving.branch, 'The policy changed while the write was prepared.'), { policy, default_branch: moving.branch });
     }
     // No await between this check and the inflight record: one key reaches GitHub at most once.
     const again = earlier();
@@ -371,6 +390,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
         const value = await github.request(method, github.path(path), outgoing);
         response = summarize(value); url = urlOf(value);
       }
+      if (moving?.request && response && typeof response === 'object' && !Array.isArray(response)) response = { ...response, merge_request: moving.request };
       if (merging) {
         response = { ...response, via: merging.queued ? 'merge_queue' : 'merge', ...(merging.request ? { merge_request: merging.request } : {}) };
         url = typeof merging.pr.html_url === 'string' && /^https:\/\//.test(merging.pr.html_url) ? merging.pr.html_url : null;
@@ -407,13 +427,23 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   }
 }
 const resourceName = (resource: WriteResource) => ({ issues: 'Issues', pull_requests: 'Pull requests', contents: 'Contents', actions: 'Actions' })[resource];
+/** The branch a move route writes: a file's branch (the default branch when none is named), a ref's branch, a merge's base. */
+function movedBranch(entry: Route, path: string, body: unknown, defaultBranch: string): string | null {
+  const fields = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+  if (entry.move === 'contents') return typeof fields.branch === 'string' && fields.branch ? fields.branch.replace(/^refs\/heads\//, '') : defaultBranch;
+  if (entry.move === 'merges') return typeof fields.base === 'string' ? fields.base.replace(/^refs\/heads\//, '') : null;
+  return /^\/git\/refs\/heads\/(.+)$/.exec(decodedPath(path))?.[1] ?? null;
+}
+const moveRefusal = (policy: AutoMergePolicy, branch: string, reason: string) => `This project's auto-merge policy is ${policy}: a write that moves the default branch (${branch}) without a pull request counts as merging the bot's own change, so it needs a maintainer's explicit request. ${reason} Prefer a branch, a pull request and PUT /pulls/{n}/merge. Nothing was sent.`;
 
 /**
  * The maintainer's request a merge rests on (#1170), checked rather than believed: a comment, review or review comment on
- * this very pull request by someone with write access who is not the bot, or the message this conversation turn answers,
- * sent by a person whose live authority writes tasks in the project. What the words ask for is the agent's to judge.
+ * this very pull request (number) by someone with write access who is not the bot, or the message this conversation turn
+ * answers, sent by a person whose live authority writes tasks in the project. A write that moves the default branch has no
+ * pull request (number null): its link may be on any Issue or pull request of the repository. What the words ask for is
+ * the agent's to judge.
  */
-async function verifyMergeRequest(context: WriteContext, reader: GitHub, number: number, value: unknown): Promise<{ source: string } | { reason: string }> {
+async function verifyMergeRequest(context: WriteContext, reader: GitHub, number: number | null, value: unknown): Promise<{ source: string } | { reason: string }> {
   const { store, repository } = context, repositoryId = String(repository.id);
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text) return { reason: 'No merge_request was given: pass the link to the maintainer\'s comment, review or review comment on this pull request that asks for this merge, or "current_message" for the conversation message you are answering.' };
@@ -426,14 +456,16 @@ async function verifyMergeRequest(context: WriteContext, reader: GitHub, number:
   }
   const full = reader.fullName || String(repository.full_name);
   const match = /^https:\/\/github\.com\/([^/#?]+\/[^/#?]+)\/(?:pull|issues)\/(\d+)#(?:(issuecomment|pullrequestreview)-(\d+)|discussion_r(\d+))$/.exec(text);
-  if (!match || match[1]!.toLowerCase() !== full.toLowerCase() || Number(match[2]) !== number)
-    return { reason: `merge_request must be the link to a comment (#issuecomment-…), review (#pullrequestreview-…) or review comment (#discussion_r…) on pull request #${number} of ${full}, or "current_message".` };
-  const kind = match[3] ?? 'discussion', id = match[4] ?? match[5];
-  const item = await reader.request('GET', reader.path(kind === 'issuecomment' ? '/issues/comments/' + id : kind === 'pullrequestreview' ? `/pulls/${number}/reviews/${id}` : '/pulls/comments/' + id), undefined, true);
+  const where = number === null ? `an Issue or pull request of ${full}` : `pull request #${number} of ${full}`;
+  if (!match || match[1]!.toLowerCase() !== full.toLowerCase() || number !== null && Number(match[2]) !== number)
+    return { reason: `merge_request must be the link to a comment (#issuecomment-…), review (#pullrequestreview-…) or review comment (#discussion_r…) on ${where}, or "current_message".` };
+  const kind = match[3] ?? 'discussion', id = match[4] ?? match[5], linked = Number(match[2]);
+  const item = await reader.request('GET', reader.path(kind === 'issuecomment' ? '/issues/comments/' + id : kind === 'pullrequestreview' ? `/pulls/${linked}/reviews/${id}` : '/pulls/comments/' + id), undefined, true);
   const on = kind === 'issuecomment' ? /\/issues\/(\d+)$/.exec(String(item?.issue_url ?? ''))?.[1] : /\/pulls\/(\d+)$/.exec(String(item?.pull_request_url ?? ''))?.[1];
-  if (!item || Number(on) !== number) return { reason: `${text} was not found on pull request #${number}.` };
-  // The bot writes as an ordinary user under a bot account; its own account and its marker both say it was the bot.
-  const author = item.user, bot = store.get('SELECT actor_id FROM github_actors WHERE account_id=?', repository.account_id)?.actor_id;
+  if (!item || Number(on) !== linked) return { reason: `${text} was not found on ${number === null ? `#${linked}` : `pull request #${number}`}.` };
+  // The bot writes as an ordinary user under a bot account; its own account (live, else as last recorded) and its marker
+  // both say it was the bot.
+  const author = item.user, bot = reader.actorId || store.get('SELECT actor_id FROM github_actors WHERE account_id=?', repository.account_id)?.actor_id;
   if (!/^[1-9]\d*$/.test(String(author?.id ?? '')) || author.type === 'Bot' || String(author.id) === String(bot ?? '') || /<!-- dept-bot[:-]/.test(String(item.body ?? '')))
     return { reason: `${text} was written by a bot, not by a maintainer.` };
   if (!githubMaintainer(store, repositoryId, String(author.id)))
