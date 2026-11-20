@@ -74,7 +74,7 @@ const englishFailures = [
   // The service's `error` can itself be prose in the service's language: repeating it would put Chinese back inside the
   // English sentence, so only a short ASCII identifier is repeated and anything else becomes an em dash.
   { name: 'prose code', fulfill: route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '服务暂时不可用，请联系管理员' }) }),
-    wording: 'the service answered 500 · —' }
+    exact: 'Cannot read this installation: the service answered 500 · —' }
 ];
 for (const failure of englishFailures) {
   test(`English 界面：安装详情读取失败（${failure.name}）的文案不含中文`, async ({ page }) => {
@@ -83,7 +83,16 @@ for (const failure of englishFailures) {
     try {
       const strip = await readFailure(page, f, failure.fulfill, 'en');
       await expect(strip).toContainText('Cannot read this installation:');
-      await expect(strip).toContainText(failure.wording);
+      if (failure.exact) {
+        // The service's own prose must never survive: pin the whole line, and name the two fragments a reader would
+        // see if the raw `error` string ever came through again.
+        await expect(strip).toHaveText(failure.exact);
+        const line = await strip.innerText();
+        expect(line).not.toContain('服务暂时不可用');
+        expect(line).not.toContain('请联系管理员');
+      } else {
+        await expect(strip).toContainText(failure.wording);
+      }
       for (const [width, height] of viewports) {
         await page.setViewportSize({ width, height });
         await expect(strip).toBeVisible();
@@ -150,6 +159,9 @@ test('中文界面：服务端 code 是散文时显示破折号', async ({ page 
   try {
     const strip = await readFailure(page, f, route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '服务暂时不可用，请联系管理员' }) }), 'zh-CN');
     await expect(strip).toHaveText('读不到这条安装：500 · —');
+    const line = await strip.innerText();
+    expect(line).not.toContain('服务暂时不可用');
+    expect(line).not.toContain('请联系管理员');
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
