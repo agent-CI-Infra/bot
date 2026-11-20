@@ -3,7 +3,7 @@
 // place to change it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilityStates, chatCapabilities, chatExamplesFor, groupCapabilityNotice, groupGatesOf, groupVenue } from '../../../../dist/projects/capabilities.js';
+import { capabilityStates, chatCapabilities, chatExamplesFor, groupGatesOf, groupVenue } from '../../../../dist/projects/capabilities.js';
 import { levelPermissions } from '../../../../dist/channels/service-bindings.js';
 
 const allEvents = {
@@ -97,15 +97,6 @@ test('examples come only from what the chat can use, different kinds of work fir
   assert.ok(chatExamplesFor(chatCapabilities({ ...base, ceiling: 'read' }, { kind: 'github' }), '').length === 0);
 });
 
-test('the group notice says the level, what each repository allows and three requests to try', () => {
-  const text = groupCapabilityNotice('只读问答', [{ full_name: 'acme/app', inputs: { ...base, ceiling: 'comment' } }], readGroup);
-  assert.match(text, /^本群已接入 bot，档位：只读问答。/);
-  assert.match(text, /acme\/app（项目能力上限：可评论和打标签）\n- 可以：代码仓问答与调研、CI 失败与定时主动发现/);
-  assert.match(text, /- 暂不可以：Issue\/PR 日常管理（本群档位不支持）/);
-  assert.match(text, /试试：\n1\. @bot acme\/app[^\n]+\n2\. [^\n]+\n3\. [^\n]+$/);
-  assert.match(groupCapabilityNotice('可派活', [], dispatchGroup), /没有可用的仓库/);
-});
-
 // Review of #1157: a custom binding's items are separate gates, and the group is not told the project watches CI when it does not.
 test('a custom binding is described by its own items: PR write alone, dispatch without writes', () => {
   const prOnly = groupVenue({ github_issues: 'read', github_pull_requests: 'write', delegation: 'deny' });
@@ -124,7 +115,6 @@ test('a group is told CI failures are investigated on request, and found automat
   const quiet = { ...base, events: { ...allEvents, 'actions.run_failed': false }, schedules: 0 };
   const ci = chatCapabilities(quiet, readGroup).find(c => c.id === 'ci');
   assert.equal(ci.state, 'ready'); assert.equal(ci.title, 'CI 失败原因排查（按需）'); assert.match(ci.how, /不会自动发现/);
-  assert.doesNotMatch(groupCapabilityNotice('只读问答', [{ full_name: 'acme/app', inputs: quiet }], readGroup), /定时主动发现/);
   assert.equal(chatCapabilities(base, readGroup).find(c => c.id === 'ci').title, 'CI 失败与定时主动发现');
   // The switch or a scheduled check is what makes the project watch CI, whatever the ceiling; a read ceiling only stops it
   // from rerunning or reporting what it finds (review of #1157, second round).

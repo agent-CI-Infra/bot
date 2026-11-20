@@ -16,8 +16,7 @@ import type { ChannelDelivery, ChannelEvent } from './types.js';
 import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
-import { bindingLevel, bindingScope, ChannelServiceBindings } from './service-bindings.js';
-import { groupCapabilityNotice, groupLevelTitles, groupVenue, projectCapabilityInputs } from '../projects/capabilities.js';
+import { bindingScope, ChannelServiceBindings } from './service-bindings.js';
 import { ChannelServiceSessions } from './service-session.js';
 import { ChannelSchedules } from './schedules.js';
 import { roleConfiguration } from '../roles/definition.js';
@@ -44,9 +43,7 @@ const personalResultReasons: Record<string, string> = {
   tenant_forbidden: '创建者已没有该仓库的读取权限', principal_inactive: '创建者的账号已停用' };
 /** The deployment's GitHub permission checks, as far as Feishu turns use them (#846). */
 export interface GitHubProofs { lapsed(principal: string): boolean; renewIfLapsed(principal: string): Promise<boolean> }
-export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined;
-  /** Groups get a capability card when their binding changes (#1123); off only for fixtures that count every message they send. */
-  capabilityNotices?: boolean; }
+export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined; }
 // A principal a Feishu turn just checked is not checked again for each of its next messages, whatever the check found.
 const renewalPause = 60_000;
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
@@ -417,29 +414,6 @@ export class ChannelService {
     return { provider: 'feishu', connector_id: c.id, connector_revision: c.revision, app_id: chat.app_id, installation_tenant: chat.installation_tenant, actor_tenant: '', actor_id: '',
       chat_id: chat.chat_id, chat_type: chat.chat_type, message_id: '', event_id: '', thread_id: '', created_at: Date.now(), kind: 'message', content: '' };
   }
-  /** What a group's notice compares (#1123): whether its binding is on, its level and the repositories it covers. */
-  bindingSnapshot(chat: string): { enabled: boolean; level: string; scope: string } | null {
-    const binding = this.serviceBindings.get(chat);
-    return binding ? { enabled: !!binding.enabled, level: bindingLevel(this.serviceBindings.permissions(binding)),
-      scope: JSON.stringify(this.serviceBindings.grants(binding).map(g => [g.scope, g.tenant_id, g.project_id])) } : null;
-  }
-  /**
-   * Tells a group what it can use (#1123) when its binding is turned on or its level or repositories change: a plain card from
-   * the same projection the assistant answers 「你能干什么」 with. Sent once per binding revision, and only while that revision
-   * is still the group's binding.
-   */
-  bindingNotice(chat: string, before: { enabled: boolean; level: string; scope: string } | null): string | null {
-    if (this.options.capabilityNotices === false) return null;
-    const binding = this.serviceBindings.active(chat), now = this.bindingSnapshot(chat);
-    if (!binding || !now || (before?.enabled && before.level === now.level && before.scope === now.scope)) return null;
-    try { this.serviceBindings.assertUsable(binding); } catch (error) { if (error instanceof HttpError) return null; throw error; }
-    const granted = this.serviceBindings.permissions(binding), level = bindingLevel(granted);
-    const venue = groupVenue(granted);
-    const projects = this.serviceBindings.reach(binding).projects.map(p => ({ full_name: p.full_name, inputs: projectCapabilityInputs(this.store, p.id) }));
-    const row = this.store.get('SELECT * FROM channel_chats WHERE id=?', chat)!;
-    return this.post(row, groupCapabilityNotice(groupLevelTitles[level], projects, venue), `binding-notice:${binding.id}:${binding.revision}`, `binding-notice:${binding.id}`,
-      { kind: 'service_binding_notice', chat_id: chat, binding_id: binding.id, binding_revision: binding.revision });
-  }
   /** Queues a card to a chat once per key; the protection is checked again right before sending. */
   post(chat: Row, message: string, key: string, source: string, protection: Json): string { return this.queue(this.chatEvent(chat), card(message), key, source, protection); }
   /**
@@ -707,13 +681,9 @@ export class ChannelService {
           const task=this.store.get('SELECT * FROM tasks WHERE id=?',protection.task_id);if(!task)fail(404,'task_not_found');this.resultAuthority(task!);
           return;
         }
-        // A capability notice (#1123) goes out only while the group still has the binding revision it describes.
-        if(protection.kind==='service_binding_notice'){
-          const binding=this.serviceBindings.get(protection.chat_id);
-          if(!binding||binding.id!==protection.binding_id||binding.revision!==protection.binding_revision)fail(409,'conversation_source_changed');
-          this.serviceBindings.assertUsable(binding!);
-          return;
-        }
+        // Groups are no longer sent a capability card when their binding changes (#1123 follow-up): the bot speaks in a group
+        // only when someone there addresses it. A card queued before the change is dropped, never sent.
+        if(protection.kind==='service_binding_notice')fail(409,'conversation_source_changed');
         if(protection.kind==='service_binding'){
           const binding=this.serviceBindings.get(protection.chat_id);
           if(!binding||binding.id!==protection.binding_id||binding.revision!==protection.binding_revision)fail(409,'conversation_source_changed');
@@ -736,10 +706,8 @@ export class ChannelService {
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':String((part.content.elements as any)?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');
-        // A capability card (#1123) belongs to the binding revision it describes: binding-scoped, with the fence of that revision,
-        // so a later revision (other level or repositories) leaves it out of the group's context.
-        const fence=['service_task','service_binding_notice'].includes(protection.kind)?this.serviceBindings.fence(chat.id):protection.source_fence;
-        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_binding_notice','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
+        const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
+        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
       });
       // A private timer's result is a personal reply: it is not part of any group's context.
       if(protection.kind==='channel_schedule'&&!protection.binding_id){if(!this.stopped)this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);return;}
