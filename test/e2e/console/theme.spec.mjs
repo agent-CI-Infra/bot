@@ -583,9 +583,13 @@ const PIN_ROWS = [
 ];
 
 // The values below were measured on this head, once, and are now the pin: [page, selector, dark [color, background],
-// light [color, background], optional darkBorder, lightBorder]. The light column is the base value — the light pixel
-// comparison against b6b67bbf is 0 px on every light frame, so a light value here and a base value are the same
-// measurement. A border pin exists where the base paints a border that a token swap had already moved once
+// light [color, background], optional darkBorder, lightBorder]. The light column is what this head paints in light.
+// For the 17 frames that compare to b6b67bbf at 0 px it is also the base value; the three task frames are not 0 px
+// (they carry live request-generated values), and their light values were measured on both trees instead of being
+// inferred from a pixel count. The two `pre.output` rows differ on purpose: `.step-fold-body pre.output` inherits the
+// body text colour on the base (that fold has no `.fold` ancestor), while `.task-archive-body pre.output` inherits
+// `.fold`'s muted colour — pinning either to the other's value would lock a drift as the baseline.
+// A border pin exists where the base paints a border that a token swap had already moved once
 // (settings / confirm / role-run folds): color+background alone would not catch that drift.
 const PIN_TABLE = [
   ['task', '.step', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
