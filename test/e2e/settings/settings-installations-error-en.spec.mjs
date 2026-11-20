@@ -4,9 +4,10 @@ import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 // #527 slice: the installation archive's two failure paths are sentences the dictionary owns. Both used to interpolate
 // readErrorText(), which answers in the console's own prose (Chinese), so an English console read "Cannot read this
 // installation: 网络连接失败，请稍后重试" — one English sentence with a Chinese clause inside it. This spec makes the
-// archive read and the re-sync fail in every way the console can observe (no network, a gateway page on a 500, a
-// permission change, an error code the page does not know) and counts the CJK words left in the strip. The width loop
-// keeps a reading taken at the default 1280x720 from standing in for the narrow layout the same sentence has to wrap in.
+// archive read and the re-sync fail in every way the console can observe (no network, a gateway page on a 500, an
+// unparseable body on a 200, a permission change, an error code the page does not know) and counts the CJK words left in
+// the strip. The width loop keeps a reading taken at the default 1280x720 from standing in for the narrow layout the
+// same sentence has to wrap in.
 const viewports = [[1440, 900], [768, 1024], [390, 844]];
 const cjkWords = text => text.match(/[^\s]*[\u4e00-\u9fff][^\s]*/g) || [];
 const at = '2026-11-19T09:00:00Z';
@@ -56,9 +57,14 @@ const englishFailures = [
   // A read that never reached the service is the case the reported strip showed: the console's own network sentence.
   { name: 'network', fulfill: route => route.abort('connectionrefused'),
     wording: 'the network request failed, try again shortly' },
-  // A proxy in front of the console answers with its own page: status 500, no JSON, so there is no service code to name.
+  // A proxy in front of the console answers with its own page: status 500, no JSON, so there is no service code to name —
+  // the status stays in the sentence because it is the only diagnostic the reader gets for such a page.
   { name: 'gateway page on a 500', fulfill: route => route.fulfill({ status: 500, contentType: 'text/html', body: '<html><body>502 Bad Gateway</body></html>' }),
-    wording: 'the gateway answered with an error page' },
+    wording: 'the gateway answered 500 · an error page with no reason' },
+  // The same unparseable body on a 2xx is a different failure: the service claimed success, so the page says the content
+  // could not be read rather than blaming a gateway.
+  { name: 'unreadable body on a 200', fulfill: route => route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>maintenance</body></html>' }),
+    wording: 'the service answered 200 · content the console could not read' },
   // A code the console knows is named by the dictionary rather than by the Chinese sentence api() happens to carry.
   { name: 'permission change', fulfill: route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":"authorization_changed"}' }),
     wording: 'your permissions changed; refresh the page and retry with your current permissions' },
@@ -108,6 +114,26 @@ test('中文界面：读取失败的原文与今天逐字相同', async ({ page 
   try {
     const strip = await readFailure(page, f, route => route.abort('connectionrefused'), 'zh-CN');
     await expect(strip).toHaveText('读不到这条安装：网络连接失败，请稍后重试');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
+// api() writes the status in front of a non-JSON body, so the two branches that read such a body keep it: dropping the
+// status would take away the only diagnostic a Chinese reader has for a gateway page.
+test('中文界面：网关页的原文与今天逐字相同', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const strip = await readFailure(page, f, route => route.fulfill({ status: 500, contentType: 'text/html', body: '<html><body>502 Bad Gateway</body></html>' }), 'zh-CN');
+    await expect(strip).toHaveText('读不到这条安装：500 · 入口网关返回了错误页面，没有带回具体原因。请稍后重试；持续出现时请管理员查看服务日志。');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
+test('中文界面：不可解析内容的原文与今天逐字相同', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const strip = await readFailure(page, f, route => route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>maintenance</body></html>' }), 'zh-CN');
+    await expect(strip).toHaveText('读不到这条安装：200 · 服务返回了无法识别的内容，请刷新页面后重试。');
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
