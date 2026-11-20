@@ -59,11 +59,11 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 改变目标、范围或验收条件必须显式 `task.contract`，增加 contract revision 并清除旧候选和验收；已经发布成果的合同禁止原地修改。`task.create` 必须有目标、范围、验收条件和交付终点，进入普通 Task 调度、统一交付和独立 QA。
 
-## 生效来源与配置 PR
+## 生效来源与仓库文件变更
 
 `get_effective_config` 返回每条规则的来源（builtin 内置文本或 console Manager 章节；只有仓库 skill 为 repository）和版本；`workflows[].prompt.effective` 是生效的全文，`layers` 只列各层的来源和版本，不再重复全文（#1026，避免结果超出管理工具的 256 KiB 上限）。`.bot/` 文件不再读取（#935），`workflow.update` 和 `manager.update` 保存后即对之后的新任务生效，回执为 `effect: future_tasks`、`effective: true`。
 
-`configuration.pr` 只允许仓库 skill 路径（`.agents/skills/<名称>/SKILL.md`；`.bot/` 文件不再读取），行为规则用 `manager.update`、`roles.update` 和 `project.update` 的标签字段修改；它使用已有 GitHub App installation token，不接受个人写 Token。必须先刷新默认分支规则来源；默认分支变化后要求重新读取。创建 PR 返回 `pending_merge` 和链接，合入并刷新来源之前不宣称生效。分支和 PR 使用持久命令 ID 对账；任何未知外部响应都进入 `unknown`，`POST /api/management/commands/:id/resume` 先查原 PR，未查到仍保留未知状态，绝不盲目重复创建。
+新增或修改仓库 `.agents/skills/<名称>/**`（含 `SKILL.md` 与配套文本文件）以及 `AGENTS.md`、`CONTRIBUTING.md`、`.github/ISSUE_TEMPLATE/**`、`.github/CODEOWNERS` 等仓库文件不设特殊快捷通道，统一走正常的 PR 开发流程：在项目能力上限开启为 `develop` 时，通过 `task.create` 创建 `reviewable_pull_request` 开发任务，经测试与独立 QA 开出 PR，合入基准分支并刷新来源后生效（修改 `.github/workflows/` 仍须带 `workflow_changes: true` 并在控制台确认）。早期快捷命令 `configuration.pr` 已退役（#1171），新提交返回 `410 configuration_pr_removed`；升级前遗留的 `unknown` 历史回执仍可通过 `POST /api/management/commands/:id/resume` 按持久命令 ID 对账查询已开出的 PR，不会重复创建。
 
 ## 会话、停止和执行
 

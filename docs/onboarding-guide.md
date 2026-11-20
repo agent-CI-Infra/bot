@@ -74,13 +74,13 @@ https://github.com/apps/agent-ci-infra-bot/installations/select_target
 
 ### 2.2 只读分析与个人电脑
 
-检查或补充输入框里的提示词后点击 **发送**。在未确认前，助手只读仓库（`github_read`、`github_search`、`read_job_log` 均支持你管理的未启动已安装仓库，未启动前严格拒绝 `github_write`）：读取 README、目录结构、语言与构建测试文件、`.github/workflows/`、`.agents/skills/`、现有标签与用法、近期 Issue／PR 与 Actions 运行记录。
+检查或补充输入框里的提示词后点击 **发送**。在未确认前，助手只读仓库（`github_read`、`github_search`、`read_job_log` 均支持你管理的未启动已安装仓库，未启动前严格拒绝 `github_write`）：读取 README、根目录 `AGENTS.md`／`CONTRIBUTING.md`、`.github/ISSUE_TEMPLATE/`、`.github/CODEOWNERS`、目录结构、语言与构建测试文件、`.github/workflows/`、`.agents/skills/`（仅 `.agents/skills/` 视为本仓库给协作 Agent 准备的 skill，其他业务目录里的 `SKILL.md` 视为项目自身资产）、默认分支保护情况、现有标签与用法、近期 Issue／PR 与 Actions 运行记录。
 
 因为接入运行在标准管理助手会话中，部署启用了助手电脑时，你在 0 个已启动项目阶段即可挂载并使用自己的个人虚拟电脑（`run_command`、`read_file`、`write_file`）配合分析，也可以使用管理助手的独立子任务（`start_own_task`）和配置的任意后端（Native / Pi / Codex / Claude Code）。回复流式显示，随时可以点 **停止**。
 
 ### 2.3 画像与关键选择
 
-助手在对话中给出简洁的**仓库画像**（用途、技术栈、协作与检视习惯、CI 工作流与近期运行情况、现有标签、读过的来源），说明三种能力上限（`read` 只读问答、`comment` 检视与打标签及失败运行分析、`develop` 进一步开发 Issue 并开 PR），并针对仓库本身尚未定下的地方提出最多 5 个问题（每题附选项、推荐项与理由）。你直接在对话里用自然语言确认或调整选择即可。
+助手在对话中给出简洁的**仓库画像**（用途、技术栈、协作与检视习惯、现有协作文件与 `.agents/skills/`、CI 工作流与默认分支保护情况、现有标签、读过的来源），说明三种能力上限（`read` 只读问答、`comment` 检视与打标签及失败运行分析、`develop` 进一步开发 Issue 并开 PR），并针对仓库本身尚未定下的地方提出最多 5 个问题（每题附选项、推荐项与理由）。仓库已有的约定和配置直接沿用；缺少 `AGENTS.md`、Issue 模板、分支保护等协作项时，仅在与你期望的用途直接相关时顺带给出一两句轻量的可选建议，绝不作为接入前提或打分清单。你直接在对话里用自然语言确认或调整选择即可。
 
 ### 2.4 启动（或申请启动）与应用配置
 
@@ -94,6 +94,7 @@ https://github.com/apps/agent-ci-infra-bot/installations/select_target
 | 本仓库约定 | 作为独立的 `## 本仓库约定` 段落追加到 Manager 提示词（`manager.update`）和各启用工作角色提示词（`roles.update`），不覆盖原有内容 |
 | GitHub 标签 | 先核对现有标签，仅对缺失标签调用 `github_write POST /labels` 新建（能力上限需至少 `comment`；`develop` 档默认确保开发进度标签存在），已有同名标签保持不变 |
 | 定时检查与准点触发 workflow | `management_command` `schedule.register`（`workflow: "manager.check"`），项目尚无服务身份时按当前管理员委托自动创建，见[定时任务](schedules.md#定时触发-workflow) |
+| 协作说明文件或仓库 skill（可选） | 仅当你明确希望由 bot 代提 PR 新增或修改（如根目录 `AGENTS.md`、`CONTRIBUTING.md`、`.github/ISSUE_TEMPLATE/**`、`.github/CODEOWNERS` 或 `.agents/skills/<名称>/**`）时，统一走正常的 PR 开发流程：将项目能力上限开启为 `develop` 后，通过 `management_command` `task.create` 创建标准开发任务（bot 跑验证并开可检视 PR，人工检视合并后生效，不设特殊快捷通道） |
 | CI 建议（修改 `.github/workflows/`） | 助手调用带 `workflow_changes: true` 的 `task.create` 时**不会直接建单**，而是在控制台对话里生成一张「执行前确认」卡片；由项目管理员在控制台点击 **确认执行** 后才正式创建开发任务（bot 开 PR，人工检视合并，见 3.2） |
 
 **未受信任组织的启动申请（#933）**：当仓库所属组织尚未被超级管理员设为受信任组织时，仓库管理员确认启动会生成一条待处理的启动申请。超级管理员在控制台「待处理」页顶部看到申请卡片（绑定了飞书私聊的还会收到通知，可直接回复「同意」或「拒绝 + 原因」处理），同意时可选择模型、能力上限并可顺带信任该组织；拒绝须写明原因。申请人在等待期间可在管理助手里随时让助手查询申请状态或撤回申请；同意启动后即可继续在管理助手里让助手应用其余配置。

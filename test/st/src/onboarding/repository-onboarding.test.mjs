@@ -16,6 +16,7 @@ import { ownerId } from '../../../../dist/service-roles/assistant-computers.js';
 import { onboardingInstructions } from '../../../../dist/management/onboarding.js';
 import { onboardingItems } from '../../../../dist/management/onboarding-apply.js';
 import { developedLabel, developingIssueLabel } from '../../../../dist/review/labels.js';
+import { readResource } from '../../../../dist/agent/exploration.js';
 
 test('standalone onboarding endpoints and legacy onboarding conversations return 410 repository_onboarding_merged (#1133)', async t => {
   const f = await identityFixture(t, { github: true }), { h, state } = f;
@@ -215,5 +216,15 @@ test('onboarding prompt and label helpers preserve development status labels (#1
   assert.match(onboardingInstructions, /bot-developing/);
   assert.match(onboardingInstructions, /bot-developed/);
   assert.match(onboardingInstructions, /on\.schedule/);
+  assert.match(onboardingInstructions, /AGENTS\.md/);
+  assert.match(onboardingInstructions, /CONTRIBUTING\.md/);
+  assert.match(onboardingInstructions, /\.github\/ISSUE_TEMPLATE\//);
+  assert.match(onboardingInstructions, /\.github\/CODEOWNERS/);
+  assert.doesNotMatch(onboardingInstructions, /configuration\.pr/);
+  assert.match(onboardingInstructions, /task\.create/);
+  assert.match(onboardingInstructions, /reviewable_pull_request/);
+  assert.match(onboardingInstructions, /\.agents\/skills\//);
+  assert.doesNotMatch(onboardingInstructions, /\.bot\b/);
+  assert.equal(readResource('/rules/branches/main'), 'contents');
   assert.ok(!onboardingItems.includes('scheduled_dispatch'));
 });

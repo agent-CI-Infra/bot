@@ -40,7 +40,7 @@ function readPath(path: unknown): string | null {
       }
     }
   } catch { return null; }
-  if (!/^\/(?:contents(?:\/.*)?|readme|git\/(?:trees|blobs|commits|refs|ref)\/.*|commits(?:\/.*)?|compare\/.*|branches(?:\/.*)?|tags|issues(?:\/.*)?|pulls(?:\/.*)?|actions\/(?:runs|jobs|workflows|artifacts)(?:\/.*)?|check-runs(?:\/.*)?|check-suites(?:\/.*)?|statuses\/.*|labels(?:\/.*)?|releases(?:\/.*)?|milestones(?:\/.*)?)$/.test(pathname)) return null;
+  if (!/^\/(?:contents(?:\/.*)?|readme|git\/(?:trees|blobs|commits|refs|ref)\/.*|commits(?:\/.*)?|compare\/.*|branches(?:\/.*)?|rules\/branches\/.*|tags|issues(?:\/.*)?|pulls(?:\/.*)?|actions\/(?:runs|jobs|workflows|artifacts)(?:\/.*)?|check-runs(?:\/.*)?|check-suites(?:\/.*)?|statuses\/.*|labels(?:\/.*)?|releases(?:\/.*)?|milestones(?:\/.*)?)$/.test(pathname)) return null;
   if (/\/(?:logs|zip|tarball)(?:\/|$)/.test(pathname) && !pathname.startsWith('/contents/')) return null;
   return path;
 }

@@ -27,6 +27,9 @@ async function repositoryFixture(t,{stopModel=false}={}){
     if(rest.startsWith('/git/blobs/'))return send({sha:rest.slice(11),content:blobs.get(rest.slice(11)).toString('base64'),encoding:'base64'});
     if(rest==='/issues/1')return send(issue);
     if(rest==='/pulls/7')return send(fixture.pr);
+    if(/^\/pulls\/7\/(?:files|comments|reviews)$|^\/issues\/7\/(?:comments|events)$/.test(rest))return send([]);
+    if(rest.endsWith('/check-runs'))return send({check_runs:[]});
+    if(rest.endsWith('/status'))return send({statuses:[]});
     if(rest==='/issues/1/comments'){
       if(req.method==='POST'){const value={id:comments.length+1,body:body.body,user:{id:999},html_url:'https://github.invalid/comment/1'};comments.push(value);return send(value,201);}
       return send(comments);
@@ -71,6 +74,8 @@ test('the computer and its field sources are the project console spec; .bot/ fil
   // A pull request that changes .bot/ no longer changes how the bot works; one that changes a skill does.
   assert.equal(behaviorPath('.bot/guide.md'),false);assert.equal(behaviorPath('.bot'),false);
   assert.equal(behaviorPath('.agents/skills/ci/SKILL.md'),true);assert.equal(behaviorPath('.agents/skills'),true);
+  assert.equal(behaviorPath('AGENTS.md'),true);assert.equal(behaviorPath('CLAUDE.md'),true);
+  assert.equal(behaviorPath('.pi/skills/triage/SKILL.md'),true);assert.equal(behaviorPath('packages/sub/AGENTS.md'),false);
 });
 
 test('a project added after the upgrade reads its skills and lists its .bot/ files without importing them',async t=>{
@@ -172,6 +177,30 @@ test('an Issue development that continues the bot PR checks out its head and rea
   assert.equal(input.snapshot_sha,head);assert.equal(f.logs('next').find(log=>log.type==='prepared').sha,head);
   assert.equal(f.store.get("SELECT sha FROM repository_rule_sources WHERE repository_id='101'").sha,f.heads.release);
   assert.equal(input.context.effective_rules.files.find(row=>row.path==='.agents/skills/ci/SKILL.md').effective,'Release skill');
+
+  // External PR review and rules/refresh also follow policies.base_branch when configured (#1171).
+  await f.admin('/api/repositories/101/policy','PATCH',{base_branch:'release'});
+  const refreshed=await f.admin('/api/repositories/101/rules/refresh','POST',{});
+  assert.equal(refreshed.status,201);
+  assert.equal(refreshed.value.rules.sha,f.heads.release);
+  f.pr={id:56,number:7,state:'open',draft:false,user:{id:1234},head:{sha:head,ref:'ext/pr-7',repo:{id:999}},base:{ref:'release',sha:f.heads.release}};
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at) VALUES('ext-pr','101','review.pr','queued','ext','{}',7,?,'2026-10-27T00:00:00Z')",head);
+  await f.run('ext-pr');
+  const prInput=JSON.parse(f.store.get("SELECT input FROM tasks WHERE id='ext-pr'").input);
+  assert.equal(prInput.context.effective_rules.files.find(row=>row.path==='.agents/skills/ci/SKILL.md').effective,'Release skill');
+
+  // If the configured base_branch is missing, event PR review falls back only to defaultBranch (`main`), NEVER to the untrusted PR head;
+  // and if defaultBranch is also unreadable, it stops at `waiting_configuration` (`repository_has_no_commit`) instead of loading PR head skills.
+  await f.admin('/api/repositories/101/policy','PATCH',{base_branch:'missing-base'});
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at) VALUES('ext-pr-fallback','101','review.pr','queued','ext-fb','{}',7,?,'2026-10-27T00:00:00Z')",head);
+  await f.run('ext-pr-fallback');
+  const fbInput=JSON.parse(f.store.get("SELECT input FROM tasks WHERE id='ext-pr-fallback'").input);
+  assert.equal(fbInput.context.effective_rules.files.find(row=>row.path==='.agents/skills/ci/SKILL.md').effective,'Main skill');
+
+  delete f.heads.main;
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at) VALUES('ext-pr-no-trusted','101','review.pr','queued','ext-none','{}',7,?,'2026-10-27T00:00:00Z')",head);
+  const blockedPr=await f.run('ext-pr-no-trusted');
+  assert.deepEqual([blockedPr.status,blockedPr.phase,blockedPr.error_code],['waiting_configuration','prepare','repository_has_no_commit']);
 });
 
 // A project that had nothing cached at the upgrade imports its .bot/ files at its first task. That task, created before
@@ -236,4 +265,54 @@ test('a skill is indexed by its front matter description, or else its first line
   assert.deepEqual(skillIndex([{path:'.agents/skills/a/b/SKILL.md',source:'repository',effective:'---\ndescription: "Nested skill: does b"\n---\nBody'},
     {path:'.agents/skills/plain/SKILL.md',source:'repository',effective:'\n## Plain heading\nmore'},{path:'.bot/guide.md',source:'builtin',effective:'guide'}]).map(({name,description,path})=>[name,description,path]),
     [['a/b','Nested skill: does b','../context/skills/a/b/SKILL.md'],['plain','Plain heading','../context/skills/plain/SKILL.md']]);
+});
+
+test('#1171 whole .agents/skills/<name>/ companion files are loaded and staged, non-.agents SKILL.md are ignored, and companion safety/size caps are enforced',async t=>{
+  const f=await repositoryFixture(t);
+  f.heads.main=f.commit({
+    'src/app.js':'export {};\n',
+    '.agents/skills/release/SKILL.md':'---\nname: release\ndescription: Ship verified releases.\n---\nSee ./config.json, references/guide.md, scripts/tag.sh, and assets/template.md.\n',
+    '.agents/skills/release/config.json':'{"channel":"stable"}\n',
+    '.agents/skills/release/references/guide.md':'# Release Guide\n',
+    '.agents/skills/release/scripts/tag.sh':'#!/bin/sh\necho tag\n',
+    '.agents/skills/release/assets/template.md':'## Changelog\n',
+    // Orphan file under `.agents/skills/` without a SKILL.md directory is not mounted as a skill.
+    '.agents/skills/orphan/notes.txt':'orphan note\n',
+    // Business/test SKILL.md files outside `.agents/skills/` must never be loaded, indexed, or rejected as bot skills.
+    'tests/fixtures/SKILL.md':'binary\0fixture',
+    'plugins/demo/SKILL.md':{data:'../../src/app.js',mode:'120000'},
+    'harness/sample/SKILL.md':'# Harness sample\n',
+    'src/skills/SKILL.md':'# Internal module\n',
+  });
+  await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
+  const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
+  assert.equal(task.status,'succeeded',task.error_code);
+  assert.equal(f.context['skills/release/SKILL.md'].includes('Ship verified releases.'),true);
+  assert.equal(f.context['skills/release/config.json'],'{"channel":"stable"}\n');
+  assert.equal(f.context['skills/release/references/guide.md'],'# Release Guide\n');
+  assert.equal(f.context['skills/release/scripts/tag.sh'],'#!/bin/sh\necho tag\n');
+  assert.equal(f.context['skills/release/assets/template.md'],'## Changelog\n');
+  assert.equal(f.context['skills/orphan/notes.txt'],undefined);
+  assert.ok(!Object.keys(f.context).some(k=>k.includes('plugins')||k.includes('harness')||k.includes('fixtures')));
+
+  const cached=JSON.parse(f.store.get("SELECT files FROM repository_rule_sources WHERE repository_id='101'").files);
+  assert.deepEqual(
+    skillIndex(resolveRules({},cached).files).map(s=>({name:s.name,support_files:s.support_files})),
+    [{name:'release',support_files:['assets/template.md','config.json','references/guide.md','scripts/tag.sh']}],
+  );
+
+  // Companion file validation: binary NUL, symlink, single-file >512 KiB, total >1 MiB, and >256 files.
+  assert.throws(()=>resolveRules({},{'.agents/skills/a/SKILL.md':'# A','.agents/skills/a/references/bin.dat':'bad\0'}),{code:'invalid_rule_content'});
+  assert.throws(()=>resolveRules({},{'.agents/skills/a/SKILL.md':'# A','.agents/skills/a/references/big.txt':'x'.repeat(512*1024+1)}),{code:'skill_file_too_large'});
+  assert.throws(()=>resolveRules({},{
+    '.agents/skills/a/SKILL.md':'# A',
+    '.agents/skills/a/references/one.txt':'x'.repeat(400*1024),
+    '.agents/skills/a/references/two.txt':'x'.repeat(400*1024),
+    '.agents/skills/a/references/three.txt':'x'.repeat(300*1024),
+  }),{code:'skill_file_too_large'});
+  assert.throws(()=>resolveRules({},Object.fromEntries([
+    ['.agents/skills/a/SKILL.md','# A'],
+    ...Array.from({length:256},(_,i)=>[`.agents/skills/a/references/f${i}.md`,'ok']),
+  ])),{code:'too_many_bot_skills'});
+  assert.equal(explainFailure('skill_file_too_large','waiting_configuration').label,'仓库内容或规则');
 });

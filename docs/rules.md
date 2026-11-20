@@ -8,7 +8,7 @@
 | 各角色的提示词、模型、权限和预算 | 「角色」页的各个角色 | `roles.update` |
 | 检视标签、开发标签、开发中标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label`、`developing_label` |
 | 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 「机器配置」 | `POST /api/environments/:id/configure` |
-| 仓库自己的 skill | 仓库默认分支的 `.agents/skills/<名称>/SKILL.md` | 改仓库文件 |
+| 仓库自己的 skill | 仓库基准分支的 `.agents/skills/<名称>/`（含 `SKILL.md` 及配套文本文件） | 走正常 PR 开发流程提交仓库变更（合入基准分支后生效） |
 
 项目没有写自己的约定时用内置原文，就是 [`docs/prompts/`](prompts/README.md) 下的 Markdown，见[统一任务调度与对象 Manager](workflows.md)。保存只影响之后新建的任务，已经开始的任务按开始时的配置做完。
 
@@ -26,12 +26,12 @@
 
 ## 仓库 skill
 
-`.agents/skills/` 下各级目录里的 `SKILL.md` 是仓库的 skill，bot 像普通 agent 一样读取并遵循：
+`.agents/skills/<名称>/` 目录（含入口 `SKILL.md` 及同目录引用的 `config.json`、`references/`、`scripts/`、`assets/` 等配套文本文件）是本仓库供协作 Agent 使用的仓库 skill，bot 在各类任务角色（`Pi`、`Native`、`Process`、`Codex`、`Claude Code`）与事件分派 Manager 中自动挂载并按需读取：
 
-- 规则从分支读，不从正在处理的 PR 的提交里读：PR 检视和 bot 按检视意见修订自己的 PR 读默认分支；Issue 检视和 Issue 开发读项目的「基准分支」（没设时就是默认分支）；继续修改 bot 已经为 Issue 开的 PR 时读这条 PR 的基准分支。
-- agent 先只看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）和路径，做到相应工作时再读全文。只加载文本，不加载 JS 扩展，最多 32 份；单份不限大小。
-- PR 改动 `.agents/skills/` 下的文件（含移动、删除）时，检视总结会写明这些文件改变了 bot 的行为，需要人来决定。
-- 「角色 → Manager」的「仓库 skill」列出默认分支上的 skill，可以刷新和查看全文。
+- **可信分支与严格路径边界**：只从可信基准分支读取 `.agents/skills/`，绝不从外部 PR 分支或未受信任分支/提交加载（检视外部 PR 或未受信任检出时，同样禁用检出目录中的 `.pi/skills/` 与 `AGENTS.md`／`CLAUDE.md`，仅注入可信基准分支内容）：PR 检视和修订读项目的「基准分支」（没设时就是默认分支）；Issue 检视和 Issue 开发读「基准分支」；继续修改 bot 已经为 Issue 开的 PR 时读这条 PR 的基准分支。仓库其他业务目录（如 `tests/`、`plugins/`、`harness/`、`src/` 等）里的 `SKILL.md` 属于项目自身业务或测试资产，bot 不扫描、不校验，也不会当作本项目的协作 skill 加载。
+- **整目录挂载与按需读取**：任务准备阶段固定该次任务的可信分支 skill 快照并整目录挂载到角色技能目录（保持相对路径引用完整，无需每次仓库更新后在控制台手工重绑 `skill_bundle_ref`）；agent 先看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）、入口路径和配套文件列表，需要时再读取 `SKILL.md` 及配套文件；事件分派 Manager 在角色具备 Contents 读权限时也可用 `read_skill` 按需读取。只加载文本文件，最多 32 份 `SKILL.md`、总计最多 256 个文件，单文件不超过 512 KiB、总大小不超过 1 MiB。
+- PR 改动 `.agents/skills/`、`.pi/skills/` 或根目录 `AGENTS.md`／`CLAUDE.md`（含移动、删除）时，检视上下文与总结会标明这些文件改变了 bot 的行为，需要人来决定。
+- 「角色 → Manager」的「仓库 skill」列出基准分支（未设置时即默认分支）上的 skill，可以刷新和查看全文。
 
 **边界**：skill 只能指导与本仓库相关的工作，不能扩大权限或改变平台规则。系统提示词写明了这一点；下面这些照常由控制面拒绝并记录，不因 skill 的内容放开：
 
@@ -44,10 +44,11 @@
 
 | 错误码 | 原因 |
 | --- | --- |
-| `invalid_rule_content` | `SKILL.md` 含 NUL 字节 |
-| `invalid_skill_file` | `SKILL.md` 是符号链接、子模块等，不是普通文件 |
-| `unsafe_skill_file` | 检出的代码里 skill 路径上有符号链接 |
-| `too_many_bot_skills` | `.agents/skills/` 下的 `SKILL.md` 超过 32 份 |
+| `invalid_rule_content` | `.agents/skills/` 下的技能或配套文件含 NUL 字节（非文本） |
+| `invalid_skill_file` | `.agents/skills/` 下的路径非法，或包含符号链接、子模块等非普通文件 |
+| `unsafe_skill_file` | 检出的代码里 `.agents/skills/` 路径上有符号链接 |
+| `too_many_bot_skills` | `.agents/skills/` 下的 `SKILL.md` 超过 32 份，或技能文件总数超过 256 个 |
+| `skill_file_too_large` | `.agents/skills/` 下单文件超过 512 KiB，或文件总大小超过 1 MiB |
 
 修好默认分支上的文件后，等待中的任务会自动重试。规则章节原文和 skill 索引每个任务都直接交给模型，它们和任务摘要合计超过 2 MiB 时，任务停下并报 `agent_context_too_large`。早期版本因 `.bot/` 文件停下的任务（`invalid_bot_label`、`invalid_bot_computer`、`invalid_bot_rule_file`、`unsafe_bot_rule`、`bot_rule_too_large`），点「重试」即可继续。
 

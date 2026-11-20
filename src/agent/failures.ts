@@ -28,7 +28,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_skill_file','pull_request_file_limit','agent_context_too_large','github_pagination_limit','pull_request_media_invalid',
     // The repository's .agents/skills/ are the repository's to fix.
-    'too_many_bot_skills','invalid_skill_file','invalid_rule_content',
+    'too_many_bot_skills','invalid_skill_file','invalid_rule_content','skill_file_too_large',
     // Raised only by versions that still read .bot/ files (before #935) or limited their sizes; tasks may still wait on them.
     'bot_rule_too_large','invalid_bot_rule_file','invalid_bot_label','invalid_bot_computer','unsafe_bot_rule',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
@@ -228,9 +228,10 @@ const codeActions: Record<string,string> = {
   agent_compaction_failed:'Pi 压缩会话时失败了（通常是生成摘要的模型请求出错），原因见故障详情。任务会自动重试并续接同一会话；反复出现时检查模型服务。',
   // Codes of the .bot/ files, which are no longer read (#935): what they stopped on is gone.
   ...Object.fromEntries(['bot_rule_too_large','invalid_bot_rule_file','invalid_bot_label','invalid_bot_computer','unsafe_bot_rule'].map(code=>[code,'仓库的 .bot/ 规则文件已不再读取（规则已迁入 Manager 提示词、项目设置和机器配置），点「重试」即可继续。'])),
-  invalid_skill_file:'.agents/skills/ 下的 SKILL.md 必须是普通文件（不能是符号链接或子模块）：修正后提交到默认分支，再点「重试」。',
-  unsafe_skill_file:'.agents/skills/ 下的 SKILL.md 是符号链接：换成普通文件后提交，再点「重试」。',
-  too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
+  invalid_skill_file:'.agents/skills/ 下的文件必须是普通文件（不能是符号链接或子模块）：修正后提交到默认分支，再点「重试」。',
+  unsafe_skill_file:'.agents/skills/ 下包含符号链接：换成普通文件后提交，再点「重试」。',
+  too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md（共最多 256 个文件）：合并或删掉一些，提交到默认分支后点「重试」。',
+  skill_file_too_large:'.agents/skills/ 下单文件最多 512 KiB、总计最多 1 MiB：精简体积后提交到默认分支，再点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
   capability_ceiling:'项目能力上限不够这一步（详情写明需要的档位），任务已停下，已有改动保留。需要时由项目管理员在「项目设置 → 监听与触发」调高上限后点「重试」。',
   capability_ceiling_lowered:'项目能力上限已调低，任务在下一个工具调用前停下，已有改动保留，没有取消。调回足够的档位后点「重试」继续；不再需要时可以取消。',

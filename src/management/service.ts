@@ -20,6 +20,7 @@ import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
 import { installationExecutionDenied } from '../installations/archive.js';
 import { commands, commandSchema, querySchema, queries as queryNames, schedulingQueries, validate } from './catalog.js';
+import { configurationPrRemoved } from './configuration-pr.js';
 import type { AssistantComputerService } from '../service-roles/assistant-computers.js';
 import { schedulingCommands } from '../schedules/schema.js';
 
@@ -143,8 +144,9 @@ export class ManagementService {
       installations:this.store.all('SELECT g.ref,g.revision,g.status,g.scope_pending,r.present FROM github_installations g JOIN installation_repositories r ON r.installation_ref=g.ref WHERE g.account_id=? AND r.repository_id=? ORDER BY g.ref',p.account_id,project),policy:this.policy(actor,project)});
   }
   check(actor:ActorContext,command:Pick<ManagementCommand,'operation'|'target'|'arguments'>): void {
-    const {operation,target}=command,entry=commands[operation]!;
-    const project=this.scope(actor,target.project_id,entry.capability);
+    const {operation,target}=command,capability=commands[operation]?.capability??(operation==='configuration.pr'?'config.write':undefined);
+    if(!capability)fail(400,'invalid_management_arguments');
+    const project=this.scope(actor,target.project_id,capability);
     if(target.task_id&&!this.store.get('SELECT 1 FROM tasks WHERE id=? AND repository_id=?',target.task_id!,target.project_id))fail(404,'task_not_found');
     if(operation.startsWith('task.')&&operation!=='task.create'&&!target.task_id!)fail(400,'task_target_required');
     if(!operation.startsWith('task.')&&target.task_id)fail(400,'invalid_management_target');
@@ -199,7 +201,7 @@ export class ManagementService {
       if(!this.schedulingQuery)fail(409,'scheduling_not_registered');
       return this.schedulingQuery!(actor,operation,target.project_id,args);
     }
-    if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!confinedTenant(actor)||s.scope!=='platform')&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
+    if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!confinedTenant(actor)||s.scope!=='platform')&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
     if(operation==='list_projects')return {projects:ids.slice(offset,offset+limit).map(id=>{
       const project=this.scope(actor,id),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!;
       return {id,tenant_id:this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',id)?.tenant_id,full_name:project.full_name,enabled:!!project.enabled,configuration_gaps:[...(!policy.model_id?['model_not_configured']:[]),...(installationExecutionDenied(this.store,project.account_id,id)?['installation_unavailable']:[])],url:'#/projects/'+id+'/basic'};
@@ -254,6 +256,7 @@ export class ManagementService {
     // The rule files' console layer is gone (#935): an old client learns what replaces it instead of a schema error.
     if(input?.operation==='rules.update')throw Object.assign(new HttpError(410,'rules_update_removed'),{detail:rulesUpdateRemoved});
     if(input?.operation==='workflow.update')throw Object.assign(new HttpError(410,'workflow_update_removed'),{detail:'固定工作类型已退役（#1122）：请用 manager.update 修改统一 Manager 提示词与事件规则，或用 roles.update 修改角色提示词与权限。'});
+    if(input?.operation==='configuration.pr')throw Object.assign(new HttpError(410,'configuration_pr_removed'),{detail:configurationPrRemoved});
     validate(commandSchema,input);const submitted=input as unknown as ManagementCommand,entry=commands[submitted.operation]!;
     validate(entry.arguments,submitted.arguments);
     this.scope(actor,submitted.target.project_id,entry.capability);

@@ -170,7 +170,7 @@ test('persistent conversations execute actual model tools, replay messages and s
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE source_conversation=?",conversation).n,1);assert.ok(result.events.some(e=>e.type==='tool_result'&&e.data.result.state==='succeeded'));
   assert.ok(!JSON.stringify(requests).includes('fixture-provider-key'));
   // The assistant is not told about a repository .bot/ layer: none exists since #935, and a workflow.update takes effect.
-  const system=requests[0].messages[0].content;assert.doesNotMatch(system,/\.bot\b/);assert.match(system,/configuration pull request \(a repository skill\)/);
+  const system=requests[0].messages[0].content;assert.doesNotMatch(system,/\.bot\b/);assert.match(system,/pull request adding or changing repository skills \(\.agents\/skills\/\)/);
   // #1072: an example scheduled task that starts a workflow (checking for a running run first), and the late-schedule recommendation.
   assert.match(system,/POST \/actions\/workflows\/nightly\.yml\/dispatches.*有没有排队或正在运行的运行，有就不再触发/);assert.match(system,/# Late scheduled workflow runs[\s\S]*cancel-in-progress: false/);
   // #1123: a flow is explained from the project's own Manager prompt and changed only after a confirmed before/after flowchart.
