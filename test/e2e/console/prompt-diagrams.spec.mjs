@@ -126,6 +126,48 @@ test('the Manager prompt reads as text with drawn diagrams, stays inert on hosti
   } finally { await h.stop(); }
 });
 
+// The built-in Manager prompt a project follows until it saves its own: six scenario chapters, each drawn as a diagram
+// the people of the project can read on a phone.
+test('the built-in Manager prompt reads as six scenarios with a drawn flow each at every width', async ({ page }) => {
+  test.setTimeout(90000);
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  mkdirSync('.tmp/prompt-diagrams', { recursive: true });
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    expect((await admin('/api/repositories/101/manager')).value.manager.prompt.customized).toBe(false);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await goRolePage(page, { role: 'Manager' });
+
+    const reading = page.getByRole('region', { name: 'Manager 提示词阅读视图', exact: true });
+    const scenarios = ['代码仓问答与调研', 'Issue/PR 日常管理', 'Issue/PR 检视', '特性开发与缺陷修复', '分支/PR 自主测试', 'CI 失败与定时主动发现'];
+    await expect(reading.getByRole('heading', { level: 2 })).toHaveText(scenarios.map(name => new RegExp(`^\\d\\. .+（${name.replace('/', '\\/')}）$`)));
+    const figures = reading.locator('figure.diagram');
+    await expect(figures).toHaveCount(6);
+    for (let i = 0; i < 6; i++) await expect(figures.nth(i)).toHaveAttribute('data-diagram', 'ready', { timeout: 20000 });
+    await expect(figures.nth(3).locator('svg text').filter({ hasText: '由人决定合并' })).toHaveCount(1);
+    for (const [width, height] of [[1440, 1000], [768, 1024], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      // From a tablet up every drawing fits its column whole; on a phone a two-branch flow keeps 70% of its size and
+      // scrolls a little inside its own frame, which stays within the screen.
+      const frames = await figures.evaluateAll(nodes => nodes.map(node => {
+        const canvas = node.querySelector('.diagram-canvas');
+        return { fits: canvas.scrollWidth <= canvas.clientWidth + 1, inside: canvas.getBoundingClientRect().right <= innerWidth };
+      }));
+      expect(frames.every(frame => frame.inside)).toBe(true);
+      if (width >= 768) expect(frames.map(frame => frame.fits)).toEqual([true, true, true, true, true, true]);
+      await figures.nth(3).scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `.tmp/prompt-diagrams/builtin-${width}.png` });
+    }
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
+
 const chunk = (res, delta, finish = null) => res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n');
 // An assistant answer streams its diagram in pieces: the half-written block waits as source, the finished one is drawn
 // once, and the answer fits a 390px screen.

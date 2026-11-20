@@ -11,6 +11,8 @@ import { roleConfiguration } from '../roles/definition.js';
  * are retired; delivery rights are governed solely by `capability_ceiling`, `task_write_grants`, and role permissions.
  */
 export const defaultManagerPrompt = readFileSync(resolve(import.meta.dirname, '../../docs/prompts/manager-dispatch.md'), 'utf8');
+/** How the management assistant explains the Manager's flows and changes them with a before/after flowchart (#1123). */
+export const managerFlowInstructions = readFileSync(resolve(import.meta.dirname, '../../docs/prompts/manager-flows.md'), 'utf8');
 
 export function managerStorage(store: Store) {
   rulesStorage(store);

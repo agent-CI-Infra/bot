@@ -25,6 +25,7 @@ import { privateTurnMessageInstructions, type TurnMessages } from '../channels/t
 import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
 import { RepositoryOnboarding, onboardingInstructions, onboardingRepositoryOf, startRepositoryName, startRepositoryTool } from './onboarding.js';
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
+import { managerFlowInstructions } from '../dispatch/settings.js';
 import { lateSchedules } from '../actions/late-schedules.js';
 import { readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
 import { assertCeiling } from '../projects/ceiling.js';
@@ -298,6 +299,8 @@ export class ManagementAgent {
           +' A project scheduled task (management_command schedule.register, workflow manager.check) can also start a GitHub Actions workflow on time, for example when GitHub\'s own schedule runs late. Its instruction says which workflow, on which ref, and to check first, for example: 「在 main 上触发 .github/workflows/nightly.yml（github_write POST /actions/workflows/nightly.yml/dispatches，ref 为 main）。触发前先用 github_read 查看这个 workflow 有没有排队或正在运行的运行，有就不再触发，只在报告里说明；触发后在报告里写上 GitHub 返回的运行链接。」 The Manager runs it with github_write, which needs the project\'s capability ceiling at comment or more, Actions write on the Manager role and the workflow declaring workflow_dispatch; GitHub refuses the rest and the task reports it.'
           +'\n\n'+lateSchedules
           +'\n\n'+onboardingInstructions
+          // #1123: explain a flow from the project's own Manager prompt; change it only after a before/after flowchart is confirmed.
+          +'\n\n'+managerFlowInstructions
           +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +administrator;
         const context={...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()};

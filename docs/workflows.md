@@ -39,6 +39,14 @@
 - **`create_task`**：创建 `kind = 'task.request'` 通用任务，指定 `role`（如 `reviewer`、`test`、`dev` 或留空由主控编排）、`writes`（`review`、`pull_request`、`github`、`actions_rerun`）、`target`、任务 `brief` 与开发 `basis`；
 - **`continue_task`**：把新事件并入同一对象上排队、运行中或可续接的任务（含已完成检视的下一轮，自动迁移到最新 PR head 并原位更新总结评论）。
 
+## 内置 Manager 提示词：六大场景（#1123）
+
+没有保存过自己提示词的项目使用内置的 [`docs/prompts/manager-dispatch.md`](prompts/manager-dispatch.md)。开头说明四种决定和控制面强制的边界，正文按六个场景分章：① 代码仓问答与调研、② Issue/PR 日常管理、③ Issue/PR 检视、④ 特性开发与缺陷修复、⑤ 分支/PR 自主测试、⑥ CI 失败与定时主动发现。每章都是「一句话能力说明 + 一张 ` ```mermaid ` `flowchart TD` 流程图 + 3～5 条可调的边界准则」，第 ④ 章另带「Starting development」小节（开发依据和 `project_rule` 引用的自主开发规则原句）。流程图和准则说的是同一件事：控制台「角色 → Manager」的阅读视图画出来的就是模型读到的指令，改流程时两者一起改。章节结构由 `test/ut/src/dispatch/manager-prompt.test.mjs` 固定。
+
+两个分支的流程图在 1440 和 768 宽度下完整放进栏宽；手机（390）上按 70% 缩放后仍略宽，在自己的框内横向滚动，页面本身不横向滚动。
+
+想让 bot 换一种做法时，在管理助手里用对话说明即可：助手先读项目当前的 Manager 提示词，回复「当前流程」和「修改后流程」两张图及变更要点，等确认后才用 `manager.update` 写回整份提示词，见[管理助手](management-agent.md#讲解和修改协作流程1123)。提示词不能放宽能力上限、写入授权、角色权限、开发依据和合并规则，需要改这些设置时助手会单独提出对应命令。
+
 ## 常设规则
 
 例行事件优先由常设规则（`standing_rules`）直接决定，不调用 Manager 模型：
