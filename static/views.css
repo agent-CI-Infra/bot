@@ -1028,3 +1028,28 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 /* #935: a repository that still has .bot/ files is told they were imported and can be deleted. */
 .retired-rules{display:grid;gap:var(--space-2);padding:var(--space-4);margin:var(--space-3) 0 0;background:var(--color-brand-weak);border-left:3px solid var(--color-brand);border-radius:var(--radius-2)}
 .retired-rules>.muted{margin:0}
+/* #750 phase 1, reviewed gap: the task detail, project list and project pages keep their own values hardcoded in
+   light (white cards, #f7fafb side rails, #fbfdfe table head), so a dark console painted the dark text token on a
+   white card there — 1.09:1 on the owner bar, 1.12:1 on the task side rail, 1.18:1 on a step, 2.09:1 on the table
+   head. These blocks are scoped to dark only, exactly like the token blocks in shell.css: in light every value below
+   is untouched, so the light baseline does not move. `pre.command` and `pre.output.snapshot-output` paint
+   `--color-text` as a background, which inverts correctly in light and paints light-on-light in dark, so they take a
+   raised surface with normal text instead. Both dark blocks must stay identical. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-surface-alt); border-color: var(--color-border); color: var(--color-text); }
+  :root:not([data-theme="light"]) .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
+  :root:not([data-theme="light"]) .step-running { border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .fault-action { color: var(--color-text); }
+  :root:not([data-theme="light"]) .project-nav a:hover { background: var(--color-hover); }
+  :root:not([data-theme="light"]) .task-archive-body { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(#rows[data-view=projects], .global-project-table) .project-table-head { background: var(--color-surface-alt); border-bottom-color: var(--color-border); }
+}
+:root[data-theme="dark"] :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
+:root[data-theme="dark"] :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-surface-alt); border-color: var(--color-border); color: var(--color-text); }
+:root[data-theme="dark"] .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
+:root[data-theme="dark"] .step-running { border-color: var(--color-border); }
+:root[data-theme="dark"] .fault-action { color: var(--color-text); }
+:root[data-theme="dark"] .project-nav a:hover { background: var(--color-hover); }
+:root[data-theme="dark"] .task-archive-body { border-top-color: var(--color-border); }
+:root[data-theme="dark"] :is(#rows[data-view=projects], .global-project-table) .project-table-head { background: var(--color-surface-alt); border-bottom-color: var(--color-border); }

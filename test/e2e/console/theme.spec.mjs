@@ -216,3 +216,69 @@ test('#750 dark theme paints login, project list, global settings and the confir
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
+
+// Review of the first version: dark tokens were in place, but the task detail, the project list head and the project
+// page still painted their own light values, so dark text landed on a white card (1.09:1 – 2.09:1). These surfaces
+// now read the same tokens in dark; the light baseline is untouched and stays covered by the shots in the PR.
+async function colours(page, selectors) {
+  return page.evaluate((list) => {
+    const parse = (c) => c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)?.slice(1).map(Number) || null;
+    const paint = (el) => {
+      for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+        const bg = getComputedStyle(n).backgroundColor;
+        if (bg && bg !== 'transparent' && !/rgba\(0, 0, 0, 0\)/.test(bg)) return bg;
+      }
+      return getComputedStyle(document.body).backgroundColor;
+    };
+    return list.map((selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return { selector, missing: true };
+      const style = getComputedStyle(el);
+      return { selector, color: style.color, background: paint(el) };
+    });
+  }, selectors);
+}
+
+test('#750 dark theme keeps the task detail, project head and project page readable', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    h.store.run("UPDATE repositories SET full_name=?, owner_id=? WHERE id=?", 'fixture/project-101', '20', '101');
+    h.store.run(
+      "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,result,created_at,updated_at) VALUES('t-750','101','development.issue','running','P1','控制台深色主题：跟随系统与手动三态',750,'model',?,'2026-11-18T08:00:00Z','2026-11-18T08:12:00Z')",
+      JSON.stringify({ pr_number: 1067, branch: 'feat/theme-750', sha: '4'.repeat(40) }),
+    );
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await signIn(page, h, password, '');
+
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      const pages = [
+        ['#/tasks/t-750', ['pre.output', '.step', '.task-side', '.task-archive-body', '.back-link']],
+        ['#/projects', [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar']],
+        ['#/projects/101/overview', ['.project-page']],
+      ];
+      for (const [hash, selectors] of pages) {
+        await page.goto(h.admin + '/' + hash);
+        await page.waitForFunction(() => (document.getElementById('console-page')?.innerText || document.querySelector('#workspace')?.innerText || '').trim().length > 0);
+        await page.waitForLoadState('networkidle').catch(() => {});
+        await page.waitForTimeout(600);
+        const measured = await colours(page, selectors);
+        for (const sample of measured) {
+          if (sample.missing) continue;
+          readable(sample, 4.5, `${hash} ${sample.selector} ${width}`);
+        }
+        // Nothing in dark may sit on a white card: every measured background has to be one of the dark tokens.
+        for (const sample of measured) {
+          if (sample.missing) continue;
+          const [r, g, b] = rgb(sample.background);
+          expect(r + g + b, `${hash} ${sample.selector} ${width} background ${sample.background}`).toBeLessThan(200);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), `${hash} ${width} overflow`).toBeLessThanOrEqual(0);
+      }
+    }
+  } finally { await h.stop(); }
+});
