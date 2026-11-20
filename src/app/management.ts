@@ -17,6 +17,7 @@ import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 import { isCeiling, legacySwitchCeiling, projectCeiling, setCeiling, type Ceiling } from '../projects/ceiling.js';
 import { saveLabels, validLabel } from '../rules/service.js';
+import { projectCapabilities } from '../projects/capabilities.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 // A user created by signing in with GitHub has no local password: the column is NOT NULL, so it carries this sentinel
@@ -325,6 +326,15 @@ export async function management(store: Store, user: Actor, method: string, url:
     if (method !== 'GET') return fail(405, 'method_not_allowed');
     const canWriteTasks = (() => { try { if (user.context) authorize(user.context, 'tasks.write', { project_id: repoId }); return true; } catch { return false; } })();
     return { ...(roleBoard(store, repoId, url) as Record<string, Json>), can_write_tasks: canWriteTasks };
+  }
+  const capabilitiesMatch = /^\/api\/repositories\/([^/]+)\/capabilities$/.exec(path);
+  if (capabilitiesMatch) {
+    // What the bot can do here now (#1123): projected from existing settings for anyone who may read the project. Groups and
+    // scheduled checks appear as counts, so members learn they exist without reading their names or plans.
+    const repoId = capabilitiesMatch[1]!;
+    repository(store, user, repoId);
+    if (method !== 'GET') return fail(405, 'method_not_allowed');
+    return projectCapabilities(store, repoId);
   }
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);
   if (repoMatch) {

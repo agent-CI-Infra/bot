@@ -99,3 +99,45 @@ test('overview deep links, live permissions and late responses retain scope acro
     await expect(page.locator('.workspace-task-rows')).toHaveCount(0);
   }finally{await h.stop();}
 });
+
+// #1123: 「我们能干什么」 shows the six scenarios with live states. Changing the ceiling or an event switch elsewhere shows on
+// the next refresh without reloading, each tile links to the setting that decides it, and the card fits 1440 / 768 / 390.
+test('the capability card follows the ceiling and the event switches and links to their settings',async({page})=>{
+  const {h,admin,password}=await fixture(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  mkdirSync('.tmp/project-overview',{recursive:true});
+  try {
+    await admin('/api/repositories/101/policy','PATCH',{capability_ceiling:'comment'});
+    await login(page,h,password);
+    const card=page.getByRole('region',{name:'我们能干什么 · 实时能力速览'}),tile=id=>card.locator(`[data-capability=${id}]`);
+    await expect(card.locator('.capability-tile')).toHaveCount(6);
+    await expect(card.locator('.capability-facts')).toContainText('能力上限：可评论和打标签');
+    await expect(tile('review')).toHaveAttribute('data-state','ready');
+    await expect(tile('development')).toHaveAttribute('data-state','ceiling_limited');
+    await expect(tile('development')).toContainText('受能力上限约束');
+    // The settings link of a held-back scenario leads to the page with the ceiling; every tile also shows its flow.
+    await expect(tile('development').getByRole('link',{name:'特性开发与缺陷修复：监听与触发'})).toHaveAttribute('href','#/projects/101/triggers');
+    await expect(tile('review').getByRole('link',{name:'Issue/PR 检视：看流程'})).toHaveAttribute('href','#/projects/101/roles/manager');
+
+    // Raising the ceiling and switching automatic reviews off (mentions stay on; unsaved, they follow the open switches):
+    // the card follows on its next refresh.
+    await admin('/api/repositories/101/policy','PATCH',{capability_ceiling:'develop'});
+    const manager=(await admin('/api/repositories/101/manager')).value.manager;
+    expect((await admin('/api/repositories/101/manager','PUT',{expected_revision:manager.prompt.revision,events:{'issue.opened':false,'pull_request.opened':false,'issue.mention':true,'pull_request.mention':true}})).status).toBe(200);
+    await expect(tile('development')).toHaveAttribute('data-state','ready',{timeout:10000});
+    await expect(tile('review')).toHaveAttribute('data-state','mention_only');
+    await expect(tile('review')).toContainText('仅提及触发');
+
+    // The fold stays as the person left it while the card refreshes.
+    await card.locator('summary').click();await expect(card.locator('.capability-grid')).toBeHidden();
+    await card.locator('summary').click();await expect(card.locator('.capability-grid')).toBeVisible();
+
+    for(const [width,height] of [[1440,900],[768,1024],[390,844]]){
+      await page.setViewportSize({width,height});
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+      const columns=await card.locator('.capability-grid').evaluate(node=>getComputedStyle(node).gridTemplateColumns.split(' ').length);
+      expect(columns).toBe(width>1024?3:width>=768?2:1);
+      await card.scrollIntoViewIfNeeded();await page.screenshot({path:`.tmp/project-overview/capabilities-${width}.png`});
+    }
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
