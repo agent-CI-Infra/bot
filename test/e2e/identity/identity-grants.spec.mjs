@@ -67,6 +67,13 @@ test('身份页按浏览器时区显示时间，有效期写成还剩多少分�
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    const principalId = f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='github' AND external_actor='42'").principal_id;
+    const grantor = f.h.store.get("SELECT id FROM users WHERE username='administrator'").id;
+    f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at,expires_at)
+      VALUES('grant-518',?,'github.com:10','101','project','delegated',?,'explicit_delegation',?,'independent','timed delegation',?,?)`,
+      principalId, JSON.stringify(['tasks.read']), grantor, Date.now() - 60_000, Date.now() + 25 * 60_000);
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
     await openIdentityAdvanced(page);
     const panel = page.locator('#identity-panel');
     await expect(panel).toContainText(/UTC[+-]\d/);

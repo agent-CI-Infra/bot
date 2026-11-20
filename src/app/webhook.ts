@@ -9,11 +9,70 @@ import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
 import { actionsWebhook } from '../actions/storage.js';
 import { recordCheckWebhook } from '../tasks/external-links.js';
-import { archiveInstallationEvent, isInstallationControlEvent } from '../installations/archive.js';
+import { archiveInstallationEvent, isInstallationControlEvent, numericId } from '../installations/archive.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { activeScopes, invalidate, invalidateIfLost } from '../identity/authorization.js';
+import { markInstallationMemberCacheDirty, markRepositoryMemberCacheDirty } from '../identity/storage.js';
 import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './delivery-audit.js';
 import { covers, projectCeiling } from '../projects/ceiling.js';
+
+function markWebhookMemberCacheDirty(store: Store, accountId: string, event: string, payload: Json): string[] {
+  if (!['member', 'organization', 'membership', 'team', 'installation', 'installation_repositories', 'installation_target'].includes(event)) {
+    return [];
+  }
+  const refs = new Set<string>();
+  const installationId = numericId((payload.installation as Json | undefined)?.id);
+  const repoId = numericId((payload.repository as Json | undefined)?.id);
+  const orgId = numericId((payload.organization as Json | undefined)?.id) ||
+    numericId(((payload.installation as Json | undefined)?.account as Json | undefined)?.id);
+
+  if (installationId) {
+    for (const row of store.all(`SELECT g.ref FROM github_installations g
+      LEFT JOIN accounts a ON a.app_id=g.app_id AND a.type='github_app'
+      WHERE g.github_host='github.com' AND g.installation_id=? AND (g.account_id=? OR a.id=?)`, installationId, accountId, accountId)) {
+      refs.add(String(row.ref));
+    }
+  }
+  if (!refs.size && orgId && ['organization', 'membership', 'team'].includes(event)) {
+    for (const row of store.all(`SELECT g.ref FROM github_installations g
+      LEFT JOIN accounts a ON a.app_id=g.app_id AND a.type='github_app'
+      WHERE g.github_host='github.com' AND g.target_id=? AND (g.account_id=? OR a.id=?)`, orgId, accountId, accountId)) {
+      refs.add(String(row.ref));
+    }
+  }
+
+  if (event === 'member' || (event === 'team' && repoId)) {
+    if (repoId) {
+      if (refs.size) {
+        for (const ref of refs) markRepositoryMemberCacheDirty(store, repoId, ref);
+      } else {
+        for (const ref of markRepositoryMemberCacheDirty(store, repoId)) refs.add(ref);
+      }
+    }
+    return [...refs];
+  }
+
+  if (event === 'organization' || event === 'installation' || event === 'installation_target') {
+    for (const ref of refs) markInstallationMemberCacheDirty(store, ref, event === 'organization' || event === 'installation');
+    return [...refs];
+  }
+
+  if (event === 'membership' || event === 'team') {
+    for (const ref of refs) markInstallationMemberCacheDirty(store, ref, true);
+    return [...refs];
+  }
+
+  if (event === 'installation_repositories') {
+    for (const ref of refs) {
+      markInstallationMemberCacheDirty(store, ref, false);
+      for (const added of Array.isArray(payload.repositories_added) ? payload.repositories_added : []) {
+        const id = numericId((added as Json | undefined)?.id);
+        if (id) markRepositoryMemberCacheDirty(store, id, ref);
+      }
+    }
+  }
+  return [...refs];
+}
 
 export async function ingest(
   store: Store,
@@ -99,6 +158,7 @@ export async function ingest(
     const sync = status === 200 && !!payload && (appControl
       ? archiveInstallationEvent(store, accountId, endpointId, deliveryId, id, event, payload, bytes)
       : !duplicate && recordInstallationEvent(store, accountId, event, payload));
+    const memberSync = status === 200 && !duplicate && payload ? markWebhookMemberCacheDirty(store, accountId, event, payload) : [];
     if (status === 200 && appControl) dropUninstalledIntegrations(store);
     if (status === 200 && !duplicate && event === 'installation' && ['deleted','suspend'].includes(action)) {
       const installation = payload?.installation as Json | undefined, account = installation?.account as Json | undefined;
@@ -127,6 +187,6 @@ export async function ingest(
       Object.assign(response, { forwards_created: enqueueForwards(store,String(owner.id),event,payload,id) });
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
-    return { status, response, sync };
+    return { status, response, sync, memberSync };
   });
 }

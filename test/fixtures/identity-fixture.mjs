@@ -5,16 +5,44 @@ import { GitHubIdentity } from '../../dist/identity/github.js';
 import { GitHubLogin } from '../../dist/identity/github-login.js';
 import { harness, setup, account, repository } from './helpers.mjs';
 
-// Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port. A repository permission is
-// `state.permission` when set, else admin or none by `state.admin` (unset: no usable answer).
+function roleFlags(role) {
+  const value = String(role || '').toLowerCase();
+  return {
+    admin: value === 'admin',
+    maintain: ['admin', 'maintain'].includes(value),
+    push: ['admin', 'maintain', 'write'].includes(value),
+    triage: ['admin', 'maintain', 'write', 'triage'].includes(value),
+    pull: ['admin', 'maintain', 'write', 'triage', 'read'].includes(value),
+  };
+}
+
+// Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port. Supports both multi-user
+// `state.owners` / `state.collaborators` lists and single-user `state.owner` / `state.permission` / `state.admin` shorthands.
 export async function githubIdentityServer(t) {
   const state = { id: 42, login: 'administrator', owner: true, admin: false, type: 'Organization', selection: 'all', failure: 0,
     accessible: ['101'], codes: new Map(), exchanges: 0, requests: [], refreshed: 0 };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://fixture'), path = url.pathname;
-    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    const send = (value, status = 200, extraHeaders = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
+      res.end(JSON.stringify(value));
+    };
+    const sendWithEtag = (items, key) => {
+      const page = Number(url.searchParams.get('page') || 1);
+      const etag = `"${key}-${createHash('sha256').update(JSON.stringify(items)).digest('hex').slice(0, 16)}"`;
+      if (state.etag !== false && page === 1 && items.length < 100 && req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { ETag: etag });
+        res.end();
+        return;
+      }
+      const slice = items.slice((page - 1) * 100, page * 100);
+      send(slice, 200, items.length < 100 && page === 1 ? { ETag: etag } : {});
+    };
     let raw = ''; for await (const b of req) raw += b; const body = raw ? JSON.parse(raw) : {};
-    state.requests.push({ path, method: req.method, authorization: req.headers.authorization, body, scope: url.searchParams.get('scope') });
+    state.requests.push({
+      path, query: url.search, method: req.method, authorization: req.headers.authorization,
+      ifNoneMatch: req.headers['if-none-match'] || null, body, scope: url.searchParams.get('scope'),
+    });
     if (path === '/login/oauth/authorize') {
       const code = 'code-' + state.codes.size; state.codes.set(code, { challenge: url.searchParams.get('code_challenge'), id: state.id });
       const redirect = new URL(url.searchParams.get('redirect_uri')); redirect.searchParams.set('code', code); redirect.searchParams.set('state', url.searchParams.get('state'));
@@ -27,19 +55,69 @@ export async function githubIdentityServer(t) {
       if (!saved || saved.used || createHash('sha256').update(body.code_verifier).digest('base64url') !== saved.challenge) return send({ error: 'bad_verification_code' });
       saved.used = true; return send({ scope: state.scope || '', access_token: 'fixture-user-' + saved.id, refresh_token: 'fixture-refresh', expires_in: 28800, refresh_token_expires_in: 15897600 });
     }
-    if (state.failure) return send({ error: 'blocked' }, state.failure);
+    if (state.failure) return send({ error: 'blocked' }, state.failure, state.failure === 429 ? { 'Retry-After': '1' } : {});
     await state.apiGate?.(path);
     // A test's own routes (repository contents, labels ...) answer before the identity endpoints below.
     if (await state.route?.(path, req.method, body, send)) return;
-    if (path === '/user') return send({ id: Number(String(req.headers.authorization).split('-').at(-1)), login: state.login, email: 'same@example.com' });
+    if (path === '/user') {
+      const uid = Number(String(req.headers.authorization).split('-').at(-1));
+      const named = Array.isArray(state.collaborators) ? state.collaborators.find(c => Number(c.id) === uid)?.login
+        : Array.isArray(state.owners) ? state.owners.find(o => Number(o.id) === uid)?.login : undefined;
+      return send({ id: uid, login: uid === Number(state.id) ? state.login : (named || state.login), email: 'same@example.com' });
+    }
     const target = { id: state.type === 'User' ? 42 : 10, login: 'fixture', type: state.type };
     if (path === '/app/installations/77') return send({ id: 77, app_id: state.appId || 123, account: target, repository_selection: state.selection, permissions: { members: state.membersPermission === false ? undefined : 'read' }, suspended_at: state.suspended ? 'now' : null });
     if (path === '/app/installations/77/access_tokens') return send({ token: 'fixture-installation' });
     if (path === '/installation/token' && req.method === 'DELETE') { res.writeHead(204); res.end(); return; }
-    if (path === '/installation/repositories') return send({ total_count: state.repositoryTotal || state.accessible.length, repositories: state.accessible.map(id => ({ id: Number(id), full_name: 'fixture/project-' + id, owner: target })) });
+    if (path === '/installation/repositories') {
+      const publicSet = new Set((state.publicRepos || []).map(String));
+      return send({
+        total_count: state.repositoryTotal || state.accessible.length,
+        repositories: state.accessible.map(id => ({
+          id: state.repositoryProofId && String(id) === '101' ? state.repositoryProofId : Number(id),
+          full_name: 'fixture/project-' + id,
+          private: !publicSet.has(String(id)),
+          owner: target,
+        })),
+      });
+    }
+    if (path === '/orgs/fixture/members') {
+      if (state.membershipFailure) return send({}, state.membershipFailure, state.membershipFailure === 429 ? { 'Retry-After': '1' } : {});
+      const role = url.searchParams.get('role');
+      const owners = Array.isArray(state.owners) ? state.owners
+        : state.owner ? [{ id: state.membershipUserId ?? state.id, login: state.login }] : [];
+      return sendWithEtag(role === 'admin' ? owners : [], 'owners');
+    }
     if (path.startsWith('/orgs/fixture/memberships/')) return state.membershipFailure ? send({}, state.membershipFailure) : send({ state: 'active', role: state.owner ? 'admin' : 'member', organization: target, user: { id: state.membershipUserId || state.id } });
-    if (/^\/repos\/fixture\/project-\d+$/.test(path)) return send({ id: state.repositoryProofId || Number(path.split('-').at(-1)), owner: target });
-    if (/^\/repos\/fixture\/project-\d+\/collaborators\/[^/]+\/permission$/.test(path)) return send({ permission: state.permission ?? (state.admin === undefined ? null : state.admin ? 'admin' : 'none'), user: { id: state.permissionUserId || state.id } });
+    if (/^\/repos\/fixture\/project-\d+$/.test(path)) return send({ id: state.repositoryMetaId ?? state.repositoryProofId ?? Number(path.split('-').at(-1)), owner: target });
+    const collabMatch = /^\/repos\/fixture\/project-(\d+)\/collaborators$/.exec(path);
+    if (collabMatch) {
+      const repoId = collabMatch[1];
+      if (state.collaboratorsFailure) return send({}, state.collaboratorsFailure, state.collaboratorsFailure === 429 ? { 'Retry-After': '1' } : {});
+      let rawList;
+      if (Array.isArray(state.collaborators)) rawList = state.collaborators;
+      else if (state.collaborators && typeof state.collaborators === 'object') rawList = state.collaborators[repoId] || [];
+      else if (!state.owner && state.permission === undefined && state.admin === undefined) {
+        // Deliberately incomplete payload for fail-closed tests.
+        rawList = [{ id: state.permissionUserId ?? state.id, login: state.login, role_name: null, raw: true }];
+      } else {
+        const perm = state.permission ?? (state.admin ? 'admin' : 'none');
+        rawList = perm === 'none' ? [] : [{ id: state.permissionUserId ?? state.id, login: state.login, role_name: perm }];
+      }
+      const normalized = rawList.map(item => item.raw ? { id: item.id, login: item.login, role_name: item.role_name }
+        : { id: item.id, login: item.login, role_name: item.role_name, permissions: item.permissions ?? roleFlags(item.role_name) });
+      const permFilter = url.searchParams.get('permission');
+      const filtered = permFilter === 'admin'
+        ? normalized.filter(item => item.role_name === null && !item.permissions || item.role_name === 'admin' || item.permissions?.admin === true)
+        : normalized;
+      return sendWithEtag(filtered, `collab-${repoId}-${permFilter || 'all'}`);
+    }
+    const legacyPerm = /^\/repos\/fixture\/project-(\d+)\/collaborators\/[^/]+\/permission$/.exec(path);
+    if (legacyPerm) {
+      const repoId = legacyPerm[1], isPublic = (state.publicRepos || []).map(String).includes(repoId);
+      const perm = state.permission ?? (state.admin === undefined ? (isPublic ? 'read' : null) : state.admin ? 'admin' : (isPublic ? 'read' : 'none'));
+      return send({ permission: perm, role_name: perm, user: { id: state.permissionUserId || state.id } });
+    }
     send({}, 404);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');

@@ -117,6 +117,9 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     identity: options.githubIdentity, environment: () => options.githubOAuth, defaultOrigin: options.publicOrigin,
     apiUrl: options.githubUrl || options.githubOAuth?.apiUrl, webUrl: options.githubOAuth?.webUrl,
   });
+  if (options.installations && !options.installations.onSynced) {
+    options.installations.onSynced = () => githubLogin.identity?.scheduleMemberSync();
+  }
   const onboarding = options.onboarding || new Onboarding(store);
   onboarding.options.githubLogin = githubLogin;
   const installationSetup = options.installationSetup || new InstallationSetup(store, {
@@ -131,7 +134,10 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     protectedVersions: cli => activeCliVersions(store, cli),
   });
   sharedManagement.assistants = assistants;
-  sharedManagement.reconcileProjects = () => { void options.projects?.reconcile().catch(() => {}); };
+  sharedManagement.reconcileProjects = () => {
+    void options.projects?.reconcile().catch(() => {});
+    githubLogin.identity?.scheduleMemberSync();
+  };
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
@@ -223,8 +229,19 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
       const result = await ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.githubUrl);
       respond(res, result.status, result.response);
-      // Installation changes are already recorded; a full listing follows outside the delivery path.
-      if (result.status === 200 && 'sync' in result && result.sync) options.installations?.schedule(match[1]!);
+      // Installation changes are already recorded; full scope and member-cache refreshes follow outside the delivery path (#1158).
+      if (result.status === 200) {
+        const refs = 'memberSync' in result ? result.memberSync : [];
+        if ('sync' in result && result.sync && options.installations) {
+          void options.installations.sync(match[1]!).then(
+            () => githubLogin.identity?.scheduleMemberSync(refs.length ? refs : undefined),
+            () => { if (refs.length) githubLogin.identity?.scheduleMemberSync(refs); },
+          );
+        } else {
+          if ('sync' in result && result.sync) githubLogin.identity?.reconcileAllGrants();
+          if (refs.length) githubLogin.identity?.scheduleMemberSync(refs);
+        }
+      }
       return;
     }
     const githubIdentity = githubLogin.identity;
@@ -338,10 +355,12 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       // A concurrent administrator may have disabled this user during hashing.
       if (!store.get('SELECT id FROM users WHERE id=? AND active=1', row!.id)) fail(401, 'invalid_login');
       const credentials = store.transaction(() => session(store, row!.id)); loginAttempts.delete(key);
-      // Signing in to an account bound to GitHub checks its GitHub permissions again (#708), without making the sign-in wait:
-      // the console opens at once and shows the check's progress. A failed check only leaves its derived grants pending;
-      // super administrators and accounts with explicit delegation are never checked.
-      void Promise.resolve().then(() => githubIdentity?.renew(row!.id)).catch(() => {});
+      // A local account bound to GitHub reads valid cached derived grants directly (#1158); only a cold cache or a
+      // pending proof triggers a non-blocking background check.
+      if (githubIdentity) {
+        if (githubIdentity.lapsed(row!.id)) void Promise.resolve().then(() => githubIdentity.renewIfLapsed(row!.id)).catch(() => {});
+        else githubIdentity.syncPrincipalFromCache(row!.id);
+      }
       res.setHeader('Set-Cookie', cookie(req, credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (!user) return fail(401, 'login_required');
@@ -470,6 +489,8 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     // List visibility, board publication and notes never change the desired state of a project computer.
     const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|releases|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
+    const activatedRepo = method === 'POST' ? /^\/api\/installations\/([1-9]\d*)\/activate$/.exec(path)?.[1] : undefined;
+    if (activatedRepo) githubLogin.identity?.scheduleRepositoryMemberSync(activatedRepo);
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
@@ -483,7 +504,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     }
   });
   let drained:Promise<unknown>=Promise.resolve();
-  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),scheduler.close(),managementApi.agent.close()]); });
+  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),scheduler.close(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
   const close=server.close.bind(server);
   // The caller may close SQLite after this callback; every background consumer must have finished first.
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;

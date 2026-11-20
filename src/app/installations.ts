@@ -11,7 +11,7 @@ import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { accessGaps, appGaps } from './access.js';
 import { installationSnapshot, installationRef, accountRef, queueInstallationSync, installationExecutionDenied } from '../installations/archive.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
-import { identityProjection } from '../identity/storage.js';
+import { identityProjection, markRepositoryMemberCacheDirty } from '../identity/storage.js';
 import { requestedCeiling, trustCeiling, trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { adoptOnboardingUsage } from '../management/storage.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
@@ -100,6 +100,7 @@ export class InstallationSync {
   private timer?: ReturnType<typeof setInterval>;
   // The rate-limit window each credential in use counts against, so every response here updates it too.
   private readonly windows = new Map<string, Bucket>();
+  onSynced?: (accountId: string) => void;
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
   start(): void {
     if (this.timer) return;
@@ -346,6 +347,7 @@ export class InstallationSync {
     });
     // App definition failures must not discard a successfully synchronized repository list.
     const app = account.type === 'github_app' ? await this.permissions(accountId).then(report => report.app).catch(() => ({ error: 'app_check_failed' })) : null;
+    if (account.type === 'github_app') { try { this.onSynced?.(accountId); } catch {} }
     return { account_id: accountId, repositories: rows.length, synced_at: now, installations, app };
   }
 }
@@ -531,6 +533,7 @@ function activate(store: Store, user: Actor, id: string, input: Json, check: () 
       store.run('INSERT INTO repositories VALUES(?,?,?,?)', id, chosen!.full_name, chosen!.owner_id, chosen!.account_id);
       store.run('INSERT INTO policies(repository_id) VALUES(?)', id);
       if (store.hasTable('identity_projects')) identityProjection(store);
+      markRepositoryMemberCacheDirty(store, id);
     }
     // A deployment-shared model becomes available to this repository when chosen here.
     if (modelRow && modelRow.repository_id === null) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);

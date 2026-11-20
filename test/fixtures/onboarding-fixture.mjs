@@ -62,7 +62,14 @@ export async function provider(t, script) {
 export const call = (step, ...calls) => ({ role: 'assistant', content: null, tool_calls: calls.map(([name, args], i) => ({ id: `call-${step}-${i}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) });
 // Signs in through the fake GitHub as user `id` with this repository permission, and returns that person's console client.
 export async function person(f, id, permission) {
+  f.state.owners ??= [];
+  f.state.collaborators ??= [];
+  f.state.collaborators = f.state.collaborators.filter(c => c.id !== id);
+  if (permission && permission !== 'none') f.state.collaborators.push({ id, login: 'user-' + id, role_name: permission });
   Object.assign(f.state, { id, login: 'user-' + id, owner: false, permission });
+  if (f.h.store.get("SELECT synced_at FROM github_installation_member_cache WHERE installation_ref='github.com/123/77'")?.synced_at) {
+    await f.identity.syncMemberCache({ checkAll: true, bypassBackoff: true });
+  }
   const login = await f.login();
   // The client carries the person's principal id.
   return Object.assign(client(f, session(f.h.store, login.result.principal_id, login.result.identity_id)), { principal: login.result.principal_id });
