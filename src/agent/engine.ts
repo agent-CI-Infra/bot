@@ -273,6 +273,8 @@ export class TaskEngine {
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number;input?:string});
       const isDevTask=task.kind.startsWith('development.')||task.kind==='task.development'||(task.kind==='task.request'&&(()=>{try{return JSON.parse(task.input||'{}')?.intent==='development';}catch{return false;}})());
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||isDevTask&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
+      if(!policy?.actions_failures_enabled&&(adapterId==='actions.failures'||(requestMode&&JSON.parse(current!.input||'{}').actions_failure)))
+        stop('actions_failures_disabled','cancelled');
       if(!policy?.enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用。`);
       // A capability ceiling lowered below what this task needs (#850) stops it before its next tool call, with its work kept;
       // raising the ceiling again lets it be retried. It is never cancelled for this.
@@ -762,8 +764,9 @@ export class TaskEngine {
         validatedPhase=undefined;await beginProgress();
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         // github_write: a direct write the acting role's GitHub permissions allow (#381), keyed per task so a retried attempt
-        // never writes twice. Event work's own write tools (Actions rerun and report) come from its module.
+        // never writes twice.
         input.context={...input.context,acceptance_feedback:records.get(id).acceptance};
+        if(adapterId==='actions.failures')delete input.context.work_prompt;
         const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
         const write=taskGithubWrite(this.store,task,redactor,guard,this.githubUrl);
         // The milestones of an Issue's development go to its status comment (#1047); the control plane writes the comment.
@@ -772,7 +775,7 @@ export class TaskEngine {
           if(!('error' in recorded))await issueProgress();
           return recorded;
         };
-        platform.github_write=async(_callId,args)=>{
+        if(adapterId!=='actions.failures')platform.github_write=async(_callId,args)=>{
           const result=await write(args);
           if(result?.html_url&&!result.replayed)log({type:'published',outputs:[{html_url:result.html_url,...(result.number?{number:result.number}:{})}]});
           return result;

@@ -453,16 +453,13 @@ test('a reply task is not offered a PR while the project capability ceiling is b
   assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n, 0); assert.equal(d.h.store.get('SELECT count(*) n FROM development_candidates').n, 0);
 });
 
-test('an Actions failure analysis runs as a task in the project computer: the failed commit checked out, its failed steps as context, rerun and report through the mailbox', async t => {
+test('a queued legacy Actions investigation can still finish in the project computer', async t => {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port, head = (await fetch(endpoint + '/fixture/state').then(r => r.json())).repositories.find(r => r.id === 101).refs.trunk;
-  let repoDirectory, config, configBytes = [], step = 0, toolBytes = [];
-  const context = {}, toolReplies = [], git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+  let repoDirectory, config, configBytes = [];
+  const context = {}, git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
   const write = (path, content) => { mkdirSync(dirname(join(repoDirectory, path)), { recursive: true }); writeFileSync(join(repoDirectory, path), content); };
-  // The agent: it hands job 91 to rerun_failed_run and job 92 to report_failure, then finishes.
-  const calls = [{ name: 'rerun_failed_run', arguments: { job_ids: [91], reason: 'Rate limited by the package index.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] } },
-    { name: 'report_failure', arguments: { cause: 'addition returns an invalid sum', job_ids: [92], kind: 'code', title: 'Correct the addition result', diagnosis: 'The addition test fails. Source investigation identifies an invalid sum; reproduce with the focused check.', report_reason: 'An actionable fixture defect was found.', evidence: [{ type: 'log', job_id: 92, lines: ['AssertionError: 1 + 1 !== 2'] }] } }];
   const manager = { call: async (_method, path, input) => {
     if (!path.endsWith('/execute')) return { state: 'ready', generation: 1, computer: resolveRules({}, {}).computer };
     const r = input.request; let value = {};
@@ -472,8 +469,7 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
     else if (r.type === 'workspace_context') { context[r.path] = (context[r.path] || '') + Buffer.from(r.base64, 'base64').toString(); value = { written: true }; }
     else if (r.type === 'workspace_agent_config') { configBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) config = JSON.parse(Buffer.concat(configBytes)); value = { written: true }; }
     else if (r.type === 'workspace_agent_start') value = { started: true };
-    else if (r.type === 'workspace_agent_poll') value = step < calls.length ? { state: 'running', tool_requests: [{ id: String(step).repeat(48), kind: 'repository', ...calls[step] }] } : { state: 'completed', result: { summary: 'One external, one code failure.' } };
-    else if (r.type === 'workspace_agent_tool') { toolBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; step++; } }
+    else if (r.type === 'workspace_agent_poll') value = { state: 'completed', result: { summary: 'One external, one code failure.' } };
     else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
     return { ok: true, result: value };
   } };
@@ -495,14 +491,9 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
   assert.equal(task.status, 'succeeded', JSON.stringify(h.store.all("SELECT content FROM task_logs WHERE task_id='analysis'")));
   // A checkout of the failed commit, with the failed steps' output as files next to it.
   assert.equal(JSON.parse(task.input).snapshot_sha, head); assert.equal(context['failed-steps/92.log'], 'AssertionError: 1 + 1 !== 2'); assert.match(context['run.json'], /"head_sha"/);
-  // The workflow's own tools reach the control plane through the mailbox and are recorded; finish_analysis ends the agent.
-  assert.deepEqual(config.finish_tools, ['finish_analysis']); assert.deepEqual(config.capabilities.writes, ['issue', 'actions_rerun']);
-  for (const name of ['rerun_failed_run', 'report_failure', 'finish_analysis', 'read_job_log', 'run_command']) assert.ok(config.tools.some(tool => tool.function.name === name), name);
-  assert.deepEqual(toolReplies.map(reply => [reply.recorded, reply.cited_lines_found]), [[true, [{ job_id: 91, found: 1 }]], [true, [{ job_id: 92, found: 1 }]]]);
-  assert.deepEqual(JSON.parse(task.result).verdicts.map(v => [v.job_id, v.kind]), [[91, 'external'], [92, 'code']]);
-  assert.equal(JSON.parse(task.result).reports[0].cause, 'addition returns an invalid sum');
-  assert.match(JSON.parse(task.result).reports[0].diagnosis, /Source investigation/);
-  // Nothing is written to GitHub by the task itself: the Actions module acts on the result.
+  assert.deepEqual(config.finish_tools, ['finish_analysis']); assert.deepEqual(config.capabilities.writes, []);
+  for (const name of ['finish_analysis', 'read_job_log', 'run_command']) assert.ok(config.tools.some(tool => tool.function.name === name), name);
+  assert.deepEqual(JSON.parse(task.result), { summary: 'One external, one code failure.' });
   assert.equal(h.store.get('SELECT count(*) n FROM github_effects').n, 0);
 });
 

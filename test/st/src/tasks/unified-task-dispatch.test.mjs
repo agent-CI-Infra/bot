@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from '../../../fixtures/helpers.mjs';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
+import { requestAnalysis } from '../../../../dist/actions/analysis.js';
+import { Redactor } from '../../../../dist/agent/common.js';
 import { configureDispatch, Dispatcher, ruleDecider } from '../../../../dist/dispatch/worker.js';
 import { managerDecision } from '../../../../dist/dispatch/manager.js';
 import { queueWebhook } from '../../../../dist/review/queue.js';
@@ -367,6 +369,21 @@ test('#1122 GitHub PR webhook & Feishu review/test requests run unified task.req
           resolved_comments: existingInlines.map(c => c.id),
         });
       }
+    } else if (tools.includes('create_task')) {
+      assert.equal(JSON.parse(messages[1].content).event.type, 'actions.run_failed');
+      reply = toolCall('create_task', { role: 'test', writes: ['github'], reason: 'Investigate the CI failure.' });
+    } else if (tools.includes('submit_report') && tools.includes('github_write')) {
+      const prompt = JSON.parse(messages[1].content);
+      assert.match(prompt.actions_failure_guidance, /search open Issues/);
+      assert.match(prompt.actions_failure_guidance, /\.github\/ISSUE_TEMPLATE\//);
+      assert.match(prompt.actions_failure_guidance, /a useful short report can include/);
+      assert.ok(!tools.includes('report_failure'));
+      if (!called.includes('read_file')) {
+        reply = toolCall('read_file', { path: '../context/run.json' });
+      } else {
+        assert.match(JSON.stringify(toolOutputs.at(-1)), /assertion failed/);
+        reply = toolCall('submit_report', { summary: 'Read the failed attempt and its assertion output.', artifacts: [] });
+      }
     } else if (tools.includes('submit_report')) {
       if (!called.includes('run_command')) {
         reply = toolCall('run_command', { command: 'node --test' });
@@ -512,6 +529,21 @@ test('#1122 GitHub PR webhook & Feishu review/test requests run unified task.req
   const testRoles = h.store.all("SELECT role FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid", feishuTestRes.value.id).map(r => r.role);
   assert.deepEqual(testRoles, ['test'], 'read-only PR test diagnosis runs in 1 hop as role=test with 0 redundant QA');
   assert.match(JSON.parse(feishuTestDone.result).summary, /Failure localized to calc\.mjs:1/);
+
+  // A default-branch Actions event reaches the same task executor with failure-specific guidance and context.
+  await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true });
+  requestAnalysis(h.store, { repository: { id: '101' }, fullName: 'fixture/project-101', redactor: new Redactor() },
+    { id: 801, run_attempt: 1, name: 'CI', event: 'push', head_branch: 'main', head_sha: ghFixture.state.baseSha },
+    [{ job: { id: 91, name: 'check' }, output: { lines: ['assertion failed'] } }], null);
+  dispatcher.tick();
+  await dispatcher.idle();
+  const actionTask = h.store.get("SELECT t.* FROM tasks t JOIN task_events l ON l.task_id=t.id JOIN dispatch_events e ON e.id=l.event_id WHERE e.type='actions.run_failed'");
+  assert.equal(actionTask.kind, 'task.request');
+  const actionDone = await runTaskToCompletion(actionTask.id);
+  assert.equal(actionDone.status, 'completed', JSON.stringify(h.store.all('SELECT content FROM task_logs WHERE task_id=?', actionTask.id)));
+  assert.equal(actionDone.head_sha, ghFixture.state.baseSha);
+  assert.match(JSON.parse(actionDone.result).summary, /failed attempt/);
+
 });
 
 test('#1122 persistent Object Manager thread links follow-up PR comments & Issue-linked bot PRs, and retired endpoints/historical tasks stay clean', async t => {

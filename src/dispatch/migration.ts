@@ -20,6 +20,9 @@ const earlierDispatchHashes = new Set([
   '00e8a509bb03f722',
 ]);
 
+// Former built-in Actions analysis text (with and without its heading).
+const earlierActionsHashes = new Set(['bafbf10ff1334a5c', '49d266244b5b76df']);
+
 const legacySectionBuiltins: Record<string, () => string> = {
   dispatch: () => defaultManagerPrompt,
   'review.issue': () => ruleDefaults['.bot/rules/issue-review.md'] ?? promptFile('issue-review.md'),
@@ -39,10 +42,8 @@ const isBuiltinSectionBody = (id: string, rawBody: string): boolean => {
   if (!trimmed) return true;
   const builtin = legacySectionBuiltins[id]?.()?.trim() ?? '';
   if (trimmed === builtin || stripHeading(trimmed) === stripHeading(builtin)) return true;
-  if (id === 'dispatch' && (earlierDispatchHashes.has(hash16(trimmed)) || earlierDispatchHashes.has(hash16(stripHeading(trimmed))))) {
-    return true;
-  }
-  return false;
+  const earlier = id === 'dispatch' ? earlierDispatchHashes : id === 'actions.failures' ? earlierActionsHashes : null;
+  return !!earlier && (earlier.has(hash16(trimmed)) || earlier.has(hash16(stripHeading(trimmed))));
 };
 
 const roleModelPriority: Record<string, readonly string[]> = {

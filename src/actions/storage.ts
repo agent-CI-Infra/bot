@@ -26,7 +26,7 @@ export function actionsStorage(store: Store) {
   // When the last look for reruns of earlier runs happened (milliseconds); see ActionsFailures.reconcileReruns.
   if (!store.all('PRAGMA table_info(actions_failure_scans)').some(r => r.name === 'reconciled_at'))
     store.db.exec('ALTER TABLE actions_failure_scans ADD COLUMN reconciled_at INTEGER NOT NULL DEFAULT 0');
-  // New outbox entries retain reusable cause identities. Historical receipts are left untouched.
+  // Retain the historical report schema so earlier records remain readable after upgrading.
   const reportColumns = new Set(store.all('PRAGMA table_info(actions_failure_reports)').map(r => r.name));
   if (!reportColumns.has('cause')) store.db.exec('ALTER TABLE actions_failure_reports ADD COLUMN cause TEXT');
   if (!reportColumns.has('workflow_id')) store.db.exec('ALTER TABLE actions_failure_reports ADD COLUMN workflow_id INTEGER');

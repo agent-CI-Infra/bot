@@ -31,7 +31,7 @@ const legacyItems: PermissionItem[] = [
   action('submission', '提交角色结果', ['submit_role_result', 'submit_delivery', 'finish', 'finish_review', 'finish_analysis', 'finish_observation', 'finish_release_notes'], '提交当前任务入口要求的结构化结果。'),
   action('acceptance', '提交独立验收', ['submit_acceptance'], '仅独立验收入口提供此工具。'),
   action('pull_request', '创建或更新 bot PR', ['create_pull_request'], '请求控制面发布本次任务允许的 PR，仍须通过项目验证和 QA。'),
-  action('issues', '提报 Issue', ['create_issue', 'report_failure'], '请求控制面提交本次任务允许的 Issue。'),
+  action('issues', '提报 Issue', ['create_issue'], '请求控制面提交本次任务允许的 Issue。'),
   action('actions_rerun', '重跑失败的 Actions', ['rerun_failed_run'], '请求控制面重跑本次任务允许的失败运行。')
 ];
 
@@ -43,9 +43,8 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   'read_coordination','acknowledge_coordination','start_agent','dispatch',
   'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
   'finish_analysis','finish_observation','finish_release_notes','submit_acceptance',
-  // Framework deliveries (#381): a tested PR from the task's candidate, Actions reruns and failure reports. The work type's
-  // writes decide whether a task offers them; the executing role needs no GitHub write for them.
-  'create_pull_request','publish_candidate','rerun_failed_run','report_failure',
+  // Framework deliveries: a tested PR from the task's candidate, or a granted Actions rerun.
+  'create_pull_request','publish_candidate','rerun_failed_run',
   // An Issue development's milestones on the Issue's status comment (#1047), written by the control plane.
   'report_development_milestone',
   // Delivery tools of generic tasks (#814): offered by the writes the task was granted, checked again at every call.

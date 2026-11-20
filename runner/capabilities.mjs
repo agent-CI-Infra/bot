@@ -1,6 +1,6 @@
 // Write tools the control plane performs for the agent, and the work-type write each needs (see writeCatalog in the control
 // plane). github_write needs none here: the control plane offers it only to roles that may write and checks every call.
-export const platformWrites = { github_write: null, rerun_failed_run: 'actions_rerun', report_failure: 'issue' };
+export const platformWrites = { github_write: null, rerun_failed_run: 'actions_rerun' };
 // Trusted control-plane capabilities, never inferred from an exposed tool name.
 // These checks govern runner tools; they are not an OS sandbox for arbitrary shell commands.
 export function toolCapabilityError(config, name, args = {}) {

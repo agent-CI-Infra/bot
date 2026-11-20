@@ -13,6 +13,7 @@
 | [`release-observe.md`](release-observe.md) | CI 观察章节 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
 | [`manager-dispatch.md`](manager-dispatch.md) | `dispatch` | 每个事件新建、续接还是不处理的默认流程，按六大场景分章，每章一句话能力说明、一张流程图和 3～5 条边界准则（#1123，见[统一任务调度与对象 Manager](../workflows.md#内置-manager-提示词六大场景1123)） |
 | [`manager-flows.md`](manager-flows.md) | 无，不可覆盖 | 讲解和修改协作流程（#1123）：附在管理助手系统提示后面，回答「怎么工作」时引用项目当前 Manager 提示词的流程图，改流程时先给「当前流程 vs 修改后流程」两张图和变更要点，确认后才用 `manager.update` 写回，见[管理助手](../management-agent.md#讲解和修改协作流程1123) |
+| [`actions-failures.md`](actions-failures.md) | 无，不可覆盖 | Actions 失败任务的排查、查重与按仓库约定提报指引。Manager 分派的通用任务会收到这份提示词和运行上下文。 |
 | [`late-schedules.md`](late-schedules.md) | 无，不可覆盖 | 定时运行延迟严重时的推荐（#1072）：怎样判断 workflow 的定时运行晚得多、先查重（同一仓库只推荐一次）、在 Issue 里推荐 bot 定时触发并附 workflow 改造的 YAML 示例。由 `src/actions/late-schedules.ts` 读入，作为 `late_scheduled_runs` 交给 Actions 失败处理、CI 观察和项目定时任务，并附在群聊助手（能读 Actions 时）和管理助手的系统提示后面，见[定时任务](../schedules.md#定时触发-workflow) |
 | [`onboarding.md`](onboarding.md) | 无，不可覆盖 | 仓库接入指引（#1133）：附在管理助手系统提示后面，引导助手对已安装仓库做只读分析、给出画像与关键选项、经确认后调用 `start_repository` 启动或申请启动，并通过标准管理命令与控制台确认卡片落地配置，见[管理助手](../management-agent.md#仓库接入启动申请与控制台确认卡片) |
 

@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import type { Redactor } from '../agent/common.js';
+import { stop, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { githubWrite, type WriteResource, type WriteOperation } from '../github/write.js';
 import { githubWriteAllowed } from '../roles/permissions.js';
@@ -464,23 +464,34 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
       if (!Number.isSafeInteger(runId) || runId < 1) {
         return { error: 'invalid_arguments', detail: 'rerun_failed_run requires a positive integer run_id.' };
       }
-      if (!sourcePolicies(store, task).every(p => githubWriteAllowed(p, 'actions'))) {
-        return { error: 'task_external_write_forbidden', detail: 'Source policy does not permit Actions writes.' };
-      }
-      const alreadyRerun = store.get(
+      const failure = taskInput.actions_failure;
+      if (failure && runId !== taskInput.run_id) return { error: 'actions_run_identity_changed', detail: 'The requested run differs from the failure assigned to this task.' };
+      const canRerun = () => effectiveWrites(store, task, sourcePolicies(store, task)).includes('actions_rerun');
+      const alreadyRerun = () => store.get(
         `SELECT 1 FROM github_effects e JOIN tasks t ON t.id=e.task_id
-         WHERE t.repository_id=? AND e.kind='rerun' AND e.state='sent' AND json_extract(e.request,'$.run_id')=? LIMIT 1`,
-        task.repository_id,
-        runId,
+         WHERE t.repository_id=? AND e.kind='rerun' AND e.state IN ('inflight','unknown','recheck','sent') AND json_extract(e.request,'$.run_id')=?
+         UNION ALL
+         SELECT 1 FROM actions_failure_runs WHERE repository_id=? AND run_id=? AND retry_state IN ('sending','sent','unknown','denied')
+         LIMIT 1`,
+        task.repository_id, runId, task.repository_id, runId,
       );
-      if (alreadyRerun) {
-        return { error: 'rerun_budget_exhausted', run_id: runId, detail: `Run ${runId} already used its single rerun budget.` };
-      }
+      const spent = () => ({ error: 'rerun_budget_exhausted', run_id: runId, detail: `Run ${runId} already used its single rerun budget.` });
+      if (alreadyRerun()) return spent();
       const github = new GitHub(store, repository, redactor, guard, apiUrl);
       github.purpose = 'actions_rerun';
       try {
         await github.connect(true, undefined, { actions: 'write' });
-        const publisher = new Publisher(store, github, task, guard, undefined, () => {}, undefined, scope);
+        if (failure) {
+          const live = await github.request('GET', github.path(`/actions/runs/${runId}`));
+          if (live.id !== runId || live.run_attempt !== failure.attempt || live.head_sha !== failure.head_sha ||
+              live.status !== 'completed' || live.conclusion !== 'failure') {
+            return { error: 'actions_attempt_identity_changed', run_id: runId, detail: 'The assigned attempt is no longer the latest completed failure.' };
+          }
+        }
+        if (alreadyRerun()) return spent();
+        const publisher = new Publisher(store, github, task, guard, undefined, () => {}, () => {
+          if (!canRerun()) stop('delivery_not_granted', 'waiting_permission');
+        }, scope);
         const path = github.path(`/actions/runs/${runId}/rerun-failed-jobs`);
         await publisher.effect(
           `rerun:${runId}`,

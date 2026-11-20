@@ -22,7 +22,7 @@ export const featureNeeds: Record<Feature, Needs> = {
   board: { permissions: { metadata: 'read', contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read' } },
   release: { app: true, permissions: { metadata: 'read', contents: 'write', actions: 'write', pull_requests: 'read' } },
   ci_changes: { app: true, permissions: { metadata: 'read', contents: 'write', pull_requests: 'write', workflows: 'write' } },
-  actions_failures: { app: true, permissions: { metadata: 'read', contents: 'read', actions: 'write', issues: 'write' }, events: ['workflow_run'] },
+  actions_failures: { app: true, permissions: { metadata: 'read', contents: 'read', actions: 'read' }, events: ['workflow_run'] },
   // Starting a workflow through github_write (#1072): project scheduled tasks, the management assistant and Feishu groups.
   // A bot account with the Write role can start one too, so it is not App-only.
   actions_dispatch: { permissions: { metadata: 'read', actions: 'write' } },

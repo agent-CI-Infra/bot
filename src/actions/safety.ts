@@ -1,4 +1,3 @@
-export { publicText, registeredRedactor as actionsRedactor } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
 import { covers, projectCeiling } from '../projects/ceiling.js';
 

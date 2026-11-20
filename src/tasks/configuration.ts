@@ -94,7 +94,6 @@ function legacyKindWrites(kind: string, input: any): string[] {
   const adapter = typeof input?.event_adapter === 'string' ? input.event_adapter : kind;
   if (kind === 'development.issue' || kind === 'development.pr' || kind === 'task.development') return ['code', 'pull_request'];
   if (kind.startsWith('review.')) return ['reply', 'labels'];
-  if (adapter === 'actions.failures') return ['issue', 'actions_rerun'];
   if (adapter === 'release.notes') return ['release_notes'];
   if (adapter === 'release.observe') return [];
   if (kind.startsWith('workflow.')) {
@@ -117,9 +116,9 @@ export function taskPermissions(store: Store, task: Row): TaskPermissions {
   const isReleaseNotes = adapter === 'release.notes';
 
   if (grantedWrites(store, String(task.id ?? ''))) {
-    const effective = effectiveWrites(store, task, sourcePolicies(store, task));
+    const effective = adapter === 'actions.failures' ? [] : effectiveWrites(store, task, sourcePolicies(store, task));
     const writes = isEventAdapter
-      ? [...effective, ...(adapter === 'actions.failures' && effective.includes('github') ? ['issue'] : []), ...(adapter === 'release.notes' ? ['release_notes'] : [])]
+      ? [...effective, ...(isReleaseNotes ? ['release_notes'] : [])]
       : [...(covers(ceiling, 'develop') || effective.includes('pull_request') ? ['code'] : []), ...effective];
     return {
       workspace: { read: true, write: !isEventAdapter && writes.includes('code'), shell: !isReleaseNotes, notes: !isReleaseNotes },

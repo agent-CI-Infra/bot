@@ -302,7 +302,7 @@ const featureImpact = {
   review: '读不到代码或发不出检视意见', review_threads: '检视照常发布，但作者修复后的行内意见不会自动关闭', development: '推不了分支、开不了或更新不了 PR', ci_reads: '任务看不到 Actions、检查和提交状态',
   ci_checks: '控制台任务列表与详情收不到或读不到检查状态',
   board: '采集不到看板数据', release: '打不了标签、写不了 Release、重跑不了发布运行', ci_changes: '推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来',
-  actions_failures: '读不到运行、重跑不了外部失败、提报不了 Issue',
+  actions_failures: '无法读取运行并生成失败事件',
   actions_dispatch: '定时任务、管理助手和飞书群触发不了工作流（例如定时触发 Nightly）',
 };
 // What a missing event stops, in the words of the triggers it carries (src/review/queue.ts, src/actions).
@@ -312,7 +312,7 @@ const eventImpact = {
   pull_request_review: '提交 PR 检视意见后不会触发跟进', pull_request_review_comment: 'PR 行内评论和回复不会触发跟进',
   check_run: '控制台任务列表与详情收不到实时的 GitHub Actions 作业检查推送',
   status: '控制台任务列表与详情收不到实时的提交状态检查推送',
-  workflow_run: 'Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue',
+  workflow_run: '默认分支和版本标签上的失败运行不会生成排查事件',
 };
 const gapLabels = { permission: '权限不足', role: '权限不足', event: '事件未订阅', account: '需要 GitHub App' };
 // Whether a stopped feature is in use on this row: on, off, or run by hand (releases and CI change PRs have no switch).

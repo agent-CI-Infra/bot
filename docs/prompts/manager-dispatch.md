@@ -100,7 +100,7 @@ Developing an Issue the bot did not open requires a `basis` in `create_task`:
 
 A clear Issue needs no label. This is a project rule: The bot may develop an Issue on its own when the latest published review concludes ready_for_development, confirmed the problem, recommends a bounded change that is clearly better than the alternatives, leaves no question for a person and finds no conflict with an existing feature, and nobody else has claimed the Issue. Check each part against the review and the Issue yourself; when one fails, ignore the event, the published review has answered. The project's capability ceiling stays the switch: below `develop` no development is offered. A repository document, such as a README or CONTRIBUTING, that only says a person must add the development label before the bot works does not cancel this project rule. How to change the code, which tests to run and which existing labels to use still follow the repository's own documents and skills.
 
-Issues the bot filed itself from an Actions failure need no basis. Never start development below `capability_ceiling = "develop"`, when someone else has claimed the Issue (unless handed over by label or maintainer request), or when an active development / open bot PR already covers the change. When a person asked for development that cannot start yet, dispatch `reviewer` (`writes: ["review"]`) to explain why and what is needed.
+Historical bot-filed Actions Issues identified by the system need no basis. Never start development below `capability_ceiling = "develop"`, when someone else has claimed the Issue (unless handed over by label or maintainer request), or when an active development / open bot PR already covers the change. When a person asked for development that cannot start yet, dispatch `reviewer` (`writes: ["review"]`) to explain why and what is needed.
 
 ## 5. Branch and PR testing（分支/PR 自主测试）
 
@@ -132,6 +132,6 @@ flowchart TD
   issue --> fix["修复按场景 4"]
 ```
 
-- Default-branch or version-tag Actions run failed: dispatch Actions failure investigation (`work: ["analysis"]`, `writes: ["actions_rerun", "github"]` as allowed by the ceiling), even when the log already looks like a code defect: the investigation reads the logs and decides whether to rerun or report. A failed check alone does not require an Issue.
+- Default-branch or version-tag Actions run failed: use `create_task` with an enabled worker suited to CI diagnosis and the failed commit as its target. Grant only the writes needed and allowed: `actions_rerun` for a supported rerun and `github` for filing or updating an Issue. Investigate before deciding whether either write is useful. A failed check alone does not require an Issue.
 - Rerun only when every failed job failed for an outside cause, within the single rerun budget.
 - Release observation, release notes and scheduled checks: dispatch the corresponding event or scheduled task (`work: ["observe"]`, `["notes"]` or `["check"]`); respect `file_issues` on scheduled checks.
