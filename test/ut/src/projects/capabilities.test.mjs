@@ -3,7 +3,7 @@
 // place to change it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilityStates, chatCapabilities, chatExamplesFor, groupCapabilityNotice } from '../../../../dist/projects/capabilities.js';
+import { capabilityStates, chatCapabilities, chatExamplesFor, groupCapabilityNotice, groupVenue } from '../../../../dist/projects/capabilities.js';
 
 const allEvents = {
   'issue.opened': true, 'issue.updated': true, 'issue.mention': true, 'issue.labels': [], 'issue.development_label': true,
@@ -68,7 +68,7 @@ test('CI failures need the Actions switch or a scheduled check, and a stopped pr
 
 // The chat capability card (#1123): a Feishu group's level narrows what the project allows; a GitHub thread reaches the Manager.
 const chat = (venue, change = {}) => Object.fromEntries(chatCapabilities({ ...base, ...change, events: { ...allEvents, ...change.events } }, venue).map(c => [c.id, c.state]));
-const readGroup = { kind: 'feishu_group', write: false, dispatch: false }, commentGroup = { kind: 'feishu_group', write: true, dispatch: false }, dispatchGroup = { kind: 'feishu_group', write: true, dispatch: true };
+const readGroup = { kind: 'feishu_group', issues: false, pulls: false, dispatch: false }, commentGroup = { kind: 'feishu_group', issues: true, pulls: true, dispatch: false }, dispatchGroup = { kind: 'feishu_group', issues: true, pulls: true, dispatch: true };
 
 test('a read-only group answers questions and reads CI, and cannot ask for writes or work', () => {
   assert.deepEqual(chat(readGroup), { qa: 'ready', triage: 'level_limited', review: 'level_limited', development: 'level_limited', testing: 'level_limited', ci: 'ready' });
@@ -103,4 +103,26 @@ test('the group notice says the level, what each repository allows and three req
   assert.match(text, /- 暂不可以：Issue\/PR 日常管理（本群档位不支持）/);
   assert.match(text, /试试：\n1\. @bot acme\/app[^\n]+\n2\. [^\n]+\n3\. [^\n]+$/);
   assert.match(groupCapabilityNotice('可派活', [], dispatchGroup), /没有可用的仓库/);
+});
+
+// Review of #1157: a custom binding's items are separate gates, and the group is not told the project watches CI when it does not.
+test('a custom binding is described by its own items: PR write alone, dispatch without writes', () => {
+  const prOnly = groupVenue({ github_issues: 'read', github_pull_requests: 'write', delegation: 'deny' });
+  assert.deepEqual(prOnly, { kind: 'feishu_group', issues: false, pulls: true, dispatch: false });
+  const list = chatCapabilities(base, prOnly), triage = list.find(c => c.id === 'triage'), ci = list.find(c => c.id === 'ci');
+  assert.equal(triage.state, 'ready'); assert.match(triage.how, /只有 PR 写入，Issue 不能整理/);
+  assert.ok(triage.examples.every(example => example.includes('PR #34')), triage.examples.join(' | '));
+  assert.doesNotMatch(ci.how, /需要时提报 Issue/);
+  // Dispatch without GitHub writes: work can be handed over, triage cannot, and the reason names the missing item, not a level.
+  const dispatchOnly = chatCapabilities(base, groupVenue({ github_issues: 'read', github_pull_requests: 'read', delegation: 'allow' }));
+  assert.equal(dispatchOnly.find(c => c.id === 'development').state, 'ready');
+  assert.match(dispatchOnly.find(c => c.id === 'triage').how, /^本群没有 Issue\/PR 写入/);
+});
+
+test('a group is told CI failures are investigated on request, and found automatically only when the project watches them', () => {
+  const quiet = { ...base, events: { ...allEvents, 'actions.run_failed': false }, schedules: 0 };
+  const ci = chatCapabilities(quiet, readGroup).find(c => c.id === 'ci');
+  assert.equal(ci.state, 'ready'); assert.equal(ci.title, 'CI 失败原因排查（按需）'); assert.match(ci.how, /不会自动发现/);
+  assert.doesNotMatch(groupCapabilityNotice('只读问答', [{ full_name: 'acme/app', inputs: quiet }], readGroup), /定时主动发现/);
+  assert.equal(chatCapabilities(base, readGroup).find(c => c.id === 'ci').title, 'CI 失败与定时主动发现');
 });

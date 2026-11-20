@@ -17,7 +17,7 @@ import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
 import { bindingLevel, bindingScope, ChannelServiceBindings } from './service-bindings.js';
-import { groupCapabilityNotice, groupLevelTitles, projectCapabilityInputs } from '../projects/capabilities.js';
+import { groupCapabilityNotice, groupLevelTitles, groupVenue, projectCapabilityInputs } from '../projects/capabilities.js';
 import { ChannelServiceSessions } from './service-session.js';
 import { ChannelSchedules } from './schedules.js';
 import { roleConfiguration } from '../roles/definition.js';
@@ -434,7 +434,7 @@ export class ChannelService {
     if (!binding || !now || (before?.enabled && before.level === now.level && before.scope === now.scope)) return null;
     try { this.serviceBindings.assertUsable(binding); } catch (error) { if (error instanceof HttpError) return null; throw error; }
     const granted = this.serviceBindings.permissions(binding), level = bindingLevel(granted);
-    const venue = { kind: 'feishu_group' as const, write: granted.github_issues === 'write' || granted.github_pull_requests === 'write', dispatch: granted.delegation === 'allow' };
+    const venue = groupVenue(granted);
     const projects = this.serviceBindings.reach(binding).projects.map(p => ({ full_name: p.full_name, inputs: projectCapabilityInputs(this.store, p.id) }));
     const row = this.store.get('SELECT * FROM channel_chats WHERE id=?', chat)!;
     return this.post(row, groupCapabilityNotice(groupLevelTitles[level], projects, venue), `binding-notice:${binding.id}:${binding.revision}`, `binding-notice:${binding.id}`,
@@ -736,8 +736,10 @@ export class ChannelService {
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':String((part.content.elements as any)?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');
-        const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
-        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
+        // A capability card (#1123) belongs to the binding revision it describes: binding-scoped, with the fence of that revision,
+        // so a later revision (other level or repositories) leaves it out of the group's context.
+        const fence=['service_task','service_binding_notice'].includes(protection.kind)?this.serviceBindings.fence(chat.id):protection.source_fence;
+        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_binding_notice','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
       });
       // A private timer's result is a personal reply: it is not part of any group's context.
       if(protection.kind==='channel_schedule'&&!protection.binding_id){if(!this.stopped)this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);return;}

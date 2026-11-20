@@ -28,7 +28,7 @@ import { directMention, groupTurnMessageInstructions, groupWorkingMode, type Tur
 import type { ChannelMembers } from './members.js';
 import { conversationScheduleName, conversationScheduleTool, type ChannelSchedules } from './schedules.js';
 import { lateSchedules } from '../actions/late-schedules.js';
-import { chatCapabilities, chatExamplesFor, groupLevelTitles, projectCapabilityInputs } from '../projects/capabilities.js';
+import { chatCapabilities, chatExamplesFor, groupLevelTitles, groupVenue, projectCapabilityInputs } from '../projects/capabilities.js';
 import { ceilingTitles } from '../projects/ceiling.js';
 
 const fn = (name: string, description: string, properties: Json, required: string[] = []) => ({ type: 'function', function: { name, description,
@@ -263,7 +263,7 @@ export class ChannelServiceSessions {
         if (name === describeCapabilities) {
           fields(input, []);
           const reach = this.bindings.reach(binding), granted = permissions(), level = bindingLevel(granted);
-          const venue = { kind: 'feishu_group' as const, write: granted.github_issues === 'write' || granted.github_pull_requests === 'write', dispatch: granted.delegation === 'allow' };
+          const venue = groupVenue(granted);
           return { group_level: level, group_level_title: groupLevelTitles[level], repositories: reach.projects.map(p => {
             const inputs = projectCapabilityInputs(this.store, p.id), capabilities = chatCapabilities(inputs, venue);
             return { repository: p.full_name, enabled: inputs.enabled, ceiling: inputs.ceiling, ceiling_title: ceilingTitles[inputs.ceiling],

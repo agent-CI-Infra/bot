@@ -4,6 +4,7 @@ import { eventFilters, type EventFilters } from '../dispatch/settings.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { bindingLevel, bindingPermissions, scopeProjects, type BindingLevel } from '../channels/service-bindings.js';
 import { scheduledCheck } from '../dispatch/schedule.js';
+import type { RolePermissions } from '../roles/permissions.js';
 
 /**
  * What the bot can do in a project right now (#1123): the six scenarios of the built-in Manager prompt, each projected from
@@ -166,9 +167,13 @@ export type ChatState = 'ready' | 'ceiling_limited' | 'level_limited' | 'off';
 export const chatStateTitles: Record<ChatState, string> = { ready: '可以用', ceiling_limited: '受项目能力上限约束', level_limited: '本群档位不支持', off: '未开启' };
 export interface ChatVenue {
   kind: 'feishu_group' | 'github';
-  /** Feishu group: Issue/PR write (comment level and up) and creating tasks through the Manager (dispatch). */
-  write?: boolean; dispatch?: boolean;
+  /** Feishu group: Issue write and pull request write (separate items in a custom binding; both from comment level up), and
+   * creating tasks through the Manager (dispatch level, or the custom item). */
+  issues?: boolean; pulls?: boolean; dispatch?: boolean;
 }
+/** A group's gates from its binding's items, as github_write and create_project_task check them. */
+export const groupVenue = (granted: RolePermissions): ChatVenue =>
+  ({ kind: 'feishu_group', issues: granted.github_issues === 'write', pulls: granted.github_pull_requests === 'write', dispatch: granted.delegation === 'allow' });
 export interface ChatCapability { id: ScenarioId; title: string; state: ChatState; state_title: string; how: string; examples: string[] }
 
 /** Requests people can copy, per scenario; `<repo>` is replaced with the repository's full name. */
@@ -195,22 +200,26 @@ const exampleOrder: ScenarioId[] = ['qa', 'testing', 'review', 'development', 't
 
 export function chatCapabilities(input: CapabilityInputs, venue: ChatVenue): ChatCapability[] {
   const project = new Map(capabilityStates(input).map(c => [c.id, c])), has = (role: string) => input.roles.includes(role);
-  const group = venue.kind === 'feishu_group', write = !group || !!venue.write, dispatch = !group || !!venue.dispatch;
+  const group = venue.kind === 'feishu_group', dispatch = !group || !!venue.dispatch;
+  const issues = !group || !!venue.issues, pulls = !group || !!venue.pulls;
   const out: ChatCapability[] = [];
-  const add = (id: ScenarioId, state: ChatState, how: string) =>
-    out.push({ id, title: scenarioTitles[id], state, state_title: chatStateTitles[state], how, examples: state === 'ready' ? chatExamples[venue.kind][id] : [] });
+  const add = (id: ScenarioId, state: ChatState, how: string, title = scenarioTitles[id], examples = chatExamples[venue.kind][id]) =>
+    out.push({ id, title, state, state_title: chatStateTitles[state], how, examples: state === 'ready' ? examples : [] });
   const ceilingNote = (needed: Ceiling) => `项目能力上限是「${ceilingTitles[input.ceiling]}」，这项需要「${ceilingTitles[needed]}」`;
   if (!input.enabled) { for (const id of Object.keys(scenarioTitles) as ScenarioId[]) add(id, 'off', '项目已停用。'); return out; }
   // ① In a group the assistant reads and answers itself; on GitHub the answer is a comment.
   if (group) add('qa', 'ready', '@bot 提问，读代码、Issue、PR 和 Actions 记录后在群里回答。');
   else add('qa', covers(input.ceiling, 'comment') ? 'ready' : 'ceiling_limited', covers(input.ceiling, 'comment') ? '@bot 提问，读代码和讨论后在这里回复。' : ceilingNote('comment') + '，GitHub 上不能回复。');
-  // ② Labels, assignees, titles and open/closed state: a group needs to write; the ceiling must cover comment.
-  if (!write) add('triage', 'level_limited', '本群是只读问答档位；改标签、指派或开关 Issue/PR 需要「可评论和打标签」或以上档位。');
+  // ② Labels, assignees, titles and open/closed state: Issue and pull request writes are separate items of a group; the
+  // ceiling must cover comment.
+  const only = issues && !pulls ? '（本群只有 Issue 写入，PR 不能整理）' : pulls && !issues ? '（本群只有 PR 写入，Issue 不能整理）' : '';
+  if (!issues && !pulls) add('triage', 'level_limited', '本群没有 Issue/PR 写入；改标签、指派或开关 Issue/PR 需要「可评论和打标签」或以上档位。');
   else if (!covers(input.ceiling, 'comment')) add('triage', 'ceiling_limited', ceilingNote('comment') + '。');
-  else add('triage', 'ready', group ? '@bot 提出明确的整理请求，只用仓库已有的标签，回复里写明请求来源。' : 'Issue/PR 的作者或维护者 @bot 提出整理请求；只用仓库已有的标签。');
+  else add('triage', 'ready', (group ? '@bot 提出明确的整理请求，只用仓库已有的标签，回复里写明请求来源' : 'Issue/PR 的作者或维护者 @bot 提出整理请求；只用仓库已有的标签') + only + '。',
+    undefined, issues ? chatExamples[venue.kind].triage : ['@bot 给 <repo> 的 PR #34 加上仓库已有的 type/bug 标签']);
   // ③④⑤ Work handed to the project's Manager: a group needs dispatch; the role must be enabled; GitHub writes need the ceiling.
   const handed = (id: ScenarioId, role: string, needed: Ceiling | null, how: string) => {
-    if (!dispatch) add(id, 'level_limited', '把工作交给项目需要本群是「可派活」档位。');
+    if (!dispatch) add(id, 'level_limited', '把工作交给项目需要本群能派活（「可派活」档位）。');
     else if (!has(role)) add(id, 'off', `项目没有启用 ${roleTitles[role] ?? role} 角色。`);
     else if (needed && !covers(input.ceiling, needed)) add(id, 'ceiling_limited', ceilingNote(needed) + '。');
     else add(id, 'ready', how);
@@ -218,9 +227,13 @@ export function chatCapabilities(input: CapabilityInputs, venue: ChatVenue): Cha
   handed('review', 'reviewer', 'comment', group ? '@bot 要求检视某个 PR 或 Issue，交给项目 Manager 派 reviewer，结果发到 GitHub 并通知本群。' : '@bot 要求检视，reviewer 发布一份结构化检视。');
   handed('development', 'dev', 'develop', group ? '@bot 要求开发某个 Issue，Manager 核实依据后在 bot 分支开 PR；不会自行合并。' : '维护者 @bot 要求开发，Manager 核实依据后在 bot 分支开 PR；不会自行合并。');
   handed('testing', 'test', group ? null : 'comment', group ? '@bot 要求在 PR、分支或提交上跑测试，test 检出运行后把命令和输出发回本群。' : '@bot 要求在这个 PR 上跑测试，test 检出运行后回复命令和输出。');
-  // ⑥ A group reads Actions itself; filing an Issue needs write. On GitHub, failures are handled when the project listens.
-  if (group) add('ci', 'ready', write && covers(input.ceiling, 'comment') ? '@bot 查 CI 失败原因，需要时提报 Issue；也可以让 bot 设定时检查。' : '@bot 查 CI 失败原因并在群里说明；提报 Issue 需要更高档位或能力上限。');
-  else { const c = project.get('ci')!; add('ci', c.state === 'ready' ? 'ready' : c.state === 'ceiling_limited' ? 'ceiling_limited' : 'off', c.detail); }
+  // ⑥ A group reads Actions itself, on request; finding failures on its own is the project's (its Actions switch or a
+  // scheduled check), so the title says which of the two this group gets. Filing an Issue needs Issue write.
+  if (group) {
+    const watched = project.get('ci')!.state === 'ready', files = issues && covers(input.ceiling, 'comment');
+    add('ci', 'ready', '@bot 查 CI 失败原因并在群里说明' + (files ? '，需要时提报 Issue；也可以让 bot 设定时检查' : '；提报 Issue 需要 Issue 写入和「可评论和打标签」以上的能力上限')
+      + (watched ? '。项目也会自动排查失败的 Actions 运行或按定时检查发现问题。' : '。项目没有打开 Actions 失败事件，也没有定时检查，不会自动发现。'), watched ? scenarioTitles.ci : 'CI 失败原因排查（按需）');
+  } else { const c = project.get('ci')!; add('ci', c.state === 'ready' ? 'ready' : c.state === 'ceiling_limited' ? 'ceiling_limited' : 'off', c.detail); }
   return out;
 }
 
