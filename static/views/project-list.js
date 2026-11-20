@@ -1,10 +1,10 @@
 // Project automation switches update their own policy fields; board publication is independent.
-const projectFeatures = [['review_enabled', '检视'], ['development_enabled', '开发']];
+const projectFeatures = [['review_enabled', 'projects.columns.review'], ['development_enabled', 'projects.columns.development']];
 function updateProjectTaskPreview(preview, row) {
-  preview.replaceChildren(element('span', `执行中 ${row.running_tasks}`, row.running_tasks ? 'task-count-active' : ''));
-  if (row.queued_tasks) preview.append(element('span', `排队 ${row.queued_tasks}`, 'muted'));
-  preview.title = `正在执行 ${row.running_tasks} 个任务，排队 ${row.queued_tasks} 个任务`;
-  preview.setAttribute('aria-label', `${row.full_name}：${preview.title}，查看运行状态`);
+  preview.replaceChildren(element('span', t('projects.list.running', { count: row.running_tasks }), row.running_tasks ? 'task-count-active' : ''));
+  if (row.queued_tasks) preview.append(element('span', t('projects.list.queued', { count: row.queued_tasks }), 'muted'));
+  preview.title = t('projects.list.preview_title', { running: row.running_tasks, queued: row.queued_tasks });
+  preview.setAttribute('aria-label', t('projects.list.preview_aria', { repo: row.full_name, title: preview.title }));
 }
 async function confirmBoardVisibility(repository, enabled) {
   const actor = me, address = location.hash;
@@ -18,51 +18,52 @@ async function confirmBoardVisibility(repository, enabled) {
 }
 function projectListControls(row, { showStatus = true, showTasks = true } = {}) {
   const registered = row.registered !== false, group = element('div', '', 'project-controls'), features = element('div', '', 'project-features');
-  group.setAttribute('role', 'group'); group.setAttribute('aria-label', row.full_name + ' 功能与任务');
+  group.setAttribute('role', 'group'); group.setAttribute('aria-label', t('projects.list.features_aria', { repo: row.full_name }));
   if (showStatus) {
-    const availability = badge(!registered ? '未启动' : row.enabled ? '已启用' : '已禁用', !registered ? 'info' : row.enabled ? 'success' : 'warning');
+    const availability = badge(t(!registered ? 'projects.list.state_unstarted' : row.enabled ? 'projects.list.state_enabled' : 'projects.list.state_disabled'), !registered ? 'info' : row.enabled ? 'success' : 'warning');
     features.append(availability);
-    if (row.installed === false) features.append(badge('已移出安装', 'danger'));
-    else if (row.installed === null) features.append(badge('不在安装列表'));
+    if (row.installed === false) features.append(badge(t('projects.list.removed'), 'danger'));
+    else if (row.installed === null) features.append(badge(t('projects.list.not_installed')));
   }
   const feedback = element('p', '', 'project-control-feedback'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
   let pending = false, boardSavedAt = 0; const switches = [];
   const sync = () => switches.forEach(({control, value, key, caption}) => {
-    const on = !!row[key]; control.setAttribute('aria-checked', String(on)); value.textContent = on ? '开' : '关';
+    const on = !!row[key]; control.setAttribute('aria-checked', String(on)); value.textContent = t(on ? 'projects.columns.on' : 'projects.columns.off');
     if (key === 'board_enabled') {
       control.disabled = pending || row.installed !== true;
-      control.title = row.installed !== true ? '仓库不在安装范围' : '开启后单仓看板与 Dashboard 汇总无需登录即可访问；未保存选择时公开仓默认开、私有仓默认关，保存后不随可见性变化';
+      control.title = row.installed !== true ? t('projects.list.install_scope') : t('projects.list.board_switch_title');
       return;
     }
     control.disabled = pending || !registered;
-    control.title = !registered ? '请先启动项目' : !row.enabled ? '项目已禁用；此开关只保存配置，重新启用项目后才会生效' : row.installed === false ? '项目已移出安装范围；此开关只保存配置' : caption === '开发' ? 'Issue 明确要求改代码时自动开发；只修改 bot 自己的分支' : '检视这个项目的 Issue 和 PR';
+    control.title = !registered ? t('projects.list.need_start') : !row.enabled ? t('projects.list.project_disabled') : row.installed === false ? t('projects.list.project_removed') : key === 'development_enabled' ? t('projects.list.development_title') : t('projects.list.review_title');
   });
-  const featuresToShow = tab === 'settings' ? [['board_enabled', '看板']] : projectFeatures;
-  for (const [key, caption] of featuresToShow) {
-    if (tab !== 'settings') { features.append(badge(caption + (row[key] ? '已开启' : '已关闭'))); continue; }
+  const featuresToShow = tab === 'settings' ? [['board_enabled', 'projects.columns.board']] : projectFeatures;
+  for (const [key, captionKey] of featuresToShow) {
+    const caption = t(captionKey);
+    if (tab !== 'settings') { features.append(badge(t(row[key] ? 'projects.list.feature_on' : 'projects.list.feature_off', { caption }))); continue; }
     const control = button('', async () => {
       if (pending) return; pending = true; sync(); feedback.className = 'project-control-feedback';
       try {
         const enabled = !row.board_enabled;
         if (key === 'board_enabled') {
-          feedback.textContent = '请确认公开看板的访问范围。';
-          if (!await confirmBoardVisibility(row, enabled)) { feedback.textContent = '已取消公开看板变更'; return; }
+          feedback.textContent = t('projects.list.confirm_board_scope');
+          if (!await confirmBoardVisibility(row, enabled)) { feedback.textContent = t('projects.list.board_cancelled'); return; }
         }
-        features.setAttribute('aria-busy', 'true'); feedback.textContent = `正在保存${caption}…`;
+        features.setAttribute('aria-busy', 'true'); feedback.textContent = t('projects.list.saving', { caption });
         if (key === 'board_enabled') {
           const {board} = await api(`/api/installations/${row.id}/board`, 'PATCH', {enabled});
           Object.assign(row, {board_enabled: board.enabled, board_state: board.state, board_url: board.url});
           boardSavedAt = Date.now();
           updateBoardChip(group, row);
-          feedback.textContent = board.enabled ? '看板已开启；数据公开可访问' : '看板已关闭；不再公开展示';
+          feedback.textContent = t(board.enabled ? 'projects.list.board_on' : 'projects.list.board_off_done');
         } else {
           const {policy} = await api(`/api/repositories/${row.id}/policy`, 'PATCH', {[key]: !row[key]});
-          Object.assign(row, policy); feedback.textContent = `${caption}已${row[key] ? '开启' : '关闭'}${!row.enabled ? '；项目仍已禁用' : ''}`;
+          Object.assign(row, policy); feedback.textContent = t('projects.list.saved', { caption, state: t(row[key] ? 'projects.list.switched_on' : 'projects.list.switched_off'), disabled: !row.enabled ? t('projects.list.still_disabled') : '' });
         }
-      } catch (err) { feedback.classList.add('control-error'); feedback.textContent = `${caption}保存失败：${readErrorText(err)}`; }
+      } catch (err) { feedback.classList.add('control-error'); feedback.textContent = t('projects.list.save_failed', { caption, error: readErrorText(err) }); }
       finally { pending = false; features.removeAttribute('aria-busy'); sync(); }
     }, 'project-feature-switch');
-    control.setAttribute('role', 'switch'); control.setAttribute('aria-label', row.full_name + ' ' + caption);
+    control.setAttribute('role', 'switch'); control.setAttribute('aria-label', t('projects.list.switch_aria', { repo: row.full_name, caption }));
     const track = element('span', '', 'switch-track'), value = element('span', '', 'switch-value'); track.setAttribute('aria-hidden', 'true');
     control.append(element('span', caption), track, value); features.append(control); switches.push({control, value, key, caption});
   }
@@ -92,7 +93,7 @@ function showProjectActivityStatus(text) {
   const status = element('p', text, 'view-warning project-activity-status');
   status.setAttribute('role', 'status'); status.setAttribute('data-testid', 'project-activity-status');
   // A stopped listing is read again by hand; a delayed one is still retried by the poll itself.
-  if (projectActivityStopped) status.append(button('重新读取任务数', () => {
+  if (projectActivityStopped) status.append(button(t('projects.list.activity_reread'), () => {
     projectActivityStopped = false; projectActivityDelay = 0; projectActivityNextAt = 0; return refreshProjectActivity(true);
   }, 'quiet'));
   $('rows').prepend(status);
@@ -102,12 +103,10 @@ function showProjectActivityStatus(text) {
 // 未检查 for a permission reading that is stale), when that reading was taken, and the one manual read that replaces it.
 // The failure itself schedules nothing (#43), and a successful read takes the statement away.
 const projectCheckCopy = {
-  integrations: { name: '门禁与看板接入检查', action: '重新检查门禁',
-    previous: '列表上的门禁和看板徽章还是上次读到的结果，可能已经过期。',
-    never: '列表上还没有门禁和看板徽章可显示——这项检查还没有成功读取过。' },
-  permissions: { name: '安装权限检查', action: '重新检查权限',
-    previous: '列表上需要重新检查的权限徽章显示「未检查」，不显示上次读到的结果。',
-    never: '列表上的权限徽章显示「未检查」——这项检查还没有成功读取过。' },
+  integrations: { name: 'projects.list.check.integrations.name', action: 'projects.list.check.integrations.action',
+    previous: 'projects.list.check.integrations.previous', never: 'projects.list.check.integrations.never' },
+  permissions: { name: 'projects.list.check.permissions.name', action: 'projects.list.check.permissions.action',
+    previous: 'projects.list.check.permissions.previous', never: 'projects.list.check.permissions.never' },
 };
 const projectCheckOrder = ['integrations', 'permissions'];
 // #869 review: both records belong to the account that ran the check. The maps are dropped when a different account is
@@ -151,11 +150,11 @@ function projectCheckStatusLine(name) {
   const copy = projectCheckCopy[name], read = timestamp(projectCheckReads.get(name) || '');
   // Without a successful reading there is no old badge to point at and no time to state, so the sentence says the check
   // has never read anything instead of claiming a reading it does not have.
-  const line = element('p', `${copy.name}读取失败（${projectCheckFailures.get(name)}），${read ? copy.previous : copy.never}`,
+  const line = element('p', t('projects.list.check.line', { name: t(copy.name), error: projectCheckFailures.get(name), detail: t(read ? copy.previous : copy.never) }),
     'view-warning project-check-status');
   line.dataset.check = name; line.setAttribute('role', 'status'); line.setAttribute('data-testid', 'project-check-status');
-  if (read) line.append(element('span', `上次成功读取：${read}`, 'muted'));
-  const control = button(copy.action, async () => {
+  if (read) line.append(element('span', t('projects.list.check.last_read', { time: read }), 'muted'));
+  const control = button(t(copy.action), async () => {
     control.disabled = true;
     try { await (name === 'integrations' ? refreshStaleIntegrations() : refreshStalePermissions()); }
     finally { control.disabled = false; }
@@ -210,22 +209,23 @@ async function refreshProjectActivity(force = false) {
     projectActivityStopped = poll.terminal; projectActivityDelay = poll.delay;
     projectActivityNextAt = poll.terminal ? 0 : Date.now() + poll.delay;
     showProjectActivityStatus(poll.terminal
-      ? `任务数已停止更新：${readErrorText(err)}。已有任务数保留；重新登录，或点「重新读取任务数」再读一次。`
-      : `任务数更新失败：${readErrorText(err)}；${Math.ceil(poll.delay / 1000)} 秒后重试。`);
+      ? t('projects.list.activity.stopped', { error: readErrorText(err) })
+      : t('projects.list.activity.retry', { error: readErrorText(err), seconds: Math.ceil(poll.delay / 1000) }));
   } finally { projectActivityPending = false; }
 }
 
 // Installed repositories: automation needs activation; board publication has its own switch.
 function syncSummary(syncs = []) {
-  if (!syncs.length) return '尚未同步';
-  return syncs.map(s => s.error ? `${s.account_name} 同步失败（${s.error}）` : `${s.account_name} 同步于 ${timestamp(s.synced_at).slice(11, 19)}`).join(' · ');
+  if (!syncs.length) return t('projects.list.sync_never');
+  return syncs.map(s => s.error ? t('projects.list.sync_failed', { account: s.account_name, error: s.error })
+    : t('projects.list.synced_at', { account: s.account_name, time: timestamp(s.synced_at).slice(11, 19) })).join(' · ');
 }
 // The project list shows names and state, never the installation or repository ids (#544): those stay in the API,
 // the routes and the settings panels that need them.
 function installedDetail(row) {
-  const parts = [row.owner_login || '所有者', row.private ? '私有' : '公开'];
+  const parts = [row.owner_login || t('projects.list.owner_unknown'), t(row.private ? 'projects.list.private' : 'projects.list.public')];
   if (row.account_name) parts.push(row.account_name);
-  if (row.registered && !row.model_id) parts.push('还没有默认模型');
+  if (row.registered && !row.model_id) parts.push(t('projects.list.no_model'));
   return parts.join(' · ');
 }
 // #544: one shared column definition for the project list, so 启用/检视/开发/权限/门禁/看板/任务 line up across rows and
@@ -253,10 +253,10 @@ function projectStatusCell(label, row, on) {
 // The cells of one project row, in the order of projectColumnLabels; 项目 and 操作 are built by the renderer.
 function projectRowCells(row, integration, installed) {
   const registered = row.registered !== false;
-  const availability = !registered ? badge('未启动', 'info') : row.enabled ? badge('已启用', 'success') : badge('已禁用', 'warning');
+  const availability = !registered ? badge(t('projects.list.state_unstarted'), 'info') : row.enabled ? badge(t('projects.list.state_enabled'), 'success') : badge(t('projects.list.state_disabled'), 'warning');
   const state = [availability];
-  if (row.installed === false) state.push(badge('已移出安装', 'danger'));
-  else if (row.installed === null) state.push(badge('不在安装列表'));
+  if (row.installed === false) state.push(badge(t('projects.list.removed'), 'danger'));
+  else if (row.installed === null) state.push(badge(t('projects.list.not_installed')));
   const taskCell = projectCell('tasks');
   // #544: the task cell keeps the drill-down the pre-table row had; an unstarted project has no activity page yet.
   const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
@@ -276,11 +276,11 @@ function projectRowCells(row, integration, installed) {
   ];
 }
 function installedBadges(row) {
-  const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : badge('已启用', 'info')];
-  if (row.registered) badges.push(badge(row.review_enabled ? '检视已开启' : '检视未开启', row.review_enabled ? 'info' : ''));
-  if (row.hidden) badges.push(badge('已隐藏', 'info'));
-  if (row.installed === false) badges.push(badge('已移出安装', 'danger'));
-  else if (row.installed === null) badges.push(badge('不在安装列表'));
+  const badges = [!row.registered ? badge(t('projects.list.state_unstarted'), 'info') : !row.enabled ? badge(t('projects.list.state_disabled'), 'warning') : badge(t('projects.list.state_enabled'), 'info')];
+  if (row.registered) badges.push(badge(t(row.review_enabled ? 'projects.list.review_on' : 'projects.list.review_off'), row.review_enabled ? 'info' : ''));
+  if (row.hidden) badges.push(badge(t('projects.list.hidden_badge'), 'info'));
+  if (row.installed === false) badges.push(badge(t('projects.list.removed'), 'danger'));
+  else if (row.installed === null) badges.push(badge(t('projects.list.not_installed')));
   badges.push(permissionBadge(row));
   return badges;
 }
@@ -401,15 +401,15 @@ function permissionReading(row) {
 function permissionPlaceholder() {
   const placeholder = element('span', '—', 'project-empty');
   placeholder.dataset.permission = '';
-  const explanation = '仓库安装权限由管理员在安装列表中核对';
+  const explanation = t('projects.list.permission_note');
   placeholder.title = explanation;
   placeholder.setAttribute('aria-label', explanation);
   return placeholder;
 }
 function permissionCell(row) {
   if (!permissionReading(row)) return permissionPlaceholder();
-  if (row.access_gaps == null || row.permissions_stale) return permissionStateChip('未检查', 'info');
-  if (!row.access_gaps.length) return permissionStateChip('正常', 'success');
+  if (row.access_gaps == null || row.permissions_stale) return permissionStateChip(t('projects.list.permission_unchecked'), 'info');
+  if (!row.access_gaps.length) return permissionStateChip(t('projects.list.permission_ok'), 'success');
   return permissionBadge(row);
 }
 // Every access gap of a repository the account still lists, against every feature whether or not it is on. Warning tone
@@ -474,7 +474,7 @@ async function restoreInstalled(row, after) {
   try { await api(`/api/installations/${row.id}/restore`, 'POST', {}); notice('message'); } catch (err) { error(err); }
   await after();
 }
-const gateLabels = { none: ['未配置门禁', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
+const gateLabels = { none: ['projects.list.gate_none', 'info'], configured: ['projects.list.gate_configured', 'warning'], live: ['projects.list.gate_live', 'success'], unknown: ['projects.list.gate_unknown', 'info'] };
 function integrationChip(caption, tone, href, title) {
   if (!href) { const chip = badge(caption, tone); if (title) chip.title = title; return chip; }
   const link = element('a', caption, `status status-${tone} status-link`);
@@ -483,9 +483,9 @@ function integrationChip(caption, tone, href, title) {
 }
 function boardChip(row) {
   const published = row.board_enabled && row.board_state === 'published';
-  const chip = integrationChip(!row.board_enabled ? '看板已关闭' : published ? '查看看板' : '看板采集中',
+  const chip = integrationChip(!row.board_enabled ? t('projects.list.board_off') : published ? t('projects.list.board_view') : t('projects.list.board_collecting'),
     !row.board_enabled ? 'info' : published ? 'success' : 'warning', published ? row.board_url : null,
-    row.board_enabled ? '看板数据公开可访问' : '在全局设置的项目管理中开启后对外提供');
+    row.board_enabled ? t('projects.list.board_public_hint') : t('projects.list.board_enable_hint'));
   chip.dataset.boardStatus = ''; return chip;
 }
 function updateBoardChip(group, row) {
@@ -494,7 +494,7 @@ function updateBoardChip(group, row) {
 }
 function installedIntegration(integration, row) {
   const gate = integration ? gateLabels[integration.gate_state] || gateLabels.unknown : null;
-  const chip = gate ? integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail) : badge('发布检查未完成', 'info');
+  const chip = gate ? integrationChip(t(gate[0]), gate[1], integration.gate_url, integration.gate_detail) : badge(t('projects.list.gate_incomplete'), 'info');
   chip.dataset.integration = '';
   return row ? [chip, boardChip(row)] : [chip];
 }

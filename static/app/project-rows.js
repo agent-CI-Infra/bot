@@ -1,9 +1,9 @@
 // #934, #1133: an installed repository nobody has started is onboarded in the management assistant (#/management): clicking
 // 开始接入 opens the assistant and prefills a repository-specific onboarding prompt.
-function onboardingEntry(repo, caption = '开始接入') {
+function onboardingEntry(repo, caption = t('projects.list.onboard')) {
   const entry = element('a', caption, 'button-link btn-primary');
   entry.href = repo.started ? `#/projects/${encodeURIComponent(repo.id)}/management` : '#/management';
-  entry.setAttribute('aria-label', `${caption} ${repo.full_name}`);
+  entry.setAttribute('aria-label', t('projects.list.onboard_aria', { caption, repo: repo.full_name }));
   entry.addEventListener('click', event => {
     if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || typeof openRepositoryOnboarding !== 'function') return;
     event.preventDefault();
@@ -30,15 +30,15 @@ function foldPendingList(list, count, scope) {
   const state = pendingListState(scope);
   const fold = element('details', '', 'pending-repo-fold'); fold.dataset.testid = 'pending-repo-fold'; fold.open = state.open;
   fold.addEventListener('toggle', () => { state.open = fold.open; });
-  fold.append(element('summary', `查看 ${count} 个待接入仓库`));
+  fold.append(element('summary', t('projects.list.pending_fold', { count })));
   if (count > pendingSearchThreshold) {
-    const label = element('label', '按名称查找', 'pending-repo-search'), input = document.createElement('input');
-    input.type = 'search'; input.placeholder = '输入仓库名称'; input.setAttribute('autocomplete', 'off'); input.dataset.testid = 'pending-repo-search';
+    const label = element('label', t('projects.list.pending_search'), 'pending-repo-search'), input = document.createElement('input');
+    input.type = 'search'; input.placeholder = t('projects.list.pending_search_placeholder'); input.setAttribute('autocomplete', 'off'); input.dataset.testid = 'pending-repo-search';
     const empty = element('p', '', 'muted pending-repo-empty'); empty.setAttribute('role', 'status'); empty.hidden = true;
     const apply = () => {
       const typed = input.value.trim(), query = typed.toLowerCase(); let shown = 0; state.query = input.value;
       for (const item of list.children) { const match = !query || String(item.dataset.name || '').toLowerCase().includes(query); item.hidden = !match; if (match) shown++; }
-      empty.hidden = shown > 0; empty.textContent = shown ? '' : `没有名称包含「${typed}」的待接入仓库`;
+      empty.hidden = shown > 0; empty.textContent = shown ? '' : t('projects.list.pending_search_empty', { name: typed });
     };
     input.addEventListener('input', apply); input.value = state.query; if (state.query) apply();
     label.append(input); fold.append(label, empty);
@@ -48,7 +48,7 @@ function foldPendingList(list, count, scope) {
 }
 function pendingActivationGroup(pending) {
   const section = element('div', '', 'project-owner-group project-pending-group');
-  const title = '待接入的仓库';
+  const title = t('projects.list.pending_title');
   section.setAttribute('role', 'listitem'); section.dataset.key = 'pending-activation';
   const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', title);
   for (const repo of pending) {
@@ -56,14 +56,14 @@ function pendingActivationGroup(pending) {
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
     line.dataset.name = repo.full_name; content.append(element('strong', repo.full_name));
     // #979: the group intro already says a super administrator starts these; only a row that differs carries its own note.
-    if (repo.self_start) { const note = element('p', '所属组织已受信任，在管理助手确认后可以直接启动。'); note.title = note.textContent; content.append(note); }
-    status.append(repo.self_start ? element('span', '可自行启动', 'status status-info') : element('span', '启动需超级管理员同意', 'status status-warning'));
+    if (repo.self_start) { const note = element('p', t('projects.list.pending_trusted')); note.title = note.textContent; content.append(note); }
+    status.append(repo.self_start ? element('span', t('projects.list.pending_self_start'), 'status status-info') : element('span', t('projects.list.pending_approval'), 'status status-warning'));
     actions.append(onboardingEntry(repo));
     line.append(content, status, actions); list.append(line);
   }
   section.append(element('h2', title, 'project-owner-title'),
-    element('p', '这些仓库已装好 GitHub App。点「开始接入」打开管理助手并自动填入接入提示词：助手先只读分析仓库并提出关键选项，你确认后启动' + (pending.every(repo => repo.self_start) ? '' : '（所属组织未受信任的会提交启动申请，由超级管理员同意后启动）') + '。启动后它们出现在上面的项目列表里。', 'project-pending-intro muted'),
-    foldPendingList(list, pending.length, 'projects'), consoleLink('#/identity', '查看身份与权限'));
+    element('p', t('projects.list.pending_intro') + (pending.every(repo => repo.self_start) ? '' : t('projects.list.pending_intro_review')) + t('projects.list.pending_intro_tail'), 'project-pending-intro muted'),
+    foldPendingList(list, pending.length, 'projects'), consoleLink('#/identity', t('projects.list.identity_link')));
   return section;
 }
 // #544: the shared column header for the project list; it is re-created per list render but skipped by a quiet refresh.
@@ -96,7 +96,7 @@ function groupProjectRows(rows, lines) {
   });
   const folding = ownerFoldState();
   return [...groups].map(([owner, group]) => {
-    const section = element('div', '', 'project-owner-group'), title = group.login || group.name || `所有者 ${owner}`;
+    const section = element('div', '', 'project-owner-group'), title = group.login || group.name || t('projects.list.owner_fallback', { owner });
     section.setAttribute('role', 'listitem'); section.dataset.ownerId = owner; section.dataset.key = owner;
     const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', title);
     list.append(...group.lines);
@@ -111,7 +111,7 @@ function groupProjectRows(rows, lines) {
       toggle.setAttribute('aria-expanded', String(!folded)); list.hidden = folded; section.classList.toggle('is-folded', folded);
       if (folded) states.set(owner, true); else states.delete(owner);
     });
-    const count = element('span', `本页 ${group.rows.length} 个项目`, 'project-owner-count muted');
+    const count = element('span', t('projects.list.page_count', { count: group.rows.length }), 'project-owner-count muted');
     const bar = element('div', '', 'project-owner-bar'); bar.append(heading, count);
     section.append(bar, list);
     rowSignatures.set(section, JSON.stringify(group.rows));

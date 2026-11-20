@@ -5,7 +5,7 @@
 function redrawFailedList(version, card) {
   if (version === renderVersion) { render().catch(error); return; }
   const retry = card.querySelector('[data-testid=console-state-retry]');
-  if (retry) retry.replaceWith(element('p', '该列表已经离开当前页面，回到这个列表再重试。', 'muted'));
+  if (retry) retry.replaceWith(element('p', t('projects.list.stale_retry'), 'muted'));
 }
 async function render(quiet = false) {
   // The list renderer never owns a console page. This is the second line of defence for #365: even when a stale route
@@ -18,7 +18,7 @@ async function render(quiet = false) {
   const identityTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? t('nav.feishu_apps')
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? t('nav.feishu') : t('identity.title');
   const settingsTitle = tab === 'settings' && typeof settingsPageTitle === 'function' ? settingsPageTitle() : null;
-  $('page-title').textContent = isIdentity ? identityTitle : settingsTitle || titles[tab];
+  $('page-title').textContent = isIdentity ? identityTitle : settingsTitle || (tab === 'projects' ? t('nav.projects') : titles[tab]);
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab);
@@ -27,14 +27,14 @@ async function render(quiet = false) {
     filtersFold.hidden = $('filters').hidden;
     const active = $('account-filter').value || $('owner-filter').value;
     const summary = filtersFold.querySelector('summary');
-    if (summary) summary.textContent = active ? '筛选（已设条件）' : '筛选';
+    if (summary) summary.textContent = active ? t('projects.list.filters_active') : t('projects.list.filters');
     if (active) filtersFold.open = true;
   } $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
   // Only lists that render into #rows show its loading state; console pages draw their own and must not keep a stale one.
-  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren(...($('rows').hidden||consoleTabs.includes(tab)?[]:[consoleState('正在加载列表','正在读取当前范围的记录。',{tone:'loading'})]));listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
+  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren(...($('rows').hidden||consoleTabs.includes(tab)?[]:[consoleState(t('projects.list.loading_title'),t('projects.list.loading_text'),{tone:'loading'})]));listSignature='';$('count').textContent=t('projects.list.loading');$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(isIdentity){try{await renderIdentity();}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
@@ -63,7 +63,7 @@ async function render(quiet = false) {
     if (!integrations.length) {
       checked = true;
       // #869: this inline check is the one a cold start or an emptied cache runs, and its failure used to be swallowed too.
-      try { $('count').textContent = '正在检查门禁和看板的接入状态…'; integrations = (await api('/api/integrations/check', 'POST', {})).integrations || [];
+      try { $('count').textContent = t('projects.list.checking_integrations'); integrations = (await api('/api/integrations/check', 'POST', {})).integrations || [];
         if (request === renderVersion) projectCheckPassed('integrations', integrations, 'checked_at', { draw: false });
       } catch (err) { if (request === renderVersion) projectCheckFailed('integrations', err, { draw: false }); }
     }
@@ -79,12 +79,12 @@ async function render(quiet = false) {
   catch (err) {
     if (request !== renderVersion) return;
     $('rows').removeAttribute('aria-busy');
-    const heading = tab === 'projects' ? '项目列表未能读取' : '列表未能读取';
-    $('count').textContent = '读取失败';
+    const heading = tab === 'projects' ? t('projects.list.failed_title_projects') : t('projects.list.failed_title');
+    $('count').textContent = t('projects.list.failed_count');
     // #872: the retry is bound to this read. `render()` re-reads whatever `tab`, `offset` and the filters say when the
     // button is pressed, so a card the console has left behind would draw this page's list over the page the reader is
     // on now. `renderVersion` is bumped by every navigation and redraw, which is exactly "this card is stale".
-    const card = consoleState(heading, readErrorText(err) + '。这不是空列表，当前无法判断是否有记录。',
+    const card = consoleState(heading, t('projects.list.failed_text', { error: readErrorText(err) }),
       { tone: 'error', retry: () => redrawFailedList(request, card) });
     $('rows').replaceChildren(card);
     return;
@@ -110,17 +110,17 @@ async function render(quiet = false) {
   // The probe row is part of the signature: when the 51st row appears or goes, only `next` changes, and a quiet refresh
   // that compared the drawn rows alone would return early and leave the pager stale (#747).
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+String(hasMore)+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待接入`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
+  const lines=[]; $('count').textContent = hiddenView ? t('projects.list.count_hidden', { count: rows.length }) : installedView ? t('projects.list.count_installed', { count: rows.length, sync: syncSummary(result.syncs) }) : tab === 'projects' ? t('projects.list.count_projects', { count: rows.length }) + (pendingRepositories.length ? t('projects.list.count_pending', { count: pendingRepositories.length }) : pendingRepositoriesError ? t('projects.list.pending_error') : '') : t('projects.list.count_records', { count: rows.length });
   const count = $('count'); if (count) count.title = count.textContent;
-  $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
+  $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = t('projects.list.page', { page: offset / 50 + 1 });
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
     const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     const heading = element('strong', name); heading.title = name; heading.classList.add('row-title'); content.append(heading);
-    if (tab === 'projects' && !hiddenView && row.registered !== false) content.append(consoleLink(`#/projects/${row.id}/overview`, '项目总览', '查看工作进展与待处理事项'));
+    if (tab === 'projects' && !hiddenView && row.registered !== false) content.append(consoleLink(`#/projects/${row.id}/overview`, t('projects.list.overview'), t('projects.list.overview_hint')));
     // #934, #1133: a super administrator's installed list keeps 启动 in 操作; 开始接入 opens the management assistant where 项目总览 would.
     else if (tab === 'projects' && !hiddenView && row.installed) {
-      const onboard = consoleLink('#/management', '开始接入', '在管理助手分析仓库、确认后启动并配置');
+      const onboard = consoleLink('#/management', t('projects.list.onboard'), t('projects.list.onboard_hint'));
       onboard.addEventListener('click', event => {
         if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || typeof openRepositoryOnboarding !== 'function') return;
         event.preventDefault();
@@ -129,9 +129,9 @@ async function render(quiet = false) {
       content.append(onboard);
     }
     const detail = taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
-      : installedView ? installedDetail(row) : (row.model_id ? '' : '还没有默认模型');
+      : installedView ? installedDetail(row) : (row.model_id ? '' : t('projects.list.no_model'));
     // The repository number leaves the first screen but stays on hover, with or without a detail line.
-    if (tab === 'projects' && row.id) content.title = '编号 ' + row.id;
+    if (tab === 'projects' && row.id) content.title = t('projects.list.number', { id: row.id });
     if (detail) { const detailLine = element('p', detail); detailLine.title = detail; content.append(detailLine); } line.append(content);
     if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     // #544: the project list is one shared-column table. Each category gets its own cell so 启用/检视/开发/权限/门禁/看板/任务
@@ -143,9 +143,9 @@ async function render(quiet = false) {
       const cells = projectRowCells(row, installedView ? integrationMap.get(row.id) : null, installedView);
       const actions = element('div', '', 'actions project-cell'); actions.dataset.label = 'actions'; actions.dataset.colLabel = projectColumnText('actions'); actions.setAttribute('aria-labelledby', projectColumnId('actions'));
       if (installedView) {
-        if (registered) actions.append(button('设置', () => openProject(row.id), 'quiet'));
-        else if (row.installed) actions.append(button('启动', () => openActivation(row, () => start()).catch(error), 'quiet'));
-      } else actions.append(button('设置', () => openProject(row.id), 'quiet'));
+        if (registered) actions.append(button(t('projects.list.settings'), () => openProject(row.id), 'quiet'));
+        else if (row.installed) actions.append(button(t('projects.list.start'), () => openActivation(row, () => start()).catch(error), 'quiet'));
+      } else actions.append(button(t('projects.list.settings'), () => openProject(row.id), 'quiet'));
       line.append(content, ...cells, actions);
       lines.push(line); return;
     }
@@ -155,11 +155,11 @@ async function render(quiet = false) {
     if(status.childElementCount)line.append(status);
     // An installed repository that was never started has no project page yet; it offers 启动 instead of 设置.
     if(installedView){const actions=element('div','','actions');
-      if(row.registered)actions.append(button('设置',()=>openProject(row.id),'quiet'));
-      else if(row.installed&&!hiddenView)actions.append(button('启动',()=>openActivation(row,()=>start()).catch(error),'quiet'));
-      if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
+      if(row.registered)actions.append(button(t('projects.list.settings'),()=>openProject(row.id),'quiet'));
+      else if(row.installed&&!hiddenView)actions.append(button(t('projects.list.start'),()=>openActivation(row,()=>start()).catch(error),'quiet'));
+      if(hiddenView)actions.append(button(t('projects.list.restore'),()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
-    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id),'quiet'));line.append(actions);}
+    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button(t('projects.list.settings'),()=>openProject(row.id),'quiet'));line.append(actions);}
     if(taskTab){
       const actions=element('div','','actions'),detail=element('button','查看过程','quiet');
       detail.addEventListener('click',()=>openTask(row.id).catch(error));actions.append(detail);
@@ -188,20 +188,20 @@ async function render(quiet = false) {
     $('rows').append(pendingActivationGroup(pendingRepositories));
   }
   if (tab === 'projects' && !installedView && !hiddenView && pendingRepositoriesError) {
-    $('rows').append(consoleState('等待启动的仓库暂时无法读取', readErrorText(pendingRepositoriesError), { tone: 'error', retry: () => start().catch(error) }));
+    $('rows').append(consoleState(t('projects.list.pending_unreadable'), readErrorText(pendingRepositoriesError), { tone: 'error', retry: () => start().catch(error) }));
   }
   // #708: while the GitHub permission check that follows signing in runs, an empty list means "not known yet", not "none".
   if (tab === 'projects' && !installedView && !hiddenView && !repositories.length && !rows.length && me.github_verification) {
     $('rows').replaceChildren(consoleState(t('verification.title'), t('verification.projects'), { tone: 'loading' }));
   } else if (tab === 'projects' && !installedView && !repositories.length && !rows.length && !pendingRepositories.length && !pendingRepositoriesError) {
-    const empty = consoleState('已登录，尚无可管理的项目', '可以先查看身份与权限；安装待同步或权限待核验时，按身份页提示重新验证，或联系管理员分配项目。', { retry: () => start().catch(error) });
-    empty.append(consoleLink('#/identity', '查看身份与权限')); $('rows').replaceChildren(empty);
+    const empty = consoleState(t('projects.list.empty_projects_title'), t('projects.list.empty_projects_text'), { retry: () => start().catch(error) });
+    empty.append(consoleLink('#/identity', t('projects.list.identity_link'))); $('rows').replaceChildren(empty);
   } else if (tab === 'projects' && !rows.length && (hiddenView || installedView)) {
     // Installed / hidden warehouse lists only. Do not replace a pending-activation
     // group or a pending-read error that was just appended on the project list.
     const empty = consoleState(
-      hiddenView ? '没有已隐藏的仓库' : '还没有仓库',
-      hiddenView ? '没有从项目列表中隐藏的仓库。当前看到的是空列表，不是读取失败。' : '安装 GitHub App 并启动仓库后，它们会出现在这里。当前看到的是空列表，不是读取失败。'
+      hiddenView ? t('projects.list.empty_hidden_title') : t('projects.list.empty_installed_title'),
+      hiddenView ? t('projects.list.empty_hidden_text') : t('projects.list.empty_installed_text')
     );
     $('rows').replaceChildren(empty);
   }
