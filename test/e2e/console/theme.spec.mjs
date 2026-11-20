@@ -261,6 +261,9 @@ const DARK_TASK_DETAIL = [
   '.live', '.task-metrics', '.task-cancel-btn',
   '.step-fold-title', '.step-fold-num', '.step-fold-meta', '.step-fold-summary',
   '.role-run-title-row', '.role-run-meta', '.role-run-summary',
+  // Review of 5084b13c: the role run fold body and its findings were never repainted in dark, and neither were the
+  // links of the capability card that main added after this branch started.
+  '.role-run-fold', '.role-run-fold .role-step-toolbar > .muted', '.role-run-fold .role-empty-steps', '.role-run-findings',
 ];
 
 test('#750 dark theme keeps the task detail, project head and project page readable', async ({ page }) => {
@@ -283,15 +286,22 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     // The project detail role board shows a chip only while a role run is running, so one live run keeps the row: the
     // review measured `button.role-task-chip` at 1.12:1 and the running fill at 1.08:1 on a surface that was still light.
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
+    // The findings list inside a role run fold paints #78350f in light and is repainted from --color-warning in dark, so
+    // the fixture keeps one reviewer result that carries a finding instead of leaving the list unrendered (review of 5084b13c).
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id) VALUES('run-3','t-750','execution',1,1,'2026-11-18T08:12:00Z','2026-11-18T08:13:00Z','succeeded','{}','{}','reviewer','asg-750')");
+    h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_handoff',?,'2026-11-18T08:11:30Z','run-3','role:manager')",
+      JSON.stringify({ assignment_id: 'asg-750', role: 'reviewer', purpose: '核对深色主题的对比度' }));
+    h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_result',?,'2026-11-18T08:13:00Z','run-3','role:reviewer')",
+      JSON.stringify({ role: 'reviewer', assignment_id: 'asg-750', result: { summary: '退回 1 项问题', findings: [{ description: '深色下折叠体仍是白纸', evidence: ['static/views.css'] }], inspected_scope: ['static/'], unknowns: [] } }));
     await page.emulateMedia({ colorScheme: 'dark' });
     await signIn(page, h, password, '');
 
-    for (const width of [390, 1440]) {
+    for (const width of [768, 390, 1440]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       const pages = [
         ['#/tasks/t-750', DARK_TASK_DETAIL],
-        ['#/projects', width === 390 ? ['.project-owner-bar'] : [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar']],
-        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line', '.role-board-row', ...(width === 390 ? ['.role-mobile-label'] : [])]],
+        ['#/projects', width >= 1280 ? [':is(#rows[data-view=projects], .global-project-table) .project-table-head', '.project-owner-bar'] : ['.project-owner-bar']],
+        ['#/projects/101/overview', ['.project-page', '.workbench-tab', '.workbench-tab[aria-current=page]', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line', '.role-board-row', '.capability-tile:not([data-state=off]) .capability-links a', '.capability-tile[data-state=off] .capability-links a', ...(width === 390 ? ['.role-mobile-label'] : [])]],
       ];
       for (const [hash, selectors] of pages) {
         await page.goto(h.admin + '/' + hash);
@@ -330,9 +340,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     readable((await colours(page, ['.project-task-preview']))[0], 4.5, 'hover .project-task-preview');
 
     // The project detail tabs, the current tab, the footer link and the role-board row hover kept their light values
-    // (1.51 / 1.59 / 1.14 / 3.00:1). Measure the computed pairs at both layouts, and hover the row for real because its
+    // (1.51 / 1.59 / 1.14 / 3.00:1). Measure the computed pairs at 768/1440/390, and hover the row for real because its
     // fill only changes on hover.
-    for (const width of [1440, 390]) {
+    for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       await page.goto(h.admin + '/#/projects/101/overview');
       await page.waitForSelector('.role-board-row');
@@ -353,9 +363,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     }
 
     // The rest of the project detail the review measured: the role task chip in its three states, the tab count badge,
-    // the filter pills and the task row hover. Each is measured at both layouts; the chip has to exist, so the fixture
+    // the filter pills and the task row hover. Each is measured at 1440/768/390; the chip has to exist, so the fixture
     // keeps one running role run (see the seed above) instead of letting a hidden element pass again.
-    for (const width of [1440, 390]) {
+    for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       await page.goto(h.admin + '/#/projects/101/overview');
       await page.waitForSelector('button.role-task-chip');
@@ -477,6 +487,224 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       rendered(sample, `light task detail ${sample.selector}`);
       const [key, value] = LIGHT_VALUES[sample.selector];
       expect(sample[key], `light task detail ${sample.selector} keeps ${value}`).toBe(value);
+    }
+
+    // The review of 5084b13c caught the other half of the same contract: seven light declarations had been pointed at
+    // theme tokens, so the light baseline moved (#a02b31 -> #ad3039 and friends). They are literals again and only the
+    // two dark blocks repaint them; these pins are what makes a future token swap fail here instead of on the review.
+    await page.goto(h.admin + '/#/settings/work-computers');
+    await page.waitForSelector('.settings-body');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(300);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('.settings-body')).borderTopColor),
+      'light settings body keeps #e3eaf0').toBe('rgb(227, 234, 240)');
+    // No view renders `.settings-rows` today; probing the rule keeps the pin alive for the view that will.
+    expect(await page.evaluate(() => {
+      const host = document.querySelector('.settings-body'), probe = document.createElement('div');
+      probe.className = 'settings-rows'; host.append(probe);
+      const value = getComputedStyle(probe).borderTopColor; probe.remove(); return value;
+    }), 'light settings rows keep #e8eef2').toBe('rgb(232, 238, 242)');
+
+    // The audit page is not in the evidence set, so this is the only record that its pressed pill is #e8f3f4 in light.
+    await page.goto(h.admin + '/#/projects/101/activity');
+    await page.waitForSelector('.audit-filters button[aria-pressed=true]');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(300);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('.audit-filters button[aria-pressed=true]')).backgroundColor),
+      'light audit pill keeps #e8f3f4').toBe('rgb(232, 243, 244)');
+
+    // The confirmation dialog's four light values, including the error line a failed action writes.
+    await page.evaluate(() => { void confirmDialog({ title: '删除项目 fixture/project-101？', action: '删除', danger: true, input: { label: '确认名称' },
+      body: ['项目下的任务与记录会一并删除。'], run: () => Promise.reject(new Error('fixture_refused')) }); });
+    const lightDialog = page.locator('dialog.confirm-dialog');
+    await expect(lightDialog).toBeVisible();
+    const lightConfirm = await lightDialog.evaluate((node) => {
+      const read = (selector, key) => { const el = node.querySelector(selector); return el ? getComputedStyle(el)[key] : null; };
+      return {
+        iconBackground: read('.confirm-icon.danger', 'backgroundColor'), iconColor: read('.confirm-icon.danger', 'color'),
+        label: read('.confirm-body label', 'color'),
+        actionsBackground: read('.confirm-actions', 'backgroundColor'), actionsBorder: read('.confirm-actions', 'borderTopColor'),
+      };
+    });
+    expect(lightConfirm.iconBackground, 'light danger icon keeps #fbeaea').toBe('rgb(251, 234, 234)');
+    expect(lightConfirm.iconColor, 'light danger icon keeps #a02b31').toBe('rgb(160, 43, 49)');
+    expect(lightConfirm.label, 'light confirm label keeps #22313a').toBe('rgb(34, 49, 58)');
+    expect(lightConfirm.actionsBackground, 'light confirm actions keep #f6f9fa').toBe('rgb(246, 249, 250)');
+    expect(lightConfirm.actionsBorder, 'light confirm actions keep #e3eaf0').toBe('rgb(227, 234, 240)');
+    await lightDialog.getByRole('button', { name: '删除', exact: true }).click();
+    await expect(lightDialog.locator('.confirm-status.error')).toBeVisible();
+    expect(await lightDialog.evaluate((node) => getComputedStyle(node.querySelector('.confirm-status.error')).color),
+      'light confirm error keeps #a02b31').toBe('rgb(160, 43, 49)');
+    await page.evaluate(() => document.querySelector('dialog.confirm-dialog')?.close());
+  } finally { await h.stop(); }
+});
+
+// Chief 2026-11-20: every rule inside the two dark blocks must be pinned by its measured value, in dark and in light,
+// not only by "contrast >= 4.5". A token swap that loses one dark override then fails for its author, not for the
+// reviewer. Hover-only and state-variant rules stay where they are measured by driving them (see the test above); this
+// table covers every rule whose painted value can be read in a resting state. `::before` parts are read through
+// getComputedStyle(el, '::before'); the background of a text element is the surface it is painted on, resolved through
+// its ancestors, because a transparent computed background says nothing about what a reader sees.
+const PIN_ROWS = [
+  ['task', '.step'], ['task', '.task-side'], ['task', '.task-archive-body'], ['task', 'pre.output'],
+  ['task', '.task-goal-box'], ['task', '.role-run-conclusion'], ['task', '.role-run-summary'],
+  ['task', '.task-next-text'], ['task', '.task-ext-label'], ['task', '.step-fold-num'], ['task', '.step-fold-meta'],
+  ['task', '.role-run-brief'], ['task', '.role-run-meta'], ['task', '.task-archive-fold > summary'],
+  ['task', '.task-metrics'], ['task', '.live'], ['task', '.task-cancel-btn'],
+  ['task', '.role-run-fold'], ['task', '.role-run-fold.role-run-returned'], ['task', '.role-run-findings'],
+  ['task', '.role-step-toolbar > .muted'], ['task', '.role-empty-steps'],
+  ['task', '.step-fold-title::before'], ['task', '.role-run-title-row::before'], ['task', '.task-archive-fold > summary::before'],
+  ['projects', '.project-owner-bar'], ['projects', '.project-table-head'],
+  ['overview', '.project-page'], ['overview', '.workbench-tab'],
+  ['overview', '.workbench-tab[aria-current=page]'], ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count'],
+  ['overview', '.workbench-quick-link'], ['overview', '.workbench-live-stats'], ['overview', '.role-backend-line'],
+  ['overview', '.role-chip-ref'], ['overview', '.role-chip-summary'],
+  ['overview', '.capability-tile:not([data-state=off]) .capability-links a'],
+  ['overview', '.capability-tile[data-state=off] .capability-links a'],
+  ['tasks', '.workbench-filter-pill'], ['tasks', '.workbench-filter-pill[aria-current=page]'],
+  ['settings', '.settings-body'], ['settings', '.project-nav'], ['settings', '.settings-rows'],
+  ['audit', '.audit-filters button[aria-pressed=true]'],
+  ['confirm', '.confirm-icon.danger'], ['confirm', '.confirm-body label'], ['confirm', '.confirm-actions'],
+  ['confirm', '.confirm-status.error'],
+];
+
+// The values below were measured on this head, once, and are now the pin: [page, selector, dark [color, background],
+// light [color, background]]. The light column is the base value — the light pixel comparison against b6b67bbf is
+// 0 px on every light frame, so a light value here and a base value are the same measurement.
+const PIN_TABLE = [
+  ['task', '.step', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['task', '.task-side', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(248, 250, 252)']],
+  ['task', '.task-archive-body', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(248, 250, 252)']],
+  ['task', 'pre.output', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(245, 248, 250)']],
+  ['task', '.task-goal-box', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(248, 250, 252)']],
+  ['task', '.role-run-conclusion', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(248, 250, 252)']],
+  ['task', '.role-run-summary', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(248, 250, 252)']],
+  ['task', '.task-next-text', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
+  ['task', '.task-ext-label', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
+  ['task', '.step-fold-num', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
+  ['task', '.step-fold-meta', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
+  ['task', '.role-run-brief', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(71, 85, 105)', 'rgb(248, 250, 252)']],
+  ['task', '.role-run-meta', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(71, 85, 105)', 'rgb(248, 250, 252)']],
+  ['task', '.task-archive-fold > summary', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
+  ['task', '.task-metrics', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(82, 110, 124)', 'rgb(255, 255, 255)']],
+  ['task', '.live', ['rgb(168, 198, 245)', 'rgb(22, 29, 39)'], ['rgb(44, 87, 145)', 'rgb(255, 255, 255)']],
+  ['task', '.task-cancel-btn', ['rgb(255, 156, 156)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['task', '.role-run-fold', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['task', '.role-run-fold.role-run-returned', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['task', '.role-run-findings', ['rgb(240, 200, 130)', 'rgb(27, 36, 48)'], ['rgb(120, 53, 15)', 'rgb(248, 250, 252)']],
+  ['task', '.role-step-toolbar > .muted', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
+  ['task', '.role-empty-steps', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
+  ['task', '.step-fold-title::before', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(100, 116, 139)', 'rgb(255, 255, 255)']],
+  ['task', '.role-run-title-row::before', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(71, 85, 105)', 'rgb(248, 250, 252)']],
+  ['task', '.task-archive-fold > summary::before', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(100, 116, 139)', 'rgb(255, 255, 255)']],
+  ['projects', '.project-owner-bar', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(243, 247, 249)']],
+  ['projects', '.project-table-head', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(251, 253, 254)']],
+  ['overview', '.project-page', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['overview', '.workbench-tab', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
+  ['overview', '.workbench-tab[aria-current=page]', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
+  ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(237, 242, 255)']],
+  ['overview', '.workbench-quick-link', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
+  ['overview', '.workbench-live-stats', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
+  ['overview', '.role-backend-line', ['rgb(163, 179, 199)', 'rgb(29, 39, 51)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
+  ['overview', '.role-chip-ref', ['rgb(150, 180, 255)', 'rgb(22, 35, 58)'], ['rgb(30, 58, 138)', 'rgb(239, 246, 255)']],
+  ['overview', '.role-chip-summary', ['rgb(231, 237, 246)', 'rgb(22, 35, 58)'], ['rgb(23, 36, 59)', 'rgb(239, 246, 255)']],
+  ['overview', '.capability-tile:not([data-state=off]) .capability-links a', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
+  ['overview', '.capability-tile[data-state=off] .capability-links a', ['rgb(150, 180, 255)', 'rgb(27, 36, 48)'], ['rgb(36, 93, 224)', 'rgb(248, 250, 252)']],
+  ['tasks', '.workbench-filter-pill', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(51, 65, 85)', 'rgb(255, 255, 255)']],
+  ['tasks', '.workbench-filter-pill[aria-current=page]', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(237, 242, 255)']],
+  ['settings', '.settings-body', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['settings', '.project-nav', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['settings', '.settings-rows', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
+  ['audit', '.audit-filters button[aria-pressed=true]', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(232, 243, 244)']],
+  ['confirm', '.confirm-icon.danger', ['rgb(255, 156, 156)', 'rgb(58, 29, 31)'], ['rgb(160, 43, 49)', 'rgb(251, 234, 234)']],
+  ['confirm', '.confirm-body label', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(34, 49, 58)', 'rgb(255, 255, 255)']],
+  ['confirm', '.confirm-actions', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(246, 249, 250)']],
+  ['confirm', '.confirm-status.error', ['rgb(255, 156, 156)', 'rgb(22, 29, 39)'], ['rgb(160, 43, 49)', 'rgb(255, 255, 255)']],
+];
+
+async function pinValues(page, rows) {
+  return page.evaluate((rows) => {
+    const painted = (el) => {
+      for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+        const bg = getComputedStyle(n).backgroundColor;
+        if (bg && bg !== 'transparent' && !/rgba\(0, 0, 0, 0\)/.test(bg)) return bg;
+      }
+      return getComputedStyle(document.body).backgroundColor;
+    };
+    const out = {};
+    for (const [pageName, selector] of rows) {
+      const pseudo = selector.includes('::') ? selector.slice(selector.indexOf('::')) : null;
+      const base = pseudo ? selector.slice(0, selector.indexOf('::')) : selector;
+      const el = document.querySelector(base);
+      if (!el) { out[`${pageName} ${selector}`] = { missing: true }; continue; }
+      const visible = !!el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) && el.getBoundingClientRect().width > 1;
+      const style = getComputedStyle(el, pseudo || undefined);
+      out[`${pageName} ${selector}`] = { color: style.color, background: pseudo ? painted(el) : painted(el), visible };
+    }
+    return out;
+  }, rows);
+}
+
+test('#750 every dark-block rule keeps its measured value in dark and in light', async ({ page }) => {
+  test.setTimeout(180000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    h.store.run("UPDATE repositories SET full_name=?, owner_id=? WHERE id=?", 'fixture/project-101', '20', '101');
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,result,created_at,updated_at) VALUES('t-750','101','development.issue','running','P1','控制台深色主题：跟随系统与手动三态',750,'model',?,'2026-11-18T08:00:00Z','2026-11-18T08:12:00Z')",
+      JSON.stringify({ pr_number: 1067, branch: 'feat/theme-750', sha: '4'.repeat(40) }));
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role) VALUES('run-1','t-750','execution',1,1,'2026-11-18T08:00:00Z','2026-11-18T08:10:00Z','done','{}','{}','dev')");
+    h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750','t-750',?,?, 'run-1','dev')",
+      JSON.stringify({ type: 'tool', name: 'read', summary: '读取 static/views.css', ok: true }), '2026-11-18T08:05:00Z');
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
+    h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id) VALUES('run-3','t-750','execution',1,1,'2026-11-18T08:12:00Z','2026-11-18T08:13:00Z','succeeded','{}','{}','reviewer','asg-750')");
+    h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_handoff',?,'2026-11-18T08:11:30Z','run-3','role:manager')",
+      JSON.stringify({ assignment_id: 'asg-750', role: 'reviewer', purpose: '核对深色主题的对比度' }));
+    h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_result',?,'2026-11-18T08:13:00Z','run-3','role:reviewer')",
+      JSON.stringify({ role: 'reviewer', assignment_id: 'asg-750', result: { summary: '退回 1 项问题', findings: [{ description: '深色下折叠体仍是白纸', evidence: ['static/views.css'] }], inspected_scope: ['static/'], unknowns: [] } }));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await signIn(page, h, password);
+    const pages = { task: '#/tasks/t-750', projects: '#/projects', overview: '#/projects/101/overview', tasks: '#/projects/101/overview/tasks.active', settings: '#/settings/work-computers', audit: '#/projects/101/activity' };
+    const collect = async () => {
+      const values = {};
+      for (const [name, hash] of Object.entries(pages)) {
+        await page.goto(h.admin + '/' + hash);
+        await page.waitForFunction(() => (document.getElementById('console-page')?.innerText || document.querySelector('#workspace')?.innerText || '').trim().length > 0).catch(() => {});
+        await page.waitForLoadState('networkidle').catch(() => {});
+        await page.evaluate(() => document.querySelectorAll('details').forEach((node) => { node.open = true; }));
+        if (name === 'settings') await page.evaluate(() => { const host = document.querySelector('.settings-body'); const probe = document.createElement('div'); probe.className = 'settings-rows'; host?.append(probe); });
+        await page.waitForTimeout(300);
+        Object.assign(values, await pinValues(page, PIN_ROWS.filter(([p]) => p === name)));
+      }
+      // The confirmation dialog, in both themes, is the one surface that is not a page.
+      await page.evaluate(() => { void confirmDialog({ title: '删除项目 fixture/project-101？', action: '删除', danger: true, input: { label: '确认名称' }, body: ['项目下的任务与记录会一并删除。'], run: () => Promise.reject(new Error('fixture_refused')) }); });
+      await page.locator('dialog.confirm-dialog').waitFor({ state: 'visible' });
+      await page.locator('dialog.confirm-dialog').getByRole('button', { name: '删除', exact: true }).click();
+      await page.locator('dialog.confirm-dialog .confirm-status.error').waitFor({ state: 'visible' });
+      Object.assign(values, await pinValues(page, PIN_ROWS.filter(([p]) => p === 'confirm')));
+      await page.evaluate(() => document.querySelector('dialog.confirm-dialog')?.close());
+      return values;
+    };
+    await page.emulateMedia({ colorScheme: 'dark' });
+    const dark = await collect();
+    if (process.env.PIN_DUMP) console.log('PIN_DARK=' + JSON.stringify(dark), 'PIN_LIGHT=' + JSON.stringify({ pending: true }));
+    await page.emulateMedia({ colorScheme: 'light' });
+    const light = await collect();
+    if (process.env.PIN_DUMP) console.log('PIN_LIGHT=' + JSON.stringify(light));
+    if (process.env.PIN_DUMP) return;
+    for (const [pageName, selector, expectedDark, expectedLight] of PIN_TABLE) {
+      const key = `${pageName} ${selector}`;
+      const d = dark[key], l = light[key];
+      expect(d?.missing, `${key} must render`).toBeFalsy();
+      expect(l?.missing, `${key} must render in light`).toBeFalsy();
+      expect(d.visible, `${key} must be visible in dark`).toBe(true);
+      expect(l.visible, `${key} must be visible in light`).toBe(true);
+      for (const [theme, sample, expected] of [['dark', d, expectedDark], ['light', l, expectedLight]]) {
+        expect(sample.color, `${key} ${theme} color`).toBe(expected[0]);
+        expect(sample.background, `${key} ${theme} background`).toBe(expected[1]);
+      }
     }
   } finally { await h.stop(); }
 });

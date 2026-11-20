@@ -291,13 +291,13 @@ dialog.confirm-dialog::backdrop{background:var(--color-modal-backdrop)}
 .confirm-head{display:flex;align-items:center;gap:12px;padding:22px 24px 8px}
 .confirm-head h2{font-size:var(--font-size-touch);line-height:1.45;overflow-wrap:anywhere}
 .confirm-icon{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:var(--font-size-touch);font-weight:700;background:var(--color-info-bg);color:var(--color-info)}
-.confirm-icon.danger{background:var(--color-danger-bg);color:var(--color-danger)}
+.confirm-icon.danger{background:#fbeaea;color:#a02b31}
 .confirm-body{display:grid;gap:8px;padding:2px 24px 16px 68px;color:var(--color-text-muted);font-size:var(--font-size-label);line-height:1.7;overflow-wrap:anywhere}
 .confirm-body p,.confirm-body ul{margin:0}.confirm-body ul{padding-left:18px}.confirm-body li+li{margin-top:2px}
-.confirm-body label{margin-top:4px;color:var(--color-text)}
+.confirm-body label{margin-top:4px;color:#22313a}
 .confirm-status{margin:0;padding:0 24px 14px 68px;font-size:var(--font-size-label);line-height:1.6}.confirm-status:empty{display:none}
-.confirm-status.progress{color:var(--color-info)}.confirm-status.error{color:var(--color-danger)}
-.confirm-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 24px;background:var(--color-surface-alt);border-top:1px solid var(--color-border)}
+.confirm-status.progress{color:#2c5791}.confirm-status.error{color:#a02b31}
+.confirm-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 24px;background:#f6f9fa;border-top:1px solid #e3eaf0}
 .confirm-actions button{min-width:76px;justify-content:center}
 button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}
@@ -308,10 +308,10 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .project-content .side-card :is(.card-sub,.rate-account){font-size:var(--font-size-label);margin:6px 0 0;font-weight:700;line-height:normal;color:var(--color-text)}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
 
 /* Global settings (static/settings.js): the project page's category layout inside the list card. */
-.settings-body{border-top:1px solid var(--color-border);min-height:calc(100svh - 170px)}
+.settings-body{border-top:1px solid #e3eaf0;min-height:calc(100svh - 170px)}
 .settings-body .project-content{max-width:none;width:100%}
 .settings-list-head{justify-content:space-between;align-items:flex-start;flex-wrap:nowrap;gap:12px}.settings-list-head>.muted{flex:1;margin:0}
-.settings-rows{margin-top:8px;border-top:1px solid var(--color-border)}
+.settings-rows{margin-top:8px;border-top:1px solid #e8eef2}
 .settings-rows .row{padding:10px 0;grid-template-columns:minmax(0,1fr) max-content max-content}
 .settings-rows .row:last-child{border-bottom:0}
 .settings-rows .row-content p{margin:2px 0 0}
@@ -494,7 +494,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:var(--font-size-1);padding:4px 10px}
-.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color: var(--color-brand-text);background:var(--color-brand-weak)}
+.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand);background:#e8f3f4}
 /* #698: one audit row reads as a sentence (action · who), then time and the object link; codes fold under 技术信息. */
 .history li.audit-row{display:block;padding:9px 0}
 .audit-row-head{font-size:var(--font-size-row,14px);overflow-wrap:anywhere}.audit-row-head .audit-actor{color:var(--color-text-muted,#4b5563)}
@@ -1064,6 +1064,18 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root:not([data-theme="light"]) button.role-task-chip.role-task-running { background: var(--color-info-bg); border-color: var(--color-info-border); }
   :root:not([data-theme="light"]) button.role-task-chip:hover { background: var(--color-hover); }
   :root:not([data-theme="light"]) .role-chip-ref { color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .confirm-icon.danger { background: var(--color-danger-bg); color: var(--color-danger); }
+  :root:not([data-theme="light"]) .confirm-status.error { color: var(--color-danger); }
+  :root:not([data-theme="light"]) .confirm-body label { color: var(--color-text); }
+  :root:not([data-theme="light"]) .confirm-actions { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .settings-body { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .settings-rows { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .audit-filters button[aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .capability-links a { color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .role-run-fold { background: var(--color-surface); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .role-run-fold.role-run-running { border-color: var(--color-info-border); }
+  :root:not([data-theme="light"]) .role-run-fold.role-run-returned, :root:not([data-theme="light"]) .role-run-fold.role-run-paused { border-color: var(--color-warning-border); }
+  :root:not([data-theme="light"]) .role-run-findings { color: var(--color-warning); }
 }
 :root[data-theme="dark"] :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
 :root[data-theme="dark"] :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
@@ -1093,3 +1105,15 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 :root[data-theme="dark"] button.role-task-chip.role-task-running { background: var(--color-info-bg); border-color: var(--color-info-border); }
 :root[data-theme="dark"] button.role-task-chip:hover { background: var(--color-hover); }
 :root[data-theme="dark"] .role-chip-ref { color: var(--color-brand-text); }
+  :root[data-theme="dark"] .confirm-icon.danger { background: var(--color-danger-bg); color: var(--color-danger); }
+  :root[data-theme="dark"] .confirm-status.error { color: var(--color-danger); }
+  :root[data-theme="dark"] .confirm-body label { color: var(--color-text); }
+  :root[data-theme="dark"] .confirm-actions { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .settings-body { border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .settings-rows { border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .audit-filters button[aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
+  :root[data-theme="dark"] .capability-links a { color: var(--color-brand-text); }
+  :root[data-theme="dark"] .role-run-fold { background: var(--color-surface); border-color: var(--color-border); }
+  :root[data-theme="dark"] .role-run-fold.role-run-running { border-color: var(--color-info-border); }
+  :root[data-theme="dark"] .role-run-fold.role-run-returned, :root[data-theme="dark"] .role-run-fold.role-run-paused { border-color: var(--color-warning-border); }
+  :root[data-theme="dark"] .role-run-findings { color: var(--color-warning); }
