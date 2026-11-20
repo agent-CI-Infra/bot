@@ -24,11 +24,11 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
     await expect(toggle).toBeChecked();
     await expect(status).toContainText('配置检查通过后');
     h.store.run("UPDATE actions_failure_scans SET error='actions_workflow_run_subscription_missing'");
-    await expect(status).toContainText('此仓库使用的 App 安装未订阅 Webhook 事件「Workflow run」', { timeout: 10000 }); await expect(status).toContainText('不读取运行、不重跑、不提报');
+    await expect(status).toContainText('此仓库使用的 App 安装未订阅 Webhook 事件「Workflow run」', { timeout: 10000 }); await expect(status).toContainText('失败运行无法生成排查事件');
     // The subscription needs only Actions read; the message must not send people after the Workflows permission.
     await expect(status).toContainText('不是 Workflows 权限'); await expect(status).toContainText('Actions「Read-only」');
     h.store.run("UPDATE actions_failure_scans SET error='actions_permission_missing'");
-    await expect(status).toContainText('此仓库使用的 App 安装没有 Actions 权限', { timeout: 10000 }); await expect(status).toContainText('不需要 Workflows 权限');
+    await expect(status).toContainText('此仓库使用的 App 安装没有 Actions 权限', { timeout: 10000 }); await expect(status).toContainText('为 Actions 授予至少「Read-only」'); await expect(status).toContainText('不需要 Workflows 权限');
     await status.scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/actions-failures/desktop.png' });
     await page.setViewportSize({ width: 390, height: 844 }); await status.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

@@ -74,7 +74,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     const row = id => page.locator(`.global-project-row[data-repository-id="${id}"]`), message = page.locator('#message'), chip = id => row(id).locator('[data-permission]');
     const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
     await sync.click(); await expect(message).toContainText('权限和事件订阅并非全部正常。');
-    await expect(message).toContainText('fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析、触发 Actions 工作流）');
+    await expect(message).toContainText('fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、触发 Actions 工作流）');
     await expect(message).toContainText('未订阅事件 Pull request review（影响检视、开发）'); await expect(message).toContainText('未订阅事件 Check run（影响控制台检查状态展示）'); await expect(message).toContainText('未订阅事件 Workflow run（影响 Actions 失败分析）');
     await expect(message).not.toContainText('paused');
     for (const id of ['101', '202']) {
@@ -91,7 +91,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     // #1072: a project that cannot write Actions cannot start workflows either; it has no switch, so it reads as manual use.
     await expect(items.nth(0)).toContainText('触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流');
     await expect(items.nth(4)).toContainText('未订阅事件 Check run');
-    await expect(items.nth(6)).toContainText('Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）');
+    await expect(items.nth(6)).toContainText('默认分支和版本标签上的失败运行不会生成排查事件。涉及：Actions 失败分析（未开启）');
     await expect(items.nth(6)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
     for (const [width, height] of [[1365, 900], [1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });

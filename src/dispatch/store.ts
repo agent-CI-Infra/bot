@@ -26,9 +26,8 @@ import { actionsDevelopmentAllowed } from '../actions/safety.js';
  *   generic `task.request` tasks bound to `target` (`issue` / `pr` / `branch` / `commit`), `executor_role` (`reviewer`,
  *   `dev`, `test`, or `null` for team coordination), and `writes` (`pull_request`, `review`, `github`, `actions_rerun`),
  *   all bounded by `capability_ceiling` and `manager` role permissions.
- * - Domain event modules (`release.observe`, `release.notes`, `actions.failures`, `schedule.due`) still attach their
- *   lifecycle hooks via `options`; their tasks keep the module's own kind (`spec.kind`), while a scheduled check's request
- *   runs as `task.request`.
+ * - Release observation, release notes, and scheduled checks retain their domain hooks. Actions failure events use ordinary
+ *   commit-targeted tasks with run context.
  */
 export function dispatchStorage(store: Store) {
   store.db.exec(`
@@ -245,6 +244,7 @@ export function dispatchRecovery(store: Store, repositoryId: string, eventId: st
 }
 
 export type CreateSpec =
+  | { type: 'generic' }
   | { type: 'object'; kind: string; number: number; head: string | null; input: Json; delivery: string | null; source_task?: string | null; comment_id?: string | null; update_id?: string | null; requests?: Json[] }
   | { type: 'reply'; kind: 'workflow.issue' | 'workflow.pr'; number: number; head: string | null; input: Json; key: string; delivery: string | null }
   | { type: 'event'; kind: string; key: string; sha: string; input: Json; summary: string }
@@ -336,11 +336,11 @@ function neededCeilingForOption(work: string): Ceiling {
 function optionCeilingRefusal(store: Store, repositoryId: string, work: string, eventType?: string): { code: string; reason: string } | null {
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   if (!policy?.enabled) return { code: 'project_disabled', reason: '项目已停用。' };
-  if (work === 'actions.failures' && !policy.actions_failures_enabled) {
+  if (eventType === 'actions.run_failed' && !policy.actions_failures_enabled) {
     return { code: 'actions_failures_disabled', reason: '项目已关闭 Actions 失败处理。' };
   }
   const ceiling = projectCeiling(store, repositoryId, policy);
-  const needed = neededCeilingForOption(work);
+  const needed = eventType === 'actions.run_failed' ? 'comment' : neededCeilingForOption(work);
   if (!covers(ceiling, needed)) {
     return {
       code: 'capability_ceiling',
@@ -497,7 +497,11 @@ export function continuations(store: Store, event: Record<string, any>): Continu
 
 export function dispatchContext(store: Store, event: Row): DispatchContext {
   const joinable = continuations(store, event), options: CreateOption[] = [], unavailable: UnavailableWork[] = [];
-  for (const option of JSON.parse(event.options) as CreateOption[]) {
+  for (const saved of JSON.parse(event.options) as CreateOption[]) {
+    // Pending events from earlier versions keep their selection id and use the new task path.
+    const option = event.type === 'actions.run_failed' && saved.work === 'actions.failures'
+      ? { ...saved, work: 'task.request', spec: { type: 'generic' as const } }
+      : saved;
     if (option.unless_continued && joinable.length) continue;
     const refusal = optionCeilingRefusal(store, event.repository_id, option.work, event.type);
     if (refusal) unavailable.push({ id: option.id, work: option.work, title: option.title, ...refusal });
@@ -612,6 +616,10 @@ export function genericRefusal(
   const repo = String(context.event.repository_id);
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repo);
   if (!policy?.enabled) return { work: role ?? 'task.request', code: 'project_disabled', reason: '项目已停用。' };
+  if (context.event.type === 'actions.run_failed') {
+    const refusal = optionCeilingRefusal(store, repo, 'task.request', 'actions.run_failed');
+    if (refusal) return { work: 'task.request', ...refusal };
+  }
   for (const write of writes) {
     const refused = projectRefusal(store, repo, write);
     if (refused) return { work: write, code: refused.code, reason: refused.message };
@@ -707,6 +715,10 @@ function mapShorthandWork(shorthand: string): { role: string; writes: string[] }
 
 function defaultEventTarget(context: DispatchContext): NormalizedTaskTarget | null {
   const event = context.event;
+  if (event.type === 'actions.run_failed') {
+    const sha = (context.facts as any)?.run?.head_sha;
+    return typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha) ? { type: 'commit', ref: sha } : null;
+  }
   if (!event.object_type || !event.object_number) return null;
   const type = event.object_type === 'pr' ? 'pr' : 'issue';
   const head = (context.facts as any)?.object?.head ?? (context.facts as any)?.push?.after ?? null;
@@ -759,7 +771,8 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   }
 
   // Test-only legacy `ruleDecider` path
-  if (value.legacyKinds === true) {
+  const actionsEvent = context.event.type === 'actions.run_failed';
+  if (value.legacyKinds === true && !actionsEvent) {
     if (!ids.length) failDecision('dispatch_decision_invalid', 'create needs at least one option id.');
     return {
       decision: 'create',
@@ -773,7 +786,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
     };
   }
 
-  // Domain event adapter options (`observe`, `notes`, `analysis`, `check`) keep their module hook binding
+  // Domain event adapter options (`observe`, `notes`, `check`) keep their module hook binding
   const allEventOptions: (CreateOption | UnavailableWork)[] = [...context.options, ...context.unavailable];
   const domainMatches: CreateOption[] = [];
   for (const id of ids) {
@@ -798,7 +811,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
     };
   }
 
-  // If no explicit ids/role were given on a single-domain event (e.g. role='dev' on actions.run_failed), bind to the domain option
+  // When a single domain option exists, retain its hook binding for a create without explicit work.
   const singleDomain = !ids.length && context.options.length === 1 && (context.options[0]!.spec.type === 'event' || context.options[0]!.spec.type === 'request')
     ? context.options[0]
     : undefined;
@@ -836,6 +849,10 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
     // Support legacy `work` shorthand array (`['review']`, `['reply']`, `['development']`, or role names)
     const combinedWrites = new Set<string>(writes ?? []);
     for (const id of ids) {
+      if (actionsEvent && (id === 'analysis' || id === 'actions.failures')) {
+        role ??= 'dev';
+        continue;
+      }
       const mapped = mapShorthandWork(id);
       if (mapped) {
         role ??= mapped.role;
@@ -887,7 +904,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
 
   return {
     decision: 'create',
-    option_ids: ids,
+    option_ids: actionsEvent ? [] : ids,
     role,
     writes,
     target,
@@ -902,7 +919,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
 const log = (store: Store, taskId: string, value: Json) =>
   store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), taskId, JSON.stringify(value), new Date().toISOString());
 
-/** Creates a generic `task.request` task for an Issue, PR, branch or commit event. */
+/** Creates a generic `task.request` task from a Manager event decision. */
 function createGenericDispatchedTask(store: Store, event: Row, checked: Decision, executor: string | null): string | null {
   const repo = String(event.repository_id);
   const target = checked.target ?? undefined;
@@ -923,7 +940,7 @@ function createGenericDispatchedTask(store: Store, event: Row, checked: Decision
     : {};
 
   const objectNumber = target && (target.type === 'issue' || target.type === 'pr') ? target.number ?? null : (event.object_number != null ? Number(event.object_number) : null);
-  const headSha = target?.type === 'pr' && target.ref && /^[a-f0-9]{40}$/.test(target.ref)
+  const headSha = (target?.type === 'pr' || target?.type === 'commit') && target.ref && /^[a-f0-9]{40}$/.test(target.ref)
     ? target.ref
     : typeof facts?.object?.head === 'string' && /^[a-f0-9]{40}$/.test(facts.object.head)
       ? facts.object.head
@@ -966,6 +983,11 @@ function createGenericDispatchedTask(store: Store, event: Row, checked: Decision
   const id = randomId(), now = new Date().toISOString();
   const savedInput = {
     ...webhookPayload,
+    ...(event.type === 'actions.run_failed' ? {
+      run_id: facts.run?.id,
+      actions_failure: { attempt: facts.run?.attempt, head_sha: facts.run?.head_sha },
+      context_files: { 'run.json': JSON.stringify({ run: facts.run, failed_jobs: facts.failed_jobs }, null, 2) },
+    } : {}),
     generic: true,
     delivery: null,
     request: goal,
@@ -1034,13 +1056,9 @@ function createOptionTask(store: Store, event: Row, option: CreateOption, decisi
     log(store, id, { type: 'queued', repository_id: repo, detail: `排队中，等待仓库 ${repo} 的虚拟电脑空闲…` });
     return id;
   }
+  if (spec.type === 'generic') return null;
   if (spec.type === 'event') {
-    const ceiling = projectCeiling(store, repo);
-    const defaultAdapterWrites = spec.kind === 'actions.failures' && covers(ceiling, 'comment') ? ['issue', 'actions_rerun'] : [];
-    const granted = decision.writes
-      ? defaultAdapterWrites.filter(w => decision.writes!.includes(w) || (w === 'issue' && decision.writes!.includes('github')))
-      : defaultAdapterWrites;
-    return String(enqueueEventTask(store, repo, spec.kind, spec.key, spec.sha, { ...(spec.input as any), manager }, spec.summary, { writes: granted }).id);
+    return String(enqueueEventTask(store, repo, spec.kind, spec.key, spec.sha, { ...(spec.input as any), manager }, spec.summary).id);
   }
   const key = `${repo}:task.request:${spec.key}`;
   if (store.get('SELECT 1 FROM tasks WHERE unique_key=?', key)) return null;

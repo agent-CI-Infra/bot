@@ -109,7 +109,7 @@ node test/framework/unit-shards.mjs weights .tmp/run-a/unit-balance.json .tmp/ru
 
 安装事实档案、持久化同步、回调与身份模块契约及独立容器验收见[安装档案与同步](installation-archive.md)。
 
-默认关闭的 Actions 失败处理及其扫描、分类和一次重跑设计见 [Actions 失败分类与提报](actions-failures.md)。
+Actions 失败处理的扫描、分派和一次重跑见 [Actions 失败排查与提报](actions-failures.md)。
 
 GitHub 登录、统一授权、迁移和隔离验收见 [身份与授权](identity-authorization.md)。
 

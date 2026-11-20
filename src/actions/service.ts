@@ -1,20 +1,14 @@
-import { parse } from 'yaml';
 import type { Store, Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { GitHub, revokeInstallationToken } from '../github/client.js';
-import { sha, stop, TaskError } from '../agent/common.js';
+import { stop, TaskError } from '../agent/common.js';
 import { actionPages } from '../releases/actions.js';
 import { activateActions, recordActionsRun, actionsWorkflowOn } from './storage.js';
-import { classifyFailure, type Evidence, type FailureKind } from './classifier.js';
-import { analysisDecision, analysisTask, classifiedEvidence, failedStepOutput, requestAnalysis, taskVerdicts, taskReports } from './analysis.js';
-import { checkReports, type CheckedReport } from './reports.js';
-import { publishReport, resumeReports } from './publisher.js';
+import { failedStepOutput } from './classifier.js';
+import { requestAnalysis } from './analysis.js';
 import { eventTaskActive } from '../tasks/event-adapters.js';
-import { projectCeiling, withinCeiling } from '../projects/ceiling.js';
-import { assertManagedExecution } from '../tasks/management.js';
-import { taskPermissions } from '../tasks/configuration.js';
 import { actionsConfigurationError } from './safety.js';
-import { registeredRedactor, publicText } from '../core/redaction.js';
+import { registeredRedactor } from '../core/redaction.js';
 
 export const scanInterval = 60_000, scanPageSize = 50;
 // Reruns of earlier runs are looked for every 10 minutes among runs created in the last 72 hours.
@@ -59,10 +53,10 @@ export class ActionsFailures {
     const redactor = registeredRedactor(this.store), github = new GitHub(this.store, repo, redactor, guard, this.apiUrl);
     try {
       if (this.store.get('SELECT type FROM accounts WHERE id=?', repo.account_id)?.type !== 'github_app') stop('actions_app_required');
-      await github.connect(false, undefined, { contents: 'read', actions: 'write', issues: 'write' });
+      await github.connect(false, undefined, { contents: 'read', actions: 'read' });
       const configuration = actionsConfigurationError(github); if (configuration) stop(configuration);
       this.store.run('UPDATE actions_failure_scans SET error=NULL,configured_at=? WHERE repository_id=? AND lease=?', new Date().toISOString(), repo.id, lease);
-      // Poll sent/uncertain reruns even when discovery no longer returns their original creation window.
+      // Poll tracked runs even when discovery no longer returns their original creation window.
       let pendingError: unknown;
       for (const run of this.store.all(`SELECT * FROM actions_failure_runs WHERE repository_id=? AND
         (tracking=1 OR EXISTS(SELECT 1 FROM actions_failure_attempts a WHERE a.repository_id=? AND a.run_id=actions_failure_runs.run_id AND a.state='pending'))`, repo.id, repo.id)) {
@@ -72,7 +66,7 @@ export class ActionsFailures {
           pendingError ??= error;
         }
       }
-      // Keep this scan page in place, but do not let one uncertain report strand other tracked reruns.
+      // Keep this scan page in place while allowing other tracked runs to advance.
       if (pendingError) throw pendingError;
       await this.scan(github);
       await this.reconcileReruns(github);
@@ -169,12 +163,9 @@ export class ActionsFailures {
     const id = github.repository.id, live = await github.request('GET', github.path('/actions/runs/' + runId));
     if (live.id !== runId || String(live.repository?.id) !== id || !/^[a-f0-9]{40}$/.test(live.head_sha) || !Number.isSafeInteger(live.run_attempt)) stop('actions_run_identity_changed');
     recordActionsRun(this.store, id, live);
-    let budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
+    const budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
     if (budget.head_sha && (budget.head_sha !== live.head_sha || budget.head_branch !== live.head_branch)) stop('actions_rerun_identity_changed');
     const activated = this.store.get('SELECT enabled_at FROM actions_failure_scans WHERE repository_id=?', id)!.enabled_at;
-    // Project ceiling writes: without actions_rerun nothing is rerun, without issue nothing is reported. A task the Manager
-    // created with fewer writes keeps to those.
-    const projectWrites = withinCeiling(projectCeiling(this.store, id), ['actions_rerun', 'issue']);
     let analyzing = false;
     for (const attempt of this.store.all("SELECT * FROM actions_failure_attempts WHERE repository_id=? AND run_id=? AND state='pending' ORDER BY attempt", id, runId)) {
       const run = attempt.attempt === live.run_attempt ? live : await github.request('GET', github.path(`/actions/runs/${runId}/attempts/${attempt.attempt}`));
@@ -184,127 +175,41 @@ export class ActionsFailures {
       if (!Number.isFinite(Date.parse(run.updated_at))) stop('actions_completion_time_missing');
       const eligible = run.conclusion !== 'failure' || budget.retry_state === 'none' && Date.parse(run.updated_at) < Date.parse(activated) ? null : await this.eligible(github, run);
       if (!eligible) { finish(); continue; }
-      const tag = eligible.tag;
-      let data: { version?: number; kind: FailureKind; evidence: Evidence[]; reports?: CheckedReport[]; summary?: string };
-      const task = analysisTask(this.store, id, runId, run.run_attempt);
-      if(task)assertManagedExecution(this.store,task);
-      // The rerun and the reports are framework deliveries (#381): the work type's writes decide, not the executing role.
-      const writes = task ? taskPermissions(this.store, task).writes : projectWrites;
-      if (attempt.data) data = JSON.parse(attempt.data);
-      else {
-        // The analysis runs as a task in the project computer; until it ends, the attempt waits and nothing is written.
-        const decision = task ? null : analysisDecision(this.store, id, runId, run.run_attempt);
-        if (decision?.state === 'pending') { analyzing = true; continue; }
-        // A decision that will not come (the dispatch failed) keeps the run waiting, like a model that cannot be reached.
-        if (decision?.state === 'failed') stop('manager_dispatch_failed', 'retry_wait', 'Manager 没能分派这次失败分析，请在项目的事件记录里重试。');
-        // The Manager decided this failure needs nothing: record that, rerun nothing and report nothing.
-        if (decision?.state === 'declined') {
+      const key = `${id}:actions.run_failed:${runId}:${run.run_attempt}`;
+      const event = this.store.get('SELECT id,state,decision,reason FROM dispatch_events WHERE event_key=?', key);
+      if (event?.state === 'failed') stop('manager_dispatch_failed', 'retry_wait', 'Manager 没能分派这次失败分析，请在项目的事件记录里重试。');
+      if (event?.state === 'pending' || event?.state === 'dispatching') { analyzing = true; continue; }
+      if (event) {
+        const legacy = this.store.get('SELECT status FROM tasks WHERE unique_key=?', `${id}:actions.failures:${runId}:${run.run_attempt}`);
+        if (eventTaskActive(legacy)) { analyzing = true; continue; }
+        if (event.decision === 'ignore' && !attempt.data) {
           this.store.run('UPDATE actions_failure_attempts SET classification=?,data=? WHERE repository_id=? AND run_id=? AND attempt=?', 'ignored',
-            JSON.stringify({ kind: 'ignored', evidence: [], reason: decision.reason }), id, runId, run.run_attempt);
-          finish(); continue;
+            JSON.stringify({ kind: 'ignored', evidence: [], reason: String(event.reason || '') }), id, runId, run.run_attempt);
         }
-        if (task && eventTaskActive(task)) {
-          analyzing = true;
-          // A model that cannot be reached keeps the run waiting, as the failure status of the whole workflow.
-          if (/^model_/.test(String(task.error_code || ''))) stop(task.error_code, 'retry_wait', '等待模型恢复后继续分析。');
-          continue;
-        }
-        const jobs = await actionPages(github, github.path(`/actions/runs/${runId}/attempts/${run.run_attempt}/jobs`), 'jobs');
-        if (jobs.some(j => j.run_id !== runId || j.run_attempt && j.run_attempt !== run.run_attempt)) stop('actions_jobs_identity_changed');
-        const failed = jobs.filter(j => j.conclusion === 'failure'), logs: { job: any; log: string | null }[] = [], evidence: Evidence[] = [];
-        for (const job of failed) {
-          let log: string | null = null;
-          try { log = await github.jobLog(job.id); } catch (error) { if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error; }
-          logs.push({ job, log });
-        }
-        // The workflow's agent classifies the failed jobs; the control plane checks what it cites and acts on the result.
-        const outputs = logs.map(({ job, log }) => ({ job, output: failedStepOutput(job, log) }));
-        // Missing logs still merit investigation of source/artifacts; they never manufacture a public report.
-        if (outputs.length && !task) { requestAnalysis(this.store, github, run, outputs, tag); analyzing = true; continue; }
-        const verdicts = task ? taskVerdicts(task) : null;
-        for (const classified of failed.length ? classifiedEvidence(outputs, verdicts) : []) {
-          const job = classified.job;
-          const quote = publicText(classified.quote, github.redactor).slice(0, 2400);
-          // Keep readable reasons in the attempt record; only explicit cause reports are published.
-          const reason = publicText(classified.reason, github.redactor) || 'The reason could not be made safe for public disclosure.';
-          evidence.push({ ...classified, reason, job: { id: job.id, key: sha(String(job.name)), name: publicText(String(job.name), github.redactor).replace(/[\r\n`#<>]/g, ' ') || 'Failed job' }, quote });
-        }
-        if (!evidence.length) evidence.push({ job: { name: 'Workflow', id: null }, kind: 'unknown', reason: 'Failed job evidence is unavailable.', quote: '' });
-        data = { version: 2, kind: classifyFailure(evidence), evidence, reports: task ? await checkReports(github, run, taskReports(task), outputs) : [],
-          summary: task?.status === 'succeeded' ? publicText(String(JSON.parse(task.result || '{}').summary || ''), github.redactor) : 'Analysis did not return a usable result; no report was requested.' };
-        this.store.run('UPDATE actions_failure_attempts SET classification=?,data=? WHERE repository_id=? AND run_id=? AND attempt=?', data.kind, JSON.stringify(data), id, runId, run.run_attempt);
+        finish();
+        continue;
       }
-      budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
-      if (data.kind === 'external' && writes.includes('actions_rerun')) {
-        if (budget.retry_state === 'none') {
-          // A human may have rerun while we read logs. Never rerun a newer/incomplete attempt on this evidence.
-          const current = await github.request('GET', github.path('/actions/runs/' + runId));
-          if (current.id !== runId || current.head_sha !== run.head_sha || current.head_branch !== run.head_branch) stop('actions_rerun_identity_changed');
-          if (current.run_attempt !== run.run_attempt || current.status !== 'completed') { finish(); continue; }
-          if (await this.dispatchSupported(github, run)) {
-            this.store.run(`UPDATE actions_failure_runs SET retry_state='sending',before_attempt=?,expected_attempt=?,retry_at=?,head_sha=?,head_branch=?
-              WHERE repository_id=? AND run_id=? AND retry_state='none'`, run.run_attempt, run.run_attempt + 1, Date.now(), run.head_sha, run.head_branch, id, runId);
-            const previous = github.beforeWrite;
-            try {
-              github.beforeWrite = () => {
-                previous?.();
-                if (task) assertManagedExecution(this.store, task);
-                const allowedWrites = task ? taskPermissions(this.store, task).writes : withinCeiling(projectCeiling(this.store, id), ['actions_rerun', 'issue']);
-                if (!allowedWrites.includes('actions_rerun')) stop('write_not_allowed');
-              };
-              await github.request('POST', github.path(`/actions/runs/${runId}/rerun`));
-              this.store.run("UPDATE actions_failure_runs SET retry_state='sent' WHERE repository_id=? AND run_id=?", id, runId);
-            } catch (error) {
-              const uncertain = error instanceof TaskError && error.code === 'github_response_unknown';
-              this.store.run('UPDATE actions_failure_runs SET retry_state=? WHERE repository_id=? AND run_id=?', uncertain ? 'unknown' : 'denied', id, runId);
-              if (!uncertain && error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost'].includes(error.code)) throw error;
-            } finally { github.beforeWrite = previous; }
-            budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
-            // Always reconcile an uncertain send, including the first tick, without another POST.
-            if (budget.retry_state === 'unknown') await github.request('GET', github.path('/actions/runs/' + runId));
-            if (budget.retry_state !== 'denied') { finish(); continue; }
-          } else this.store.run("UPDATE actions_failure_runs SET retry_state='unsupported' WHERE repository_id=? AND run_id=?", id, runId);
-          budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
+      // A pre-upgrade attempt can already have a classification or a pending publication receipt.
+      // Keep the evidence without opening a second investigation or resending a write.
+      if (attempt.data) { finish(); continue; }
+      const jobs = await actionPages(github, github.path(`/actions/runs/${runId}/attempts/${run.run_attempt}/jobs`), 'jobs');
+      if (jobs.some(j => j.run_id !== runId || j.run_attempt && j.run_attempt !== run.run_attempt)) stop('actions_jobs_identity_changed');
+      const failed = [];
+      for (const job of jobs.filter(j => j.conclusion === 'failure')) {
+        let log: string | null = null;
+        try { log = await github.jobLog(job.id); }
+        catch (error) {
+          if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error;
         }
-        if (['sent', 'sending', 'unknown'].includes(budget.retry_state) && run.run_attempt < budget.expected_attempt) { finish(); continue; }
+        failed.push({ job, output: failedStepOutput(job, log) });
       }
-      if (writes.includes('issue')) {
-        if (data.version === 2) for (const report of data.reports || []) {
-          const before = report.withheld_reason;
-          await publishReport(this.store, github, run, report, data.evidence);
-          if (report.withheld_reason !== before) this.store.run('UPDATE actions_failure_attempts SET data=? WHERE repository_id=? AND run_id=? AND attempt=?', JSON.stringify(data), id, runId, run.run_attempt);
-        }
-        // Upgrade recovery honors existing receipts without replaying per-job verdicts as new Issues.
-        await resumeReports(this.store, github, run);
-      }
-      finish();
+      await github.guard();
+      requestAnalysis(this.store, github, run, failed, eligible.tag);
+      analyzing = true;
     }
-    budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
-    const awaiting = ['sent', 'sending', 'unknown'].includes(budget.retry_state) && live.run_attempt < budget.expected_attempt;
-    if (awaiting && Date.now() - budget.retry_at > 5 * 60_000) {
-      const attempt = this.store.get('SELECT data FROM actions_failure_attempts WHERE repository_id=? AND run_id=? AND attempt=?', id, runId, budget.before_attempt);
-      const source = analysisTask(this.store, id, runId, budget.before_attempt);
-      const allowed = source ? taskPermissions(this.store, source).writes : projectWrites;
-      if (attempt?.data && allowed.includes('issue')) {
-        const saved = JSON.parse(attempt.data), original = { ...live, run_attempt: budget.before_attempt };
-        if (saved.version === 2) for (const report of saved.reports || []) {
-          const before = report.withheld_reason;
-          await publishReport(this.store, github, original, report, saved.evidence);
-          if (report.withheld_reason !== before) this.store.run('UPDATE actions_failure_attempts SET data=? WHERE repository_id=? AND run_id=? AND attempt=?', JSON.stringify(saved), id, runId, budget.before_attempt);
-        }
-        await resumeReports(this.store, github, original);
-      }
-    }
+    // An outstanding legacy rerun can still produce a new attempt. Keep tracking it briefly without trying to send it again.
+    const awaiting = ['sent', 'sending', 'unknown'].includes(budget.retry_state) && live.run_attempt < budget.expected_attempt
+      && Date.now() - budget.retry_at <= 5 * 60_000;
     this.store.run('UPDATE actions_failure_runs SET tracking=? WHERE repository_id=? AND run_id=?', Number(awaiting || analyzing || live.status !== 'completed'), id, runId);
-  }
-  private async dispatchSupported(github: GitHub, run: any): Promise<boolean> {
-    const workflow = await github.request('GET', github.path('/actions/workflows/' + run.workflow_id));
-    if (typeof workflow.path !== 'string' || !/^\.github\/workflows\/[^/]+\.ya?ml$/.test(workflow.path)) return false;
-    // Read the actual original commit: rerun never changes SHA/ref or writes the workflow.
-    const file = await github.request('GET', github.path('/contents/' + workflow.path + '?ref=' + run.head_sha), undefined, true);
-    if (!file || file.encoding !== 'base64' || typeof file.content !== 'string') return false;
-    try { const on = parse(Buffer.from(file.content, 'base64').toString('utf8'))?.on;
-      return typeof on === 'string' ? on === 'workflow_dispatch' : Array.isArray(on) ? on.includes('workflow_dispatch') : !!on && Object.hasOwn(on, 'workflow_dispatch');
-    } catch { return false; }
   }
 }

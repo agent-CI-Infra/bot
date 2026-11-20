@@ -49,7 +49,7 @@ test('only the Manager writes by default; write offers github_write on its resou
     assert.ok(['issues','pull_requests','contents','actions','checks','statuses'].every(r=>p['github_'+r]==='read'),id);
     assert.ok(!permissionTools(p).includes('github_write'),id);
     // Deliveries need no GitHub write of the role.
-    for(const tool of ['create_pull_request','report_failure','rerun_failed_run','finish_review'])assert.ok(permissionTools(p).includes(tool),id+' '+tool);
+    for(const tool of ['create_pull_request','rerun_failed_run','finish_review'])assert.ok(permissionTools(p).includes(tool),id+' '+tool);
   }
   assert.ok(permissionTools(manager).includes('github_write'));
   const issuesOnly=updatePermissions(manager,{github_pull_requests:'read',github_contents:'read'});

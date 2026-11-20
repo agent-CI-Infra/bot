@@ -350,7 +350,7 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status, 200);
   const gaps = async () => Object.fromEntries((await admin('/api/installations')).value.repositories.map(r => [r.id, r.access_gaps]));
   const appGaps = [
-    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures', 'actions_dispatch'] },
+    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_dispatch'] },
     { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
     { kind: 'event', name: 'check_run', features: ['ci_checks'] },
     { kind: 'event', name: 'status', features: ['ci_checks'] },
@@ -465,7 +465,7 @@ test('an older audit with foreign keys is rebuilt without them and keeps its rec
 });
 
 test('the project list marks reduced permissions, refreshes stale ones once, and links to global project administration', async () => {
-  const gap = [{ kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures', 'actions_dispatch'] }];
+  const gap = [{ kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_dispatch'] }];
   const event = (name, features) => ({ kind: 'event', name, features });
   const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', owner_login: 'fixture', installed: true, registered: true, enabled: true, review_enabled: true,
     development_enabled: false, actions_failures_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, access_gaps: [], permissions_stale: false, ...extra });
@@ -501,7 +501,7 @@ test('the project list marks reduced permissions, refreshes stale ones once, and
   assert.equal(view.open, true); assert.deepEqual(view.querySelectorAll('dt').map(dt => dt.textContent), ['缺少', '怎么操作', '会影响什么']);
   assert.equal(facts[0], '未订阅事件 Workflow run');
   assert.match(facts[1], /Subscribe to events 勾选 Workflow run/);
-  assert.equal(facts[2], 'Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）。');
+  assert.equal(facts[2], '默认分支和版本标签上的失败运行不会生成排查事件。涉及：Actions 失败分析（未开启）。');
   view.close();
   assert.ok(removed.querySelectorAll('.status').some(chip => chip.textContent === '已移出安装'));
   for (const line of [removed, first, third]) {
@@ -517,7 +517,7 @@ test('the project list marks reduced permissions, refreshes stale ones once, and
   assert.match(permission(third).title, /未订阅事件 Pull request review/);
   // A gap the opened dialog explains per feature, naming whether each is on, off or used by hand.
   permission(third).listeners.click[0]();
-  assert.equal(page.run('accessView').querySelectorAll('dd')[2].textContent, '发版本（手动使用时）：打不了标签、写不了 Release、重跑不了发布运行；Actions 失败分析（未开启）：读不到运行、重跑不了外部失败、提报不了 Issue；触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流（例如定时触发 Nightly）。');
+  assert.equal(page.run('accessView').querySelectorAll('dd')[2].textContent, '发版本（手动使用时）：打不了标签、写不了 Release、重跑不了发布运行；触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流（例如定时触发 Nightly）。');
   page.run('accessView').close();
   // The five-second task refresh reads the list again but leaves permission badges alone.
   page.requests.length = 0; listing = listing.map(r => ({ ...r, access_gaps: [], permissions_stale: false, running_tasks: 2 })); const badge = permission(first);

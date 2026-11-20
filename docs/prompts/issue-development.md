@@ -51,8 +51,8 @@ At task start, read the existing notes in `../notes/` (`/workspace/project-notes
 The project Manager started this task on a basis the control plane checked, given as
 `development_basis` in the context: `label` (a person, not an app, added the project's development
 label), `maintainer_request` (a comment on the Issue by someone with triage permission or higher)
-or `project_rule` (a sentence of the project's Manager prompt). An Issue the bot filed from an
-Actions failure needs no basis. The Manager judged from the Issue, the latest review and the earlier
+or `project_rule` (a sentence of the project's Manager prompt). Historical bot-filed Actions
+Issues identified by the system need no basis. The Manager judged from the Issue, the latest review and the earlier
 tasks that the bot may develop it now; its reason and brief are under `manager` in the context. Only
 a development started on the label is checked again before publication: the control plane stops it
 if a person removed the label. A revision task exists only for a pull request the bot opened,

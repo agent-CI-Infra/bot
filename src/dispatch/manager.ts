@@ -42,7 +42,7 @@ const reason = { type: 'string', description: 'Why, in one or two sentences of S
 const decisionTools = [
   fn(
     'create_task',
-    'Create a generic task (task.request) for this event. Pick role from the project\'s enabled worker roles (for example "reviewer" for PR/Issue review or discussion reply, "test" to check out and run tests/diagnosis, "dev" to implement an Issue or revise a bot PR, or omit role for coordinated multi-role execution), grant only the writes needed ("review" for post_review, "pull_request" for open_pull_request, "github" for github_write, "actions_rerun" for rerun_failed_run, or [] for a read-only/test report), and optionally pass target ({type:"issue"|"pr"|"branch"|"commit", number?, ref?}; defaults to this event\'s object). For domain events (release observation/notes, Actions failure analysis, scheduled check), pass work with the domain option id. When the control plane refuses a creation (capability ceiling, active development, or missing basis), nothing is created and the refusal comes back so you can reply to the person and decide again.',
+    'Create a generic task (task.request) for this event. Pick role from the project\'s enabled worker roles (for example "reviewer" for PR/Issue review or discussion reply, "test" to check out and run tests/diagnosis, "dev" to implement an Issue or revise a bot PR, or omit role for coordinated multi-role execution), grant only the writes needed ("review" for post_review, "pull_request" for open_pull_request, "github" for github_write, "actions_rerun" for rerun_failed_run, or [] for a read-only/test report), and optionally pass target ({type:"issue"|"pr"|"branch"|"commit", number?, ref?}; defaults to this event\'s object). For domain events (release observation/notes and scheduled checks), pass work with the domain option id. When the control plane refuses a creation (capability ceiling, active development, or missing basis), nothing is created and the refusal comes back so you can reply to the person and decide again.',
     {
       role: { type: 'string', description: 'Executor role id (e.g. reviewer, dev, test). Omit to run a coordinated team.' },
       writes: {
@@ -164,7 +164,6 @@ function optionDefaultWrites(store: Store, repositoryId: string, work: string): 
   if (work.startsWith('review.')) return withinCeiling(ceiling, ['review']);
   if (work === 'reply') return withinCeiling(ceiling, ['github']);
   if (work.startsWith('development.')) return withinCeiling(ceiling, ['pull_request']);
-  if (work === 'actions.failures') return withinCeiling(ceiling, ['actions_rerun', 'github']);
   if (work === 'release.notes') return withinCeiling(ceiling, ['release_notes']);
   return [];
 }

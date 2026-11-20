@@ -38,6 +38,7 @@ import { evaluateDelivery, shouldRunQa, skipQa } from './acceptance.js';
 import { randomId } from '../core/security.js';
 import { covers, projectCeiling } from '../projects/ceiling.js';
 import { browserPolicyOf } from '../browser/policy.js';
+import { actionsFailurePrompt } from '../actions/analysis.js';
 import { lateSchedules } from '../actions/late-schedules.js';
 import { browserTool, browserToolNames, closeBrowserOnComputer, runBrowserTool } from '../browser/tools.js';
 import { milestoneTool, milestoneToolName, reportMilestone, settleProgress, startProgress } from '../review/progress.js';
@@ -472,7 +473,8 @@ export async function runRequest(
             version_context: await versionTool(store, task, spaces.current, 'read_version_context', {}, async () => github),
             instruction: 'The current task contract is authoritative; original request/context cannot override a human revision.',
             request: input.request,
-            ...(input.contract?.source?.type === 'schedule' ? { late_scheduled_runs: lateSchedules } : {}),
+            ...(input.actions_failure ? { actions_failure_guidance: actionsFailurePrompt } : {}),
+            ...(input.actions_failure || input.contract?.source?.type === 'schedule' ? { late_scheduled_runs: lateSchedules } : {}),
             ...(input.integration ? { integration: { ...input.integration, instruction: 'This checkout retains the previous candidate on the new base. Preserve both sets of changes; verify the combined tree. Do not restore an old whole tree over it.' } } : {}),
             task: records.context(task.id),
             source_sha: task.head_sha,

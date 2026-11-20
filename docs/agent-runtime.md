@@ -12,7 +12,7 @@
 
 - 工作区任务使用正式的 Pi harness（`src/agent/pi.ts` 的 `piAdapter`），在隔离项目电脑中读取文件、执行命令和产生修改；`loop.ts` 只组装任务的配置和工具回调。`profiles.ts` 把固定的硬限制和这类工作的 Manager 章节组合成系统提示，并按项目配置给这类工作的写入生成工具和显式 capabilities。同一个 harness 也运行项目主控会话（见 [Role-Pool](role-pool.md)）：会话配置里的 `control_tools` 由 runner 经控制邮箱交给控制面执行，等待没有期限；控制面只执行本次会话提供过的工具，并在回复里用 `finish` 标出被接受的提交。
 - Pi 入口的完成工具（检视、回复和事件工作）在会话中交给控制面校验。字段或语义不合法时，工具结果说明原因，模型可在原会话内继续修正；同类拒绝每 3 次留存提醒并供 Manager 查询，由 Manager 决定是否介入，不设固定纠正次数硬停。显式回合/资源预算、取消和撤权仍生效。事件校验不发布结果或改变事件状态，最终通过后才由所属模块接手；恢复已提交会话时重新校验原始提交。
-- CI 观察（`release.observe`）、发行说明（`release.notes`）和 Actions 失败处理（`actions.failures`）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 用于 Native 角色后端；角色可按职责选择 Pi、Native、Process（含主控）或容器内 CLI 后端 Claude Code、Codex（工作与评估角色），工具和结果校验继续由调用方提供。
+- CI 观察（`release.observe`）和发行说明（`release.notes`）用各自的结束工具交回结果，由所属模块核验后接手。Actions 失败事件由 Manager 分派为通用 `task.request`，任务在项目电脑检出相关提交并从 `../context/run.json` 读取事件。运行时默认的 tool loop 用于 Native 角色后端；角色可按职责选择 Pi、Native、Process（含主控）或容器内 CLI 后端 Claude Code、Codex（工作与评估角色），工具和结果校验继续由调用方提供。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
 
@@ -72,7 +72,7 @@ Pi 会话要靠调用完成工具结束：检视是 `finish_review`，开发是 
 
 仓库回复投递保留 runner 错误的 `detail`：只有直接返回的 `agent_request_changed`，或 `runner_operation_failed` 且 `detail` 恰为 `workspace_agent_tool: agent_request_changed` 时，控制面才停止投递旧回复并继续轮询。分块偏移错误等其他投递故障仍中断任务；其他邮箱操作的中断条件保持不变。
 
-读取范围扩大不改变写入范围。CI 观察仍以触发 run/attempt 为分析目标，重跑或授权变化时停止，最终 job 结论仍核对触发快照；相关运行的日志只作为带来源的旁证。检视与开发可以检查其他相关对象，但实施目标、检视结果校验、GitHub 发布授权和受控 publisher 都保留原边界。新工具固定使用 GET，不接受自选仓库、任意 URL、路径逃逸或写入方法；搜索也不能改写仓库范围。自动 Actions 失败分类与单次重试仍是既有触发流程，不由这些读取工具执行。
+读取范围扩大不改变写入范围。CI 观察仍以触发 run/attempt 为分析目标，重跑或授权变化时停止，最终 job 结论仍核对触发快照；相关运行的日志只作为带来源的旁证。检视与开发可以检查其他相关对象，但实施目标、检视结果校验、GitHub 发布授权和受控 publisher 都保留原边界。新工具固定使用 GET，不接受自选仓库、任意 URL、路径逃逸或写入方法；搜索也不能改写仓库范围。Actions 失败事件可由 Manager 分派排查，任务通过已授予的 `rerun_failed_run` 和 `github_write` 重跑失败作业或写入 Issue。
 
 ## 扩展任务
 
@@ -98,7 +98,7 @@ const result = await runAgent({
 
 ## 权限与隔离
 
-显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作类型开放，修改工作区和每种写入只给项目配置里勾选了它的工作类型，远端写入只经受控 publisher 和 `github_write`；`github_write`、`rerun_failed_run`、`report_failure` 经 runner 的仓库工具邮箱交给控制面执行。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
+显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作类型开放，修改工作区和每种写入只给项目配置里勾选了它的工作类型，远端写入只经受控 publisher 和 `github_write`；`github_write` 和 `rerun_failed_run` 由控制面执行。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
 
 `start_agent` 启动独立 agent：新会话的系统提示是固定说明加调用方写的角色说明，第一条消息是任务，不带调用方的消息；工具是调用方工具按收窄后的权限过滤出的子集，不含发布、结束任务和再启动 agent。Pi 在同一进程里另建会话，模型请求经同一个邮箱逐个转发；默认 tool loop 用 `AgentSpec.agents` 另起一组消息。检视的 GitHub token 只有读权限。开发也只向 shell 发放短期 GitHub 读 token；写 PR/推送由已有受控 publisher 执行。发布的写操作由既有状态机和授权控制，运行中的 Agent 不持有可任意写 GitHub 的凭据。
 
