@@ -238,8 +238,22 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     );
     let additionalVerification: any = null;
     if (required && !proof) {
+      // The command runs in the shared task workspace, so it certifies the candidate only while the workspace still holds the
+      // candidate's tree (#1121 review): another role or a resumed run may have changed it since the submission. A runner
+      // without the tree operation leaves it unknown, and the result is recorded as before.
+      const expected = String((snapshot as any)?.tree_sha || sourceTree || '');
+      const live = await verification.call(`accept:${evaluationId}:tree`, { type: 'workspace_tree' }).catch(() => null);
+      const tested = typeof live?.tree_sha === 'string' && /^[0-9a-f]{40,64}$/.test(live.tree_sha) ? live.tree_sha : null;
+      if (expected && tested && tested !== expected) {
+        const gap = `The shared task workspace changed after this candidate was submitted (candidate tree ${expected.slice(0, 12)}, workspace tree ${tested.slice(0, 12)}), so the project check \`${required}\` cannot certify it. Submit the delivery again from the current workspace, or restore the candidate's files first.`;
+        records.history(task.id, 'acceptance_evidence', { evaluation_id: evaluationId, name: 'policy_validation', version: tested, candidate_version: expected, command: required, skipped: 'workspace_changed' });
+        const verdict: Verdict = { pass: false, issues: [gap], outcome: 'return', reason: 'The workspace no longer holds the submitted candidate', gaps: [gap], residuals: [], core_complete: false, required_evidence_complete: false, acceptable_risk: true };
+        records.history(task.id, 'acceptance_evaluated', { evaluation_id: evaluationId, candidate_id: candidate.id, elapsed_ms: Date.now() - start, verdict, method: 'deterministic_policy' }, verificationRun?.id);
+        verificationOutcome = verdict.outcome;
+        return verdict;
+      }
       additionalVerification = await verification.call(`accept:${evaluationId}:policy`, { type: 'workspace_command', command: required, timeout_ms: null });
-      records.history(task.id, 'acceptance_evidence', { evaluation_id: evaluationId, name: 'policy_validation', version: sourceTree, command: required, result: additionalVerification });
+      records.history(task.id, 'acceptance_evidence', { evaluation_id: evaluationId, name: 'policy_validation', version: tested ?? sourceTree, tested_tree: tested, command: required, result: additionalVerification });
       if (additionalVerification.error || additionalVerification.exit_code !== 0 || additionalVerification.timed_out) {
         const failure = required + '; ' + String(additionalVerification.output || additionalVerification.error || 'verification incomplete').slice(-4000);
         const verdict: Verdict = { pass: false, issues: [failure], outcome: 'return', reason: 'Required project verification failed for the submitted candidate', gaps: [failure], residuals: [], core_complete: false, required_evidence_complete: false, acceptable_risk: true };

@@ -1,5 +1,5 @@
 import {harnessAccess} from '../harness/access.js';
-import { commandTool, configuredCommandTimeout, resolveCommandTimeout } from '../agent/command.js';
+import { configuredCommandTimeout, resolveCommandTimeout, retimeCommandTool } from '../agent/command.js';
 import { resultSpec, taskResultOwner } from '../agent/tool-results.js';
 import {TaskRecords} from '../tasks/service.js';
 import { taskRecordContext } from '../tasks/record-tools.js';
@@ -203,7 +203,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const managedTools=snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
   const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   const cmdConfigured=configuredCommandTimeout(s,task,role),cmdBudget=cmdConfigured!==null?resolveCommandTimeout(s,task,role,cmdConfigured):null;
-  const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?commandTool(cmdBudget.defaultSeconds,undefined,cmdBudget.maxSeconds):t):rawTools;
+  const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
   // External CLIs own their turn semantics; only these three loops share the request-based finalization reserve.

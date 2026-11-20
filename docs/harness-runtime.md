@@ -9,7 +9,7 @@ Role 服务选择执行器并组装角色说明、assignment 和任务事实引�
 当前已注册的 Agent 后端：
 
 - **内部驱动（`pi`、`native`、`process`）**：支持 `controller`、`writer`、`observer`、`evaluator` 四类角色；新角色默认推荐 `pi`。`pi` 在项目容器中运行 Pi SDK 会话，`native` 使用控制面内置工具循环，`process` 运行独立 Node worker 子进程。
-- **容器内外部 CLI 驱动（`claude_code`、`codex`）**：支持四类角色（`controller`、`writer`、`observer`、`evaluator`），Manager 与 Coordinator 也可选择。两者均在项目容器（`Workspace`）及每运行隔离容器（`RunEnvironments`，声明 `isolation: run_environment`）内执行，直接以 `<task_dir>/repo` 为工作目录开放原生终端、文件读写/编辑与子 Agent 能力，默认使用原生供应商直连；显式配置 gateway 时通过容器内回环模型中转（`127.0.0.1:0`）访问平台多格式模型网关，并通过 stdio MCP 服务 `bot`（`runner/mcp-bridge.mjs`）调用平台管理工具。历史通用 `acp` 驱动与 `opencode` 待接入占位已下线。
+- **容器内外部 CLI 驱动（`claude_code`、`codex`）**：支持四类角色（`controller`、`writer`、`observer`、`evaluator`），Manager 与 Coordinator 也可选择。两者均在项目容器（`Workspace`）内执行（每运行隔离容器已在 #1121 移除，`isolation` 只接受 `none`），直接以 `<task_dir>/repo` 为工作目录开放原生终端、文件读写/编辑与子 Agent 能力，默认使用原生供应商直连；显式配置 gateway 时通过容器内回环模型中转（`127.0.0.1:0`）访问平台多格式模型网关，并通过 stdio MCP 服务 `bot`（`runner/mcp-bridge.mjs`）调用平台管理工具。历史通用 `acp` 驱动与 `opencode` 待接入占位已下线。
 
 公共协作与安全边界：
 

@@ -143,6 +143,29 @@ test('a missing current policy proof runs deterministic verification and returns
  const c=f.records.get(f.task.id).candidate;f.records.decide(f.task.id,c.id,c.revision,result);const final=f.h.store.get("SELECT run_id,caused_by FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id DESC LIMIT 1",f.task.id);const verification=f.h.store.get("SELECT id FROM task_runs WHERE task_id=? AND kind='verification' ORDER BY rowid DESC LIMIT 1",f.task.id);assert.equal(final.run_id,verification.id);assert.equal(JSON.parse(final.caused_by).length,1);
 });
 
+// #1121 review: the project check runs in the shared workspace, so it certifies the candidate only while the workspace still holds
+// the candidate's tree. A changed workspace returns the candidate instead of attributing another tree's result to it.
+test('a workspace that changed after the submission returns the candidate without running the project check against it',async t=>{
+ const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
+ f.h.store.run("UPDATE policies SET test_command='required-check' WHERE repository_id='101'");f.task.workspace_id='a'.repeat(48);f.task.generation=1;
+ f.records.submit(f.task.id,[{kind:'code',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),tree_sha:'b'.repeat(40)}}],[],{});
+ const calls=[],workspace={task:f.task,call:async(_k,request)=>{calls.push(request);return request.type==='workspace_tree'?{tree_sha:'d'.repeat(40)}:request.type==='workspace_command'?{exit_code:0,output:'passes on another tree'}:{tree_sha:'b'.repeat(40)};},log:()=>{}};
+ const result=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{});
+ assert.equal(result.outcome,'return');assert.equal(result.pass,false);
+ assert.match(result.gaps[0],/workspace changed after this candidate was submitted \(candidate tree bbbbbbbbbbbb, workspace tree dddddddddddd\)/);
+ assert.ok(!calls.some(r=>r.type==='workspace_command'),'the check never ran against the other tree');assert.equal(f.requests.length,0);
+ const evidence=f.h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_evidence'",f.task.id).map(r=>JSON.parse(r.data));
+ assert.deepEqual(evidence.map(e=>[e.version,e.candidate_version,e.skipped]),[['d'.repeat(40),'b'.repeat(40),'workspace_changed']]);
+ // The same workspace still holding the candidate's tree runs the check and records the tree it tested.
+ const again=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
+ again.h.store.run("UPDATE policies SET test_command='required-check' WHERE repository_id='101'");again.task.workspace_id='a'.repeat(48);again.task.generation=1;
+ again.records.submit(again.task.id,[{kind:'code',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),tree_sha:'b'.repeat(40)}}],[],{});
+ const same={task:again.task,call:async(_k,request)=>request.type==='workspace_command'?{exit_code:1,output:'A real mandatory check failed'}:{tree_sha:'b'.repeat(40)},log:()=>{}};
+ assert.ok((await evaluateDelivery(again.h.store,again.task,same,new Redactor(),async()=>{})).gaps[0].includes('mandatory check failed'));
+ const tested=again.h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_evidence'",again.task.id).map(r=>JSON.parse(r.data));
+ assert.deepEqual(tested.map(e=>[e.version,e.tested_tree]),[['b'.repeat(40),'b'.repeat(40)]]);
+});
+
 test('lightweight QA runs verification commands in-place inside the shared task workspace without executor_workspace_reference',async t=>{
  const source='a'.repeat(48),calls=[];
  const f=await fixture(t,(_body,n)=>n===1?{role:'assistant',content:null,tool_calls:[{id:'command1',type:'function',function:{name:'run_command',arguments:JSON.stringify({command:'cat /workspace/tasks/'+source+'/repo/report.md'})}}]}:{role:'assistant',content:null,tool_calls:[{id:'done',type:'function',function:{name:'submit_acceptance',arguments:JSON.stringify({pass:true,issues:[]})}}]});
