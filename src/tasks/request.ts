@@ -15,7 +15,14 @@ import { runTeam } from '../roles/team.js';
 import { controlled, runRole, roleExecutionModel } from '../roles/run.js';
 import { assertManagedExecution, sourcePolicies, taskReadScopes, taskRolePolicies } from './management.js';
 import { ReadTokens } from '../agent/read-token.js';
-import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
+import { RepositoryExplorer, workspaceRepositoryTools } from '../agent/exploration.js';
+import {
+  eventSubscriptionInstructions,
+  eventSubscriptionToolNames,
+  eventSubscriptionTools,
+  executeTaskSubscriptionTool,
+  taskEventSubscriptionContext,
+} from './event-subscriptions.js';
 import { grantedTaskWrite, postReviewTool, rerunFailedRunTool, taskGithubWrite, validateReviewDelivery, publishReviewDelivery } from './github-write.js';
 import { scheduledIssueWrite } from './schedule-write.js';
 import { githubWriteTool, grantedGithubWriteTool, withMergePolicy } from '../github/write.js';
@@ -93,9 +100,13 @@ export async function runRequest(
   const githubWrite = taskGithubWrite(store, task, redactor, guard, githubUrl);
   const grantedWrite = grantedTaskWrite(store, task, redactor, guard, githubUrl);
   const readScopes = () => taskReadScopes(store, task).filter(scope => scope !== 'metadata');
+  const canWriteCheckout = () => covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
   const readTokens = new ReadTokens(store, repo, redactor, guard, githubUrl, readScopes(), readScopes);
-  const explorer = new RepositoryExplorer(readTokens, redactor, guard);
-  const readTools = repositoryTools.map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } }));
+  const explorer = new RepositoryExplorer(readTokens, redactor, guard, {
+    extract: (artifactId, data, targetPath) => spaces.current.extractArtifact(artifactId, data, targetPath),
+    canWriteCheckout,
+  });
+  const readTools = workspaceRepositoryTools.map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } }));
 
   const link = task.source_task_id ? store.get('SELECT * FROM task_followups WHERE task_id=? AND parent_id=?', task.id, task.source_task_id) : null;
   const parent = link ? store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?', link.parent_id, task.repository_id) : null;
@@ -308,7 +319,11 @@ export async function runRequest(
       records.history(task.id, 'inherited_artifact', { parent_task: parent.id, candidate_id: link!.candidate_id, source_tree: parentFiles!.version });
     }
     await restoreCheckpoint(store, task, workspace, task.head_sha);
-    const contextFiles = { ...(parent ? JSON.parse(parent.input || '{}').context_files : {}), ...blobValue(store, input.context_files), ...targetContextFiles, ...inheritedContext };
+    const subscriptionSnapshot = taskEventSubscriptionContext(store, String(task.id));
+    const wakeupContextFile = Array.isArray(subscriptionSnapshot?.wakeups) && subscriptionSnapshot.wakeups.length
+      ? { 'event-wakeups.json': JSON.stringify(subscriptionSnapshot, null, 2) }
+      : {};
+    const contextFiles = { ...(parent ? JSON.parse(parent.input || '{}').context_files : {}), ...blobValue(store, input.context_files), ...targetContextFiles, ...inheritedContext, ...wakeupContextFile };
     if (Object.keys(contextFiles).length) await workspace.context(contextFiles);
     if (controlled(store, task, entry) && !ownRole) await assessRetryReport(store, task, workspace, github, guard, redactor);
 
@@ -445,6 +460,7 @@ export async function runRequest(
         const legacyGithubWrite = !generic && (roleRuns || taskRolePolicies(store, task).every(policy => permitsTool(policy, 'github_write')));
         const offered = (tools: any[]) => (roleRuns || !generic ? tools : tools.filter(t => offeredNow(t.function.name) !== false));
 
+        const subscriptionCtx = taskEventSubscriptionContext(store, String(task.id));
         const result = await executeAgent({
           store,
           task,
@@ -457,7 +473,7 @@ export async function runRequest(
               : software()
                 ? "This contract explicitly ends in a reviewable pull request. Submit the code through submit_delivery with change_title, any labels the repository rules ask for, and verification evidence."
                 : 'Your result is delivered through submit_delivery, not published to GitHub.'
-          } ${writable ? 'You may implement in this task checkout.' : 'Do not modify tracked source files.'} Read ../context/*.json and ../notes if present. Keep conclusions concise and cite actual verification. ${taskRecordInstructions}`,
+          } ${writable ? 'You may implement in this task checkout.' : 'Do not modify tracked source files.'} Read ../context/*.json and ../notes if present. Keep conclusions concise and cite actual verification.${eventSubscriptionInstructions} ${taskRecordInstructions}`,
           prompt: JSON.stringify({
             ...((generic ? effective().includes('pull_request') : software()) ? { ci_changes: ciChanges(task) } : {}),
             ...(input.target_meta ? { target: input.target_meta } : targetSpec ? { target: targetSpec } : {}),
@@ -465,6 +481,7 @@ export async function runRequest(
             ...(input.trigger ? { trigger: input.trigger } : {}),
             ...(input.comment ? { trigger_comment: input.comment } : {}),
             ...(input.merged_updates?.length ? { merged_updates: input.merged_updates } : {}),
+            ...(subscriptionCtx ? { event_subscriptions: subscriptionCtx } : {}),
             ...(Number(input.round) > 1 ? { continuation: continuationContext(input, String(task.head_sha), targetSpec?.type === 'pr', false) } : {}),
             ...(() => {
               const updates = pendingReviewUpdates(store, task);
@@ -492,6 +509,7 @@ export async function runRequest(
             relatedArtifactTool,
             ...(writable ? [write] : []),
             ...taskTools,
+            ...eventSubscriptionTools,
             ...memoryTools,
             ...(browserPolicyOf(task) && (!roleRuns || taskRolePolicies(store, task).every(policy => permitsTool(policy, 'browser'))) ? [browserTool] : []),
           ]),
@@ -594,6 +612,9 @@ export async function runRequest(
               return result;
             }
             if (browserToolNames.includes(name)) return runBrowserTool(store, task, args, { guard, workspace });
+            if (eventSubscriptionToolNames.includes(name)) {
+              return executeTaskSubscriptionTool(store, actorTask, name, redactor.clean(args), { log });
+            }
             if (taskTools.some(t => t.function.name === name)) {
               const result = records.tool(task.id, name, redactor.clean(args), taskTraceAccess(store, actorTask));
               if (!('error' in result) && name === 'record_progress' && writable) await checkpoint(store, task, workspace);

@@ -13,7 +13,7 @@
 | 档位 | 含义 | GitHub 写入 |
 | --- | --- | --- |
 | `read` 只读问答 | 在飞书和控制台里回答、拉分支跑测试诊断 | 无 |
-| `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视（`post_review`）、维护开发进度评论（`report_development_milestone`）、重跑失败 Actions（`rerun_failed_run`）与触发工作流；不改代码 | Issues、Pull requests、Actions |
+| `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视（`post_review`）、维护开发进度评论（`report_development_milestone`）、重跑失败 Actions（`rerun_failed_run`）以及经 `github_write` 触发、重跑或取消工作流运行与 job；不改代码 | Issues、Pull requests、Actions |
 | `develop` 可开发并开 PR | 还可以改代码、推送 bot 分支并创建或更新 bot PR（`open_pull_request`） | 再加 Contents（文件、分支和引用；合并 PR 另按[自动合并策略](#项目自动合并策略)） |
 
 所有写入工具（`post_review`、`open_pull_request`、`report_development_milestone`、`rerun_failed_run`、`github_write`）均受 `capability_ceiling`、任务写入授权 `task_write_grants`（`pull_request`、`review`、`github`、`actions_rerun`）与来源策略三重约束：

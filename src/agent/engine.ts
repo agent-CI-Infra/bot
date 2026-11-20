@@ -1,5 +1,6 @@
 import { assertRequestPullRequest, isRequestedTask } from '../tasks/pull-request.js';
 import { resumeParentTasks } from '../tasks/children.js';
+import { hasActiveEventSubscriptions, nextEventSubscriptionTimeout, onSubscriptionWake, resumeExpiredEventSubscriptions } from '../tasks/event-subscriptions.js';
 import { taskReadScopes } from '../tasks/management.js';
 import { claimQueuedTask } from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
@@ -133,11 +134,12 @@ export class TaskEngine {
     this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     resumeFinishedReviews(this.store);
+    onSubscriptionWake(()=>this.tick());
     this.timer=setInterval(()=>this.tick(),1000);this.tick();this.dispatcher.start();
   }
   tick(){
     if(this.closing)return;
-    this.coordinator.tick();resumeParentTasks(this.store,id=>this.active.has(id));resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
+    this.coordinator.tick();resumeParentTasks(this.store,id=>this.active.has(id));resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeExpiredEventSubscriptions(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
     for(const request of this.store.all("SELECT m.* FROM task_merge_requests m JOIN tasks t ON t.id=m.task_id WHERE m.state IN ('waiting','queued','cancelling') AND m.next_run_at<=? AND (m.state='cancelling' OR t.status IN ('pr_opened','completed'))",Date.now())){
       if(this.active.has(request.task_id)||this.merging.has(request.task_id))continue;
       this.store.run('UPDATE task_merge_requests SET next_run_at=? WHERE task_id=?',Date.now()+15000,request.task_id);
@@ -210,7 +212,7 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;await this.coordinator.close();}
+  async close(){this.closing=true;onSubscriptionWake(null);if(this.timer)clearInterval(this.timer);await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;await this.coordinator.close();}
   // Issues whose development is not shown as it is (#1047): a write to retry, or a development that ended or paused outside a
   // run (a person cancelled it, the Issue was closed). A running development settles its Issue itself. One sweep at a time,
   // with one GitHub client per project.
@@ -963,7 +965,8 @@ export class TaskEngine {
       }
       const managerFault=this.store.get("SELECT role,status FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid DESC LIMIT 1",id);
       const managerRetry=failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||managerFault?.role===roleConfig(this.store,task).controller.role&&managerFault?.status==='fault';
-      const state=managerRetry&&failure.state==='failed'? 'retry_wait':automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
+      const subscriptionAlreadyWoken=failure.code==='event_subscription_pending'&&!hasActiveEventSubscriptions(this.store,id);
+      const state=subscriptionAlreadyWoken?'queued':managerRetry&&failure.state==='failed'? 'retry_wait':automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
       const previousCode=current?.retry_error_code||current?.error_code;
       // A development that prepares a new head (headMoved) starts over: earlier failures were about the old one.
       const retries=headMoved?0:counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;
@@ -974,14 +977,15 @@ export class TaskEngine {
       // The same stop again waits twice as long as the last time, up to a cap; a different stop starts over. Automatic
       // retries back off too (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted.
       const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
-      const delay=failure.code==='manager_deferred'?Math.max(5000,failure.retryAfterMs??30000):limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
+      const delay=subscriptionAlreadyWoken?0:state==='waiting_event'?Math.max(1000,(nextEventSubscriptionTimeout(this.store,id)??(now+60000))-now)
+        :failure.code==='manager_deferred'?Math.max(5000,failure.retryAfterMs??30000):limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
         :counted&&cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
       // The module of event work hears that its task ended without a result (a waiting or retried task has not ended).
       if(event&&current?.claim_token===token&&['failed','cancelled','superseded','needs_replan'].includes(state))event.ended?.(this.store,task,failure.code,redactor.text(String(failure.detail||'')));
-      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
+      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:subscriptionAlreadyWoken?null:failure.code,retry_count:retries,wait_count:subscriptionAlreadyWoken?0:waits,
         retry_error_code:counted?failure.code:retrying&&!headMoved?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
-        rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
+        rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay,...(subscriptionAlreadyWoken?{attempt:task.attempt+1}:{})});
       // A development whose go-ahead no longer holds goes back to the Manager to answer the person (#815), not to a retry button.
       if(failure.code==='development_not_approved'&&task.kind==='development.issue'&&state==='waiting_permission'&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))
         developmentStopped(this.store,{...task,input:this.store.get('SELECT input FROM tasks WHERE id=?',id)?.input??task.input},redactor.text(String(failure.detail||'')));

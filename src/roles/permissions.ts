@@ -19,7 +19,7 @@ const legacyItems: PermissionItem[] = [
   access('role_memory', '角色知识', ['search_role_memory', 'read_role_memory'], ['remember_role_memory'], '查询或记录当前角色的知识。'),
   access('skills', '技能包', ['read_skill'], [], '读取绑定在当前角色上的技能文件。'),
   access('related_artifacts', '关联交付物', ['read_related_artifact'], [], '读取任务提供的关联交付物。'),
-  access('github', 'GitHub 内容', ['github_read_token', 'github_read', 'github_search', 'read_job_log'], [], '读取本次任务授权的仓库；不授予 GitHub 写入凭据。'),
+  access('github', 'GitHub 内容', ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'download_artifact'], [], '读取本次任务授权的仓库；不授予 GitHub 写入凭据。'),
   // 「访问其他角色的任务」：拒绝 / 只读 / 读写。读写的工具只在提供它的入口出现（服务角色的任务操作），工作角色现有的值和快照不变。
   access('project_tasks', '其他角色的任务', ['list_project_tasks', 'read_project_task'], ['manage_project_task'], '只读查询范围内其他角色任务的进展；读写还可以追加指令、暂停、继续或取消这些任务，仍走管理服务的版本检查和幂等。角色自己的独立任务不受这一项限制。'),
   access('coordination', '跨任务协调记录', ['read_coordination'], ['acknowledge_coordination', 'decide_coordination', 'request_task_coordination', 'wait_for_tasks', 'submit_coordination'], '读取协调通知，或提出请求、等待依赖、登记采纳、提交建议；请求方 Manager 还可决定重试或撤回协调建议。'),
@@ -51,7 +51,9 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   'submit_report','open_pull_request','post_review',
   // The task's own workspace choice (#769): which worktree of the project computer it works in. They read and write no
   // files themselves, so they need no computer permission.
-  'list_workspaces','use_workspace','create_workspace'];
+  'list_workspaces','use_workspace','create_workspace',
+  // Lightweight webhook event subscriptions (#1168) for releasing a task's execution slot while waiting for external CI/GitHub events.
+  'subscribe_event','list_event_subscriptions','cancel_event_subscription'];
 const githubReads = ['github_read_token','github_read','github_search'];
 const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
 const github = (item: PermissionItem) => ({ ...item, group: 'github' });
@@ -65,7 +67,7 @@ export const permissionItems: PermissionItem[] = [
   platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理共享项目计划和通知订阅，目标与收件人仍受项目范围限制。')),
   github(access('github_issues','Issue',githubReads,['github_write'],'只读：查看 Issue、评论和标签。读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。')),
   github(access('github_pull_requests','Pull Request',githubReads,['github_write'],'只读：查看 PR、diff 和检视。读写：还可以用 github_write 开 PR、修改 PR，评论，发检视（包括批准和要求修改）、请求检视人。合并 PR 需要 Contents 和 Pull Request 都是读写，并按项目的自动合并策略。')),
-  github(access('github_actions','Actions',[...githubReads,'read_job_log'],['github_write'],'只读：查看工作流运行、job 和日志。读写：还可以用 github_write 触发声明了 workflow_dispatch 的工作流。失败处理的重跑不需要这项。')),
+  github(access('github_actions','Actions',[...githubReads,'read_job_log','download_artifact'],['github_write'],'只读：查看工作流运行、job、日志并下载构建产物到任务工作区。读写：还可以用 github_write 触发 workflow_dispatch、重跑或取消运行与 job。失败处理的重跑不需要这项。')),
   github(access('github_contents','Contents',githubReads,['github_write'],'只读：读取代码和提交。读写：还可以用 github_write 提交文件、创建 Git 对象、分支和引用，可以直接推送到分支；合并 PR 另需 Pull Request 读写，并按项目的自动合并策略。')),
   github(access('github_checks','Checks',githubReads,[],'读取检查运行和结论；尚未提供写入检查结果的角色工具。')),
   github(access('github_statuses','Commit Status',githubReads,[],'读取提交状态；尚未提供发布状态的角色工具。')),
@@ -231,7 +233,7 @@ export function permissionTools(value: RolePermissions): string[] {
   const scopes=githubReadScopes(p);
   if (scopes.length) ['github_read_token','github_read'].forEach(name => tools.add(name));
   if (scopes.includes('issues')||scopes.includes('pull_requests')) tools.add('github_search');
-  if (resourceAllowed(p,'actions')) tools.add('read_job_log');
+  if (resourceAllowed(p,'actions')) ['read_job_log','download_artifact'].forEach(name => tools.add(name));
   if (githubWrites(p)) tools.add('github_write');
   return [...tools];
 }
@@ -252,7 +254,7 @@ export function narrowPermissions(value: RolePermissions, tools: readonly string
     p[keyOf(resource)] = 'custom';
     for (const operation of resourceOperations) {
       // Deliveries (publish, report) need no role permission; every direct write goes through github_write.
-      const tool = operation === 'read' ? resource === 'actions' && allowed.has('read_job_log') || githubReads.some(name => allowed.has(name))
+      const tool = operation === 'read' ? resource === 'actions' && (allowed.has('read_job_log') || allowed.has('download_artifact')) || githubReads.some(name => allowed.has(name))
         : ['publish','report'].includes(operation) || allowed.has('github_write');
       p[mask(resource,operation)] = tool && resourceAllowed(original,resource,operation) ? 'allow' : 'deny';
     }
@@ -291,7 +293,8 @@ export function migratePermissions(role: { role_id: string; kind: RoleKind; perm
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,16);
 export function permissionSnapshot(permissions: RolePermissions, kind?: RoleKind) {
   const tools = permissionTools(permissions).filter(name => (name !== 'submit_acceptance' || kind === 'evaluator') &&
-    (name !== 'write_file' || !['observer','evaluator'].includes(kind??''))), has = (tool: string) => tools.includes(tool);
+    (name !== 'write_file' || !['observer','evaluator'].includes(kind??'')) &&
+    (!['subscribe_event','cancel_event_subscription'].includes(name) || kind !== 'evaluator')), has = (tool: string) => tools.includes(tool);
   return { id: 'permissions', version: hash({permissions,tools}), tools, permissions:normalizePermissions(permissions), authorities: {
     query_facts: has('read_task_record') || has('read_project_task'), delegate: has('delegate_role'), coordinate: has('request_task_coordination') || has('submit_coordination'),
     nominate: has('nominate_delivery'), edit_candidate: has('write_file'), decide_acceptance: has('submit_acceptance'),

@@ -149,7 +149,7 @@ export class GitHub {
   }
   // replaced: the token a first 401 replaced. GitHub answers 401 for a token that expired or was revoked; an installation
   // token this client minted is then minted again and the request sent once more. Only a second 401 stops the task.
-  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false, replaced?: string): Promise<any> {
+  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false, replaced?: string, artifactMaxBytes?: number): Promise<any> {
     await this.guard();
     this.store?.checkAuthorization();
     if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
@@ -160,35 +160,39 @@ export class GitHub {
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
     let response: Response;
+    const redirectedDownload = jobLogs || artifactMaxBytes !== undefined;
     if(method!=='GET')this.beforeWrite?.();
     // A publication may need the exact credentials that were issued during this guard or refresh.
     const outgoing = typeof body === 'function' ? body() : body;
-    try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: jobLogs ? 'manual' : 'error', signal: AbortSignal.timeout(30000),
+    try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: redirectedDownload ? 'manual' : 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(outgoing === undefined ? {} : { body: JSON.stringify(outgoing) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
     this.status = response.status;
     if (window) observe(this.store, window, response.headers, response.status);
-    if (jobLogs && response.status === 302) {
-      // Only a fixed Actions job-log endpoint can enter this branch. The URL is supplied by GitHub,
+    if (redirectedDownload && response.status === 302) {
+      // Only a fixed Actions job-log or artifact-zip endpoint can enter this branch. The URL is supplied by GitHub,
       // never by a model; signed storage requests deliberately carry no GitHub authorization header.
       const location = response.headers.get('location'); await response.body?.cancel();
+      const redirectErr = jobLogs ? 'github_log_redirect_invalid' : 'github_artifact_redirect_invalid';
+      const downloadErr = jobLogs ? 'github_log_download_failed' : 'github_artifact_download_failed';
+      const label = jobLogs ? '日志' : '构建产物';
       let address: URL;
-      try { address = new URL(location || ''); } catch { return stop('github_log_redirect_invalid', undefined, 'GitHub 日志下载没有返回有效地址。'); }
+      try { address = new URL(location || ''); } catch { return stop(redirectErr, undefined, `GitHub ${label}下载没有返回有效地址。`); }
       if (address.username || address.password || address.hash || (address.protocol !== 'https:' && !(address.protocol === 'http:' && address.origin === new URL(this.apiUrl).origin)))
-        return stop('github_log_redirect_invalid', undefined, 'GitHub 日志下载返回了不安全的地址，已拒绝读取。');
+        return stop(redirectErr, undefined, `GitHub ${label}下载返回了不安全的地址，已拒绝读取。`);
       await this.guard();
       try { response = await fetch(address, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(30000) }); }
-      catch { return stop('github_log_download_failed', 'retry_wait', 'GitHub 日志下载失败，未转发 GitHub 令牌或记录临时下载地址。'); }
-      if (!response.ok) { await response.body?.cancel(); return stop('github_log_download_failed', 'retry_wait', `GitHub 日志存储返回 HTTP ${response.status}，可稍后重试读取。`); }
+      catch { return stop(downloadErr, 'retry_wait', `GitHub ${label}下载失败，未转发 GitHub 令牌或记录临时下载地址。`); }
+      if (!response.ok) { await response.body?.cancel(); return stop(downloadErr, 'retry_wait', `GitHub ${label}存储返回 HTTP ${response.status}，可稍后重试读取。`); }
     }
-    // A followed job-log redirect that fails has already stopped above, so a 401 here is GitHub's answer to the token.
+    // A followed redirect that fails has already stopped above, so a 401 here is GitHub's answer to the token.
     if (response.status === 401 && renewable && !replaced) {
       await response.body?.cancel();
       // Another request of this client may already have replaced the refused token.
       if (this.token === token) await this.renew('after_401'); else await this.renewing;
-      return this.request(method, path, body, allow404, this.token, allowEmptyRepository, snapshotBlob, jobLogs, token);
+      return this.request(method, path, body, allow404, this.token, allowEmptyRepository, snapshotBlob, jobLogs, token, artifactMaxBytes);
     }
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
@@ -223,20 +227,22 @@ export class GitHub {
     // runtime error and failed the task (a publication whose bot was blocked while GitHub's answer arrived).
     const unread = (error: unknown): never => {
       if (error instanceof TaskError) throw error;
-      return stop(jobLogs ? 'github_log_download_failed' : method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
+      return stop(jobLogs ? 'github_log_download_failed' : artifactMaxBytes !== undefined ? 'github_artifact_download_failed' : method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
         this.redactor.text(`GitHub 请求 ${method} ${path} 读取响应失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`));
     };
-    if (jobLogs) {
+    if (jobLogs || artifactMaxBytes !== undefined) {
+      const limit = jobLogs ? 8 * 1024 * 1024 : artifactMaxBytes!;
       const reader = response.body?.getReader(), chunks: Uint8Array[] = []; let size = 0;
       try {
         if (reader) for (;;) {
           const { done, value } = await reader.read(); if (done) break;
           size += value.length;
-          if (size > 8 * 1024 * 1024) return stop('github_log_too_large', undefined, '该 job 日志超过 8 MiB，未返回不完整内容；请在 Actions 查看完整日志。');
+          if (size > limit) return stop(jobLogs ? 'github_log_too_large' : 'github_artifact_too_large', undefined,
+            jobLogs ? '该 job 日志超过 8 MiB，未返回不完整内容；请在 Actions 查看完整日志。' : `该构建产物压缩包超过 ${Math.floor(limit / (1024 * 1024))} MiB 上限，已拒绝下载。`);
           chunks.push(value);
         }
       } catch (error) { unread(error); } finally { await reader?.cancel().catch(() => {}); }
-      return Buffer.concat(chunks).toString('utf8');
+      return jobLogs ? Buffer.concat(chunks).toString('utf8') : Buffer.concat(chunks);
     }
     let value: string;
     try { value = await response.text(); } catch (error) { return unread(error); }
@@ -246,6 +252,10 @@ export class GitHub {
   async jobLog(jobId: number): Promise<string> {
     if (!Number.isSafeInteger(jobId) || jobId < 1) return stop('github_log_job_invalid', undefined, 'Actions job ID 无效。');
     return this.request('GET', this.path(`/actions/jobs/${jobId}/logs`), undefined, false, this.token, false, false, true);
+  }
+  async artifactArchive(artifactId: number, maxBytes = 32 * 1024 * 1024): Promise<Buffer> {
+    if (!Number.isSafeInteger(artifactId) || artifactId < 1) return stop('github_artifact_invalid', undefined, 'Actions artifact ID 无效。');
+    return this.request('GET', this.path(`/actions/artifacts/${artifactId}/zip`), undefined, false, this.token, false, false, false, undefined, maxBytes);
   }
   // A short-lived token of the App installation with permissions the task token was not given, for one control-plane write
   // (resolving a review thread takes contents: write). It covers this repository only and is revoked after use; GitHub

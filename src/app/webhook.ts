@@ -15,6 +15,8 @@ import { activeScopes, invalidate, invalidateIfLost } from '../identity/authoriz
 import { markInstallationMemberCacheDirty, markRepositoryMemberCacheDirty } from '../identity/storage.js';
 import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './delivery-audit.js';
 import { covers, projectCeiling } from '../projects/ceiling.js';
+import { matchWebhookSubscriptions, shouldFallbackWebhookToManager } from '../tasks/event-subscriptions.js';
+import { queueSubscriptionFallbackEvent } from '../dispatch/store.js';
 
 function markWebhookMemberCacheDirty(store: Store, accountId: string, event: string, payload: Json): string[] {
   if (!['member', 'organization', 'membership', 'team', 'installation', 'installation_repositories', 'installation_target'].includes(event)) {
@@ -183,7 +185,22 @@ export async function ingest(
       const policy=store.get('SELECT * FROM policies WHERE repository_id=?',String(owner.id)),pr=payload.pull_request as Json|undefined;
       // A disabled project archives everything, whatever its review switch says; the deliveries page says which one held it back.
       Object.assign(response,{review_outcome:pr?.draft===true?'draft':policy&&!policy.enabled?'project_disabled':!covers(projectCeiling(store,String(owner.id),policy),'comment')?'review_disabled':'not_trigger'});
+      const subscriptionMatch = policy?.enabled
+        ? matchWebhookSubscriptions(store, String(owner.id), event, payload, id)
+        : { matched: [], tasksWoken: [] };
+      if (subscriptionMatch.matched.length) {
+        Object.assign(response, { subscriptions_matched: subscriptionMatch.matched.length, tasks_woken: subscriptionMatch.tasksWoken.length });
+      }
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest);
+      if (
+        policy?.enabled &&
+        !subscriptionMatch.matched.length &&
+        shouldFallbackWebhookToManager(store, String(owner.id), event, payload) &&
+        !store.get("SELECT 1 FROM dispatch_events WHERE repository_id=? AND delivery_id=? AND state='pending' LIMIT 1", String(owner.id), id)
+      ) {
+        const fallbackQueued = queueSubscriptionFallbackEvent(store, String(owner.id), event, payload, id);
+        if (fallbackQueued) Object.assign(response, { subscription_fallback_queued: fallbackQueued });
+      }
       Object.assign(response, { forwards_created: enqueueForwards(store,String(owner.id),event,payload,id) });
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }

@@ -21,6 +21,7 @@ import { assertRequestPullRequest, genericTask, isRequestedTask, pullRequestRefu
 import { assertGrantable, grantTaskWrites, projectRefusal, requestedWrites, setGrant } from './grants.js';
 import { assertCeiling } from '../projects/ceiling.js';
 import { recordBasis, requestBasis } from '../dispatch/basis.js';
+import { cancelTaskEventSubscription } from './event-subscriptions.js';
 
 export interface NormalizedTaskTarget {
   type: 'issue' | 'pr' | 'branch' | 'commit';
@@ -101,6 +102,20 @@ export class TaskCommands {
       // A Manager never lends a write it does not hold itself: its permissions as issued to this run and as configured now.
       const live=config?.roles.find(r=>r.role_id===caller!.role)?.permissions,granter=[...(caller?.permissions?[caller.permissions]:[]),...(live?[live]:[])];
       const result=grantTaskWrites(this.store,task!,input,caller?'role:'+caller.role:'user:'+user.id,granter);this.hooks.tick?.();return result as unknown as Json;
+    }
+    const cancelSubscription = /^\/api\/tasks\/([^/]+)\/subscriptions\/([^/]+)\/cancel$/.exec(url.pathname);
+    if (cancelSubscription && method === 'POST') {
+      fields(input, ['reason']);
+      const filter = scope(user, 'repository_id');
+      const task = this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`, cancelSubscription[1]!, ...filter.args);
+      if (!task) return fail(404, 'task_not_found');
+      const reason = input.reason !== undefined ? text(input.reason, 500) : undefined;
+      const actor = caller ? 'role:' + caller.role : 'user:' + user.id;
+      const result = cancelTaskEventSubscription(this.store, String(task.id), cancelSubscription[2]!, actor, reason);
+      if (result.error === 'subscription_not_found') return fail(404, 'subscription_not_found');
+      this.store.audit(user.id, 'task.subscription.cancel', cancelSubscription[2]!, task.repository_id);
+      this.hooks.tick?.();
+      return result as unknown as Json;
     }
     const intervention=/^\/api\/tasks\/([^/]+)\/(pause|cancel|instructions|adopt-config)$/.exec(url.pathname);
     if(intervention&&method==='POST'){
@@ -261,7 +276,7 @@ export class TaskCommands {
     // #713: a task moved out of 待处理 as obsolete is retried as the state it left, with what that state needs.
     const left=obsoleteOrigin(this.store,task);if(left)task={...task,status:left.status};
     if(this.hooks.active?.(task.id)||['queued','running','preparing','implementing','validating','publishing','result_ready'].includes(task.status))fail(409,'task_already_running');
-    if(!['paused','waiting_coordination','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan','needs_help'].includes(task.status))fail(409,'task_not_retryable');
+    if(!['paused','waiting_coordination','waiting_event','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan','needs_help'].includes(task.status))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
       // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
       const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);

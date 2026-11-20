@@ -17,6 +17,10 @@ const stepToolLabels = {
   relate_task: '关联相关任务',
   search_project_memory: '检索项目知识库',
   read_project_memory: '读取项目知识条目',
+  download_artifact: '下载构建产物',
+  subscribe_event: '注册事件订阅并让出槽位',
+  list_event_subscriptions: '查询事件订阅',
+  cancel_event_subscription: '取消事件订阅',
   acceptance: '提交独立验收结论',
 };
 
@@ -174,6 +178,16 @@ function summarizeLogStep(log, index) {
     // #1100: why a review publishes now, and which updates its next round answers.
     caption = decisionCaption(value);
     badgeNode = badge('发布决定', 'info');
+    if (value.detail) bodyNodes.push(element('p', value.detail, 'say'));
+  } else if (value.type === 'event_subscribed') {
+    caption = `注册事件订阅 · ${(value.events || []).join(' / ')}`;
+    badgeNode = badge('等待事件', 'info');
+    if (value.detail) bodyNodes.push(element('p', value.detail, 'say'));
+  } else if (value.type === 'event_wakeup') {
+    const tone = value.wake_reason === 'timeout' ? 'warning' : 'success';
+    const label = value.wake_reason === 'timeout' ? '超时唤醒' : value.wake_reason === 'manager_assigned' ? 'Manager 唤醒' : '事件唤醒';
+    caption = `${label}${value.event ? ' · ' + value.event : ''}`;
+    badgeNode = badge(label, tone);
     if (value.detail) bodyNodes.push(element('p', value.detail, 'say'));
   } else if (value.type === 'published') {
     caption = '已发布结果至 GitHub';
@@ -524,6 +538,16 @@ function step(log) {
     if (args.summary) add(element('p', clipText(args.summary, 240)));
     if (args.test_command) add(element('p', '测试：' + args.test_command, 'muted'));
     add(collapsible('原始 JSON', JSON.stringify({ arguments: args, result }, null, 2)));
+  } else if (value.type === 'event_subscribed') {
+    title.textContent = `注册事件订阅 · ${(value.events || []).join(' / ')}`;
+    meta.prepend(badge('等待事件', 'info'));
+    if (value.detail) add(element('p', value.detail, 'say'));
+  } else if (value.type === 'event_wakeup') {
+    const tone = value.wake_reason === 'timeout' ? 'warning' : 'success';
+    const label = value.wake_reason === 'timeout' ? '超时唤醒' : value.wake_reason === 'manager_assigned' ? 'Manager 唤醒' : '事件唤醒';
+    title.textContent = `${label}${value.event ? ' · ' + value.event : ''}`;
+    meta.prepend(badge(label, tone));
+    if (value.detail) add(element('p', value.detail, 'say'));
   } else if (value.type === 'published') {
     title.textContent = '发布到 GitHub'; const links = element('div', '', 'calls');
     for (const out of value.outputs || []) {

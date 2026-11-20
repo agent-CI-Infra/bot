@@ -154,6 +154,97 @@ function taskRunHistoryCard(roles) {
   }
   section.append(list); return section;
 }
+// Active and recent webhook event subscriptions registered by the task (#1168).
+const subscriptionStates = {
+  active: ['等待触发', 'info'],
+  matched: ['已命中', 'success'],
+  timed_out: ['超时唤醒', 'warning'],
+  cancelled: ['已取消', ''],
+};
+const subscriptionWakeLabels = {
+  webhook_matched: 'Webhook 直接命中',
+  manager_assigned: 'Manager 兜底关联',
+  timeout: '到达超时时间自动唤醒',
+  operator_cancelled: '人工取消订阅',
+  agent_cancelled: 'Agent 主动取消',
+};
+function formatSubscriptionHints(hints) {
+  if (!hints || typeof hints !== 'object') return null;
+  const parts = [];
+  if (hints.run_id != null) parts.push('run_id=' + hints.run_id);
+  if (hints.workflow) parts.push('workflow=' + hints.workflow);
+  if (hints.head_sha) parts.push('head_sha=' + String(hints.head_sha).slice(0, 12));
+  if (hints.branch) parts.push('branch=' + hints.branch);
+  if (hints.object_number != null) parts.push('#' + hints.object_number);
+  if (hints.action) parts.push('action=' + hints.action);
+  if (hints.conclusion) parts.push('conclusion=' + hints.conclusion);
+  for (const [key, val] of Object.entries(hints)) {
+    if (['run_id', 'workflow', 'head_sha', 'branch', 'object_number', 'action', 'conclusion'].includes(key) || val == null || val === '') continue;
+    parts.push(`${key}=${String(val)}`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+function taskSubscriptionsCard(task, subscriptions, canManage) {
+  const section = card('事件订阅');
+  section.classList.add('task-subscriptions');
+  section.dataset.testid = 'task-subscriptions-card';
+  const activeCount = subscriptions.filter(s => s.state === 'active').length;
+  section.append(
+    mutedLine(
+      activeCount
+        ? `当前有 ${activeCount} 条待触发订阅；等待期间不占用项目电脑执行槽位，事件命中或到达超时时间后自动唤醒。`
+        : '所有已登记订阅均已结束，保留最近触发或超时记录供核对。',
+    ),
+  );
+  const list = element('ul', '', 'history wrap');
+  for (const sub of subscriptions) {
+    const item = element('li', '', 'audit-row');
+    item.dataset.subscriptionId = sub.id;
+    item.dataset.subscriptionState = sub.state;
+    const [caption, tone] = own(subscriptionStates, sub.state) || [sub.state, ''];
+    const head = element('div', '', 'actions');
+    head.append(element('strong', (sub.events || []).join(' / ') || '仓库事件'), badge(caption, tone));
+    item.append(head);
+    const hintText = formatSubscriptionHints(sub.hints);
+    const timeoutIso = Number.isFinite(sub.timeout_at) ? new Date(sub.timeout_at).toISOString() : null;
+    const wakeText = sub.wake_reason
+      ? (own(subscriptionWakeLabels, sub.wake_reason) || sub.wake_reason) + (sub.matched_event ? `（${sub.matched_event}）` : '')
+      : null;
+    item.append(
+      facts([
+        ['匹配线索', hintText || '未限定过滤字段（按仓库事件或 Manager 兜底）'],
+        ['备注说明', sub.note || null],
+        ['超时唤醒', timeoutIso ? timestamp(timeoutIso) : null],
+        ['处理结果', wakeText],
+        ['命中摘要', sub.matched_summary || null],
+      ]),
+    );
+    if (sub.state === 'active' && canManage && !terminalStates.includes(task.status)) {
+      const cancelBtn = button(
+        '取消订阅',
+        async () => {
+          cancelBtn.disabled = true;
+          try {
+            await api(`/api/tasks/${encodeURIComponent(task.id)}/subscriptions/${encodeURIComponent(sub.id)}/cancel`, 'POST', {});
+            await refreshTask();
+          } catch (err) {
+            cancelBtn.disabled = false;
+            taskPollError = '';
+            notice('task-error', readErrorText(err));
+          }
+        },
+        'quiet',
+      );
+      cancelBtn.dataset.testid = 'cancel-subscription-' + sub.id;
+      const footer = element('div', '', 'actions');
+      footer.append(cancelBtn);
+      item.append(footer);
+    }
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
@@ -165,6 +256,7 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
     if (sourceDelivery) { origin.dataset.sourceDelivery = sourceDelivery; origin.append(facts([['来源投递', button('查看投递', () => openTaskDelivery(sourceDelivery).catch(error), 'quiet linkish')]])); }
     side.append(origin);
   }
+  if (detail.event_subscriptions?.length) side.append(taskSubscriptionsCard(task, detail.event_subscriptions, detail.can_manage !== false));
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(task, record, roles, purposes));
   side.append(taskRunHistoryCard(roles));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));

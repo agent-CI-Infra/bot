@@ -6,7 +6,7 @@ export function resultPreview(value,limit=32768){
   while(Buffer.byteLength(JSON.stringify(result()))>limit&&first.length+last.length){first=first.slice(0,Math.floor(first.length*.75));last=last.length>1?last.slice(-Math.floor(last.length*.75)):'';}
   return result();
 }
-const repositoryTools=new Set(['github_read','github_search','read_job_log']);
+const repositoryTools=new Set(['github_read','github_search','read_job_log','download_artifact']);
 // Pi compaction summarizes older history but always keeps the latest tool call with all of its results. Its summary
 // (earlier history plus, for a split turn, the turn prefix) takes up to two model outputs of 8192 tokens.
 const compactionSummaryTokens=2*8192;

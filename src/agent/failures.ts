@@ -3,7 +3,7 @@
 export type FailureCause = 'external'|'github_access'|'github_rejected'|'model'|'environment'|'repository'|'task_changed'|'publication'|'role_configuration'|'bot';
 
 const causes: Record<FailureCause,{label:string,codes:string[]}> = {
-  external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete','github_log_download_failed',
+  external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete','github_log_download_failed','github_artifact_download_failed',
     'actions_scan_incomplete','actions_completion_time_missing','claude_gateway_unavailable','claude_rate_limited','claude_transport_error','agent_tool_download_failed'] },
   github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_installation_access_revoked','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
@@ -53,7 +53,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
     'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired',
     // A role at its concurrency limit: nothing ran, so the queue retries it without spending an attempt.
-    'role_capacity','task_children_pending','manager_execution_stopped',
+    'role_capacity','task_children_pending','event_subscription_pending','manager_execution_stopped',
     // #735: the install named a CLI version (or Node runtime) an active run is still executing; it waits for that run.
     'agent_tool_version_in_use'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
@@ -67,7 +67,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   bot: { label:'Bot 自身问题', codes:['harness_permission_mismatch','pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed','publication_receipt_mismatch',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
-    'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing',
+    'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','github_artifact_redirect_invalid','github_artifact_too_large','github_artifact_invalid','actions_report_identity_missing',
     'role_run_protocol_invalid','role_run_secret_rejected','role_run_operation_used','role_run_unknown','role_checkpoint_not_found','role_run_handle_unknown','role_run_not_started','role_recovery_scope_mismatch','role_run_cursor_invalid',
     'run_token_ttl_invalid','run_token_invalid','run_token_scope_mismatch','run_token_capability_denied','run_candidate_invalid','claude_prepare_required','claude_run_context_required','claude_session_scope_mismatch','claude_tool_denied',
     // A recorded result or trajectory record that fails its hash check; replaying the call could repeat its effect.
@@ -103,7 +103,7 @@ export function automaticState(code: string, state: string): string {
 }
 
 // These states are polled by the engine and continue on their own; every other paused or failed state waits for 重试.
-const automatic = new Set(['queued','retry_wait','waiting_coordination','waiting_configuration','waiting_environment','waiting_pr_head']);
+const automatic = new Set(['queued','retry_wait','waiting_coordination','waiting_event','waiting_configuration','waiting_environment','waiting_pr_head']);
 // A wait the engine ends by itself once its condition is gone, in a state that otherwise waits for a person.
 const resumedWaits = new Set(['github_installation_access_revoked']);
 const environmentFailures = new Set(['execution_interrupted','workspace_init_failed','workspace_write_failed',
@@ -113,7 +113,7 @@ const environmentFailures = new Set(['execution_interrupted','workspace_init_fai
 // Waits the control plane ends by itself once the outside condition clears: they are not failed attempts, so they do not
 // consume the retry burst. A role at its concurrency limit is one of them — nothing about the run was tried. A pull request
 // that got new commits (#770) is not a failure either: the task prepares the new head with its work kept.
-const capacityWaits = new Set(['manager_deferred','github_rate_limited','role_capacity','task_children_pending','manager_execution_stopped','pull_request_head_changed']);
+const capacityWaits = new Set(['manager_deferred','github_rate_limited','role_capacity','task_children_pending','event_subscription_pending','manager_execution_stopped','pull_request_head_changed']);
 export function isAttemptFailure(code: string|null|undefined, state: string) {
   return state==='retry_wait'&&!capacityWaits.has(code||'')||state==='waiting_environment'&&environmentFailures.has(code||'');
 }
@@ -125,6 +125,7 @@ const codeActions: Record<string,string> = {
   obsolete_closed:'Issue 或 PR（或这个任务来源的那个）已关闭或合入，任务已自动移出待处理，无需处理。原来的失败保留在时间线里；仍需要时可以点「重试」。',
   obsolete_expired:'这是很久以前因平台或临时原因（限流、服务不可用、上下文或响应超限、运行异常等）留下的失败，之后没有新的动静，已自动移出待处理，无需处理。原来的失败保留在时间线里；仍需要时可以点「重试」。',
   task_children_pending:'正在等待子任务返回；任一结果到达后由父任务 Manager 自动继续协调，无需人工重试。',
+  event_subscription_pending:'正在等待已订阅的仓库事件触发；匹配事件到达或到达超时时间后任务会自动唤醒继续执行，期间不占用执行槽位，无需人工重试。',
   manager_execution_stopped:'Manager 已停止本次角色执行；已有产物和证据保留，接下来由 Manager 决定恢复或调整安排。',
   stage_policy_changed:'阶段策略已变化，任务已暂停。等到安全检查点后采用新配置，旧 run 和证据保留为历史。',
   stage_plan_stale:'阶段计划的合同版本已过期，任务已暂停。显式重试或采用当前配置并重新规划后继续。',

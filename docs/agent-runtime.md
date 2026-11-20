@@ -31,6 +31,8 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 - `github_read`：读取当前仓库的目录、文件、Git tree、提交、其他 Issue/PR 与讨论、Actions 和检查信息。路径相对当前仓库，文件内容解码为 UTF-8，可用 `ref` 选择固定提交并按 API 分页读取列表。
 - `github_search`：搜索当前仓库的 Issue 与 PR，支持 GitHub issue search 语法和分页；仓库范围由执行器固定并核对返回项。
 - `read_job_log`：读取当前仓库任意相关 Actions job 的日志片段，保留 run、attempt、job 与行号；日志下载和脱敏也由执行器完成。
+- `download_artifact`（#1168，仅工作区任务提供）：在当前任务具备 Actions 读权限时，按 `artifact_id` 下载并安全解压该仓库的构建产物到任务工作区（默认 `../context/artifacts/<artifact_id>`，不污染候选提交；严格限制压缩/解压体积，拒绝路径穿越与符号链接逃逸，302 跳转存储地址不转发安装令牌）。
+- `subscribe_event` / `list_event_subscriptions` / `cancel_event_subscription`（#1168）：任务等待外部仓库事件（如 `workflow_run`、`check_suite`、`pull_request`、`issue_comment` 等）时登记轻量订阅表 `event_subscriptions`（支持可选宽松匹配线索 `run_id`、`workflow`、`head_sha`、`branch`、`object_number`、`note` 与 `timeout_seconds`）并释放当前执行槽位进入 `waiting_event`。Webhook 到达时优先直接命中并唤醒任务；过滤字段未命中但该仓库存在待触发 `active` 订阅时，将事件与待触发订阅交给 Manager 兜底关联并经 `continue_task` 唤醒；到达 `timeout_at` 仍未收到预期事件时自动唤醒任务，由 Agent 用只读工具核查真实状态。
 
 先调用 `github_read_token` 建立只读访问。令牌只覆盖当前接入仓库，权限取安装已授予的内容、Issue、PR、Actions 等读取项；缺少权限时返回诊断，不回退到写令牌。CI 的令牌不离开控制面。Pi 的结构化读取工具通过任务邮箱调用同一个执行器；原有命令工具继续可使用同一次签发的只读令牌，真实凭据不进入模型上下文。任务结束、失败或中止后撤销签发的令牌。
 
@@ -44,7 +46,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 所有 agent 用同一个写工具（#381，`src/github/write.ts`）：`github_write {method, path, body?, key, merge_request?}`（`merge_request` 只用于合并，见[自动合并策略](workflows.md#项目自动合并策略)），形状和 GitHub REST 一致。`method` 是 `POST`、`PATCH`、`PUT` 或 `DELETE`，`path` 相对仓库、不带查询串（例如 `POST /issues`、`POST /issues/12/comments`、`POST /issues/12/labels`、`PATCH /issues/12`、`POST /pulls`、`POST /pulls/7/reviews`、`PUT /pulls/7/merge`、`PUT /contents/docs/a.md`、`POST /git/refs`、`POST /actions/workflows/nightly.yml/dispatches`），`body` 是 REST 请求体。服务多个仓库的入口（群聊助手、管理助手）另带 `repository`；任务入口和 Manager 固定为任务或事件所在仓库。
 
-- **授权**：每条路由按 GitHub 细粒度权限归到一个资源：Issue（Issue、评论、标签、指派人、里程碑）、Pull Request（PR、检视、行内评论、请求检视人、更新分支）、Contents（文件、Git 对象和引用、合并 PR；合并另要 Pull Request 写，并受[自动合并策略](workflows.md#项目自动合并策略)约束，#1170）、Actions（触发 workflow：`POST /actions/workflows/{文件名或 id}/dispatches`，#1072）。按编号操作的 `/issues/{n}/…` 先用只读令牌查清对象是 Issue 还是 PR，再按它的资源判断；评论编号先查到所属对象。调用方角色对该资源有读写（或旧配置里对应的创建、评论、分类标签子集）才允许，发送前再核对一次实时权限。仓库外和未列出的路由一律拒绝。
+- **授权**：每条路由按 GitHub 细粒度权限归到一个资源：Issue（Issue、评论、标签、指派人、里程碑）、Pull Request（PR、检视、行内评论、请求检视人、更新分支）、Contents（文件、Git 对象和引用、合并 PR；合并另要 Pull Request 写，并受[自动合并策略](workflows.md#项目自动合并策略)约束，#1170）、Actions（触发 workflow：`POST /actions/workflows/{文件名或 id}/dispatches`，#1072；重跑或取消运行与 job：`POST /actions/runs/{run_id}/rerun`、`rerun-failed-jobs`、`rerun-pending-jobs`、`cancel`、`force-cancel`、`POST /actions/jobs/{job_id}/rerun`，#1168）。按编号操作的 `/issues/{n}/…` 先用只读令牌查清对象是 Issue 还是 PR，再按它的资源判断；评论编号先查到所属对象。调用方角色对该资源有读写（或旧配置里对应的创建、评论、分类标签子集）才允许，发送前再核对一次实时权限。仓库外和未列出的路由一律拒绝。
 - **能力上限**：项目的能力上限（#850）是每个调用方的顶：Issue、Pull Request 和 Actions 路由要 `comment`，Contents 路由要 `develop`。超过时返回 `capability_ceiling`，带 `needed`、`ceiling` 和说明，不签发令牌、不发出请求，并记一条 `refused`；签发令牌后、发送前再按当时的上限核对一次。见[项目能力上限](workflows.md#项目能力上限)。
 - **令牌**：控制面为这一次调用签发只含该资源写权限加 Metadata 读的安装令牌，发送后撤销；GitHub 返回的令牌权限多于请求时不发送。Token 账号使用账号自身的令牌。agent 和命令环境只拿得到只读令牌。
 - **文本**：给人看的 `title`、`body`（Issue、评论、PR、检视及其行内评论）按公开文本规则脱敏，其余原样发出，`@` 也不转义，所以提到谁就会通知谁；其他字符串也按相同白名单遮盖凭据。Base64 文件内容是 UTF-8 时按文本脱敏，二进制内容含已知密钥时拒绝。正文末尾加 `<!-- dept-bot-write:… -->` 标记，Token 账号以普通用户身份写入时，bot 自己的评论不会再作为新事件回来；角色任务或 Manager 开的 Issue、PR 也不作为新事件交给 Manager。

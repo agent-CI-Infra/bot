@@ -10,7 +10,12 @@ import { covers, projectCeiling, type Ceiling } from '../projects/ceiling.js';
 import { projectRefusal, setGrant } from '../tasks/grants.js';
 import { normalizeTaskTarget, type NormalizedTaskTarget } from '../tasks/commands.js';
 import { roleConfiguration } from '../roles/definition.js';
-import { githubWriteAllowed } from '../roles/permissions.js';
+import { githubWriteAllowed, githubWrites } from '../roles/permissions.js';
+import {
+  activeRepositorySubscriptions,
+  extractWebhookSubscriptionFacts,
+  resolveSubscriptionsByManager,
+} from '../tasks/event-subscriptions.js';
 import { assertManagedTask, assertTaskCaller, createManagedTask, eventTaskCaller } from '../tasks/management.js';
 import { ownIssue, recordBasis, type Basis } from './basis.js';
 import { scheduledCheckCriteria } from '../tasks/schedule-write.js';
@@ -308,6 +313,7 @@ export interface DispatchContext {
   unavailable: UnavailableWork[];
   continuations: ContinueOption[];
   related: Json[];
+  subscriptions?: ReturnType<typeof activeRepositorySubscriptions>;
 }
 export interface Refusal { work: string; code: string; reason: string; task_id?: string }
 
@@ -325,7 +331,7 @@ export const decideImmediately = (decider: SyncDecider | null) => { immediate = 
 let wake: (() => void) | null = null;
 export const onDispatchEvent = (callback: (() => void) | null) => { wake = callback; };
 
-const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'running', 'preparing', 'implementing', 'validating', 'publishing', 'result_ready'];
+const activeStates = ['queued', 'retry_wait', 'waiting_coordination', 'waiting_event', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'running', 'preparing', 'implementing', 'validating', 'publishing', 'result_ready'];
 
 function neededCeilingForOption(work: string): Ceiling {
   if (work === 'development.issue' || work === 'development.pr' || work === 'task.development') return 'develop';
@@ -375,7 +381,11 @@ function optionOffered(store: Store, repositoryId: string, work: string, eventTy
 export function recordEvent(store: Store, input: EventInput): number {
   const options = input.options;
   const offered = options.filter(option => optionOffered(store, input.repositoryId, option.work, input.type));
-  if (!offered.length && !(input.merge && continuations(store, { repository_id: input.repositoryId, object_type: input.object?.type ?? null, object_number: input.object?.number ?? null, merge: JSON.stringify(input.merge) }).length)) {
+  const hasContinuations = !!(
+    (input.merge && continuations(store, { repository_id: input.repositoryId, object_type: input.object?.type ?? null, object_number: input.object?.number ?? null, merge: JSON.stringify(input.merge) }).length) ||
+    activeRepositorySubscriptions(store, input.repositoryId).length
+  );
+  if (!offered.length && !hasContinuations) {
     for (const option of input.options) if (option.hook) hooks.get(option.hook)?.declined(store, { repository_id: input.repositoryId, type: input.type }, 'work_inactive', option.ref ?? null);
     const reasons = options.map(option => optionCeilingRefusal(store, input.repositoryId, option.work, input.type)?.reason).filter(Boolean);
     recordFiltered(store, { ...input, code: 'work_inactive', reason: reasons.length ? [...new Set(reasons)].join(' ') : '这个事件没有项目允许的工作，也没有可以续接的任务。' });
@@ -412,9 +422,32 @@ export function recordEvent(store: Store, input: EventInput): number {
  * including active development linked across a root Issue and its bot PR.
  */
 export function continuations(store: Store, event: Record<string, any>): ContinueOption[] {
-  const merge = event.merge ? JSON.parse(String(event.merge)) : null;
-  if (!merge?.kinds?.length || !event.object_number) return [];
   const repo = String(event.repository_id);
+  const subscribedTasks = store.hasTable('event_subscriptions')
+    ? store.all(
+        `SELECT DISTINCT t.id,t.kind,t.status,t.summary,t.created_at
+         FROM event_subscriptions s
+         JOIN tasks t ON t.id=s.task_id
+         WHERE s.repository_id=? AND s.state='active' AND s.timeout_at>?
+           AND t.status IN (${activeStates.map(() => '?').join(',')})
+         ORDER BY s.created_at ASC, t.rowid DESC
+         LIMIT 10`,
+        repo,
+        Date.now(),
+        ...activeStates,
+      )
+    : [];
+  const merge = event.merge ? JSON.parse(String(event.merge)) : null;
+  if (!merge?.kinds?.length || !event.object_number) {
+    return subscribedTasks.map(task => ({
+      id: 'continue:' + task.id,
+      task_id: String(task.id),
+      kind: String(task.kind),
+      status: String(task.status),
+      summary: String(task.summary),
+      created_at: String(task.created_at),
+    }));
+  }
   const objectNumber = Number(event.object_number);
   const allKinds = [...new Set([...merge.kinds, 'task.request'])];
   const marks = allKinds.map(() => '?').join(',');
@@ -485,6 +518,13 @@ export function continuations(store: Store, event: Record<string, any>): Continu
     );
     if (finished) joinable.push(finished);
   }
+  const joinableIds = new Set(joinable.map(t => String(t.id)));
+  for (const subTask of subscribedTasks) {
+    if (!joinableIds.has(String(subTask.id))) {
+      joinableIds.add(String(subTask.id));
+      joinable.push(subTask);
+    }
+  }
   return joinable.map(task => ({
     id: 'continue:' + task.id,
     task_id: String(task.id),
@@ -537,6 +577,7 @@ export function dispatchContext(store: Store, event: Row): DispatchContext {
       })
     : [];
   const tKey = threadKey(store, event);
+  const subscriptions = activeRepositorySubscriptions(store, String(event.repository_id));
   return {
     event,
     thread: readDispatchThread(store, tKey, String(event.repository_id)),
@@ -545,6 +586,7 @@ export function dispatchContext(store: Store, event: Row): DispatchContext {
     unavailable,
     continuations: joinable,
     related,
+    ...(subscriptions.length ? { subscriptions } : {}),
   };
 }
 
@@ -633,7 +675,7 @@ export function genericRefusal(
         ? githubWriteAllowed(managerRole.permissions, 'pull_requests') || githubWriteAllowed(managerRole.permissions, 'issues')
         : write === 'actions_rerun'
           ? githubWriteAllowed(managerRole.permissions, 'actions')
-          : githubWriteAllowed(managerRole.permissions, 'issues') || githubWriteAllowed(managerRole.permissions, 'pull_requests');
+          : githubWrites(managerRole.permissions);
     if (!ok) return { work: write, code: 'task_external_write_forbidden', reason: `Manager 角色当前未持有授予 ${write} 所需的 GitHub 写权限。` };
   }
   if (role) {
@@ -1084,27 +1126,30 @@ function createOptionTask(store: Store, event: Row, option: CreateOption, decisi
 }
 
 function join(store: Store, event: Row, taskId: string, decision: Decision) {
-  const merge = JSON.parse(event.merge), task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!;
-  const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify({ ...merge.data, at: event.created_at ?? new Date().toISOString() }));
-  if (inserted.changes) {
-    const input = JSON.parse(task.input || '{}');
-    const isDevWithPr = task.kind === 'development.pr' || task.kind === 'development.issue' || (task.kind === 'task.request' && (input.target?.type === 'pr' || input.target?.type === 'issue') && taskPermissions(store, task).writes.includes('pull_request'));
-    const request = isDevWithPr ? merge.data?.revision_request : null, known = (input.revision?.requests || []) as any[];
-    const revision = request && !known.some(r => r.type === request.type && String(r.id) === String(request.id))
-      ? { revision: { ...(input.revision || {}), source: input.revision?.source || 'request', requests: [...known, request] } }
-      : {};
-    const pushedHead = typeof merge.head === 'string' && /^[a-f0-9]{40}$/.test(merge.head) ? merge.head : null;
-    const headMove = task.kind === 'task.request' && input.target?.type === 'pr' && pushedHead && pushedHead !== task.head_sha
-      ? { move_to_sha: pushedHead, target: { ...input.target, ref: pushedHead } }
-      : {};
-    store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, ...revision, ...headMove, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
-    if (request) {
-      const prNumber = event.object_type === 'pr' && event.object_number ? Number(event.object_number) : Number(task.object_number);
-      store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
-        DO UPDATE SET state='done',task_id=excluded.task_id`, task.repository_id, prNumber, request.type, request.id, request.author, request.author_id,
-        request.author_type, request.url, 'done', taskId, new Date().toISOString());
+  const merge = event.merge ? JSON.parse(event.merge) : null, task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!;
+  if (merge) {
+    const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify({ ...merge.data, at: event.created_at ?? new Date().toISOString() }));
+    if (inserted.changes) {
+      const input = JSON.parse(task.input || '{}');
+      const isDevWithPr = task.kind === 'development.pr' || task.kind === 'development.issue' || (task.kind === 'task.request' && (input.target?.type === 'pr' || input.target?.type === 'issue') && taskPermissions(store, task).writes.includes('pull_request'));
+      const request = isDevWithPr ? merge.data?.revision_request : null, known = (input.revision?.requests || []) as any[];
+      const revision = request && !known.some(r => r.type === request.type && String(r.id) === String(request.id))
+        ? { revision: { ...(input.revision || {}), source: input.revision?.source || 'request', requests: [...known, request] } }
+        : {};
+      const pushedHead = typeof merge.head === 'string' && /^[a-f0-9]{40}$/.test(merge.head) ? merge.head : null;
+      const headMove = task.kind === 'task.request' && input.target?.type === 'pr' && pushedHead && pushedHead !== task.head_sha
+        ? { move_to_sha: pushedHead, target: { ...input.target, ref: pushedHead } }
+        : {};
+      store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, ...revision, ...headMove, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
+      if (request) {
+        const prNumber = event.object_type === 'pr' && event.object_number ? Number(event.object_number) : Number(task.object_number);
+        store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
+          DO UPDATE SET state='done',task_id=excluded.task_id`, task.repository_id, prNumber, request.type, request.id, request.author, request.author_id,
+          request.author_type, request.url, 'done', taskId, new Date().toISOString());
+      }
     }
   }
+  resolveSubscriptionsByManager(store, taskId, event, decision.reason);
   log(store, taskId, { type: 'dispatch', relation: 'continued', event_id: event.id, event_type: event.type, reason: decision.reason, detail: `Manager 把事件「${event.summary}」续接到这个任务：${decision.reason}` });
   if (task.status === 'succeeded') continueFinishedReview(store, taskId);
   const facts = JSON.parse(String(event.facts || '{}'));
@@ -1220,6 +1265,42 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
     if (error instanceof HttpError) throw new TaskError(error.code, 'waiting_configuration');
     throw error;
   }
+}
+
+export function queueSubscriptionFallbackEvent(
+  store: Store,
+  repositoryId: string,
+  event: string,
+  payload: Json,
+  deliveryRecordId: string,
+): number {
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
+  if (!policy?.enabled) return 0;
+  const extracted = extractWebhookSubscriptionFacts(event, payload);
+  const p = payload as any;
+  const object = p?.pull_request?.number
+    ? { type: 'pr' as const, number: Number(p.pull_request.number) }
+    : p?.issue?.number
+      ? { type: (p.issue.pull_request ? 'pr' : 'issue') as 'pr' | 'issue', number: Number(p.issue.number) }
+      : extracted.object_numbers[0]
+        ? { type: 'pr' as const, number: extracted.object_numbers[0] }
+        : null;
+  return recordEvent(store, {
+    repositoryId,
+    key: `subscription.check:${deliveryRecordId}`,
+    type: 'subscription.check',
+    source: 'github',
+    summary: `订阅事件核对：${extracted.summary}`,
+    facts: {
+      webhook_event: extracted.event,
+      action: extracted.action,
+      route: extracted.route,
+      ...extracted.excerpt,
+    },
+    object,
+    delivery: deliveryRecordId,
+    options: [],
+  });
 }
 
 export function taskDispatch(store: Store, taskId: string) {

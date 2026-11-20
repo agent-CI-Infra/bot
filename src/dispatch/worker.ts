@@ -114,9 +114,11 @@ export class Dispatcher {
       const defaultTarget = event.object_type && event.object_number
         ? { type: event.object_type === 'pr' ? 'pr' as const : 'issue' as const, number: Number(event.object_number) }
         : null;
-      const ruled = !answering && hasWork
+      const hasSubscriptions = Boolean(context.subscriptions?.length);
+      const rawRuled = !answering && hasWork && event.type !== 'subscription.check'
         ? ruleDecision(this.store, context, (role, writes) => !genericRefusal(this.store, context, role, writes, defaultTarget))
         : null;
+      const ruled = hasSubscriptions && rawRuled?.decision === 'ignore' ? null : rawRuled;
       const decision: Decision = ruled ?? (answering || (context.options.length || context.continuations.length)
         ? await this.decide(this.store, context)
         : {
