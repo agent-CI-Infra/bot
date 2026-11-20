@@ -283,6 +283,11 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role) VALUES('run-1','t-750','execution',1,1,'2026-11-18T08:00:00Z','2026-11-18T08:10:00Z','done','{}','{}','dev')");
     h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750','t-750',?,?, 'run-1','dev')",
       JSON.stringify({ type: 'tool', name: 'read', summary: '读取 static/views.css', ok: true }), '2026-11-18T08:05:00Z');
+    // #750: `.step-fold-stat` and the muted line inside `.step-fold-body` only exist for a log entry the timeline can
+    // summarise, so pinning them without this row would pin nothing (the `read` entry above falls through to the raw
+    // fallback and renders no badge). `result.bytes` is what the reviewer measured at 2.10:1 on the un-fixed dark block.
+    h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750b','t-750',?,?, 'run-1','dev')",
+      JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'static/views.css' }, result: { bytes: 61234 }, ok: true }), '2026-11-18T08:06:00Z');
     // The project detail role board shows a chip only while a role run is running, so one live run keeps the row: the
     // review measured `button.role-task-chip` at 1.12:1 and the running fill at 1.08:1 on a surface that was still light.
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
@@ -424,7 +429,7 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     for (const sample of await colours(page, ['.workbench-tab', '.workbench-quick-link', '.workbench-live-stats', '.role-backend-line'])) {
       rendered(sample, `light project detail ${sample.selector}`);
       // The fixture has a single tab and it is the current one, so it paints --color-brand; the non-current tab keeps
-      // #334155 and is pinned in test/ut/static/console-tokens.test.mjs instead. `.role-backend-line` carries the
+      // its own colour and is pinned by this file's PIN_TABLE (`overview .workbench-tab`). `.role-backend-line` carries the
       // `muted` class, and `shell.css`'s `.console-ready .muted` wins over workspace.css in both themes.
       const expected = { '.workbench-tab': 'rgb(36, 93, 224)', '.workbench-quick-link': 'rgb(36, 93, 224)', '.workbench-live-stats': 'rgb(71, 85, 105)', '.role-backend-line': 'rgb(96, 112, 135)' }[sample.selector];
       expect(sample.color, `light project detail ${sample.selector} keeps its base colour`).toBe(expected);
@@ -548,7 +553,8 @@ test('#750 dark theme keeps the task detail, project head and project page reada
 const PIN_ROWS = [
   ['task', '.step'], ['task', '.task-side'], ['task', '.task-archive-body'], ['task', 'pre.output'],
   ['task', '.task-goal-box'], ['task', '.role-run-conclusion'], ['task', '.role-run-summary'],
-  ['task', '.task-next-text'], ['task', '.task-ext-label'], ['task', '.step-fold-num'], ['task', '.step-fold-meta'],
+  ['task', '.task-next-text'], ['task', '.task-ext-label'], ['task', '.step-fold-num'], ['task', '.step-fold-meta'], ['task', '.step-fold-stat'],
+  ['task', '.step-fold-body'], ['task', '.step-fold-body .muted'],
   ['task', '.role-run-brief'], ['task', '.role-run-meta'], ['task', '.task-archive-fold > summary'],
   ['task', '.task-metrics'], ['task', '.live'], ['task', '.task-cancel-btn'], ['task', '.task-elapsed-chip'],
   ['task', '.role-run-fold'], ['task', '.role-run-fold.role-run-running'],
@@ -560,7 +566,7 @@ const PIN_ROWS = [
   ['projects', '.project-owner-bar'], ['projects', '.project-table-head'],
   ['overview', '.project-page'], ['overview', '.workbench-tab'],
   ['overview', '.workbench-tab[aria-current=page]'], ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count'],
-  ['overview', '.workbench-quick-link'], ['overview', '.workbench-live-stats'], ['overview', '.role-backend-line'],
+  ['overview', '.workbench-quick-link'], ['overview', '.workbench-live-stats'], ['overview', '.role-backend-line'], ['overview', '.role-board-table'],
   ['overview', '.role-chip-ref'], ['overview', '.role-chip-summary'],
   ['overview', '.capability-tile:not([data-state=off]) .capability-links a'],
   ['overview', '.capability-tile[data-state=off] .capability-links a'],
@@ -568,7 +574,7 @@ const PIN_ROWS = [
   ['settings', '.settings-body'], ['settings', '.project-nav'], ['settings', '.settings-rows'],
   ['audit', '.audit-filters button[aria-pressed=true]'],
   ['confirm', '.confirm-icon.danger'], ['confirm', '.confirm-body label'], ['confirm', '.confirm-actions'],
-  ['confirm', '.confirm-status.error'],
+  ['confirm', '.confirm-status.error'], ['confirm', '.confirm-status.progress'],
 ];
 
 // The values below were measured on this head, once, and are now the pin: [page, selector, dark [color, background],
@@ -615,7 +621,12 @@ const PIN_TABLE = [
   ['overview', '.workbench-tab[aria-current=page] .workbench-tab-count', ['rgb(150, 180, 255)', 'rgb(27, 44, 77)'], ['rgb(36, 93, 224)', 'rgb(237, 242, 255)']],
   ['overview', '.workbench-quick-link', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
   ['overview', '.workbench-live-stats', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(71, 85, 105)', 'rgb(255, 255, 255)']],
-  ['overview', '.role-backend-line', ['rgb(163, 179, 199)', 'rgb(29, 39, 51)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
+  // `.role-backend-line` sits in a role-board row whose fill is a state paint (the board's first row carries
+  // --color-surface-alt on some visits and not on others, with the same fixture), so only its colour is pinned here and
+  // the surface it is read against is pinned separately as `.role-board-table`. Pinning the row fill would make the
+  // table red for a reason that has nothing to do with the dark block.
+  ['overview', '.role-backend-line', ['rgb(163, 179, 199)', '*'], ['rgb(96, 112, 135)', '*']],
+  ['overview', '.role-board-table', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(23, 36, 59)', 'rgb(255, 255, 255)']],
   ['overview', '.role-chip-ref', ['rgb(150, 180, 255)', 'rgb(22, 35, 58)'], ['rgb(30, 58, 138)', 'rgb(239, 246, 255)']],
   ['overview', '.role-chip-summary', ['rgb(231, 237, 246)', 'rgb(22, 35, 58)'], ['rgb(23, 36, 59)', 'rgb(239, 246, 255)']],
   ['overview', '.capability-tile:not([data-state=off]) .capability-links a', ['rgb(150, 180, 255)', 'rgb(22, 29, 39)'], ['rgb(36, 93, 224)', 'rgb(255, 255, 255)']],
@@ -630,6 +641,10 @@ const PIN_TABLE = [
   ['confirm', '.confirm-body label', ['rgb(231, 237, 246)', 'rgb(22, 29, 39)'], ['rgb(34, 49, 58)', 'rgb(255, 255, 255)']],
   ['confirm', '.confirm-actions', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(246, 249, 250)'], 'rgb(85, 104, 138)', 'rgb(227, 234, 240)'],
   ['confirm', '.confirm-status.error', ['rgb(255, 156, 156)', 'rgb(22, 29, 39)'], ['rgb(160, 43, 49)', 'rgb(255, 255, 255)']],
+  ['task', '.step-fold-body', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(252, 253, 254)'], 'rgb(85, 104, 138)', 'rgb(241, 245, 249)'],
+  ['task', '.step-fold-body .muted', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(252, 253, 254)']],
+  ['task', '.step-fold-stat', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(51, 65, 85)', 'rgb(241, 245, 249)']],
+  ['confirm', '.confirm-status.progress', ['rgb(168, 198, 245)', 'rgb(22, 29, 39)'], ['rgb(44, 87, 145)', 'rgb(255, 255, 255)']],
 ];
 
 async function pinValues(page, rows) {
@@ -663,7 +678,7 @@ async function pinValues(page, rows) {
 }
 
 test('#750 every dark-block rule keeps its measured value in dark and in light', async ({ page }) => {
-  test.setTimeout(180000);
+  test.setTimeout(420000);
   const h = await harness();
   try {
     const { admin, password } = await setup(h);
@@ -675,6 +690,11 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role) VALUES('run-1','t-750','execution',1,1,'2026-11-18T08:00:00Z','2026-11-18T08:10:00Z','done','{}','{}','dev')");
     h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750','t-750',?,?, 'run-1','dev')",
       JSON.stringify({ type: 'tool', name: 'read', summary: '读取 static/views.css', ok: true }), '2026-11-18T08:05:00Z');
+    // #750: `.step-fold-stat` and the muted line inside `.step-fold-body` only exist for a log entry the timeline can
+    // summarise, so pinning them without this row would pin nothing (the `read` entry above falls through to the raw
+    // fallback and renders no badge). `result.bytes` is what the reviewer measured at 2.10:1 on the un-fixed dark block.
+    h.store.run("INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES('l-750b','t-750',?,?, 'run-1','dev')",
+      JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'static/views.css' }, result: { bytes: 61234 }, ok: true }), '2026-11-18T08:06:00Z');
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-2','t-750','execution',2,2,'2026-11-18T08:11:00Z','running','{}','{}','dev')");
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id) VALUES('run-3','t-750','execution',1,1,'2026-11-18T08:12:00Z','2026-11-18T08:13:00Z','succeeded','{}','{}','reviewer','asg-750')");
     h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_handoff',?,'2026-11-18T08:11:30Z','run-3','role:manager')",
@@ -718,26 +738,54 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
       await page.locator('dialog.confirm-dialog .confirm-status.error').waitFor({ state: 'visible' });
       Object.assign(values, await pinValues(page, PIN_ROWS.filter(([p]) => p === 'confirm')));
       await page.evaluate(() => document.querySelector('dialog.confirm-dialog')?.close());
+      // The second confirm state: the action never settles, so the dialog keeps `.confirm-status.progress` on screen.
+      // `widgets.js:111` writes this class on every async confirm; before this row the state had no input at all and
+      // its 2.3:1 dark reading could not fail a test.
+      await page.evaluate(() => { void confirmDialog({ title: '执行 fixture 动作？', action: '执行', body: ['这条动作故意不结束，用来把「执行中…」这一态留在屏幕上。'], run: () => new Promise(() => {}) }); });
+      await page.locator('dialog.confirm-dialog').waitFor({ state: 'visible' });
+      await page.locator('dialog.confirm-dialog').getByRole('button', { name: '执行', exact: true }).click();
+      await page.locator('dialog.confirm-dialog .confirm-status.progress').waitFor({ state: 'visible' });
+      // Only this one row: the progress dialog carries neither the danger icon nor an input label, so copying the whole
+      // `confirm` slice here would overwrite the two rows measured on the dialog above with `missing`.
+      Object.assign(values, await pinValues(page, PIN_ROWS.filter(([p, selector]) => p === 'confirm' && selector === '.confirm-status.progress')));
+      await page.evaluate(() => document.querySelector('dialog.confirm-dialog')?.close());
       return values;
     };
-    await page.emulateMedia({ colorScheme: 'dark' });
-    const dark = await collect();
-    if (process.env.PIN_DUMP) console.log('PIN_DARK=' + JSON.stringify(dark), 'PIN_LIGHT=' + JSON.stringify({ pending: true }));
-    await page.emulateMedia({ colorScheme: 'light' });
-    const light = await collect();
-    if (process.env.PIN_DUMP) console.log('PIN_LIGHT=' + JSON.stringify(light));
+    // #750: the pin runs at all three layouts, not only 1440. A row the narrow layout removes from the render path
+    // (`display: none`, or a block that only the wide layout paints) is skipped at that width, but 1440 has to render
+    // every row and stay visible — so no regression can hide by switching a row off at the one width it was pinned on.
+    const VIEWPORTS = [390, 768, 1440];
+    const shots = {};
+    for (const width of VIEWPORTS) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      const dark = await collect();
+      await page.emulateMedia({ colorScheme: 'light' });
+      const light = await collect();
+      shots[width] = { dark, light };
+      if (process.env.PIN_DUMP) console.log(`PIN_${width}=` + JSON.stringify({ dark, light }));
+    }
     if (process.env.PIN_DUMP) return;
     for (const [pageName, selector, expectedDark, expectedLight, darkBorder, lightBorder] of PIN_TABLE) {
       const key = `${pageName} ${selector}`;
-      const d = dark[key], l = light[key];
-      expect(d?.missing, `${key} must render`).toBeFalsy();
-      expect(l?.missing, `${key} must render in light`).toBeFalsy();
-      expect(d.visible, `${key} must be visible in dark`).toBe(true);
-      expect(l.visible, `${key} must be visible in light`).toBe(true);
-      for (const [theme, sample, expected, expectedBorder] of [['dark', d, expectedDark, darkBorder], ['light', l, expectedLight, lightBorder]]) {
-        expect(sample.color, `${key} ${theme} color`).toBe(expected[0]);
-        expect(sample.background, `${key} ${theme} background`).toBe(expected[1]);
-        if (expectedBorder) expect(sample.border, `${key} ${theme} border`).toBe(expectedBorder);
+      const wide = shots[1440];
+      expect(wide.dark[key]?.missing, `${key} must render at 1440`).toBeFalsy();
+      expect(wide.light[key]?.missing, `${key} must render at 1440 in light`).toBeFalsy();
+      expect(wide.dark[key].visible, `${key} must be visible in dark at 1440`).toBe(true);
+      expect(wide.light[key].visible, `${key} must be visible in light at 1440`).toBe(true);
+      for (const width of VIEWPORTS) {
+        const d = shots[width].dark[key], l = shots[width].light[key];
+        if (d?.missing || l?.missing) continue;
+        // Narrow layouts legitimately fold some rows away; only 1440 is required to keep every row visible.
+        if (width !== 1440 && (!d.visible || !l.visible)) continue;
+        expect(d.visible, `${key} must be visible in dark at ${width}`).toBe(true);
+        expect(l.visible, `${key} must be visible in light at ${width}`).toBe(true);
+        for (const [theme, sample, expected, expectedBorder] of [['dark', d, expectedDark, darkBorder], ['light', l, expectedLight, lightBorder]]) {
+          expect(sample.color, `${key} ${theme} color at ${width}`).toBe(expected[0]);
+          // '*' = this field is not pinned for this row; see the `.role-backend-line` note in PIN_TABLE.
+          if (expected[1] !== '*') expect(sample.background, `${key} ${theme} background at ${width}`).toBe(expected[1]);
+          if (expectedBorder) expect(sample.border, `${key} ${theme} border at ${width}`).toBe(expectedBorder);
+        }
       }
     }
   } finally { await h.stop(); }

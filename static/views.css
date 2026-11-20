@@ -1066,6 +1066,9 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root:not([data-theme="light"]) .role-chip-ref { color: var(--color-brand-text); }
   :root:not([data-theme="light"]) .confirm-icon.danger { background: var(--color-danger-bg); color: var(--color-danger); }
   :root:not([data-theme="light"]) .confirm-status.error { color: var(--color-danger); }
+  :root:not([data-theme="light"]) .confirm-status.progress { color: var(--color-info); }
+  :root:not([data-theme="light"]) .step-fold-body { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .step-fold-stat { background: var(--color-surface); color: var(--color-text-muted); }
   :root:not([data-theme="light"]) .confirm-body label { color: var(--color-text); }
   :root:not([data-theme="light"]) .confirm-actions { background: var(--color-surface-alt); border-top-color: var(--color-border); }
   :root:not([data-theme="light"]) .settings-body { border-top-color: var(--color-border); }
@@ -1107,6 +1110,9 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 :root[data-theme="dark"] .role-chip-ref { color: var(--color-brand-text); }
   :root[data-theme="dark"] .confirm-icon.danger { background: var(--color-danger-bg); color: var(--color-danger); }
   :root[data-theme="dark"] .confirm-status.error { color: var(--color-danger); }
+  :root[data-theme="dark"] .confirm-status.progress { color: var(--color-info); }
+  :root[data-theme="dark"] .step-fold-body { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .step-fold-stat { background: var(--color-surface); color: var(--color-text-muted); }
   :root[data-theme="dark"] .confirm-body label { color: var(--color-text); }
   :root[data-theme="dark"] .confirm-actions { background: var(--color-surface-alt); border-top-color: var(--color-border); }
   :root[data-theme="dark"] .settings-body { border-top-color: var(--color-border); }
