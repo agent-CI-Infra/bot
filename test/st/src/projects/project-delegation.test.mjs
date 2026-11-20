@@ -41,8 +41,10 @@ test('Write and Maintain collaborators may ask and create tasks, Triage and Read
 test('a project administrator delegates and revokes inside their project only, and the delegation lasts while they hold it (#847)', async t => {
   const f = await identityFixture(t), { h } = f;
   // A: organization owner, so project administrator of 101 through GitHub. B: a Read collaborator.
-  as(f, 42, 'owner-a', { owner: true }); const a = await f.login(), A = a.result.principal_id;
-  as(f, 43, 'reader-b', { owner: false, permission: 'read' }); const b = await f.login(), B = b.result.principal_id;
+  f.state.owners = [{ id: 42, login: 'owner-a' }];
+  f.state.collaborators = [{ id: 43, login: 'reader-b', role_name: 'read' }];
+  as(f, 42, 'owner-a', {}); const a = await f.login(), A = a.result.principal_id;
+  as(f, 43, 'reader-b', {}); const b = await f.login(), B = b.result.principal_id;
   const sessionA = session(h.store, A, a.result.identity_id), sessionB = session(h.store, B, b.result.identity_id), byA = client(f, sessionA), byB = client(f, sessionB);
   assert.equal(can(f, sessionB, 'tasks.read'), true); assert.equal(can(f, sessionB, 'tasks.write'), false);
   // A gives B task write by GitHub login, then appoints B project administrator.
@@ -66,22 +68,22 @@ test('a project administrator delegates and revokes inside their project only, a
   assert.equal(listed.find(g => g.source === 'github_derived').role, 'project_reader');
   // Delegated by a project administrator, B is still checked on GitHub and keeps the Read grant GitHub gives.
   assert.equal(verificationExempt(h.store, B), false);
-  as(f, 43, 'reader-b', { owner: false, permission: 'read' }); await f.identity.reverify(B);
+  as(f, 43, 'reader-b', {}); await f.identity.reverify(B);
   assert.ok(listEffectiveScopes(h.store, B).some(g => g.source === 'github_derived' && g.state === 'active'));
 
   // B, now administrator, appoints A in return. GitHub takes A's ownership away: neither delegation keeps the other alive.
   assert.equal((await byB('/api/identity/grants', 'POST', { principal_id: A, tenant_id: tenant, project_id: '101', capabilities: projectCapabilities })).status, 201);
-  as(f, 42, 'owner-a', { owner: false, permission: 'none' }); await f.identity.reverify(A);
+  f.state.owners = []; as(f, 42, 'owner-a', {}); await f.identity.reverify(A);
   assert.equal(can(f, sessionA, 'config.write'), false); assert.equal(can(f, sessionB, 'config.write'), false); assert.equal(can(f, sessionB, 'tasks.read'), true);
   assert.deepEqual([...delegations(f, A), ...delegations(f, B)].map(g => [g.state, g.reason]), Array(3).fill(['suspended', 'grantor_authority']));
   // A is owner again: both delegations count again.
-  as(f, 42, 'owner-a', { owner: true }); await f.identity.reverify(A);
+  f.state.owners = [{ id: 42, login: 'owner-a' }]; as(f, 42, 'owner-a', {}); await f.identity.reverify(A);
   assert.equal(can(f, sessionB, 'config.write'), true); assert.deepEqual(delegations(f, B).map(g => g.state), ['active', 'active']);
   // A revokes B's administration; GitHub's own grant can only change on GitHub (the members page offers no revoke for it).
   assert.equal((await byA('/api/identity/grants/' + admin.value.grant_id, 'DELETE', {})).status, 200);
   assert.equal(can(f, sessionB, 'config.write'), false); assert.equal(can(f, sessionB, 'tasks.write'), true);
   // Removing the collaborator on GitHub removes the derived grant at the next check; A's delegation stays.
-  as(f, 43, 'reader-b', { owner: false, permission: 'none' }); await f.identity.reverify(B);
+  f.state.collaborators = []; as(f, 43, 'reader-b', {}); await f.identity.reverify(B);
   assert.equal(can(f, sessionB, 'tasks.read'), true, 'the delegated member grant still covers reading');
   assert.equal(listEffectiveScopes(h.store, B).filter(g => g.source === 'github_derived' && g.state === 'active').length, 0);
   assert.equal((await byA('/api/identity/grants/' + member.value.grant_id, 'DELETE', {})).status, 200);

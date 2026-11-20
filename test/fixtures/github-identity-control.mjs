@@ -43,9 +43,9 @@ const fixture = createServer(async (req, res) => {
   if (url.pathname === '/app/installations/77/access_tokens') return send({ token: 'fixture-installation' });
   if (url.pathname === '/installation/token') { res.writeHead(204);res.end();return; }
   if (url.pathname === '/installation/repositories') return send({ total_count: 1, repositories: [{ id: 101, full_name: 'fixture/project-101', owner: target }] });
-  if (url.pathname === '/orgs/fixture/memberships/docker-user') return send({ state: 'active', role: owner ? 'admin' : 'member', organization: target, user: { id: 42 } });
+  if (url.pathname === '/orgs/fixture/members') return send(owner ? [{ id: 42, login: 'docker-user' }] : []);
   if (url.pathname === '/repos/fixture/project-101') return send({ id: 101, owner: target });
-  if (url.pathname === '/repos/fixture/project-101/collaborators/docker-user/permission') return send({ permission: 'read', user: { id: 42 } });
+  if (url.pathname === '/repos/fixture/project-101/collaborators') return send([]);
   send({}, 404);
 });
 fixture.listen(8080, '0.0.0.0');

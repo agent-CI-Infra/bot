@@ -28,7 +28,10 @@ test('project administrators start repositories of a trusted organization with i
   const f = await identityFixture(t), { h, state, admin } = f;
   installed(f, '103'); installed(f, '104'); state.accessible = ['101', '103', '104'];
   // A GitHub repository admin, not an owner: project administrator of every repository of the installation.
-  Object.assign(state, { id: 42, login: 'repo-admin', owner: false, permission: 'admin' });
+  Object.assign(state, { id: 42, login: 'repo-admin', owner: false, collaborators: [
+    { id: 42, login: 'repo-admin', role_name: 'admin' },
+    { id: 43, login: 'reader', role_name: 'read' },
+  ] });
   const login = await f.login(), principal = login.result.principal_id, byAdmin = client(f, session(h.store, principal, login.result.identity_id));
   const pending = async () => (await byAdmin('/api/identity')).value.github_connection.pending_repositories.map(repo => [repo.id, repo.self_start]);
   assert.deepEqual(await pending(), [['103', false], ['104', false]]);

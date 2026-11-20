@@ -82,6 +82,26 @@ export function identityStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS authorization_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,principal_id TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS identity_cursors(name TEXT PRIMARY KEY,sequence INTEGER NOT NULL);
     INSERT OR IGNORE INTO identity_cursors VALUES('installations',0);
+    CREATE TABLE IF NOT EXISTS github_installation_member_cache(
+      installation_ref TEXT PRIMARY KEY,target_id TEXT NOT NULL,target_type TEXT NOT NULL,repository_selection TEXT NOT NULL,
+      installation_revision INTEGER NOT NULL DEFAULT 0,owners_etag TEXT,owners_uncertain TEXT,
+      synced_at INTEGER,checked_at INTEGER,dirty INTEGER NOT NULL DEFAULT 1,failures INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,next_retry_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS github_installation_owners(
+      installation_ref TEXT NOT NULL,github_user_id TEXT NOT NULL,login TEXT NOT NULL,
+      PRIMARY KEY(installation_ref,github_user_id));
+    CREATE INDEX IF NOT EXISTS github_installation_owners_user ON github_installation_owners(github_user_id);
+    CREATE TABLE IF NOT EXISTS github_repository_member_cache(
+      installation_ref TEXT NOT NULL,repository_id TEXT NOT NULL,owner_id TEXT NOT NULL,full_name TEXT NOT NULL,
+      tier TEXT NOT NULL,in_installation INTEGER NOT NULL DEFAULT 1,etag TEXT,synced_at INTEGER,checked_at INTEGER,
+      dirty INTEGER NOT NULL DEFAULT 1,failures INTEGER NOT NULL DEFAULT 0,last_error TEXT,next_retry_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(installation_ref,repository_id));
+    CREATE INDEX IF NOT EXISTS github_repository_member_cache_repo ON github_repository_member_cache(repository_id);
+    CREATE TABLE IF NOT EXISTS github_repository_collaborators(
+      installation_ref TEXT NOT NULL,repository_id TEXT NOT NULL,github_user_id TEXT NOT NULL,login TEXT NOT NULL,role TEXT NOT NULL,
+      PRIMARY KEY(installation_ref,repository_id,github_user_id));
+    CREATE INDEX IF NOT EXISTS github_repository_collaborators_user ON github_repository_collaborators(github_user_id);
+    CREATE INDEX IF NOT EXISTS github_repository_collaborators_repo ON github_repository_collaborators(repository_id);
     CREATE TRIGGER IF NOT EXISTS identity_user_insert AFTER INSERT ON users BEGIN
       INSERT OR IGNORE INTO principals(id,kind,user_id) VALUES(NEW.id,'human',NEW.id); END;
     CREATE TRIGGER IF NOT EXISTS identity_user_delete AFTER DELETE ON users BEGIN
@@ -116,6 +136,8 @@ export function identityStorage(store: Store): void {
   // Why the latest GitHub permission check was uncertain: [{installation, code}], never a credential (#521).
   if (!store.all('PRAGMA table_info(external_identities)').some(c => c.name === 'verification_issues'))
     store.db.exec('ALTER TABLE external_identities ADD COLUMN verification_issues TEXT');
+  if (!store.all('PRAGMA table_info(github_repository_member_cache)').some(c => c.name === 'in_installation'))
+    store.db.exec('ALTER TABLE github_repository_member_cache ADD COLUMN in_installation INTEGER NOT NULL DEFAULT 1');
   store.transaction(() => {
     identityProjection(store);
     if (!store.get('SELECT 1 FROM identity_migrations WHERE version=1')) {
@@ -128,4 +150,23 @@ export function identityStorage(store: Store): void {
       users: store.get('SELECT count(*) n FROM users')!.n, grants: store.get("SELECT count(*) n FROM scoped_grants WHERE policy='legacy'")!.n,
       quarantined: store.get('SELECT count(*) n FROM identity_quarantine')!.n }));
   });
+}
+
+/** Marks an installation's cached owners (and optionally all its cached repositories) dirty for incremental refresh (#1158). */
+export function markInstallationMemberCacheDirty(store: Store, installationRef: string, includeRepositories = false): void {
+  if (!store.hasTable('github_installation_member_cache')) return;
+  store.run('UPDATE github_installation_member_cache SET dirty=dirty+1,next_retry_at=0 WHERE installation_ref=?', installationRef);
+  if (includeRepositories) store.run('UPDATE github_repository_member_cache SET dirty=dirty+1,next_retry_at=0 WHERE installation_ref=?', installationRef);
+}
+
+/** Marks a repository's collaborator cache dirty and returns the installation refs covering it (#1158). */
+export function markRepositoryMemberCacheDirty(store: Store, repositoryId: string, installationRef?: string): string[] {
+  if (!store.hasTable('github_repository_member_cache')) return [];
+  if (installationRef) {
+    store.run('UPDATE github_repository_member_cache SET dirty=dirty+1,next_retry_at=0 WHERE installation_ref=? AND repository_id=?', installationRef, repositoryId);
+    return [installationRef];
+  }
+  store.run('UPDATE github_repository_member_cache SET dirty=dirty+1,next_retry_at=0 WHERE repository_id=?', repositoryId);
+  return store.all('SELECT DISTINCT installation_ref FROM installation_repositories WHERE repository_id=? AND present=1', repositoryId)
+    .map(row => String(row.installation_ref));
 }

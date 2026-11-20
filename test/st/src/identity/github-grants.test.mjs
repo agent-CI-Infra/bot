@@ -129,13 +129,13 @@ test('a deleted installation\'s stale grant and another uncertain installation d
   for (let i = 0; i < 3; i++) await f.identity.reverify(p);
   assert.equal(revision(), start, 'nothing the principal could use was lost');
   assert.ok(h.store.get('SELECT revoked_at FROM scoped_grants WHERE id=?', stale).revoked_at, 'a confirmed deletion revokes its grants despite the uncertainty');
-  assert.ok(active(h.store, p).some(g => g.project_id === '101' && g.expires_at > Date.now()), 'current grants are renewed');
+  assert.ok(active(h.store, p).some(g => g.project_id === '101'), 'current grants remain active');
   const identity = h.store.get('SELECT status,verification_issues FROM external_identities WHERE id=?', login.result.identity_id);
   assert.equal(identity.status, 'active');
   assert.deepEqual(JSON.parse(identity.verification_issues), [{ installation: 'github.com/123/99', code: 'installation_scope_pending' }]);
   assert.doesNotMatch(identity.verification_issues, /fixture-|token|secret/);
-  // The proved installation turns uncertain too: its grants stop counting once, which is one loss.
-  state.membershipFailure = 500;
+  // The proved installation turns uncertain on a non-transient permission refusal: its grants stop counting once, which is one loss.
+  state.membershipFailure = 403;
   for (let i = 0; i < 3; i++) await f.identity.reverify(p);
   assert.equal(revision(), start + 1); assert.deepEqual(active(h.store, p), []);
   assert.ok(h.store.get("SELECT 1 FROM scoped_grants WHERE principal_id=? AND installation_ref='github.com/123/77' AND revoked_at IS NULL", p), 'uncertain grants wait, they are not revoked');
@@ -205,18 +205,18 @@ test('incomplete installation evidence, a different App or credential rotation c
 test('login and reverify renew an expired GitHub-derived grant', async t => {
   const f = await identityFixture(t), { h } = f, login = await f.login(), p = login.result.principal_id;
   const grant = () => h.store.get("SELECT verified_at,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", p);
-  const first = grant(); assert.ok(first); assert.ok(first.expires_at > Date.now() + 4 * 60_000);
+  const first = grant(); assert.ok(first); assert.equal(first.expires_at, null);
   h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
   assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'pending_verification'));
   await f.identity.reverify(p);
   const renewed = grant();
-  assert.ok(renewed.expires_at > Date.now() + 4 * 60_000);
+  assert.equal(renewed.expires_at, null);
   assert.ok(renewed.verified_at > Date.now() - 15_000);
   assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
   h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
   await f.login();
   const afterLogin = grant();
-  assert.ok(afterLogin.expires_at > Date.now() + 4 * 60_000);
+  assert.equal(afterLogin.expires_at, null);
   assert.ok(afterLogin.verified_at > Date.now() - 15_000);
   assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
 });
@@ -244,7 +244,7 @@ test('a login that overlaps an in-flight permission check still renews derived g
   await loginDone;
   await inflight;
   const after = h.store.get("SELECT verified_at,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", p);
-  assert.ok(after.expires_at > Date.now() + 4 * 60_000, `expires_at=${after?.expires_at}`);
+  assert.equal(after.expires_at, null, `expires_at=${after?.expires_at}`);
   assert.ok(after.verified_at > Date.now() - 15_000);
   assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
 });

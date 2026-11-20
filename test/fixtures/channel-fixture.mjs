@@ -213,10 +213,30 @@ export async function githubChannelFixture(t) {
   f.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?", f.h.store.secrets.seal({ ...secrets, token: undefined, private_key: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) }, 'account:' + account.id), account.id);
   seedInstallation(f.h, f.a.id, github.state);
   const reads = id => github.state.requests.filter(r => r.path === '/user' && r.authorization === 'Bearer fixture-user-' + id).length;
-  // A GitHub user who signed in once, bound to Feishu as `actor`, whose console sessions have all ended. The fake GitHub then
-  // answers as this user until the next one signs in.
+  const enrolled = new Map();
+  const syncFixtureRoster = () => {
+    if (github.state.owner === false && github.state.permission === 'none') {
+      github.state.owners = [];
+      github.state.collaborators = [];
+      return;
+    }
+    github.state.owners = [...enrolled.values()].filter(u => u.owner).map(u => ({ id: u.id, login: u.login }));
+    github.state.collaborators = [...enrolled.values()].filter(u => !u.owner && u.permission && u.permission !== 'none')
+      .map(u => ({ id: u.id, login: u.login, role_name: u.permission }));
+  };
+  const baseRoute = github.state.route;
+  github.state.route = async (path, method, body, send) => {
+    if (path === '/orgs/fixture/members' || path.endsWith('/collaborators')) syncFixtureRoster();
+    return baseRoute ? await baseRoute(path, method, body, send) : false;
+  };
+  // A GitHub user who signed in once, bound to Feishu as `actor`, whose console sessions have all ended.
   const person = async (id, login, actor) => {
     Object.assign(github.state, { id, login });
+    enrolled.set(id, { id, login, owner: !!github.state.owner, permission: github.state.permission });
+    syncFixtureRoster();
+    if (f.h.store.get("SELECT synced_at FROM github_installation_member_cache WHERE installation_ref='github.com/123/77'")?.synced_at) {
+      await identity.syncMemberCache({ checkAll: true, bypassBackoff: true });
+    }
     const principal = (await githubSignIn(identity)).result.principal_id;
     bindFixture(f.h, f.id, principal, actor); f.h.store.run('DELETE FROM sessions WHERE user_id=?', principal);
     return principal;
