@@ -3,6 +3,7 @@ import type { Store, Row } from '../storage/database.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
+import { pullRequestSummaryForProgress } from '../github/pull-request-media.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { permitsTool } from '../roles/permissions.js';
 import { assertManagedExecution, assertTaskExternalEffect, sourcePolicies, taskToolAllowed } from './management.js';
@@ -124,7 +125,7 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
     await validate();
     integratedPublication(store, task, commit);
     return {
-      summary: candidate.summary,
+      summary: pullRequestSummaryForProgress(candidate),
       test_command: candidate.test_command,
       pr_number: pr.number,
       pr_url: pr.html_url,

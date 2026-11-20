@@ -30,6 +30,7 @@ import { basisStorage } from '../dispatch/basis.js';
 import { progressStorage } from '../review/progress.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
+import { hostedMediaStorage } from '../github/hosted-pr-media.js';
 import { installationStorage } from '../installations/storage.js';
 import { identityStorage } from '../identity/storage.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -281,6 +282,7 @@ export class Store {
     basisStorage(this);
     // What an Issue development shows on the Issue: its developing label and status comment (#1047).
     progressStorage(this);
+    hostedMediaStorage(this);
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);

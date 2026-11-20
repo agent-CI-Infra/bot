@@ -18,6 +18,7 @@ import type {AgentSpec} from '../agent/runtime.js';
 import {githubWriteTool,withMergePolicy} from '../github/write.js';
 import {autoMergePolicy} from '../github/merge-policy.js';
 import {pullRequestLabelsSchema} from '../github/pull-request-labels.js';
+import {pullRequestMediaSchema} from '../github/pull-request-media.js';
 import {pullRequestSummaryRules} from '../github/text.js';
 import {milestoneTool,milestoneToolName} from '../review/progress.js';
 const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
@@ -31,7 +32,7 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
  const {store,task,redactor,guard}=workspace,records=new TaskRecords(store),spaces=roleWorkspaces(workspace);
  const submit=tool('submit_delivery','Submit code candidate metadata for mandatory QA and framework publication. Never publish yourself.',{summary:{type:'string',description:summaryDescription},
   test_command:{type:'string',description:'The command you ran to test the change. The pull request description shows it as your report; the platform reruns only a project test command it has configured.'},
-  change_title:{type:'string',description:'The commit subject and pull request title: a concise description of the code change.'},labels:pullRequestLabelsSchema},['summary','test_command']);
+  change_title:{type:'string',description:'The commit subject and pull request title: a concise description of the code change.'},labels:pullRequestLabelsSchema,media:pullRequestMediaSchema},['summary','test_command']);
  const validate=(v:any)=>{if(!v||typeof v.summary!=='string'||!v.summary.trim()||typeof v.test_command!=='string'||!v.test_command.trim())return stop('role_delivery_invalid','retry_wait');return redactor.clean(v);};
  const readTools=explorer?workspaceRepositoryTools.map(t=>({...t,function:{...t.function,description:t.function.description.replace(/\s*Call github_read_token first\./g,'')}})):[];
  for(let round=0;round<3;round++){

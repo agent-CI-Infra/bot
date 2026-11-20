@@ -9,6 +9,7 @@ import { assertRequestPullRequest, genericTask, pullRequestRefusal, softwareRequ
 import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRequestQaRequired, toolGrant } from './grants.js';
 import { checkPullRequestLabels, pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 import { pullRequestSummaryRules } from '../github/text.js';
+import { assertMediaOutsideCode, collectPullRequestMedia, planPullRequestMedia, pullRequestMediaSchema, type CandidateMedia } from '../github/pull-request-media.js';
 import { ownLabels } from '../rules/service.js';
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
@@ -402,6 +403,7 @@ export async function runRequest(
           summary: { type: 'string', description: "The public pull request description on GitHub, read by the repository's maintainers as written. " + pullRequestSummaryRules },
           change_title: { type: 'string' },
           labels: pullRequestLabelsSchema,
+          media: pullRequestMediaSchema,
           test_command: { type: 'string' },
         };
         if (software() && !generic) {
@@ -439,6 +441,14 @@ export async function runRequest(
             return stop('agent_output_invalid', 'retry_wait', '提交需要结构化结果及 artifact 引用；软件交付还需 change_title。');
           }
           return redactor.clean(value);
+        };
+        let checkedMedia: { selection: string; files: CandidateMedia['media'] } | undefined;
+        const validateMedia = async (value: any) => {
+          const { paths } = planPullRequestMedia(value.summary, value.media);
+          if (!paths.length) return;
+          const snapshot = await spaces.current.artifact(`request:media:${randomId()}`);
+          assertMediaOutsideCode(paths, snapshot.files, blobValue(store, input.snapshot_files) ?? []);
+          checkedMedia = { selection: JSON.stringify(paths), files: await collectPullRequestMedia(spaces.current, paths) };
         };
         const writable = covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
         const execution = randomId();
@@ -564,11 +574,13 @@ export async function runRequest(
               const delivered = generic ? { ...validated, delivery: pr ? 'pull_request' : 'report' } : validated;
               if (!pr) return delivered;
               const labels = await checkPullRequestLabels(github, validated.labels, ownLabels(store, task.repository_id));
-              return 'error' in labels ? stop('pull_request_labels_refused', 'retry_wait', labels.message + ' Refused: ' + JSON.stringify(labels.refused)) : { ...delivered, labels: labels.labels };
+              if ('error' in labels) return stop('pull_request_labels_refused', 'retry_wait', labels.message + ' Refused: ' + JSON.stringify(labels.refused));
+              await validateMedia(validated);
+              return { ...delivered, labels: labels.labels };
             },
           },
           repairInvalid: error =>
-            error instanceof TaskError && ['pull_request_labels_refused', 'delivery_refused', 'review_inline_out_of_diff'].includes(error.code) ? error.detail : undefined,
+            error instanceof TaskError && ['pull_request_labels_refused', 'pull_request_media_invalid', 'delivery_refused', 'review_inline_out_of_diff'].includes(error.code) ? error.detail : undefined,
           finalizationTools: offered(deliveryTools.filter(t => ['submit_report', 'open_pull_request', 'post_review', 'submit_delivery'].includes(t.function.name)))
             .map(t => t.function.name)
             .concat(writable ? ['write_file', 'record_progress'] : []),
@@ -636,12 +648,16 @@ export async function runRequest(
             records.history(task.id, 'execution_evidence', { execution, name, version: beforeCommand?.tree_sha || (typeof result.content === 'string' ? blobSha(Buffer.from(result.content)) : name === 'write_file' ? blobSha(Buffer.from(args.content)) : null), arguments: redactor.clean(args), result: redactor.clean(result) }, spaces.runId);
             return result;
           },
-          validate: content => {
+          validate: async content => {
+            let value;
             try {
-              return validateReport(JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')));
+              value = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ''));
             } catch {
               return stop('agent_output_invalid', 'retry_wait', '普通任务需要提交结构化报告及 artifact 引用。');
             }
+            const validated = validateReport(value);
+            if (software()) await validateMedia(validated);
+            return validated;
           },
         });
 
@@ -654,6 +670,10 @@ export async function runRequest(
         let policyEvidence: any[] = [];
         if (software()) {
           assertRequestPullRequest(store, task);
+          const { paths } = planPullRequestMedia(result.summary, result.media);
+          assertMediaOutsideCode(paths, snapshot.files, blobValue(store, input.snapshot_files) ?? []);
+          // A Manager can nominate a Dev result saved before this execution. Read that result's files in the current workspace.
+          const media = checkedMedia?.selection === JSON.stringify(paths) ? checkedMedia.files : await collectPullRequestMedia(workspace, paths);
           const command = String(store.get('SELECT test_command FROM policies WHERE repository_id=?', task.repository_id)?.test_command || '').trim();
           const validation = command ? { ...(await workspace.call(`request:${execution}:tests`, { type: 'workspace_command', command, timeout_ms: null })), command, source: 'policy' } : { command: result.test_command ?? null, source: 'agent', skipped: true };
           const defaultBranchName = targetSpec?.type === 'issue' && Number.isSafeInteger(targetSpec.number) ? `bot/issue-${targetSpec.number}` : 'bot/task-' + task.id;
@@ -671,6 +691,7 @@ export async function runRequest(
             change_title: result.change_title,
             test_command: result.test_command,
             labels: result.labels,
+            ...(media ? { media } : {}),
             implementation_goal: before.contract.goal,
             base_sha: task.head_sha,
             base_branch: input.base_branch,

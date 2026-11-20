@@ -85,7 +85,7 @@ const latestResult = results => results.filter(r => r.result_ref).at(-1)?.result
 const contract = goal => ({ goal, scope: ['calc.mjs'], criteria: ['add(2, 3) returns 5 and the project test passes'], endpoint: 'report' });
 
 test('a report task that finds a needed change continues after grant_writes and opens the PR behind independent QA', { timeout: 240000 }, async t => {
-  let granted = false, prsBefore;
+  let granted = false, prsBefore, mediaSelectionAttempted = false, mediaRefusal;
   const h = await engineFixture(t, {
     manager: ({ tools, names, results, messages }) => {
       assert.ok(tools.includes('grant_writes'), 'the Task Manager of a generic task can change its writes');
@@ -97,7 +97,7 @@ test('a report task that finds a needed change continues after grant_writes and 
         return call('delegate_role', { role: 'dev', purpose: 'Fix add in calc.mjs and open the pull request', refs: [prompt.task_ref, latestResult(results)] }); }
       return call('nominate_delivery', { result_ref: latestResult(results) });
     },
-    dev: ({ tools, names }) => {
+    dev: ({ tools, names, messages }) => {
       if (!granted) {
         // Before the grant the executor has no PR tool: it reports the needed change instead.
         assert.ok(!tools.includes('open_pull_request') && !tools.includes('post_review') && !tools.includes('github_write'), tools.join(','));
@@ -106,6 +106,12 @@ test('a report task that finds a needed change continues after grant_writes and 
       }
       assert.ok(tools.includes('open_pull_request'), 'after the grant the executor gets open_pull_request');
       if (!names.includes('write_file')) return call('write_file', { path: 'calc.mjs', content: fixed });
+      if (!mediaSelectionAttempted) {
+        mediaSelectionAttempted = true;
+        return call('open_pull_request', { summary: '![Screenshot](workspace:.tmp/missing.png)', media: ['.tmp/missing.png'], artifacts: [], change_title: 'fix: add sums both numbers' });
+      }
+      mediaRefusal = messages.filter(message => ['tool', 'user'].includes(message.role)).map(message => JSON.stringify(message.content))
+        .find(text => text.includes('Cannot read') && text.includes('.tmp/missing.png'));
       return call('open_pull_request', { summary: 'add now sums both numbers', artifacts: [{ path: 'calc.mjs', description: 'Fixed add' }], evidence: [], unknowns: [], change_title: 'fix: add sums both numbers' });
     },
     qa: ({ names }) => {
@@ -119,6 +125,7 @@ test('a report task that finds a needed change continues after grant_writes and 
   const task = await h.run(id);
   assert.equal(task.status, 'pr_opened', h.logs(id));
   assert.equal(task.kind, 'task.request');
+  assert.ok(mediaRefusal, 'an invalid media file can be corrected in the active delivery turn');
   const prs = (await h.state()).prs;
   assert.equal(prs.length, prsBefore + 1);
   assert.equal(prs.at(-1).head.ref, 'bot/task-' + id, 'the same task opened the PR');
