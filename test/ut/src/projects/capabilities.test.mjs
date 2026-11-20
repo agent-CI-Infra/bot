@@ -125,4 +125,12 @@ test('a group is told CI failures are investigated on request, and found automat
   assert.equal(ci.state, 'ready'); assert.equal(ci.title, 'CI 失败原因排查（按需）'); assert.match(ci.how, /不会自动发现/);
   assert.doesNotMatch(groupCapabilityNotice('只读问答', [{ full_name: 'acme/app', inputs: quiet }], readGroup), /定时主动发现/);
   assert.equal(chatCapabilities(base, readGroup).find(c => c.id === 'ci').title, 'CI 失败与定时主动发现');
+  // The switch or a scheduled check is what makes the project watch CI, whatever the ceiling; a read ceiling only stops it
+  // from rerunning or reporting what it finds (review of #1157, second round).
+  for (const watching of [{ events: { ...allEvents, 'actions.run_failed': true }, schedules: 0 }, { events: { ...allEvents, 'actions.run_failed': false }, schedules: 2 }]) {
+    const atRead = chatCapabilities({ ...base, ceiling: 'read', ...watching }, dispatchGroup).find(c => c.id === 'ci');
+    assert.equal(atRead.title, 'CI 失败与定时主动发现');
+    assert.doesNotMatch(atRead.how, /没有打开 Actions 失败事件/);
+    assert.match(atRead.how, /会自动排查失败的 Actions 运行或按定时检查发现问题，但项目能力上限是「只读问答」，这项需要「可评论和打标签」，不会重跑或提报 Issue/);
+  }
 });

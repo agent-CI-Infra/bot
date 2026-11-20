@@ -230,9 +230,14 @@ export function chatCapabilities(input: CapabilityInputs, venue: ChatVenue): Cha
   // ⑥ A group reads Actions itself, on request; finding failures on its own is the project's (its Actions switch or a
   // scheduled check), so the title says which of the two this group gets. Filing an Issue needs Issue write.
   if (group) {
-    const watched = project.get('ci')!.state === 'ready', files = issues && covers(input.ceiling, 'comment');
-    add('ci', 'ready', '@bot 查 CI 失败原因并在群里说明' + (files ? '，需要时提报 Issue；也可以让 bot 设定时检查' : '；提报 Issue 需要 Issue 写入和「可评论和打标签」以上的能力上限')
-      + (watched ? '。项目也会自动排查失败的 Actions 运行或按定时检查发现问题。' : '。项目没有打开 Actions 失败事件，也没有定时检查，不会自动发现。'), watched ? scenarioTitles.ci : 'CI 失败原因排查（按需）');
+    // Whether the project watches CI is its switch and its scheduled checks, whatever the ceiling; the ceiling only decides
+    // whether what it finds can be rerun or reported on GitHub.
+    const watched = input.events['actions.run_failed'] || input.schedules > 0, files = issues && covers(input.ceiling, 'comment');
+    const automatic = !watched ? '。项目没有打开 Actions 失败事件，也没有定时检查，不会自动发现。'
+      : covers(input.ceiling, 'comment') ? '。项目也会自动排查失败的 Actions 运行或按定时检查发现问题。'
+      : `。项目会自动排查失败的 Actions 运行或按定时检查发现问题，但${ceilingNote('comment')}，不会重跑或提报 Issue。`;
+    add('ci', 'ready', '@bot 查 CI 失败原因并在群里说明' + (files ? '，需要时提报 Issue；也可以让 bot 设定时检查' : '；提报 Issue 需要 Issue 写入和「可评论和打标签」以上的能力上限') + automatic,
+      watched ? scenarioTitles.ci : 'CI 失败原因排查（按需）');
   } else { const c = project.get('ci')!; add('ci', c.state === 'ready' ? 'ready' : c.state === 'ceiling_limited' ? 'ceiling_limited' : 'off', c.detail); }
   return out;
 }
