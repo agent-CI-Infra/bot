@@ -30,9 +30,10 @@ function installationErrorText(err) {
   if (err instanceof TypeError || name === 'TypeError' || /failed to fetch|networkerror|network error|load failed|network request failed/i.test(message))
     return t('settings.installations.error_network');
   // A body the console could not parse is the gateway's own page when the status says the request failed, and unreadable
-  // content when it claimed success; neither carries a service code to name.
+  // content when it claimed success; neither carries a service code to name, and the status is all a reader gets to tell
+  // two such failures apart, so both phrases keep it in front.
   if (err && err.code === 'response_not_json')
-    return t(err.status >= 200 && err.status < 300 ? 'settings.installations.error_unreadable' : 'settings.installations.error_gateway');
+    return t(err.status >= 200 && err.status < 300 ? 'settings.installations.error_unreadable' : 'settings.installations.error_gateway', { status: err.status });
   if (err && err.code === 'authorization_changed') return t('settings.installations.error_authorization_changed');
   if (err && err.status) return t('settings.installations.error_status', { status: err.status, code: err.code || '—' });
   return t('settings.installations.error_unknown');
