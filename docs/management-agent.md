@@ -18,6 +18,12 @@ Ctrl / ⌘ + Enter 发送。切换会话、离开页面和重新连接都不会�
 
 管理助手可以用 `read_skill` 按需读取随服务提供的内置 skill（#1136）。工具说明里列出每份 skill 的名称、用途和入口路径，模型做到相应工作时再读 `SKILL.md` 和它引用的文件；路径不在清单里时作为参数错误交还模型改正。目前提供 `layered-ci-gates`：按仓库的作用、语言和技术架构扫描已有脚本、用例和 workflow，把用例放进 PR、合并队列、daily、release 各层门禁，判断要不要用合并队列，写出推荐报告、需要人改的仓库设置和 CI 改动计划。skill 只是工作材料，不增加工具或权限；改 workflow 仍是项目管理员在控制台确认的开发任务（#931），这类任务的 Manager 和 Dev 也带着同一份 skill（见[角色池](role-pool.md)）。
 
+## 讲解和修改协作流程（#1123）
+
+管理助手的系统提示附有 [`docs/prompts/manager-flows.md`](prompts/manager-flows.md)（不可覆盖）。用户问 bot 在某个项目里怎么工作时，助手先用 `get_effective_config` 读该项目当前的 Manager 提示词和设置，引用对应场景章节的流程图，并说明能力上限、事件开关、常设规则和启用角色现在怎样限制它，不凭记忆回答。
+
+用户要改流程（如「开发前先让 reviewer 审方案」「CI 失败只评论不自动提单」）时，助手先回复「当前流程」与「修改后流程」两张流程图和变更要点（改了哪些步骤和准则、新准则原文、需要另改的设置），本轮不写入；用户在本会话确认后，才重读修订号并用 `manager.update` 写回整份提示词，同一章的流程图和准则一起改，其他章节和项目自己的段落保持不变，最后报告回执里的修订号。项目还在跟随内置提示词（`customized` 为 `false`）时，变更要点会说明保存后不再跟随内置更新。控制台 Manager 与角色提示词卡片的「在管理助手中用对话改流程」预填的就是这类请求。
+
 ## 查询与命令契约
 
 `POST /api/management/query` 接受 `{ operation, target, arguments }`。目录与 JSON Schema 见 `src/management/catalog.ts`；`get_capabilities` 返回当前作用域和可用注册项。分页使用 `offset`、`limit`，Task run、事件与角色记录中的 offset 对应返回的 `next_after`。

@@ -356,9 +356,9 @@ test('a member\'s comment on the bot\'s pull request reaches the Manager as a re
   // The Manager prompt says what such a comment calls for, and that the bot's own pull requests are not reviewed again.
   const system = f.requests[0].messages[0].content.replace(/\s+/g, ' ');
   assert.match(system, /The bot's own pull requests and its own pushes do not come here/);
-  assert.match(system, /On the bot's own pull request \(`facts\.bot_pull_request`\), judge what it asks: for actionable changes, dispatch `dev` \(`writes: \["pull_request"\]`\)/);
+  assert.match(system, /On the bot's own pull request \(`facts\.bot_pull_request`\), judge what a comment or review asks: for actionable changes, dispatch `dev` \(`writes: \["pull_request"\]`\)/);
   assert.match(system, /`facts\.revisions` says how often the pull request was already revised for comments \(`for_requests`\) and for this author \(`for_this_author`\); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again/);
-  assert.match(system, /\| Issue review published \| Start `dev` \(`writes: \["pull_request"\]`\) when the review concludes `ready_for_development`/);
+  assert.match(system, /Issue review published: start `dev` \(`writes: \["pull_request"\]`\) when the review concludes `ready_for_development`/);
   assert.deepEqual(seen.event.facts.revisions, { for_requests: 0, for_this_author: 0 });
   assert.equal(seen.work.create.find(o => o.id === 'development')?.work, 'development.pr'); assert.ok(seen.work.create.some(o => o.id === 'review'));
   const revision = tasks(f.h).find(isDevTask);

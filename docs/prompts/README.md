@@ -1,6 +1,6 @@
 # 内置场景规则
 
-本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 和 `late-schedules.md` 除外：前者由 `src/management/onboarding.ts` 读入并附在管理助手的系统提示后面，用于引导仓库接入；后者由 `src/actions/late-schedules.ts` 读入；两者都不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。项目可以把 [定时检查章节的建议文本](../schedule-check.md) 自行写入 Manager「定时检查」章节；那份文本必须留在 `docs/` 下作为模板，不得加入本目录或登记为内置提示词（该章节默认保持为空，以免撑破管理助手单次工具结果的 256 KiB 上限）。
+本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md`、`manager-flows.md` 和 `late-schedules.md` 除外：前两者分别由 `src/management/onboarding.ts` 和 `src/dispatch/settings.ts` 读入并附在管理助手的系统提示后面，用于引导仓库接入和讲解、修改协作流程；后者由 `src/actions/late-schedules.ts` 读入；三者都不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。项目可以把 [定时检查章节的建议文本](../schedule-check.md) 自行写入 Manager「定时检查」章节；那份文本必须留在 `docs/` 下作为模板，不得加入本目录或登记为内置提示词（该章节默认保持为空，以免撑破管理助手单次工具结果的 256 KiB 上限）。
 
 ## 文件对应
 
@@ -11,7 +11,8 @@
 | [`pr-review.md`](pr-review.md) | `review.pr` | PR 检视：一轮报全、实现是否合理（是否达成关联 Issue、是否符合现有架构、有无更简单做法、修复是否有测试证明）、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
 | [`issue-development.md`](issue-development.md) | `development` | 开发任务的资格、范围、停止条件、测试与 PR 说明；开发 Issue 时用 `report_development_milestone` 提交分析与计划、完成、停止三类里程碑，由控制面写进 Issue 上的一条进展评论 |
 | [`release-observe.md`](release-observe.md) | CI 观察章节 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
-| [`manager-dispatch.md`](manager-dispatch.md) | `dispatch` | 每个事件新建、续接还是不处理的默认流程 |
+| [`manager-dispatch.md`](manager-dispatch.md) | `dispatch` | 每个事件新建、续接还是不处理的默认流程，按六大场景分章，每章一句话能力说明、一张流程图和 3～5 条边界准则（#1123，见[统一任务调度与对象 Manager](../workflows.md#内置-manager-提示词六大场景1123)） |
+| [`manager-flows.md`](manager-flows.md) | 无，不可覆盖 | 讲解和修改协作流程（#1123）：附在管理助手系统提示后面，回答「怎么工作」时引用项目当前 Manager 提示词的流程图，改流程时先给「当前流程 vs 修改后流程」两张图和变更要点，确认后才用 `manager.update` 写回，见[管理助手](../management-agent.md#讲解和修改协作流程1123) |
 | [`late-schedules.md`](late-schedules.md) | 无，不可覆盖 | 定时运行延迟严重时的推荐（#1072）：怎样判断 workflow 的定时运行晚得多、先查重（同一仓库只推荐一次）、在 Issue 里推荐 bot 定时触发并附 workflow 改造的 YAML 示例。由 `src/actions/late-schedules.ts` 读入，作为 `late_scheduled_runs` 交给 Actions 失败处理、CI 观察和项目定时任务，并附在群聊助手（能读 Actions 时）和管理助手的系统提示后面，见[定时任务](../schedules.md#定时触发-workflow) |
 | [`onboarding.md`](onboarding.md) | 无，不可覆盖 | 仓库接入指引（#1133）：附在管理助手系统提示后面，引导助手对已安装仓库做只读分析、给出画像与关键选项、经确认后调用 `start_repository` 启动或申请启动，并通过标准管理命令与控制台确认卡片落地配置，见[管理助手](../management-agent.md#仓库接入启动申请与控制台确认卡片) |
 
