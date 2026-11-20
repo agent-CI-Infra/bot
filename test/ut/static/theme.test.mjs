@@ -78,6 +78,7 @@ test('#750 the dark palette meets AA on the surfaces phase 1 covers', () => {
     ['--color-brand-text', '--color-surface', 4.5], ['--color-brand-text', '--color-bg', 4.5],
     ['--color-brand-text', '--color-surface-alt', 4.5],
     ['--color-text-inverse', '--color-brand', 4.5],
+    ['--color-code-text', '--color-code-bg', 4.5],
     ['--color-warning', '--color-warning-bg', 4.5], ['--color-success', '--color-success-bg', 4.5],
     ['--color-danger', '--color-danger-bg', 4.5], ['--color-danger', '--color-surface', 4.5],
     ['--color-info', '--color-info-bg', 4.5],

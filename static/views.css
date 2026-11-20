@@ -28,7 +28,7 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .step-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.step-head strong{font-size:var(--font-size-label)}
 .step-meta{display:flex;align-items:center;gap:6px;color:var(--color-text-muted);font-size:var(--font-size-1)}.step p{margin:5px 0 0;font-size:var(--font-size-label);overflow-wrap:anywhere}.say{white-space:pre-wrap}.fault-action{color:#24414f}
 pre.command{margin:7px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-text);color:var(--color-text-inverse);max-height:none}
-pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:#f5f8fa;border:1px solid #e3eaf0;max-height:340px}
+pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-code-bg);color:var(--color-code-text);border:1px solid #e3eaf0;max-height:340px}
 .fold{margin-top:6px;font-size:var(--font-size-1);color:var(--color-text-muted)}.fold summary{cursor:pointer;width:fit-content}
 .snapshot-progress>summary{cursor:pointer;overflow-wrap:anywhere;font-size:var(--font-size-label)}.snapshot-progress>summary:focus-visible{outline:2px solid var(--color-brand);outline-offset:4px;border-radius:3px}
 .snapshot-heading{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px 10px;width:calc(100% - 20px);vertical-align:top}.snapshot-heading>time{margin-left:auto;color:var(--color-text-muted);font-size:var(--font-size-1)}
@@ -494,7 +494,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:var(--font-size-1);padding:4px 10px}
-.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color: var(--color-brand-text);background:#e8f3f4}
+.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color: var(--color-brand-text);background:var(--color-brand-weak)}
 /* #698: one audit row reads as a sentence (action · who), then time and the object link; codes fold under 技术信息. */
 .history li.audit-row{display:block;padding:9px 0}
 .audit-row-head{font-size:var(--font-size-row,14px);overflow-wrap:anywhere}.audit-row-head .audit-actor{color:var(--color-text-muted,#4b5563)}
@@ -1037,7 +1037,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
    raised surface with normal text instead. Both dark blocks must stay identical. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
-  :root:not([data-theme="light"]) :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-surface-alt); border-color: var(--color-border); color: var(--color-text); }
+  :root:not([data-theme="light"]) :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
   :root:not([data-theme="light"]) .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
   :root:not([data-theme="light"]) .step-running { border-color: var(--color-border); }
   :root:not([data-theme="light"]) .fault-action { color: var(--color-text); }
@@ -1046,7 +1046,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root:not([data-theme="light"]) :is(#rows[data-view=projects], .global-project-table) .project-table-head { background: var(--color-surface-alt); border-bottom-color: var(--color-border); }
 }
 :root[data-theme="dark"] :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
-:root[data-theme="dark"] :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-surface-alt); border-color: var(--color-border); color: var(--color-text); }
+:root[data-theme="dark"] :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
 :root[data-theme="dark"] .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
 :root[data-theme="dark"] .step-running { border-color: var(--color-border); }
 :root[data-theme="dark"] .fault-action { color: var(--color-text); }
