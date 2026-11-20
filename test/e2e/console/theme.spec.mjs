@@ -374,7 +374,7 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       // both tabs at all three widths instead of being inferred from the resting rows.
       for (const [selector, color] of [
         ['.workbench-tab:not([aria-current=page])', 'rgb(231, 237, 246)'],
-        // The current tab keeps --color-brand-text (views.css:1059/:1106) while the hover rule supplies the fill.
+        // The current tab keeps --color-brand-text (views.css:1058/:1105) while the hover rule supplies the fill.
         ['.workbench-tab[aria-current=page]', 'rgb(150, 180, 255)'],
       ]) {
         await page.locator(selector).hover();
@@ -454,7 +454,7 @@ test('#750 dark theme keeps the task detail, project head and project page reada
       // `#334155` (workspace.css, not a token) and is its own PIN_TABLE row; the current one paints --color-brand.
       // `.role-backend-line` carries the `muted` class, and `shell.css`'s `.console-ready .muted` wins over workspace.css
       // in both themes.
-      const expected = { '.workbench-tab:not([aria-current=page])': 'rgb(51, 65, 85)', '.workbench-tab[aria-current=page]': 'rgb(36, 93, 224)', '.workbench-quick-link': 'rgb(36, 93, 224)', '.workbench-live-stats': 'rgb(71, 85, 105)', '.role-backend-line': 'rgb(96, 112, 135)' }[sample.selector];
+      const expected = { '.workbench-tab:not([aria-current=page])': 'rgb(51, 65, 85)', '.workbench-quick-link': 'rgb(36, 93, 224)', '.workbench-live-stats': 'rgb(71, 85, 105)', '.role-backend-line': 'rgb(96, 112, 135)' }[sample.selector];
       expect(sample.color, `light project detail ${sample.selector} keeps its base colour`).toBe(expected);
     }
     await page.locator('.role-board-row').first().hover();
@@ -462,18 +462,29 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     expect((await colours(page, ['.role-board-row']))[0].background, 'light role board hover keeps #fafcfe').toBe('rgb(250, 252, 254)');
     // Light keeps its own hover rule from workspace.css: the non-current tab washes to rgba(255,255,255,.7) with
     // --color-text, and the current tab keeps its surface fill and --color-brand because its [aria-current] rule wins.
-    for (const [selector, background, color] of [
-      ['.workbench-tab:not([aria-current=page])', 'rgba(255, 255, 255, 0.7)', 'rgb(23, 36, 59)'],
-      ['.workbench-tab[aria-current=page]', 'rgb(255, 255, 255)', 'rgb(36, 93, 224)'],
-    ]) {
-      await page.locator(selector).hover();
-      await page.waitForTimeout(250);
-      const hovered = (await colours(page, [selector]))[0];
-      rendered(hovered, `light tab hover ${selector}`);
-      readable(hovered, 4.5, `light tab hover ${selector}`);
-      expect(hovered.background, `light tab hover ${selector} background`).toBe(background);
-      expect(hovered.color, `light tab hover ${selector} colour`).toBe(color);
-      await page.mouse.move(0, 0);
+    // This is a state and it is viewport-dependent, so it is driven at 1440/768/390 like the dark hover above: left
+    // outside the dark loop it silently measured whichever width that loop ended on (390), which is how the review
+    // found the "three widths" claim overstated. The loop leaves the viewport at 390, the width the chip block below
+    // has always measured at.
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.goto(h.admin + '/#/projects/101/overview');
+      await page.waitForSelector('.workbench-tab');
+      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.waitForTimeout(400);
+      for (const [selector, background, color] of [
+        ['.workbench-tab:not([aria-current=page])', 'rgba(255, 255, 255, 0.7)', 'rgb(23, 36, 59)'],
+        ['.workbench-tab[aria-current=page]', 'rgb(255, 255, 255)', 'rgb(36, 93, 224)'],
+      ]) {
+        await page.locator(selector).hover();
+        await page.waitForTimeout(250);
+        const hovered = (await colours(page, [selector]))[0];
+        rendered(hovered, `light tab hover ${selector} ${width}`);
+        readable(hovered, 4.5, `light tab hover ${selector} ${width}`);
+        expect(hovered.background, `light tab hover ${selector} ${width} background`).toBe(background);
+        expect(hovered.color, `light tab hover ${selector} ${width} colour`).toBe(color);
+        await page.mouse.move(0, 0);
+      }
     }
     await page.goto(h.admin + '/#/projects/101/overview');
     await page.waitForSelector('button.role-task-chip');
