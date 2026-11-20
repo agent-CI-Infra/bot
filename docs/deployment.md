@@ -178,7 +178,7 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
 
 未保存向导配置时，也可使用部署默认值：设置 `BOT_GITHUB_OAUTH_CLIENT_ID`、`BOT_PUBLIC_ORIGIN`，并以只读文件挂载 Client secret 到 `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE`；本地测试可用 loopback HTTP。生产环境设置 `BOT_COOKIE_SECURE=true`。secret 不写进镜像、仓库或浏览器配置，Compose 基础配置不会在未启用 OAuth 时要求该文件。
 
-选择部署默认值时，例如用私有 Compose 覆盖文件给 bot 服务增加 `volumes: ["./secrets/github-oauth-client-secret:/run/secrets/github-oauth-client-secret:ro"]`，文件按运行 UID 10001 设置最小读取权限。OAuth App 的 Client ID 与仓库 App ID、仓库 App Client ID 不同，不能互换。登录请求空 scope，令牌仅用于公开身份核实；组织 owner 识别通过仓库 App 的 Members 只读权限完成，不申请成员写权限。无法证明当前权限时显示待验证。
+选择部署默认值时，例如用私有 Compose 覆盖文件给 bot 服务增加 `volumes: ["./secrets/github-oauth-client-secret:/run/secrets/github-oauth-client-secret:ro"]`，文件按运行 UID 10001 设置最小读取权限。OAuth App 的 Client ID 与仓库 App ID、仓库 App Client ID 不同，不能互换。登录请求空 scope，令牌仅用于公开身份核实；仓库协作者与管理员权限通过仓库 App 的仓库级只读令牌核验（已有 App 若已授予 Members 只读权限也可识别组织级 owner），默认不申请组织成员权限。无法证明当前权限时显示待验证。
 
 先完成原有本地超级管理员初始化，再允许用户 GitHub 登录；升级后本地恢复账号不变。备份仍须同时保护数据库与原 master key，新增用户 token 也由 SecretBox 加密。迁移报告、未知归属处理、权限来源和撤销说明见 [GitHub 登录与统一授权](identity-authorization.md)。
 

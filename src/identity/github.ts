@@ -12,7 +12,14 @@ import {
   readerCapabilities,
   tenantId,
 } from './storage.js';
-import { failureCode as errorCode, GitHubPermissions, isTransientGitHubError, rateLimitedUntil } from './github-permissions.js';
+import {
+  boundGitHubUsers,
+  failureCode as errorCode,
+  GitHubPermissions,
+  isTransientGitHubError,
+  rateLimitedUntil,
+  repositoryNeedsBoundUserRole,
+} from './github-permissions.js';
 
 // What made the latest permission check uncertain, kept on the identity for diagnosis; null once everything was settled.
 const issues = (list: { installation: string | null; code: string }[]): string | null => list.length ? JSON.stringify(list) : null;
@@ -32,8 +39,9 @@ export function verificationExempt(store: Store, principal: string): boolean {
 }
 
 /** Whether every active installation and present repository has completed its initial local member-cache sync (#1158). */
-export function memberCacheWarm(store: Store): boolean {
+export function memberCacheWarm(store: Store, principal?: string): boolean {
   if (!store.hasTable('github_installation_member_cache')) return false;
+  const users = boundGitHubUsers(store, principal);
   const installations = store.all(`SELECT * FROM github_installations
     WHERE github_host='github.com' AND status='active' AND scope_pending=0 AND completeness='complete'`);
   for (const snapshot of installations) {
@@ -42,20 +50,25 @@ export function memberCacheWarm(store: Store): boolean {
     if (!cache || cache.synced_at === null || cache.target_id !== snapshot.target_id ||
       cache.repository_selection !== snapshot.repository_selection || cache.installation_revision !== snapshot.revision) return false;
     if (cache.last_error && !isTransientGitHubError(String(cache.last_error))) return false;
-    const missingRepo = store.get(`SELECT 1 FROM installation_repositories ir
-      LEFT JOIN github_repository_member_cache rc ON rc.installation_ref=ir.installation_ref AND rc.repository_id=ir.repository_id
-      WHERE ir.installation_ref=? AND ir.present=1 AND (
-        rc.synced_at IS NULL OR rc.full_name<>ir.full_name
-        OR (rc.last_error IS NOT NULL AND rc.last_error NOT IN ('github_rate_limited','github_verification_unavailable'))
-        OR (EXISTS(SELECT 1 FROM repositories r WHERE r.id=ir.repository_id) AND rc.tier<>'full')
-      ) LIMIT 1`, ref);
-    if (missingRepo) return false;
+    const repos = store.all(`SELECT ir.repository_id,ir.full_name,EXISTS(SELECT 1 FROM repositories r WHERE r.id=ir.repository_id) AS started
+      FROM installation_repositories ir WHERE ir.installation_ref=? AND ir.present=1`, ref);
+    const repoCaches = new Map<string, Row>(
+      store.all('SELECT * FROM github_repository_member_cache WHERE installation_ref=?', ref).map(r => [String(r.repository_id), r]),
+    );
+    for (const repo of repos) {
+      const repoId = String(repo.repository_id), rc = repoCaches.get(repoId);
+      if (!rc || rc.synced_at === null || rc.full_name !== repo.full_name ||
+        (rc.last_error !== null && !isTransientGitHubError(String(rc.last_error))) ||
+        (repo.started && rc.tier !== 'full') ||
+        repositoryNeedsBoundUserRole(store, ref, repoId, rc, users)) return false;
+    }
   }
   return true;
 }
 
-function installationsNeedingMemberSync(store: Store, now = Date.now(), options: { refs?: ReadonlySet<string>; checkAll?: boolean; bypassBackoff?: boolean } = {}): Row[] {
+function installationsNeedingMemberSync(store: Store, now = Date.now(), options: { refs?: ReadonlySet<string>; checkAll?: boolean; bypassBackoff?: boolean; principal?: string } = {}): Row[] {
   if (!store.hasTable('github_installation_member_cache')) return [];
+  const users = boundGitHubUsers(store, options.principal);
   const snapshots = store.all(`SELECT * FROM github_installations
     WHERE github_host='github.com' AND status='active' AND scope_pending=0 AND completeness='complete' ORDER BY ref`);
   return snapshots.filter(snapshot => {
@@ -69,13 +82,18 @@ function installationsNeedingMemberSync(store: Store, now = Date.now(), options:
     }
     if (Number(cache.dirty) > 0) return true;
     if (cache.last_error && (options.bypassBackoff || cache.next_retry_at <= now)) return true;
-    return !!store.get(`SELECT 1 FROM installation_repositories ir
-      LEFT JOIN github_repository_member_cache rc ON rc.installation_ref=ir.installation_ref AND rc.repository_id=ir.repository_id
-      WHERE ir.installation_ref=? AND ir.present=1 AND (
-        rc.synced_at IS NULL OR rc.dirty>0 OR rc.full_name<>ir.full_name
-        OR (EXISTS(SELECT 1 FROM repositories r WHERE r.id=ir.repository_id) AND rc.tier<>'full')
-        OR (rc.last_error IS NOT NULL AND (?=1 OR rc.next_retry_at<=?))
-      ) LIMIT 1`, ref, options.bypassBackoff ? 1 : 0, now);
+    const repos = store.all(`SELECT ir.repository_id,ir.full_name,EXISTS(SELECT 1 FROM repositories r WHERE r.id=ir.repository_id) AS started
+      FROM installation_repositories ir WHERE ir.installation_ref=? AND ir.present=1`, ref);
+    const repoCaches = new Map<string, Row>(
+      store.all('SELECT * FROM github_repository_member_cache WHERE installation_ref=?', ref).map(r => [String(r.repository_id), r]),
+    );
+    return repos.some(repo => {
+      const repoId = String(repo.repository_id), rc = repoCaches.get(repoId);
+      if (!rc || rc.synced_at === null || Number(rc.dirty) > 0 || rc.full_name !== repo.full_name ||
+        (repo.started && rc.tier !== 'full') ||
+        repositoryNeedsBoundUserRole(store, ref, repoId, rc, users)) return true;
+      return Boolean(rc.last_error !== null && (options.bypassBackoff || rc.next_retry_at <= now));
+    });
   });
 }
 
@@ -97,7 +115,7 @@ export function githubProof(store: Store, principal: string): { state: 'reauthor
     return { state: 'reauthorize', login: String(identity.display_name) };
   }
   const hasPendingGrant = listEffectiveScopes(store, principal).some(g => g.source === 'github_derived' && g.state === 'pending_verification');
-  const state = identity.status === 'pending_verification' || hasPendingGrant || !memberCacheWarm(store) ? 'pending' : 'checked';
+  const state = identity.status === 'pending_verification' || hasPendingGrant || !memberCacheWarm(store, principal) ? 'pending' : 'checked';
   return { state, login: String(identity.display_name) };
 }
 
@@ -117,6 +135,8 @@ export class GitHubIdentity implements InstallationIdentity {
   // Single-flight per installation_ref so concurrent logins, webhooks and periodic refreshes share one GitHub pass (#1158).
   private syncingInstallations = new Map<string, Promise<void>>();
   private queuedInstallationSync = new Map<string, SyncWaiter>();
+  private scheduledSyncs = new Set<Promise<void>>();
+  private closed = false;
   /** Until when GitHub asked this deployment to stop sending, as reported by the latest rate-limited response; the background refresh waits for it. */
   rateLimitedUntil = 0;
   private limited = (until: number) => { this.rateLimitedUntil = Math.max(this.rateLimitedUntil, until); };
@@ -214,7 +234,7 @@ export class GitHubIdentity implements InstallationIdentity {
         this.dropDerived(principal);
         return { principal_id: principal, identity_id: id, setup_state: row.setup_state as string | null, warm: true };
       }
-      const warm = !this.refreshing.has(principal) && memberCacheWarm(this.store) && !installationsNeedingMemberSync(this.store, now).length;
+      const warm = !this.refreshing.has(principal) && memberCacheWarm(this.store, principal) && !installationsNeedingMemberSync(this.store, now, { principal }).length;
       if (warm) {
         this.reconcilePrincipalInTransaction(principal, { login, verifiedAt: now, fromUserCheck: true });
       }
@@ -277,7 +297,7 @@ export class GitHubIdentity implements InstallationIdentity {
   /** Reconciles one principal's derived grants synchronously from the local member cache when warm (#1158). */
   syncPrincipalFromCache(principal: string): void {
     if (verificationExempt(this.store, principal)) { this.dropDerived(principal); return; }
-    if (!memberCacheWarm(this.store)) return;
+    if (!memberCacheWarm(this.store, principal)) return;
     const identity = this.store.get("SELECT status,credentials FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal);
     if (!identity?.credentials) return;
     this.commitPrincipalReconcile(principal, { fromUserCheck: false });
@@ -285,22 +305,31 @@ export class GitHubIdentity implements InstallationIdentity {
 
   /** Triggers asynchronous single-flight member-cache synchronization for dirty or cold installations (#1158). */
   scheduleMemberSync(refs?: Iterable<string>): void {
+    if (this.closed) return;
     const list = refs ? [...new Set(refs)].filter(Boolean) : undefined;
     if (list && !list.length) return;
-    void this.syncMemberCache({ refs: list }).catch(error => {
-      if ((error as { code?: string })?.code === 'ERR_INVALID_STATE') return;
+    const task = this.syncMemberCache({ refs: list, shouldStop: () => this.closed }).catch(error => {
+      if (this.closed || (error as { code?: string })?.code === 'ERR_INVALID_STATE') return;
       console.error('[github-member-cache] sync failed:', error);
-    });
+    }).finally(() => this.scheduledSyncs.delete(task));
+    this.scheduledSyncs.add(task);
   }
 
   /** Marks a newly activated or modified repository's member cache dirty and schedules a single-flight refresh (#1158). */
   scheduleRepositoryMemberSync(repositoryId: string): void {
+    if (this.closed) return;
     const refs = markRepositoryMemberCacheDirty(this.store, repositoryId);
     if (refs.length) this.scheduleMemberSync(refs);
   }
 
+  close(): void {
+    this.closed = true;
+  }
+
   async drain(): Promise<void> {
-    await Promise.allSettled([...this.syncingInstallations.values(), ...this.refreshing.values()]);
+    while (this.scheduledSyncs.size || this.syncingInstallations.size || this.refreshing.size) {
+      await Promise.allSettled([...this.scheduledSyncs, ...this.syncingInstallations.values(), ...this.refreshing.values()]);
+    }
   }
 
   /**
@@ -317,6 +346,7 @@ export class GitHubIdentity implements InstallationIdentity {
     onProgress?: (checked: number, total: number) => void;
   } = {}): Promise<void> {
     const now = Date.now();
+    if (this.closed || options.shouldStop?.()) return;
     if (this.rateLimitedUntil > now) {
       this.reconcileAllGrants();
       return;
@@ -353,6 +383,7 @@ export class GitHubIdentity implements InstallationIdentity {
       };
       await Promise.all(Array.from({ length: concurrency }, worker));
     }
+    if (this.closed || options.shouldStop?.()) return;
     this.reconcileAllGrants();
   }
 
@@ -406,6 +437,7 @@ export class GitHubIdentity implements InstallationIdentity {
       this.store.run('DELETE FROM github_installation_owners WHERE installation_ref=?', gone.ref);
       this.store.run('DELETE FROM github_installation_member_cache WHERE installation_ref=?', gone.ref);
       this.store.run('DELETE FROM github_repository_collaborators WHERE installation_ref=?', gone.ref);
+      if (this.store.hasTable('github_repository_assignees')) this.store.run('DELETE FROM github_repository_assignees WHERE installation_ref=?', gone.ref);
       this.store.run('DELETE FROM github_repository_member_cache WHERE installation_ref=?', gone.ref);
     }
     for (const principal of principals) {
@@ -462,7 +494,7 @@ export class GitHubIdentity implements InstallationIdentity {
     const hasExpiredGrant = !!this.store.get(`SELECT 1 FROM scoped_grants WHERE principal_id=? AND source='github_derived'
       AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?
       AND (expires_at=0 OR ?<=?) LIMIT 1`, principal, now, Number(identity.verified_at), now - 30 * 60_000);
-    const coldCache = !memberCacheWarm(this.store) && installationsNeedingMemberSync(this.store, now).length > 0;
+    const coldCache = !memberCacheWarm(this.store, principal) && installationsNeedingMemberSync(this.store, now, { principal }).length > 0;
     if (identity.status === 'active' && !hasExpiredGrant && !coldCache) return false;
     if (this.rateLimitedUntil > now) return false;
     if (identity.status !== 'active' && now - (this.finished.get(principal) ?? 0) < retryPause) return false;
@@ -666,11 +698,13 @@ export class GitHubIdentity implements InstallationIdentity {
           .map(r => [String(r.repository_id), r]),
       );
 
+      const singleUser = [{ id: userId, login: String(identity.display_name) }];
       for (const repo of knownRepos) {
         const repoId = String(repo.repository_id), rc = repoCaches.get(repoId);
         const neededTier = repo.started ? 'full' : 'admin';
         const repoHardError = rc?.last_error && !isTransientGitHubError(String(rc.last_error)) ? String(rc.last_error) : null;
-        const repoReady = Boolean(rc && rc.synced_at !== null && (rc.tier === 'full' || neededTier === 'admin') && !repoHardError);
+        const userRolePending = Boolean(rc && rc.synced_at !== null && !repoHardError && repositoryNeedsBoundUserRole(this.store, ref, repoId, rc, singleUser));
+        const repoReady = Boolean(rc && rc.synced_at !== null && (rc.tier === 'full' || neededTier === 'admin') && !repoHardError && !userRolePending);
         if (!repoReady) {
           const code = repoHardError ? `repository_permission:${repoHardError}` : (rc?.last_error ? String(rc.last_error) : 'repository_member_cache_pending');
           uncertainRepos.set(`${ref}:${repoId}`, code);
@@ -685,10 +719,17 @@ export class GitHubIdentity implements InstallationIdentity {
           addIssue(ref, String(rc.last_error));
           if (rc.last_error === 'github_rate_limited') rateLimitedSeen = true;
         }
+        if (rc && Number(rc.in_installation) === 0) continue;
         const collab = userCollabs.get(repoId);
         if (!collab) continue;
-        if (collab.login && !detectedLogin) detectedLogin = String(collab.login);
         const role = String(collab.role);
+        if (role === 'ambiguous_public_read') {
+          uncertainRepos.set(`${ref}:${repoId}`, 'membership_unreadable');
+          addIssue(ref, 'membership_unreadable');
+          continue;
+        }
+        if (role === 'none' || !repo.started && role !== 'admin') continue;
+        if (collab.login && !detectedLogin) detectedLogin = String(collab.login);
         const grant = role === 'admin' ? { role: 'project_admin', capabilities: projectCapabilities, evidence: 'repository_admin' }
           : role === 'write' || role === 'maintain' ? { role: 'project_member', capabilities: memberCapabilities, evidence: 'repository_write' }
           : role === 'read' || role === 'triage' ? { role: 'project_reader', capabilities: readerCapabilities, evidence: 'repository_read' } : null;
@@ -739,8 +780,12 @@ export class GitHubIdentity implements InstallationIdentity {
           item.id, principal, item.tenant, item.project, item.project ? 'project' : 'tenant', item.role,
           JSON.stringify(item.capabilities), item.evidence, nextGrantVerifiedAt, nextExpiresAt, item.installation.ref, item.installation.revision);
       }
-      const hasBlockingIssue = diagnosticIssues.some(item => !isTransientGitHubError(item.code));
-      const nextStatus = hasBlockingIssue && !desired.length ? 'pending_verification' : 'active';
+      const hasPendingDerivedGrant = !!this.store.get(
+        "SELECT 1 FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at<=? LIMIT 1",
+        principal, now,
+      );
+      const hasHardBlockingIssue = diagnosticIssues.some(item => !isTransientGitHubError(item.code) && item.code !== 'membership_unreadable');
+      const nextStatus = (hasHardBlockingIssue || hasPendingDerivedGrant) && !desired.length ? 'pending_verification' : 'active';
       const nextVerifiedAt = options.fromUserCheck ? (rateLimitedSeen ? identity.verified_at : (options.verifiedAt ?? now)) : identity.verified_at;
       this.store.run('UPDATE external_identities SET display_name=?,status=?,verified_at=?,verification_issues=? WHERE id=?',
         options.login ?? detectedLogin ?? String(identity.display_name), nextStatus, nextVerifiedAt, issues(diagnosticIssues), identity.id);
@@ -815,7 +860,7 @@ export class GitHubIdentity implements InstallationIdentity {
       const userId = String(identity.external_actor);
       if (numericId(user.id) !== userId || typeof user.login !== 'string') return null;
 
-      const access = await new GitHubPermissions(this.store, this.config.apiUrl, this.limited).readInstallationAccess(ref, userId);
+      const access = await new GitHubPermissions(this.store, this.config.apiUrl, this.limited).readInstallationAccess(ref, userId, user.login);
       const targetId = access.target_id;
       const owner = access.owner;
       const repositoryIds = access.repository_ids;

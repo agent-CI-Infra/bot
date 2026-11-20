@@ -93,15 +93,23 @@ export function identityStorage(store: Store): void {
     CREATE INDEX IF NOT EXISTS github_installation_owners_user ON github_installation_owners(github_user_id);
     CREATE TABLE IF NOT EXISTS github_repository_member_cache(
       installation_ref TEXT NOT NULL,repository_id TEXT NOT NULL,owner_id TEXT NOT NULL,full_name TEXT NOT NULL,
-      tier TEXT NOT NULL,in_installation INTEGER NOT NULL DEFAULT 1,etag TEXT,synced_at INTEGER,checked_at INTEGER,
-      dirty INTEGER NOT NULL DEFAULT 1,failures INTEGER NOT NULL DEFAULT 0,last_error TEXT,next_retry_at INTEGER NOT NULL DEFAULT 0,
+      tier TEXT NOT NULL,in_installation INTEGER NOT NULL DEFAULT 1,private INTEGER NOT NULL DEFAULT 1,
+      sync_mode TEXT NOT NULL DEFAULT 'collaborators',etag TEXT,assignees_etag TEXT,
+      synced_at INTEGER,checked_at INTEGER,dirty INTEGER NOT NULL DEFAULT 1,failures INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,next_retry_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY(installation_ref,repository_id));
     CREATE INDEX IF NOT EXISTS github_repository_member_cache_repo ON github_repository_member_cache(repository_id);
     CREATE TABLE IF NOT EXISTS github_repository_collaborators(
-      installation_ref TEXT NOT NULL,repository_id TEXT NOT NULL,github_user_id TEXT NOT NULL,login TEXT NOT NULL,role TEXT NOT NULL,
+      installation_ref TEXT NOT NULL,repository_id TEXT NOT NULL,github_user_id TEXT NOT NULL,login TEXT NOT NULL,
+      role TEXT NOT NULL,role_etag TEXT,source TEXT NOT NULL DEFAULT 'collaborators',
       PRIMARY KEY(installation_ref,repository_id,github_user_id));
     CREATE INDEX IF NOT EXISTS github_repository_collaborators_user ON github_repository_collaborators(github_user_id);
     CREATE INDEX IF NOT EXISTS github_repository_collaborators_repo ON github_repository_collaborators(repository_id);
+    CREATE TABLE IF NOT EXISTS github_repository_assignees(
+      installation_ref TEXT NOT NULL,repository_id TEXT NOT NULL,github_user_id TEXT NOT NULL,login TEXT NOT NULL,
+      PRIMARY KEY(installation_ref,repository_id,github_user_id));
+    CREATE INDEX IF NOT EXISTS github_repository_assignees_user ON github_repository_assignees(github_user_id);
+    CREATE INDEX IF NOT EXISTS github_repository_assignees_repo ON github_repository_assignees(repository_id);
     CREATE TRIGGER IF NOT EXISTS identity_user_insert AFTER INSERT ON users BEGIN
       INSERT OR IGNORE INTO principals(id,kind,user_id) VALUES(NEW.id,'human',NEW.id); END;
     CREATE TRIGGER IF NOT EXISTS identity_user_delete AFTER DELETE ON users BEGIN
@@ -136,8 +144,32 @@ export function identityStorage(store: Store): void {
   // Why the latest GitHub permission check was uncertain: [{installation, code}], never a credential (#521).
   if (!store.all('PRAGMA table_info(external_identities)').some(c => c.name === 'verification_issues'))
     store.db.exec('ALTER TABLE external_identities ADD COLUMN verification_issues TEXT');
-  if (!store.all('PRAGMA table_info(github_repository_member_cache)').some(c => c.name === 'in_installation'))
-    store.db.exec('ALTER TABLE github_repository_member_cache ADD COLUMN in_installation INTEGER NOT NULL DEFAULT 1');
+  const rcCols = store.all('PRAGMA table_info(github_repository_member_cache)');
+  const addingSyncMode = !rcCols.some(c => c.name === 'sync_mode');
+  for (const [name, def] of [
+    ['in_installation', 'INTEGER NOT NULL DEFAULT 1'],
+    ['private', 'INTEGER NOT NULL DEFAULT 1'],
+    ['sync_mode', "TEXT NOT NULL DEFAULT 'collaborators'"],
+    ['assignees_etag', 'TEXT'],
+  ] as const) {
+    if (!rcCols.some(c => c.name === name)) store.db.exec(`ALTER TABLE github_repository_member_cache ADD COLUMN ${name} ${def}`);
+  }
+  const collabCols = store.all('PRAGMA table_info(github_repository_collaborators)');
+  for (const [name, def] of [
+    ['role_etag', 'TEXT'],
+    ['source', "TEXT NOT NULL DEFAULT 'collaborators'"],
+  ] as const) {
+    if (!collabCols.some(c => c.name === name)) store.db.exec(`ALTER TABLE github_repository_collaborators ADD COLUMN ${name} ${def}`);
+  }
+  if (addingSyncMode) {
+    // Databases upgraded from the initial #1158 schema cached empty `/collaborators` lists on Organization installations
+    // lacking `Members: read`; mark those caches cold once so startup re-syncs via repository-level `/assignees` + `/permission`.
+    store.transaction(() => {
+      store.run(`UPDATE github_repository_member_cache SET synced_at=NULL,etag=NULL,dirty=1,next_retry_at=0
+        WHERE installation_ref IN (SELECT installation_ref FROM github_installation_member_cache WHERE owners_uncertain='membership_unreadable')`);
+      store.run("UPDATE github_installation_member_cache SET dirty=1,next_retry_at=0 WHERE owners_uncertain='membership_unreadable'");
+    });
+  }
   store.transaction(() => {
     identityProjection(store);
     if (!store.get('SELECT 1 FROM identity_migrations WHERE version=1')) {

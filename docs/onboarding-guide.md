@@ -22,7 +22,7 @@
 
 登录后，系统超级管理员从顶部「全局设置」进入部署用的「系统初始化」（`#/settings/onboarding`），在第三步配置 GitHub 账号登录（它配置的是整个部署，和下面第 2 节在管理助手里接入单个仓库不是一回事）。系统初始化仅系统超级管理员可用；普通使用者通常是**项目管理员**，只看到自己有权管理的仓库，超级管理员能看到全部。
 
-GitHub 登录使用独立 OAuth App：在 OAuth Apps 中登记 Bot 入口和登录 Callback URL，复制这个 OAuth App 的 Client ID 和 Client secret，再回本页保存启用。仓库连接使用另一份 GitHub App，组织 Members 只读权限也在仓库 App 上配置。更换仓库 App 不会切换登录配置；已有登录 Secret 留空保留。升级前复用仓库 App 登录的配置会显示迁移说明。详细配置见[GitHub 用户登录](onboarding.md#github-用户登录)。
+GitHub 登录使用独立 OAuth App：在 OAuth Apps 中登记 Bot 入口和登录 Callback URL，复制这个 OAuth App 的 Client ID 和 Client secret，再回本页保存启用。仓库连接使用另一份 GitHub App，默认仅申请仓库级权限，无需配置组织级权限。更换仓库 App 不会切换登录配置；已有登录 Secret 留空保留。升级前复用仓库 App 登录的配置会显示迁移说明。详细配置见[GitHub 用户登录](onboarding.md#github-用户登录)。
 
 > 忘记密码或需要账号，找超级管理员在「用户管理」里重置或新建；控制台的写操作需要登录会话，长时间无操作后会要求重新登录。
 
