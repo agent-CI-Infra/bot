@@ -369,6 +369,24 @@ test('#750 dark theme keeps the task detail, project head and project page reada
         readable(sample, 4.5, `project detail hover ${sample.selector} ${width}`);
         darkCard(sample, `project detail hover ${sample.selector} ${width}`);
       }
+      // The tab hover is a state, not a resting value: views.css:1057/:1104 repaint a hovered tab with --color-hover.
+      // This is the state that produced e2e run 44710842421 (a pointer left on a tab at 768), so it is driven here for
+      // both tabs at all three widths instead of being inferred from the resting rows.
+      for (const [selector, color] of [
+        ['.workbench-tab:not([aria-current=page])', 'rgb(231, 237, 246)'],
+        // The current tab keeps --color-brand-text (views.css:1059/:1106) while the hover rule supplies the fill.
+        ['.workbench-tab[aria-current=page]', 'rgb(150, 180, 255)'],
+      ]) {
+        await page.locator(selector).hover();
+        await page.waitForTimeout(250);
+        const hovered = (await colours(page, [selector]))[0];
+        rendered(hovered, `tab hover ${selector} ${width}`);
+        readable(hovered, 4.5, `tab hover ${selector} ${width}`);
+        darkCard(hovered, `tab hover ${selector} ${width}`);
+        expect(hovered.background, `dark tab hover ${selector} ${width}`).toBe('rgb(29, 39, 51)');
+        expect(hovered.color, `dark tab hover ${selector} ${width}`).toBe(color);
+        await page.mouse.move(0, 0);
+      }
     }
 
     // The rest of the project detail the review measured: the role task chip in its three states, the tab count badge,
@@ -442,6 +460,21 @@ test('#750 dark theme keeps the task detail, project head and project page reada
     await page.locator('.role-board-row').first().hover();
     await page.waitForTimeout(250);
     expect((await colours(page, ['.role-board-row']))[0].background, 'light role board hover keeps #fafcfe').toBe('rgb(250, 252, 254)');
+    // Light keeps its own hover rule from workspace.css: the non-current tab washes to rgba(255,255,255,.7) with
+    // --color-text, and the current tab keeps its surface fill and --color-brand because its [aria-current] rule wins.
+    for (const [selector, background, color] of [
+      ['.workbench-tab:not([aria-current=page])', 'rgba(255, 255, 255, 0.7)', 'rgb(23, 36, 59)'],
+      ['.workbench-tab[aria-current=page]', 'rgb(255, 255, 255)', 'rgb(36, 93, 224)'],
+    ]) {
+      await page.locator(selector).hover();
+      await page.waitForTimeout(250);
+      const hovered = (await colours(page, [selector]))[0];
+      rendered(hovered, `light tab hover ${selector}`);
+      readable(hovered, 4.5, `light tab hover ${selector}`);
+      expect(hovered.background, `light tab hover ${selector} background`).toBe(background);
+      expect(hovered.color, `light tab hover ${selector} colour`).toBe(color);
+      await page.mouse.move(0, 0);
+    }
     await page.goto(h.admin + '/#/projects/101/overview');
     await page.waitForSelector('button.role-task-chip');
     await page.waitForLoadState('networkidle').catch(() => {});
