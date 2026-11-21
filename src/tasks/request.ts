@@ -298,6 +298,28 @@ export async function runRequest(
   const spaces = roleWorkspaces(workspace);
   const origin = assertManagedExecution(store, task);
   const ownRole = origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null);
+
+  // #532: this entry's own limits follow the same budget configuration as every other entry — the executing role's
+  // `budget_policy_ref` when it is `bounded` or `metered` — and keep today's entry defaults only when nothing is
+  // configured. The command timeout keeps its role → project → default order inside resolveCommandTimeout.
+  const budgetRole = () => ownRole ?? 'dev';
+  const entryBudget = () => {
+    try {
+      const snapshot = taskConfiguration(store, task)?.roles;
+      const saved = snapshot ?? (() => {
+        const value = store.get('SELECT value FROM settings WHERE key=?', 'roles:' + task.repository_id)?.value;
+        return value ? JSON.parse(String(value)) : null;
+      })();
+      const definition = Array.isArray(saved?.roles) ? saved.roles.find((role: any) => role?.role_id === budgetRole()) : null;
+      const budget = definition?.budget_policy_ref;
+      return budget && (budget.id === 'bounded' || budget.id === 'metered') ? budget : null;
+    } catch { return null; }
+  };
+  const entryMaxTurns = () => {
+    const configured = entryBudget()?.max_turns;
+    return Number.isSafeInteger(configured) && configured >= 1 && configured <= 256 ? Number(configured) : 64;
+  };
+  const commandBudget = () => resolveCommandTimeout(store, task, budgetRole(), 180);
   const generic = genericTask(task);
   const entry = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request')) ? 'development' : 'request';
   const software = () => softwareRequest(task);
@@ -312,6 +334,10 @@ export async function runRequest(
       : runAgent;
 
   const roleRuns = executeAgent !== runAgent;
+  // #532 review (B1/B2): only a direct entry run takes this entry's own configured limits. A role run (\`runTeam\`, or the
+  // single executing role of \`runRole\`) resolves its own role budget, so the shared AgentSpec keeps the neutral entry
+  // defaults (64 turns, 180-second command default) and the dev budget never travels into other roles.
+  const entryCommandDefault = roleRuns ? 180 : commandBudget().defaultSeconds;
   const githubWrite = taskGithubWrite(store, task, redactor, guard, githubUrl);
   const grantedWrite = grantedTaskWrite(store, task, redactor, guard, githubUrl);
   const readScopes = () => taskReadScopes(store, task).filter(scope => scope !== 'metadata');
@@ -801,8 +827,8 @@ export async function runRequest(
       if (task.phase !== 'acceptance') {
         update({ phase: 'model' });
         const read = { type: 'function', function: { name: 'read_file', description: 'Read repository, ../notes, ../context, or /tmp text', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } } };
-        const cmdBudget = resolveCommandTimeout(store, task, ownRole ?? 'dev', 180);
-        const command = commandTool(cmdBudget.defaultSeconds, 'Run bounded implementation/verification commands in this shared task workspace. Never publish, push, merge or use host credentials.', cmdBudget.maxSeconds);
+        const cmdBudget = commandBudget();
+        const command = commandTool(entryCommandDefault, 'Run bounded implementation/verification commands in this shared task workspace. Never publish, push, merge or use host credentials.', cmdBudget.maxSeconds);
         const write = { type: 'function', function: { name: 'write_file', description: 'Write a text artifact, ../notes entry, /tmp file or source file within the shared project workspace', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'], additionalProperties: false } } };
         const submit = {
           type: 'function',
@@ -969,7 +995,7 @@ export async function runRequest(
             ...(browserPolicyOf(task) && (!roleRuns || taskRolePolicies(store, task).every(policy => permitsTool(policy, 'browser'))) ? [browserTool] : []),
           ]),
           requestPrefix: `execution:${execution}:`,
-          maxTurns: 64,
+          maxTurns: roleRuns ? 64 : entryMaxTurns(),
           maxOutputChars: 60000,
           ...(generic ? { grants: offeredNow } : {}),
           finish: {
@@ -1119,7 +1145,7 @@ export async function runRequest(
                 ? await spaces.current.call(key, { type: 'workspace_read', path: args?.path })
                 : name === 'write_file'
                   ? (await spaces.current.write(key, args?.path, Buffer.from(args?.content || '')), { ok: true })
-                  : await runCommand(spaces.current, key, args, 180, spaces.role);
+                  : await runCommand(spaces.current, key, args, entryCommandDefault, spaces.role);
             records.history(task.id, 'execution_evidence', { execution, name, version: beforeCommand?.tree_sha || (typeof result.content === 'string' ? blobSha(Buffer.from(result.content)) : name === 'write_file' ? blobSha(Buffer.from(args.content)) : null), arguments: redactor.clean(args), result: redactor.clean(result) }, spaces.runId);
             return result;
           },

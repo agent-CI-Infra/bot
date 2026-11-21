@@ -18,7 +18,7 @@
 
 ## 工作区命令时限
 
-`run_command` 接受正整数 `timeout_seconds` 和布尔值 `keep_background`。阶段观察者和独立 QA 不传时默认 120 秒；角色化开发和请求执行器默认 180 秒；普通工作流不传时仍等待命令结束。显式时限统一由部署变量 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 限制，默认 600 秒；Compose 会把它传入控制面，修改后重建控制面容器生效。变量必须是 1～2147363 的整数（为工作区 RPC 的额外等待预留后，Node 定时器允许的毫秒范围）。若配置上限小于入口缺省值，缺省值也按上限执行。
+`run_command` 接受正整数 `timeout_seconds` 和布尔值 `keep_background`。入口默认 180 秒，阶段观察者和独立 QA 的 120 秒缺省保持不变；显式角色预算 `budget_policy_ref.command_timeout_seconds` 或项目策略 `command_timeout_seconds` 可覆盖该缺省，被委派的角色按各自预算执行，入口解析出的默认不会传入其他角色；普通工作流不传时仍等待命令结束。显式时限统一由部署变量 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 限制，默认 600 秒；Compose 会把它传入控制面，修改后重建控制面容器生效。变量必须是 1～2147363 的整数（为工作区 RPC 的额外等待预留后，Node 定时器允许的毫秒范围）。若配置上限小于入口缺省值，缺省值也按上限执行。
 
 超过上限的请求会按上限执行，工具结果增加 `timeout_notice`，列出 `requested_seconds`、`effective_seconds`、`max_seconds` 和说明。Native、Process 与 Pi 使用同一参数处理，Pi 普通工作流的容器内命令也遵守控制面传入的上限。框架自行运行的项目策略测试不属于模型的 `run_command`，保持原有等待行为。
 
