@@ -10,7 +10,7 @@ import { stop, TaskError } from '../agent/common.js';
 import { modelProtocol } from '../models/catalog.js';
 import { testUpstreamModel } from '../app/model-probe.js';
 import { type Json } from '../core/security.js';
-import { harnesses } from './harness.js';
+import { harnesses, type RegisteredRoleHarness } from './harness.js';
 import { roleConfiguration } from './definition.js';
 
 export const recommendedBackend = 'pi';
@@ -40,6 +40,8 @@ export interface BackendResolvedModel {
 }
 
 export interface BackendRuntimeStatus {
+  /** `tool_volume`: inspected through the agent-tools volume. `declaration`: the driver declared where it runs (#1042). */
+  source: 'tool_volume' | 'declaration';
   ready: boolean;
   status: 'ready' | 'unavailable';
   volume_root: string;
@@ -59,7 +61,7 @@ export interface BackendRuntimeStatus {
   connectivity: ModelConnectivityStatus;
   reason_code: string | null;
   reason: string | null;
-  subscription: ReturnType<typeof subscriptionStatusView>;
+  subscription: ReturnType<typeof subscriptionStatusView> | null;
 }
 
 const emptyConnectivity = (): ModelConnectivityStatus => ({
@@ -300,6 +302,7 @@ function containerCliStatus(
 
   const ready = reasonCode === null;
   return {
+    source: 'tool_volume',
     ready,
     status: ready ? 'ready' : 'unavailable',
     volume_root: displayRoot,
@@ -323,14 +326,47 @@ function containerCliStatus(
   };
 }
 
+// #1042: a driver that declares `environment: 'workspace'` and task tools runs inside the project computer, but its
+// install path is the product's own (ACP agents shipped as Python packages). Nothing in the console inspects that path
+// yet, so its readiness row states exactly that instead of leaving the backend without any status.
+function declaredRuntimeStatus(h: RegisteredRoleHarness): BackendRuntimeStatus {
+  return {
+    source: 'declaration',
+    ready: true,
+    status: 'ready',
+    volume_root: '',
+    volume_present: false,
+    cli_installed: false,
+    installed_versions: [],
+    compatible_versions: [],
+    incompatible_versions: [],
+    selected_version: null,
+    compatible_range: '',
+    tested_version: h.version,
+    node_version: null,
+    config_override: false,
+    model_relay_ready: true,
+    model_count: 0,
+    resolved_model: null,
+    connectivity: emptyConnectivity(),
+    reason_code: null,
+    reason: null,
+    subscription: null,
+  };
+}
+
 export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: string, workflow = 'development.issue') {
   return [...harnesses]
     .sort((a, b) => Number(b.id === recommendedBackend) - Number(a.id === recommendedBackend))
     .map(h => {
-      const isContainerCli = h.id === 'claude_code' || h.id === 'codex';
-      const runtime_status = isContainerCli
-        ? containerCliStatus(h.id as AgentToolCli, store, repositoryId, toolsRoot, workflow)
-        : null;
+      // The readiness row comes from what the driver declares (#1042): a tool-volume CLI is inspected there, any other
+      // driver that declares workspace execution reports its declaration, and a control-plane driver has no volume to
+      // report. Adding a backend no longer means editing a list of two ids.
+      const runtime_status = h.tool_volume
+        ? containerCliStatus(h.tool_volume, store, repositoryId, toolsRoot, workflow)
+        // Task tools alone do not place a driver in the project computer: a control-plane driver reports its evidence
+        // through the platform and has no workspace install path to describe (#1192 review F2).
+        : h.environment === 'workspace' && h.capabilities.raw_evidence === 'task_tools' ? declaredRuntimeStatus(h) : null;
       return {
         id: h.id,
         name: names[h.id] ?? h.id,
@@ -339,7 +375,7 @@ export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: 
         version: h.version,
         kinds: h.kinds,
         model_source: h.externalModel ? 'external_harness' : 'project',
-        supported_model_sources: isContainerCli ? ['gateway', 'subscription'] : ['gateway'],
+        supported_model_sources: h.tool_volume ? ['gateway', 'subscription'] : ['gateway'],
         integration_issue: null,
         runtime_status,
       };

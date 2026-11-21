@@ -36,7 +36,7 @@ function roleBackendAvailabilityCard(state) {
   if (!containerBackends.length) return null;
   const section = card('容器内 Agent 后端可用性');
   section.dataset.testid = 'backend-availability-card';
-  section.append(note('Claude Code 与 Codex 在项目容器或隔离运行容器内执行，从只读工具卷 /opt/agent-tools 加载二进制，并经容器内模型中转调用平台配置的模型。'));
+  section.append(note('在项目电脑内执行的后端列在这里：Claude Code 与 Codex 从只读工具卷 /opt/agent-tools 加载二进制并经容器内模型中转调用平台模型；其他后端按它自己的声明显示就绪状态，安装与版本由产品自身管理。'));
   const { table, body } = projectTable(['后端', '状态', '已安装版本', '兼容范围', '说明'], '容器内 Agent 后端状态');
   for (const backend of containerBackends) {
     const rt = backend.runtime_status;
@@ -51,6 +51,10 @@ function roleBackendAvailabilityCard(state) {
       if (conn?.state === 'ok') detailText = `模型 ${rt.resolved_model.name}（${src}）· 连通正常${conn.http_status ? '（HTTP ' + conn.http_status + '）' : ''}`;
       else if (conn?.state === 'failed') detailText = `模型 ${rt.resolved_model.name}（${src}）· 连通失败：${conn.detail || conn.error || '请求失败'}`;
       else detailText = `已配置模型 ${rt.resolved_model.name}（${src} · 连通性未探测）`;
+    } else if (rt.source === 'declaration') {
+      // #1042: nothing in the console inspects this product's install path yet; say that instead of claiming a model
+      // status the row never measured.
+      detailText = '由后端声明决定：在项目电脑内执行，安装与版本由产品自身管理，控制台尚未检查。';
     } else if (rt.config_override) {
       detailText = '本地配置覆盖（连通性未探测）';
     } else {
@@ -59,8 +63,12 @@ function roleBackendAvailabilityCard(state) {
     const row = document.createElement('tr');
     row.dataset.backend = backend.id;
     tableCell(row, '后端', element('strong', backend.name));
-    tableCell(row, '状态', badge(!rt.ready ? '未就绪' : connFailed ? '连通异常' : '可用', !rt.ready || connFailed ? 'warning' : 'success'));
-    tableCell(row, '已安装版本', note(rt.installed_versions?.length ? `${rt.installed_versions.join(', ')}${rt.selected_version ? '（选用 ' + rt.selected_version + '）' : ''}` : rt.config_override ? '本地配置覆盖' : '未安装'));
+    tableCell(row, '状态', rt.source === 'declaration'
+      // #1042/#1192: the console has not inspected this backend's install path, so the badge states who manages it
+      // instead of claiming it is ready — the same wording the role box uses.
+      ? badge('由产品管理', 'warning')
+      : badge(!rt.ready ? '未就绪' : connFailed ? '连通异常' : '可用', !rt.ready || connFailed ? 'warning' : 'success'));
+    tableCell(row, '已安装版本', note(rt.installed_versions?.length ? `${rt.installed_versions.join(', ')}${rt.selected_version ? '（选用 ' + rt.selected_version + '）' : ''}` : rt.source === 'declaration' ? '由产品声明管理' : rt.config_override ? '本地配置覆盖' : '未安装'));
     tableCell(row, '兼容范围', element('code', rt.compatible_range || '—'));
     tableCell(row, '说明', note(detailText));
     body.append(row);

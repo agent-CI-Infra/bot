@@ -16,6 +16,7 @@ import { prepareClaudeCode } from '../harness/claude-code.js';
 import { claudeCodeRuntime } from '../harness/claude-code-protocol.js';
 import { codexHarness, prepareCodex } from '../harness/codex.js';
 import { COMPATIBLE_CLI_RANGES } from '../harness/agent-tools.js';
+import type { AgentToolCli } from '../harness/agent-tools.js';
 import type { AgentSpec,AgentServices } from '../agent/runtime.js';
 import { TaskError, stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
@@ -75,6 +76,10 @@ export const completeTranscript=(messages:any[])=>{const last=messages.findLastI
  * outside the matrix is a configuration error; no other model, provider or driver is substituted.
  */
 export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;kinds?:RoleKind[];model_api?:string[];tool_calls?:boolean;structured_output?:string[];environment?:'control_plane'|'workspace';runtime?:{package:string;version:string}|null;
+ /** The agent-tools volume CLI this driver runs, when its readiness is decided by that volume's installed binary (#1042).
+  *  Without it, a driver reports from its declaration only when it declares `environment: 'workspace'` **and**
+  *  `capabilities.raw_evidence: 'task_tools'`; a workspace driver that reports control-plane tools (Pi) keeps no row. */
+ tool_volume?:AgentToolCli;
  /** The driver brings its own model (ACP agents): no project model is resolved, called or accounted for it. */
  externalModel?:boolean;
  /** What the driver's protocol does, checked by RoleRun admission (see protocol.ts). Undeclared means unsupported. */
@@ -85,10 +90,12 @@ const containerRelayApis=['openai-chat-completions','openai-responses','anthropi
 // Container CLI drivers (Claude Code, Codex) execute inside the shared project computer workspace,
 // communicating with the control plane through the task mailbox (model relay, stdio MCP `bot`, read-only GitHub token helpers).
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
-export const harnesses:Required<RoleHarnessMetadata>[]=[
- {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},externalModel:false,
+/** A registered driver: every declaration is filled in except `tool_volume`, which only tool-volume CLIs carry (#1042). */
+export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume'>> & {tool_volume?:AgentToolCli};
+export const harnesses:RegisteredRoleHarness[]=[
+ {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},tool_volume:'claude_code',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:false,
+ {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},tool_volume:'codex',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
