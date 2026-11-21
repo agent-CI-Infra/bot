@@ -179,7 +179,7 @@ test('questions mode: an ordinary statement stays in the ledger only (#534)', as
   f.modelState.respond = async (_body, res) => { calls++; say(res, 'unexpected'); };
   // A bare 呢/哪 is not a question, and a link or inline code must not count just because it contains "?".
   for (const text of ['今天天气不错', '收到', '好的', '报错了', '我还以为他走了呢', '哪怕只有一次机会也要试', '他在家呢很忙',
-    '无论如何', '不管怎么样', '我看下日志再回复你',
+    '无论如何', '不管怎么样', '这就是为什么我们要先发版', '我看下日志再回复你',
     '文档在 https://example.com/?tab=readme 里', '文档在 example.com/docs?x=1 里', '日志里写着 `怎么启动`']) {
     const receipt = await post(f.h, f.id, chat(text));
     assert.equal(receipt.value.state, 'completed', text);
