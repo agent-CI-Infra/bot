@@ -68,6 +68,23 @@ export function bindingLevel(value: RolePermissions): BindingLevel {
 }
 /** The stored form: normalized like a service role's items, so a migrated binding keeps the authorization fence it had. */
 const stored = (p: RolePermissions) => JSON.stringify(normalizePermissions(p, true));
+/** Preserve the pre-#1206 fence slot for untouched existing bindings whose stored JSON still carries retired
+ * computer/browser (or legacy_repository/legacy_commands) keys, so upgrading never breaks active turns, visible group
+ * history, attachments, or running assistant computers. Saving a binding after #1206 increments binding.revision and
+ * writes only active items, rotating the fence normally. */
+function fencePermissions(binding: Row): string {
+  const raw: RolePermissions | null = binding.permissions ? JSON.parse(String(binding.permissions)) : null;
+  if (raw && Object.hasOwn(raw, 'computer')) {
+    const { playbooks: _playbooks, ...active } = raw;
+    const base = Object.fromEntries(permissionItems.map(item => [item.id, item.modes[0]!])) as RolePermissions;
+    const slot: RolePermissions = { computer: 'deny', browser: 'deny', ...base, ...active };
+    if (!Object.hasOwn(raw, 'browser') && (slot.computer === 'allow' || slot.computer === 'custom' && slot.legacy_commands === 'allow')) slot.browser = 'allow';
+    if (slot.github_actions === 'write') slot.github_actions = 'read';
+    return JSON.stringify(slot);
+  }
+  const items = bindingPermissions(binding);
+  return stored(items.github_actions === 'write' ? { ...items, github_actions: 'read' } : items);
+}
 /** Older advanced bindings could grant task creation (delegation) independently of task visibility and control.
  * Keep those exact grants until the owner explicitly selects one of the four task modes. */
 function bindingTaskMode(p: RolePermissions) {
@@ -115,9 +132,11 @@ function migrateActionsWrite(store: Store): void {
   if (store.get("SELECT 1 FROM settings WHERE key='channel_service_binding_actions_write_migrated'")) return;
   store.transaction(() => {
     for (const binding of store.all('SELECT id,permissions FROM channel_service_bindings WHERE permissions IS NOT NULL ORDER BY created_at,id')) {
-      let p: RolePermissions; try { p = normalizePermissions(JSON.parse(String(binding.permissions)), true); } catch { continue; }
+      let raw: RolePermissions; try { raw = JSON.parse(String(binding.permissions)); } catch { continue; }
+      const p = normalizePermissions(raw, true);
       if (p.github_issues !== 'write' || p.github_actions !== 'read') continue;
-      store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?', stored({ ...p, github_actions: 'write' }), binding.id);
+      const next = Object.hasOwn(raw, 'computer') ? JSON.stringify({ ...raw, ...p, github_actions: 'write' }) : stored({ ...p, github_actions: 'write' });
+      store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?', next, binding.id);
       store.audit('system', 'channel.service_binding.actions_write_migrated', binding.id);
     }
     store.run("INSERT INTO settings VALUES('channel_service_binding_actions_write_migrated',?) ON CONFLICT(key) DO NOTHING", new Date().toISOString());
@@ -228,10 +247,10 @@ export class ChannelServiceBindings {
    * upgrade that added it to comment and dispatch keeps every group's fence, and with it the group's history, computer and
    * queued replies. A person who changes the items still changes the fence, through the binding revision. */
   fence(chat: string): string {
-    const binding = this.get(chat), role = binding && serviceRole(this.store, binding.service_role_id), items = binding && this.permissions(binding);
+    const binding = this.get(chat), role = binding && serviceRole(this.store, binding.service_role_id);
     return digest(JSON.stringify({ context: this.store.get('SELECT context_revision FROM channel_chats WHERE id=?', chat)?.context_revision,
       binding: binding ? [binding.id, binding.revision, binding.enabled, revision(this.store, binding.principal_id)] : null,
-      role: role ? [role.id, role.enabled, stored(items!.github_actions === 'write' ? { ...items!, github_actions: 'read' } : items!)] : null,
+      role: role ? [role.id, role.enabled, fencePermissions(binding!)] : null,
       grants: binding ? this.grants(binding).map(g => [g.id, revision(this.store, g.grantor_id)]) : [] }));
   }
   /** Projects inside the binding's grants, split by whether each grantor still holds config.write and the capability there. */
