@@ -1010,3 +1010,57 @@ test('decoupled group permissions default project_memory to read, preserve store
   assert.equal(createdRes.state, 'succeeded', JSON.stringify(createdRes));
   assert.equal(writeRes.error, 'tool_not_allowed');
 });
+
+test('upgrading to #1206 preserves the exact authorization fence of pre-#1206 bindings carrying computer/browser/legacy keys', async t => {
+  const f = await fixture(t), { h } = f;
+  assert.equal((await f.bind()).status, 200);
+  const bindings = new ChannelServiceBindings(h.store, undefined);
+  const bindingRow = () => h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', f.chat.id);
+  const roleRow = serviceRole(h.store, bindingRow().service_role_id);
+  const expectedFence = slotJson => digest(JSON.stringify({
+    context: h.store.get('SELECT context_revision FROM channel_chats WHERE id=?', f.chat.id).context_revision,
+    binding: [bindingRow().id, bindingRow().revision, bindingRow().enabled, revision(h.store, bindingRow().principal_id)],
+    role: [roleRow.id, roleRow.enabled, slotJson],
+    grants: h.store.all("SELECT * FROM scoped_grants WHERE principal_id=? AND policy='channel_service_binding' AND revoked_at IS NULL ORDER BY scope,tenant_id,project_id", bindingRow().principal_id)
+      .map(g => [g.id, revision(h.store, g.grantor_id)]),
+  }));
+  const cases = [
+    // Standard pre-#1206 read binding (computer: deny, browser: deny, project_memory: none).
+    {
+      raw: { computer: 'deny', browser: 'deny', delegation: 'deny', project_tasks: 'none', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read' },
+      expected: { computer: 'deny', browser: 'deny', delegation: 'deny', project_tasks: 'none', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read' },
+    },
+    // Pre-#1206 comment binding with computer/browser allow and Actions write (Actions write masks to read in fence per #1072).
+    {
+      raw: { computer: 'allow', browser: 'allow', delegation: 'deny', project_tasks: 'none', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'write', github_pull_requests: 'write', github_actions: 'write', github_contents: 'read', github_checks: 'read', github_statuses: 'read' },
+      expected: { computer: 'allow', browser: 'allow', delegation: 'deny', project_tasks: 'none', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'write', github_pull_requests: 'write', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read' },
+    },
+    // Pre-browser binding (stored computer: allow without browser key; pre-#1206 normalized browser to allow).
+    {
+      raw: { computer: 'allow', delegation: 'deny', project_tasks: 'none', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read' },
+      expected: { computer: 'allow', browser: 'allow', delegation: 'deny', project_tasks: 'none', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read' },
+    },
+    // Pre-#1206 custom computer + legacy task masks in original key order.
+    {
+      raw: { computer: 'custom', browser: 'allow', delegation: 'allow', project_tasks: 'custom', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read', legacy_repository: 'read', legacy_commands: 'allow', legacy_project_tasks: 'none', legacy_delegation_controls: 'allow' },
+      expected: { computer: 'custom', browser: 'allow', delegation: 'allow', project_tasks: 'custom', project_memory: 'none', project_configuration: 'none', schedules: 'none', github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read', legacy_repository: 'read', legacy_commands: 'allow', legacy_project_tasks: 'none', legacy_delegation_controls: 'allow' },
+    },
+  ];
+  for (const { raw, expected } of cases) {
+    h.store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?', JSON.stringify(raw), bindingRow().id);
+    assert.equal(bindings.fence(f.chat.id), expectedFence(JSON.stringify(expected)));
+    const listed = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === f.chat.id);
+    assert.equal(listed.permissions.computer, undefined);
+    assert.equal(listed.permissions.browser, undefined);
+    assert.equal(listed.permissions.legacy_repository, undefined);
+    assert.equal(listed.permissions.legacy_commands, undefined);
+  }
+  // Explicitly saving the binding after #1206 increments revision, drops retired keys from storage, and rotates the fence.
+  const beforeFence = bindings.fence(f.chat.id);
+  const updated = await f.bind({ participation: 'questions', expected_revision: bindingRow().revision });
+  assert.equal(updated.status, 200, JSON.stringify(updated.value));
+  assert.notEqual(bindings.fence(f.chat.id), beforeFence);
+  const savedRaw = JSON.parse(bindingRow().permissions);
+  assert.equal(Object.hasOwn(savedRaw, 'computer'), false);
+  assert.equal(Object.hasOwn(savedRaw, 'browser'), false);
+});

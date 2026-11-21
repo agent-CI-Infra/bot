@@ -128,7 +128,7 @@ test('the management assistant manages its private chat\'s timers for the owner,
     [['channel.schedule.created', f.principal], ['channel.schedule.updated', f.principal]]);
 });
 
-test('any member of a group at the comment level manages its timers through the assistant; below it the tool is not there (#851)', async t => {
+test('any member of an active bound group manages its own timers through the assistant even at GitHub read-only (#851, #1206)', async t => {
   const f = await channelFixture(t); await repositoryAssistant(f);
   const group = await boundGroup(f, ['101']), binding = () => f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
   const level = async value => assert.equal((await f.admin('/api/channels/chats/' + group.id + '/service-binding', 'PUT',
@@ -194,7 +194,7 @@ test('two groups each run their own timers by their own assistant and answer in 
   assert.ok(!cards(f, first).some(c => c.includes('乙群')) && !cards(f, second).some(c => c.includes('甲群')));
   const turns = id => f.h.store.all("SELECT service_role_id FROM channel_service_turns WHERE chat_id=? AND source_message LIKE 'schedule:%'", id);
   assert.deepEqual([turns(first.id).length, turns(second.id).length], [1, 1]);
-  // In the second group (at the comment level) a member asks to move "this timer" to 10:00: the assistant sees only this group's.
+  // In the second group a member asks to move "this timer" to 10:00: the assistant sees only this group's.
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', second.id);
   assert.equal((await f.admin('/api/channels/chats/' + second.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant',
     scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: 'comment', expected_revision: binding.revision })).status, 200);
