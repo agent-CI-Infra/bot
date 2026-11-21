@@ -14,8 +14,15 @@ const minute = 60000;
 /** A timer whose occurrence is older than this when the worker sees it (the process was down) skips it instead of running late. */
 const grace = 10 * minute;
 const code = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_schedule_failed';
-/** Lost authority or configuration (4xx) pauses the timer with that reason; a model or network fault only fails the one run. */
-const authority = (error: unknown) => error instanceof HttpError && error.status === 403 || error instanceof TaskError && error.state === 'waiting_configuration';
+/** A passing fault: the authority check changed between two reads, transport, or a configuration still settling. The timer keeps
+ * running and retries; `waiting_configuration` is shared by both a model whose key is being replaced and a role whose grant was
+ * really revoked, so a code naming a withdrawal stays terminal below. */
+export const transient = (error: unknown): boolean =>
+  error instanceof HttpError && (/authority_changed$/.test(error.code) || [408, 425, 429].includes(error.status) || error.status >= 500)
+  || error instanceof TaskError && !/revoked|forbidden/.test(error.code) && (error.state === 'waiting_configuration' || error.state === 'retry_wait');
+/** A withdrawn authority or unusable configuration a person must repair: only this pauses the timer, with the reason recorded. */
+export const withdrawn = (error: unknown): boolean =>
+  !transient(error) && (error instanceof HttpError && error.status === 403 || error instanceof TaskError && error.state === 'waiting_configuration');
 
 /**
  * The timers of the current conversation, for its assistant (#851): the management assistant in a private chat, or any
@@ -238,12 +245,27 @@ export class ChannelSchedules {
       if (claimed && !late && !previous) this.start(row, claimed);
     }
   }
+  /** Retry a passing fault sooner than the timer's own rhythm, backing off per failed run: 1, 2, 4 … minutes up to 30. The
+   * occurrence already planned stays the upper bound, so a retry never moves the timer past its own schedule. The run's
+   * revision must still be the current one: a timer edited while the run was in flight keeps its new plan untouched. */
+  private retry(row: Row, revision: number): void {
+    const history = this.store.all("SELECT state FROM channel_schedule_runs WHERE schedule_id=? ORDER BY created_at DESC,rowid DESC LIMIT 8", row.id);
+    let failed = 0; for (const run of history) { if (run.state !== 'failed') break; failed++; }
+    const now = this.clock(), delay = Math.min(30 * minute, minute * 2 ** Math.min(Math.max(failed - 1, 0), 5));
+    const next = this.store.get('SELECT next_at FROM channel_schedules WHERE id=?', row.id)?.next_at as number | null | undefined;
+    this.store.run("UPDATE channel_schedules SET next_at=?,updated_at=? WHERE id=? AND state='active' AND revision=?", next == null ? now + delay : Math.min(now + delay, next), now, row.id, revision);
+  }
   private start(row: Row, run: string): void {
     const work = this.execute(row, run).catch(error => {
       if (this.stopped) return; // Shutdown: restart records the run as interrupted.
       const reason = code(error);
       this.store.run("UPDATE channel_schedule_runs SET state='failed',error=?,updated_at=? WHERE id=? AND state='running'", reason, this.clock(), run);
-      if (authority(error)) this.store.run("UPDATE channel_schedules SET state='paused',reason=?,next_at=NULL,revision=revision+1,updated_at=? WHERE id=? AND state='active'", reason, this.clock(), row.id);
+      if (withdrawn(error)) this.store.run("UPDATE channel_schedules SET state='paused',reason=?,next_at=NULL,revision=revision+1,updated_at=? WHERE id=? AND state='active'", reason, this.clock(), row.id);
+      // A passing fault fails only this run; the timer stays active. Only a timer run may move the plan: a manual run must not.
+      else if (transient(error)) {
+        const failed = this.store.get('SELECT trigger,schedule_revision FROM channel_schedule_runs WHERE id=?', run);
+        if (failed?.trigger === 'timer') this.retry(row, Number(failed.schedule_revision));
+      }
     }).finally(() => this.running.delete(row.id));
     this.running.set(row.id, work);
   }
