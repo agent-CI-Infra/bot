@@ -535,11 +535,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .console-save-bar > [role=alert]:empty { display: none; }
 .console-save-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .console-save-actions button { min-height: var(--control-min, 44px); }
-.console-save-advanced { flex-basis: 100%; }
-.console-save-advanced > summary { cursor: pointer; min-height: var(--control-min, 44px); display: flex; align-items: center; list-style: none; }
-.console-save-advanced > summary::-webkit-details-marker { display: none; }
-.console-save-advanced > summary::before { content: '▸'; margin-right: 8px; }
-.console-save-advanced[open] > summary::before { content: '▾'; }
+.console-save-bar-inline-status > [role=status] { flex-basis: auto; }
 @media (max-width: 767px) {
   .console-save-bar { padding: 10px; }
 }
