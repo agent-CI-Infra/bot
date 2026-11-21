@@ -89,29 +89,57 @@ test('a private message still shows the processing indicator until its answer is
 });
 
 // #534: the mode that answers questions judged a message by a question mark at its very end alone, so "这个怎么弄？谢谢" and
-// "这个怎么办" got no reply at all. A question mark anywhere now counts, and so does a narrow set of interrogatives and
-// requests for help; ordinary statements and acknowledgements still never start a turn.
-test('questions mode: a question mark anywhere in the message reaches the assistant (#534)', async t => {
-  const f = await group(t, 'questions');
-  f.modelState.respond = async (_body, res) => say(res, '先看 migrate 步骤的日志。');
+// "这个怎么办" got no reply at all. A question mark anywhere outside links and code now counts, and so does a narrow set of
+// interrogatives and requests for help; ordinary statements and acknowledgements still never start a turn.
+test('questions mode: a question mark anywhere in the message starts a real turn (#534)', async t => {
+  const f = await group(t, 'questions'), requests = [];
+  f.modelState.respond = async (body, res) => { requests.push(body); say(res, '先看 migrate 步骤的日志。'); };
   const receipt = await post(f.h, f.id, chat('这个怎么弄？谢谢'));
-  // Taken in, not dropped: the queue, or a turn already running for this chat.
-  assert.notEqual(row(f, receipt).state, 'completed');
+  await done(f, receipt);
+  assert.equal(row(f, receipt).state, 'completed');
+  // The turn really ran: the model was asked with this exact text and the answer was sent. The old early return at
+  // service.ts:613 completed the row without either, which is why asserting only the inbox state stayed green.
+  assert.equal(requests.length, 1);
+  assert.equal(JSON.parse(requests[0].messages[1].content).request, '这个怎么弄？谢谢');
+  await until(() => f.wire.sent.some(sent => JSON.stringify(sent).includes('先看 migrate 步骤的日志。')));
 });
 
-test('questions mode: a request for help without punctuation reaches the assistant (#534)', async t => {
-  const f = await group(t, 'questions');
-  f.modelState.respond = async (_body, res) => say(res, '先看 migrate 步骤的日志。');
+test('questions mode: a request for help without punctuation starts a real turn (#534)', async t => {
+  const f = await group(t, 'questions'), requests = [];
+  f.modelState.respond = async (body, res) => { requests.push(body); say(res, '先看 migrate 步骤的日志。'); };
   for (const text of ['这个怎么办', '报错了，帮我看下']) {
     const receipt = await post(f.h, f.id, chat(text));
-    assert.notEqual(row(f, receipt).state, 'completed', text);
+    await done(f, receipt);
+    assert.equal(row(f, receipt).state, 'completed', text);
   }
+  assert.deepEqual(requests.map(body => JSON.parse(body.messages[1].content).request), ['这个怎么办', '报错了，帮我看下']);
+  await until(() => f.wire.sent.filter(sent => JSON.stringify(sent).includes('先看 migrate 步骤的日志。')).length === 2);
+});
+
+test('questions mode: a message waiting while a turn starts is merged as one that would start a reply (#534)', async t => {
+  const f = await group(t, 'questions');
+  let release; const gate = new Promise(r => { release = r; });
+  // Hold the turn between claiming the chat and opening it, so the second message is still queued when the turn opens.
+  f.service.renewal = () => gate;
+  let calls = 0, second;
+  f.modelState.respond = async (body, res) => { calls++; if (calls === 1) return call(res, 'start_own_task'); second = body; return say(res, '收到。'); };
+  const initial = await post(f.h, f.id, chat('这个怎么弄？'));
+  await until(() => f.service.business.has(f.chat.id));
+  const follow = await post(f.h, f.id, chat('报错了，帮我看下'));
+  assert.equal(row(f, follow).state, 'queued');
+  release(); await done(f, initial); await done(f, follow);
+  // needsReply (service.ts:609) sets this flag when the turn captures a message that was still queued. Reverting it to the
+  // old end-anchored regex still merges the message but reports false, so the incoming batch is what covers that call site.
+  const batch = incoming(second)[0];
+  assert.deepEqual(batch.messages.map(m => [m.content, m.group_setting_invites_reply]), [['报错了，帮我看下', true]]);
 });
 
 test('questions mode: an ordinary statement stays in the ledger only (#534)', async t => {
   const f = await group(t, 'questions'); let calls = 0;
   f.modelState.respond = async (_body, res) => { calls++; say(res, 'unexpected'); };
-  for (const text of ['今天天气不错', '收到', '好的']) {
+  // A bare 呢/哪 is not a question, and a link or inline code must not count just because it contains "?".
+  for (const text of ['今天天气不错', '收到', '好的', '我还以为他走了呢', '哪怕只有一次机会也要试', '他在家呢很忙',
+    '文档在 https://example.com/?tab=readme 里', '日志里写着 `怎么启动`']) {
     const receipt = await post(f.h, f.id, chat(text));
     assert.equal(receipt.value.state, 'completed', text);
   }

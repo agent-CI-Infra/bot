@@ -1,4 +1,4 @@
-const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @ 及以问号结尾的文字'], ['all', '读取每条新文字后判断是否发言']];
+const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @、提问或求助的文字'], ['all', '读取每条新文字后判断是否发言']];
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
 // What a group may do is its binding's level (#849); each level adds to the one before it.
 const bindingLevelOptions = [
