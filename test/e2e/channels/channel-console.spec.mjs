@@ -162,7 +162,9 @@ test('settings keep platform mutations in global settings and project administra
     const password = testPassword(); await f.admin('/api/users', 'POST', { username: 'project-owner', password, repository_ids: ['101'] });
     await page.getByLabel('用户名', { exact: true }).fill('project-owner'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click(); await page.goto(f.h.admin + '/#/preferences');
-    await expect(page.locator('#tabs [data-console-nav=preferences]')).toHaveCount(0);
+    const prefs = page.locator('#tabs [data-console-nav=preferences]');
+    await expect(prefs).toHaveCount(1);
+    await expect(prefs).toHaveAttribute('aria-current', 'page');
     await expect(page.getByTestId('console-more-link')).toBeVisible();
     await expect(page.locator('#tabs [data-console-nav=settings]')).toBeHidden();
     await switchConsoleProject(page, '101');
