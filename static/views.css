@@ -40,6 +40,10 @@ a.call-link{background:#e5f2e9;color:#24603d}
 @keyframes live-pulse{50%{opacity:.25}}@media(prefers-reduced-motion:reduce){.live::before{animation:none}}
 .side-card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-card);padding:var(--space-6);box-shadow:var(--shadow-card);min-width:0}.side-card p{margin:6px 0 0;font-size:var(--font-size-label)}.side-card .actions{margin-top:8px}
 .facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:8px 0 0;font-size:var(--font-size-1)}.facts dt{color:var(--color-text-muted);white-space:nowrap}.facts dd{margin:0;overflow-wrap:anywhere}
+/* #1182: at 390px a 216px label ("最近一次 manager 重复正文清理") left the value column 70px and every value wrapped
+   one character per line. Below 560px the label wraps instead and the value column keeps at least 140px; wider
+   widths keep today's single-line labels. */
+@media(max-width:560px){.facts{grid-template-columns:minmax(0,max-content) minmax(140px,1fr)}.facts dt{white-space:normal;overflow-wrap:anywhere}}
 .findings{margin:8px 0 0;padding-left:18px;font-size:var(--font-size-label)}.findings li+li{margin-top:10px}
 .history{list-style:none;margin:0;padding:0}.history li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:3px 10px;padding:7px 0;border-bottom:1px solid #edf1f4;font-size:var(--font-size-label)}
 .history li:last-child{border-bottom:0}.history.wrap li{overflow-wrap:anywhere}.history .wide-cell{grid-column:1/-1}.history code{overflow-wrap:anywhere;font-size:var(--font-size-1)}
