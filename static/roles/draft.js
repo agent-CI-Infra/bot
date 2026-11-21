@@ -205,7 +205,7 @@ const permissionModeLabels = { none: '无权限', read: '只读', write: '读写
 // under one 「与默认相同」 summary (#850); without it every item is listed, as the service roles page does.
 function permissionEditor(permissions, items, change, prefix = '', fixed = false, defaults = null) {
   const box = element('div', '', 'role-permissions');
-  box.append(note('基础能力默认可用：处理自己的任务、读取当前会话、使用自己的技能与记忆、记录进度和提交本次结果。项目范围、运行契约和外部授权仍会检查。'));
+  box.append(note('基础能力默认可用：处理自己的任务、使用虚拟电脑与任务浏览器（仍受工作区与任务站点白名单边界约束）、读取当前会话、使用自己的技能与记忆、记录进度和提交本次结果。项目范围、运行契约和外部授权仍会检查。'));
   if (fixed) box.append(note('全部能力已允许；实际执行仍受当前用户授权、项目范围和入口支持情况约束。'));
   const same = item => !!defaults && Object.hasOwn(defaults, item.id) && permissions[item.id] === defaults[item.id];
   const groups = (shown, host) => {

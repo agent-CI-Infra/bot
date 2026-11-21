@@ -134,3 +134,16 @@ test('recalling the current group question preserves its computer for the next q
   assert.ok(f.assistant.computers.leases.has(owner),'a recalled question keeps the idle computer');
   script(f,{[chat.id]:[['read_file',{path:'~/kept.txt'}]]});assert.equal((await ask(f,'oc_group'))[0].content,'retained');
 });
+
+test('a default read-only group and a legacy computer=deny binding both use the assistant computer without extra permission (#1206)', async t => {
+  const f = await fixture(t);
+  f.groupPermissions = undefined;
+  const chat = await boundGroup(f, ['101'], 'oc_group_readonly');
+  const row = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  // Even an existing stored binding with legacy computer=deny still has computer access.
+  f.h.store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?',
+    JSON.stringify({ ...JSON.parse(row.permissions), computer: 'deny', browser: 'deny' }), row.id);
+  script(f, { [chat.id]: [['run_command', { command: 'printf ok-readonly' }]] });
+  const seen = await ask(f, 'oc_group_readonly', '跑个只读统计脚本');
+  assert.equal(seen[0].output, 'ok-readonly');
+});

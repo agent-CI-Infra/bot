@@ -162,10 +162,10 @@ test('binding needs a Feishu-bound maintainer in the group with config.write ove
   const binding = h.store.get('SELECT * FROM channel_service_bindings'), principal = h.store.get('SELECT * FROM principals WHERE id=?', binding.principal_id);
   assert.equal(principal.kind, 'service'); assert.equal(principal.project_id, null);
   assert.deepEqual(h.store.all('SELECT project_id,grantor_id,capabilities FROM scoped_grants WHERE principal_id=?', binding.principal_id)
-    .map(g => [g.project_id, g.grantor_id, JSON.parse(g.capabilities)]), [['101', 'maintainer', ['tasks.read']]]);
-  // The binding principal never holds configuration, grant, knowledge or schedule authority, nor any project outside its scope.
+    .map(g => [g.project_id, g.grantor_id, JSON.parse(g.capabilities)]), [['101', 'maintainer', ['tasks.read', 'knowledge.read']]]);
+  // The binding principal never holds configuration, grant, knowledge write or schedule authority, nor any project outside its scope.
   const scoped = resolvePrincipalActor(h.store, binding.principal_id, null, '101');
-  for (const capability of ['config.write', 'grants.manage', 'knowledge.read', 'schedules.manage', 'roles.edit']) assert.throws(() => authorize(scoped, capability, { project_id: '101' }), { code: 'capability_forbidden' });
+  for (const capability of ['config.write', 'grants.manage', 'knowledge.write', 'schedules.manage', 'roles.edit']) assert.throws(() => authorize(scoped, capability, { project_id: '101' }), { code: 'capability_forbidden' });
   assert.throws(() => authorize(resolvePrincipalActor(h.store, binding.principal_id, null, '201'), 'tasks.read', { project_id: '201' }), { code: 'capability_forbidden' });
   // Someone else may not disable it unless they hold config.write over its whole scope.
   const other = maintainer(f, 'other-maintainer', ['102'], 'ou_other');
@@ -763,7 +763,7 @@ test('a project administrator binds one group at read and another at dispatch; e
   assert.deepEqual([a.level, b.level, a.owner, b.owner], ['read', 'dispatch', 'project-admin', 'project-admin']);
   assert.equal(b.permissions.github_contents, 'read', 'dispatch never includes Contents write');
   const grants = chat => JSON.parse(h.store.get("SELECT g.capabilities FROM scoped_grants g JOIN channel_service_bindings b ON b.principal_id=g.principal_id WHERE b.chat_id=?", chat).capabilities);
-  assert.deepEqual([grants(f.chat.id), grants(chatB.id)], [['tasks.read'], ['tasks.read', 'tasks.write']]);
+  assert.deepEqual([grants(f.chat.id), grants(chatB.id)], [['tasks.read', 'knowledge.read'], ['tasks.read', 'tasks.write', 'knowledge.read']]);
   let offered;
   const create = (seen, res, request) => seen.length ? say(res, '已处理。') : call(res, 'create_project_task', { repository: repo(101), request, contract });
   // Group B: a member without a platform account and one with only read access both hand work to the Manager.
@@ -841,8 +841,8 @@ test('upgrading moves each binding\'s role items onto the binding unchanged: sam
   assert.deepEqual(h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision), revisions);
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.level_migrated'").n, 2);
   const views = (await f.admin('/api/channels/service-bindings')).value.bindings, view = chat => views.find(b => b.chat_id === chat);
-  // The repository assistant's group reads as read; the old delegating role's group keeps exactly its transitional set.
-  assert.equal(view(chatB.id).level, 'read');
+  // The repository assistant's group keeps its pre-#1206 project_memory=none while reading as GitHub read / tasks none; the old delegating role's group keeps its transitional set.
+  assert.deepEqual([view(chatB.id).github_level, view(chatB.id).task_mode, view(chatB.id).permissions.project_memory], ['read', 'none', 'none']);
   assert.deepEqual([view(f.chat.id).level, view(f.chat.id).service_role.id, view(f.chat.id).permissions.legacy_delegation_controls], ['custom', custom.id, 'allow']);
   // Its role stays the prompt and model; its items can no longer be edited there and never reach a group again.
   const edit = await f.admin('/api/service-roles/' + custom.id, 'PATCH', { expected_revision: custom.revision, permissions: { project_tasks: 'write' } });
@@ -961,4 +961,52 @@ test('removing a project deletes its unused assistant roles; one a group still n
   assert.deepEqual({ ...row(bound.id) }, { enabled: 0, model_id: null }, 'kept for the group that names it, disabled, without the deleted project model');
   assert.equal(row(unused.id), undefined);
   assert.deepEqual({ ...row(other.id) }, { enabled: 1, model_id: f.assistantModel.id });
+});
+
+test('decoupled group permissions default project_memory to read, preserve stored none, allow orthogonal read+dispatch, and always permit computer/browser (#1206)', async t => {
+  const f = await fixture(t), { h } = f;
+  const bound = await f.bind();
+  assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  assert.deepEqual([bound.value.github_level, bound.value.task_mode, bound.value.permissions.project_memory, bound.value.permissions.project_configuration, bound.value.permissions.schedules],
+    ['read', 'none', 'read', 'none', 'none']);
+  assert.equal(bound.value.permissions.computer, undefined);
+  assert.equal(bound.value.permissions.browser, undefined);
+  const listed = (await f.admin('/api/channels/service-bindings')).value;
+  assert.deepEqual(listed.github_levels.map(l => l.id), ['read', 'comment']);
+  assert.equal(listed.default_permissions.project_memory, 'read');
+  assert.ok(!listed.permission_items.some(item => ['computer', 'browser', 'delegation'].includes(item.id)));
+
+  // Existing stored bindings keep project_memory=none while legacy computer/browser deny normalize to always allowed.
+  const bindingRow = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', f.chat.id);
+  h.store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?',
+    JSON.stringify({ ...JSON.parse(bindingRow.permissions), computer: 'deny', browser: 'deny', project_memory: 'none' }), bindingRow.id);
+  const preserved = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === f.chat.id);
+  assert.deepEqual([preserved.github_level, preserved.task_mode, preserved.permissions.project_memory], ['read', 'none', 'none']);
+  assert.equal(preserved.permissions.computer, undefined);
+  assert.equal(preserved.permissions.browser, undefined);
+  // An unrelated edit keeps stored project_memory=none unchanged.
+  const reedit = await f.bind({ participation: 'questions', expected_revision: preserved.revision });
+  assert.equal(reedit.status, 200, JSON.stringify(reedit.value));
+  assert.equal(reedit.value.permissions.project_memory, 'none');
+
+  // Orthogonal combination: GitHub read + tasks create + project_memory read (no GitHub write, no project schedules).
+  const ortho = await f.setLevel({ github_issues: 'read', github_pull_requests: 'read', github_actions: 'read', github_contents: 'read', github_checks: 'read', github_statuses: 'read', project_tasks: 'create', project_memory: 'read', schedules: 'none' });
+  assert.deepEqual([ortho.github_level, ortho.task_mode, ortho.permissions.project_memory], ['read', 'create', 'read']);
+  let offered;
+  f.modelState.respond = async (body, res) => {
+    offered = body.tools.map(tool => tool.function.name);
+    const seen = observations(body);
+    if (!seen.length) return call(res, 'management_query', { operation: 'search_knowledge', target: { project_id: repo(101) }, arguments: { query: 'bot' } });
+    if (seen.length === 1) return call(res, 'create_project_task', { repository: repo(101), request: '只读加派活测试', contract });
+    if (seen.length === 2) return call(res, 'github_write', { repository: repo(101), method: 'POST', path: '/issues', key: 'no-write', body: { title: 'Denied' } });
+    return say(res, '完成验证。');
+  };
+  const row = await done(f, await post(h, f.id, groupMessage('查一下知识并派活')));
+  assert.equal(row.state, 'completed', row.error);
+  assert.ok(offered.includes('create_project_task') && offered.includes('management_query') && offered.includes('conversation_schedules'));
+  assert.ok(!offered.includes('github_write'));
+  const [knowledgeRes, createdRes, writeRes] = observations(f.requests.at(-1));
+  assert.ok(!knowledgeRes.error, JSON.stringify(knowledgeRes));
+  assert.equal(createdRes.state, 'succeeded', JSON.stringify(createdRes));
+  assert.equal(writeRes.error, 'tool_not_allowed');
 });

@@ -109,7 +109,7 @@ test('a live authority change discards the physical transcript before resuming t
   const instance = f.s.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");
   f.s.run('UPDATE role_instances SET session=?,harness_state=?,runtime=? WHERE id=?',
     JSON.stringify([{ role: 'user', content: 'obsolete-authority-transcript' }]), '{"session_id":"obsolete-session"}', 'obsolete-runtime', instance.id);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, permissions: { commands: 'deny' } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, permissions: { project_memory: 'none' } }] });
   await runRole(f.spec, 'dev');
   assert.ok(!JSON.stringify(requests.at(-1).messages).includes('obsolete-authority-transcript'));
   const resumed = f.s.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");

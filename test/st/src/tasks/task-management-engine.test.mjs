@@ -40,7 +40,7 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,0)");
   roleApi(store, { id: 'operator', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), {
     expected_revision: 0, enabled: false, roles: [
-      { role_id: 'reviewer', harness_ref: { id: 'native' }, permissions: { task_management: 'write', delegation: 'deny', commands: 'deny' } },
+      { role_id: 'reviewer', harness_ref: { id: 'native' }, permissions: { task_management: 'write', delegation: 'deny' } },
       { role_id: 'qa', harness_ref: { id: 'native' } }
     ]
   });
@@ -62,7 +62,7 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
   assert.equal(store.get('SELECT count(*) n FROM task_runs WHERE task_id=? AND role=?', id, 'reviewer').n, 1);
   assert.equal(store.get('SELECT executor_role FROM task_origins WHERE task_id=?', id).executor_role, 'reviewer');
   assert.ok(requests.length >= 1);
-  assert.ok(requests.every(body => !body.tools.some(t => ['delegate_role', 'delegate_roles', 'run_command', 'create_issue', 'create_pull_request'].includes(t.function.name))));
+  assert.ok(requests.every(body => !body.tools.some(t => ['delegate_role', 'delegate_roles', 'create_issue', 'create_pull_request'].includes(t.function.name))));
   assert.equal(store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n, 0);
   }
   commands.tool(source, 'create_task', { request: 'Second report', criteria: ['Return a separate result'], execute: false });

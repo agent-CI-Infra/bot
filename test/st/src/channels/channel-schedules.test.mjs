@@ -133,23 +133,16 @@ test('any member of a group at the comment level manages its timers through the 
   const group = await boundGroup(f, ['101']), binding = () => f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
   const level = async value => assert.equal((await f.admin('/api/channels/chats/' + group.id + '/service-binding', 'PUT',
     { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: value, expected_revision: binding().revision })).status, 200);
-  const ask = { action: 'create', name: '群巡检', prompt: '每天检查 main 的 CI；有失败就提 Issue 并在群里说明，没有异常就保持沉默。', cron: '0 9 * * *' };
-  // At read the group cannot change anything on GitHub, and its timers stay with the people who manage its binding.
+  const ask = { action: 'create', name: '群巡检', prompt: '每天早 8 点统计昨天的 PR 和 Issue 情况并在群里汇报。', cron: '0 8 * * *' };
+  // #1206: every active bound group may manage its own conversation timers, even at GitHub read-only with project schedules off.
   await level('read');
-  scriptedModel(f, [['conversation_schedules', ask], done => `结果：${done[0].error}`]);
-  let row = await finished(f.h, (await post(f.h, f.id, inGroup('每天九点检查一下 CI', 'ou_bob'))).value.operation_id);
-  assert.equal(row.state, 'completed', row.error);
-  assert.ok(!offeredTools(f).includes('conversation_schedules'));
-  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('结果：tool_not_allowed')));
-  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_schedules').n, 0);
-  // At comment anyone in the group may ask, whoever they are; the binding's principal is recorded as the author.
-  await level('comment');
   scriptedModel(f, [['conversation_schedules', ask], done => ['conversation_schedules', { action: 'pause', id: done[0].schedule.id }],
     done => `已创建「${done[1].schedule.name}」，状态 ${done[1].schedule.state}`]);
-  row = await finished(f.h, (await post(f.h, f.id, inGroup('每天九点检查一下 CI', 'ou_stranger'))).value.operation_id);
+  let row = await finished(f.h, (await post(f.h, f.id, inGroup('每天早 8 点统计昨天的 PR 和 Issue 情况', 'ou_stranger'))).value.operation_id);
   assert.equal(row.state, 'completed', row.error);
   assert.ok(offeredTools(f).includes('conversation_schedules'));
-  assert.match(f.requests.at(-1).messages[0].content, /conversation_schedules manages this group's timers/);
+  assert.ok(!offeredTools(f).includes('github_write'), 'conversation timers stay decoupled from GitHub writes');
+  assert.match(f.requests.at(-1).messages[0].content, /conversation_schedules manages this group's own timers/);
   const saved = f.h.store.get('SELECT * FROM channel_schedules');
   assert.deepEqual({ kind: saved.kind, chat: saved.chat_id, owner: saved.owner_id, by: saved.created_by, state: saved.state, reason: saved.reason },
     { kind: 'group', chat: group.id, owner: null, by: binding().principal_id, state: 'paused', reason: 'user_paused' });
