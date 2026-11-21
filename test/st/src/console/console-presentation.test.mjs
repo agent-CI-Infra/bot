@@ -521,3 +521,48 @@ test('container backend cards distinguish CLI installation, model selection, and
   assert.match(text(failedCard.querySelector('tr[data-backend=codex]')), /连通异常/);
   assert.match(text(failedCard.querySelector('tr[data-backend=codex]')), /连通失败：HTTP 401/);
 });
+
+// #1192 review F1/F4: a backend whose install and version are managed by its product is not an unready tool-volume CLI.
+// The overview row and the role box both state the declaration, and neither offers the tool-volume install path.
+test('a product-declared backend reads as product-managed in the overview row and the role box', () => {
+  const declared = {
+    id: 'acp_fixture', name: 'ACP Fixture', version: '1', kinds: ['writer', 'observer', 'evaluator'], available: true,
+    recommended: false, model_source: 'project', supported_model_sources: ['gateway'], integration_issue: null,
+    runtime_status: { source: 'declaration', ready: true, status: 'ready', volume_root: '', volume_present: false,
+      cli_installed: false, installed_versions: [], compatible_versions: [], incompatible_versions: [], selected_version: null,
+      compatible_range: '', tested_version: '1', node_version: null, config_override: false, model_relay_ready: true,
+      model_count: 0, resolved_model: null,
+      connectivity: { state: 'untested', source: null, model_id: null, model_name: null, checked_at: null, http_status: null, error: null, detail: null },
+      reason_code: null, reason: null, subscription: null },
+  };
+  const config = { schema: 2, revision: 4, enabled: true, controller: { role: 'manager', entries }, roles: team('pi'), skills: [] };
+  const data = roleData(config);
+  data.backends = [...data.backends, declared];
+  data.harnesses = [...data.harnesses, { id: declared.id, version: declared.version, kinds: declared.kinds }];
+  data.configuration.roles.find(role => role.role_id === 'dev').harness_ref = { id: declared.id, version: '1' };
+
+  const overview = rolesPage(data);
+  const card = overview.cards.find(c => c.dataset?.testid === 'backend-availability-card');
+  const row = card.querySelector('tr[data-backend=acp_fixture]');
+  assert.ok(row, 'the declared backend has a readiness row');
+  assert.match(text(row), /由产品声明管理/);
+  assert.match(text(row), /控制台尚未检查/);
+  assert.match(text(row), /由产品管理/, 'the badge states product management instead of claiming success');
+  assert.doesNotMatch(text(row), /未就绪|未安装|无可用兼容版本|请平台管理员/);
+
+  const detail = roleForm(data, 'dev');
+  const box = detail.form.querySelector('[data-testid=backend-runtime-status]');
+  assert.ok(box, 'the role box explains the declaration instead of hiding it');
+  assert.match(text(box), /由产品管理/);
+  assert.match(text(box), /由产品自身管理/);
+  assert.match(text(box), /控制台尚未检查/);
+  assert.doesNotMatch(text(box), /工具卷|打开工具卷设置|安装兼容版本|容器运行条件尚未就绪|未就绪/);
+  // #1192 review F6: the declaration does not imply the driver brings its own model. This fixture resolves the
+  // project's model through the relay, and the fact must say so instead of repeating the product-managed wording.
+  assert.match(text(box), /平台网关（按角色配置解析）/);
+  assert.doesNotMatch(text(box), /模型中转\n由产品自身管理/);
+
+  declared.model_source = 'external_harness';
+  const ownModelBox = roleForm(data, 'dev').form.querySelector('[data-testid=backend-runtime-status]');
+  assert.match(text(ownModelBox), /模型中转\n由产品自身管理/, 'a driver that brings its own model keeps the product-managed wording');
+});

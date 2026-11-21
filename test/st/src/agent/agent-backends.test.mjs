@@ -298,3 +298,39 @@ test('container backend runtime_status checks resolved model selection and repor
   assert.equal(codex.runtime_status.connectivity.state, 'failed');
   assert.match(codex.runtime_status.connectivity.detail, /401/);
 });
+
+// #1042: readiness follows the driver's own declaration. A driver that declares it runs in the workspace with task
+// tools used to get no readiness row at all, because the page was fed by a two-id list; from here it reports its
+// declared environment, and Pi (a control-plane-tools driver) stays as it was.
+test('a newly registered workspace driver reports readiness from its declaration', async t => {
+  const { registerRoleHarness } = await import('../../../../dist/roles/harness.js');
+  registerRoleHarness({ id: 'declared_workspace_fixture', version: '1', session: 'external_session', events: 'acp_session_events',
+    kinds: ['writer', 'observer'], model_api: ['openai-chat-completions'], environment: 'workspace', runtime: { package: 'fixture-product', version: '1' },
+    capabilities: { raw_evidence: 'task_tools', cancel: 'protocol_then_kill', isolation: 'none', version_binding: true, output_validation: true, fresh_context: true, recovery: ['rebuilt_from_task_records'] } },
+    () => async () => ({ summary: 'declared fixture, not a real driver' }));
+  const f = await fixture(t, () => call('finish', {}));
+  const view = f.view();
+  const declared = view.backends.find(b => b.id === 'declared_workspace_fixture');
+  assert.ok(declared, 'the registered driver is listed');
+  assert.ok(declared.runtime_status, 'it carries a readiness row instead of nothing');
+  assert.equal(declared.runtime_status.ready, true);
+  assert.equal(declared.runtime_status.source, 'declaration');
+  assert.equal(declared.runtime_status.compatible_range, '');
+  // The two tool-volume CLIs keep the inspected status, and Pi keeps no row at all.
+  assert.equal(view.backends.find(b => b.id === 'claude_code').runtime_status.source, 'tool_volume');
+  assert.equal(view.backends.find(b => b.id === 'pi').runtime_status, null);
+});
+
+// #1192 review F2: task tools alone do not place a driver in the project computer. The declaration row belongs to a
+// driver that declares `environment: 'workspace'`; a task-tools driver on the control plane keeps no row.
+test('a task-tools driver that does not declare the workspace gets no project-computer row', async t => {
+  const { registerRoleHarness } = await import('../../../../dist/roles/harness.js');
+  registerRoleHarness({ id: 'declared_control_plane_fixture', version: '1', session: 'external_session', events: 'acp_session_events',
+    kinds: ['writer'], model_api: ['openai-chat-completions'], environment: 'control_plane', runtime: null,
+    capabilities: { raw_evidence: 'task_tools', cancel: 'protocol_then_kill', isolation: 'none', version_binding: true, output_validation: true, fresh_context: true, recovery: ['rebuilt_from_task_records'] } },
+    () => async () => ({ summary: 'control-plane fixture, not a real driver' }));
+  const f = await fixture(t, () => call('finish', {}));
+  const controlPlane = f.view().backends.find(b => b.id === 'declared_control_plane_fixture');
+  assert.ok(controlPlane, 'the registered driver is listed');
+  assert.equal(controlPlane.runtime_status, null, 'task tools on the control plane are not a workspace declaration');
+});

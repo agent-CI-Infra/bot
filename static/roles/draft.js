@@ -108,6 +108,25 @@ function roleBackendRuntimeBox(role, state) {
   const info = (state.data.backends || []).find(entry => entry.id === role.harness_ref.id);
   const rt = info?.runtime_status;
   if (!rt) return null;
+  // #1042/#1192: a driver whose install and version are managed by its own product (ACP agents shipped as Python
+  // packages in the project computer) is not a tool-volume CLI. The box states that declaration; it must not report
+  // the CLI missing or send anyone to the Claude Code / Codex tool volume, which cannot install such a product.
+  if (rt.source === 'declaration') {
+    const declaredBox = element('div', '', 'role-backend-runtime');
+    declaredBox.dataset.testid = 'backend-runtime-status';
+    declaredBox.dataset.source = 'declaration';
+    const declaredHead = element('p', '', 'muted');
+    declaredHead.append(badge('由产品管理', 'warning'), ' ',
+      `${info.name} 由产品声明管理：在项目电脑内执行，安装与版本由产品自身管理，控制台尚未检查。`);
+    declaredBox.append(declaredHead, facts([
+      ['执行位置', '项目电脑内（后端声明）'],
+      ['安装与版本', '由产品自身管理（控制台未检查）'],
+      // A declaration row does not by itself mean the driver brings its own model: a workspace/task-tools driver
+      // without `externalModel` still resolves the project's model through the relay (#1192 review F6).
+      ['模型中转', info.model_source === 'external_harness' ? '由产品自身管理' : '平台网关（按角色配置解析）'],
+    ]));
+    return declaredBox;
+  }
   const cliReady = !!(rt.config_override || rt.selected_version);
   const isSubscription = role.harness_ref?.model_source === 'subscription';
   let roleModelReady = false, targetModelId = null, targetModelName = null, targetSourceLabel = '', conn = null, relayText = '';
