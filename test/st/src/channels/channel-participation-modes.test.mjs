@@ -104,6 +104,34 @@ test('questions mode: a question mark anywhere in the message starts a real turn
   await until(() => f.wire.sent.some(sent => JSON.stringify(sent).includes('先看 migrate 步骤的日志。')));
 });
 
+test('questions mode: a question mark in the middle alone starts a real turn (#534)', async t => {
+  const f = await group(t, 'questions'), requests = [];
+  f.modelState.respond = async (body, res) => { requests.push(body); say(res, '这版可以，先跑一遍回归。'); };
+  // No interrogative word and no sentence-final mark: the mark right there in the middle is the only thing that makes this
+  // a question. Anchoring QUESTION back to the end leaves every other case green and turns this one red.
+  const receipt = await post(f.h, f.id, chat('这版可行？谢谢'));
+  await done(f, receipt);
+  assert.equal(row(f, receipt).state, 'completed');
+  assert.equal(requests.length, 1);
+  assert.equal(JSON.parse(requests[0].messages[1].content).request, '这版可行？谢谢');
+  await until(() => f.wire.sent.some(sent => JSON.stringify(sent).includes('这版可以，先跑一遍回归。')));
+});
+
+test('questions mode: the sentence particle alone starts a real turn, a word containing it does not (#534)', async t => {
+  const f = await group(t, 'questions'), requests = [];
+  f.modelState.respond = async (body, res) => { requests.push(body); say(res, '可以发。'); };
+  // "这版能发吗" asks with no question mark and no other interrogative: only the particle at the end makes it a question, so
+  // turning PARTICLE off drops this case and leaves the others green. "吗啡" is a word that merely contains 吗.
+  const asked = await post(f.h, f.id, chat('这版能发吗'));
+  await done(f, asked);
+  assert.equal(row(f, asked).state, 'completed');
+  assert.deepEqual(requests.map(body => JSON.parse(body.messages[1].content).request), ['这版能发吗']);
+  const word = await post(f.h, f.id, chat('吗啡'));
+  await until(() => row(f, word)?.state === 'completed');
+  await f.service.tick();
+  assert.equal(requests.length, 1);
+});
+
 test('questions mode: a request for help without punctuation starts a real turn (#534)', async t => {
   const f = await group(t, 'questions'), requests = [];
   f.modelState.respond = async (body, res) => { requests.push(body); say(res, '先看 migrate 步骤的日志。'); };
@@ -150,8 +178,9 @@ test('questions mode: an ordinary statement stays in the ledger only (#534)', as
   const f = await group(t, 'questions'); let calls = 0;
   f.modelState.respond = async (_body, res) => { calls++; say(res, 'unexpected'); };
   // A bare 呢/哪 is not a question, and a link or inline code must not count just because it contains "?".
-  for (const text of ['今天天气不错', '收到', '好的', '我还以为他走了呢', '哪怕只有一次机会也要试', '他在家呢很忙',
-    '文档在 https://example.com/?tab=readme 里', '日志里写着 `怎么启动`']) {
+  for (const text of ['今天天气不错', '收到', '好的', '报错了', '我还以为他走了呢', '哪怕只有一次机会也要试', '他在家呢很忙',
+    '无论如何', '不管怎么样', '我看下日志再回复你',
+    '文档在 https://example.com/?tab=readme 里', '文档在 example.com/docs?x=1 里', '日志里写着 `怎么启动`']) {
     const receipt = await post(f.h, f.id, chat(text));
     assert.equal(receipt.value.state, 'completed', text);
   }
