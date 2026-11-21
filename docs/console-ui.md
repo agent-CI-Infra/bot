@@ -37,7 +37,7 @@
 | `#/preferences`、`#/identity` | 个人设置入口，直接呈现身份与权限及横向个人设置二级导航 |
 | `#/conversations`、`#/conversations/<chat-id>` | 飞书会话列表与消息、执行过程、派生任务管理页（位于个人设置二级导航） |
 | `#/external` | 个人外部执行端接入与连接诊断（位于个人设置二级导航） |
-| `#/identity/feishu`、`#/settings/feishu` | 统一的「飞书绑定」页（同页列表展示个人绑定与群绑定、仓库范围与权限档位、点击查看聊天记录）与管理员应用配置保持分离；旧 `#/identity/feishu/groups` 与 `#/identity/feishu/conversations` 自动重定向 |
+| `#/identity/feishu`、`#/settings/feishu` | 统一的「飞书绑定」页（同页列表展示个人绑定与群绑定、仓库范围与三维权限配置、点击查看聊天记录）与管理员应用配置保持分离；旧 `#/identity/feishu/groups` 与 `#/identity/feishu/conversations` 自动重定向 |
 | `#/design` | 设计系统样例页；仅平台超级管理员可见，不进入任何导航 |
 
 项目模型、机器状态、任务并发、电脑规格与项目外部执行统一从对应项目设置进入；既有个人飞书绑定和群助手深链继续有效。身份总览呈现本人身份、私聊和可管理群的概览，飞书绑定（含个人绑定与群绑定）、飞书会话和外部执行端通过主区横向二级导航切换。

@@ -76,7 +76,7 @@ Pi SDK 使用默认资源加载器和原生文件、搜索、编辑、Shell 工�
 
 服务角色也可选择 `native / pi / codex / claude_code`。非项目会话通过同一 Driver 使用会话所有者的助手电脑，不创建虚假的业务项目/任务。旧部署保持 Native；已有角色的显式权限不会因升级自动扩大。`service_harness_sessions` 保存绑定，`service_harness_events` 保存加密公共事件；超级管理员可读 `GET /api/service-roles/:role/sessions` 及 `/sessions/:session/events`（最近 100 条）。项目角色继续使用 `role_instances / task_runs / task_history`。
 
-有效权限由 `HarnessAccess` 从现有角色权限与调用来源权限交集生成，并传入原生启动配置：文件工具、Shell、网络与仓库凭证范围分开表达。GitHub 原生凭证当前仍只签发仓库只读 App token，写操作仍走既有平台接口；**尚未实现原生 GitHub 读写凭证模式**。文件工具开关与文件系统权限分开记录：现有授权若允许任意 Shell，有效工作区权限如实记为可写，即使直接文件编辑工具关闭；对话来源只有 tasks.read 时不会获得 Shell/写权限。Pi/Claude 暂不支持严格只读文件系统同时开放任意 Shell；由现有 computer 权限生成的访问配置在开放 Shell 时明确记为可写，不能把关闭编辑工具宣称为只读隔离。外部传入的只读加 Shell 配置会在启动前被拒绝。助手电脑保留其既有无网络策略。
+有效权限由 `HarnessAccess` 从现有角色权限与调用来源权限交集生成，并传入原生启动配置：文件工具、Shell、网络与仓库凭证范围分开表达。GitHub 原生凭证当前仍只签发仓库只读 App token，写操作仍走既有平台接口；**尚未实现原生 GitHub 读写凭证模式**。文件工具开关与文件系统权限分开记录：虚拟电脑（文件工具与 Shell）已改为角色与群绑定的内置基础能力（#1206）；只要运行入口开放了任意 Shell，有效工作区权限就如实记为可写，即使直接文件编辑工具对观察/评估角色关闭——不能把关闭编辑工具宣称为只读隔离。群聊助手绑定在范围内至少有一个具备 `tasks.read` 的可达仓库时即可使用无网络隔离的助手电脑（`src/channels/service-session.ts`），但不因此获得 `tasks.write` 或远程 GitHub 写权限。Pi/Claude 暂不支持严格只读文件系统同时开放任意 Shell；外部传入的只读加 Shell 配置会在启动前被拒绝。助手电脑保留其既有无网络策略。
 
 开发验证中应区分真实 CLI + 合成模型协议测试、真实模型实验和 Docker 隔离测试。LocalManager 不提供容器隔离，不能用其通过结果代替权限/网络隔离验收。完整验收清单以 #834 为准，阶段性代码通过回归不代表全部清单完成。
 
