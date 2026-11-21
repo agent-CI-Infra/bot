@@ -1,5 +1,5 @@
 // Exercise the visible navigation at each breakpoint, rather than clicking a hidden desktop menu.
-// #549: a project administrator no longer has 用量与成本 / 个人设置 / 存储 on the sidebar;
+// #549: a project administrator no longer has 用量与成本 / 存储 on the sidebar; 个人设置 is shared;
 // if the visible nav does not carry the destination, the helper follows the address (permissions are unchanged).
 const addresses = {
   '全局设置': '#/settings/work-computers', '外部执行端': '#/external',
