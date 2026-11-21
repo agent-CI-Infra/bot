@@ -411,7 +411,9 @@ test('retention cleanup, transaction rollbacks, message edits and orphan sweep h
   f.wire.state.resources.set('img_keep', { data: png, mime: 'image/png' });
   f.wire.state.resources.set('img_drop', { data: png, mime: 'image/png' });
   const editTurn = localTurn(f, chat, editEv);
-  const [keepImg, dropImg] = (await editTurn.execute('list_message_resources', {})).resources.map(r => r.resource_id);
+  const editResources = (await editTurn.execute('list_message_resources', {})).resources;
+  const keepImg = editResources.find(r => r.name === 'image-1').resource_id;
+  const dropImg = editResources.find(r => r.name === 'image-2').resource_id;
   await editTurn.bytes(keepImg); await editTurn.bytes(dropImg);
   assert.ok(existsSync(channelResourcePath(f.h.store, keepImg)));
   assert.ok(existsSync(channelResourcePath(f.h.store, dropImg)));
