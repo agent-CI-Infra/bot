@@ -116,6 +116,18 @@ test('questions mode: a request for help without punctuation starts a real turn 
   await until(() => f.wire.sent.filter(sent => JSON.stringify(sent).includes('先看 migrate 步骤的日志。')).length === 2);
 });
 
+test('questions mode: a message during a running turn is reported as one that would start a reply (#534)', async t => {
+  const f = await group(t, 'questions'), tool = hold(t, f); let calls = 0, second;
+  f.modelState.respond = async (body, res) => { calls++; if (calls === 1) return call(res, 'start_own_task'); second = body; return say(res, '收到。'); };
+  const initial = await post(f.h, f.id, chat('这个怎么弄？'));
+  await until(() => tool.running());
+  const follow = await post(f.h, f.id, chat('报错了，帮我看下'));
+  assert.equal(row(f, follow).state, 'merged');
+  tool.release(); await done(f, initial); await done(f, follow);
+  const batch = incoming(second)[0];
+  assert.deepEqual(batch.messages.map(m => [m.content, m.group_setting_invites_reply]), [['报错了，帮我看下', true]]);
+});
+
 test('questions mode: a message waiting while a turn starts is merged as one that would start a reply (#534)', async t => {
   const f = await group(t, 'questions');
   let release; const gate = new Promise(r => { release = r; });
