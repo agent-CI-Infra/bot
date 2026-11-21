@@ -34,7 +34,11 @@ export class Dispatcher {
   private closing = false;
   constructor(readonly store: Store, readonly decide: Decider = managerDecision, readonly onApplied: () => void = () => {}, readonly concurrency = 4) {}
   start() {
-    this.store.run("UPDATE dispatch_events SET state='pending',lease=NULL,lease_until=NULL WHERE state='dispatching'");
+    // A claim counts an attempt before the decision starts (see `tick`), so an event a restart found mid-decision spent one
+    // attempt without deciding anything: hand it back, or every restart would bring that event closer to being given up
+    // (#476). The refund is limited to `dispatching` rows; an event already back in the queue had its refund where it lost
+    // the claim, and refunding it here would subtract a round that really ran.
+    this.store.run("UPDATE dispatch_events SET state='pending',lease=NULL,lease_until=NULL,attempts=max(0,attempts-1) WHERE state='dispatching'");
     onDispatchEvent(() => this.tick());
     this.timer = setInterval(() => this.tick(), 2000);
     this.tick();
