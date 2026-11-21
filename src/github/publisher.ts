@@ -9,6 +9,7 @@ import { applyPullRequestLabels } from './pull-request-labels.js';
 import { assertTaskExternalEffect } from '../tasks/management.js';
 import { planPullRequestMedia, publishPullRequestMedia, type CandidateMedia } from './pull-request-media.js';
 import { hostedMediaUrl } from './hosted-pr-media.js';
+import { assertWorkflowChangesAuthorized, workflowsPermissionMissingDetail } from './workflow-changes.js';
 import { syncBotPullRequestState } from '../review/bot-pr-wake.js';
 
 /**
@@ -234,6 +235,7 @@ export class Publisher {
     const direct=this.store.get("SELECT 1 FROM tasks WHERE id=? AND repository_id=? AND kind IN ('task.request','task.development')",candidate.owner_task_id,this.task.repository_id)&&candidate.branch==='bot/task-'+candidate.owner_task_id;
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-')&&!direct)stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
+    const workflowFiles=assertWorkflowChangesAuthorized(this.task,this.github,candidate);
     const save=()=>this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
     if(candidate.media?.length&&!candidate.hosted_media){
       this.store.transaction(()=>{
@@ -274,7 +276,14 @@ export class Publisher {
     // differently, falls back to the complete listing.
     const before=[...upstream.keys(),...skipped.map((f:any)=>f.path)],files=new Set(before),directories=new Set(before.flatMap(parents));
     const reshaped=changes.some((f:any)=>directories.has(f.path)||parents(f.path).some(path=>files.has(path)));
-    const create=(body:any)=>this.github.request('POST',this.github.path('/git/trees'),body);
+    const create=async(body:any)=>{
+      try{return await this.github.request('POST',this.github.path('/git/trees'),body);}
+      catch(error){
+        if(workflowFiles.length&&error instanceof TaskError&&error.code==='github_permission_403')
+          stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
+        throw error;
+      }
+    };
     let tree=candidate.source_tree&&changes.length+deletions.length&&!reshaped?await create({base_tree:candidate.source_tree,tree:[...changes,...deletions]}):null;
     if(tree?.sha!==expected)tree=await create(skipped.length?{base_tree:candidate.source_tree,tree:[...candidate.files.map((f:any)=>entry(f)),...deletions]}:{tree:candidate.files.map((f:any)=>entry(f))});
     if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
@@ -297,7 +306,12 @@ export class Publisher {
     // (a 5xx or a dropped connection) is checked and sent again, instead of waiting for a person to release it.
     const send=async()=>{
       try{return await this.github.request(candidate.expected_sha?'PATCH':'POST',path,request);}
-      catch(error){if(error instanceof TaskError&&error.code==='github_http_422'){const state=await find();if(state)return state;}throw error;}
+      catch(error){
+        if(error instanceof TaskError&&error.code==='github_http_422'){const state=await find();if(state)return state;}
+        if(workflowFiles.length&&error instanceof TaskError&&error.code==='github_permission_403')
+          stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
+        throw error;
+      }
     };
     publicationFact(this.store,this.task,'branch_update_requested',{operation_key:key,branch:candidate.branch,target_sha:commit.sha,expected_sha:candidate.expected_sha??null});
     const ref=await this.effect(key,'branch',request,send,find,true);

@@ -3,6 +3,7 @@ import type { Store, Row } from '../storage/database.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
+import { hasWorkflowChangesConfirmation } from '../github/workflow-changes.js';
 import { pullRequestSummaryForProgress } from '../github/pull-request-media.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { permitsTool } from '../roles/permissions.js';
@@ -14,7 +15,7 @@ import { stopAboveCeiling } from '../projects/ceiling.js';
 
 export const isRequestedTask = (task: { kind?: unknown }) => ['task.request', 'task.development'].includes(String(task.kind ?? ''));
 
-export const workflowChanges = (task: Row) => !!JSON.parse(task.input || '{}').workflow_changes?.confirmed_by;
+export const workflowChanges = (task: Row) => hasWorkflowChangesConfirmation(task);
 
 export const pullRequestPermissions = (task: Row): Record<string, string> | undefined =>
   workflowChanges(task) ? { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' } : undefined;

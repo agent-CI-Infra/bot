@@ -10,6 +10,7 @@ import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRe
 import { checkPullRequestLabels, pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 import { pullRequestSummaryRules } from '../github/text.js';
 import { assertMediaOutsideCode, collectPullRequestMedia, planPullRequestMedia, pullRequestMediaSchema, type CandidateMedia } from '../github/pull-request-media.js';
+import { changedWorkflowPaths, hasWorkflowChangesConfirmation, workflowChangesNotConfirmedDetail, workflowChangesSubmissionError } from '../github/workflow-changes.js';
 import { RuleService, behaviorPath, ownLabels, projectLabels, resolveRules, ruleErrors, skillIndex, trustedCachedRuleFiles } from '../rules/service.js';
 import { skillFiles } from '../roles/definition.js';
 import { extractRepositorySkillFiles, pinRepositorySkillEntries, type PinnedRepositorySkills } from '../roles/skill-defaults.js';
@@ -892,13 +893,25 @@ export async function runRequest(
           return redactor.clean(value);
         };
         let checkedMedia: { selection: string; files: CandidateMedia['media'] } | undefined;
-        const validateMedia = async (value: any, reuseChecked = false) => {
+        const validatePullRequestCandidate = async (value: any, tool: 'open_pull_request' | 'submit_delivery', reuseChecked = false) => {
           const { paths } = planPullRequestMedia(value.summary, value.media);
           const selection = JSON.stringify(paths);
-          if (!paths.length || reuseChecked && checkedMedia?.selection === selection) return;
-          const snapshot = await spaces.current.artifact(`request:media:${randomId()}`);
-          assertMediaOutsideCode(paths, snapshot.files, blobValue(store, input.snapshot_files) ?? []);
-          checkedMedia = { selection, files: await collectPullRequestMedia(spaces.current, paths) };
+          const needMedia = paths.length > 0 && !(reuseChecked && checkedMedia?.selection === selection);
+          const needWorkflowCheck = !hasWorkflowChangesConfirmation(task);
+          if (!needMedia && !needWorkflowCheck) return;
+          const snapshot = await spaces.current.artifact(`request:candidate:${randomId()}`);
+          const baseline = blobValue(store, input.snapshot_files) ?? [];
+          if (needWorkflowCheck) {
+            const touchedWorkflows = changedWorkflowPaths(snapshot.files, baseline);
+            if (touchedWorkflows.length) {
+              const refusal = workflowChangesSubmissionError(touchedWorkflows, tool);
+              stop('delivery_refused', 'retry_wait', JSON.stringify({ ...refusal, tool }));
+            }
+          }
+          if (needMedia) {
+            assertMediaOutsideCode(paths, snapshot.files, baseline);
+            checkedMedia = { selection, files: await collectPullRequestMedia(spaces.current, paths) };
+          }
         };
         const writable = covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
         const execution = randomId();
@@ -1075,7 +1088,7 @@ export async function runRequest(
               }
               const labels = await checkPullRequestLabels(github, validated.labels, ownLabels(store, task.repository_id));
               if ('error' in labels) return stop('pull_request_labels_refused', 'retry_wait', labels.message + ' Refused: ' + JSON.stringify(labels.refused));
-              await validateMedia(validated);
+              await validatePullRequestCandidate(validated, generic ? 'open_pull_request' : 'submit_delivery');
               return { ...delivered, labels: labels.labels };
             },
           },
@@ -1157,11 +1170,11 @@ export async function runRequest(
               return stop('agent_output_invalid', 'retry_wait', '普通任务需要提交结构化报告及 artifact 引用。');
             }
             const validated = validateReport(value);
-            if (software()) await validateMedia(validated);
+            if (software()) await validatePullRequestCandidate(validated, generic ? 'open_pull_request' : 'submit_delivery');
             return validated;
           },
         }, async result => {
-          if (generic ? result.delivery === 'pull_request' : software()) await validateMedia(result, true);
+          if (generic ? result.delivery === 'pull_request' : software()) await validatePullRequestCandidate(result, generic ? 'open_pull_request' : 'submit_delivery', true);
         });
 
         syncConcurrentInput();
@@ -1174,8 +1187,15 @@ export async function runRequest(
         let policyEvidence: any[] = [];
         if (software()) {
           assertRequestPullRequest(store, task);
+          const baselineFiles = blobValue(store, input.snapshot_files) ?? [];
+          if (!hasWorkflowChangesConfirmation(task)) {
+            const touchedWorkflows = changedWorkflowPaths(snapshot.files, baselineFiles);
+            if (touchedWorkflows.length) {
+              stop('workflow_changes_not_confirmed', 'waiting_permission', workflowChangesNotConfirmedDetail(touchedWorkflows));
+            }
+          }
           const { paths } = planPullRequestMedia(result.summary, result.media);
-          assertMediaOutsideCode(paths, snapshot.files, blobValue(store, input.snapshot_files) ?? []);
+          assertMediaOutsideCode(paths, snapshot.files, baselineFiles);
           // A Manager can nominate a Dev result saved before this execution. Read that result's files in the current workspace.
           const media = checkedMedia?.selection === JSON.stringify(paths) ? checkedMedia.files : await collectPullRequestMedia(workspace, paths);
           const command = String(store.get('SELECT test_command FROM policies WHERE repository_id=?', task.repository_id)?.test_command || '').trim();
