@@ -26,7 +26,7 @@ import { TaskError } from '../agent/common.js';
 import { ChannelReactions } from './reactions.js';
 import { ChannelMedia, MediaTurn } from './media.js';
 import { markdownPosts } from './format.js';
-import { assistantMessage, ChannelTurnMessages } from './turn-messages.js';
+import { asksForHelp, assistantMessage, ChannelTurnMessages } from './turn-messages.js';
 import { ChannelMembers } from './members.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
@@ -320,7 +320,7 @@ export class ChannelService {
     // Reading is independent of speaking. A delayed message still belongs in the local ledger.
     const participation=event.chat_type==='group'?this.store.get(`SELECT b.participation FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1`,
       event.provider,event.app_id,event.installation_tenant,event.chat_id)?.participation as string|undefined:undefined;
-    const ambient=participation==='all'||participation==='questions'&&/[?？]\s*$/.test(event.content);
+    const ambient=participation==='all'||participation==='questions'&&asksForHelp(event.content);
     const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
     // The processing indicator acknowledges a call: a private message, or a group message that @-mentions the bot, in every
     // working mode. A group message without an @ never gets one, even when the assistant follows every message or every
@@ -606,11 +606,11 @@ export class ChannelService {
   }
   /** One message in a bound group: participation decides whether to answer; the reply is protected by the turn's fence. */
   private needsReply(event:ChannelEvent,binding:Row):boolean {
-    return !!event.addressed||binding.participation==='all'||binding.participation==='questions'&&/[?？]\s*$/.test(event.content.trim());
+    return !!event.addressed||binding.participation==='all'||binding.participation==='questions'&&asksForHelp(event.content);
   }
   private async serviceMessage(row:Row,e:ChannelEvent,chat:Row,binding:Row):Promise<void> {
     const content=e.content.trim();
-    if(!e.addressed&&binding.participation!=='all'&&!(binding.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
+    if(!e.addressed&&binding.participation!=='all'&&!(binding.participation==='questions'&&asksForHelp(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
     const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
     this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
