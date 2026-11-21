@@ -22,6 +22,7 @@ import { taskActingRole } from '../../../../dist/tasks/management.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { scheduledCheckDecision } from '../../../../dist/dispatch/schedule.js';
 import { scheduledIssueWrite, scheduledIssueOperationAllowed, scheduledCheckCriteria } from '../../../../dist/tasks/schedule-write.js';
+import { githubWriteStorage } from '../../../../dist/github/write.js';
 import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination, scriptedModel } from '../../../fixtures/channel-fixture.mjs';
 
 const target = { project_id: '101' };
@@ -512,6 +513,192 @@ test('an outsider cannot create a project manager.check (#905)', async t => {
     idempotency_key: randomId(), source_conversation: 'schedule-fixture', source_message: 'outsider-check'
   });
   assert.equal(denied.value.result?.error || denied.value.error, 'capability_forbidden');
+});
+
+
+function recordWrite(store, { scope, key, repository_id, state, method = 'POST', path = '/issues', html_url = null, response = null, error = null, status = null }) {
+  const now = new Date().toISOString();
+  store.run('INSERT INTO github_writes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    randomId(), scope, key, String(repository_id), '{}', method, path, '', state, status, html_url,
+    response ? JSON.stringify(response) : null, error, now, now, '');
+}
+
+test('list_occurrences shows check results, Issue links and write refusals in plain language (#906)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  githubWriteStorage(f.h.store);
+  const issueUrl = 'https://github.com/agent-test-zone/admin-fixture-101/issues/12';
+
+  const allowed = await f.create(f.plan({ name: '允许建单的检查', workflow: 'manager.check', parameters: { instruction: 'File a follow-up.', file_issues: true } }));
+  await command(f, 'schedule.run-now', { id: allowed.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const allowedTask = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:task.request:%' ORDER BY rowid DESC LIMIT 1");
+  recordWrite(f.h.store, {
+    scope: 'task:' + allowedTask.id, key: 'follow-up', repository_id: allowedTask.repository_id, state: 'sent', status: 201,
+    html_url: issueUrl, response: { number: 12, title: 'Stale labels', html_url: issueUrl }
+  });
+  const opened = (await query(f, 'list_occurrences')).records.find(row => row.schedule_id === allowed.id && row.check?.issues?.length);
+  assert.equal(opened.state, 'succeeded');
+  assert.equal(opened.check.task_status, 'queued');
+  assert.equal(opened.check.outcome_text, '已交给检查任务');
+  assert.equal(opened.check.file_issues, true);
+  assert.equal(opened.check.issues[0].number, 12);
+  assert.equal(opened.check.issues[0].url, issueUrl);
+  assert.equal(opened.check.issues[0].title, 'Stale labels');
+  assert.equal(opened.check.issues[0].kind, 'created');
+  assert.equal(opened.check.write_refusal, null);
+  const listed = (await query(f, 'list_schedules')).schedules.find(row => row.id === allowed.id);
+  assert.equal(listed.latest.check.issues[0].number, 12);
+  assert.equal(listed.latest.check.outcome_text, '已交给检查任务');
+
+  f.advance(70000);
+  f.worker.produce();
+  const skipped = (await query(f, 'list_occurrences')).records.find(row => row.reason === 'overlap');
+  assert.equal(skipped.check.outcome_text, '已跳过');
+  assert.equal(skipped.check.reason_text, '上次检查还在进行，本次已跳过');
+  assert.equal(skipped.check.issues.length, 0);
+
+  const denied = await f.create(f.plan({ name: '只报告的检查', workflow: 'manager.check', parameters: { instruction: 'Report only.', file_issues: false } }));
+  await command(f, 'schedule.run-now', { id: denied.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const reported = (await query(f, 'list_occurrences')).records.find(row => row.schedule_id === denied.id && row.state === 'succeeded');
+  assert.equal(reported.check.write_refusal.code, 'schedule_issue_write_disabled');
+  assert.equal(reported.check.write_refusal.text, '此计划未允许创建 Issue，只报告发现');
+  assert.equal(reported.check.issues.length, 0);
+
+  const refusedPlan = await f.create(f.plan({ name: '写入被拒的检查', workflow: 'manager.check', parameters: { instruction: 'Try to file.', file_issues: true } }));
+  await command(f, 'schedule.run-now', { id: refusedPlan.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const refusedTask = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:task.request:%' ORDER BY rowid DESC LIMIT 1");
+  recordWrite(f.h.store, {
+    scope: 'task:' + refusedTask.id, key: 'denied-issue', repository_id: refusedTask.repository_id, state: 'refused',
+    error: 'github_resource_forbidden'
+  });
+  const refused = (await query(f, 'list_occurrences')).records.find(row => row.schedule_id === refusedPlan.id && row.check?.write_refusal?.code === 'github_resource_forbidden');
+  assert.equal(refused.check.write_refusal.text, '没有在这个仓库创建或评论 Issue 的权限');
+  assert.equal(refused.check.issues.length, 0);
+
+  // Non-check plans still have occurrences, but no check summary. report.daily can no longer be registered (#1027).
+  const other = await f.create(f.plan({ name: '普通定时任务', workflow: fixtureWorkflow }));
+  await command(f, 'schedule.run-now', { id: other.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const plain = (await query(f, 'list_occurrences')).records.find(row => row.schedule_id === other.id);
+  assert.equal(plain.check, undefined);
+});
+
+test('a later failed check task shows 检查失败, not the hand-off success (#906)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  githubWriteStorage(f.h.store);
+
+  const plan = await f.create(f.plan({ name: '随后失败的检查', workflow: 'manager.check', parameters: { instruction: 'File a follow-up.', file_issues: true } }));
+  await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const task = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:task.request:%' ORDER BY rowid DESC LIMIT 1");
+  const handed = (await query(f, 'list_occurrences')).records.find(row => row.schedule_id === plan.id && row.state === 'succeeded');
+  assert.equal(handed.check.task_status, 'queued');
+  assert.equal(handed.check.outcome_text, '已交给检查任务');
+
+  f.h.store.run("UPDATE tasks SET status='failed' WHERE id=?", task.id);
+  const failed = (await query(f, 'list_occurrences')).records.find(row => row.id === handed.id);
+  assert.equal(failed.state, 'succeeded');
+  assert.equal(failed.check.outcome, 'succeeded');
+  assert.equal(failed.check.task_status, 'failed');
+  assert.equal(failed.check.outcome_text, '检查失败');
+
+  // task.request ends as completed (or pr_opened), not succeeded.
+  f.h.store.run("UPDATE tasks SET status='completed' WHERE id=?", task.id);
+  const done = (await query(f, 'list_occurrences')).records.find(row => row.id === handed.id);
+  assert.equal(done.check.task_status, 'completed');
+  assert.equal(done.check.outcome_text, '检查完成');
+
+  f.h.store.run("UPDATE tasks SET status='pr_opened' WHERE id=?", task.id);
+  const opened = (await query(f, 'list_occurrences')).records.find(row => row.id === handed.id);
+  assert.equal(opened.check.task_status, 'pr_opened');
+  assert.equal(opened.check.outcome_text, '检查完成');
+});
+
+test('in-progress and waiting check tasks are not 状态未知 (#906)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+
+  const plan = await f.create(f.plan({ name: '进行中的检查', workflow: 'manager.check', parameters: { instruction: 'Wait states.', file_issues: false } }));
+  await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const task = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:task.request:%' ORDER BY rowid DESC LIMIT 1");
+  const row = (await query(f, 'list_occurrences')).records.find(item => item.schedule_id === plan.id && item.state === 'succeeded');
+  assert.ok(row);
+
+  const expectPlain = async (status, text) => {
+    f.h.store.run('UPDATE tasks SET status=? WHERE id=?', status, task.id);
+    const record = (await query(f, 'list_occurrences')).records.find(item => item.id === row.id);
+    assert.equal(record.check.task_status, status);
+    assert.equal(record.check.outcome_text, text);
+    assert.equal(record.check.task_status_text, text);
+    assert.notEqual(record.check.outcome_text, '状态未知');
+    assert.notEqual(record.check.task_status_text, '状态未知');
+    assert.notEqual(record.check.outcome_text, status);
+    assert.notEqual(record.check.task_status_text, status);
+  };
+
+  await expectPlain('waiting_environment', '等待环境');
+  await expectPlain('waiting_permission', '权限待处理');
+  await expectPlain('preparing', '准备中');
+
+  f.h.store.run("UPDATE tasks SET status='waiting_future_gate' WHERE id=?", task.id);
+  const fallback = (await query(f, 'list_occurrences')).records.find(item => item.id === row.id);
+  assert.equal(fallback.check.task_status, 'waiting_future_gate');
+  assert.equal(fallback.check.outcome_text, '已交接，尚无检查任务');
+  assert.equal(fallback.check.task_status_text, '已交接，尚无检查任务');
+  assert.notEqual(fallback.check.outcome_text, '状态未知');
+  assert.notEqual(fallback.check.task_status_text, 'waiting_future_gate');
+});
+
+test('a dead occurrence with a retry budget reason is not 状态未知 (#906)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+
+  const plan = await f.create(f.plan({ name: '重试耗尽的检查', workflow: 'manager.check', parameters: { instruction: 'Retry budget.', file_issues: false } }));
+  await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  f.worker.produce();
+  const claim = f.worker.claimOccurrence();
+  assert.ok(claim);
+  f.h.store.run("UPDATE schedule_occurrences SET state='dead', reason='retry_budget_exhausted' WHERE id=?", claim.id);
+  const dead = (await query(f, 'list_occurrences')).records.find(row => row.id === claim.id);
+  assert.equal(dead.state, 'dead');
+  assert.equal(dead.check.task_id, null);
+  assert.equal(dead.check.outcome_text, '多次重试仍未执行');
+  assert.equal(dead.check.reason_text, '已用完自动重试次数，本次未执行');
+});
+
+test('a capability_ceiling write refusal names the project ceiling (#906)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  githubWriteStorage(f.h.store);
+
+  const plan = await f.create(f.plan({ name: '上限拒绝的检查', workflow: 'manager.check', parameters: { instruction: 'Try to file.', file_issues: true } }));
+  await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const task = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:task.request:%' ORDER BY rowid DESC LIMIT 1");
+  recordWrite(f.h.store, {
+    scope: 'task:' + task.id, key: 'ceiling-issue', repository_id: task.repository_id, state: 'refused',
+    error: 'capability_ceiling'
+  });
+  const refused = (await query(f, 'list_occurrences')).records.find(row => row.schedule_id === plan.id && row.check?.write_refusal?.code === 'capability_ceiling');
+  assert.ok(refused);
+  assert.equal(refused.check.write_refusal.text, '项目的能力上限阻止了 Issue 写入，需要把上限提升到评论级别');
+  assert.equal(refused.check.issues.length, 0);
+  assert.equal(refused.check.outcome_text, '已交给检查任务');
 });
 
 test('controlled workflow contract dispatches a fake business handler once, preserves its run and enforces tool/model budgets', async t => {

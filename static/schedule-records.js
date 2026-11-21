@@ -114,6 +114,48 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
     }
     return card;
   }
+  const issueLink = (url, label) => {
+    if (typeof url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(issues|pull)\/\d+(#[\w./-]*)?$/.test(url)) return null;
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = label;
+    return a;
+  };
+  const sourceCaption = source => source?.startsWith('run-now:') ? '立即运行' : source === 'timer' || source?.startsWith('time:') ? '定时触发' : source || '未记录来源';
+  function occurrence(row) {
+    const card = element('details', '', 'schedule-record'); card.dataset.recordId = String(row.id);
+    const plan = row.snapshot?.plan, check = row.check, zone = plan?.timezone || 'UTC';
+    const title = check
+      ? [check.outcome_text, check.reason_text, plan?.name || row.schedule_id, at(row.logical_at, zone)].filter(Boolean).join(' · ')
+      : caption(row.state) + ' · ' + (plan?.name || row.schedule_id) + ' · ' + at(row.logical_at, zone);
+    card.append(element('summary', title));
+    const rows = [['来源', sourceCaption(row.source)], ['处理结果', check?.outcome_text || caption(row.state)]];
+    if (check?.reason_text) rows.push(['说明', check.reason_text]);
+    if (check?.task_status_text) rows.push(['检查任务', check.task_status_text]);
+    if (check?.write_refusal) rows.push(['Issue 写入', check.write_refusal.text]);
+    rows.push(['开始', at(row.started_at, zone)], ['结束', at(row.finished_at, zone)]);
+    card.append(facts(rows));
+    if (check?.issues?.length) {
+      const box = element('div', '', 'schedule-record-issues');
+      box.append(element('h5', '相关 Issue'));
+      const list = document.createElement('ul');
+      for (const issue of check.issues) {
+        const item = document.createElement('li');
+        const label = (issue.number != null ? 'Issue #' + issue.number : '查看 Issue') + (issue.title ? ' · ' + issue.title : '') + (issue.kind === 'created' ? '（已创建）' : '');
+        const link = issueLink(issue.url, label);
+        if (link) item.append(link); else item.textContent = label;
+        list.append(item);
+      }
+      box.append(list);
+      card.append(box);
+    }
+    if (row.result?.report?.text) card.append(element('pre', row.result.report.text));
+    const technical = element('details', '', 'schedule-record-technical');
+    const techSummary = element('summary', '技术信息');
+    techSummary.setAttribute('aria-label', '本条运行记录的技术信息');
+    technical.append(techSummary, facts([['计划编号', row.schedule_id], ['保存版本', row.revision], ['运行编号', row.run_id], ['交接状态', row.state || '未记录'], ['原因码', row.reason || '无单独原因码'], ['检查任务编号', check?.task_id || '无检查任务'], ['检查任务状态码', check?.task_status || '无'], ['处理结果正文', row.result ? JSON.stringify(row.result) : '无结果正文']]));
+    card.append(technical);
+    return card;
+  }
   function draw() {
     if (!live()) return;
     const expanded = new Set([...list.querySelectorAll('details.schedule-record[open]')].map(node=>node.dataset.recordId));
@@ -121,11 +163,10 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
     for (const row of records) {
       let card;
       if (operation === 'list_notification_deliveries') card=delivery(row);
+      else if (operation === 'list_occurrences') card = occurrence(row);
       else {
         card=element('details','','schedule-record'); card.dataset.recordId=String(row.id);
-        const plan=row.snapshot?.plan;
-        card.append(element('summary',operation === 'list_occurrences' ? caption(row.state)+' · '+(plan?.name || row.schedule_id)+' · '+at(row.logical_at,plan?.timezone || 'UTC') : row.action+' · '+at(row.created_at)),facts(operation === 'list_occurrences' ? [['来源',row.source],['计划编号',row.schedule_id],['保存版本',row.revision],['运行编号',row.run_id],['状态',caption(row.state)],['原因',row.reason],['开始',at(row.started_at)],['结束',at(row.finished_at)]] : [['对象',row.resource_id],['动作',row.action],['发起人',row.initiator],['执行身份',row.actor_id],['授权版本',row.authorization_revision],['配置版本',row.revision],['操作来源',row.source]]));
-        if (row.result?.report?.text) card.append(element('pre',row.result.report.text));
+        card.append(element('summary', row.action+' · '+at(row.created_at)),facts([['对象',row.resource_id],['动作',row.action],['发起人',row.initiator],['执行身份',row.actor_id],['授权版本',row.authorization_revision],['配置版本',row.revision],['操作来源',row.source]]));
         if (row.detail && Object.keys(row.detail).length) { const detail=element('details'); detail.append(element('summary','审计详情'),element('pre',JSON.stringify(row.detail,null,2))); card.append(detail); }
       }
       card.open=expanded.has(String(row.id)); list.append(card);

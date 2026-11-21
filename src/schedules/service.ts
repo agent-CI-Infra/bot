@@ -11,6 +11,7 @@ import { planSchema, schedulingCommands, subscriptionSchema } from './schema.js'
 import { localParts, nextTime, parseCron, previewTimes, quietUntil } from './time.js';
 import { defaultLimits, type Plan, type SubscriptionSpec, type TriggerHandler, type ActionUsage } from './types.js';
 import { budgetScopes, notificationWorkflow, reserve, terminalRunStates } from './budget.js';
+import { checkOccurrenceRecord } from './check-record.js';
 
 export const reasonOf = (e: unknown): string => e instanceof HttpError ? e.code : 'schedule_service_failed';
 export class ScheduleService {
@@ -356,7 +357,12 @@ export class ScheduleService {
       dst: 'gap_skip_fold_first', misfire: plan.misfire, timezone_change: '新版本保存后仅影响新实例' }, future: row.state === 'active' ? previewTimes(plan, this.clock()) : [],
       supported: this.handlers.has(plan.workflow), handover: { maintainer_id: plan.maintainer_id, required: row.kind === 'project' && row.state === 'paused' },
       migration: this.store.get('SELECT outcome,reason,chat_type,channel_schedule_id,created_at FROM schedule_migrations WHERE schedule_id=?', row.id) ?? null,
-      latest: this.store.get('SELECT id,state,reason,run_id,logical_at FROM schedule_occurrences WHERE schedule_id=? ORDER BY scheduled_at DESC,id DESC LIMIT 1', row.id) ?? null };
+      latest: (() => {
+        const latest = this.store.get('SELECT * FROM schedule_occurrences WHERE schedule_id=? ORDER BY scheduled_at DESC,id DESC LIMIT 1', row.id);
+        if (!latest) return null;
+        const check = checkOccurrenceRecord(this.store, latest);
+        return { id: latest.id, state: latest.state, reason: latest.reason, run_id: latest.run_id, logical_at: latest.logical_at, ...(check ? { check } : {}) };
+      })() };
   }
   async query(actor: ActorContext, operation: string, project: string, args: any): Promise<Json> {
     if (!project) fail(400, 'project_target_required'); this.management.scope(actor, project, 'schedules.manage');
@@ -405,8 +411,15 @@ export class ScheduleService {
     if (!table) return fail(400, 'unknown_schedule_query');
     const rows = this.store.all(`SELECT * FROM ${table} WHERE project_id=? ORDER BY ${table === 'schedule_occurrences' ? 'scheduled_at' : 'created_at'} DESC,id DESC LIMIT ? OFFSET ?`, project, limit + 1, offset);
     const more = rows.length > limit; rows.splice(limit);
-    return { revision, records: rows.map(r => ({ ...r, ...Object.fromEntries(['snapshot', 'authorization', 'payload', 'result', 'detail'].filter(k => typeof r[k] === 'string').map(k => [k, JSON.parse(r[k])])),
-      ...(table === 'notification_outbox' ? { ...this.deliveryContext(r, project), attempts_detail: this.store.all('SELECT * FROM notification_attempts WHERE outbox_id=? ORDER BY attempt', r.id) } : {}) })),
+    return { revision, records: rows.map(r => {
+      const record: Json = { ...r, ...Object.fromEntries(['snapshot', 'authorization', 'payload', 'result', 'detail'].filter(k => typeof r[k] === 'string').map(k => [k, JSON.parse(r[k])])),
+        ...(table === 'notification_outbox' ? { ...this.deliveryContext(r, project), attempts_detail: this.store.all('SELECT * FROM notification_attempts WHERE outbox_id=? ORDER BY attempt', r.id) } : {}) };
+      if (table === 'schedule_occurrences') {
+        const check = checkOccurrenceRecord(this.store, r);
+        if (check) record.check = check;
+      }
+      return record;
+    }),
       budgets: this.store.all('SELECT * FROM schedule_budgets WHERE (scope=\'project\' AND scope_id=?) OR (scope=\'tenant\' AND scope_id=?)', project, actor.tenant_id),
       usage: this.store.all('SELECT * FROM schedule_usage WHERE scope=\'project\' AND scope_id=? ORDER BY day DESC', project), next_offset: more ? offset + limit : null };
   }

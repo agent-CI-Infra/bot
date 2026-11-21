@@ -11,3 +11,8 @@
 .schedule-record pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:420px; overflow:auto; }
 .schedule-record-receipt:not(:empty) { padding:16px; background:var(--color-brand-weak); border-radius:var(--radius-3); }
 @media(max-width:767px) { .schedule-records { padding:12px; } .schedule-record { padding:12px; } .schedule-record dl { grid-template-columns:minmax(0,1fr); gap:4px; } .schedule-record dd { margin-bottom:10px; } .schedule-record-timeline { padding-left:16px; } }
+.schedule-record-issues { margin:12px 0; min-width:0; }
+.schedule-record-issues ul { margin:0; padding-left:1.2em; }
+.schedule-record-issues a { overflow-wrap:anywhere; }
+.schedule-record-technical { margin:12px 0 0; }
+.schedule-record-technical > summary { cursor:pointer; min-height:44px; line-height:1.6; }
