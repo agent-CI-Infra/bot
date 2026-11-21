@@ -9,6 +9,7 @@ import type { AgentSpec } from '../agent/runtime.js';
 import { openModel, resolveModelWireUrl, type RuntimeModel } from '../agent/model.js';
 import { beginModelRequest, finishModelRequest, pricingFor, type Pricing } from '../metrics/accounting.js';
 import {
+  entryCapabilities,
   inferCatalogEntryProtocol,
   modelCapabilities,
   modelCatalog,
@@ -403,7 +404,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         entry?.name ?? fileProvider.model,
         entry?.provider ?? 'configured',
         '2026-01-01T00:00:00Z',
-        { interface_type: iface, ...(entry ? { capabilities: entry.capabilities } : {}) },
+        { interface_type: iface, ...(entry ? { capabilities: entryCapabilities(entry) } : {}) },
       );
     }
 
@@ -426,7 +427,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         entry?.name ?? String(row.model_name),
         entry?.provider ?? 'configured',
         String(row.updated_at || '2026-01-01T00:00:00Z'),
-        { interface_type: proto.interface_type, capabilities: { context_window: caps.context_window, max_output_tokens: caps.max_output_tokens, reasoning: caps.reasoning } },
+        { interface_type: proto.interface_type, capabilities: { context_window: caps.context_window, max_output_tokens: caps.max_output_tokens, reasoning: caps.reasoning, image_input: caps.image_input } },
       );
       if (entry && entry.model !== row.model_name) {
         addModelEntry(
@@ -434,7 +435,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
           entry.name,
           entry.provider,
           String(row.updated_at || '2026-01-01T00:00:00Z'),
-          { interface_type: proto.interface_type, capabilities: entry.capabilities },
+          { interface_type: proto.interface_type, capabilities: entryCapabilities(entry) },
         );
       }
     }

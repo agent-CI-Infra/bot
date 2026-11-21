@@ -109,6 +109,41 @@ test('an ambiguous relay identity remains unpriced until the administrator choos
   saveModelMetadata(store,'m',{catalog:{mode:'manual',ref:'alternate/deepseek-flash'}});assert.equal(catalogPricing(store,model).input_per_million,1);
 });
 
+test('image_input derives from modalities.input rather than attachment, defaults to true when unmatched, handles legacy snapshots and round-trips overrides',async t=>{
+  const store=storeFor(t);
+  const payload=data();
+  payload.deepseek.models['text-only']=card('text-only',{attachment:true,modalities:{input:['text'],output:['text']}});
+  payload.deepseek.models['vision-only']=card('vision-only',{attachment:false,modalities:{input:['text','image'],output:['text']}});
+  await install(store,payload);
+  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES('m-text',NULL,'https://relay.example/v1','text-only',NULL,1,'now')");
+  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES('m-vision',NULL,'https://relay.example/v1','vision-only',NULL,1,'now')");
+  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES('m-unknown',NULL,'https://relay.example/v1','custom-unlisted',NULL,1,'now')");
+  const textModel=store.get("SELECT * FROM models WHERE id='m-text'");
+  const visionModel=store.get("SELECT * FROM models WHERE id='m-vision'");
+  const unknownModel=store.get("SELECT * FROM models WHERE id='m-unknown'");
+  assert.equal(modelCapabilities(store,textModel).image_input,false,'attachment:true without image modality must stay image_input:false');
+  assert.equal(modelCapabilities(store,visionModel).image_input,true,'image modality enables image_input even when attachment is false');
+  assert.equal(modelCapabilities(store,unknownModel).image_input,true,'unmatched models default to allowing image input');
+
+  // Legacy catalog snapshots stored before image_input existed still derive image_input from modalities.input.
+  const snapRow=store.get('SELECT data FROM model_catalog_snapshot WHERE id=1');
+  const legacyEntries=JSON.parse(snapRow.data).map(e=>{const {image_input,...restCaps}=e.capabilities;return {...e,capabilities:restCaps};});
+  store.run('UPDATE model_catalog_snapshot SET revision=revision+1,data=? WHERE id=1',JSON.stringify(legacyEntries));
+  assert.equal(modelCapabilities(store,textModel).image_input,false);
+  assert.equal(modelCapabilities(store,visionModel).image_input,true);
+
+  // Manual override round-trip and untouched field preservation.
+  saveModelMetadata(store,'m-text',{capabilities:{image_input:true}});
+  assert.equal(modelCapabilities(store,textModel).image_input,true);
+  saveModelMetadata(store,'m-text',{capabilities:{max_output_tokens:16000}});
+  assert.equal(modelCapabilities(store,textModel).image_input,false,'clearing image_input override restores catalog value');
+  saveModelMetadata(store,'m-unknown',{capabilities:{image_input:false}});
+  assert.equal(modelCapabilities(store,unknownModel).image_input,false);
+  saveModelMetadata(store,'m-unknown',{capabilities:{}});
+  assert.equal(modelCapabilities(store,unknownModel).image_input,true,'clearing override on unmatched model restores default true');
+  assert.throws(()=>saveModelMetadata(store,'m-text',{capabilities:{image_input:'yes'}}),{code:'invalid_model_capabilities'});
+});
+
 test('modelProtocol resolves interface_type and auth_header from manual overrides, URL suffixes and catalog providers',async t=>{
   const store=storeFor(t);await install(store);
   const model=store.get("SELECT * FROM models WHERE id='m'");

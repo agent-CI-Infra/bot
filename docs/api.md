@@ -108,9 +108,9 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 - `GET /api/models/catalog?q=&offset=0&limit=100` 返回目录状态 `catalog`、规范化条目 `entries`、匹配总数与下一页偏移，limit 为 1–200。状态含来源、最近成功快照时间、最近尝试时间、刷新错误和丢弃/跳过计数。
 - `POST /api/models/catalog/refresh {}` 仅超级管理员可用。控制面启动时及每 6 小时刷新固定的 models.dev 地址；失败保留旧快照。目录校验只接受文本对话模型、合法能力/价格和有限范围数值，非法条目单独丢弃。
-- 模型 POST/PATCH 可带 `catalog:{mode:'auto'|'manual'|'disabled',ref?:'provider/model'}`、`capabilities:{context_window?,max_output_tokens?,reasoning?}`。手动模式必须指定当前目录中的 ref；空能力对象恢复目录/默认。手填能力按字段优先，不改变模型身份 version。上下文为 1–32000000，最大输出为 1–16000000，reasoning 为布尔值。
+- 模型 POST/PATCH 可带 `catalog:{mode:'auto'|'manual'|'disabled',ref?:'provider/model'}`、`capabilities:{context_window?,max_output_tokens?,reasoning?,image_input?}`。手动模式必须指定当前目录中的 ref；空能力对象恢复目录/默认。手填能力按字段优先，不改变模型身份 version。上下文为 1–32000000，最大输出为 1–16000000，`reasoning` 与 `image_input` 为布尔值。
 - 模型响应含 `capabilities`（有效能力、来源和目录匹配状态）与 `capabilities_override`。自动匹配先按 provider API/官方域名，再按去前缀、忽略大小写、点与横线等价的官方模型名；不唯一时显示候选，等待手动指定。中转使用官方 USD 参考价格，不作 CNY 换算。
-- 从未成功下载或没有匹配时，能力沿用 128000 上下文、8192 最大输出、非推理模型。Pi 使用这些有效能力构建模型配置和上下文预留；显式角色输出额度保持优先。价格统计仍要求实际 token 计数；缺失缓存计数且缓存价不同时保持未知，不按零计价。
+- 从未成功下载或没有匹配时，能力沿用 128000 上下文、8192 最大输出、非推理模型、默认允许尝试图像输入（`image_input: true`）；匹配目录时 `image_input` 严格由 `modalities.input` 是否包含 `image` 推导。Pi 使用这些有效能力构建模型配置和上下文预留；显式角色输出额度保持优先。价格统计仍要求实际 token 计数；缺失缓存计数且缓存价不同时保持未知，不按零计价。
 
 
 供应商连接的批量管理沿用模型范围和规范化请求地址，不引入跨项目凭据共享：

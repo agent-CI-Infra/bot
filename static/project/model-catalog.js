@@ -46,20 +46,24 @@ function modelCapabilitiesEditor(model, after) {
   mode.addEventListener('change', () => {sync(); if(mode.value === 'manual') void query();});
   search.addEventListener('input', () => void query()); sync();
   form.append(title, note(`当前：${match?.entry?.ref || ({ambiguous:'多个候选，请手动选择',disabled:'已取消匹配',unavailable:'目录不可用',missing:'指定条目已不存在'}[match?.state] || '未匹配')} · ${match?.fetched_at ? timeText(match.fetched_at) : '无快照'}`), field('目录匹配',mode), searchField,pick,results,
-    note('留空的能力值继承目录；没有匹配时使用 128000 上下文、8192 最大输出、非推理模型。保存只影响新请求，不改写历史。'));
+    note('留空的能力值继承目录；没有匹配时使用 128000 上下文、8192 最大输出、非推理模型、默认允许尝试图像输入。保存只影响新请求，不改写历史。'));
   for (const [name, caption] of [['context_window','上下文窗口（token）'],['max_output_tokens','最大输出（token）']]) {
     const value = input(name, manual[name] ?? '', {type:'number',min:1,max:name === 'context_window'?32000000:16000000,step:1,placeholder:String(effective?.[name] ?? '')}); form.append(field(caption,value));
   }
   const reasoning = document.createElement('select'); reasoning.name = 'reasoning'; reasoning.setAttribute('aria-label','推理能力');
   for (const [value,text] of [['','继承目录 / 默认'],['true','推理模型'],['false','非推理模型']]) reasoning.add(new Option(text,value));
   reasoning.value = typeof manual.reasoning === 'boolean' ? String(manual.reasoning) : '';
+  const imageInput = document.createElement('select'); imageInput.name = 'image_input'; imageInput.setAttribute('aria-label','图像输入');
+  for (const [value,text] of [['','继承目录 / 默认（未匹配时默认允许）'],['true','支持图像输入'],['false','不支持图像输入']]) imageInput.add(new Option(text,value));
+  imageInput.value = typeof manual.image_input === 'boolean' ? String(manual.image_input) : '';
   const actions = element('div','','actions'), save = element('button','保存能力与目录'); save.type = 'submit'; actions.append(button('取消',()=>modal.close()),save);
-  form.append(field('推理能力',reasoning),message,actions);
+  form.append(field('推理能力',reasoning),field('图像输入',imageInput),message,actions);
   const actor = me, address = location.hash, live = () => me === actor && location.hash === address && modal.isConnected;
   form.addEventListener('submit',async event => {event.preventDefault(); if(!live())return;save.disabled=true;
     const data = Object.fromEntries(new FormData(form)), capabilities = {};
     for (const key of ['context_window','max_output_tokens']) if (data[key] !== '') capabilities[key] = Number(data[key]);
     if (data.reasoning !== '') capabilities.reasoning = data.reasoning === 'true';
+    if (data.image_input !== '') capabilities.image_input = data.image_input === 'true';
     try {await api('/api/models/'+model.id,'PATCH',{version:model.version,capabilities,catalog:{mode:mode.value,...(mode.value==='manual'?{ref:choices.value}:{})}});if(live()){modal.close();await after('已保存模型能力与目录');}}
     catch(err){if(live())message.textContent = readErrorText(err);}finally{save.disabled=false;}
   });

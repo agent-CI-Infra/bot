@@ -143,7 +143,7 @@ export class ChannelService {
         management:store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',conversation,String(context.source_message)),
         github:store.hasTable('github_writes')?store.all('SELECT key,method,path,state,status,html_url FROM github_writes WHERE scope=?',`management:${conversation}:${context.source_message}`):[]}};
     };
-    management.mediaTurn=(actor,conversation,input,computers,guard)=>{
+    management.mediaTurn=(actor,conversation,input,computers,guard,imageInput)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
       if(!source)return;
       const event=store.secrets.open(source.payload,'channel-event:'+source.id) as unknown as ChannelEvent;
@@ -151,7 +151,7 @@ export class ChannelService {
       if(!chat||event.chat_type!=='p2p')return;
       const fence=digest(JSON.stringify([actor.principal_id,actor.authorization_revision,chat.context_revision,event.connector_revision]));
       return new MediaTurn(this.media,chat.id,event.message_id,()=>{guard();this.source(event);this.employees.guardPersonal(chat.id,actor.principal_id,source.id);},computers,
-        project=>{this.management.service.scope(actor,project);},undefined,fence);
+        project=>{this.management.service.scope(actor,project);},undefined,fence,imageInput);
     };
     // A progress message of the management assistant (#435) goes to the private chat or timer that started the turn, under
     // the same protection as its final answer; a console conversation only shows it in its event stream.

@@ -4,9 +4,27 @@ import { stop } from './common.js';
 // their own tasks (#333). How many tools the model calls in one message is its own choice (one call per repository across
 // ten repositories is normal); what stays bounded is the request each loop sends next.
 
-/** The gateway refuses a model request over 2 MiB (model_request_invalid). */
+/** The gateway refuses a text-only model request over 2 MiB (model_request_invalid). */
 export const requestLimit = 2 * 1024 * 1024;
+/** Requests carrying inline image_url data URLs have a separate total ceiling while keeping the 2 MiB text ceiling. */
+export const imageRequestLimit = 20 * 1024 * 1024;
 export const requestBytes = (body: unknown) => Buffer.byteLength(JSON.stringify(body));
+export const isInlineImagePart = (part: unknown): boolean =>
+  !!part && typeof part === 'object' && (part as any).type === 'image_url' && typeof (part as any).image_url?.url === 'string' && (part as any).image_url.url.startsWith('data:image/');
+export function hasImageContent(body: unknown): boolean {
+  const messages = (body as any)?.messages;
+  return Array.isArray(messages) && messages.some((message: any) => Array.isArray(message?.content) && message.content.some(isInlineImagePart));
+}
+/** Serialized byte size excluding inline image_url base64 payloads so images never crowd out text context budgets. */
+export function textRequestBytes(body: unknown): number {
+  if (!body || typeof body !== 'object') return requestBytes(body);
+  const messages = (body as any).messages;
+  if (!Array.isArray(messages) || !hasImageContent(body)) return requestBytes(body);
+  const stripped = messages.map((message: any) => !Array.isArray(message?.content) || !message.content.some(isInlineImagePart)
+    ? message
+    : { ...message, content: message.content.map((part: any) => isInlineImagePart(part) ? { type: 'image_url', image_url: { url: '[image]' } } : part) });
+  return requestBytes({ ...(body as Record<string, any>), messages: stripped });
+}
 /** Every built-in loop reserves the same final turns for a bounded submission. */
 export const finalizationReserve = (maxTurns: number) => Math.min(8, Math.max(2, Math.ceil(maxTurns / 4)));
 /** Chat assistants answer inside a model's context window, which is usually far below 2 MiB: older tool results are folded
@@ -89,7 +107,7 @@ export class ToolTranscript {
    * read them again). Results of the latest batch, not seen yet, go only when the request is still over the gateway limit;
    * a request over it even then stops the run instead of failing at the gateway. */
   fit(body: Record<string, any>): void {
-    let bytes = requestBytes(body);
+    let bytes = textRequestBytes(body);
     const unseen = this.messages.findLastIndex(message => message.role === 'assistant');
     const elide = (limit: number, last: number) => {
       for (const [index, message] of this.messages.entries()) {
@@ -106,7 +124,7 @@ export class ToolTranscript {
   }
   /** Preserve a result before admitting its bounded preview to the next request. */
   admit(name: string, result: unknown, tools: any[]): string {
-    const content = JSON.stringify(boundedResult(result, batchBytes, this.preserve && (value => this.preserve!(value, name)))), base = requestBytes({ tools, messages: this.messages.map(message => message.role === 'tool' && !this.elided.has(message) ? { ...message, content: JSON.stringify({elided:true,file:'result:'+ '0'.repeat(48),head:'',tail:'',notice:'read_tool_result'}) } : message) });
+    const content = JSON.stringify(boundedResult(result, batchBytes, this.preserve && (value => this.preserve!(value, name)))), base = textRequestBytes({ tools, messages: this.messages.map(message => message.role === 'tool' && !this.elided.has(message) ? { ...message, content: JSON.stringify({elided:true,file:'result:'+ '0'.repeat(48),head:'',tail:'',notice:'read_tool_result'}) } : message) });
     // The content is a string inside the request, so it is escaped once more there.
     return base + Buffer.byteLength(JSON.stringify(content)) + 64 > requestLimit ? JSON.stringify(withheldResult(name, result, this.preserve)) : content;
   }
