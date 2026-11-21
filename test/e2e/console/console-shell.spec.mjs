@@ -105,8 +105,12 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.getByRole('heading',{name:'全局设置',exact:true})).toHaveCount(0);
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     await page.setViewportSize({width:1440,height:900});
-    // #549: a project administrator's sidebar keeps four destinations; 个人设置 lives in 更多 and the account menu.
-    await expect(page.locator('.console-settings-nav').getByRole('link',{name:'个人设置',exact:true})).toBeHidden();
+    // #1204: both roles get the fixed 个人设置 entry; only 全局设置 remains super-admin-only.
+    const prefs=page.locator('.console-settings-nav').getByRole('link',{name:'个人设置',exact:true});
+    await expect(prefs).toBeVisible();
+    await prefs.click();
+    await expect(page.locator('#identity-panel')).toBeVisible();
+    await expect(prefs).toHaveAttribute('aria-current','page');
     await expect(page.locator('.console-settings-nav').getByRole('link',{name:'全局设置',exact:true})).toBeHidden();
     await expect(page.locator('#tabs').getByRole('link',{name:'用量与成本',exact:true})).toBeHidden();
     await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);

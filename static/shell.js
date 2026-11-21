@@ -111,8 +111,7 @@ function taskOriginCaption(origin) {
 }
 // #481: the phone's bottom bar owns the five primary destinations (项目 / 任务 / 待处理 / 助手 / 更多), so this page is
 // the supplement behind 更多. It must not repeat what the bar already carries, and it stays short enough to read on a
-// phone. #549: a project administrator's 更多 is only personal settings — usage, storage and the external
-// runner belong to the management area (#550). Scoped project work and settings are also available here.
+// phone. More keeps personal pages and separately groups management links. Scoped project work and settings are also available here.
 function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
   const groups = [];
@@ -155,7 +154,7 @@ function syncConsoleNavigation(repo) {
   const rows = [...entries.map(([key, caption]) => ({ key, caption, href: consolePageAddress(key, id) })),
     ...(id ? [{ key: 'basic', caption: t('nav.project_settings'), href: `#/projects/${id}/basic`, group: t('nav.project_settings_group') }] : []),
     ...(!isSuper ? [{ key: 'more', caption: t('nav.more'), href: '#/more' }] : [])];
-  const pinned = isSuper ? [{ key: 'preferences', caption: t('nav.preferences'), href: '#/identity' }, { key: 'settings', caption: t('nav.settings'), href: '#/settings/work-computers' }] : [];
+  const pinned = [{ key: 'preferences', caption: t('nav.preferences'), href: '#/identity' }, ...(isSuper ? [{ key: 'settings', caption: t('nav.settings'), href: '#/settings/work-computers' }] : [])];
   const reconcile = (container, items) => {
     const signature = JSON.stringify(items);
     if (container.dataset.entries !== signature) {
