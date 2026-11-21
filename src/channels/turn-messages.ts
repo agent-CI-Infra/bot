@@ -18,11 +18,15 @@ export const groupTurnMessageInstructions = ' Messages that arrive in this group
 // acknowledgements, problem reports and links ("今天天气不错", "收到", "好的", "报错了", "我还以为他走了呢",
 // "文档在 https://example.com/?tab=readme 里") stay out: this mode answers questions, not every message.
 const plain = (text: string): string => text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
-  .replace(/(?:https?:\/\/|www\.)[^\s<>"'`，。；！？、]+/gi, ' ');
+  .replace(/(?:https?:\/\/|www\.)[^\s<>"'`，。；！？、]+/gi, ' ')
+  // A host name in running text ("example.com/docs?x=1") is a link too, so the "?" in it is not a question.
+  .replace(/(?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s<>"'`，。；！？、]*/gi, ' ');
 const QUESTION = /[?？]/;
 // "哪" only as a question word (哪里/哪个/哪些…), never the bare character in "哪怕"; "吗" only as the sentence particle, so
-// "吗啡" is a statement. Symptom words alone ("报错了") are not requests either.
-const ASKS = /(怎么|如何|为什么|为何|为啥|咋|哪里|哪儿|哪个|哪些|哪种|是否|有没有|能不能|可不可以|可以吗|行吗|对吗|是不是|求助|请教|请问|帮忙|帮我|帮看|看一下|看下|查一下|确认一下)/;
+// "吗啡" is a statement. Symptom words alone ("报错了") are not requests either. "无论如何" and "不管怎么样" are concessions,
+// not questions, and "我看下日志" is the sender's own next step: a request needs a second person ("帮我看下") or no subject
+// at all ("看下这个报错"), so a 我 right before the verb rules it out.
+const ASKS = /(?:(?<!无论|不管|不论)(?:怎么|如何)|为什么|为何|为啥|咋|哪里|哪儿|哪个|哪些|哪种|是否|有没有|能不能|可不可以|可以吗|行吗|对吗|是不是|求助|请教|请问|帮忙|帮我|帮看|(?<!我)(?:看一下|看下)|查一下|确认一下)/;
 const PARTICLE = /吗[。！!…]*$/;
 export const asksForHelp = (content: string): boolean => { const text = plain(content.trim()); return QUESTION.test(text) || ASKS.test(text) || PARTICLE.test(text); };
 // The group's participation setting, stated to the model so it knows when it is expected to speak (its working mode).
