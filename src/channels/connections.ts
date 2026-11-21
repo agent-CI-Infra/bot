@@ -9,12 +9,24 @@ export class ChannelConnections {
   constructor(readonly service: ChannelService, private readonly create: (options: ConstructorParameters<typeof WSClient>[0]) => Connection = options => new WSClient(options)) {}
   reconcile(): void {
     const store = this.service.store, rows = store.all("SELECT * FROM channel_connectors WHERE enabled=1 AND transport='websocket' AND application_type='enterprise'");
+    // A socket the SDK already gave up on is rebuilt on a later tick, after one tick that keeps `failed` visible.
+    const retry = new Set<string>();
     for (const [id, socket] of this.sockets) {
       if (!rows.some(r => r.id === id && r.revision === socket.revision)) {
         socket.client.close({ force: true }); this.sockets.delete(id);
         store.run("UPDATE channel_connectors SET connection_state='idle' WHERE id=?", id);
       } else {
         const state = socket.client.getConnectionStatus().state;
+        if (state === 'failed') {
+          // The pinned SDK calls reConnect() without awaiting or returning it, so a refused connection, a failed
+          // handshake or a non-retryable credential error leaves start() resolved and only surfaces here (#533).
+          // Drop the terminal client or every later tick skips the connector on the "already in sockets" check and
+          // only re-saving the credentials brings the channel back. `failed`/`last_error` stay for the console, and
+          // the next tick builds a fresh client instead of rebuilding inside this one.
+          socket.client.close({ force: true }); this.sockets.delete(id);
+          store.run("UPDATE channel_connectors SET last_error='channel_connection_failed',connection_state='failed' WHERE id=?", id);
+          retry.add(id); continue;
+        }
         if (state === 'connected' && socket.state !== state) {
           for (const chat of store.all("SELECT id FROM channel_chats WHERE connector_id=? AND state='active'", id)) this.service.ledger.resync(chat.id);
         }
@@ -23,7 +35,7 @@ export class ChannelConnections {
       }
     }
     for (const c of rows) {
-      if (this.sockets.has(c.id)) continue;
+      if (this.sockets.has(c.id) || retry.has(c.id)) continue;
       const ref = store.get('SELECT sealed FROM channel_credentials WHERE id=?', c.credential_ref);
       if (!ref) continue;
       const secret = store.secrets.open(ref.sealed, 'channel-credential:' + c.credential_ref);
@@ -41,7 +53,12 @@ export class ChannelConnections {
       this.sockets.set(c.id, { revision: c.revision, client });
       store.run("UPDATE channel_connectors SET connection_state='connecting' WHERE id=?", c.id);
       void client.start({ eventDispatcher: dispatcher }).catch(() => {
-        if (this.sockets.get(c.id)?.client === client) store.run("UPDATE channel_connectors SET last_error='channel_connection_failed',connection_state='failed' WHERE id=?", c.id);
+        // Defense in depth: the pinned SDK resolves start() for connection failures, so this path is not the one that
+        // recovers #533; if a future version does reject, release the client before dropping it like the failed-state
+        // path above does.
+        if (this.sockets.get(c.id)?.client !== client) return;
+        client.close({ force: true }); this.sockets.delete(c.id);
+        store.run("UPDATE channel_connectors SET last_error='channel_connection_failed',connection_state='failed' WHERE id=?", c.id);
       });
     }
   }
