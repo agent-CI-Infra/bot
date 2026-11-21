@@ -523,7 +523,10 @@ test('IM commands and revision conflicts retain the shared business outcome with
     const r = await post(h, id, envelope('修改 Issue 检视提示词', { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat } })); return finished(h, r.value.operation_id);
   };
   const wrong = await submit('obsolete-revision');
-  assert.equal(h.store.get('SELECT state FROM management_messages WHERE id=?', wrong.message_id).state, 'failed');
+  // #533: a stale revision is an observation the assistant can correct, so the turn finishes; the refused command still writes nothing.
+  assert.equal(h.store.get('SELECT state FROM management_messages WHERE id=?', wrong.message_id).state, 'completed');
+  assert.equal(JSON.parse(f.requests[1].messages.filter(m => m.role === 'tool')[0].content).error, 'management_revision_conflict');
+  assert.equal(h.store.get('SELECT count(*) n FROM management_commands WHERE expected_revision=?', 'obsolete-revision').n, 0);
   const webConflict = await admin('/api/management/commands', 'POST', { operation: 'manager.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: 'obsolete-revision', idempotency_key: 'web-conflict', source_conversation: 'web', source_message: 'web-conflict' });
   assert.equal(webConflict.value.error, 'management_revision_conflict');
   // A policy left by an older version is no longer read: the private chat's command runs at once, with the console's receipt.

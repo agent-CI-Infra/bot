@@ -40,6 +40,14 @@ const historyReplyChars=4000,historyBytes=96*1024;
 // Title and activity are visible only within the same authorization revision as the source messages.
 const conversationFields=`c.id,c.principal_id,c.tenant_id,c.scope,c.created_at,CASE WHEN c.title_revision=? THEN c.title END AS title,
   coalesce((SELECT max(m.updated_at) FROM management_messages m WHERE m.conversation_id=c.id AND m.authorization_revision=?),c.created_at) AS last_activity_at`;
+/** A tool status the model can correct from the observation it gets back: a wrong target, an unsupported or oversized
+ * request. A 409 is recoverable only for a stale revision; any other conflict is a configuration state or a business
+ * outcome decided elsewhere (a disabled project, revoked account credentials, an onboarding request someone already
+ * decided), so it ends the turn instead of looking retryable. Authorization and internal failures stay fatal too (#533). */
+const recoverableStatuses=new Set([400,404,413,415]);
+const recoverableConflicts=new Set(['management_revision_conflict']);
+export const recoverableToolStatus=(error:unknown):boolean=>error instanceof HttpError
+  &&(recoverableStatuses.has(error.status)||error.status===409&&recoverableConflicts.has(error.code));
 /** Conversation transport state is separate from business tasks. Submitted commands outlive the browser connection. */
 export class ManagementAgent {
   readonly active=new Map<string,{controller:AbortController;work:Promise<void>}>();
@@ -399,8 +407,9 @@ export class ManagementAgent {
               messages.push(traceClean(message));
               const results:unknown[]=[];
               for(const call of calls){
-                // An unknown tool or malformed arguments are the model's to correct, so they return as observations; a refusal,
-                // conflict or failed command still ends the turn with its code, as the user's authoritative answer.
+                // An unknown tool or malformed arguments are the model's to correct, so they return as observations; so does a
+                // recoverable tool status (a wrong target, a stale revision, an unsupported request). A refusal or an internal
+                // failure still ends the turn with its code, as the user's authoritative answer.
                 const args=toolArguments(call);let result:any;
                 if(!turnTools.some(t=>t.function.name===call.function.name))result={error:'tool_not_allowed'};
                 else if(args===null||typeof args!=='object'||Array.isArray(args))result={error:'invalid_arguments',detail:'Tool arguments must be a JSON object.'};
@@ -410,8 +419,9 @@ export class ManagementAgent {
                   this.event(id,result.error?'tool_error':'tool_result',{name:staySilentName,call_id:callId,...result.error?result:{result}});
                 }
                 else try{result=await execute(call.function.name,args,call.id);}catch(error){
-                  if(!(error instanceof HttpError&&error.status===400))throw error;
-                  await guard();result={error:error.code,...(error.detail?{detail:error.detail}:{})};
+                  if(!recoverableToolStatus(error))throw error;
+                  const failure=error as HttpError;
+                  await guard();result={error:failure.code,...(failure.detail?{detail:failure.detail}:{})};
                 }
                 results.push(result);
               }

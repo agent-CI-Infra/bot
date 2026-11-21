@@ -162,11 +162,14 @@ test('ambiguous tasks only ask for a choice and a stale write revision cannot pa
       reads++;f.h.store.run("UPDATE tasks SET summary='Changed while choosing' WHERE id='blocked'");
       return respond(res,{role:'assistant',content:null,tool_calls:[{id:'stale-pause',type:'function',function:{name:'management_command',arguments:JSON.stringify({operation:'task.pause',target:{project_id:'101',task_id:'blocked'},arguments:{},expected_revision:observed[0].revision})}}]});
     }
-    reply(res,'不应到达这里');
+    // #533: the conflict is an observation the assistant reads and states, not the end of the user's turn.
+    assert.equal(observed[1].error,'management_revision_conflict');
+    reply(res,'任务没有暂停：配置在此期间变了，我重新读取后再试。');
   };
   const ambiguous=await im(f,'暂停某个任务');assert.equal(ambiguous.row.state,'completed');assert.equal(f.h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n,0);
-  const stale=await im(f,'暂停刚才那个');assert.equal(stale.row.state,'failed');assert.equal(reads,1);
+  const stale=await im(f,'暂停刚才那个');assert.equal(stale.row.state,'completed');assert.equal(reads,1);
   assert.ok(f.h.store.get("SELECT 1 FROM management_events WHERE message_id=? AND type='tool_error' AND data LIKE '%management_revision_conflict%'",stale.row.message_id));
+  await sent(f,'任务没有暂停');
   assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
 });
 
