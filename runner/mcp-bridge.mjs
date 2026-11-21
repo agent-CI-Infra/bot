@@ -3,8 +3,34 @@ import { resolve } from 'node:path';
 import { createToolDispatch } from './tool-dispatch.mjs';
 
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const MAX_FRAME_BYTES = 24 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 3_600_000;
+
+function buildMcpToolResult(reply) {
+  if (reply && typeof reply === 'object' && !Array.isArray(reply) && reply.__bot_tool_content === true && Array.isArray(reply.content)) {
+    const content = [];
+    for (const block of reply.content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && typeof block.text === 'string') {
+        content.push({ type: 'text', text: block.text });
+      } else if (block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string') {
+        content.push({ type: 'image', data: block.data, mimeType: block.mimeType });
+      }
+    }
+    if (!content.length) {
+      content.push({ type: 'text', text: JSON.stringify(reply.observation ?? null) });
+    }
+    const isError = typeof reply.isError === 'boolean'
+      ? reply.isError
+      : Boolean(reply.observation && typeof reply.observation === 'object' && reply.observation.error);
+    return { content, isError };
+  }
+  const isError = Boolean(reply && typeof reply === 'object' && reply.error);
+  return {
+    content: [{ type: 'text', text: JSON.stringify(reply ?? null) }],
+    isError,
+  };
+}
 
 /**
  * Starts the stdio MCP server `bot` over arbitrary readable/writable streams.
@@ -137,14 +163,10 @@ export function startMcpBridge({
         // are authoritatively rejected and recorded as capability_denied.
         const reply = await dispatch(name, args, { signal: controller.signal, token, timeoutMs });
         if (controller.signal.aborted) return;
-        const isError = Boolean(reply && typeof reply === 'object' && reply.error);
         send({
           jsonrpc: '2.0',
           id,
-          result: {
-            content: [{ type: 'text', text: JSON.stringify(reply ?? null) }],
-            isError,
-          },
+          result: buildMcpToolResult(reply),
         });
       } catch (err) {
         if (!controller.signal.aborted) {

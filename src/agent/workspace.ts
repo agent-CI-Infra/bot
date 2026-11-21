@@ -14,6 +14,7 @@ import { operationRequestText, operationResult } from '../storage/payloads.js';
 import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.js';
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
 import { sanitizeBrowserTrajectory } from '../../runner/browser-policy.mjs';
+import { sanitizeAgentPollTrajectory } from '../../runner/image-budget.mjs';
 import { MAX_ARTIFACT_COMPRESSED_BYTES } from '../../runner/artifact-zip.mjs';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
@@ -116,7 +117,7 @@ export class Workspace {
       new ResultSession(this.store,scope,()=>projectResultOwner(this.task.repository_id),this.guard));
     // A repeated call replays this result: it is on disk before the row points to it. Browser screenshot bytes and typed
     // text stay off the stored record; the in-memory result still carries them so evidence can be persisted.
-    const storedResult=request.type==='workspace_browser'?sanitizeBrowserTrajectory(result):result;
+    const storedResult=request.type==='workspace_browser'?sanitizeBrowserTrajectory(result):request.type==='workspace_agent_poll'?sanitizeAgentPollTrajectory(result):result;
     let resultRef:string|null=null;
     if(scope){resultRef=trajectories.append(scope,'tool_result',id,storedResult);await trajectories.sync(resultRef);}
     await this.guard();

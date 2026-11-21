@@ -49,6 +49,16 @@ const pause = (ms: number, signal?: AbortSignal) => new Promise<void>(resolve =>
   signal?.addEventListener('abort', done, { once: true });
 });
 
+export interface ToolImageBlock {
+  type: 'image';
+  data: string;
+  mimeType: string;
+  bytes?: number;
+  resource_id?: string;
+  path?: string;
+  name?: string;
+}
+
 export interface AgentSpec<T> {
   store: Store;
   /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
@@ -126,6 +136,8 @@ export interface AgentSpec<T> {
   /** Told before each wait for a model retry, so a caller can record it and drop output the failed attempt streamed. */
   onModelRetry?: (retry: ModelRetry) => void | Promise<void>;
   execute?: (name: string, args: any) => Promise<any>;
+  /** Optional sideband image blocks attached to a tool call result; kept out of tool receipts, logs and trajectories. */
+  takeToolImages?: (name: string, observation: unknown) => ToolImageBlock[];
   validate?: (content: string) => T | Promise<T>;
   /** Trusted, opt-in format feedback; at most two corrections within the same finite run. */
   repairInvalid?: (error: unknown) => string | undefined;

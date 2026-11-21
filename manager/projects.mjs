@@ -16,6 +16,7 @@ import { DiskGuard } from './disk.mjs';
 import { IncrementalVacuum } from './compaction.mjs';
 import { isCleanupCall, validateCall } from './project-runner-calls.mjs';
 import { sanitizeBrowserTrajectory } from '../runner/browser-policy.mjs';
+import { sanitizeAgentPollTrajectory } from '../runner/image-budget.mjs';
 
 export { validateCall };
 
@@ -72,11 +73,19 @@ function sanitizeTrajectoryValue(value) {
   return out;
 }
 export function sanitizeTrajectoryInput(input) {
-  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config'].includes(input.request.type) && typeof input.request.base64 === 'string') {
+  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_tool'].includes(input.request.type) && typeof input.request.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
   }
   if (input?.request?.type === 'workspace_browser') return sanitizeBrowserTrajectory(sanitizeTrajectoryValue(input));
   return sanitizeTrajectoryValue(input);
+}
+export function sanitizeTrajectoryResult(type, result) {
+  if (type === 'workspace_browser') return sanitizeBrowserTrajectory(sanitizeTrajectoryValue(result));
+  if (type === 'workspace_agent_poll' || type === 'workspace_harness_poll') return sanitizeAgentPollTrajectory(sanitizeTrajectoryValue(result));
+  if ((type === 'workspace_agent_request' || type === 'workspace_agent_model_request') && result && typeof result === 'object' && typeof result.base64 === 'string') {
+    return sanitizeTrajectoryValue({ ...result, base64: '[omitted]' });
+  }
+  return result;
 }
 // WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
 // The control plane uses the same limit (src/storage/database.ts).
@@ -777,7 +786,7 @@ export class Projects {
           }
         }
         // A repeated call replays this result: it is on disk before the row points to it.
-        const trajectoryResult = action === 'execute' && (input.request.type === 'workspace_agent_poll' || input.request.type === 'workspace_browser') ? (input.request.type === 'workspace_browser' ? sanitizeBrowserTrajectory(sanitizeTrajectoryValue(result)) : sanitizeTrajectoryValue(result)) : result;
+        const trajectoryResult = action === 'execute' ? sanitizeTrajectoryResult(input.request.type, result) : result;
         const resultRef = this.trajectories.append(scope, 'tool_result', input.operation_id, trajectoryResult);
         await this.trajectories.sync(resultRef);
         this.db.prepare("UPDATE operations SET state='completed',result=NULL,result_ref=? WHERE id=?").run(resultRef, input.operation_id);

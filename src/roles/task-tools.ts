@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { HttpError, randomId } from '../core/security.js';
 import { stop, TaskError, type Redactor } from '../agent/common.js';
-import type { AgentSpec } from '../agent/runtime.js';
+import type { AgentSpec, ToolImageBlock } from '../agent/runtime.js';
 import { traceEvent } from '../tasks/trace.js';
 
 export interface TaskToolCallInput {
@@ -27,7 +27,7 @@ export interface TaskToolDispatcher<T> {
   readonly submitted: boolean;
   readonly result: T | undefined;
   checkToken(presented: unknown): void;
-  call(presented: unknown, input: TaskToolCallInput): Promise<{ observation: any; isError: boolean; submitted: boolean }>;
+  call(presented: unknown, input: TaskToolCallInput): Promise<{ observation: any; isError: boolean; submitted: boolean; images?: ToolImageBlock[] }>;
   rpc(presented: unknown, request: any, transport?: 'http' | 'mailbox'): Promise<any>;
   halt(): void;
   close(): Promise<void>;
@@ -154,14 +154,15 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
           observation = spec.execute ? await spec.execute(name, args) : { error: 'tool_not_allowed' };
         } catch (error) {
           await spec.guard();
-          if(error instanceof HttpError&&[400,403,404,409].includes(error.status))observation={error:error.code,...(error.field?{field:error.field}:{}),instruction:'Correct this call or choose another authorized action. The session remains active.'};
+          if(error instanceof HttpError&&[400,403,404,409,413,415].includes(error.status))observation={error:error.code,...(error.field?{field:error.field}:{}),instruction:'Correct this call or choose another authorized action. The session remains active.'};
           else{const feedback = submissionFeedback(spec,error);
           if (!feedback) throw error;
           observation = feedback;}
         }
         const clean = boundedResult(spec.redactor.clean(observation ?? null),batchBytes,value=>spec.resultSession?.preserve(value,name));
-        traceEvent(spec.store, String(spec.task.id), 'tool_observation', { name, call_id: String(input.id), observation: clean }, spec.task.trace_run_id, 'tool', [started]);
-        return { observation: clean, isError: !!(clean && typeof clean === 'object' && 'error' in clean && clean.error), submitted: false };
+        const images = spec.takeToolImages ? spec.takeToolImages(name, clean) : [];
+        traceEvent(spec.store, String(spec.task.id), 'tool_observation', { name, call_id: String(input.id), observation: clean, ...(images.length ? { image_count: images.length } : {}) }, spec.task.trace_run_id, 'tool', [started]);
+        return { observation: clean, isError: !!(clean && typeof clean === 'object' && 'error' in clean && clean.error), submitted: false, ...(images.length ? { images } : {}) };
       })();
       nonFinishInFlight.add(work);
       return work.finally(() => { nonFinishInFlight.delete(work); });
@@ -183,7 +184,11 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
     }
     if (method === 'tools/call') {
       const out = await call(presented, { id: String(id), name: String(params?.name ?? ''), arguments: params?.arguments ?? {}, transport });
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(out.observation) }], isError: out.isError } };
+      const content: any[] = [{ type: 'text', text: JSON.stringify(out.observation ?? null) }];
+      if (out.images?.length) {
+        for (const img of out.images) content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
+      }
+      return { jsonrpc: '2.0', id, result: { content, isError: out.isError } };
     }
     return { jsonrpc: '2.0', id, error: { code: -32601, message: 'method_not_found' } };
   };
@@ -230,7 +235,19 @@ export async function handleMailboxToolRequest<T>(
   if (typeof request?.id !== 'string' || !/^[a-f0-9]{48}$/.test(request.id)) stop('model_request_invalid');
   try {
     const out = await dispatcher.call(request.token, { id: request.id, name: String(request.name ?? ''), arguments: request.arguments ?? {}, transport: 'mailbox' });
-    const delivered = await deliverMailboxToolReply(redactor.clean(out.observation), request.id, sendChunk);
+    const cleanedObservation = redactor.clean(out.observation);
+    const wireReply = out.images?.length
+      ? {
+          __bot_tool_content: true,
+          observation: cleanedObservation,
+          content: [
+            { type: 'text', text: JSON.stringify(cleanedObservation ?? null) },
+            ...out.images.map(img => ({ type: 'image', data: img.data, mimeType: img.mimeType })),
+          ],
+          isError: out.isError,
+        }
+      : cleanedObservation;
+    const delivered = await deliverMailboxToolReply(wireReply, request.id, sendChunk);
     return { delivered, observation: out.observation, submitted: out.submitted };
   } catch (error) {
     const code = String((error as any)?.code ?? '');

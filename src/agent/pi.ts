@@ -1,11 +1,11 @@
 import { ResultSession, projectResultOwner, resultScope, commandResult } from './tool-results.js';
 import { randomId } from '../core/security.js';
 import { stop, TaskError, type Redactor } from './common.js';
-import type { AgentServices } from './runtime.js';
+import type { AgentServices, ToolImageBlock } from './runtime.js';
 import type { Workspace } from './workspace.js';
 import type { AgentModel } from './gateway.js';
 import type { Store } from '../storage/database.js';
-import { finalizationReserve } from './tool-context.js';
+import { finalizationReserve, hasImageContent, imageRequestLimit, requestLimit, textRequestBytes } from './tool-context.js';
 import { deliverMailboxToolReply } from '../roles/task-tools.js';
 import { modelTransport, nativeModelConnection } from '../harness/model-connection.js';
 import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
@@ -49,7 +49,7 @@ export interface PiSession<T> {
   /** Binds the task's worktree when a file tool or command of the session finds none (#769): the choice made, or the system's. */
   ensureWorkspace?: () => Promise<{ error?: string; message?: string } & Record<string, unknown>>;
   /** Control-plane tools named in config.control_tools. The runner waits for them without a deadline. */
-  control?: (name: string, args: any, meta?: { id: string; token?: unknown }) => Promise<{ result: any; finish?: boolean }>;
+  control?: (name: string, args: any, meta?: { id: string; token?: unknown }) => Promise<{ result: any; finish?: boolean; images?: ToolImageBlock[] }>;
   /** The session ended: turn the runner's final state, and a publication answered during it, into the run result. */
   complete: (state: any, publication: any) => T | Promise<T>;
   /** Reattach to the session already living in this workspace (native resume) instead of starting one. */
@@ -89,7 +89,9 @@ export function piAdapter<T>(session: PiSession<T>) {
       config.native_model={...nativeModelConnection(model),model:model.model};
       redactor.add(model.key);
     }
-    config.model = model.capabilities ? {context_window:model.capabilities.context_window,max_output_tokens:model.capabilities.max_output_tokens,reasoning:model.capabilities.reasoning} : {context_window:128000,max_output_tokens:8192,reasoning:false};
+    config.model = model.capabilities
+      ? { context_window: model.capabilities.context_window, max_output_tokens: model.capabilities.max_output_tokens, reasoning: model.capabilities.reasoning, image_input: model.capabilities.image_input !== false }
+      : { context_window: 128000, max_output_tokens: 8192, reasoning: false, image_input: true };
     config.output_tokens = outputTokens ?? config.model.max_output_tokens;
     const finishingNames=new Set(session.finalizationTools??config.finish_tools??[]);
     if(session.maxRequests!==undefined&&finishingNames.size&&session.maxRequests<=finalizationReserve(session.maxRequests))
@@ -234,8 +236,17 @@ export function piAdapter<T>(session: PiSession<T>) {
             if (kind === 'control' || (config.control_tools || []).includes(name)) {
               const allowed = session.control && session.offered(name) && (config.control_tools || []).includes(name) && (!finalizing || finishingNames.has(name));
               const reply = allowed ? await abortable(session.control!(name, args, { id, token: toolRequest?.token })) : { result: { error: 'tool_not_allowed' } };
-              await deliverMailboxToolReply(redactor.clean({ result: reply.result, ...(reply.finish ? { finish: true } : {}) }), id,
-                chunk => workspace.call(`${key}:control:${id}:${chunk.offset}`, chunk), '发送控制面工具结果时中断。');
+              const hasImages = Array.isArray(reply.images) && reply.images.length > 0;
+              const payload = hasImages
+                ? {
+                    result: redactor.clean(reply.result),
+                    ...(reply.finish ? { finish: true } : {}),
+                    images: reply.images!.map(img => ({ type: 'image', data: img.data, mimeType: img.mimeType })),
+                  }
+                : redactor.clean({ result: reply.result, ...(reply.finish ? { finish: true } : {}) });
+              // Keep image bytes out of persisted operation logs/trajectories by using deliver() when images are attached.
+              await deliverMailboxToolReply(payload, id,
+                chunk => hasImages ? workspace.deliver(chunk) : workspace.call(`${key}:control:${id}:${chunk.offset}`, chunk), '发送控制面工具结果时中断。');
               return;
             }
             if (kind === 'pull_request' || name === 'create_pull_request') {
@@ -261,8 +272,45 @@ export function piAdapter<T>(session: PiSession<T>) {
         if (state.request && !answered.has(state.request.id)) {
           if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
           if (backgroundError !== null) throw backgroundError;
-          const body = state.request.body;
-          if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024) stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
+          let fullRequest = state.request;
+          if (state.request.chunked) {
+            const parts: Buffer[] = [];
+            let readAt = 0;
+            for (;;) {
+              const chunkRes = await workspace.deliver({ type: 'workspace_agent_request', request_id: state.request.id, offset: readAt });
+              if (chunkRes?.error === 'agent_request_changed' || (chunkRes?.error === 'runner_operation_failed' && typeof chunkRes?.detail === 'string' && chunkRes.detail.includes('agent_request_changed'))) {
+                fullRequest = null;
+                break;
+              }
+              if (chunkRes?.error) stop('execution_interrupted', 'waiting_environment', `读取大型模型请求时中断：${String(chunkRes.detail || chunkRes.error)}。`);
+              const buf = Buffer.from(String(chunkRes.base64 || ''), 'base64');
+              parts.push(buf);
+              readAt += buf.length;
+              if (readAt > imageRequestLimit + 256 * 1024) stop('model_request_invalid', undefined, `含图模型请求超过 ${Math.round(imageRequestLimit / (1024 * 1024))} MiB 上限。`);
+              if (!buf.length || readAt >= Number(chunkRes.size || 0)) break;
+            }
+            if (!fullRequest) continue;
+            fullRequest = JSON.parse(Buffer.concat(parts).toString('utf8'));
+          }
+          const sendModelReply = async (replyStatus: number, replyContentType: string, replyBody: string) => {
+            const replyBuf = Buffer.from(JSON.stringify({ status: replyStatus, content_type: replyContentType, body: replyBody }));
+            for (let at = 0; at < replyBuf.length; at += 30000) {
+              const wrote = await workspace.call(`${key}:reply:${state.request.id}:${at}`, { type: 'workspace_agent_reply', request_id: state.request.id, base64: replyBuf.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= replyBuf.length });
+              if (wrote.error) stop('execution_interrupted', 'waiting_environment', `向任务执行进程发送模型响应时中断，offset=${at}。`);
+            }
+            answered.add(state.request.id);
+          };
+          const body = fullRequest.body;
+          const hasImages = hasImageContent(body);
+          const maxBytes = hasImages ? imageRequestLimit : requestLimit;
+          if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > maxBytes || (hasImages && textRequestBytes(body) > requestLimit)) {
+            if (hasImages) {
+              const message = `Model request exceeded limits (2 MiB text ceiling or ${Math.round(imageRequestLimit / (1024 * 1024))} MiB image request ceiling).`;
+              await sendModelReply(413, 'application/json', JSON.stringify({ error: { type: 'invalid_request_error', code: 'request_too_large', message } }));
+              continue;
+            }
+            stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
+          }
           if(body.tools?.some((tool:any)=>['read_playbook','select_playbooks'].includes(tool.function?.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含已退役指南工具；保留任务记录并在新工作区恢复。');
           if(body.tools?.some((tool:any)=>['create_task','manage_task','list_managed_tasks'].includes(tool.function?.name)&&!session.offered(tool.function.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含不再获准的任务管理工具；保留任务记录并在新工作区恢复。');
           await session.checkpoint?.();
@@ -293,11 +341,24 @@ export function piAdapter<T>(session: PiSession<T>) {
             if (sent.error) stop('execution_interrupted', 'waiting_environment', '向任务执行进程发送模型 token 活动通知时中断。');
           };
           const onRetry = async () => { await ping(); heartbeat ??= setInterval(() => { void ping().catch(() => {}); }, 30000); };
-          const { value, status, model: used } = await abortable(request(body, String(state.request.id), async () => {
-            if (Date.now() - lastProgress < 1000) return;
-            lastProgress = Date.now();
-            await ping();
-          }, undefined, { onRetry })).finally(() => clearInterval(heartbeat));
+          let modelResult: Awaited<ReturnType<typeof request>>;
+          try {
+            modelResult = await abortable(request(body, String(state.request.id), async () => {
+              if (Date.now() - lastProgress < 1000) return;
+              lastProgress = Date.now();
+              await ping();
+            }, undefined, { onRetry })).finally(() => clearInterval(heartbeat));
+          } catch (error) {
+            const recoverableImageRejection = hasImages && error instanceof TaskError
+              && (error.code === 'model_request_invalid' || /^model_http_(400|413|415|422)$/.test(error.code));
+            if (!recoverableImageRejection) throw error;
+            const match = /^model_http_(\d+)$/.exec(error.code);
+            const httpStatus = match ? Number(match[1]) : 413;
+            const detail = redactor.text(String(error.detail || error.code)).slice(0, 500);
+            await sendModelReply(httpStatus, 'application/json', JSON.stringify({ error: { type: 'invalid_request_error', code: error.code, message: `${error.code}: ${detail}` } }));
+            continue;
+          }
+          const { value, status, model: used } = modelResult;
           session.inspect?.(value?.choices?.[0]?.message);
           const cleaned = redactor.clean(value);
           for (const [index, call] of (value.choices?.[0]?.message?.tool_calls || []).entries()) {
@@ -314,12 +375,8 @@ export function piAdapter<T>(session: PiSession<T>) {
             const chunk = (part: any, finish: any = null) => JSON.stringify({ id: value.id || state.request.id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: used.model, choices: [{ index: 0, delta: part, finish_reason: finish }], usage: value.usage });
             responseBody = 'data: ' + chunk(delta) + '\n\ndata: ' + chunk({}, message.tool_calls?.length ? 'tool_calls' : 'stop') + '\n\ndata: [DONE]\n\n'; contentType = 'text/event-stream';
           }
-          const reply = Buffer.from(JSON.stringify({ status, content_type: contentType, body: responseBody }));
-          for (let at = 0; at < reply.length; at += 30000) {
-            const wrote = await workspace.call(`${key}:reply:${state.request.id}:${at}`, { type: 'workspace_agent_reply', request_id: state.request.id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
-            if (wrote.error) stop('execution_interrupted', 'waiting_environment', `向任务执行进程发送模型响应时中断，offset=${at}。`);
-          }
-          answered.add(state.request.id); continue;
+          await sendModelReply(status, contentType, responseBody);
+          continue;
         }
         await waitNextPoll(500);
       }

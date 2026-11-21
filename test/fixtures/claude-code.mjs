@@ -166,6 +166,65 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ type: 'control_request', request_id: 'permission-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'gh pr create' } } });
   }
 
+  if (mode === 'multimodal') {
+    const wsPath = /"fixture_workspace_path":"([^"]+)"/.exec(prompt)?.[1] ?? null;
+    let toolName = 'view_message_image';
+    let toolArgs = {};
+    if (wsPath) {
+      toolName = 'view_workspace_image';
+      toolArgs = { path: wsPath };
+    } else {
+      const listed = await call('list_message_resources', {});
+      toolArgs = { resource_id: listed.resources?.[0]?.resource_id ?? '' };
+    }
+    const id = 'rpc-' + toolName + '-' + Math.random().toString(36).slice(2);
+    send({
+      type: 'assistant',
+      message: {
+        id,
+        content: [{ type: 'tool_use', id, name: 'mcp__bot__' + toolName, input: toolArgs }],
+        usage: { input_tokens: 15, output_tokens: 5 },
+      },
+    });
+    const mcpReply = await mcpRpc('tools/call', { name: toolName, arguments: toolArgs }, id);
+    const content = Array.isArray(mcpReply?.result?.content) ? mcpReply.result.content : [];
+    const textPart = content.find(b => b?.type === 'text')?.text ?? '';
+    const imageParts = content.filter(b => b?.type === 'image' && typeof b.data === 'string');
+    // Emit realistic Claude stream-json user tool_result carrying the MCP image blocks so ClaudeJsonStream line sizing & base64 scrubbing are verified.
+    const toolResultBlocks = [
+      ...(textPart ? [{ type: 'text', text: textPart }] : []),
+      ...imageParts.map(img => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType, data: img.data } })),
+    ];
+    send({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content: toolResultBlocks }],
+      },
+    });
+    const response = await fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: arg('--model'),
+        max_tokens: 256,
+        stream: false,
+        messages: [
+          { role: 'user', content: 'Inspect the image via MCP tool.' },
+          { role: 'assistant', content: [{ type: 'tool_use', id, name: 'mcp__bot__' + toolName, input: toolArgs }] },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: toolResultBlocks }] },
+        ],
+        tools: [],
+      }),
+    });
+    await response.text();
+    await call('finish', {
+      message: JSON.stringify({ tool: toolName, image_blocks: imageParts.length, relay_status: response.status }),
+    });
+    send({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, usage: { input_tokens: 25, output_tokens: 12 } });
+    continue;
+  }
+
   if (mode === 'conversation') {
     const response = await fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', {
       method: 'POST',

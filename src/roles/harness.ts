@@ -173,7 +173,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
     inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(spec.harnessAccess&&['read','edit','write','bash','grep','find','ls'].includes(name))continue;if(!tools.some(t=>t.function.name===name)&&!(spec.harnessAccess&&['read','edit','write','bash','grep','find','ls'].includes(name))){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
     control:async(name,args,meta)=>{
      const out=await dispatcher.call(dispatcher.token,{id:meta?.id??randomId(),name,arguments:args,transport:'mailbox'});
-     return {result:out.observation,...(out.submitted?{finish:true}:{})};
+     return {result:out.observation,...(out.submitted?{finish:true}:{}),...(out.images?.length?{images:out.images}:{})};
     },
     complete:async(state,publication)=>{
      if(dispatcher.submitted)return dispatcher.result as T;

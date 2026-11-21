@@ -20,6 +20,7 @@ import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
 import {noSpace,toolDiskFull} from './disk.mjs';
 import {Redactor} from './credential-redaction.mjs';
+import {TEXT_REQUEST_LIMIT,IMAGE_REQUEST_LIMIT,MAX_IMAGES_IN_CONTEXT,IMAGE_TOKEN_ESTIMATE,sanitizeImageEvents,analyzeModelPayload,enforceSessionImageBudget,isImageOrPayloadRejection,extractToolContentBlocks} from './image-budget.mjs';
 
 const root=process.argv[2],dir=root+'/agent',legacyCwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const direct=config.model_transport!=='gateway';
@@ -39,11 +40,21 @@ const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
 // recovery: how the main session began (openSession). lastModelError: the error of the latest failed model reply, the
 // reason a turn ended without its finishing call.
-let steps=0,session,nativeSessionId,recovery,finished,requestFailure,failureDetail,lastModelError;
+let steps=0,session,nativeSessionId,recovery,finished,requestFailure,failureDetail,lastModelError,pendingImageRecovery=null;
 // reserve: tokens a later request needs beyond raw, such as a compaction summary.
-const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false};
+const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false,image_input:true};
+const modelSupportsImage=modelCapabilities.image_input!==false;
+const imageRequestLimit=Number.isSafeInteger(config.image_request_limit)&&config.image_request_limit>0?config.image_request_limit:IMAGE_REQUEST_LIMIT;
 const outputReserve=config.output_tokens??modelCapabilities.max_output_tokens;
-const modelRequestTooLarge=(raw,reserve=0)=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+outputReserve+reserve>modelCapabilities.context_window;
+const estimateRequestTokens=(raw,preAnalyzed)=>{
+  let analysis=preAnalyzed;
+  if(!analysis&&typeof raw==='string'&&(raw.includes('data:image/')||raw.includes('"type":"image"'))){
+    try{analysis=analyzeModelPayload(JSON.parse(raw),Buffer.byteLength(raw,'utf8'));}catch{}
+  }
+  const textRaw=analysis?.strippedJson??raw;
+  return estimateTokens({role:'user',content:textRaw,timestamp:Date.now()})+(analysis?.imageCount??0)*IMAGE_TOKEN_ESTIMATE;
+};
+const modelRequestTooLarge=(raw,reserve=0,preAnalyzed)=>estimateRequestTokens(raw,preAnalyzed)+outputReserve+reserve>modelCapabilities.context_window;
 // Mask credentials issued to this runner before its model sees a result or an event reaches disk.
 const secrets = new Redactor();
 let events = Promise.resolve();
@@ -52,7 +63,7 @@ secrets.add(config.run_token);
 const clean = value => secrets.clean(value);
 const modelFacing = result => Array.isArray(result?.content) ? { ...result, content: result.content.map(item =>
   item?.type === 'text' ? { ...item, text: clean(item.text) } : item) } : result;
-const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
+const writeEvent=value=>{const line=JSON.stringify(sanitizeImageEvents(clean(value)))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
 const exchange=createTokenExchange(dir),grant=createReadGrant(exchange,token=>secrets.add(token));
 // Repository exploration, publication and control-plane tools share the per-request tool mailbox with mcp-bridge.mjs.
@@ -115,11 +126,19 @@ async function proxy(req,res){
   try{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
     if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
-    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes<=2*1024*1024)chunks.push(chunk);}
-    if(bytes>2*1024*1024)return overflow(res,`${bytes} bytes exceed the 2 MiB request limit.`);
+    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes<=imageRequestLimit)chunks.push(chunk);}
+    if(bytes>imageRequestLimit){
+      res.writeHead(413,{'Content-Type':'application/json'});
+      res.end(JSON.stringify({error:{type:'invalid_request_error',code:'request_too_large',message:`Request payload (${bytes} bytes) exceeds the ${Math.round(imageRequestLimit/(1024*1024))} MiB image request limit.`}}));
+      return;
+    }
     const raw=Buffer.concat(chunks).toString('utf8');
-    if(modelRequestTooLarge(raw))return overflow(res,`the estimated tokens plus the ${outputReserve}-token output reserve exceed ${modelCapabilities.context_window}.`);
-    const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
+    const parsed=JSON.parse(raw);
+    const analysis=analyzeModelPayload(parsed,bytes);
+    if(analysis.imageCount===0&&bytes>TEXT_REQUEST_LIMIT)return overflow(res,`${bytes} bytes exceed the 2 MiB request limit.`);
+    if(analysis.imageCount>0&&analysis.textBytes>TEXT_REQUEST_LIMIT)return overflow(res,`text payload (${analysis.textBytes} bytes) exceeds the 2 MiB text request limit.`);
+    if(modelRequestTooLarge(raw,0,analysis))return overflow(res,`the estimated tokens plus the ${outputReserve}-token output reserve exceed ${modelCapabilities.context_window}.`);
+    const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:parsed}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
     const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
   }catch{res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"model_proxy_unavailable"}');}
@@ -130,7 +149,7 @@ try{
   // This literal is not a provider credential. The local proxy ignores it and cannot reach any provider itself.
   const providerId=direct?'department-direct':'department-proxy',modelId=direct?config.native_model.model:'selected';
   const api=direct?({'openai-chat-completions':'openai-completions','openai-responses':'openai-responses','anthropic-messages':'anthropic-messages'}[config.native_model.interfaceType]):'openai-completions';
-  await writeFile(dir+'/models.json',JSON.stringify({providers:{[providerId]:{api,baseUrl:direct?config.native_model.baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:direct?config.native_model.key:'local-proxy',models:[{id:modelId,name:direct?modelId:'Project model',contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:['text'],...(api==='openai-completions'?{compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}:{})}]}}}),{mode:0o600});
+  await writeFile(dir+'/models.json',JSON.stringify({providers:{[providerId]:{api,baseUrl:direct?config.native_model.baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:direct?config.native_model.key:'local-proxy',models:[{id:modelId,name:direct?modelId:'Project model',contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:modelSupportsImage?['text','image']:['text'],...(api==='openai-completions'?{compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}:{})}]}}}),{mode:0o600});
   const runtime=await ModelRuntime.create({authPath:dir+'/auth.json',modelsPath:dir+'/models.json',modelsStorePath:dir+'/catalog.json',allowModelNetwork:false});
   // Tools for one agent. cfg holds that agent's trusted capabilities; agent names a sub-agent in the task log; guard
   // checks repository results against that agent's own session.
@@ -139,12 +158,12 @@ try{
       const name=tool.function.name,who=agent?{agent}:{};
       // Start metadata deliberately excludes file contents and publication payloads.
       await writeEvent({type:'tool_start',name,call_id:id,...who,...(['read_file','write_file'].includes(name)?{path:args.path}:name==='run_command'?{command:args.command}:{})});
-      let result,submitted=false;
+      let result,toolImages=[],submitted=false;
       const denied=controlTools.has(name)&&!agent?null:toolCapabilityError(cfg,name,args);
       if(denied) result={error:denied};
       // The control plane decides the result; only its explicit finish ends this session with the validated submission.
-      else if(controlTools.has(name)&&!agent){const reply=await controlTool(name,args,signal);result=reply.result;if(reply.finish===true){finished=reply.result;submitted=true;}}
-      else if(['github_read','github_search','read_job_log','download_artifact','read_task_history','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent)result=await repositoryTool(name,args,signal);
+      else if(controlTools.has(name)&&!agent){const reply=await controlTool(name,args,signal);const extracted=Array.isArray(reply.images)?extractToolContentBlocks(reply):extractToolContentBlocks(reply.result);result=extracted.observation;toolImages=extracted.images;if(reply.finish===true){finished=result;submitted=true;}}
+      else if(['github_read','github_search','read_job_log','download_artifact','read_task_history','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent){const reply=await repositoryTool(name,args,signal);const extracted=extractToolContentBlocks(reply);result=extracted.observation;toolImages=extracted.images;}
       else if(finishTools.has(name)&&!agent){finished=args;result={finished:true};}
       else if(name==='create_pull_request'&&!agent){
         result=await createPullRequest(args,signal);
@@ -185,7 +204,9 @@ try{
       const full=['run_command','write_file'].includes(name)?toolDiskFull(result):null;
       if(full&&!requestFailure){requestFailure='disk_full';failureDetail=`${name}${name==='run_command'?' '+String(args.command).slice(0,200):' '+args.path}: ${full}`;if(agent)setTimeout(()=>void session.abort(),10);}
       result=await guard.check(id,name,result);
-      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(full||submitted||finishTools.has(name)&&!agent&&!controlTools.has(name)?{terminate:true}:{})};
+      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result,...(toolImages.length?{image_count:toolImages.length}:{})});
+      const content=[{type:'text',text:JSON.stringify(result)},...toolImages.map(img=>({type:'image',data:img.data,mimeType:img.mimeType}))];
+      return {content,details:{},...(full||submitted||finishTools.has(name)&&!agent&&!controlTools.has(name)?{terminate:true}:{})};
     }}));
   // The main session is the one the control plane bound to this task and role instance (native_session): its file is
   // opened under the current working directory, whatever directory the session was recorded in (native_resume). A new
@@ -250,6 +271,15 @@ try{
       if(raw===undefined)throw new Error('repository_request_preview_failed');
       return raw;
     }});
+    const rejectedImages=new Map();
+    let lastSentImages=[];
+    const prevTransformContext=created.agent.transformContext;
+    created.agent.transformContext=async(messages,signal)=>{
+      const base=prevTransformContext?await prevTransformContext(messages,signal):messages;
+      const budgeted=enforceSessionImageBudget(base,{maxTotalBytes:imageRequestLimit,maxImages:MAX_IMAGES_IN_CONTEXT,rejected:rejectedImages});
+      lastSentImages=budgeted.activeImages;
+      return budgeted.messages;
+    };
     let own=0;
     created.subscribe(event=>{
       if(native&&['tool_execution_start','tool_execution_end'].includes(event.type))void writeEvent({type:'tool',phase:event.type==='tool_execution_start'?'started':'completed',name:event.toolName,call_id:event.toolCallId,...(event.args?{arguments:event.args}:{}),...(event.result?{result:event.result}:{}),isError:event.isError});
@@ -258,11 +288,22 @@ try{
       // does not fit either; reopening it would fail the same way. A compaction that failed otherwise (its summary request
       // failed, an extension cancelled it) keeps its own reason and the session. Pi 1.4.0 says which only in its message.
       if(event.type==='compaction_end'&&event.reason==='overflow'&&event.errorMessage&&!event.aborted&&!requestFailure){
+        if(!agent&&pendingImageRecovery)return;
         requestFailure=/ recovery failed after /.test(event.errorMessage)||contextOverflow.test(event.errorMessage)?'agent_context_too_large':'agent_compaction_failed';failureDetail=event.errorMessage;
       }
       if(event.type==='message_end'&&event.message.role==='assistant'){
         guard.check.reset();
-        const m=event.message;lastModelError=m.stopReason==='error'&&m.errorMessage?String(m.errorMessage):undefined;void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),...(direct?{model:m.model,usage:m.usage,source:'pi_native'}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
+        const m=event.message;lastModelError=m.stopReason==='error'&&m.errorMessage?String(m.errorMessage):undefined;
+        if(m.stopReason==='error'&&lastModelError&&lastSentImages.length>0&&isImageOrPayloadRejection(lastModelError)){
+          const reason=lastModelError.slice(0,400);
+          for(const key of lastSentImages)rejectedImages.set(key,reason);
+          if(!agent)pendingImageRecovery=reason;
+          lastSentImages=[];
+        }else if(m.stopReason!=='error'){
+          if(!agent)pendingImageRecovery=null;
+          lastSentImages=[];
+        }
+        void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),...(direct?{model:m.model,usage:m.usage,source:'pi_native'}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
       }
     });
     return created;
@@ -293,11 +334,19 @@ try{
   // instead of the finishing call. The work so far is in this session, so it is asked to continue (a bounded number of
   // times) rather than failing the attempt and starting again in a fresh workspace.
   async function untilFinished(input){
+    let imageRecoveries=0;
     for(let nudge=0;;nudge++){
-      try{await session.prompt(input);}catch(error){if(!finished||requestFailure)throw error;}
+      try{await session.prompt(input);}catch(error){if((!finished||requestFailure)&&(!pendingImageRecovery||imageRecoveries>=4))throw error;}
       if(requestFailure)throw Object.assign(new Error(requestFailure),failureDetail?{detail:failureDetail}:{});
-      // A controlled session ends only through its control-plane submission; without one the control plane decides.
       if(finished)return finished;
+      if(pendingImageRecovery&&imageRecoveries<4){
+        const reason=pendingImageRecovery;pendingImageRecovery=null;imageRecoveries++;
+        await writeEvent({type:'image_recovery',attempt:imageRecoveries,reason});
+        input=`Your previous model request containing inline image(s) was rejected (${clean(reason).slice(0,300)}). The rejected image(s) have been stripped from the conversation context and replaced with recovery notices. Follow the recovery guidance (resize, compress, crop or convert the image on your computer if available, or explain the limitation clearly to the user without claiming to have inspected any omitted image) and continue.`;
+        nudge--;
+        continue;
+      }
+      // A controlled session ends only through its control-plane submission; without one the control plane decides.
       if(config.accept_turn_result)return {harness_turn:true,text:session.getLastAssistantText()??'',session_id:nativeSessionId};
       if(controlTools.size)return null;
       const result=textResult();if(result!==undefined)return result;

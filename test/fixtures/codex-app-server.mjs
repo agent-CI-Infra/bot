@@ -274,6 +274,56 @@ async function runTurn(turnId, prompt) {
   if (flag('DISCONNECT')) { await queue; process.exit(0); }
 
   const taskRef = /"task_ref":"(task:[a-zA-Z0-9_-]+)"/.exec(String(prompt))?.[1] ?? 'task:t';
+  if (flag('MULTIMODAL') || /"fixture_mode":"multimodal"/.test(String(prompt))) {
+    const wsPath = /"fixture_workspace_path":"([^"]+)"/.exec(String(prompt))?.[1] ?? null;
+    let toolName = 'view_message_image';
+    let toolArgs = {};
+    if (wsPath) {
+      toolName = 'view_workspace_image';
+      toolArgs = { path: wsPath };
+    } else {
+      const listed = await tool('list_message_resources', {});
+      toolArgs = { resource_id: listed.resources?.[0]?.resource_id ?? '' };
+    }
+    const mcpResult = await rpc('tools/call', { name: toolName, arguments: toolArgs });
+    const content = Array.isArray(mcpResult?.content) ? mcpResult.content : [];
+    const textPart = content.find(b => b?.type === 'text')?.text ?? '';
+    const imageParts = content.filter(b => b?.type === 'image' && typeof b.data === 'string');
+    await item('completed', turnId, {
+      type: 'mcpToolCall',
+      id: 'mcp-img-' + turnId,
+      server: 'bot',
+      tool: toolName,
+      arguments: toolArgs,
+      status: 'completed',
+      result: { content },
+    });
+    const directProvider = process.argv.find(arg => arg.startsWith('model_providers.bot_direct ='));
+    const directBase = directProvider ? /base_url = ("(?:[^"\\]|\\.)*")/.exec(directProvider)?.[1] : null;
+    const outputItems = [
+      ...(textPart ? [{ type: 'input_text', text: textPart }] : []),
+      ...imageParts.map(img => ({ type: 'input_image', image_url: `data:${img.mimeType};base64,${img.data}` })),
+    ];
+    const relayResp = await fetch((directBase ? JSON.parse(directBase) : env.OPENAI_BASE_URL) + '/responses', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + (directBase ? env.BOT_NATIVE_MODEL_KEY : env.OPENAI_API_KEY), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: thread.model,
+        stream: false,
+        input: [
+          { role: 'user', content: [{ type: 'input_text', text: 'Inspect the image via MCP tool.' }] },
+          { type: 'function_call', call_id: 'call_img_1', name: toolName, arguments: JSON.stringify(toolArgs) },
+          { type: 'function_call_output', call_id: 'call_img_1', output: outputItems },
+        ],
+      }),
+    });
+    await relayResp.text();
+    await tool('finish', {
+      message: JSON.stringify({ tool: toolName, image_blocks: imageParts.length, relay_status: relayResp.status }),
+    });
+    finish(turnId, 'completed');
+    return;
+  }
   if (flag('NATIVE_WORKSPACE') || /"fixture_mode":"native_workspace"/.test(String(prompt))) {
     const target = join(thread.cwd, 'native-codex.txt');
     writeFileSync(target, 'written natively by codex\n');

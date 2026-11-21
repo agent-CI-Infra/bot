@@ -65,7 +65,7 @@ export function claudeMessage(v: any): any {
 export class ClaudeJsonStream {
   private decoder = new TextDecoder('utf-8', { fatal: true });
   private pending = ''; private bytes = 0;
-  constructor(private readonly accept: (v: any, cursor: number) => void, private readonly maxLine = 2 * 1024 * 1024, private readonly maxStream = 32 * 1024 * 1024) {}
+  constructor(private readonly accept: (v: any, cursor: number) => void, private readonly maxLine = 24 * 1024 * 1024, private readonly maxStream = 64 * 1024 * 1024) {}
   cursor = 0;
   push(chunk: Uint8Array) {
     this.bytes += chunk.byteLength;

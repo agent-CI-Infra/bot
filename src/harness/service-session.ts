@@ -6,11 +6,12 @@ import {stop} from '../agent/common.js';
 import {roleHarness} from '../roles/harness.js';
 import {harnessAccess} from './access.js';
 import type {AssistantComputer} from '../service-roles/assistant-computers.js';
+import type {MediaTurn} from '../channels/media.js';
 import {traceEvent} from '../tasks/trace.js';
 
 /** Non-project assistants connect to the same drivers, using the conversation owner's computer, never a random project. */
 export async function serviceHarnessTurn(
- spec:AgentSpec<string>,services:AgentServices,role:Row,computer:AssistantComputer|undefined,scope:string,
+ spec:AgentSpec<string>,services:AgentServices,role:Row,computer:AssistantComputer|undefined,scope:string,media?:MediaTurn,
 ):Promise<string>{
  if(!computer)return stop('harness_environment_required','waiting_environment','所选 Harness 需要助手会话运行环境。');
  const driver=roleHarness(String(role.harness)),digest=(v:string)=>createHash('sha256').update(v).digest('hex');
@@ -25,8 +26,9 @@ export async function serviceHarnessTurn(
  const token=randomId();spec.redactor.add(token);
  const finish={type:'function',function:{name:'finish',description:'Finish this conversational turn. This does not accept or complete a business task.',parameters:{type:'object',properties:{message:{type:'string'}},required:['message'],additionalProperties:false}}};
  const current:AgentSpec<string>={...spec,adapter:undefined,tools:[...(spec.tools??[]).filter(t=>t.function.name!=='finish'),finish],
+  ...(media?{takeToolImages:(name,observation)=>media.takeToolImages(name,observation)}:{}),
   finish:{name:'finish',validate:args=>{if(typeof args?.message!=='string')throw new Error('invalid_reply');return args.message;}},onTurnEnd:turn=>turn.text,
-  roleWorkspace:workspace,containerOptions:{manager:workspace.manager,egress:false},
+  roleWorkspace:workspace,containerOptions:{...spec.containerOptions,manager:workspace.manager,egress:false},
   harnessSessionKey:binding,
   harnessAccess:harnessAccess(JSON.parse(role.permissions??'{}'),false,null,{read:!!spec.tools?.some(t=>t.function.name==='read_file'),write:!!spec.tools?.some(t=>t.function.name==='write_file'),commands:!!spec.tools?.some(t=>t.function.name==='run_command')}),
   harnessState:{value:state,save:value=>{state=spec.redactor.clean(value);spec.store.run('UPDATE service_harness_sessions SET state=?,updated_at=? WHERE id=?',JSON.stringify(state),Date.now(),binding);}},

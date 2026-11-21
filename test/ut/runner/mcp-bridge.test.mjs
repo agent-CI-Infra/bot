@@ -177,3 +177,61 @@ test('mcp-bridge supports Content-Length framing and standalone CLI invocation o
   assert.deepEqual(decoded[1].result.tools.map(tool => tool.name), ['ping_tool']);
   child.stdin.end();
 });
+
+test('mcp-bridge emits standard MCP image content blocks for multimodal tool replies including >4 MiB payloads', async t => {
+  const agentDir = mkdtempSync(join(tmpdir(), 'mcp-bridge-image-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  writeFileSync(join(agentDir, 'mcp-tools.json'), JSON.stringify([{ name: 'view_message_image', description: 'Inspect image' }]));
+
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const responses = [];
+  let buf = '';
+  output.on('data', chunk => {
+    buf += chunk.toString('utf8');
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) responses.push(JSON.parse(line));
+    }
+  });
+
+  const bridge = startMcpBridge({ agentDir, input, output, token: 'rrt_img_token_123456', timeoutMs: 5000, pollMs: 10 });
+  t.after(() => bridge.close());
+
+  const waitResp = async (id, timeoutMs = 5000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const hit = responses.find(r => r.id === id);
+      if (hit) return hit;
+      await delay(10);
+    }
+    throw new Error(`Timed out waiting for response id=${id}`);
+  };
+
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 'img-call', method: 'tools/call', params: { name: 'view_message_image', arguments: { resource_id: 'res_45m' } } }) + '\n');
+  const [reqFile] = await waitForRequests(agentDir, 1);
+
+  // 4.5 MiB raw -> 6 MiB base64 payload exceeds legacy 4 MiB MCP frame cap.
+  const bigBase64 = Buffer.alloc(4.5 * 1024 * 1024, 0x33).toString('base64');
+  const metadata = { resource_id: 'res_45m', name: 'big.png', mime: 'image/png', size: 4.5 * 1024 * 1024, image_input: 'next_model_request' };
+  writeReply(agentDir, reqFile, {
+    __bot_tool_content: true,
+    observation: metadata,
+    content: [
+      { type: 'text', text: JSON.stringify(metadata) },
+      { type: 'image', data: bigBase64, mimeType: 'image/png' },
+    ],
+    isError: false,
+  });
+
+  const resp = await waitResp('img-call');
+  assert.equal(resp.result.isError, false);
+  assert.equal(resp.result.content.length, 2);
+  assert.deepEqual(JSON.parse(resp.result.content[0].text), metadata);
+  assert.equal(resp.result.content[1].type, 'image');
+  assert.equal(resp.result.content[1].mimeType, 'image/png');
+  assert.equal(resp.result.content[1].data.length, bigBase64.length);
+  assert.equal(resp.result.content[1].data, bigBase64);
+});
