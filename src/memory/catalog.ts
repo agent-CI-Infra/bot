@@ -3,7 +3,7 @@ import { memoryAudience } from './access.js';
 
 export function knowledgePath(path: unknown): void {
   if (typeof path !== 'string' || !path || path.length > 500 || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(p => p === '..' || p === '.')) return fail(400, 'invalid_memory_path');
-  if (/(^|\/)(?:\.env(?:\.[^/]*)?|\.git|\.ssh|\.aws|credentials(?:\.[^/]*)?|id_(?:rsa|ed25519)|[^/]+\.(?:pem|key))(?:\/|$)/i.test(path)) fail(400, 'memory_sensitive_path');
+  if (/(^|\/)(?:\.env(?:\.[^/]*)?|\.git|\.ssh|\.aws|credentials(?:\.(?:json|ya?ml|ini|toml|conf|cfg|properties|env))?|id_(?:rsa|ed25519)|[^/]+\.(?:pem|key))(?:\/|$)/i.test(path)) fail(400, 'memory_sensitive_path');
 }
 export function memoryCatalog(data: any, key: string): any {
   return { title:key, tags:[], aliases:[], path:data.document?.path ?? null, module:data.scope?.module ?? null,
