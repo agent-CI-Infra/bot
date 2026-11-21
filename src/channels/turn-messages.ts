@@ -12,13 +12,13 @@ export const groupTurnMessageInstructions = ' Messages that arrive in this group
   + ' Take in what continues the current request (an addition, correction or cancellation, which may change your next tools), answer what is clearly asked of you, and leave other conversation as background: do not answer it, and do not mention it in your reply, not even to say that you are not answering it.'
   + ' is_direct_mention is the only verified mention of you. group_setting_invites_reply tells whether, in this group\'s working mode, that message would have started a reply on its own: a hint, not an obligation.'
   + ' When one answer covers several people, make clear whom each part is for. You never need to wait for further messages.' + recovered;
-// Whether a group message asks for something, in the working mode that answers questions (#534). A question mark at the end
-// is the rule this mode started with; people also ask without one ("报错了，帮我看下", "这个怎么弄"), and those messages got
-// no answer at all. Interrogatives and requests for help count too. Statements and acknowledgements stay out: this mode
-// answers questions, not every message.
-const QUESTION_END = /[?？]\s*$/;
-const ASKS = /(怎么|如何|为什么|为何|为啥|咋|什么|哪里|哪儿|哪个|是否|有没有|能不能|可不可以|可以吗|行吗|对吗|是不是|求助|请教|请问|帮忙|帮我|帮看|看一下|看下|查一下|确认一下|怎么办|怎么回事|咋办|弄不了|跑不通|不生效|没反应|报错|失败了|挂了|崩了)/;
-export const asksForHelp = (content: string): boolean => { const text = content.trim(); return QUESTION_END.test(text) || ASKS.test(text); };
+// Whether a group message asks for something, in the working mode that answers questions (#534). A question mark anywhere in
+// the message counts, not only at its end: "这个怎么弄？谢谢" is the same question. People also ask without one ("这个怎么办",
+// "报错了，帮我看下"), so a narrow set of interrogatives and requests for help counts too. Statements, acknowledgements and
+// reports of a problem ("今天天气不错", "收到", "好的", "报错了") stay out: this mode answers questions, not every message.
+const QUESTION = /[?？]/;
+const ASKS = /(怎么|如何|为什么|为何|为啥|咋|哪|是否|有没有|能不能|可不可以|可以吗|行吗|对吗|是不是|吗|呢|求助|请教|请问|帮忙|帮我|帮看|看一下|看下|查一下|确认一下|弄不了|跑不通|不生效|没反应)/;
+export const asksForHelp = (content: string): boolean => { const text = content.trim(); return QUESTION.test(text) || ASKS.test(text); };
 // The group's participation setting, stated to the model so it knows when it is expected to speak (its working mode).
 const workingModes: Record<string, string> = {
   mentions: ' Working mode of this group: you answer only when someone @-mentions you. Messages without an @ are people talking among themselves unless one clearly continues the request you are working on (for example the requester adding to, correcting or cancelling it). You still see them so you can follow the conversation, but otherwise do not answer them, and do not mention them in your reply, not even to say that you are leaving them alone.',

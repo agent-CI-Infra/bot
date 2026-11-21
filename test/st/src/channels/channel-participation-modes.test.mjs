@@ -88,28 +88,33 @@ test('a private message still shows the processing indicator until its answer is
   await until(() => reacted(f, event, 'POST') && reacted(f, event, 'DELETE'), Boolean, 20000);
 });
 
-// #534: the mode that answers questions judged a message by a trailing question mark alone, so "报错了，帮我看下" and
-// "这个怎么弄" got no reply at all. The same message now reaches the assistant, a statement still does not, and the
-// running turn is told that it is the kind of message this mode answers.
-test('questions mode: a message asking for help without a question mark reaches the assistant (#534)', async t => {
+// #534: the mode that answers questions judged a message by a question mark at its very end alone, so "这个怎么弄？谢谢" and
+// "这个怎么办" got no reply at all. A question mark anywhere now counts, and so does a narrow set of interrogatives and
+// requests for help; ordinary statements and acknowledgements still never start a turn.
+test('questions mode: a question mark anywhere in the message reaches the assistant (#534)', async t => {
   const f = await group(t, 'questions');
-  f.modelState.respond = async (_body, res) => say(res, '日志里 migrate 步骤失败了，先重跑 migration 再发版。');
-  const receipt = await post(f.h, f.id, chat('报错了，帮我看下'));
-  assert.equal(receipt.value.state, 'queued');
-  assert.equal(row(f, receipt).state, 'queued');
+  f.modelState.respond = async (_body, res) => say(res, '先看 migrate 步骤的日志。');
+  const receipt = await post(f.h, f.id, chat('这个怎么弄？谢谢'));
+  // Taken in, not dropped: the queue, or a turn already running for this chat.
+  assert.notEqual(row(f, receipt).state, 'completed');
 });
 
-test('questions mode: a statement without an @ stays in the ledger only (#534)', async t => {
+test('questions mode: a request for help without punctuation reaches the assistant (#534)', async t => {
+  const f = await group(t, 'questions');
+  f.modelState.respond = async (_body, res) => say(res, '先看 migrate 步骤的日志。');
+  for (const text of ['这个怎么办', '报错了，帮我看下']) {
+    const receipt = await post(f.h, f.id, chat(text));
+    assert.notEqual(row(f, receipt).state, 'completed', text);
+  }
+});
+
+test('questions mode: an ordinary statement stays in the ledger only (#534)', async t => {
   const f = await group(t, 'questions'); let calls = 0;
   f.modelState.respond = async (_body, res) => { calls++; say(res, 'unexpected'); };
-  const receipt = await post(f.h, f.id, chat('今天的例会改到下午三点，会议室还是 3 号'));
-  assert.equal(receipt.value.state, 'completed'); await f.service.tick(); await f.service.reactions.tick();
+  for (const text of ['今天天气不错', '收到', '好的']) {
+    const receipt = await post(f.h, f.id, chat(text));
+    assert.equal(receipt.value.state, 'completed', text);
+  }
+  await f.service.tick(); await f.service.reactions.tick();
   assert.equal(calls, 0); assert.equal(f.wire.state.reactionRequests.length, 0);
-});
-
-test('questions mode: a message ending with a question mark still reaches the assistant (#534)', async t => {
-  const f = await group(t, 'questions');
-  f.modelState.respond = async (_body, res) => say(res, 'unexpected');
-  const receipt = await post(f.h, f.id, chat('CI 怎么又挂了？'));
-  assert.equal(receipt.value.state, 'queued'); assert.equal(row(f, receipt).state, 'queued');
 });
