@@ -12,7 +12,7 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
     expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 })).status).toBe(200);
     f.modelState.respond = async (body, res) => {
-      const content = body.tools.some(t => t.function.name === 'management_query') ? '你好！可按项目名称管理任务，私信沿用同一会话。' : '本群可用 admin-fixture-101，已按本地记录回答。';
+      const content = body.tools.some(t => t.function.name === 'management_command') ? '你好！可按项目名称管理任务，私信沿用同一会话。' : '本群可用 admin-fixture-101，已按本地记录回答。';
       res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
     };
     const receipt = await post(f.h, f.id, inGroup('我们刚才的决定是什么？', 'ou_bob'));

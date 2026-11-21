@@ -26,8 +26,8 @@ export const earlierTemplates: Record<string, readonly string[]> = {
  * migration:1068 compares). Each entry is the difference of an earlier default from today's.
  */
 export const earlierPermissions: Record<string, readonly RolePermissions[]> = {
-  coordinator: [{ computer: 'deny' }, { computer: 'deny', project_memory: 'none' }, { project_memory: 'none' }],
-  manager: [{ computer: 'deny' }, { computer: 'deny', project_memory: 'none' }, { project_memory: 'none' }],
+  coordinator: [{ project_memory: 'none' }],
+  manager: [{ project_memory: 'none' }],
   test: [{ project_memory: 'read' }],
   reviewer: [{ project_memory: 'read' }],
   ux: [{ project_memory: 'read' }],

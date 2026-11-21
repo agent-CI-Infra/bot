@@ -1,17 +1,21 @@
 const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @、提问或求助的文字'], ['all', '读取每条新文字后判断是否发言']];
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
-// What a group may do is its binding's level (#849); each level adds to the one before it.
-const bindingLevelOptions = [
-  ['read', '只读问答', '读取范围内仓库的 Issue、PR、代码和 Actions，查本群会话记录；不写 GitHub，不建任务。'],
-  ['comment', '可评论和打标签', '另外可以在 Issue 和 PR 上评论、加删标签、指派人、新建 Issue，并触发 Actions 工作流（例如「跑一下 Nightly」）；PR 读写也包括开 PR、发检视（含批准和要求修改）和请求检视人。不改代码，不合并。'],
-  ['dispatch', '可派活', '另外可以把工作交给项目 Manager 新建任务，查看范围内任务，并补充说明或取消本群创建的任务；任务按项目自己的设置和模型执行。'],
-  ['custom', '高级：逐项设置', '按下面每一项单独选择。Contents 读写（提交文件、推送分支；在群里合并 PR 另要 Pull Request 读写并按项目的自动合并策略）只能在这里打开。'],
+// Group binding permissions are split into three orthogonal dimensions (#1206): GitHub, project tasks, and platform capabilities.
+const githubLevelOptions = [
+  ['read', '只读', '读取范围内仓库的 Issue、PR、代码、Actions 和检查状态；不写 GitHub。'],
+  ['comment', 'Issue / PR / Actions 读写', '可以在 Issue 和 PR 上评论、加删标签、指派人、新建和修改 Issue，开 PR、发检视（含批准和要求修改）、请求检视人，并触发、重跑或取消 Actions 工作流（例如「跑一下 Nightly」）。不含 Contents 写，不能改代码或合并。'],
+  ['custom', '逐项设置', '按下面 6 项 GitHub 资源分别选择。Contents 读写（提交文件、推送分支；在群里合并 PR 另需 Pull Request 读写并按项目的自动合并策略）只能在这里打开。'],
 ];
 const groupTaskOptions = [
   ['none', '不可访问', '无法查看、创建或管理项目任务。'],
   ['read', '只读', '查看范围内任务的列表、进展与详情。'],
-  ['create', '只读 + 可新增', '查看范围内任务，经 Manager 派活，只能给本群创建的任务补充说明或取消。'],
+  ['create', '只读 + 可新增', '查看范围内任务，经 Manager 派活，只能给本群创建的任务补充说明或取消；开发任务按项目测试与 QA 流程开 bot PR（需项目能力上限为开发），不依赖本群 Contents 写权限。'],
   ['write', '完全可读写', '查看和创建任务，还可暂停、重试、取消、补充说明或修改范围内任何任务的约定。'],
+];
+const groupQuickPresets = [
+  { name: '只读问答', github: 'read', task: 'none', platform: { project_memory: 'read', project_configuration: 'none', schedules: 'none' } },
+  { name: '只读 + 可派活', github: 'read', task: 'create', platform: { project_memory: 'read', project_configuration: 'none', schedules: 'none' } },
+  { name: '可协作 + 可派活', github: 'comment', task: 'create', platform: { project_memory: 'read', project_configuration: 'none', schedules: 'none' } },
 ];
 function groupTaskScope(binding) {
   const option = groupTaskOptions.find(([id]) => id === binding.task_mode);
@@ -22,23 +26,24 @@ function groupTaskScope(binding) {
     (controls || tasks === 'write') && '追加说明和取消', (controls || tasks === 'write' && !legacy) && '修改约定', tasks === 'write' && '暂停和重试'];
   return '保留旧权限 · ' + (rights.filter(Boolean).join('、') || '无法访问任务');
 }
-const bindingLevelName = level => bindingLevelOptions.find(([id]) => id === level)?.[1] || level;
-// The individual items of a binding, for the advanced level. Transitional values migrated from an older role stay
-// selectable until another mode is chosen.
-function bindingItemsEditor(permissions, items) {
-  const box = element('div', '', 'role-permissions');
-  for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
-    const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
-    for (const item of items.filter(item => item.group === group && item.id !== 'project_tasks')) {
-      const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
-      if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom]);
-      const row = element('div', '', 'role-permission-row');
-      row.append(field(item.name, roleSelect(item.name, permissions[item.id], choices, value => { permissions[item.id] = value; })), note(item.detail));
-      section.append(row);
-    }
-    box.append(section);
+const githubLevelName = level => githubLevelOptions.find(([id]) => id === level)?.[1] || level;
+const groupPermissionModeLabels = { none: '无权限', read: '只读', write: '读写', deny: '不允许', allow: '允许', custom: '保留旧权限' };
+// Per-item controls for one permission group (GitHub items when custom, or platform capabilities directly visible).
+function bindingGroupItemsEditor(permissions, items, group) {
+  const wrap = element('div', '', 'role-permissions');
+  for (const item of items.filter(item => item.group === group && item.id !== 'project_tasks')) {
+    const choices = item.modes.map(mode => [mode, groupPermissionModeLabels[mode] || mode]);
+    if (permissions[item.id] === 'custom') choices.unshift(['custom', groupPermissionModeLabels.custom]);
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', item.name);
+    for (const [value, caption] of choices) select.add(new Option(caption, value));
+    select.value = permissions[item.id] ?? item.modes[0];
+    select.addEventListener('change', () => { permissions[item.id] = select.value; });
+    const row = element('div', '', 'role-permission-row');
+    row.append(field(item.name, select), note(item.detail));
+    wrap.append(row);
   }
-  return box;
+  return wrap;
 }
 // A refused save in words, naming the projects that do not fit the chosen role (#849).
 function bindingSaveError(err) {
@@ -47,11 +52,15 @@ function bindingSaveError(err) {
   if (err.code === 'channel_service_model_unavailable') return `所选助手角色的模型没有授权给 ${projects || '范围内的部分项目'}。群助手只能用对范围内每个项目都可用的模型：请换一个角色，或请超级管理员把共享模型授权给这些项目。`;
   return employeeError(readErrorText(err));
 }
-// One line per binding: the level, or for an advanced binding the items it opens.
-function bindingLevelSummary(b, items) {
-  if (b.level !== 'custom') return bindingLevelName(b.level);
-  const open = items.filter(item => item.id !== 'project_tasks' && !['none', 'deny'].includes(b.permissions[item.id])).map(item => `${item.name} ${permissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
-  return '高级：' + (open.join('；') || '逐项设置');
+function bindingGithubSummary(b, items) {
+  if (b.github_level && b.github_level !== 'custom') return githubLevelName(b.github_level);
+  const open = items.filter(item => item.group === 'github' && !['none', 'deny'].includes(b.permissions[item.id])).map(item => `${item.name} ${groupPermissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
+  return '逐项：' + (open.join('；') || '全部无权限');
+}
+function bindingPlatformSummary(b, items) {
+  const open = items.filter(item => item.group === 'platform' && item.id !== 'project_tasks' && !['none', 'deny'].includes(b.permissions[item.id]))
+    .map(item => `${item.name} ${groupPermissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
+  return open.length ? open.join('；') : '未开放共享知识、项目设置和项目定时';
 }
 
 // Group bindings list + on-demand creator/permission editor.
@@ -146,21 +155,39 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     ...(data.organizations.length ? [] : [note('你没有组织级配置权限，只能按单个仓库勾选。')]));
   form.append(scope);
 
-  // The group's permission level (#849): one choice here decides what everyone in the group may do.
-  const levels = element('fieldset', '', 'feishu-level-choices'); levels.append(element('legend', '本群权限档位'));
-  const levelControls = new Map(), itemsWrap = element('div', '', 'feishu-level-items');
-  // `edited` is what the advanced editor changes; it starts from `startFrom`, the binding's items or the level chosen last,
-  // so switching to the advanced level never widens anything by itself.
-  let edited = {}, startFrom = null;
-  for (const [id, title, detail] of bindingLevelOptions) {
-    const control = document.createElement('input'); control.type = 'radio'; control.name = 'binding_level'; control.value = id;
+  // Decoupled group permissions (#1206): quick presets fill the three orthogonal dimensions below without locking them together.
+  const githubItems = data.permission_items.filter(item => item.group === 'github');
+  const platformItems = data.permission_items.filter(item => item.group === 'platform' && item.id !== 'project_tasks');
+  const githubPresetOf = id => data.github_levels?.find(level => level.id === id)?.permissions
+    || Object.fromEntries(githubItems.map(item => [item.id, id === 'comment' && ['github_issues', 'github_pull_requests', 'github_actions'].includes(item.id) ? 'write' : 'read']));
+  const defaultPermissions = () => ({ ...(data.default_permissions || {
+    ...githubPresetOf('read'), project_tasks: 'none', project_memory: 'read', project_configuration: 'none', schedules: 'none',
+  }) });
+
+  const githubFieldset = element('fieldset', '', 'feishu-level-choices'); githubFieldset.append(element('legend', 'GitHub 权限'));
+  const githubControls = new Map(), githubItemsWrap = element('div', '', 'feishu-level-items');
+  let githubEdited = {}, githubStartFrom = null, platformEdited = {};
+  for (const [id, title, detail] of githubLevelOptions) {
+    const control = document.createElement('input'); control.type = 'radio'; control.name = 'binding_github_level'; control.value = id;
     const label = element('label', '', 'check'); label.append(control, ' ' + title);
-    levels.append(label, note(detail)); levelControls.set(id, control);
+    githubFieldset.append(label, note(detail)); githubControls.set(id, control);
   }
-  const presetOf = id => data.levels.find(level => level.id === id)?.permissions;
-  const chosenLevel = () => [...levelControls].find(([, control]) => control.checked)?.[0] || 'read';
+  const chosenGithubLevel = () => [...githubControls].find(([, control]) => control.checked)?.[0] || 'read';
+  const showGithubItems = () => {
+    githubItemsWrap.hidden = chosenGithubLevel() !== 'custom';
+    if (!githubItemsWrap.hidden && !githubItemsWrap.childElementCount) {
+      githubEdited = Object.fromEntries(githubItems.map(item => [item.id, githubStartFrom?.[item.id] ?? 'read']));
+      githubItemsWrap.append(bindingGroupItemsEditor(githubEdited, data.permission_items, 'github'));
+    }
+  };
+  for (const [id, control] of githubControls) control.addEventListener('change', () => {
+    if (id !== 'custom') { githubStartFrom = { ...githubPresetOf(id) }; githubItemsWrap.replaceChildren(); }
+    showGithubItems();
+  });
+  githubFieldset.append(githubItemsWrap);
+
   const taskModes = element('fieldset', '', 'feishu-level-choices');
-  const selectedTaskMode = () => taskModes.querySelector('input:checked').value;
+  const selectedTaskMode = () => taskModes.querySelector('input:checked')?.value || 'none';
   const fillTaskMode = mode => {
     taskModes.replaceChildren(element('legend', '项目任务权限'));
     const options = [...groupTaskOptions];
@@ -172,17 +199,30 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
       taskModes.append(label, note(detail));
     }
   };
-  const showItems = () => {
-    itemsWrap.hidden = chosenLevel() !== 'custom';
-    if (!itemsWrap.hidden && !itemsWrap.childElementCount) { edited = structuredClone(startFrom || {}); itemsWrap.append(bindingItemsEditor(edited, data.permission_items)); }
+
+  const platformFieldset = element('fieldset', '', 'role-permission-group');
+  platformFieldset.append(element('legend', '平台能力'));
+  const platformItemsWrap = element('div');
+  const renderPlatformItems = source => {
+    platformEdited = Object.fromEntries(platformItems.map(item => [item.id, source?.[item.id] ?? (item.id === 'project_memory' ? 'read' : 'none')]));
+    platformItemsWrap.replaceChildren(bindingGroupItemsEditor(platformEdited, data.permission_items, 'platform'));
   };
-  for (const [id, control] of levelControls) control.addEventListener('change', () => {
-    if (id !== 'custom') { startFrom = presetOf(id); fillTaskMode(startFrom.project_tasks); itemsWrap.replaceChildren(); }
-    showItems();
-  });
-  levels.append(taskModes, itemsWrap,
-    element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按这一档使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
-  form.append(levels);
+  platformFieldset.append(platformItemsWrap,
+    note('基础能力默认全部允许：使用虚拟电脑、使用任务浏览器（用于派发任务）以及在群里直接设置本群定时任务（例如每天早 8 点统计昨天的 PR 和 Issue）无需单独开关；「项目定时与通知」仅控制仓库的项目级定时任务和事件订阅，不影响本群定时任务。'));
+
+  const presetBar = element('div', '', 'feishu-preset-bar');
+  presetBar.append(element('span', '快捷填充：'));
+  for (const preset of groupQuickPresets) {
+    presetBar.append(button(preset.name, () => {
+      for (const [id, control] of githubControls) control.checked = id === preset.github;
+      githubStartFrom = { ...githubPresetOf(preset.github) }; githubItemsWrap.replaceChildren(); showGithubItems();
+      fillTaskMode(preset.task);
+      renderPlatformItems(preset.platform);
+    }, 'quiet'));
+  }
+
+  form.append(presetBar, githubFieldset, taskModes, platformFieldset,
+    element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按以上权限配置使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
 
   // The assistant role: its prompt and model only.
   // Global templates, then the roles of projects this person configures (#849), which fit only groups scoped to that project.
@@ -231,10 +271,13 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     ownership.textContent = locked ? `这个群的助手由 ${current.owner || '原负责人'} 负责；只有负责人、所属组织的管理员和超级管理员可以修改。` : current?.owner ? '负责人：' + current.owner : '';
     save.disabled = unavailable || locked;
     role.value = current?.enabled && data.service_roles.some(r => r.id === current.service_role.id) ? current.service_role.id : (data.service_roles.find(r => r.recommended) || data.service_roles[0])?.id || '';
-    // A disabled binding is enabled again at its last level; a new one starts at read.
-    const level = current?.level || 'read';
-    for (const [id, control] of levelControls) control.checked = id === level;
-    startFrom = current?.permissions || presetOf('read'); fillTaskMode(current?.task_mode || 'none'); itemsWrap.replaceChildren(); showItems();
+    // A disabled binding is enabled again at its last permissions; a new one starts at GitHub read, tasks none, project_memory read.
+    const initial = current?.permissions ? { ...current.permissions } : defaultPermissions();
+    const ghLevel = current?.github_level || 'read';
+    for (const [id, control] of githubControls) control.checked = id === ghLevel;
+    githubStartFrom = { ...initial }; githubItemsWrap.replaceChildren(); showGithubItems();
+    fillTaskMode(current?.task_mode || 'none');
+    renderPlatformItems(initial);
     participation.value = current?.participation || 'mentions';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;
@@ -249,15 +292,12 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     event.preventDefault(); save.disabled = true; status.textContent = '正在核验你的飞书绑定、群成员身份和所选范围的配置权限…';
     const selected = organizationKind.checked ? { kind: 'organization', organization: organization.value } : { kind: 'repositories', repositories: [...boxes].filter(([, control]) => control.checked).map(([id]) => id) };
     try {
-      const level = chosenLevel();
-      const preset = presetOf(level), taskMode = selectedTaskMode();
-      const permissions = { ...(level === 'custom' ? edited : preset) };
-      // The task selector controls creation too. Omitting both fields preserves an older grant on an unrelated edit.
-      delete permissions.delegation;
-      if (taskMode === 'custom') delete permissions.project_tasks;
-      else permissions.project_tasks = taskMode;
+      const ghLevel = chosenGithubLevel(), taskMode = selectedTaskMode();
+      const permissions = { ...(ghLevel === 'custom' ? githubEdited : githubPresetOf(ghLevel)), ...platformEdited };
+      // The task selector controls creation too. Omitting both fields preserves an older split grant on an unrelated edit.
+      if (taskMode !== 'custom') permissions.project_tasks = taskMode;
       await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', { service_role_id: role.value, scope: selected, participation: participation.value,
-        ...(preset && preset.project_tasks === taskMode ? { level } : { permissions }), enabled: true, expected_revision: expected });
+        permissions, enabled: true, expected_revision: expected });
       if (location.hash.includes('?')) history.replaceState(null, '', '#/identity/feishu');
       await start();
     } catch (err) { status.textContent = bindingSaveError(err); save.disabled = false; }
@@ -313,8 +353,9 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     info.append(titleWrap,
       note('项目范围：' + scopeText),
       ...(b.scope.organization && b.enabled ? [note(b.reachable.length ? `可达仓库（${b.reachable.length}）：${b.reachable.join('、')}` : '当前组织范围下暂无可达仓库')] : []),
-      note('权限档位：' + bindingLevelSummary(b, data.permission_items)),
+      note('GitHub 权限：' + bindingGithubSummary(b, data.permission_items)),
       note('项目任务权限：' + groupTaskScope(b)),
+      note('平台能力：' + bindingPlatformSummary(b, data.permission_items)),
       note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation)),
       note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
       channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); updateOption(b.chat); }),

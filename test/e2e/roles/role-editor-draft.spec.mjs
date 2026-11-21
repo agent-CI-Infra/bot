@@ -52,7 +52,7 @@ test('a role conflict merges independent changes and requires a deliberate choic
     await (await promptEditor(page, '角色提示词')).fill('My new prompt');
     const role = (await admin('/api/repositories/101/roles')).value.configuration.roles.find(row => row.role_id === 'dev');
     const draft = await page.evaluate(role => editableRole(role), role);
-    const changed = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ ...draft, name: 'Server name', persona_prompt: 'Server prompt', permissions: { ...draft.permissions, computer: 'deny' } }] });
+    const changed = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ ...draft, name: 'Server name', persona_prompt: 'Server prompt', permissions: { ...draft.permissions, project_tasks: 'write' } }] });
     expect(changed.status, JSON.stringify(changed.value)).toBe(200);
     await consoleSave(page).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeInViewport();
     await expect(draftPrompt(page)).toHaveValue('My new prompt'); await expect(consoleSave(page)).toBeDisabled();
@@ -62,10 +62,10 @@ test('a role conflict merges independent changes and requires a deliberate choic
     await page.getByLabel('处理 roles › dev › persona_prompt', { exact: true }).selectOption('draft'); await apply.click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toHaveCount(0);
     await expect(page.getByLabel('显示名称', { exact: true })).toHaveValue('Server name'); await expect(draftPrompt(page)).toHaveValue('My new prompt');
     await openRoleFormAdvanced(page);
-    await expect(page.getByLabel('dev 使用虚拟电脑权限', { exact: true })).toHaveValue('deny');
+    await expect(page.getByLabel('dev 项目任务与协作权限', { exact: true })).toHaveValue('write');
     await consoleSave(page).click(); await expect(page.locator('.flash')).toBeVisible();
     const saved = (await admin('/api/repositories/101/roles')).value.configuration;
-    expect(saved.revision).toBe(revision + 2); expect(saved.roles.find(row => row.role_id === 'dev')).toMatchObject({ name: 'Server name', persona_prompt: 'My new prompt', permissions: { computer: 'deny' } });
+    expect(saved.revision).toBe(revision + 2); expect(saved.roles.find(row => row.role_id === 'dev')).toMatchObject({ name: 'Server name', persona_prompt: 'My new prompt', permissions: { project_tasks: 'write' } });
   } finally { await h.stop(); }
 });
 test('role read errors expose a read-only retry and permission loss clears the retained draft', async ({ page }) => {

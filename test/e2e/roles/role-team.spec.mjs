@@ -37,7 +37,7 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await openRoleFormAdvanced(page);
     await page.getByLabel('dev 技能包', { exact: true }).selectOption('review-kit'); await dirty(); await discard();
     await openRoleFormAdvanced(page);
-    await page.getByLabel('dev 使用虚拟电脑权限', { exact: true }).selectOption(dev.permissions.computer === 'allow' ? 'deny' : 'allow'); await dirty(); await discard();
+    await page.getByLabel('dev 项目任务与协作权限', { exact: true }).selectOption(dev.permissions.project_tasks === 'write' ? 'read' : 'write'); await dirty(); await discard();
     await goRolePage(page);
     const row = table.locator('tr[data-role=dev]');
     await expect(page.getByLabel('开启角色协调', { exact: true })).toHaveCount(0);

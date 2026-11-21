@@ -50,7 +50,9 @@
 .feishu-row-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
 .feishu-row-drawer:not([hidden]) { display: grid; gap: var(--space-3); width: 100%; min-width: 0; padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .feishu-repo-picker:not([hidden]) { display: grid; gap: var(--space-3); min-width: 0; }
-/* The group's permission level (#849): one option per line, each explained right below it. */
+/* The group's decoupled permission dimensions (#849, #1206): each option explained right below it. */
+.feishu-preset-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; min-width: 0; }
+.feishu-preset-bar > span { font-size: var(--font-size-1); color: var(--color-text-muted); }
 .feishu-level-choices { display: grid; gap: var(--space-2); margin: var(--space-3) 0; min-width: 0; }
 .feishu-level-choices > label + p { margin: 0 0 var(--space-2) 1.6rem; }
 .feishu-level-items:not([hidden]) { display: grid; gap: var(--space-3); min-width: 0; }

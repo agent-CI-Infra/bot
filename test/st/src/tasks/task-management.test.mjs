@@ -138,15 +138,14 @@ test('live revocation and pinned ceilings survive recovery; granting a newer per
   valid = false; assert.throws(() => create(guarded), /source_revoked/);
 });
 
-test('a source role cannot lend GitHub writes, commands, subagents or another role through its own task', t => {
+test('a source role cannot lend GitHub writes or another role through its own task', t => {
   const { s, caller, create, save } = fixture(t);
   // Ordinary tasks inherit the capability ceiling (#850); this project narrowed them to no writes.
   s.run(`UPDATE policies SET work_settings='{"task.request":{"writes":[]}}'`);
-  save('reviewer', { task_management: 'write', computer: 'deny', subagents: 'deny', issues: 'deny' });
+  save('reviewer', { task_management: 'write', subagents: 'deny', issues: 'deny' });
   const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller()).id);
-  assert.equal(taskToolAllowed(s, task, 'reviewer', 'write_file'), false);
-  assert.equal(taskToolAllowed(s,task,'reviewer','start_agent'),true);
-  for (const name of ['github_write', 'run_command', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
+  assert.equal(taskToolAllowed(s, task, 'reviewer', 'start_agent'), true);
+  for (const name of ['github_write', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
   assert.throws(() => assertTaskRole(s, task, 'manager'), { code: 'task_delegation_forbidden' });
   // A PR is a framework delivery (#381): the project's work type decides, and this task's work type was narrowed to no PR write.
   assert.throws(() => assertTaskExternalEffect(s, task, 'pull_request'), { code: 'task_external_write_forbidden' });
@@ -284,24 +283,22 @@ test('github_write from a task files an Issue once per key, sends mentions and c
   assert.equal(s.get("SELECT count(*) n FROM github_writes WHERE state='refused'").n, 3);
 });
 
-test('software request endpoint is explicit, defaults off and intersects fixed source, executor and project writes',async t=>{
+test('software request endpoint is explicit, bounded by project capability ceiling and executor availability',async t=>{
   const {s,save,commands,caller,create}=fixture(t),{assertRequestPullRequest,publishRequestPullRequest}=await import('../../../../dist/tasks/pull-request.js');
   const before=s.get('SELECT count(*) n FROM tasks').n;
-  const old=caller();assert.throws(()=>create(old,'Deliver a PR',{endpoint:'reviewable_pull_request'}),{code:'task_pull_request_forbidden'});
+  s.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='r'");
+  assert.throws(()=>create(caller(),'Deliver a PR',{endpoint:'reviewable_pull_request'}),{code:'capability_ceiling'});
   assert.equal(s.get('SELECT count(*) n FROM tasks').n,before,'rejected admission rolls back task/origin/config records');
-  s.run("UPDATE policies SET work_settings=? WHERE repository_id='r'",JSON.stringify({'task.request':{writes:['code','pull_request']}}));
-  assert.throws(()=>create(caller(),'Deliver a PR',{endpoint:'reviewable_pull_request'}),{code:'task_pull_request_forbidden'});
-  save('reviewer',{repository:'write',pull_request:'allow'});
-  assert.throws(()=>create(old,'An older caller cannot gain new authority',{endpoint:'reviewable_pull_request'}),{code:'task_pull_request_forbidden'});
+  s.run("UPDATE policies SET capability_ceiling='develop' WHERE repository_id='r'");
   const id=create(caller(),'Deliver an explicitly authorized PR',{endpoint:'reviewable_pull_request',execute:false}).id;
   const task=s.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(JSON.parse(task.input).contract.endpoint,'reviewable_pull_request');assertRequestPullRequest(s,task);
   await assert.rejects(publishRequestPullRequest(s,task,new Redactor(),async()=>{},()=>{},'http://127.0.0.1:1'),{code:'acceptance_required'});
   assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',id).executor_role,'reviewer');
-  // The PR is a framework delivery (#381): revoking the executor's PR permission changes nothing, losing code edits does.
+  // The PR is a framework delivery (#381): revoking the executor's PR permission changes nothing; disabling the source/executor stops it.
   save('reviewer',{pull_request:'deny',delegation:'allow'});assertRequestPullRequest(s,task);
-  save('reviewer',{repository:'none'});
-  assert.throws(()=>assertRequestPullRequest(s,task),{code:'task_pull_request_forbidden'});
-  assert.throws(()=>create(caller(),'Delegation cannot lend PR authority',{endpoint:'reviewable_pull_request',executor_role:'dev'}),{code:'task_pull_request_forbidden'});
+  save('reviewer',{},{enabled:false});
+  assert.throws(()=>assertRequestPullRequest(s,task),{code:'task_management_forbidden'});
+  save('reviewer',{},{enabled:true});
   const report=create(caller(),'A report still does not ask for publication',{execute:false}).id;
   assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',report).input).contract.endpoint,'report');
   const record=new TaskRecords(s).get(report);

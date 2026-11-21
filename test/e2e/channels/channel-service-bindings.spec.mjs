@@ -21,49 +21,78 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.getByRole('button', { name: '创建个人绑定', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
     await expect(page.getByLabel('助手角色', { exact: true })).toHaveValue('repository-assistant');
-    // A new group starts at read; the page says that everyone in the group, external members included, acts with the level (#849).
+    // A new group starts at decoupled defaults (#1206): GitHub read, tasks none, project_memory read; platform capabilities visible directly.
+    const github = page.getByRole('group', { name: 'GitHub 权限', exact: true });
     const tasks = page.getByRole('group', { name: '项目任务权限', exact: true });
+    const platform = page.getByRole('group', { name: '平台能力', exact: true });
+    await expect(github.getByLabel('只读', { exact: true })).toBeChecked();
     await expect(tasks.getByLabel('不可访问', { exact: true })).toBeChecked();
     await expect(tasks.getByRole('radio')).toHaveCount(4);
-    await expect(page.getByLabel('只读问答', { exact: true })).toBeChecked();
+    await expect(platform).toBeVisible();
+    await expect(platform.getByLabel('项目共享知识', { exact: true })).toHaveValue('read');
+    await expect(platform.getByLabel('项目设置与角色配置', { exact: true })).toHaveValue('none');
+    await expect(platform.getByLabel('项目定时与通知', { exact: true })).toHaveValue('none');
+    await expect(platform.getByLabel('使用虚拟电脑', { exact: true })).toHaveCount(0);
+    await expect(platform.getByLabel('使用任务浏览器', { exact: true })).toHaveCount(0);
+    await expect(platform).toContainText('不影响本群定时任务');
     await expect(page.locator('#feishu-group-editor')).toContainText('包括没有平台账号的人和其他企业的外部成员');
-    await expect(page.getByLabel('Contents', { exact: true })).toBeHidden();
+    await expect(github.getByLabel('Contents', { exact: true })).toBeHidden();
     await expect(page.getByText(/群内所有成员都能看到助手读取的所选仓库内容/)).toBeVisible();
     await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check(); await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中 · 仓库问答助手', { exact: true })).toBeVisible();
     await expect(binding.getByText('项目范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
-    await expect(binding.getByText('权限档位：只读问答', { exact: true })).toBeVisible();
+    await expect(binding.getByText('GitHub 权限：只读', { exact: true })).toBeVisible();
+    await expect(binding.getByText('平台能力：项目共享知识 只读', { exact: true })).toBeVisible();
     await expect(binding.getByText('负责人：administrator', { exact: true })).toBeVisible();
-    // Repositories and the level remain one click away on an existing group binding row.
+    // Repositories and the decoupled permissions remain one click away on an existing group binding row.
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeVisible();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-101', exact: true })).toBeChecked();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-102', exact: true })).toBeChecked();
-    // #1072: from comment up, a group may also start workflows ("跑一下 Nightly").
-    await expect(page.getByRole('group', { name: '本群权限档位', exact: true })).toContainText('并触发 Actions 工作流（例如「跑一下 Nightly」）');
-    mkdirSync('.tmp/channel-service-bindings-1072', { recursive: true });
-    await tasks.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
-    await page.screenshot({ path: `.tmp/channel-service-bindings-1072/levels-${width}.png` });
-    await page.getByLabel('可派活', { exact: true }).check();
+    // #1072: GitHub write tier explains workflow_dispatch ("跑一下 Nightly").
+    await expect(github).toContainText('并触发、重跑或取消 Actions 工作流（例如「跑一下 Nightly」）');
+    // Orthogonal preset: GitHub read + project tasks create (#1206), without forcing GitHub write.
+    await page.getByRole('button', { name: '只读 + 可派活', exact: true }).click();
+    await expect(github.getByLabel('只读', { exact: true })).toBeChecked();
+    await expect(tasks.getByLabel('只读 + 可新增', { exact: true })).toBeChecked();
+    await expect(platform.getByLabel('项目共享知识', { exact: true })).toHaveValue('read');
+    mkdirSync('.tmp/issue-1206', { recursive: true });
+    await github.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -100); });
+    await page.screenshot({ path: `.tmp/issue-1206/group-editor-${width}.png` });
+    await platform.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -100); });
+    await page.screenshot({ path: `.tmp/issue-1206/group-platform-${width}.png` });
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
-    await expect(binding.getByText('权限档位：可派活', { exact: true })).toBeVisible();
-    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'create', github_issues: 'write', github_actions: 'write', github_contents: 'read' });
-    // Merging from the group (Contents write) is only an individual item, starting from the level chosen before.
+    await expect(binding.getByText('GitHub 权限：只读', { exact: true })).toBeVisible();
+    await expect(binding.getByText(/^项目任务权限：只读 \+ 可新增/)).toBeVisible();
+    await expect(binding.getByText('平台能力：项目共享知识 只读', { exact: true })).toBeVisible();
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'create', github_issues: 'read', github_actions: 'read', github_contents: 'read', project_memory: 'read' });
+    // Quick preset for collaborate + dispatch sets GitHub write + tasks create while keeping Contents read.
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
-    await expect(page.getByLabel('可派活', { exact: true })).toBeChecked();
-    await page.getByLabel('高级：逐项设置', { exact: true }).check();
+    await page.getByRole('button', { name: '可协作 + 可派活', exact: true }).click();
+    await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
+    await expect(binding.getByText('GitHub 权限：Issue / PR / Actions 读写', { exact: true })).toBeVisible();
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'create', github_issues: 'write', github_actions: 'write', github_contents: 'read', project_memory: 'read' });
+    // Merging from the group (Contents write) is only an individual GitHub item, starting from the GitHub tier chosen before.
+    await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
+    await expect(github.getByLabel('Issue / PR / Actions 读写', { exact: true })).toBeChecked();
+    await github.getByLabel('逐项设置', { exact: true }).check();
     await expect(tasks.getByLabel('只读 + 可新增', { exact: true })).toBeChecked();
     await tasks.getByLabel('完全可读写', { exact: true }).check();
-    await page.getByLabel('Contents', { exact: true }).selectOption('write');
+    await github.getByLabel('Contents', { exact: true }).selectOption('write');
+    await platform.getByLabel('项目共享知识', { exact: true }).selectOption('write');
+    await github.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -100); });
+    await page.screenshot({ path: `.tmp/issue-1206/group-editor-custom-${width}.png` });
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
-    await expect(binding.getByText(/^权限档位：高级：.*Contents 读写/)).toBeVisible();
+    await expect(binding.getByText(/^GitHub 权限：逐项：.*Contents 读写/)).toBeVisible();
     await expect(binding.getByText(/^项目任务权限：完全可读写/)).toBeVisible();
-    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ project_tasks: 'write', github_contents: 'write' });
+    await expect(binding.getByText('平台能力：项目共享知识 读写', { exact: true })).toBeVisible();
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ project_tasks: 'write', github_contents: 'write', project_memory: 'write' });
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
     await expect(tasks.getByLabel('完全可读写', { exact: true })).toBeChecked();
-    await expect(page.getByLabel('高级：逐项设置', { exact: true })).toBeChecked(); await expect(page.getByLabel('Contents', { exact: true })).toHaveValue('write');
+    await expect(github.getByLabel('逐项设置', { exact: true })).toBeChecked(); await expect(github.getByLabel('Contents', { exact: true })).toHaveValue('write');
+    await expect(platform.getByLabel('项目共享知识', { exact: true })).toHaveValue('write');
     await page.locator('#feishu-group-editor').getByRole('button', { name: '收起配置', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeHidden();
     const row = h.store.get('SELECT * FROM channel_service_bindings');

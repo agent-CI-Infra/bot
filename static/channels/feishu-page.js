@@ -297,7 +297,7 @@ async function renderFeishuBindingsPage(panel, current) {
   groupHead.append(element('h3', '飞书群聊助手'), groupHeadActions);
   if (me.role === 'super_admin') groupHeadActions.append(channelLink('#/settings/service-roles', '管理助手角色', 'button-link quiet'));
   groupSection.append(groupHead,
-    note('为机器人所在的群选择仓库范围（可按单个仓库勾选或授权整个组织）、本群权限档位和助手角色。群里的每个人，包括没有平台账号的人和外部成员，都按本群的档位使用助手，不核对发言人；点击条目可查看群聊天记录。'));
+    note('为机器人所在的群选择仓库范围（可按单个仓库勾选或授权整个组织）、GitHub 权限、项目任务权限、平台能力和助手角色。群里的每个人，包括没有平台账号的人和外部成员，都按本群配置使用助手，不核对发言人；点击条目可查看群聊天记录。'));
   const groupBody = element('div');
   groupBody.append(consoleState('正在读取群绑定', '个人飞书绑定已就绪，正在读取可查看或管理的群绑定。'));
   groupSection.append(groupBody);

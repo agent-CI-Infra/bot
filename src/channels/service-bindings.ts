@@ -2,7 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { managementAssistant, modelGaps, repositoryAssistant, serviceRole } from '../service-roles/roles.js';
-import { groupPermissionItems, groupTaskModes, normalizePermissions, permissionItems, permitsManagement, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
+import { githubResources, groupPermissionItems, groupTaskModes, normalizePermissions, permissionItems, permitsManagement, retiredPermissionItems, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
@@ -32,8 +32,30 @@ const terminal = (error: unknown) => error instanceof HttpError && error.status 
  */
 export const bindingLevels = ['read', 'comment', 'dispatch'] as const;
 export type BindingLevel = typeof bindingLevels[number] | 'custom';
+export const bindingGithubLevels = ['read', 'comment'] as const;
+export type BindingGithubLevel = typeof bindingGithubLevels[number] | 'custom';
+export function githubLevelPermissions(level: typeof bindingGithubLevels[number]): RolePermissions {
+  return {
+    github_issues: level === 'comment' ? 'write' : 'read',
+    github_pull_requests: level === 'comment' ? 'write' : 'read',
+    github_actions: level === 'comment' ? 'write' : 'read',
+    github_contents: 'read',
+    github_checks: 'read',
+    github_statuses: 'read',
+  };
+}
+/** The GitHub permission preset a set of items equals on the 6 GitHub resources, or custom (#1206). */
+export function bindingGithubLevel(value: RolePermissions): BindingGithubLevel {
+  const p = normalizePermissions(value, true);
+  if (Object.keys(p).some(key => githubResources.some(resource => key.startsWith('legacy_' + resource + '_')))) return 'custom';
+  return bindingGithubLevels.find(level => {
+    const preset = githubLevelPermissions(level);
+    return Object.entries(preset).every(([key, mode]) => p[key] === mode);
+  }) ?? 'custom';
+}
 export function levelPermissions(level: typeof bindingLevels[number]): RolePermissions {
   const p = normalizePermissions({ github: 'read' }, true);
+  p.project_memory = 'read';
   if (level !== 'read') { p.github_issues = 'write'; p.github_pull_requests = 'write'; p.github_actions = 'write'; }
   if (level === 'dispatch') { p.delegation = 'allow'; p.project_tasks = 'create'; }
   return p;
@@ -420,7 +442,7 @@ export class ChannelServiceBindings {
     const given = object(input.permissions);
     for (const [key, mode] of Object.entries(given)) {
       if (key === 'project_tasks' && groupTaskModes.some(value => value === mode)) continue;
-      if (!key.startsWith('legacy_') && !permissionItems.some(item => item.id === key) || !validPermissionInput(key, mode, base)) fail(400, 'channel_service_permission_invalid', 'permissions.' + key);
+      if (!key.startsWith('legacy_') && !permissionItems.some(item => item.id === key) && !(retiredPermissionItems as readonly string[]).includes(key) || !validPermissionInput(key, mode, base)) fail(400, 'channel_service_permission_invalid', 'permissions.' + key);
     }
     const next = updatePermissions(base, given as RolePermissions, true);
     // Selecting a tier sets its creation grant too. Old clients that only change delegation retain their exact subset.
@@ -514,7 +536,7 @@ export class ChannelServiceBindings {
       model_gaps: gaps,
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,
         repositories: grants.filter(g => g.scope === 'project').map(g => ({ id: g.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id })) },
-      level: bindingLevel(permissions), task_mode: bindingTaskMode(permissions), permissions,
+      level: bindingLevel(permissions), github_level: bindingGithubLevel(permissions), task_mode: bindingTaskMode(permissions), permissions,
       participation: binding.participation, enabled: !!binding.enabled, revision: binding.revision, migrated: binding.migrated_from === 'channel_employee',
       owner: username(binding.owner_id), configured_by: username(binding.configured_by),
       state, error, reachable: reach.projects.map(p => p.full_name), reachable_projects: reach.projects.map(p => ({ id: p.id, full_name: p.full_name })), paused: reach.paused.map(p => p.full_name), created_at: binding.created_at, updated_at: binding.updated_at };
@@ -537,6 +559,8 @@ export class ChannelServiceBindings {
             project: r.project_id ? { id: r.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', r.project_id)?.full_name ?? r.project_id } : null,
             model: model ? { id: model.id, model_name: model.model_name, project_id: model.repository_id ?? null } : null }; }),
       levels: bindingLevels.map(level => ({ id: level, permissions: levelPermissions(level) })),
+      github_levels: bindingGithubLevels.map(level => ({ id: level, permissions: githubLevelPermissions(level) })),
+      default_permissions: levelPermissions('read'),
       organizations: this.store.all('SELECT * FROM tenants ORDER BY display_name').filter(t => {
         try { authorize(actor, 'config.write', { tenant_id: t.id }); return true; } catch (error) { if (!terminal(error)) throw error; return false; }
       }).map(t => ({ id: t.id, name: tenantName(this.store, t.id) })),

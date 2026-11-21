@@ -70,9 +70,11 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
  assert.ok(s.get("SELECT 1 FROM task_history WHERE type='skill_read' AND json_extract(data,'$.path')='defaults/roadmap-decomposition/SKILL.md'"));
 });
 
-test('effective access is prepared from one permission definition',()=>{
+test('effective access is prepared from one permission definition and respects entry ceilings',()=>{
  const access=harnessAccess(defaultPermissions('manager','controller'),true,'owner/repo');assert.equal(access.commands,true);assert.equal(access.workspace,'write');assert.equal(access.github.repository,'owner/repo');
- const denied=harnessAccess({computer:'deny'},false,null);assert.equal(denied.commands,false);assert.equal(denied.workspace,'none');assert.deepEqual(denied.github.scopes,[]);
+ // Legacy computer: 'deny' normalizes to always-allowed (#1206); entry ceilings still enforce workspace/command limits.
+ const legacy=harnessAccess({computer:'deny'},false,null);assert.equal(legacy.commands,true);assert.equal(legacy.workspace,'write');assert.deepEqual(legacy.github.scopes,[]);
+ const bounded=harnessAccess({},false,null,{read:false,write:false,commands:false});assert.equal(bounded.commands,false);assert.equal(bounded.workspace,'none');assert.deepEqual(bounded.github.scopes,[]);
 });
 
  test('unsupported read-only shell access is reported before Pi/Claude start, without claiming enforcement',()=>{

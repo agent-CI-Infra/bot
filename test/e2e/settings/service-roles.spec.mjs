@@ -16,7 +16,9 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     const cardOf = name => panel.locator('section').filter({ has: page.getByRole('heading', { name, exact: true }) });
     const assistant = cardOf('管理助手'), repository = cardOf('仓库问答助手');
     await expect(assistant).toContainText('全部能力已允许'); await expect(assistant).toContainText('还没有模型请求');
-    await expect(assistant.getByLabel('使用虚拟电脑',{exact:true})).toBeDisabled();
+    await expect(assistant.getByLabel('使用虚拟电脑', { exact: true })).toHaveCount(0);
+    await expect(assistant.getByLabel('使用任务浏览器', { exact: true })).toHaveCount(0);
+    await expect(assistant.getByLabel('指派其他角色',{exact:true})).toBeDisabled();
     // A group assistant role is a prompt and a model; what a group may do is set on its binding (#849).
     await expect(repository.getByRole('group',{name:'GitHub',exact:true})).toHaveCount(0);
     await expect(repository.getByLabel('Issue',{exact:true})).toHaveCount(0);

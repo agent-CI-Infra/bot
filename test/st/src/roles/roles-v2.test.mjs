@@ -112,10 +112,11 @@ test('old policy selections and appended prompts migrate once without mutating h
   const raw = JSON.stringify(old);
   f.s.run('INSERT INTO settings VALUES(?,?)', 'roles:r', raw);
   const fixed = resolveRole(f.s, 'r', 'reviewer', 'task.request', {configuration:old});
-  assert.equal(fixed.definition.permissions.legacy_commands, 'deny');
+  assert.equal(fixed.definition.permissions.computer, undefined);
+  assert.equal(fixed.definition.permissions.legacy_commands, undefined);
   assert.ok(fixed.system.endsWith('Keep this project instruction.'));
   const view = roleApi(f.s, admin, 'GET', rolesUrl, {}), reviewer = view.configuration.roles.find(role => role.role_id === 'reviewer');
-  assert.equal(reviewer.permissions.legacy_commands, 'deny');
+  assert.equal(reviewer.permissions.legacy_commands, undefined);
   assert.ok(reviewer.persona_prompt.startsWith(roleTemplate('reviewer')));
   assert.ok(reviewer.persona_prompt.endsWith('Keep this project instruction.'));
   assert.equal(reviewer.capability_policy_ref, undefined);
@@ -127,13 +128,13 @@ test('old policy selections and appended prompts migrate once without mutating h
 
 test('flat permissions filter actual tools and a later grant cannot widen an existing snapshot', async t => {
   const f = await fixture(t, body => call('finish', { tools: body.tools.map(tool => tool.function.name) }));
-  f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'read', commands: 'deny', project_memory: 'none', role_memory: 'none' } }] });
+  f.put({ roles: [{ role_id: 'dev', permissions: { project_memory: 'none', role_memory: 'none' } }] });
   const old = resolveRole(f.s, 'r', 'dev', 'task.request').snapshot;
   const result = await runRole({ ...f.spec, tools: ['read_file', 'write_file', 'run_command', 'search_project_memory', 'finish'].map(tool) }, 'dev');
-  assert.deepEqual(result.result.tools, ['read_file', 'finish','read_tool_result','read_managed_task','search_role_memory']);
-  f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'write', commands: 'allow' } }] });
-  assert.equal(roleAuthority(f.s, 'r', old, 'write_file'), 'tool_not_in_permissions');
-  assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('write_file'));
+  assert.deepEqual(result.result.tools, ['read_file', 'write_file', 'run_command', 'finish','read_tool_result','read_managed_task','search_role_memory']);
+  f.put({ roles: [{ role_id: 'dev', permissions: { project_memory: 'write' } }] });
+  assert.equal(roleAuthority(f.s, 'r', old, 'search_project_memory'), 'tool_not_in_permissions');
+  assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('search_project_memory'));
 });
 
 for (const harness of ['native','process','pi']) test(`${harness} workers keep task reads and recover from unoffered management calls`, async t => {
@@ -207,16 +208,16 @@ test('only Manager and QA are protected; deleted built-in roles stay deleted thr
   assert.equal(put({ roles: [{ role_id: 'dev' }] }).roles.find(role => role.role_id === 'dev').persona_prompt, roleTemplate('dev'));
 });
 
-test('deleting a running role or revoking its computer takes effect before the next side effect', async t => {
-  for (const change of ['delete', 'computer']) await t.test(change, async t => {
+test('deleting a running role or revoking its permission takes effect before the next side effect', async t => {
+  for (const change of ['delete', 'memory']) await t.test(change, async t => {
     let executions = 0;
     const f = await fixture(t, () => {
       const revision = roleApi(f.s, admin, 'GET', rolesUrl, {}).revision;
-      roleApi(f.s, admin, 'PUT', rolesUrl, { expected_revision: revision, enabled: true, ...(change === 'delete' ? { deleted_roles: ['reviewer'] } : { roles: [{ role_id: 'reviewer', permissions: { computer: 'deny' } }] }) });
-      return call('run_command', { command: 'true' });
+      roleApi(f.s, admin, 'PUT', rolesUrl, { expected_revision: revision, enabled: true, ...(change === 'delete' ? { deleted_roles: ['reviewer'] } : { roles: [{ role_id: 'reviewer', permissions: { project_memory: 'none' } }] }) });
+      return call('remember_project_memory', { key: 'k', content: 'v' });
     });
     f.put({});
-    await assert.rejects(runRole({ ...f.spec, tools: [tool('run_command'), tool('finish')], execute: async () => { executions++; } }, 'reviewer'), { code: 'role_authority_revoked' });
+    await assert.rejects(runRole({ ...f.spec, tools: [tool('remember_project_memory'), tool('finish')], execute: async () => { executions++; } }, 'reviewer'), { code: 'role_authority_revoked' });
     assert.equal(executions, 0);
     assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer' AND status='succeeded'").n, 0);
   });
@@ -369,11 +370,11 @@ test('a new revision applies to the next assignment and to a running role only a
 test('revoked role authority blocks the next capability call of a running role', async t => {
   for (const change of ['narrow', 'disable']) await t.test(change, async t => {
     let calls = 0;
-    const f = await fixture(t, () => call('run_command', { command: 'true' }));
+    const f = await fixture(t, () => call('remember_project_memory', { key: 'k', content: 'v' }));
     f.put({ roles: [{ role_id: 'reviewer' }] });
-    const spec = { ...f.spec, tools: [tool('run_command'), tool('finish')], execute: async () => {
-      if (++calls === 1) f.put({ roles: [{ role_id: 'reviewer', ...(change === 'narrow' ? { permissions: { commands: 'deny' } } : { enabled: false }) }] });
-      return { exit_code: 0 };
+    const spec = { ...f.spec, tools: [tool('remember_project_memory'), tool('finish')], execute: async () => {
+      if (++calls === 1) f.put({ roles: [{ role_id: 'reviewer', ...(change === 'narrow' ? { permissions: { project_memory: 'none' } } : { enabled: false }) }] });
+      return { ok: true };
     } };
     await assert.rejects(runRole(spec, 'reviewer'), e => e.code === 'role_authority_revoked' && e.state === 'waiting_configuration');
     assert.equal(calls, 1, 'no capability call after revocation');

@@ -18,8 +18,8 @@ const code = (error: unknown) => error instanceof HttpError || error instanceof 
 const authority = (error: unknown) => error instanceof HttpError && error.status === 403 || error instanceof TaskError && error.state === 'waiting_configuration';
 
 /**
- * The timers of the current conversation, for its assistant (#851): the management assistant in a private chat, a group's
- * assistant in a group at the comment level or higher. Results carry next_at and the next times (future), in epoch ms.
+ * The timers of the current conversation, for its assistant (#851): the management assistant in a private chat, or any
+ * bound group's assistant. Results carry next_at and the next times (future), in epoch ms.
  */
 export const conversationScheduleName = 'conversation_schedules';
 export const conversationScheduleTool = { type: 'function', function: { name: conversationScheduleName,
@@ -173,8 +173,8 @@ export class ChannelSchedules {
   /**
    * The timers of the conversation an assistant answers in, managed from the chat itself. A private chat's management
    * assistant acts for the chat's owner, checked as in the console. A group's assistant acts for the group: any member may
-   * ask while the group's binding is at the comment level or higher (it writes Issues), since groups never check the
-   * speaker; the binding's principal is recorded as the author. Actions: list, create, update, pause, resume, delete.
+   * manage this group's timers whenever the group binding is active and usable, independent of GitHub write permissions;
+   * the binding's principal is recorded as the author. Actions: list, create, update, pause, resume, delete.
    */
   conversation(chatId: string, caller: { actor: ActorContext } | { binding: string }, input: Json): Json {
     fields(input, ['action', 'id', 'name', 'prompt', 'timezone', 'cron', 'interval_minutes']);
@@ -187,7 +187,6 @@ export class ChannelSchedules {
       const binding = chat.chat_type === 'p2p' ? undefined : this.host.serviceBindings.active(chat.id);
       if (!binding || binding.id !== caller.binding) fail(403, 'channel_schedule_forbidden');
       this.host.serviceBindings.assertUsable(binding!);
-      if (this.host.serviceBindings.permissions(binding!).github_issues !== 'write') fail(403, 'channel_schedule_level_required');
       by = String(binding!.principal_id);
     }
     const action = String(input.action);

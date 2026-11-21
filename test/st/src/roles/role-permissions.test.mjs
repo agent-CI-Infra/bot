@@ -7,16 +7,16 @@ import { serviceMemory } from '../../../../dist/service-roles/resources.js';
 import { roleConfiguration, resetBuiltinRolePermissions, actionsWriteFollowsIssues } from '../../../../dist/roles/definition.js';
 import { assertTaskExternalEffect, taskReadScopes, withTaskPermissions } from '../../../../dist/tasks/management.js';
 
-test('legacy computer and GitHub subsets survive reads and identical saves without gaining resource actions',()=>{
+test('legacy GitHub and coordination subsets survive reads and identical saves without gaining resource actions; computer is always allowed (#1206)',()=>{
   const policy=normalizePermissions({repository:'read',commands:'deny',github:'none',issues:'allow',pull_request:'deny',submission:'deny',coordination:'write',project_tasks:'none'});
-  assert.equal(policy.computer,'custom');
-  assert.ok(permissionTools(policy).includes('read_file'));assert.ok(!permissionTools(policy).includes('run_command'));
+  assert.equal(policy.computer,undefined);
+  assert.ok(permissionTools(policy).includes('read_file'));assert.ok(permissionTools(policy).includes('run_command'));
   assert.equal(resourceAllowed(policy,'issues','create'),true);assert.equal(resourceAllowed(policy,'issues','read'),false);
   assert.equal(resourceAllowed(policy,'issues','reply'),false);assert.equal(resourceAllowed(policy,'pull_requests','create'),false);
   assert.ok(permissionTools(policy).includes('request_task_coordination'));assert.ok(!permissionTools(policy).includes('manage_project_task'));
   assert.equal(permitsManagement(policy,'task.cancel',true),false);
   assert.deepEqual(updatePermissions(policy,policy),policy);
-  const changed=updatePermissions(policy,{computer:'allow',github_issues:'read'});
+  const changed=updatePermissions(policy,{github_issues:'read'});
   assert.ok(permissionTools(changed).includes('run_command'));assert.equal(resourceAllowed(changed,'issues','create'),false);
   assert.equal(changed.legacy_repository,undefined);assert.equal(changed.legacy_issues_create,undefined);
   const oldClient=updatePermissions(fullPermissions(),{github:'none',issues:'deny',pull_request:'deny'});
@@ -159,10 +159,11 @@ test('a project role editor offers no item that does nothing for project roles, 
   const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const response = await admin('/api/repositories/101/roles'), view = response.value; assert.equal(response.status, 200, JSON.stringify(view));
   const ids = view.permission_items.map(item => item.id);
-  // The management tools these items govern exist only for assistants; the service roles page still offers them.
-  for (const id of ['project_configuration', 'schedules']) assert.ok(!ids.includes(id), id);
-  assert.ok(ids.includes('computer') && ids.includes('github_contents'));
+  // The management tools these items govern exist only for assistants; computer and browser are built-in and omitted everywhere (#1206).
+  for (const id of ['computer', 'browser', 'project_configuration', 'schedules']) assert.ok(!ids.includes(id), id);
+  assert.ok(ids.includes('project_tasks') && ids.includes('project_memory') && ids.includes('github_contents'));
   assert.ok((await admin('/api/service-roles')).value.permission_items.some(item => item.id === 'schedules'));
+  assert.ok(!(await admin('/api/service-roles')).value.permission_items.some(item => ['computer', 'browser'].includes(item.id)));
   // Built-in roles read their defaults from role_defaults; permission_defaults adds only the project's own roles.
   for (const role of view.configuration.roles) assert.deepEqual(view.role_defaults[role.role_id].permissions, defaultPermissions(role.role_id, role.kind), role.role_id);
   assert.deepEqual(view.permission_defaults, {});
@@ -170,16 +171,12 @@ test('a project role editor offers no item that does nothing for project roles, 
   assert.ok(!projectCapabilities.includes('roles.publish'));
 });
 
-test('browser is a catalogued platform action, denied by default and allowed for full or computer-using defaults', () => {
-  assert.ok(permissionItems.some(item => item.id === 'browser' && item.write.includes('browser')));
-  assert.equal(permitsTool(normalizePermissions({ computer: 'deny' }), 'browser'), false);
-  assert.equal(permitsTool(fullPermissions(), 'browser'), true);
-  assert.equal(defaultPermissions('dev', 'writer').browser, 'allow');
-  assert.equal(permitsTool(defaultPermissions('dev', 'writer'), 'browser'), true);
-  assert.equal(defaultPermissions('manager', 'controller').browser, 'deny');
-  assert.equal(permitsTool(defaultPermissions('manager', 'controller'), 'browser'), false);
-  // Saved roles from before this item inherit allow when they already may use the computer.
-  assert.equal(normalizePermissions({ computer: 'allow' }).browser, 'allow');
-  assert.equal(normalizePermissions({ computer: 'allow', browser: 'deny' }).browser, 'deny');
-  assert.ok(!permitsTool(normalizePermissions({ computer: 'allow', browser: 'deny' }), 'browser'));
+test('computer and task browser are built-in and always permitted, including for stored legacy deny values (#1206)', () => {
+  assert.ok(!permissionItems.some(item => ['computer', 'browser'].includes(item.id)));
+  for (const raw of [{ computer: 'deny', browser: 'deny' }, { computer: 'allow', browser: 'deny' }, { repository: 'none', commands: 'deny' }, defaultPermissions('manager', 'controller'), defaultPermissions('dev', 'writer'), fullPermissions()]) {
+    const p = normalizePermissions(raw);
+    assert.equal(p.computer, undefined);
+    assert.equal(p.browser, undefined);
+    for (const tool of ['read_file', 'write_file', 'run_command', 'browser']) assert.equal(permitsTool(p, tool), true, tool);
+  }
 });
