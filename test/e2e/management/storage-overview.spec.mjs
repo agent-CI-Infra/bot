@@ -86,7 +86,8 @@ test('the administrator can inspect shares and reclaim expired files from storag
       await page.screenshot({ path: `.tmp/storage-overview/reclaim-${width}.png` });
     }
     await reclaim.click(); await expect(parent.getByText(/没有可回收内容/)).toBeVisible();
-    await page.unroute(/\/api\/storage$/);
+    // Let any storage refresh finish before removing the route and reloading.
+    await page.unrouteAll({ behavior: 'wait' });
     await page.reload();
     await expect(parent.getByText(/整机容量未知/)).toBeVisible();
     expect(errors).toEqual([]);
