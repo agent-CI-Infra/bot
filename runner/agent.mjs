@@ -6,6 +6,16 @@ import {environment,workspaceTag} from './command.mjs';
 import {local,runnerRoot} from './paths.mjs';
 import {volume} from './disk.mjs';
 
+async function readRequestId(path){
+  const fh=await open(path,'r').catch(()=>null);
+  if(!fh)return null;
+  try{
+    const head=Buffer.alloc(128);
+    const {bytesRead}=await fh.read(head,0,head.length,0);
+    const m=/"id":"([a-f0-9]{48})"/.exec(head.subarray(0,bytesRead).toString('utf8'));
+    return m?m[1]:null;
+  }finally{await fh.close();}
+}
 async function currentRequestFile(path){
   return readFile(path,'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
 }
@@ -73,7 +83,7 @@ async function readModelRequestsForPoll(agentDir,knownIds=null){
         inlineBudget-=item.size;
         results.push({id:item.id,size:item.size,chunked:false,data});
       }
-    }else if(item.size<=16*1024*1024){
+    }else if(item.size<=24*1024*1024){
       results.push({id:item.id,size:item.size,chunked:true});
     }
   }
@@ -239,7 +249,16 @@ export async function agentOperation(input,root){
     // not be written either.
     if(state.state==='interrupted'&&!state.error&&volume()?.full)state.error='disk_full';
     const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
-    const request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
+    let request=null;
+    const reqStat=await stat(dir+'/request.json').catch(()=>null);
+    if(reqStat&&reqStat.isFile()){
+      if(reqStat.size<=256*1024){
+        request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
+      }else if(reqStat.size<=24*1024*1024){
+        const id=await readRequestId(dir+'/request.json');
+        if(id)request={id,size:reqStat.size,chunked:true};
+      }
+    }
     const token_requests=await readRequestDirectory(dir+'/token-requests');
     const tool_requests=await readRequestDirectory(dir+'/tool-requests');
     const model_requests=await readModelRequestsForPoll(dir);
@@ -268,7 +287,7 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_agent_progress'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.sequence)||input.sequence<1)throw new Error('invalid_agent_progress');
-    const current=JSON.parse(await readFile(dir+'/request.json','utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
+    if(await readRequestId(dir+'/request.json')!==input.request_id)throw new Error('agent_request_changed');
     const path=dir+'/progress-'+input.request_id;
     await writeFile(path+'.tmp',JSON.stringify({sequence:input.sequence}),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
@@ -278,7 +297,7 @@ export async function agentOperation(input,root){
     return manifest?{agent:'pi',package:manifest.name,version:manifest.version,node:process.version}:{error:'pi_runtime_missing'};
   }
   if(input.type==='workspace_agent_tool'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_agent_reply');
     const reqPath=dir+'/tool-requests/'+input.request_id+'.json';
     const current=await currentRequestFile(reqPath);if(current?.id!==input.request_id)throw new Error('agent_request_changed');
     await mkdir(dir+'/tool-replies',{recursive:true,mode:0o700});
@@ -295,10 +314,31 @@ export async function agentOperation(input,root){
     await unlink(path).catch(()=>{});await unlink(prefix+'.json').catch(()=>{});
     throw new Error('agent_request_changed');
   }
+  if(input.type==='workspace_agent_request'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_model_request_read');
+    const fh=await open(dir+'/request.json','r').catch(error=>{if(error.code==='ENOENT')throw new Error('agent_request_changed');throw error;});
+    try{
+      const size=(await fh.stat()).size;
+      const headBuf=Buffer.alloc(128);
+      const {bytesRead:headLen}=await fh.read(headBuf,0,headBuf.length,0);
+      const m=/"id":"([a-f0-9]{48})"/.exec(headBuf.subarray(0,headLen).toString('utf8'));
+      if(!m||m[1]!==input.request_id)throw new Error('agent_request_changed');
+      const len=Math.max(0,Math.min(512*1024,size-input.offset));
+      const chunk=Buffer.alloc(len);
+      const {bytesRead}=len>0?await fh.read(chunk,0,len,input.offset):{bytesRead:0};
+      return {base64:chunk.subarray(0,bytesRead).toString('base64'),size};
+    }finally{await fh.close();}
+  }
   if(input.type==='workspace_agent_model_request'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>16*1024*1024)throw new Error('invalid_model_request_read');
-    const data=await readFile(dir+'/model-requests/'+input.request_id+'.json').catch(error=>{if(error.code==='ENOENT')throw new Error('agent_request_changed');throw error;});
-    return {base64:data.subarray(input.offset,input.offset+512*1024).toString('base64'),size:data.length};
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_model_request_read');
+    const fh=await open(dir+'/model-requests/'+input.request_id+'.json','r').catch(error=>{if(error.code==='ENOENT')throw new Error('agent_request_changed');throw error;});
+    try{
+      const size=(await fh.stat()).size;
+      const len=Math.max(0,Math.min(512*1024,size-input.offset));
+      const chunk=Buffer.alloc(len);
+      const {bytesRead}=len>0?await fh.read(chunk,0,len,input.offset):{bytesRead:0};
+      return {base64:chunk.subarray(0,bytesRead).toString('base64'),size};
+    }finally{await fh.close();}
   }
   if(input.type==='workspace_agent_model_reply'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>32*1024*1024)throw new Error('invalid_agent_reply');
@@ -333,7 +373,7 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_agent_reply'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
-    const current=JSON.parse(await readFile(dir+'/request.json','utf8'));if(current?.id!==input.request_id)throw new Error('agent_request_changed');
+    if(await readRequestId(dir+'/request.json')!==input.request_id)throw new Error('agent_request_changed');
     const prefix=dir+'/reply-'+input.request_id,path=prefix+'.tmp',bytes=Buffer.from(input.base64,'base64');
     const file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}

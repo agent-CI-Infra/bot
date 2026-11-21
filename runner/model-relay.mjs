@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 
 export const defaultRelayIdleMs = 135_000;
-export const defaultMaxRequestBytes = 8 * 1024 * 1024;
+export const defaultMaxRequestBytes = 20 * 1024 * 1024;
 
 function extractRunToken(headers) {
   const rawKey = headers['x-api-key'];
@@ -127,7 +127,7 @@ export async function startModelRelay({
         for await (const chunk of req) {
           bytes += chunk.length;
           if (bytes > maxBodyBytes) {
-            sendError(413, 'request_too_large');
+            sendError(413, 'request_too_large', `Request payload exceeded the ${Math.round(maxBodyBytes / (1024 * 1024))} MiB relay limit. Resize, compress or crop large images or inspect fewer images per request.`);
             inflight.delete(tracker);
             if (!inflight.size && onDrained) onDrained();
             return;

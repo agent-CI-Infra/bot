@@ -163,7 +163,7 @@ export class LineRpc {
       anomaly: (kind: string, detail: Record<string, unknown>) => void;
       failed: (error: Error) => void;
     },
-    private maxLine = 16 * 1024 * 1024,
+    private maxLine = 24 * 1024 * 1024,
   ) {}
   feed(chunk: Buffer | string) {
     if (this.failure) return;
@@ -486,7 +486,10 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
         return;
       }
       // Native container commands, file edits, image reads and sub-agents run inside the isolated container and are not logged one-by-one.
-      const rawRef=completed&&quietNativeItems.has(it.type)?ctx.recordNativeReceipt?.(it):undefined;
+      const sanitizedItem = it.type === 'imageView'
+        ? Object.fromEntries(Object.entries(it).filter(([k, v]) => k !== 'data' && !(typeof v === 'string' && v.startsWith('data:image/'))))
+        : it;
+      const rawRef=completed&&quietNativeItems.has(it.type)?ctx.recordNativeReceipt?.(sanitizedItem):undefined;
       emit({ ...(rawRef?{raw_ref:rawRef}:{}),type: 'tool', callId: it.id, threadId, turnId: p.turnId, itemType: it.type, phase: completed ? 'completed' : 'started', ...redactor.clean(itemFields(it, completed)) });
     } else if (method === 'thread/tokenUsage/updated') {
       if (!ours(params, method)) return;

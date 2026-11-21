@@ -32,7 +32,7 @@ import {
 } from './model-formats.js';
 
 export const maxModelReplyChunkBytes = 30_000;
-export const maxMailboxModelRequestBytes = 8 * 1024 * 1024;
+export const maxMailboxModelRequestBytes = 20 * 1024 * 1024;
 export const maxUpstreamResponseBytes = 32 * 1024 * 1024;
 
 export interface FileBackedModelProvider {
@@ -560,7 +560,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       const chunk = Buffer.from(String(res.base64 || ''), 'base64');
       parts.push(chunk);
       offset += chunk.length;
-      if (offset > maxMailboxModelRequestBytes + 65536) return null;
+      if (offset > maxMailboxModelRequestBytes + 65536) throw Object.assign(new Error('request_too_large'), { status: 413 });
       if (!chunk.length || offset >= Number(res.size || 0)) break;
     }
     return JSON.parse(Buffer.concat(parts).toString('utf8'));
@@ -604,7 +604,20 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
     };
 
     try {
-      envelope = entry.chunked ? await readChunkedEnvelope(entry.id) : entry.data ?? null;
+      try {
+        envelope = entry.chunked ? await readChunkedEnvelope(entry.id) : entry.data ?? null;
+      } catch (readErr: any) {
+        if (readErr?.message === 'request_too_large') {
+          await sendSimpleReply(
+            writer,
+            413,
+            { 'content-type': 'application/json' },
+            formatErrorPayload('chat_completions', 'request_too_large', `Request payload exceeded the ${Math.round(maxMailboxModelRequestBytes / (1024 * 1024))} MiB model gateway limit. Resize, compress or crop large images or inspect fewer images per request.`),
+          );
+          return;
+        }
+        throw readErr;
+      }
       if (!envelope || envelope.id !== entry.id) return;
 
       try {

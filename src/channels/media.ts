@@ -8,6 +8,7 @@ import type { ChannelLedger } from './ledger.js';
 import type { FeishuAdapter } from './feishu.js';
 import { marked } from 'marked';
 import { TaskError } from '../agent/common.js';
+import type { ToolImageBlock } from '../agent/runtime.js';
 import { imageRequestLimit, isInlineImagePart, requestBytes } from '../agent/tool-context.js';
 // The turn's own assistant computer (#457): HOME paths (~/...) or temporary ones (/tmp/...).
 export interface MediaComputer { importFile(path: string, data: Buffer): Promise<Json>; exportFile(path: string, maxBytes: number): Promise<{ data: Buffer; name: string }> }
@@ -498,6 +499,35 @@ export class MediaTurn {
     };
     this.activeMessage = message;
     messages.push(message);
+  }
+  /** Extracts queued image bytes for a harness tool call without putting base64 into tool receipts or trace events. */
+  takeToolImages(name: string, observation: unknown): ToolImageBlock[] {
+    if (name !== 'view_message_image' && name !== 'view_workspace_image') return [];
+    if (!observation || typeof observation !== 'object' || (observation as any).image_input !== 'next_model_request') return [];
+    const obs = observation as Record<string, unknown>;
+    const idx = this.images.findIndex(image =>
+      name === 'view_message_image'
+        ? image.source === 'resource' && image.resource === obs.resource_id
+        : image.source === 'workspace' && image.path === obs.path,
+    );
+    if (idx < 0) return [];
+    this.guard();
+    const candidate = this.images[idx]!;
+    if (candidate.resource) {
+      this.row(candidate.resource);
+      this.viewed.add(candidate.resource);
+    }
+    this.images.splice(idx, 1);
+    const match = /^data:([^;,]+);base64,(.+)$/s.exec(candidate.url);
+    if (!match) return [];
+    return [{
+      type: 'image',
+      mimeType: match[1]!,
+      data: match[2]!,
+      bytes: candidate.size,
+      ...(candidate.resource ? { resource_id: candidate.resource } : { path: candidate.path }),
+      name: candidate.name,
+    }];
   }
   /** Preflight budget check for image-bearing requests: strips oversized images and injects actionable recovery guidance instead of aborting the turn. */
   fitRequest(body: Record<string, any>, limit = imageRequestLimit): boolean {
