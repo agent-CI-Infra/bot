@@ -33,3 +33,14 @@ test('the assistant computer run_command keeps its 600 second default ceiling an
   assert.equal(plain.assistantCommandTimeout(600), 600);
   assert.throws(() => plain.assistantCommandTimeout(601), error => error.status === 400 && error.code === 'invalid_timeout_seconds' && /between 1 and 600/.test(String(error.detail?.message ?? '')));
 });
+
+test('a ceiling below the 120 second entry default lowers the default instead of refusing every command', async t => {
+  t.after(() => delete process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS);
+  // BOT_COMMAND_TIMEOUT_MAX_SECONDS accepts 1..2147363, so a deployment may set a ceiling under the 120 second entry
+  // default. Without timeout_seconds the call must then take the ceiling, not 120 and a refusal.
+  const low = await load(60);
+  assert.equal(timeoutField(low).maximum, 60, 'the schema follows the lowered ceiling');
+  assert.equal(low.assistantCommandTimeout(), 60, 'without timeout_seconds the effective default is the lowered ceiling');
+  assert.equal(low.assistantCommandTimeout(60), 60);
+  assert.throws(() => low.assistantCommandTimeout(61), error => error.status === 400 && error.code === 'invalid_timeout_seconds' && /between 1 and 60/.test(String(error.detail?.message ?? '')));
+});

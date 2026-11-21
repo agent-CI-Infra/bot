@@ -31,7 +31,7 @@ export const assistantComputerTools = [
   fn('read_file', 'Read a UTF-8 file of your computer (at most 1 MiB is returned).', { path }, ['path']),
   fn('write_file', 'Write a UTF-8 file on your computer, replacing it. Temporary files belong in /tmp; write to HOME (~/...) only data worth keeping for later turns.', { path, content: { type: 'string' } }, ['path', 'content']),
   fn('delete_file', 'Delete a file or a directory (with its contents) on your computer, in HOME or a temporary area. Use it to clean up HOME, for example when it is over its size limit.', { path }, ['path']),
-  fn('run_command', `Run a non-interactive /bin/sh command on your computer: no network, working directory /workspace, HOME persistent, /tmp temporary. Times out after timeout_seconds (default 120, at most ${commandSecondsLimit}).`,
+  fn('run_command', `Run a non-interactive /bin/sh command on your computer: no network, working directory /workspace, HOME persistent, /tmp temporary. Times out after timeout_seconds (default 120, at most ${commandSecondsLimit}; a smaller configured maximum lowers that default).`,
     { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: commandSecondsLimit, description: `Optional timeout in seconds; the configured maximum is ${commandSecondsLimit}.` } }, ['command']),
 ];
 export const assistantComputerNames = assistantComputerTools.map(t => t.function.name);
@@ -39,10 +39,12 @@ export const assistantComputerNames = assistantComputerTools.map(t => t.function
 export const computerPermission = (name: string) => name === 'delete_file' ? 'write_file' : name;
 /**
  * #534: the assistant computer's timeout request, checked against the same configured ceiling as the task workspace
- * tools. A value above it is refused with the ceiling in the message, so the refusal never states a stale 600.
+ * tools. A value above it is refused with the ceiling in the message, so the refusal never states a stale 600. Without a
+ * request the entry default applies, clamped to the ceiling like the other entries (agent/command.ts), so a deployment
+ * ceiling below 120 seconds does not refuse every command.
  */
 export function assistantCommandTimeout(value: unknown, limit = commandSecondsLimit): number {
-  const seconds = value === undefined ? 120 : Number(value);
+  const seconds = value === undefined ? Math.min(120, limit) : Number(value);
   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > limit)
     fail(400, 'invalid_timeout_seconds', 'timeout_seconds', { max_seconds: limit, message: `timeout_seconds must be an integer between 1 and ${limit}` });
   return seconds;
