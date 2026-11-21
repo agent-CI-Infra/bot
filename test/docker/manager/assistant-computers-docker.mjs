@@ -75,6 +75,10 @@ try {
   const programs = await run(A, 'ta', `for d in /tmp /workspace; do printf '#!/bin/sh\\necho ran from %s\\n' $d > $d/probe.sh && chmod +x $d/probe.sh && $d/probe.sh; done`);
   assert.equal(programs.output, 'ran from /tmp\nran from /workspace\n', programs.output);
   passed('programs written to /tmp and /workspace run (both tmpfs are mounted exec)', programs.output.trim().split('\n'));
+  const imageTools = await run(A, 'ta', `python3 -c "from PIL import Image; im=Image.new('RGB',(320,240),(12,34,56)); im.save('/tmp/im.png'); im.resize((80,60)).save('/tmp/im.jpg',quality=80)" && identify /tmp/im.png /tmp/im.jpg && convert /tmp/im.png -resize 40x30 /workspace/im-small.png && identify /workspace/im-small.png && rm -f /tmp/im.png /tmp/im.jpg /workspace/im-small.png`);
+  assert.equal(imageTools.exit_code, 0, imageTools.output);
+  assert.match(imageTools.output, /320x240[\s\S]*80x60[\s\S]*40x30/);
+  passed('offline image tools (Pillow and ImageMagick) run under the read-only no-network sandbox');
   // File operations stay below /workspace and /tmp, never follow a symlink and never reach HOME or the runner journal.
   const file = request => computers.execute(A, { turn: 'ta', operation_id: hex(24), request });
   const data = Buffer.from('chunked\0binary'), part = Math.ceil(data.length / 2);
