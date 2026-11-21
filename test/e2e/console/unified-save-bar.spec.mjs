@@ -6,7 +6,7 @@ import { harness, setup, account, repository, testPassword } from '../../fixture
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { managerFixture } from '../../fixtures/project-manager-fixture.mjs';
 import { RuleService } from '../../../dist/rules/service.js';
-import { consoleSave, consoleSaveStatus, confirmDiscard, openSaveAdvanced } from '../helpers/console-save.mjs';
+import { consoleSave, consoleSaveStatus, confirmDiscard } from '../helpers/console-save.mjs';
 
 const out = '.tmp/unified-save-bar';
 
@@ -66,15 +66,21 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     expect(saved.persona_prompt).toBe('统一保存栏已写入');
 
     await page.goto(h.admin + '/#/projects/101/basic');
-    const fold = page.getByTestId('console-save-advanced');
-    await expect(fold).toBeVisible();
-    const groupDiscards = fold.getByTestId('console-save-group-discard');
+    await expect(consoleSaveStatus(page)).toHaveText('已保存');
+    await expect(page.getByTestId('console-save-advanced')).toHaveCount(0);
+    const groupDiscards = page.getByTestId('console-save-group-discard');
     await expect(groupDiscards).toHaveCount(2);
-    await expect(groupDiscards.first()).toBeHidden();
-    await openSaveAdvanced(page);
     await expect(groupDiscards.first()).toBeVisible();
-    await fold.locator('summary').click();
-    await expect(groupDiscards.first()).toBeHidden();
+    await expect(groupDiscards.nth(1)).toBeVisible();
+    const statusBox = await consoleSaveStatus(page).boundingBox();
+    const discardBox = await groupDiscards.first().boundingBox();
+    expect(Math.abs(statusBox.y + statusBox.height / 2 - discardBox.y - discardBox.height / 2)).toBeLessThanOrEqual(2);
+    await page.screenshot({ path: `${out}/basic-clean-1440.png`, fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(groupDiscards.first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await page.screenshot({ path: `${out}/basic-clean-390.png`, fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.getByLabel('基准分支', { exact: true }).fill('feature/unified-save');
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     await expect(page.getByRole('button', { name: '保存', exact: true })).toHaveCount(1);
@@ -239,7 +245,8 @@ test('基本设置放弃分支草稿时保留 监听与触发页的策略草稿'
     await expect(page.getByLabel('只读问答', { exact: true })).toBeChecked(); await develop.check();
     await page.locator('.project-nav a[href="#/projects/101/basic"]').click();
     await expect(branch).toHaveValue('feature/group-discard');
-    await confirmDiscard(page);
+    await page.getByRole('button', { name: '放弃「分支」的更改', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '放弃本组更改', exact: true }).click();
     await expect(branch).toHaveValue(initialBranch);
     await page.getByRole('link', { name: /监听与触发设置/ }).click();
     await expect(develop).toBeChecked();

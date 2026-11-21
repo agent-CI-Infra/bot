@@ -76,7 +76,7 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
 /** One sticky「保存」bar for a page that hosts several settingsForm sections (#567). */
 function attachUnifiedSettingsBar(host, sections, { dirty: dirtyFn = null, advanced = null, afterDiscard = null } = {}) {
   const isDirty = dirtyFn || (() => sections.some(section => section.settingDirty?.()));
-  // With several draft groups on one page, each group can still be discarded on its own from the bar's「高级」(#567).
+  // With several draft groups on one page, each group can be discarded directly from the save bar.
   const groups = sections.filter(section => section.settingDiscard);
   const groupDiscards = groups.length > 1 ? groups.map(section => {
     const title = section.settingTitle || '本组';
