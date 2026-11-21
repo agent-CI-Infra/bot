@@ -7,7 +7,8 @@ import { channelFixture, envelope, post, until, finished, privateChat, boundGrou
 import { feishuMarkdown, markdownPosts, postText } from '../../../../dist/channels/format.js';
 import { MediaTurn, artifactBytes, channelResourcePath, incomingFiles, inboundBytes, mediaPermission, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
 import { saveModelMetadata } from '../../../../dist/models/catalog.js';
-import { imageRequestLimit } from '../../../../dist/agent/tool-context.js';
+import { imageRequestLimit, requestLimit } from '../../../../dist/agent/tool-context.js';
+import { TaskError } from '../../../../dist/agent/common.js';
 import { ChannelService } from '../../../../dist/channels/service.js';
 import { AssistantComputerService } from '../../../../dist/service-roles/assistant-computers.js';
 import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
@@ -562,27 +563,29 @@ test('bound group reads inbound interactive cards with embedded images and post 
   assert.equal((await postTurn.execute('read_message_resource', { resource_id: postResources.find(r => r.name === 'repro.mp4').resource_id })).text, 'video-transcript-text');
 });
 
-test('large images over 512 KiB pass directly without folding text history, and image_input=false returns clear tool guidance', async t => {
+test('large images over 2 MiB serialized request pass directly without folding text history, and image_input=false returns clear tool guidance', async t => {
   const f = await channelFixture(t); await group(f);
-  // 1.2 MiB PNG (> old 512 KiB limit and > 384 KiB text fold threshold).
-  const largePng = Buffer.concat([png, Buffer.alloc(1200 * 1024, 0x5a)]);
+  // 3 MiB PNG (~4.1 MiB serialized JSON > old 2 MiB gateway requestLimit, > old 512 KiB media cap, and > 384 KiB text fold threshold).
+  const largePng = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024, 0x5a)]);
   f.wire.state.resources.set('img_large_direct', { data: largePng, mime: 'image/png' });
-  let sawLargeImage = false, historyElided = null;
+  let sawLargeImage = false, historyElided = null, largeRequestBytes = 0;
   f.modelState.respond = async (body, res) => {
     const observations = results(body);
     if (!observations.length) return call(res, 'list_message_resources', {});
     if (observations.length === 1) return call(res, 'read_message_text', {});
     if (observations.length === 2) return call(res, 'view_message_image', { resource_id: observations[0].resources[0].resource_id });
+    largeRequestBytes = Buffer.byteLength(JSON.stringify(body));
     const imagePart = body.messages.find(m => Array.isArray(m.content))?.content.find(p => p.type === 'image_url');
     sawLargeImage = imagePart?.image_url?.url === 'data:image/png;base64,' + largePng.toString('base64');
     historyElided = observations[1].elided === true;
-    return say(res, '已直接查看超过 512 KiB 的大图。');
+    return say(res, '已直接查看超过 2 MiB 的大图。');
   };
   const event = inGroup('');
   Object.assign(event.event.message, { message_type: 'image', content: '{"image_key":"img_large_direct"}' });
   const receipt = await post(f.h, f.id, event), source = receipt.value.operation_id;
   assert.equal((await finished(f.h, source)).state, 'completed'); await delivered(f, source);
-  assert.equal(sawLargeImage, true, '1.2 MiB image passes directly to model');
+  assert.ok(largeRequestBytes > requestLimit, `expected serialized image request (${largeRequestBytes}) to exceed 2 MiB requestLimit (${requestLimit})`);
+  assert.equal(sawLargeImage, true, '3 MiB image (~4.1 MiB request) passes directly to model across the raised gateway limit');
   assert.equal(historyElided, false, 'large inline image must not fold prior text tool results');
 
   // Explicitly marking model image_input=false prevents image upload and returns clear guidance without downloading.
@@ -672,6 +675,34 @@ test('preflight fitRequest and HTTP 413 provider rejections strip oversized imag
   const rc413 = await post(f.h, f.id, ev413);
   assert.equal((await finished(f.h, rc413.value.operation_id)).state, 'completed');
   assert.equal(saw413Recovery, true);
+
+  // Direct unit coverage for gateway-preflight model_request_invalid recovery across both resource and workspace images.
+  const stubComputer = { importFile: async () => ({ written: true }), exportFile: async () => ({ data: smallPng, name: 'cropped.png' }) };
+  const invalidTurn = new MediaTurn(f.service.media, chat.id, event.message_id, () => {}, stubComputer, () => {}, undefined, 'fixture-fence');
+  const resImg = await invalidTurn.execute('view_message_image', { resource_id: smallId });
+  const wsImg = await invalidTurn.execute('view_workspace_image', { path: '/tmp/cropped.png' });
+  const invalidMessages = [
+    { role: 'system', content: 'sys' },
+    {
+      role: 'assistant', content: null,
+      tool_calls: [
+        { id: 'ci1', type: 'function', function: { name: 'view_message_image', arguments: '{}' } },
+        { id: 'ci2', type: 'function', function: { name: 'view_workspace_image', arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'ci1', content: JSON.stringify(resImg) },
+    { role: 'tool', tool_call_id: 'ci2', content: JSON.stringify(wsImg) },
+  ];
+  invalidTurn.addImages(invalidMessages);
+  assert.equal(invalidTurn.recoverModelError(new TaskError('model_request_invalid', 'failed', '含图请求内容超过 20 MiB 上限'), invalidMessages), true);
+  assert.equal(invalidMessages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url')), false, 'all inline images stripped on model_request_invalid');
+  assert.equal(JSON.parse(invalidMessages[2].content).image_input, 'rejected_by_provider');
+  assert.equal(JSON.parse(invalidMessages[2].content).image_omitted, true);
+  assert.equal(JSON.parse(invalidMessages[3].content).image_input, 'rejected_by_provider');
+  assert.equal(JSON.parse(invalidMessages[3].content).image_omitted, true);
+  const invalidNotice = String(invalidMessages.at(-1).content);
+  assert.ok(invalidNotice.includes('model_request_invalid') && invalidNotice.includes(smallId) && invalidNotice.includes('/tmp/cropped.png'), 'recovery notice carries error code, resource_id and workspace path');
+  assert.equal(invalidTurn.recoverModelError(new TaskError('model_request_invalid', 'failed', 'retry error without images'), invalidMessages), false, 'second call without inline images does not loop');
 });
 
 test('import_message_resource -> computer processing -> view_workspace_image closes the loop and enforces path/symlink/fence boundaries', async t => {
