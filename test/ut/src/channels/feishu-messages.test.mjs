@@ -36,7 +36,7 @@ test('interactive cards parse Card JSON 2.0, Card JSON 1.0, 2D received cards, w
         {
           tag: 'table',
           columns: [{ name: 'env', display_name: '环境' }, { name: 'status', display_name: '状态' }],
-          rows: [{ env: 'staging', status: '通过' }, { env: 'prod', status: '待发布' }],
+          rows: [{ env: 'staging', status: '通过' }, { env: 'prod', status: '待发布' }, { env: 'edge', status: 'a\\|b' }],
         },
         { tag: 'img_combination', img_list: [{ img_key: 'img_v3_c1' }, { img_key: 'img_v3_c2' }] },
         { tag: 'button', text: { tag: 'plain_text', content: '打开变更单' }, behaviors: [{ type: 'open_url', default_url: 'https://ops.example.test/cr/1' }] },
@@ -47,7 +47,7 @@ test('interactive cards parse Card JSON 2.0, Card JSON 1.0, 2D received cards, w
   const text2 = messageText('interactive', JSON.stringify(card2), mentions);
   for (const part of [
     '上线审批 [P1]', 'v2.3.0', '@HelperBot 和 @Alice', '**负责人**：Alice', '[图片：变更图]',
-    '**回滚预案**', '执行 `rollback.sh`', '| 环境 | 状态 |', '| staging | 通过 |', '| prod | 待发布 |',
+    '**回滚预案**', '执行 `rollback.sh`', '| 环境 | 状态 |', '| staging | 通过 |', '| prod | 待发布 |', '| edge | a\\\\\\|b |',
     '[图片组（2 张）]', '[打开变更单](https://ops.example.test/cr/1)', '[按钮：危险链接]', '[卡片链接](https://ops.example.test/release/230)',
   ]) assert.ok(text2.includes(part), `missing ${part} in:\n${text2}`);
   assert.ok(!text2.includes('javascript:'));
@@ -168,7 +168,8 @@ test('post media and emotion, audio, media, merge_forward, share_chat, share_use
   assert.match(unknownText, /\[custom_widget消息\]/);
   assert.ok(unknownText.includes('审批流'));
   assert.ok(unknownText.includes('待 @Alice 确认'));
-  assert.ok(unknownText.includes('https://app.example.test/flow/7'));
+  const unknownUrls = unknownText.match(/https:\/\/[^\s)\]]+/g) ?? [];
+  assert.deepEqual(unknownUrls.map(value => { const url = new URL(value); return `${url.protocol}//${url.host}${url.pathname}`; }), ['https://app.example.test/flow/7']);
   assert.deepEqual(incomingFiles('custom_widget', unknownRaw), [
     { key: 'img_v3_future', type: 'image', name: 'image-1' },
     { key: 'file_v3_future', type: 'file', name: 'spec.pdf' },

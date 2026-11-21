@@ -204,7 +204,7 @@ export function cardText(data: any, mention?: (id: string, name: string) => stri
     const rows = Array.isArray(el.rows) ? el.rows : [];
     if (!columns.length && !rows.length) return '';
     const cols = columns.length ? columns : Object.keys(rows[0] ?? {}).map(name => ({ name, display_name: name }));
-    const clean = (cell: string) => cell.replace(/\|/g, '\\|').replace(/\r?\n+/g, ' ').trim();
+    const clean = (cell: string) => cell.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n+/g, ' ').trim();
     const header = '| ' + cols.map((c: any) => clean(renderText(String(c.display_name ?? c.name ?? '')))).join(' | ') + ' |';
     const sep = '| ' + cols.map(() => '---').join(' | ') + ' |';
     const body = rows.map((row: any) => '| ' + cols.map((c: any) => clean(renderCell(row?.[c.name], depth + 1))).join(' | ') + ' |');
