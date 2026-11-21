@@ -9,6 +9,7 @@ import { browserEvidenceRoot } from '../browser/tools.js';
 import { browserEvidenceDir } from '../browser/runtime.js';
 import { pruneCommitChecks } from '../tasks/external-links.js';
 import { pruneEventSubscriptions } from '../tasks/event-subscriptions.js';
+import { sweepOrphanChannelResources } from '../channels/media.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
 // by platform administrators (audited) and applied by a daily background job in bounded batches. A cleanup removes
@@ -163,6 +164,7 @@ export class RetentionCleanup {
     const started = new Date(this.now()).toISOString(), settings = retentionSettings(this.store);
     const manager = await this.syncManager(settings.manager_payload_days);
     const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days), evidence = await this.browserEvidence(settings);
+    const channelResources = this.channelResources();
     const dispatchFailures={count:0,failed:0};
     try{for(const row of this.store.all('SELECT id FROM repositories')){const days=trajectoryDays(settings,String(row.id));if(days===null)continue;const before=new Date(this.now()-days*day).toISOString();while(!this.stopped){const removed=pruneDispatchFailures(this.store,String(row.id),before);dispatchFailures.count+=removed;if(removed<500)break;await this.pause(this.options.pauseMs??20);}}}catch(error){dispatchFailures.failed=1;this.failure('dispatch_failures',error);}
     const dispatchThreads={count:0,failed:0};
@@ -190,7 +192,7 @@ export class RetentionCleanup {
       }
     } catch (error) { eventSubscriptions.failed = 1; this.failure('event_subscriptions', error); }
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, manager_window: manager, last_error: this.lastError });
   }
 
   /** Tells the manager its window when it reports another; null when the manager did not answer. */
@@ -287,6 +289,18 @@ export class RetentionCleanup {
       await this.pause(this.options.pauseMs ?? 50);
     }
     return removed;
+  }
+
+  private channelResources(): Removed {
+    if (this.store.path === ':memory:' || !this.store.hasTable('channel_resources')) return { count: 0, bytes: 0, failed: 0 };
+    try {
+      const swept = sweepOrphanChannelResources(this.store, this.now());
+      if (swept.failed) this.failure('channel-resources', new Error(`${swept.failed} orphan cleanup failure(s)`));
+      return swept;
+    } catch (error) {
+      this.failure('channel-resources', error);
+      return { count: 0, bytes: 0, failed: 1 };
+    }
   }
 
   // Bodies of webhook deliveries received before the window, in received_at order from where the last cleanup stopped

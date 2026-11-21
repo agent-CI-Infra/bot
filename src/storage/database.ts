@@ -68,12 +68,15 @@ export class Store {
   readonly path: string;
   // Bodies of agent work (model requests, tool calls, large logs) in per-run JSONL files next to the database.
   readonly trajectories: Trajectories;
+  // Encrypted Feishu attachment bytes beside the database (temp dir inside trajectories root for :memory: stores).
+  readonly channelResourcesDir: string;
   // Free space of the disk the database is on (#671); null for an in-memory store.
   readonly disk: DiskGuard | null;
   private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
   private transactionDepth = 0;
   private transactionStatements = 0;
   private transactionSlowReported = false;
+  private commitHooks: (() => void)[][] = [];
   constructor(path: string, key: Buffer, private readonly options: StoreOptions = {}) {
     this.path = path;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -82,6 +85,7 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
     this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'), undefined, value => configuredRedactor(this).clean(value));
+    this.channelResourcesDir = path === ':memory:' ? join(this.trajectories.root, '.channel-resources') : join(dirname(path), 'channel-resources');
     // One place turns a post-commit cleanup failure into an audit row, whether the files belonged to a project or a
     // conversation, and whether the removal came from a deletion, a retention sweep or a retried reclaim (#771).
     this.trajectories.onCleanupFailure = (where, error) => {
@@ -328,11 +332,28 @@ export class Store {
   }
   withAuthorizationGuard<T>(guard: () => void, fn: () => T): T { return this.authorizationGuard.run(guard, fn); }
   checkAuthorization(): void { this.authorizationGuard.getStore()?.(); }
+  /** Runs a side effect (such as unlinking deleted files) immediately, or once the outermost transaction commits. */
+  afterCommit(fn: () => void): void {
+    if (!this.transactionDepth) { fn(); return; }
+    this.commitHooks.at(-1)!.push(fn);
+  }
   transaction<T>(fn: () => T): T {
     if (this.transactionDepth) {
       const savepoint = 'nested_' + randomId(); this.db.exec('SAVEPOINT ' + savepoint);
-      try { const result = fn(); this.db.exec('RELEASE ' + savepoint); return result; }
-      catch (error) { this.db.exec('ROLLBACK TO ' + savepoint); this.db.exec('RELEASE ' + savepoint); throw error; }
+      const hooks: (() => void)[] = [];
+      this.commitHooks.push(hooks);
+      try {
+        const result = fn();
+        this.db.exec('RELEASE ' + savepoint);
+        this.commitHooks.pop();
+        this.commitHooks.at(-1)!.push(...hooks);
+        return result;
+      } catch (error) {
+        this.commitHooks.pop();
+        this.db.exec('ROLLBACK TO ' + savepoint);
+        this.db.exec('RELEASE ' + savepoint);
+        throw error;
+      }
     }
     this.authorizationGuard.getStore()?.();
     const txStarted = this.now();
@@ -341,16 +362,20 @@ export class Store {
     this.transactionDepth = 1;
     this.transactionStatements = 0;
     this.transactionSlowReported = false;
+    this.commitHooks = [[]];
     let commitMs = 0, committed = false;
+    let hooks: (() => void)[] = [];
     try {
       const result = fn();
       const commitStarted = this.now();
       this.db.exec('COMMIT');
       commitMs = this.now() - commitStarted;
       committed = true;
+      hooks = this.commitHooks.pop() ?? [];
       if (this.logSlow(commitMs, 'commit', 'COMMIT')) reported = true;
       return result;
     } catch (error) {
+      this.commitHooks = [];
       this.db.exec('ROLLBACK');
       throw error;
     } finally {
@@ -358,8 +383,12 @@ export class Store {
       this.transactionDepth = 0;
       this.transactionStatements = 0;
       this.transactionSlowReported = false;
+      this.commitHooks = [];
       const totalMs = this.now() - txStarted;
       if (!reported && !childReported) this.logSlow(totalMs, 'transaction', () => `(${statements ? `${statements} statements, ` : ''}${committed ? `commit ${Math.round(commitMs)} ms` : 'rolled back'})`);
+      for (const hook of hooks) {
+        try { hook(); } catch (error) { console.error('[store] afterCommit hook failed:', error); }
+      }
     }
   }
   // Some tables belong to services that create them on construction; deletions skip the ones this process has not made.

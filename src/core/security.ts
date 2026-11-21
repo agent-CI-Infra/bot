@@ -52,6 +52,7 @@ export function verifySignature(body: Buffer, secret: string, signature: string)
 }
 
 /** AAD binds ciphertext to its row, so it cannot be transplanted between accounts or models. */
+const binaryMagic = Buffer.from('SBX1');
 export class SecretBox {
   constructor(private readonly key: Buffer) {
     if (key.length !== 32) throw new Error('invalid encryption key');
@@ -68,5 +69,19 @@ export class SecretBox {
     const cipher = createDecipheriv('aes-256-gcm', this.key, iv);
     cipher.setAAD(Buffer.from(scope)); cipher.setAuthTag(tag);
     return object(JSON.parse(Buffer.concat([cipher.update(data), cipher.final()]).toString('utf8')));
+  }
+  /** Binary AES-256-GCM envelope (magic + 12-byte IV + 16-byte tag + ciphertext) for file-backed attachments. */
+  sealBytes(data: Buffer, scope: string): Buffer {
+    const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv);
+    cipher.setAAD(Buffer.from(scope));
+    const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
+    return Buffer.concat([binaryMagic, iv, cipher.getAuthTag(), encrypted]);
+  }
+  openBytes(sealed: Buffer, scope: string): Buffer {
+    if (sealed.length < 32 || !sealed.subarray(0, 4).equals(binaryMagic)) throw new Error('invalid ciphertext');
+    const iv = sealed.subarray(4, 16), tag = sealed.subarray(16, 32), ciphertext = sealed.subarray(32);
+    const decipher = createDecipheriv('aes-256-gcm', this.key, iv);
+    decipher.setAAD(Buffer.from(scope)); decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   }
 }

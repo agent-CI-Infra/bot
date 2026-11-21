@@ -841,7 +841,7 @@ export class ChannelService {
             if(payload.delivery.resources?.length){
               const code=errorCode(error),notice=code==='channel_resource_permission_required'?'附件未全部送达。请管理员在控制台飞书连接设置中补齐图片与文件权限，并在飞书发布生效后重新请求发送。'
                 :code==='channel_delivery_unknown'?'部分消息或附件的送达结果无法确认，自动重发已停止。请管理员核对原会话与控制台的逐项发送记录，避免重复发送。'
-                :code==='channel_resource_too_large'?'附件超过大小限制：接收最多 20 MiB，发送图片最多 10 MiB、文件最多 30 MiB。已确认送达的部分会保留，请缩小附件后重新请求。'
+                :code==='channel_resource_too_large'?'附件超过大小限制：接收最多 100 MiB，发送图片最多 10 MiB、文件最多 30 MiB。已确认送达的部分会保留，请缩小附件后重新请求。'
                 :'附件发送未全部确认；已确认送达的部分会保留。请先核对原会话和控制台发送记录，再处理剩余附件，避免重复发送。';
               this.queue(payload.event,card(notice),row.id+':delivery-notice',row.source_event,payload.protection);
             }

@@ -58,7 +58,7 @@ const settingsCards = {
     if (view.host) {
       const host = settingsCard('采集明细', 'h2'), known = view.host.known ?? {};
       const table = costTable(['占用', '大小']);
-      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'],
+      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'], ['channel_resources', '飞书附件存储 channel-resources'],
         ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存'],
         ['docker_volumes', 'Docker 卷（未被计入的部分）'], ['assistant_homes', '助手电脑 HOME（assistant-homes 卷）']])
         row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);

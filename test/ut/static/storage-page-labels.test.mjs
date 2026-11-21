@@ -47,4 +47,15 @@ test('a super administrator still sees the platform category bar, and the storag
   assert.equal(byTag(panel, 'nav')[0].getAttribute('aria-label'), '全局设置类别', 'the platform category bar keeps its name');
   // The same plain headers apply to both roles.
   assert.ok(byTag(panel, 'th').some(header => header.textContent === '文件块'));
+  // The super admin host breakdown table includes the dedicated channel-resources directory row.
+  const pageWithHost = loadConsole(scripts, (method, path) => {
+    if (method === 'GET' && path === '/api/storage') return [200, {
+      refreshed_at: '2026-11-15T08:00:00.000Z', alerts: [], projects: [],
+      host: { known: { control_database: 1024, control_trajectories: 2048, git_cache: 0, public_boards: 0, browser_evidence: 0, channel_resources: 4096 }, unmeasured: [] },
+    }];
+    throw new Error('Unexpected request: ' + method + ' ' + path);
+  });
+  pageWithHost.run("me = { role: 'super_admin', repositories: [], csrf_token: 'csrf' }; location.hash = '#/settings/storage';");
+  await pageWithHost.run('renderSettings(renderVersion)');
+  assert.match(textOf(pageWithHost.$('settings-panel')), /飞书附件存储 channel-resources/);
 });
