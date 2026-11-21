@@ -22,31 +22,34 @@ test('a long connection whose start resolves into a terminal failed state is reb
     };
   });
   t.after(() => sockets.close());
+  // Reconcile runs once a second (`src/server.ts:506`); a terminal failure schedules its rebuild one second later.
+  let now = 0;
+  const tick = () => { now += 1000; sockets.reconcile(now); };
   const state = () => h.store.get('SELECT connection_state FROM channel_connectors WHERE id=?', id).connection_state;
   const lastError = () => h.store.get('SELECT last_error FROM channel_connectors WHERE id=?', id).last_error;
 
   // Attempt 1: reconcile starts the client and records `connecting`; the SDK then resolves start() as `failed`.
-  sockets.reconcile();
+  tick();
   assert.equal(started, 1);
   assert.equal(created, 1);
   assert.equal(state(), 'connecting');
   assert.deepEqual(closed, []);
 
   // Tick 2 sees the terminal failed state: the dead client is closed and dropped, and the console keeps `failed`.
-  sockets.reconcile();
+  tick();
   assert.equal(state(), 'failed');
   assert.equal(lastError(), 'channel_connection_failed');
   assert.deepEqual(closed, [1], 'the failed client must be closed before it leaves the map');
   assert.equal(created, 1, 'no two clients for one connector inside a single tick');
 
-  // Tick 3 is when the connector is rebuilt, with a fresh client that starts again.
-  sockets.reconcile();
+  // Tick 3, one second after the failure, is when the connector is rebuilt with a fresh client that starts again.
+  tick();
   assert.equal(created, 2);
   assert.equal(started, 2);
   assert.equal(state(), 'connecting');
 
   // The second attempt also ends failed: same recovery, and the first dead client is not closed twice.
-  sockets.reconcile();
+  tick();
   assert.equal(state(), 'failed');
   assert.deepEqual(closed, [1, 2]);
 
