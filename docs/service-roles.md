@@ -91,6 +91,8 @@ Bot 里的角色分两个维度：
 
 升级时（#849）每条启用中的绑定所用的共享模型，一次性授权给它当时范围内的全部项目（审计 `model.sharing_migrated`），这些项目原本就由这个模型读取，所以已有的群不会因新规则停下。
 
+可复用的仓库问答、截图反馈与 Issue 提报文本，以及现有服务角色的启用步骤，见[仓库助手静态提示词包](assistants/repository-assistant-prompts/README.md)。该包需由管理员显式配置，不会自动修改内置角色。
+
 ## 接口
 
 见 [管理 API](api.md) 的 `/api/service-roles`。
