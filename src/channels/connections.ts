@@ -2,18 +2,24 @@ import { EventDispatcher, WSClient } from '@larksuiteoapi/node-sdk';
 import type { ChannelService } from './service.js';
 import type { Json } from '../core/security.js';
 type Connection = Pick<WSClient, 'start' | 'close' | 'getConnectionStatus'>;
+/** A terminal long connection retries at 1s, 2s, 4s … capped at five minutes: every attempt logs in to Feishu. */
+const maxRebuildDelayMs = 5 * 60 * 1000;
 
 /** The SDK authenticates the socket with this connector's app credentials. HTTP cannot call this ingress. */
 export class ChannelConnections {
   private readonly sockets = new Map<string, { revision: number; client: Connection; state?: string }>();
+  // Terminal failures are remembered per connector so a bad app secret does not rebuild (and re-authenticate) every tick.
+  private readonly rebuilds = new Map<string, { attempts: number; revision: number; nextAttempt: number }>();
   constructor(readonly service: ChannelService, private readonly create: (options: ConstructorParameters<typeof WSClient>[0]) => Connection = options => new WSClient(options)) {}
-  reconcile(): void {
+  reconcile(now = Date.now()): void {
     const store = this.service.store, rows = store.all("SELECT * FROM channel_connectors WHERE enabled=1 AND transport='websocket' AND application_type='enterprise'");
     // A socket the SDK already gave up on is rebuilt on a later tick, after one tick that keeps `failed` visible.
     const retry = new Set<string>();
     for (const [id, socket] of this.sockets) {
       if (!rows.some(r => r.id === id && r.revision === socket.revision)) {
         socket.client.close({ force: true }); this.sockets.delete(id);
+        // A disabled connector or a new credential revision starts over with a clean retry schedule.
+        this.rebuilds.delete(id);
         store.run("UPDATE channel_connectors SET connection_state='idle' WHERE id=?", id);
       } else {
         const state = socket.client.getConnectionStatus().state;
@@ -25,10 +31,15 @@ export class ChannelConnections {
           // the next tick builds a fresh client instead of rebuilding inside this one.
           socket.client.close({ force: true }); this.sockets.delete(id);
           store.run("UPDATE channel_connectors SET last_error='channel_connection_failed',connection_state='failed' WHERE id=?", id);
+          this.scheduleRebuild(id, socket.revision, now);
           retry.add(id); continue;
         }
-        if (state === 'connected' && socket.state !== state) {
-          for (const chat of store.all("SELECT id FROM channel_chats WHERE connector_id=? AND state='active'", id)) this.service.ledger.resync(chat.id);
+        if (state === 'connected') {
+          // A healthy socket (including one that recovered by itself) forgets earlier terminal attempts.
+          this.rebuilds.delete(id);
+          if (socket.state !== state) {
+            for (const chat of store.all("SELECT id FROM channel_chats WHERE connector_id=? AND state='active'", id)) this.service.ledger.resync(chat.id);
+          }
         }
         socket.state = state;
         store.run('UPDATE channel_connectors SET connection_state=? WHERE id=? AND connection_state<>?', state, id, state);
@@ -36,6 +47,9 @@ export class ChannelConnections {
     }
     for (const c of rows) {
       if (this.sockets.has(c.id) || retry.has(c.id)) continue;
+      const wait = this.rebuilds.get(c.id);
+      if (wait && wait.revision !== c.revision) this.rebuilds.delete(c.id);
+      else if (wait && now < wait.nextAttempt) continue;
       const ref = store.get('SELECT sealed FROM channel_credentials WHERE id=?', c.credential_ref);
       if (!ref) continue;
       const secret = store.secrets.open(ref.sealed, 'channel-credential:' + c.credential_ref);
@@ -58,9 +72,18 @@ export class ChannelConnections {
         // path above does.
         if (this.sockets.get(c.id)?.client !== client) return;
         client.close({ force: true }); this.sockets.delete(c.id);
+        // A rejected start is the same terminal outcome, so it shares the retry schedule (wall clock, since the
+        // rejection arrives after the reconcile tick that created the client).
+        this.scheduleRebuild(c.id, c.revision, Date.now());
         store.run("UPDATE channel_connectors SET last_error='channel_connection_failed',connection_state='failed' WHERE id=?", c.id);
       });
     }
   }
-  close(): void { for (const socket of this.sockets.values()) socket.client.close({ force: true }); this.sockets.clear(); }
+  /** Records one terminal failure: the next rebuild is 1s, 2s, 4s … away, capped at five minutes. */
+  private scheduleRebuild(id: string, revision: number, now: number): void {
+    const prior = this.rebuilds.get(id);
+    const attempts = (prior && prior.revision === revision ? prior.attempts : 0) + 1;
+    this.rebuilds.set(id, { attempts, revision, nextAttempt: now + Math.min(maxRebuildDelayMs, 1000 * 2 ** Math.min(attempts - 1, 20)) });
+  }
+  close(): void { for (const socket of this.sockets.values()) socket.client.close({ force: true }); this.sockets.clear(); this.rebuilds.clear(); }
 }
