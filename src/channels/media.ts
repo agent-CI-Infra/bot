@@ -1,4 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, constants, existsSync, fdatasyncSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import type { StoredMessage } from './types.js';
@@ -9,10 +11,104 @@ import { TaskError } from '../agent/common.js';
 // The turn's own assistant computer (#457): HOME paths (~/...) or temporary ones (/tmp/...).
 export interface MediaComputer { importFile(path: string, data: Buffer): Promise<Json>; exportFile(path: string, maxBytes: number): Promise<{ data: Buffer; name: string }> }
 
-export const inboundBytes = 20 * 1024 * 1024;
+export const inboundBytes = 100 * 1024 * 1024;
 export const artifactBytes = 30 * 1024 * 1024;
 export const safeFilename = (name: string) => name.replace(/[\x00-\x1f\x7f/\\<>:"|?*\u202a-\u202e\u2066-\u2069]/g, '_').replace(/^\.+/, '_').slice(0, 180).trim() || 'attachment';
 const hash = (data: Buffer) => createHash('sha256').update(data).digest('hex');
+const resourceIdPattern = /^[a-zA-Z0-9_-]{2,120}$/;
+const resourceKeyPattern = /^(?=[\w-]*[A-Za-z0-9])[\w.-]{1,512}$/;
+
+function writeAll(fd: number, data: Buffer): void {
+  for (let offset = 0; offset < data.length;) offset += writeSync(fd, data, offset, data.length - offset);
+}
+
+/** Sealed attachment file path under the control-plane data directory, sharded by the first two ID characters. */
+export function channelResourcePath(store: Store, id: string): string {
+  if (!resourceIdPattern.test(id)) return fail(400, 'channel_resource_invalid');
+  const root = resolve(store.channelResourcesDir);
+  const target = resolve(root, id.slice(0, 2), id + '.enc');
+  if (!target.startsWith(root + sep)) return fail(400, 'channel_resource_invalid');
+  return target;
+}
+
+function writeEncryptedResource(store: Store, id: string, data: Buffer): string {
+  const target = channelResourcePath(store, id);
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  const sealed = store.secrets.sealBytes(data, 'channel-resource-data:' + id);
+  const temporary = `${target}.${randomBytes(6).toString('hex')}.tmp`;
+  const fd = openSync(temporary, 'wx', 0o600);
+  try { writeAll(fd, sealed); fdatasyncSync(fd); }
+  catch (error) { closeSync(fd); rmSync(temporary, { force: true }); throw error; }
+  closeSync(fd);
+  renameSync(temporary, target);
+  return target;
+}
+
+function readEncryptedResource(store: Store, id: string): Buffer | null {
+  const target = channelResourcePath(store, id);
+  let fd: number;
+  try { fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    if (code === 'ELOOP') return fail(409, 'channel_resource_integrity');
+    throw error;
+  }
+  let sealed: Buffer;
+  try {
+    if (!fstatSync(fd).isFile()) return fail(409, 'channel_resource_integrity');
+    sealed = readFileSync(fd);
+  } finally { closeSync(fd); }
+  try { return store.secrets.openBytes(sealed, 'channel-resource-data:' + id); }
+  catch { return fail(409, 'channel_resource_integrity'); }
+}
+
+export function removeResourceFile(store: Store, id: string): void {
+  const target = channelResourcePath(store, id);
+  rmSync(target, { force: true });
+  try { rmdirSync(dirname(target)); } catch { /* Shard directory is still non-empty or already removed. */ }
+}
+
+export function removeResourceFiles(store: Store, ids: Iterable<string>): { removed: number; failed: number } {
+  let removed = 0, failed = 0;
+  for (const id of new Set(ids)) {
+    try { removeResourceFile(store, id); removed++; }
+    catch (error) { failed++; console.error('[channel-media] removing resource file failed for ' + id + ':', error); }
+  }
+  return { removed, failed };
+}
+
+/** Sweeps unreferenced encrypted files and stale temp files left by a crash; skips fresh files to avoid racing active writes. */
+export function sweepOrphanChannelResources(store: Store, now = Date.now(), graceMs = 3600_000): { count: number; bytes: number; failed: number } {
+  const result = { count: 0, bytes: 0, failed: 0 };
+  const root = resolve(store.channelResourcesDir);
+  if (!existsSync(root)) return result;
+  let shards;
+  try { shards = readdirSync(root, { withFileTypes: true }); }
+  catch (error) { result.failed++; console.error('[channel-media] orphan sweep failed reading root:', error); return result; }
+  const cutoff = now - graceMs;
+  for (const shard of shards) {
+    if (!shard.isDirectory() || !/^[a-zA-Z0-9_-]{2}$/.test(shard.name)) continue;
+    const shardDir = join(root, shard.name);
+    let entries;
+    try { entries = readdirSync(shardDir, { withFileTypes: true }); }
+    catch (error) { result.failed++; console.error('[channel-media] orphan sweep failed reading shard ' + shard.name + ':', error); continue; }
+    for (const entry of entries) {
+      const path = join(shardDir, entry.name);
+      const encMatch = /^([a-zA-Z0-9_-]{2,120})\.enc$/.exec(entry.name);
+      const isTmp = /^[a-zA-Z0-9_-]{2,120}\.enc\.[a-f0-9]{12}\.tmp$/.test(entry.name);
+      if (!encMatch && !isTmp) continue;
+      let st;
+      try { st = lstatSync(path); } catch (error) { result.failed++; console.error('[channel-media] orphan sweep stat failed:', error); continue; }
+      if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+      if (encMatch && store.get('SELECT 1 FROM channel_resources WHERE id=?', encMatch[1]!)) continue;
+      try { rmSync(path, { force: true }); result.count++; result.bytes += st.size; }
+      catch (error) { result.failed++; console.error('[channel-media] orphan sweep remove failed:', error); }
+    }
+    try { rmdirSync(shardDir); } catch { /* Non-empty shard stays. */ }
+  }
+  return result;
+}
 
 export function mediaStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS channel_resources(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,message_id TEXT NOT NULL,
@@ -28,33 +124,121 @@ export function mediaStorage(store: Store): void {
 /** Extract only resource keys carried by the authenticated message, never model-provided keys or URLs. */
 export function incomingFiles(type: string, raw: string): { key: string; type: 'image' | 'file'; name: string }[] {
   let data: any; try { data = JSON.parse(raw); } catch { return []; }
+  if (!data || typeof data !== 'object') return [];
   const files: { key: string; type: 'image' | 'file'; name: string }[] = [];
-  const add = (key: unknown, type: 'image' | 'file', name: string) => {
-    if (typeof key === 'string' && /^[\w.-]{1,512}$/.test(key) && !files.some(f => f.key === key && f.type === type)) files.push({ key, type, name: safeFilename(name) });
+  const add = (key: unknown, kind: 'image' | 'file', name: string) => {
+    if (files.length >= 100) return;
+    if (typeof key === 'string' && resourceKeyPattern.test(key) && !files.some(f => f.key === key && f.type === kind)) files.push({ key, type: kind, name: safeFilename(name) });
+  };
+  const addMarkdownImages = (value: unknown, prefix = 'image-') => {
+    if (typeof value !== 'string' || !value.includes('img_')) return;
+    try {
+      marked.walkTokens(marked.lexer(value), token => {
+        if (token.type === 'image' && /^img_[\w.-]+$/.test(token.href)) add(token.href, 'image', token.text || prefix + (files.length + 1));
+      });
+    } catch { /* Ignore malformed markdown when scanning for embedded image keys. */ }
   };
   if (type === 'image') add(data?.image_key, 'image', 'image');
-  if (['file', 'audio', 'media'].includes(type)) add(data?.file_key, 'file', String(data?.file_name ?? (type === 'audio' ? 'audio.opus' : type === 'media' ? 'video.mp4' : 'attachment')));
+  if (['file', 'audio'].includes(type)) add(data?.file_key, 'file', String(data?.file_name ?? (type === 'audio' ? 'audio.opus' : 'attachment')));
+  if (type === 'media') {
+    add(data?.file_key, 'file', String(data?.file_name ?? 'video.mp4'));
+    if (data?.image_key) add(data.image_key, 'image', 'video-cover');
+  }
   if (type === 'post') {
-    const post = Array.isArray(data?.content) ? data : Object.values(data ?? {}).find((p: any) => Array.isArray(p?.content)) as any;
+    const post = Array.isArray(data?.content) ? data
+      : Array.isArray(data?.zh_cn?.content) ? data.zh_cn
+      : Object.values(data ?? {}).find((p: any) => Array.isArray(p?.content)) as any;
     for (const line of post?.content ?? []) for (const el of Array.isArray(line) ? line : []) {
       if (el?.tag === 'img') add(el.image_key, 'image', 'image-' + (files.length + 1));
-      if(el?.tag==='md'&&typeof el.text==='string')marked.walkTokens(marked.lexer(el.text),token=>{
-        if(token.type==='image'&&/^img_[\w.-]+$/.test(token.href))add(token.href,'image','image-'+(files.length+1));
-      });
+      if (el?.tag === 'media') {
+        add(el.file_key, 'file', String(el.file_name || ('video-' + (files.length + 1) + '.mp4')));
+        if (el.image_key) add(el.image_key, 'image', 'media-cover-' + (files.length + 1));
+      }
+      if (el?.tag === 'md' && typeof el.text === 'string') addMarkdownImages(el.text);
     }
+  }
+  if (type === 'interactive') {
+    const walkCard = (node: any, depth: number): void => {
+      if (!node || typeof node !== 'object' || depth > 20 || files.length >= 100) return;
+      if (Array.isArray(node)) { for (const item of node) walkCard(item, depth + 1); return; }
+      const tag = typeof node.tag === 'string' ? node.tag : '';
+      if (tag === 'img') {
+        const caption = typeof node.alt?.content === 'string' ? node.alt.content : typeof node.title?.content === 'string' ? node.title.content : '';
+        add(node.img_key ?? node.image_key, 'image', caption || ('card-image-' + (files.length + 1)));
+      } else if (tag === 'img_combination' && Array.isArray(node.img_list)) {
+        for (const item of node.img_list) add(item?.img_key ?? item?.image_key, 'image', 'card-image-' + (files.length + 1));
+      } else if (tag === 'media') {
+        add(node.file_key, 'file', String(node.file_name || ('card-video-' + (files.length + 1) + '.mp4')));
+        if (node.image_key) add(node.image_key, 'image', 'card-media-cover-' + (files.length + 1));
+      } else if (tag === 'markdown' || tag === 'lark_md' || tag === 'md') {
+        addMarkdownImages(node.content ?? node.text, 'card-image-');
+      } else if (tag === 'div') {
+        if (node.text?.tag === 'lark_md' || node.text?.tag === 'markdown') addMarkdownImages(node.text.content, 'card-image-');
+        if (Array.isArray(node.fields)) for (const field of node.fields) if (field?.text?.tag === 'lark_md' || field?.text?.tag === 'markdown') addMarkdownImages(field.text.content, 'card-image-');
+        if (node.extra) walkCard(node.extra, depth + 1);
+      } else if (tag === 'column_set' && Array.isArray(node.columns)) {
+        for (const column of node.columns) walkCard(column?.elements, depth + 1);
+      } else if (tag === 'table' && Array.isArray(node.rows)) {
+        for (const row of node.rows) if (row && typeof row === 'object') for (const cell of Object.values(row)) {
+          if (typeof cell === 'string') addMarkdownImages(cell, 'card-image-');
+          else walkCard(cell, depth + 1);
+        }
+      }
+      if (tag === 'collapsible_panel' && (node.header?.title?.tag === 'markdown' || node.header?.title?.tag === 'lark_md')) {
+        addMarkdownImages(node.header.title.content, 'card-image-');
+      }
+      if (node.card && typeof node.card === 'object') walkCard(node.card, depth + 1);
+      if (node.body && typeof node.body === 'object') walkCard(node.body, depth + 1);
+      if (Array.isArray(node.elements)) walkCard(node.elements, depth + 1);
+      if (node.i18n_elements && typeof node.i18n_elements === 'object') {
+        const chosen = Array.isArray(node.i18n_elements.zh_cn) ? node.i18n_elements.zh_cn : Object.values(node.i18n_elements).find(Array.isArray);
+        if (chosen) walkCard(chosen, depth + 1);
+      }
+      if (Array.isArray(node.actions)) walkCard(node.actions, depth + 1);
+    };
+    let root = data?.card && typeof data.card === 'object' && !Array.isArray(data.card) ? data.card : data;
+    if (!root.header && !root.elements && !root.body && !root.title && !root.i18n_elements && !root.i18n_header) {
+      const localized = root.zh_cn && typeof root.zh_cn === 'object' ? root.zh_cn : Object.values(root).find((v: any) => v && typeof v === 'object' && (v.elements || v.body || v.header || v.title));
+      if (localized) root = localized;
+    }
+    walkCard(root, 0);
+  }
+  const knownNoDownload = new Set(['text', 'post', 'image', 'file', 'audio', 'media', 'interactive', 'sticker', 'share_chat', 'share_user', 'location', 'system', 'merge_forward', 'hongbao', 'calendar', 'general_calendar', 'share_calendar_event', 'video_chat', 'todo', 'vote']);
+  if (!knownNoDownload.has(type)) {
+    const scanUnknown = (node: any, depth: number): void => {
+      if (!node || typeof node !== 'object' || depth > 10 || files.length >= 50) return;
+      if (Array.isArray(node)) { for (const item of node) scanUnknown(item, depth + 1); return; }
+      if (typeof node.image_key === 'string') add(node.image_key, 'image', 'image-' + (files.length + 1));
+      if (typeof node.img_key === 'string') add(node.img_key, 'image', 'image-' + (files.length + 1));
+      if (typeof node.file_key === 'string') add(node.file_key, 'file', String(node.file_name || ('attachment-' + (files.length + 1))));
+      for (const value of Object.values(node)) if (value && typeof value === 'object') scanUnknown(value, depth + 1);
+    };
+    scanUnknown(data, 0);
   }
   return files;
 }
 
 export function mergeResources(store: Store, chat: Row, message: StoredMessage, hidden: boolean): void {
-  if (message.deleted || hidden) { store.run('DELETE FROM channel_resources WHERE chat_id=? AND message_id=?', chat.id, message.message_id); return; }
+  if (message.deleted || hidden) {
+    const removed = store.all('SELECT id FROM channel_resources WHERE chat_id=? AND message_id=?', chat.id, message.message_id).map(r => String(r.id));
+    store.run('DELETE FROM channel_resources WHERE chat_id=? AND message_id=?', chat.id, message.message_id);
+    if (removed.length) store.afterCommit(() => { removeResourceFiles(store, removed); });
+    return;
+  }
   const refs = incomingFiles(message.message_type, message.raw_content), ids = new Set<string>();
   for (const ref of refs) {
     const id = digest(JSON.stringify([chat.id, message.message_id, ref.type, ref.key])).slice(0, 48); ids.add(id);
     if (!store.get('SELECT 1 FROM channel_resources WHERE id=?', id)) store.run('INSERT INTO channel_resources(id,chat_id,message_id,kind,payload) VALUES(?,?,?,?,?)', id, chat.id, message.message_id, 'incoming',
       store.secrets.seal({ ...ref, size: null, mime: '', state: 'pending' }, 'channel-resource:' + id));
   }
-  for (const row of store.all("SELECT id FROM channel_resources WHERE chat_id=? AND message_id=? AND kind='incoming'", chat.id, message.message_id)) if (!ids.has(row.id)) store.run('DELETE FROM channel_resources WHERE id=?', row.id);
+  const stale: string[] = [];
+  for (const row of store.all("SELECT id FROM channel_resources WHERE chat_id=? AND message_id=? AND kind='incoming'", chat.id, message.message_id)) {
+    if (!ids.has(row.id)) {
+      store.run('DELETE FROM channel_resources WHERE id=?', row.id);
+      stale.push(String(row.id));
+    }
+  }
+  if (stale.length) store.afterCommit(() => { removeResourceFiles(store, stale); });
 }
 
 export function resourceMetadata(store: Store, row: Row): Json {
@@ -63,33 +247,49 @@ export function resourceMetadata(store: Store, row: Row): Json {
     kind: row.kind, ...(p.error ? { error: p.error } : {}) };
 }
 
-/** Bytes stay encrypted beside their source in the ledger. Every use must pass the same live conversation/project guard. */
+/** Bytes stay sealed in dedicated files under channel-resources/ (falling back to legacy SQLite rows). Every use must pass the live guard. */
 export class ChannelMedia {
   constructor(readonly store: Store, readonly ledger: ChannelLedger, readonly adapter: (chat: Row, guard: () => void) => FeishuAdapter) {}
   async bytes(row: Row, guard: () => void): Promise<{ data: Buffer; mime: string; name: string; image: boolean }> {
     guard(); let payload = this.store.secrets.open(row.payload, 'channel-resource:' + row.id);
-    let cached=this.store.get('SELECT payload FROM channel_resource_data WHERE resource_id=?',row.id);
-    if (!cached) {
+    let data = readEncryptedResource(this.store, row.id);
+    if (!data) {
+      const legacy = this.store.get('SELECT payload FROM channel_resource_data WHERE resource_id=?', row.id);
+      if (legacy) {
+        try { data = Buffer.from(String(this.store.secrets.open(legacy.payload, 'channel-resource-data:' + row.id).data), 'base64'); }
+        catch { return fail(409, 'channel_resource_integrity'); }
+      }
+    }
+    if (!data) {
       if (row.kind !== 'incoming') return fail(404, 'channel_resource_unavailable');
+      let wroteFile = false;
       try {
         const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', row.chat_id)!;
         const file = await this.adapter(chat, guard).download(row.message_id, String(payload.key), payload.type as 'image' | 'file', inboundBytes);
         guard();
         const mime = detectedMime(file.data, file.mime, String(payload.name));
         payload = { ...payload, mime, size: file.data.length, sha256: hash(file.data), state: 'ready', error: null };
-        this.store.transaction(()=>{
-          this.store.run('INSERT OR REPLACE INTO channel_resource_data VALUES(?,?)',row.id,this.store.secrets.seal({data:file.data.toString('base64')},'channel-resource-data:'+row.id));
-          this.store.run('UPDATE channel_resources SET payload=? WHERE id=?', this.store.secrets.seal(payload, 'channel-resource:' + row.id), row.id);
+        writeEncryptedResource(this.store, row.id, file.data);
+        wroteFile = true;
+        const updated = this.store.transaction(() => {
+          const result = this.store.run('UPDATE channel_resources SET payload=? WHERE id=?', this.store.secrets.seal(payload, 'channel-resource:' + row.id), row.id);
+          if (result.changes) this.store.run('DELETE FROM channel_resource_data WHERE resource_id=?', row.id);
+          return result.changes;
         });
-        cached=this.store.get('SELECT payload FROM channel_resource_data WHERE resource_id=?',row.id);
+        if (!updated) {
+          removeResourceFile(this.store, row.id);
+          return fail(404, 'channel_resource_unavailable');
+        }
+        data = file.data;
       } catch (error) {
+        if (wroteFile) try { removeResourceFile(this.store, row.id); } catch { /* Best-effort cleanup of uncommitted file. */ }
         // A recall/cleanup racing the download must not recreate the source or its bytes.
         const current = this.store.get('SELECT * FROM channel_resources WHERE id=?', row.id);
         if (current) this.store.run('UPDATE channel_resources SET payload=? WHERE id=?', this.store.secrets.seal({ ...payload, state: 'failed', error: error instanceof HttpError ? error.code : 'channel_resource_unavailable' }, 'channel-resource:' + row.id), row.id);
         throw error;
       }
     }
-    guard(); const data = Buffer.from(String(this.store.secrets.open(cached!.payload,'channel-resource-data:'+row.id).data), 'base64');
+    guard();
     if (hash(data) !== payload.sha256) return fail(409, 'channel_resource_integrity');
     const mime = String(payload.mime), name = String(payload.name);
     return { data, mime, name, image: /^image\/(png|jpeg|gif|webp|bmp|tiff|x-icon)$/.test(mime) && data.length <= 10 * 1024 * 1024 };
@@ -148,11 +348,16 @@ export class MediaTurn {
     if(this.attachments.length>=20)fail(400,'channel_attachment_limit');
     if (!(this.media.ledger.query(this.chat, { message_id: this.source, limit: 1 }, this.scopes, this.fence || undefined).messages as Json[]).some(m => !m.deleted && !m.sensitive)) fail(403, 'channel_resource_source_required');
     const id = randomId(), mime = detectedMime(data, 'text/plain', name);
-    this.media.store.transaction(()=>{
-      this.media.store.run('INSERT INTO channel_resources VALUES(?,?,?,?,?,?,?)', id, this.chat, this.source, 'artifact', project, this.fence,
-        this.media.store.secrets.seal({ name: safeFilename(name), mime, size: data.length, state: 'ready', sha256: hash(data) }, 'channel-resource:' + id));
-      this.media.store.run('INSERT INTO channel_resource_data VALUES(?,?)',id,this.media.store.secrets.seal({data:data.toString('base64')},'channel-resource-data:'+id));
-    });
+    writeEncryptedResource(this.media.store, id, data);
+    try {
+      this.media.store.transaction(() => {
+        this.media.store.run('INSERT INTO channel_resources VALUES(?,?,?,?,?,?,?)', id, this.chat, this.source, 'artifact', project, this.fence,
+          this.media.store.secrets.seal({ name: safeFilename(name), mime, size: data.length, state: 'ready', sha256: hash(data) }, 'channel-resource:' + id));
+      });
+    } catch (error) {
+      try { removeResourceFile(this.media.store, id); } catch { /* Best-effort cleanup of uncommitted file. */ }
+      throw error;
+    }
     return this.select(id);
   }
   /** Keep image bytes out of tool receipts and console events; the gateway seals model snapshots with the conversation. */

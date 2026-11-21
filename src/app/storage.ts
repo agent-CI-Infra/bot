@@ -67,7 +67,7 @@ export class StorageReport {
       await this.refresh();
     });
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
-    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence') })
+    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources') })
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
   }
 
@@ -251,6 +251,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     control_trajectories: sum(p => bytesOf(p.files.bytes) + bytesOf(p.open.bytes) + bytesOf(p.blobs.bytes)),
     git_cache: measured(control?.directories?.git_cache?.bytes), public_boards: measured(control?.directories?.public_boards?.bytes),
     browser_evidence: measured(control?.directories?.browser_evidence?.bytes),
+    channel_resources: measured(control?.directories?.channel_resources?.bytes),
     manager_database: database(manager?.database),
     manager_trajectories: manager ? sum(p => bytesOf(p.manager?.files?.bytes) + bytesOf(p.manager?.open?.bytes)) : null,
     computers: manager?.computers ? sum(p => p.computer?.total_bytes) : null,

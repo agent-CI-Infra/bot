@@ -2,7 +2,7 @@ import { configuredRedactor } from '../core/redaction.js';
 import type { Row, Store } from '../storage/database.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
 import type { ChannelEvent, StoredMessage } from './types.js';
-import { mediaStorage, mergeResources, resourceMetadata } from './media.js';
+import { mediaStorage, mergeResources, removeResourceFiles, resourceMetadata } from './media.js';
 
 export function ledgerStorage(store: Store): void {
   store.db.exec(`
@@ -186,12 +186,17 @@ export class ChannelLedger {
   }
   cleanup(id: string, before: number, revision: number): void {
     if (!Number.isSafeInteger(before) || before < 0 || before > Date.now()) fail(400, 'channel_retention_invalid');
-    // Trajectory files are removed only after the transaction commits: a later failure rolls the rows back, and the files
-    // of a conversation that is still kept must not disappear with it.
+    // Trajectory and encrypted resource files are removed only after the transaction commits: a later failure rolls the rows
+    // back, and files of kept messages/conversations must not disappear with it.
     const removedConversations = new Set<string>();
+    let removedResources: string[] = [];
     this.store.transaction(() => {
       const chat = this.store.get('SELECT * FROM channel_chats WHERE id=? AND revision=?', id, revision);
       if (!chat) return fail(409, 'channel_revision_conflict');
+      removedResources = this.store.all(
+        'SELECT r.id FROM channel_resources r JOIN channel_messages m ON m.chat_id=r.chat_id AND m.message_id=r.message_id WHERE m.chat_id=? AND m.created_at<?',
+        id, before
+      ).map(row => String(row.id));
       this.store.run('DELETE FROM channel_messages WHERE chat_id=? AND created_at<?', id, before);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
       this.store.run('UPDATE channel_chats SET retained_after=max(retained_after,?),revision=revision+1,context_revision=context_revision+1 WHERE id=?', before, id);
@@ -244,6 +249,10 @@ export class ChannelLedger {
         console.error('[ledger] history cleanup failed for ' + conversation + ':', error);
         this.store.audit('system', 'channel.history_cleanup_failed', conversation, null);
       }
+    }
+    if (removedResources.length) {
+      const removed = removeResourceFiles(this.store, removedResources);
+      if (removed.failed) this.store.audit('system', 'channel.history_cleanup_failed', id, null);
     }
   }
   private view(row:Row):Json {
