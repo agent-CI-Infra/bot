@@ -70,12 +70,13 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
   usageRequest(h.store,'unpriced-foreign',model.id,{priced:false,usage:{prompt_tokens:2000,completion_tokens:200,prompt_cache_hit_tokens:1600}});
   usageRequest(h.store,'unpriced-own',model.id,{date:'2026-10-23',priced:false,usage:null});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/metrics-evidence',{recursive:true});
-  const filter=async(from,to)=>{
-    await page.getByLabel('开始日期（本地）',{exact:true}).fill(from);await page.getByLabel('结束日期（本地）',{exact:true}).fill(to);
-    await page.getByRole('button',{name:'查看统计',exact:true}).click();
+  const filter=async(targetPage,from,to)=>{
+    await targetPage.getByLabel('开始日期（本地）',{exact:true}).fill(from);
+    await targetPage.getByLabel('结束日期（本地）',{exact:true}).fill(to);
+    await targetPage.getByRole('button',{name:'查看统计',exact:true}).click();
   };
   try{
-    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('link',{name:'用量与成本',exact:true}).click();await filter('2026-10-22','2026-10-23');
+    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('link',{name:'用量与成本',exact:true}).click();await filter(page,'2026-10-22','2026-10-23');
     await expect(page.getByRole('heading',{name:'每日用量 · 按项目堆叠',exact:true})).toBeVisible();
     const chart=page.locator('.cost-chart-section');await expect(chart.locator('svg')).toHaveAttribute('data-metric','tokens');await expect(chart.locator('rect')).toHaveCount(2);
     // The axis unit is 用量 too, so no literal token shows unless the reader opens 统计说明.
@@ -85,14 +86,15 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     await expect(chart).toContainText('缓存命中已包含在输入中，不重复相加');await expect(page.locator('.cost-summary')).toContainText('未定价');
     await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-desktop.png'});
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-mobile.png'});
-    await switchConsoleProject(page, '101');await filter('2026-10-22','2026-10-23');
+    await switchConsoleProject(page, '101');await filter(page,'2026-10-22','2026-10-23');
     await expect(chart.locator('rect[data-project="202"]')).toHaveCount(0);await expect(chart.locator('rect')).toHaveCount(1);
-    await filter('2026-10-23','2026-10-23');await expect(chart).toContainText('没有完整的用量记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);
-    await filter('2026-10-24','2026-10-24');await expect(chart).toContainText('没有模型请求记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);
+    await filter(page,'2026-10-23','2026-10-23');await expect(chart).toContainText('没有完整的用量记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);
+    await filter(page,'2026-10-24','2026-10-24');await expect(chart).toContainText('没有模型请求记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'token-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
       await login(member,h.admin+'/#/costs','token-member',memberPassword);
+      await filter(member,'2026-10-22','2026-10-23');
       await expect(member.locator('.cost-chart-section svg')).toHaveAttribute('data-metric','tokens');await expect(member.locator('rect[data-project="202"]')).toHaveCount(0);await expect(member.locator('.cost-legend')).not.toContainText('project-202');
     }finally{await context.close();}
     expect(errors).toEqual([]);
