@@ -12,13 +12,19 @@ export const groupTurnMessageInstructions = ' Messages that arrive in this group
   + ' Take in what continues the current request (an addition, correction or cancellation, which may change your next tools), answer what is clearly asked of you, and leave other conversation as background: do not answer it, and do not mention it in your reply, not even to say that you are not answering it.'
   + ' is_direct_mention is the only verified mention of you. group_setting_invites_reply tells whether, in this group\'s working mode, that message would have started a reply on its own: a hint, not an obligation.'
   + ' When one answer covers several people, make clear whom each part is for. You never need to wait for further messages.' + recovered;
-// Whether a group message asks for something, in the working mode that answers questions (#534). A question mark anywhere in
-// the message counts, not only at its end: "这个怎么弄？谢谢" is the same question. People also ask without one ("这个怎么办",
-// "报错了，帮我看下"), so a narrow set of interrogatives and requests for help counts too. Statements, acknowledgements and
-// reports of a problem ("今天天气不错", "收到", "好的", "报错了") stay out: this mode answers questions, not every message.
+// Whether a group message asks for something, in the working mode that answers questions (#534). A question mark anywhere
+// outside a link or code counts, not only at its end: "这个怎么弄？谢谢" is the same question. People also ask without one
+// ("这个怎么办", "报错了，帮我看下"), so a narrow set of interrogatives and requests for help counts too. Statements,
+// acknowledgements, problem reports and links ("今天天气不错", "收到", "好的", "报错了", "我还以为他走了呢",
+// "文档在 https://example.com/?tab=readme 里") stay out: this mode answers questions, not every message.
+const plain = (text: string): string => text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
+  .replace(/(?:https?:\/\/|www\.)[^\s<>"'`，。；！？、]+/gi, ' ');
 const QUESTION = /[?？]/;
-const ASKS = /(怎么|如何|为什么|为何|为啥|咋|哪|是否|有没有|能不能|可不可以|可以吗|行吗|对吗|是不是|吗|呢|求助|请教|请问|帮忙|帮我|帮看|看一下|看下|查一下|确认一下|弄不了|跑不通|不生效|没反应)/;
-export const asksForHelp = (content: string): boolean => { const text = content.trim(); return QUESTION.test(text) || ASKS.test(text); };
+// "哪" only as a question word (哪里/哪个/哪些…), never the bare character in "哪怕"; "吗" only as the sentence particle, so
+// "吗啡" is a statement. Symptom words alone ("报错了") are not requests either.
+const ASKS = /(怎么|如何|为什么|为何|为啥|咋|哪里|哪儿|哪个|哪些|哪种|是否|有没有|能不能|可不可以|可以吗|行吗|对吗|是不是|求助|请教|请问|帮忙|帮我|帮看|看一下|看下|查一下|确认一下)/;
+const PARTICLE = /吗[。！!…]*$/;
+export const asksForHelp = (content: string): boolean => { const text = plain(content.trim()); return QUESTION.test(text) || ASKS.test(text) || PARTICLE.test(text); };
 // The group's participation setting, stated to the model so it knows when it is expected to speak (its working mode).
 const workingModes: Record<string, string> = {
   mentions: ' Working mode of this group: you answer only when someone @-mentions you. Messages without an @ are people talking among themselves unless one clearly continues the request you are working on (for example the requester adding to, correcting or cancelling it). You still see them so you can follow the conversation, but otherwise do not answer them, and do not mention them in your reply, not even to say that you are leaving them alone.',
