@@ -41,8 +41,15 @@ function modelConnectionFacts(model) {
   box.append(badge(model.repository_id === null ? '部署共享' : '项目专属', 'info'));
   if (price) box.append(element('span', `${price.currency} / 百万 token · 输入 ${price.input_per_million} · 输出 ${price.output_per_million} · 缓存 ${price.cache_per_million}`, 'model-price'));
   else box.append(element('span', '未定价 · 不按 0 估算', 'model-price'));
-  const capabilities=model.capabilities, match=capabilities?.catalog;
-  if(capabilities) box.append(element('span',`上下文 ${capabilities.context_window} · 最大输出 ${capabilities.max_output_tokens} · ${capabilities.reasoning?'推理模型':'非推理模型'}`));
+  const capabilities=model.capabilities, match=capabilities?.catalog, manualCaps=model.capabilities_override||{};
+  if(capabilities) {
+    const imageText = typeof manualCaps.image_input === 'boolean'
+      ? (capabilities.image_input ? '支持图像输入' : '不支持图像输入')
+      : match?.entry
+        ? (capabilities.image_input ? '支持图像输入' : '不支持图像输入')
+        : (capabilities.image_input ? '图像输入（默认允许）' : '不支持图像输入');
+    box.append(element('span',`上下文 ${capabilities.context_window} · 最大输出 ${capabilities.max_output_tokens} · ${capabilities.reasoning?'推理模型':'非推理模型'} · ${imageText}`));
+  }
   if(match) box.append(element('span',`${match.entry?.ref||({ambiguous:'目录匹配不唯一',disabled:'已取消目录匹配',unavailable:'目录不可用',missing:'指定目录条目已不存在'}[match.state]||'未匹配目录')} · ${match.fetched_at?timeText(match.fetched_at):'无快照'}${model.pricing_source==='catalog'?' · 目录 USD 参考价':model.pricing_source==='mixed'?' · 手填与目录计价':''}`));
   if (policy?.model_id === model.id) box.append(badge('项目默认', 'success'));
   const used = model.used_by || [];

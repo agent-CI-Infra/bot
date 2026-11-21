@@ -6,7 +6,7 @@ export type ModelAuthHeader = 'bearer' | 'x-api-key';
 export const modelInterfaceTypes: readonly ModelInterfaceType[] = ['openai-chat-completions', 'openai-responses', 'anthropic-messages'];
 export const modelAuthHeaders: readonly ModelAuthHeader[] = ['bearer', 'x-api-key'];
 
-export interface Capabilities { context_window: number; max_output_tokens: number; reasoning: boolean }
+export interface Capabilities { context_window: number; max_output_tokens: number; reasoning: boolean; image_input: boolean }
 export interface CatalogEntry {
   ref: string; provider: string; provider_name: string; model: string; name: string; api: string | null; doc: string | null;
   canonical: string | null; capabilities: Capabilities; attachment: boolean; modalities: { input: string[]; output: string[] };
@@ -14,7 +14,7 @@ export interface CatalogEntry {
   interface_type?: ModelInterfaceType; auth_header?: ModelAuthHeader;
 }
 export interface CatalogStatus {revision:number;fetched_at:string|null;last_attempt_at:string|null;last_error:string|null;rejected:number;skipped:number;source:string;entries:number}
-const defaults: Capabilities = { context_window: 128000, max_output_tokens: 8192, reasoning: false };
+const defaults: Capabilities = { context_window: 128000, max_output_tokens: 8192, reasoning: false, image_input: true };
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 const positive = (v: unknown, max: number) => Number.isSafeInteger(v) && Number(v) > 0 && Number(v) <= max;
 const id = (v: unknown, max = 512): v is string => typeof v === 'string' && !!v && v.length <= max && !/[\s\x00-\x1f]/.test(v);
@@ -43,7 +43,7 @@ export function parseCatalog(value: unknown) {
       }
       entries.push({ ref: provider + '/' + key, provider, provider_name: typeof p.name === 'string' ? p.name.slice(0,200) : provider,
         model: key, name: m.name, api: address(p.api), doc: address(p.doc), canonical: id(m.canonical_model_id) ? m.canonical_model_id : null,
-        capabilities: { context_window:m.limit.context, max_output_tokens:m.limit.output, reasoning:m.reasoning }, attachment:m.attachment,
+        capabilities: { context_window:m.limit.context, max_output_tokens:m.limit.output, reasoning:m.reasoning, image_input:m.modalities.input.includes('image') }, attachment:m.attachment,
         modalities:{input:[...m.modalities.input],output:[...m.modalities.output]}, cost,
         ...parseEntryProtocol(provider, p, m) });
     }
@@ -155,10 +155,23 @@ export class ModelCatalog {
     return {...base,state:entry?'matched' as const:candidates.length?'ambiguous' as const:'unmatched' as const,entry,...(candidates.length>1?{candidates:candidates.slice(0,20).map(e=>e.ref)}:{})};
   }
 }
+export function entryCapabilities(entry: CatalogEntry): Capabilities {
+  return {
+    context_window: entry.capabilities.context_window,
+    max_output_tokens: entry.capabilities.max_output_tokens,
+    reasoning: entry.capabilities.reasoning,
+    image_input: typeof entry.capabilities.image_input === 'boolean'
+      ? entry.capabilities.image_input
+      : Array.isArray(entry.modalities?.input)
+        ? entry.modalities.input.includes('image')
+        : defaults.image_input,
+  };
+}
 export function modelCapabilities(store:Store,model:{id:string;api_url:string;model_name:string}):Capabilities & {source:string;catalog:ReturnType<ModelCatalog['match']>} {
   const catalog=modelCatalog(store),match=catalog.match(model),saved=store.get('SELECT capabilities FROM model_catalog_overrides WHERE model_id=?',model.id);
   const manual=saved?JSON.parse(saved.capabilities):{};
-  return { ...defaults,...match.entry?.capabilities,...manual,source:Object.keys(manual).length?'manual':match.entry?'catalog':'default',catalog:match };
+  const fromCatalog=match.entry?entryCapabilities(match.entry):undefined;
+  return { ...defaults,...fromCatalog,...manual,source:Object.keys(manual).length?'manual':match.entry?'catalog':'default',catalog:match };
 }
 export function catalogPricing(store:Store,model:{id?:string;api_url:string;model_name:string}) {
   const entry=modelCatalog(store).match(model).entry;if(!entry?.cost)return null;
@@ -197,8 +210,8 @@ export function saveModelMetadata(store:Store,modelId:string,input:Json) {
     if(!['auto','manual','disabled'].includes(String(value.mode)))fail(400,'invalid_model_catalog');
     mode=String(value.mode);ref=mode==='manual'?value.ref:null;
     if(mode==='manual'&&(typeof ref!=='string'||!catalog.snapshot().some(e=>e.ref===ref)))fail(400,'model_catalog_entry_not_found');}
-  if(input.capabilities!==undefined){const value=input.capabilities;if(!object(value))return fail(400,'invalid_model_capabilities');fields(value,['context_window','max_output_tokens','reasoning']);
-    if(value.context_window!==undefined&&!positive(value.context_window,32000000)||value.max_output_tokens!==undefined&&!positive(value.max_output_tokens,16000000)||value.reasoning!==undefined&&typeof value.reasoning!=='boolean')fail(400,'invalid_model_capabilities');
+  if(input.capabilities!==undefined){const value=input.capabilities;if(!object(value))return fail(400,'invalid_model_capabilities');fields(value,['context_window','max_output_tokens','reasoning','image_input']);
+    if(value.context_window!==undefined&&!positive(value.context_window,32000000)||value.max_output_tokens!==undefined&&!positive(value.max_output_tokens,16000000)||value.reasoning!==undefined&&typeof value.reasoning!=='boolean'||value.image_input!==undefined&&typeof value.image_input!=='boolean')fail(400,'invalid_model_capabilities');
     capabilities={...value};}
   if(input.interface_type!==undefined){
     if(input.interface_type===null||input.interface_type==='auto')interfaceType=null;

@@ -21,7 +21,7 @@ Bot 里的角色分两个维度：
 
 ## 助手电脑
 
-群聊助手和管理助手的 `read_file`、`write_file`、`delete_file`、`run_command`（以及附件的 `import_message_resource`、`attach_workspace_file`）使用按对话归属分配的助手电脑（#457）：群按群（飞书连接 + 群），私信按人（会话所属组织 + 本人），同一个人的飞书私信和控制台管理助手对话（同一范围）共用一台电脑和一个 HOME。归属、授权围栏和 HOME 代次都由控制面根据已认证的会话决定，模型只给路径，不能指定电脑、卷或宿主路径。部署没有挂载 HOME 卷（`assistant-homes`，控制面的 `BOT_ASSISTANT_HOMES`）或没有 manager 时，不提供这些工具。
+群聊助手和管理助手的 `read_file`、`write_file`、`delete_file`、`run_command`（以及附件的 `import_message_resource`、`view_workspace_image`、`attach_workspace_file`）使用按对话归属分配的助手电脑（#457）：群按群（飞书连接 + 群），私信按人（会话所属组织 + 本人），同一个人的飞书私信和控制台管理助手对话（同一范围）共用一台电脑和一个 HOME。归属、授权围栏和 HOME 代次都由控制面根据已认证的会话决定，模型只给路径，不能指定电脑、卷或宿主路径。部署没有挂载 HOME 卷（`assistant-homes`，控制面的 `BOT_ASSISTANT_HOMES`）或没有 manager 时，不提供这些工具。镜像预装 `python3-pil`（Pillow）与 `imagemagick`，支持在无网环境下对导入的图片做格式转换、缩放、质量压缩、裁剪与元信息检查，处理后经 `view_workspace_image` 读回模型。
 
 - **电脑**：manager 在宿主 Docker 上创建的同级容器（`manager/assistant-computers.mjs`），用批准的项目电脑基础镜像（不含任何项目的软件包、环境变量和初始化脚本，`BOT_ASSISTANT_IMAGE` 可另指定），uid 10001、只读根文件系统、去掉全部 capabilities、`no-new-privileges`、init，每台默认 1 CPU、2048 MiB 内存（含 tmpfs）、512 个进程，**没有网络**，用 Docker 的默认运行时（runc）。CPU、内存、进程数、`/tmp` 和工作目录大小在「全局设置 → 助手电脑」修改，范围与项目电脑相同；新值用于之后创建的电脑，空闲的电脑在归属的下一个回合开始时按新值重建（HOME 保留，`/tmp` 和工作目录清空），进行中的回合不受影响。不在容器里嵌套其他沙箱，创建失败时工具明确返回 `assistant_computer_unavailable`，不改在项目电脑或宿主上执行。
 - **目录**：`~`（`/home/assistant`）是持久 HOME；工作目录 `/workspace` 和 `/tmp` 是 tmpfs（默认各 512 MiB，内容计入内存上限，写满时命令得到“磁盘已满”），可以运行放在里面的程序，随电脑删除。pip、uv、npm 的缓存指向 `/tmp`，用户级安装（`pip --user`、`uv tool`）仍在 HOME。提示词要求临时文件写 `/tmp`，只有值得以后复用的数据才写 HOME；群的 HOME 由本群现有和以后加入的成员共用。

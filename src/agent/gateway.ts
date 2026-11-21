@@ -4,6 +4,7 @@ import { beginModelRequest, finishModelRequest, pricingFor } from '../metrics/ac
 import { errorBody, networkReason, type Redactor, stop, TaskError } from './common.js';
 import { modelEndpoints, selectedModel } from './model.js';
 import { modelIdleMs, readModelResponse, type ModelDelta } from './model-stream.js';
+import { hasImageContent, imageRequestLimit, requestLimit, textRequestBytes } from './tool-context.js';
 
 export type AgentModel = ReturnType<typeof selectedModel>;
 /** An explicit role allowance stays authoritative; otherwise use the selected model's metadata. */
@@ -50,8 +51,12 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
     return stop('model_configuration_changed', 'waiting_configuration', '任务运行期间模型配置已变化，请重新启动任务。');
   // Runs pin the provider contract; every request uses its current credential, including retries after a rotation.
   model = { ...model, key: currentKey, pricing:pricingFor(store,model.id) }; redactor.add(currentKey);
-  if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024)
-    return stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
+  const hasImages = hasImageContent(body);
+  const maxRequestBytes = hasImages ? imageRequestLimit : requestLimit;
+  if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > maxRequestBytes || (hasImages && textRequestBytes(body) > requestLimit))
+    return stop('model_request_invalid', undefined, hasImages
+      ? `模型请求缺少 messages 数组，文本超过 2 MiB 上限，或含图请求内容超过 ${Math.round(imageRequestLimit / (1024 * 1024))} MiB 上限。`
+      : '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
   const outputTokens=modelOutputTokens(model,input.maxOutputTokens);
   if(!Number.isSafeInteger(outputTokens)||outputTokens<1||outputTokens>16000000||outputTokens>Math.max(32768,model.capabilities?.max_output_tokens??8192))return stop('agent_limits_invalid','waiting_configuration','模型输出预算配置无效。');
   const endpoint = modelEndpoints(model.url).chat_url;

@@ -5,7 +5,9 @@ import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync,
 import { dirname, join } from 'node:path';
 import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
 import { feishuMarkdown, markdownPosts, postText } from '../../../../dist/channels/format.js';
-import { MediaTurn, artifactBytes, channelResourcePath, incomingFiles, inboundBytes, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
+import { MediaTurn, artifactBytes, channelResourcePath, incomingFiles, inboundBytes, mediaPermission, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
+import { saveModelMetadata } from '../../../../dist/models/catalog.js';
+import { imageRequestLimit } from '../../../../dist/agent/tool-context.js';
 import { ChannelService } from '../../../../dist/channels/service.js';
 import { AssistantComputerService } from '../../../../dist/service-roles/assistant-computers.js';
 import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
@@ -288,18 +290,33 @@ test('long private input is read from the ledger and a long rich reply reaches F
   assert.ok(f.wire.sent.every(s=>s.msg_type==='post'));
 });
 
-test('a provider refusing image input gives an explicit image diagnostic instead of claiming the image was inspected',async t=>{
+test('a provider refusing image input recovers gracefully in the same turn with stripped images, rewritten tool results and actionable guidance',async t=>{
   const f=await channelFixture(t);f.wire.state.resources.set('img_no_vision',{data:png,mime:'image/png'});
+  let resourceId='', recoveryRequest=null;
   f.modelState.respond=async(body,res)=>{
     const seen=results(body);
     if(!seen.length)return call(res,'list_message_resources',{});
-    if(seen.length===1)return call(res,'view_message_image',{resource_id:seen[0].resources[0].resource_id});
-    res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'This model accepts text only'}}));
+    if(seen.length===1){resourceId=seen[0].resources[0].resource_id;return call(res,'view_message_image',{resource_id:resourceId});}
+    const hasImage=body.messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url'));
+    if(hasImage){
+      res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'This model accepts text only'}}));
+      return;
+    }
+    recoveryRequest=body;
+    return say(res,'当前模型不支持直接看图，我没有查看到这张图片。');
   };
   const event=envelope('',{message:{message_type:'image',content:'{"image_key":"img_no_vision"}'}}),receipt=await post(f.h,f.id,event),source=receipt.value.operation_id;
-  assert.equal((await finished(f.h,source)).state,'failed');await delivered(f,source);
-  assert.ok(JSON.stringify(f.wire.sent).includes('未能查看图片'));
-  assert.equal(JSON.parse(f.h.store.get("SELECT data FROM management_events WHERE type='error' ORDER BY sequence DESC LIMIT 1").data).error,'channel_image_model_unsupported');
+  assert.equal((await finished(f.h,source)).state,'completed');await delivered(f,source);
+  assert.ok(recoveryRequest,'turn continues with a stripped recovery request');
+  assert.equal(recoveryRequest.messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url')),false,'images are stripped on retry');
+  const toolResult=results(recoveryRequest)[1];
+  assert.equal(toolResult.image_input,'rejected_by_provider','prior view_message_image result is rewritten');
+  assert.equal(toolResult.image_omitted,true);
+  const recoveryNotice=String(recoveryRequest.messages.at(-1).content);
+  assert.ok(recoveryNotice.includes('This model accepts text only'),'includes provider error summary');
+  assert.ok(recoveryNotice.includes(resourceId),'includes resource_id');
+  assert.ok(recoveryNotice.includes('image/png')&&recoveryNotice.includes(String(png.length)),'includes format and byte size');
+  assert.ok(JSON.stringify(f.wire.sent).includes('当前模型不支持直接看图'));
 });
 
 test('encrypted file storage seals bytes with AAD and SHA-256, keeps SQLite clean, and reads legacy channel_resource_data rows', async t => {
@@ -543,4 +560,179 @@ test('bound group reads inbound interactive cards with embedded images and post 
   assert.equal(postResources.length, 2);
   assert.ok(postResources.some(r => r.name === 'repro.mp4'));
   assert.equal((await postTurn.execute('read_message_resource', { resource_id: postResources.find(r => r.name === 'repro.mp4').resource_id })).text, 'video-transcript-text');
+});
+
+test('large images over 512 KiB pass directly without folding text history, and image_input=false returns clear tool guidance', async t => {
+  const f = await channelFixture(t); await group(f);
+  // 1.2 MiB PNG (> old 512 KiB limit and > 384 KiB text fold threshold).
+  const largePng = Buffer.concat([png, Buffer.alloc(1200 * 1024, 0x5a)]);
+  f.wire.state.resources.set('img_large_direct', { data: largePng, mime: 'image/png' });
+  let sawLargeImage = false, historyElided = null;
+  f.modelState.respond = async (body, res) => {
+    const observations = results(body);
+    if (!observations.length) return call(res, 'list_message_resources', {});
+    if (observations.length === 1) return call(res, 'read_message_text', {});
+    if (observations.length === 2) return call(res, 'view_message_image', { resource_id: observations[0].resources[0].resource_id });
+    const imagePart = body.messages.find(m => Array.isArray(m.content))?.content.find(p => p.type === 'image_url');
+    sawLargeImage = imagePart?.image_url?.url === 'data:image/png;base64,' + largePng.toString('base64');
+    historyElided = observations[1].elided === true;
+    return say(res, '已直接查看超过 512 KiB 的大图。');
+  };
+  const event = inGroup('');
+  Object.assign(event.event.message, { message_type: 'image', content: '{"image_key":"img_large_direct"}' });
+  const receipt = await post(f.h, f.id, event), source = receipt.value.operation_id;
+  assert.equal((await finished(f.h, source)).state, 'completed'); await delivered(f, source);
+  assert.equal(sawLargeImage, true, '1.2 MiB image passes directly to model');
+  assert.equal(historyElided, false, 'large inline image must not fold prior text tool results');
+
+  // Explicitly marking model image_input=false prevents image upload and returns clear guidance without downloading.
+  saveModelMetadata(f.h.store, f.assistantModel.id, { capabilities: { image_input: false } });
+  const downloadsBefore = f.wire.state.resourceRequests.length;
+  f.wire.state.resources.set('img_blocked_cap', { data: png, mime: 'image/png' });
+  let unsupportedObservation = null, sentAnyImage = false;
+  f.modelState.respond = async (body, res) => {
+    if (body.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url'))) sentAnyImage = true;
+    const observations = results(body);
+    if (!observations.length) return call(res, 'list_message_resources', {});
+    if (observations.length === 1) return call(res, 'view_message_image', { resource_id: observations[0].resources[0].resource_id });
+    unsupportedObservation = observations[1];
+    return say(res, '当前模型配置为不支持图像输入，无法直接查看该图片。');
+  };
+  const blockedEvent = inGroup('');
+  Object.assign(blockedEvent.event.message, { message_type: 'image', content: '{"image_key":"img_blocked_cap"}' });
+  const blockedReceipt = await post(f.h, f.id, blockedEvent);
+  assert.equal((await finished(f.h, blockedReceipt.value.operation_id)).state, 'completed');
+  assert.equal(sentAnyImage, false);
+  assert.equal(f.wire.state.resourceRequests.length, downloadsBefore, 'image_input=false skips unnecessary resource download');
+  assert.equal(unsupportedObservation?.error, 'model_image_input_unsupported');
+  assert.match(unsupportedObservation?.detail ?? '', /image_input=false/);
+});
+
+test('preflight fitRequest and HTTP 413 provider rejections strip oversized images and keep the turn running', async t => {
+  const f = await channelFixture(t), chat = await privateChat(f);
+  const event = f.service.adapter(f.service.connector(f.id)).normalize(envelope('', {
+    message: { chat_id: 'oc_private', message_type: 'post', content: JSON.stringify({ zh_cn: { content: [[{ tag: 'img', image_key: 'img_small' }, { tag: 'img', image_key: 'img_huge' }]] } }) },
+  }));
+  f.service.ledger.accept(event);
+  const turn = localTurn(f, chat, event);
+  const resources = (await turn.execute('list_message_resources', {})).resources;
+  const smallId = resources.find(r => r.name === 'image-1').resource_id;
+  const hugeId = resources.find(r => r.name === 'image-2').resource_id;
+  const smallPng = Buffer.concat([png, Buffer.alloc(1024, 1)]);
+  const bigPng = Buffer.concat([png, Buffer.alloc(120 * 1024, 2)]);
+  f.wire.state.resources.set('img_small', { data: smallPng, mime: 'image/png' });
+  f.wire.state.resources.set('img_huge', { data: bigPng, mime: 'image/png' });
+
+  const r1 = await turn.execute('view_message_image', { resource_id: smallId });
+  const r2 = await turn.execute('view_message_image', { resource_id: hugeId });
+  const messages = [
+    { role: 'system', content: 'sys' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'view_message_image', arguments: '{}' } }, { id: 'c2', type: 'function', function: { name: 'view_message_image', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'c1', content: JSON.stringify(r1) },
+    { role: 'tool', tool_call_id: 'c2', content: JSON.stringify(r2) },
+  ];
+  turn.addImages(messages);
+  const body = { messages };
+  // Enforce a small preflight limit so the larger image is stripped while the smaller image remains.
+  assert.equal(turn.fitRequest(body, 20 * 1024), true);
+  const imgMsg = messages.at(-1);
+  assert.equal(imgMsg.content.filter(p => p.type === 'image_url').length, 1);
+  assert.equal(JSON.parse(messages[2].content).image_input, 'next_model_request');
+  assert.equal(JSON.parse(messages[3].content).image_input, 'stripped_before_request');
+  assert.ok(imgMsg.content[0].text.includes(hugeId));
+
+  // Single-image size above imageRequestLimit returns structured recovery immediately without base64 blow-up.
+  const giantPng = Buffer.concat([png, Buffer.alloc(Math.floor(imageRequestLimit * 0.8), 3)]);
+  f.wire.state.resources.set('img_giant', { data: giantPng, mime: 'image/png' });
+  const giantEv = f.service.adapter(f.service.connector(f.id)).normalize(envelope('', { message: { chat_id: 'oc_private', message_type: 'image', content: '{"image_key":"img_giant"}' } }));
+  f.service.ledger.accept(giantEv);
+  const giantTurn = localTurn(f, chat, giantEv);
+  const giantId = (await giantTurn.execute('list_message_resources', {})).resources[0].resource_id;
+  const giantRes = await giantTurn.execute('view_message_image', { resource_id: giantId });
+  assert.equal(giantRes.error, 'image_input_too_large');
+  assert.equal(giantRes.resource_id, giantId);
+  assert.match(giantRes.recovery, /import_message_resource/);
+
+  // Provider HTTP 413 in a real turn triggers recovery and completes cleanly.
+  f.wire.state.resources.set('img_413', { data: smallPng, mime: 'image/png' });
+  let saw413Recovery = false;
+  f.modelState.respond = async (reqBody, res) => {
+    const obs = results(reqBody);
+    if (!obs.length) return call(res, 'list_message_resources', {});
+    if (obs.length === 1) return call(res, 'view_message_image', { resource_id: obs[0].resources[0].resource_id });
+    if (reqBody.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url'))) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Request Entity Too Large' } }));
+      return;
+    }
+    saw413Recovery = String(reqBody.messages.at(-1).content).includes('model_http_413') && results(reqBody)[1].image_input === 'rejected_by_provider';
+    return say(res, '图片超出模型请求上限，已收到恢复提示。');
+  };
+  const ev413 = envelope('', { message: { message_type: 'image', content: '{"image_key":"img_413"}' } });
+  const rc413 = await post(f.h, f.id, ev413);
+  assert.equal((await finished(f.h, rc413.value.operation_id)).state, 'completed');
+  assert.equal(saw413Recovery, true);
+});
+
+test('import_message_resource -> computer processing -> view_workspace_image closes the loop and enforces path/symlink/fence boundaries', async t => {
+  const f = await channelFixture(t), m = await assistantManager(t);
+  const assistants = new AssistantComputerService(f.h.store, m.manager, m.homes);
+  f.service.management.service.assistants = assistants;
+  // Re-wire group binding with computer write/read/command permissions.
+  const chat = await group(f);
+  const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  const perms = JSON.parse(binding.permissions);
+  f.h.store.run('UPDATE channel_service_bindings SET permissions=?,revision=revision+1 WHERE id=?',
+    JSON.stringify({ ...perms, computer: 'allow' }), binding.id);
+
+  assert.equal(mediaPermission('view_workspace_image'), 'read_file');
+  // Simulate an unsupported BMP image arriving in group chat, imported to /tmp, converted to PNG in computer, then viewed via view_workspace_image.
+  const bmp = Buffer.concat([Buffer.from('BM'), Buffer.alloc(64, 0)]);
+  f.wire.state.resources.set('img_bmp_raw', { data: bmp, mime: 'image/bmp' });
+  let resourceId = '', viewedWorkspacePng = false, toolList = [];
+  f.modelState.respond = async (body, res) => {
+    if (!toolList.length) toolList = body.tools.map(tool => tool.function.name);
+    const obs = results(body);
+    if (!obs.length) return call(res, 'list_message_resources', {});
+    if (obs.length === 1) { resourceId = obs[0].resources[0].resource_id; return call(res, 'import_message_resource', { resource_id: resourceId, path: 'raw.bmp' }); }
+    if (obs.length === 2) {
+      // Simulate offline image conversion inside /workspace: verify imported BMP bytes, then emit PNG.
+      return call(res, 'run_command', { command: `node -e "const fs=require('fs'); if(fs.readFileSync('raw.bmp').subarray(0,2).toString()!=='BM') process.exit(2); fs.writeFileSync('converted.png', Buffer.from('${png.toString('base64')}', 'base64'))"` });
+    }
+    if (obs.length === 3) return call(res, 'view_workspace_image', { path: 'converted.png' });
+    const imgPart = body.messages.find(msg => Array.isArray(msg.content))?.content.find(p => p.type === 'image_url');
+    viewedWorkspacePng = imgPart?.image_url?.url === 'data:image/png;base64,' + png.toString('base64');
+    return say(res, '已将原图导入电脑转换格式并通过 view_workspace_image 完成查看。');
+  };
+  const ev = inGroup('');
+  Object.assign(ev.event.message, { message_type: 'file', content: JSON.stringify({ file_key: 'img_bmp_raw', file_name: 'photo.bmp' }) });
+  const rc = await post(f.h, f.id, ev);
+  assert.equal((await finished(f.h, rc.value.operation_id)).state, 'completed');
+  assert.ok(toolList.includes('view_workspace_image'), 'view_workspace_image is offered when computer is available and read_file is allowed');
+  assert.equal(viewedWorkspacePng, true, 'processed workspace PNG reaches the model via view_workspace_image');
+
+  // Security boundaries on view_workspace_image: symlinks, traversal, host paths, non-images, no-computer, and fence revocation.
+  let authorized = true;
+  const computer = assistants.turn({ owner: { kind: 'group', subject: 'ws-img-sec', tenant: '' }, turn: 'ws-img-turn', fence: () => 'b'.repeat(64),
+    check: () => { if (!authorized) throw new Error('access_revoked'); }, facts: () => ({ repositories: ['101'] }), commands: () => true, eligible: () => {} });
+  await computer.importFile('~/ok.png', png);
+  await computer.importFile('~/note.txt', Buffer.from('not an image'));
+  await computer.execute('run_command', { command: 'ln -s ok.png ~/link.png && ln -s /etc/passwd /tmp/host-link.png' });
+  const normalized = f.service.adapter(f.service.connector(f.id)).normalize(ev);
+  const secTurn = new MediaTurn(f.service.media, chat.id, normalized.message_id, () => { if (!authorized) throw new Error('access_revoked'); }, computer, () => {}, undefined, 'sec-fence');
+  assert.equal((await secTurn.execute('view_workspace_image', { path: '~/ok.png' })).image_input, 'next_model_request');
+  await assert.rejects(secTurn.execute('view_workspace_image', { path: '~/note.txt' }), /channel_image_format_unsupported/);
+  for (const badPath of ['~/link.png', '/tmp/host-link.png', '/etc/passwd', '~/../outside.png', 'https://example.test/a.png']) {
+    await assert.rejects(secTurn.execute('view_workspace_image', { path: badPath }), /invalid_path|regular_file_required|file_not_found/, badPath);
+  }
+  const noComputerTurn = new MediaTurn(f.service.media, chat.id, normalized.message_id, () => {}, undefined, () => {}, undefined, 'sec-fence');
+  assert.equal((await noComputerTurn.execute('view_workspace_image', { path: '~/ok.png' })).error, 'computer_not_configured');
+  const noVisionTurn = new MediaTurn(f.service.media, chat.id, normalized.message_id, () => {}, computer, () => {}, undefined, 'sec-fence', false);
+  const noVisionRes = await noVisionTurn.execute('view_workspace_image', { path: '~/ok.png' });
+  assert.equal(noVisionRes.error, 'model_image_input_unsupported');
+  assert.ok(!JSON.stringify(noVisionRes).includes(m.homes), 'must never leak host HOME directory path');
+  authorized = false;
+  await assert.rejects(secTurn.execute('view_workspace_image', { path: '~/ok.png' }), /access_revoked/);
+  await computer.close();
+  await assistants.close();
 });
