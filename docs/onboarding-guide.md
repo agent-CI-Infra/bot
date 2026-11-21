@@ -188,4 +188,4 @@ App 的 Workflows 权限仍然申请，只用于上面这类确认过的 CI 任�
 控制台项目行的 **删除** 只清理本系统记录（仓库、策略、运行记录），**不会**卸载 App，也不会删除 GitHub 上的仓库。GitHub 侧请自行处理。
 
 **改 CI 的任务发布失败了怎么排查？**
-任务页写明原因和错误码。GitHub 拒绝推送改到 `.github/workflows/` 的分支，通常是任务没有确认为 CI 改动，或 App 安装没有授予 Workflows 写权限。看板的问题（如 `public_address_not_verified`、`collection_failed`）显示在仓库列表的看板开关旁。
+任务页写明原因、涉及的 `.github/workflows/` 文件路径和错误码：未在控制台确认 CI 改动的任务会报 `workflow_changes_not_confirmed`（重试原任务不会生效，需由项目管理员新建勾选「允许修改 `.github/workflows/`（CI 改动）」的任务或在管理助手确认卡片后发起，或改由维护人手动修改）；已确认 CI 改动但 App 安装未授予 Workflows 写权限时会报 `github_workflows_permission_missing`（管理员在 GitHub App 权限与仓库安装中开通 `Workflows: Read and write` 后点「重试」）。看板的问题（如 `public_address_not_verified`、`collection_failed`）显示在仓库列表的看板开关旁。
