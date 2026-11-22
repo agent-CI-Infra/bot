@@ -305,8 +305,17 @@ export class ChannelApi {
           store.run('UPDATE channel_connectors SET app_id=?,installation_tenant=?,bot_open_id=?,application_type=?,transport=?,credential_ref=?,enabled=?,revision=revision+1 WHERE id=? AND revision=?',
             app, installation, bot, String(type), String(transport), credential, Number(enabled), id, expected);
           if (current.credential_ref !== credential) store.run('DELETE FROM channel_credentials WHERE id=?', current.credential_ref);
-        } else store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at,owner_tenant,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          id, 'feishu', app, installation, bot, String(type), String(transport), credential, Number(enabled), 1, Date.now(), owner, actor.principal_id);
+        } else {
+          const now = Date.now();
+          store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at,owner_tenant,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            id, 'feishu', app, installation, bot, String(type), String(transport), credential, Number(enabled), 1, now, owner, actor.principal_id);
+          // Reconnecting the same app/installation revives chats paused by a prior connector deletion
+          // without reviving chats archived or removed by Feishu events.
+          for (const chat of store.all("SELECT id FROM channel_chats WHERE provider='feishu' AND app_id=? AND installation_tenant=? AND state='connector_deleted'", app, installation)) {
+            store.run("UPDATE channel_chats SET connector_id=?,state='active',context_revision=context_revision+1 WHERE id=?", id, chat.id);
+            store.run("UPDATE channel_sync_jobs SET state='pending',last_error=NULL,updated_at=? WHERE chat_id=? AND state='paused' AND last_error='connector_deleted'", now, chat.id);
+          }
+        }
         store.run('UPDATE channel_connectors SET app_name=?,tenant_name=?,app_name_source=? WHERE id=?', appName, tenantName, appNameSource, id);
         store.audit(actor.principal_id, 'channel.connector.updated', id);
         const result = { operation_id: operation, state: 'succeeded', connector_id: id, revision: expected + 1 };
@@ -343,7 +352,7 @@ export class ChannelApi {
             store.run("UPDATE channel_schedules SET state='paused',reason='connector_deleted',revision=revision+1,updated_at=? WHERE chat_id=? AND state='active'", now, chatId);
           store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error='connector_deleted' WHERE chat_id=?", chatId);
           store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chatId);
-          store.run("UPDATE channel_chats SET state='archived',context_revision=context_revision+1 WHERE id=?", chatId);
+          store.run("UPDATE channel_chats SET state=CASE WHEN state='active' THEN 'connector_deleted' ELSE state END,context_revision=context_revision+1 WHERE id=?", chatId);
         }
         const connectorKey = saved.id + ':' + saved.app_id;
         const affectedPrincipals = store.all("SELECT DISTINCT principal_id FROM external_identities WHERE provider='feishu' AND connector=? AND status='active'", connectorKey).map(r => String(r.principal_id));
@@ -353,14 +362,14 @@ export class ChannelApi {
         store.run('DELETE FROM channel_oauth_links WHERE challenge_hash IN (SELECT challenge_hash FROM channel_bind_requests WHERE connector_id=?)', saved.id);
         store.run('DELETE FROM channel_bind_requests WHERE connector_id=?', saved.id);
         store.run("UPDATE channel_inbox SET state='failed',error='channel_connector_deleted' WHERE connector_id=? AND state IN ('queued','submitted')", saved.id);
-        store.run("UPDATE channel_outbox SET state='failed',last_error='channel_connector_deleted' WHERE connector_id=? AND state IN ('queued','retry')", saved.id);
+        store.run("UPDATE channel_outbox SET state='failed',last_error='channel_connector_deleted' WHERE connector_id=? AND state IN ('queued','retry','sending','registered')", saved.id);
         store.run("UPDATE channel_reactions SET state='done',last_error='channel_connector_deleted' WHERE source_event IN (SELECT id FROM channel_inbox WHERE connector_id=?) AND state IN ('pending','adding','removing')", saved.id);
         this.service.members.forgetConnector(saved.id);
         if (hasTable('notification_channel_limits'))
           store.run('DELETE FROM notification_channel_limits WHERE connector_id=?', saved.id);
         store.run('DELETE FROM channel_connectors WHERE id=? AND revision=?', saved.id, saved.revision);
         store.run('DELETE FROM channel_credentials WHERE id=?', saved.credential_ref);
-        store.audit(actor.principal_id, 'channel.connector.deleted', saved.id, JSON.stringify({ app_id: saved.app_id, owner_tenant: saved.owner_tenant || null }));
+        store.audit(actor.principal_id, 'channel.connector.deleted', saved.id);
         return { deleted: true, connector_id: saved.id };
       });
     }
