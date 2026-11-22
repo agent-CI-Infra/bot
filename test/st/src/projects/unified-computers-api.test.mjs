@@ -356,4 +356,32 @@ test('F1 & F2: async/sync console spec sync preserves unapplied rule_imports.com
   const liveRev3 = f.projects.describe('101').computer;
   consoleComputer(h.store, '101', liveRev3);
   assert.equal(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer, null);
+
+  // F1 subset regression: imported packages/env are a SUBSET of manager's own overlay (with extra packages & env keys)
+  // and no console row exists when spec_revision advances on an unrelated field (or without configured_keys).
+  await f.projects.operate('101', 'configure', {
+    operation_id: id(), generation: 1,
+    request: { packages: ['jq', 'ripgrep'], env: { A: '1', B: '2' } },
+  });
+  await f.projects.waitForBuild('101');
+  await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { cpus: 4 } });
+  const liveSubset = f.projects.describe('101').computer;
+  h.store.run('DELETE FROM computer_console_specs WHERE repository_id=?', '101');
+  h.store.run("INSERT OR REPLACE INTO rule_imports(repository_id,sha,pending,computer,report,imported_at) VALUES(?,?,0,?,?,?)",
+    '101', 'b'.repeat(40), JSON.stringify({ packages: ['jq'], env: { A: '1' } }), JSON.stringify({ files: ['.bot/computer.yaml'] }), new Date().toISOString());
+
+  const mergedSubset = consoleComputer(h.store, '101', liveSubset);
+  assert.deepEqual(mergedSubset.packages, ['jq', 'ripgrep'], 'imported package subset must NOT drop manager extra package ripgrep');
+  assert.deepEqual(mergedSubset.env, { A: '1', B: '2' }, 'imported env subset must NOT drop manager extra env key B');
+  assert.equal(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer, null, 'fully satisfied subset import must clear');
+  assert.equal(computerRequest(mergedSubset, liveSubset), null, 'computerRequest must NOT remove ripgrep or B');
+
+  // Partial overlap without configured_keys fallback: keeps manager extras AND adds missing imported-only elements.
+  h.store.run('DELETE FROM computer_console_specs WHERE repository_id=?', '101');
+  h.store.run("UPDATE rule_imports SET computer=? WHERE repository_id=?", JSON.stringify({ packages: ['jq', 'tree'], env: { A: '1', C: '3' } }), '101');
+  const liveNoKeys = { ...liveSubset, configured_keys: null };
+  const mergedPartial = consoleComputer(h.store, '101', liveNoKeys);
+  assert.deepEqual(mergedPartial.packages, ['jq', 'ripgrep', 'tree']);
+  assert.deepEqual(mergedPartial.env, { A: '1', B: '2', C: '3' });
+  assert.deepEqual(JSON.parse(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer), { packages: ['tree'], env: { C: '3' } });
 });

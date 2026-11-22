@@ -72,23 +72,60 @@ export function saveConsoleComputer(store: Store, id: string, spec: Record<strin
   store.run('INSERT INTO computer_console_specs(repository_id,spec,spec_revision) VALUES(?,?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec,spec_revision=excluded.spec_revision',
     id, JSON.stringify(spec), nextRev);
 }
+function mergeImportedIntoOwn(liveOwn: Record<string, unknown>, imported: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...liveOwn };
+  for (const [key, impVal] of Object.entries(imported)) {
+    if (key === 'packages') {
+      const ownPkgs = Array.isArray(liveOwn.packages) ? liveOwn.packages : [];
+      const impPkgs = Array.isArray(impVal) ? impVal : [];
+      merged.packages = [...new Set([...ownPkgs, ...impPkgs])].sort();
+    } else if (key === 'env') {
+      const ownEnv = liveOwn.env && typeof liveOwn.env === 'object' && !Array.isArray(liveOwn.env) ? liveOwn.env as Record<string, unknown> : {};
+      const impEnv = impVal && typeof impVal === 'object' && !Array.isArray(impVal) ? impVal as Record<string, unknown> : {};
+      merged.env = { ...impEnv, ...ownEnv };
+    } else if (key === 'setup_script') {
+      const ownScript = typeof liveOwn.setup_script === 'string' ? liveOwn.setup_script : '';
+      if (!ownScript.trim() && typeof impVal === 'string' && impVal.trim()) merged.setup_script = impVal;
+    } else if (liveOwn[key] === undefined) {
+      merged[key] = impVal;
+    }
+  }
+  return merged;
+}
+function remainingImportedComputer(liveOwn: Record<string, unknown>, imported: Record<string, unknown>, explicitKeys?: Set<string>): Record<string, unknown> {
+  const remaining: Record<string, unknown> = {};
+  for (const [key, impVal] of Object.entries(imported)) {
+    if (explicitKeys?.has(key)) continue;
+    if (key === 'packages') {
+      const ownSet = new Set(Array.isArray(liveOwn.packages) ? liveOwn.packages : []);
+      const missing = (Array.isArray(impVal) ? impVal : []).filter(pkg => !ownSet.has(pkg));
+      if (missing.length) remaining.packages = missing;
+    } else if (key === 'env') {
+      const ownEnv = liveOwn.env && typeof liveOwn.env === 'object' && !Array.isArray(liveOwn.env) ? liveOwn.env as Record<string, unknown> : {};
+      const impEnv = impVal && typeof impVal === 'object' && !Array.isArray(impVal) ? impVal as Record<string, unknown> : {};
+      const missingEnv = Object.fromEntries(Object.entries(impEnv).filter(([k]) => !Object.hasOwn(ownEnv, k)));
+      if (Object.keys(missingEnv).length) remaining.env = missingEnv;
+    } else if (key === 'setup_script') {
+      const ownScript = typeof liveOwn.setup_script === 'string' ? liveOwn.setup_script : '';
+      if (!ownScript.trim() && typeof impVal === 'string' && impVal.trim()) remaining.setup_script = impVal;
+    } else if (liveOwn[key] === undefined) {
+      remaining[key] = impVal;
+    }
+  }
+  return remaining;
+}
 function clearSatisfiedImportedComputer(store: Store, id: string, liveOwn: Record<string, unknown>, explicitKeys?: Set<string>): void {
   if (!store.hasTable('rule_imports')) return;
   const imported = importedComputer(store, id) ?? {};
-  const entries = Object.entries(imported);
-  if (!entries.length) return;
-  const remaining: Record<string, unknown> = {};
-  for (const [key, value] of entries) {
-    const matched = JSON.stringify(canonicalComputerValue(key, liveOwn[key])) === JSON.stringify(canonicalComputerValue(key, value));
-    if (!matched && !explicitKeys?.has(key)) remaining[key] = value;
-  }
+  if (!Object.keys(imported).length) return;
+  const remaining = remainingImportedComputer(liveOwn, imported, explicitKeys);
   store.run('UPDATE rule_imports SET computer=? WHERE repository_id=?', Object.keys(remaining).length ? JSON.stringify(remaining) : null, id);
 }
 /**
  * Reconciles computer_console_specs when an asynchronous configure (from console or management assistant) finishes on
- * the manager and advances `live.spec_revision`. Merges only the manager's configured keys into the existing console
- * spec so unapplied `.bot/computer.yaml` imports or pending console fields are never silently dropped, and clears
- * `rule_imports.computer` only for keys that are now present in the manager.
+ * the manager and advances `live.spec_revision`. Merges element-wise (manager's applied own fields win; imported-only
+ * packages/env keys/absent scalars are preserved) so neither unapplied `.bot/computer.yaml` imports nor already-applied
+ * project extras are ever silently dropped, and clears `rule_imports.computer` per satisfied package/key.
  */
 export function syncConsoleComputer(store: Store, id: string, live: any): void {
   if (!live || typeof live !== 'object' || !live.own || typeof live.spec_revision !== 'number') return;
@@ -99,7 +136,7 @@ export function syncConsoleComputer(store: Store, id: string, live: any): void {
   if (live.spec_revision > savedRev) {
     const liveOwn = ownComputer(live);
     const imported = importedComputer(store, id) ?? {};
-    const base: Record<string, unknown> = row ? JSON.parse(row.spec) : { ...liveOwn, ...imported };
+    const base: Record<string, unknown> = row ? JSON.parse(row.spec) : mergeImportedIntoOwn(liveOwn, imported);
     const configuredKeys = Array.isArray(live.configured_keys)
       ? (live.configured_keys as unknown[]).filter((k): k is string => typeof k === 'string' && computerKeys.includes(k as any))
       : null;
@@ -111,23 +148,18 @@ export function syncConsoleComputer(store: Store, id: string, live: any): void {
       saveConsoleComputer(store, id, base, live.spec_revision);
       clearSatisfiedImportedComputer(store, id, liveOwn, new Set(configuredKeys));
     } else {
-      const merged: Record<string, unknown> = { ...base, ...liveOwn };
-      for (const [key, value] of Object.entries(imported)) {
-        if (JSON.stringify(canonicalComputerValue(key, liveOwn[key])) !== JSON.stringify(canonicalComputerValue(key, value))) {
-          merged[key] = value;
-        }
-      }
+      const merged = mergeImportedIntoOwn({ ...base, ...liveOwn }, remainingImportedComputer(liveOwn, imported));
       saveConsoleComputer(store, id, merged, live.spec_revision);
       clearSatisfiedImportedComputer(store, id, liveOwn);
     }
   }
 }
-// The project's console computer spec: the saved one, else the computer as the manager has it, with the .bot/computer.yaml
-// fields the upgrade imported for a project without a saved spec (#935) on top until that spec is first saved.
+// The project's console computer spec: the saved one, else the computer as the manager has it, with absent
+// .bot/computer.yaml fields merged element-wise until that spec is first saved (#935).
 export function consoleComputer(store: Store, id: string, live: any): Record<string, unknown> {
   syncConsoleComputer(store, id, live);
   const row = store.hasTable('computer_console_specs') ? store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?', id) : undefined;
-  return row ? JSON.parse(row.spec) : { ...ownComputer(live), ...importedComputer(store, id) };
+  return row ? JSON.parse(row.spec) : mergeImportedIntoOwn(ownComputer(live), importedComputer(store, id) ?? {});
 }
 // Saves the console spec the first time a task or the machine page changes the computer; the imported fields join it.
 export function rememberConsoleComputer(store: Store, id: string, live: any): void {
