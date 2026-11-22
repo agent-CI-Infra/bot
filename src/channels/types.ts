@@ -2,11 +2,13 @@ import type { IncomingHttpHeaders } from 'node:http';
 import type { Json } from '../core/security.js';
 
 export interface ChannelMention { key: string; actor_id: string; name: string; is_self: boolean; }
+export interface ChannelCardAction { card_id?: string; act?: string; option?: string; tag?: string; }
 export interface ChannelEvent {
   provider: 'feishu'; connector_id: string; connector_revision: number; app_id: string; installation_tenant: string;
   actor_tenant: string; actor_id: string; chat_id: string; chat_type: 'p2p' | 'group';
   message_id: string; event_id: string; thread_id: string; created_at: number;
   kind: 'message' | 'message_recalled' | 'bot_added' | 'bot_removed' | 'chat_archived' | 'card' | 'audience_changed' | 'uninstalled' | 'app_ticket'; content: string; card_token?: string;
+  card_action?: ChannelCardAction;
   received_at?: number; message_type?: string; sender_type?: string; parent_id?: string; root_id?: string;
   updated_at?: number; deleted?: boolean; addressed?: boolean; raw_content?: string;
   mentions?: ChannelMention[];
@@ -18,6 +20,9 @@ export interface ChannelDelivery {
   message_id?: string; message_type?: 'interactive' | 'post' | 'image' | 'file'; reply_to?: string; reply_in_thread?: boolean;
   resources?: string[];
   format_version?: 2;
+  rich_card?: boolean;
+  card_id?: string;
+  card_fallback?: string;
 }
 export interface ChannelAdapter {
   readonly capabilities: { messages: boolean; cards: boolean; update: boolean; group_history: boolean };

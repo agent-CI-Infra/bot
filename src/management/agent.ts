@@ -1,6 +1,6 @@
 import {serviceHarnessTurn} from '../harness/service-session.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
-import { configuredRedactor, registeredRedactor } from '../core/redaction.js';
+import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
@@ -30,7 +30,8 @@ import { RepositoryOnboarding, onboardingInstructions, onboardingRepositoryOf, s
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 import { managerFlowInstructions } from '../dispatch/settings.js';
 import { lateSchedules } from '../actions/late-schedules.js';
-import { readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
+import { feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
+import { feishuCardInstructions, feishuCardTool, feishuCardToolName, FeishuCardTurn } from '../channels/cards.js';
 import { assertCeiling } from '../projects/ceiling.js';
 import { projectRefusal } from '../tasks/grants.js';
 
@@ -64,6 +65,8 @@ export class ManagementAgent {
   stageMessage?:(actor:ActorContext,conversation:string,input:Json,message:string,text:string,sequence:number)=>string|undefined;
   // The timers of the private chat this conversation belongs to (#851), managed for its owner; none for a console conversation.
   conversationSchedules?:(actor:ActorContext,conversation:string)=>((args:Json)=>Json)|undefined;
+  // Feishu Card JSON 2.0 staging for Feishu private chats and personal timers (#1219); none for Web console conversations.
+  feishuCard?:(actor:ActorContext,conversation:string,input:Json,clean:(value:string)=>string)=>FeishuCardTurn|undefined;
   readonly own:OwnTasks;
   // Repository onboarding (#930): conversations of a repository's administrators, run by this assistant with their own tools.
   readonly onboarding:RepositoryOnboarding;
@@ -265,11 +268,14 @@ export class ManagementAgent {
         actor:{kind:'management',service_role_id:managementAssistant,conversation_id:conversation,source_message:String(input.source_message),principal_id:actor.principal_id},
         allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation),speaker:()=>actor.principal_id},rest)};
     };
-    const tools=[readToolResult,...managementTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,readSkillTool,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
+    const redactor=new Redactor();
+    const cardTurn=this.feishuCard?.(actor,conversation,input,value=>publicText(redactor.text(value),configuredRedactor(this.store)));
+    const activeSkills=cardTurn?feishuAssistantSkills:undefined;
+    const activeReadSkillTool=cardTurn?makeReadSkillTool(feishuAssistantSkills):readSkillTool;
+    const tools=[readToolResult,...managementTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     let ownHost:OwnTaskHost|undefined;
-    const redactor=new Redactor();
     // A progress message (#435) is its own event, not an execution step: queued to the source transport and recorded together.
     const progress=async(args:unknown)=>{
       await guard();
@@ -291,7 +297,8 @@ export class ManagementAgent {
         else if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
-        else if(name===readSkillName)result=readSkill(args);
+        else if(name===readSkillName)result=readSkill(args,activeSkills);
+        else if(name===feishuCardToolName){if(!cardTurn)return fail(403,'tool_not_allowed');result=cardTurn.execute(args);}
         else if(name===startRepositoryName){if(!permitsManagement(permissions(),'project.update',true))fail(403,'tool_not_allowed');validate(startRepositoryTool.function.parameters,args);result=await this.onboarding.tool(actor,args);}
         else if(name===conversationScheduleName){if(!schedules)fail(403,'tool_not_allowed');result=schedules!(args);}
         else if(name===startRequestsName){if(!deciding)fail(403,'tool_not_allowed');validate(startRequestsTool.function.parameters,args);result=await requests.tool(actor,args);}
@@ -356,6 +363,7 @@ export class ManagementAgent {
           +'\n\n'+managerFlowInstructions
           +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. If an image is unsupported in format or rejected for size/resolution/context limits, use import_message_resource and your assistant computer (Python Pillow or ImageMagick) to resize, compress, crop or convert it, then call view_workspace_image to inspect the processed image. Other binary inputs also need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs or claim unsupported or omitted inputs were inspected; selecting an attachment is not delivery.':'')
+          +(cardTurn?'\n'+feishuCardInstructions:'')
           +administrator;
         const context={...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()};
         const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={resultSession:resultFiles,store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
@@ -367,7 +375,7 @@ export class ManagementAgent {
           adapter:async(services)=>{
             const {request}=services;
             ownHost={results:resultFiles,owner:{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},
-              system,tools:()=>tools,request:async(body,label)=>{
+              system,tools:()=>tools.filter(t=>t.function.name!==feishuCardToolName),request:async(body,label)=>{
                 media?.addImages(body.messages as any[]);
                 media?.fitRequest(body);
                 try { return await request(body,label); }
@@ -377,7 +385,7 @@ export class ManagementAgent {
                   return await request(body, label + ':image-recovery');
                 }
               },execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
-            if(role?.harness&&role.harness!=='native'){ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope,media);const message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence,media);await guard();this.event(id,'reply',{text:redactor.text(message),authority:'advisory; see tool receipts'});return;}
+            if(role?.harness&&role.harness!=='native'){ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope,media);const message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence,media);await guard();const finalText=redactor.text(message).trim()?redactor.text(message):(cardTurn?.staged?.fallback_text??redactor.text(message));this.event(id,'reply',{text:finalText,authority:'advisory; see tool receipts'});return;}
             const messages:any[]=[{role:'system',content:system},{role:'user',content:JSON.stringify({...context,recent_tool_results:resultFiles.recent()})}];
             // One query per project across many projects is normal (#333): results share a budget per batch and older ones
             // fold away, so the conversation stays within the model's context however many calls the model makes.
@@ -422,8 +430,9 @@ export class ManagementAgent {
                 if(typeof message.content!=='string')fail(502,'management_model_invalid');
                 await guard();
                 incoming?.finish();
-                if(mustReply&&!message.content.trim()&&!media?.attachments.length)fail(502,'management_model_invalid');
-                this.event(id,'reply',{text:redactor.text(message.content),authority:'advisory; see tool receipts'});return;
+                if(mustReply&&!message.content.trim()&&!media?.attachments.length&&!cardTurn?.staged)fail(502,'management_model_invalid');
+                const replyText=redactor.text(message.content);
+                this.event(id,'reply',{text:replyText.trim()?replyText:(cardTurn?.staged?.fallback_text??replyText),authority:'advisory; see tool receipts'});return;
               }
               incoming?.resume();
               messages.push(traceClean(message));
@@ -462,6 +471,7 @@ export class ManagementAgent {
       // Revoke temporary read-only installation tokens before publishing turn completion so callers never observe a completed turn with live tokens.
       await repositories.close();
       await guard();if(media?.attachments.length&&silence===undefined)this.event(id,'attachments',{resource_ids:media.attachments,fence:media.fence});
+      if(cardTurn?.staged&&silence===undefined)this.event(id,'feishu_card',{card:cardTurn.staged});
       this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});
       // Naming is optional and cannot delay the turn or affect its result.
       if(titleModel)void this.nameConversation(base,conversation,id,titleModel).catch(()=>{});

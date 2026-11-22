@@ -86,12 +86,18 @@ export class FeishuAdapter implements ChannelAdapter {
       message_id: text(e.message_id), created_at: eventTime(e.recall_time), updated_at: eventTime(e.recall_time), kind: 'message_recalled', deleted: true };
     if (type === 'card.action.trigger') {
       if (!this.connector.bot_open_id) fail(503, 'channel_bot_unavailable');
-      const op = object(e.operator), context = object(e.context), value = object((e.action as Json)?.value);
+      const op = object(e.operator), context = object(e.context), action = object(e.action), value = object(action.value);
       const tenant = text(op.tenant_key);
+      const cardId = typeof value.card === 'string' && value.card.trim() ? value.card.trim() : undefined;
+      const act = typeof value.act === 'string' && value.act.trim() ? value.act.trim() : undefined;
+      const cardToken = !cardId ? text(value.token) : (typeof value.token === 'string' ? value.token : undefined);
+      const option = typeof action.option === 'string' ? action.option : undefined;
+      const tag = typeof action.tag === 'string' ? action.tag : undefined;
       return { ...base, actor_tenant: tenant, actor_id: text(op.open_id), chat_id: text(context.open_chat_id),
         // The card's audience comes from the server record, never action.value or client-supplied scope.
         chat_type: 'group', message_id: text(context.open_message_id), created_at: Number(h.create_time) / 1000,
-        kind: 'card', card_token: text(value.token) };
+        kind: 'card', ...(cardToken ? { card_token: cardToken } : {}),
+        ...(cardId && act ? { card_action: { card_id: cardId, act, ...(option !== undefined ? { option } : {}), ...(tag ? { tag } : {}) } } : {}) };
     }
     if (type !== 'im.message.receive_v1') return null;
     if (!this.connector.bot_open_id) fail(503, 'channel_bot_unavailable');
@@ -167,6 +173,13 @@ export class FeishuAdapter implements ChannelAdapter {
       if (path.startsWith('/im/v1/chats/') && data.code === 99991672) fail(403, 'channel_audience_permission_required');
       if (path.startsWith('/contact/v3/users/') && data.code === 99991672) fail(403, 'channel_user_name_permission_required');
       if (path === '/application/v6/scopes' && (!r.ok || data.code !== 0)) fail(502, 'channel_scope_check_unavailable');
+      if (path.startsWith('/im/v1/messages/') && init.method === 'PATCH' && (!r.ok || data.code !== 0)) {
+        if (data.code === 200750) fail(400, 'channel_card_expired');
+        if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) fail(400, 'channel_card_rejected');
+      }
+      if (message?.fields?.msg_type === 'interactive' && (!r.ok || data.code !== 0)) {
+        if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) fail(400, 'channel_card_rejected');
+      }
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }

@@ -302,6 +302,12 @@ export function cardText(data: any, mention?: (id: string, name: string) => stri
         const title = cardTextValue(el.chart_spec?.title?.text ?? el.chart_spec?.title, renderText).trim();
         return title ? `[图表：${title}]` : '[图表]';
       }
+      case 'select_static': {
+        const selected = typeof el.initial_option === 'string' && Array.isArray(el.options)
+          ? el.options.find((o: any) => o?.value === el.initial_option) : undefined;
+        const labelText = selected ? cardTextValue(selected.text, renderText).trim() : cardTextValue(el.placeholder, renderText).trim();
+        return labelText ? `[选择：${labelText}]` : '';
+      }
       case 'input': {
         const name = cardTextValue(el.label ?? el.placeholder, renderText).trim();
         const value = typeof el.default_value === 'string' ? renderText(el.default_value).trim() : '';

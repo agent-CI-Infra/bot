@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/agent-CI-Infra/bot",
+  "revision": "f5e43d7ecfa5e6f3ee0f8e8ce89ed04b2f1e7d52",
+  "license": "Apache-2.0",
+  "references": [
+    "src/channels/cards.ts",
+    "src/channels/format.ts"
+  ],
+  "adaptation": "Original built-in skill authored for launchpad's general-purpose Feishu Card JSON 2.0 and interactive card capability."
+}

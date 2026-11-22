@@ -1,10 +1,12 @@
 import type { Store } from '../storage/database.js';
 import { ledgerStorage } from './ledger.js';
+import { interactiveCardStorage } from './cards.js';
 
 export function channelStorage(store: Store): void {
   // channel_group_scopes, channel_cards and channel_personal_roles served the retired /project chat commands (#312);
   // existing rows are left in place and no longer read.
   ledgerStorage(store);
+  interactiveCardStorage(store);
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS channel_credentials(id TEXT PRIMARY KEY,sealed TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS channel_connectors(id TEXT PRIMARY KEY,provider TEXT NOT NULL,
