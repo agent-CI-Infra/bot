@@ -9,7 +9,7 @@ import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from '../helpers/o
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { consoleSave, compareWithServer, confirmDiscard } from '../helpers/console-save.mjs';
 
-test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外部后端，展示容器工具卷状态、模型连通探测与订阅预留提示', async ({ page }) => {
+test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与模型来源', async ({ page }) => {
   const prevToolsDir = process.env.BOT_AGENT_TOOLS_DIR;
   const toolsDir = mkdtempSync(join(tmpdir(), 'e2e-agent-tools-'));
   process.env.BOT_AGENT_TOOLS_DIR = toolsDir;
@@ -55,7 +55,8 @@ test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外�
       const picker = page.getByTestId('role-form').getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
-      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'native', 'process']);
+      const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp'] : [];
+      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', ...acp, 'native', 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
       for (const backend of ['pi', 'native', 'process']) expect(await optionDisabled(backend)).toBe(false);
       // Harness selection is independent of controller/worker role.
@@ -63,6 +64,18 @@ test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外�
         expect(await optionDisabled(backend)).toBe(false);
       }
     }
+    await goRolePage(page, { role: 'dev' });
+    const acpPicker = page.getByLabel('dev Agent 后端', { exact: true });
+    await acpPicker.selectOption('container_acp');
+    await expect(page.getByTestId('backend-runtime-status')).toContainText('平台网关（按角色配置解析）');
+    await expect(page.getByLabel('dev 模型来源', { exact: true })).toHaveCount(0);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await acpPicker.evaluate(el => el.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: `.tmp/agent-backends/acp-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'manager' });
     await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('native');
     await goRolePage(page, { role: 'reviewer' });

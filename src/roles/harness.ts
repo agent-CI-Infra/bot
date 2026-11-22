@@ -24,6 +24,7 @@ import { piAdapter,piRuntime } from '../agent/pi.js';
 import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 import type { RoleKind } from './catalog.js';
 import type { HarnessCapabilities } from './protocol.js';
+import { acpHarness, containerAcpId, prepareAcp } from '../harness/acp.js';
 import { codexAppServer } from '../harness/app-server.js';
 /** The worker cannot access provider credentials or obtain arbitrary tools. */
 export function processHarness<T>(spec:AgentSpec<T>){return async(services:AgentServices):Promise<T>=>new Promise((resolve,reject)=>{
@@ -97,14 +98,17 @@ export const harnesses:RegisteredRoleHarness[]=[
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},tool_volume:'codex',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+ {id:containerAcpId,version:'1',session:'external_session',events:'acp_v1',kinds:['writer','observer'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:null,externalModel:false,
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
  // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
  {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
+export const runsInTaskCheckout = (driver: RoleHarnessMetadata) => driver.environment === 'workspace' && driver.capabilities?.raw_evidence === 'task_tools';
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],['pi',piHarness]]);
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
@@ -197,19 +201,23 @@ export function roleHarness(id:string){
   const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
   const external=spec.cancelSignal;
   let nativeState=spec.harnessState?.value??{};
+  let activeAcp:Promise<T>|undefined;
   const cancel=()=>void session.cancel(external?.reason);
   const session=managedSession(async(signal,message)=>{
    if(external?.aborted)throw external.reason??new TaskError('harness_cancelled','cancelled');
    checkHarnessAccess(id,spec.harnessAccess);
-   const wrapped:AgentSpec<T>={...spec,...(message!==undefined?{prompt:message}:{}),executionSignal:signal,
+   const wrapped:AgentSpec<T>={...spec,...(message!==undefined?{prompt:message,harnessInitialPrompt:spec.prompt}:{}),executionSignal:signal,
     harnessState:{value:nativeState,save:value=>{nativeState=value;spec.harnessState?.save(value);}},
     guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};
-   return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});
-  },emit,async()=>external?.removeEventListener('abort',cancel));
+   const guarded={...services,guard:wrapped.guard};
+   const running=factory?factory(wrapped)(guarded):runTools(wrapped,guarded);
+   if(id===containerAcpId)activeAcp=running;
+   return running;
+  },emit,async()=>{external?.removeEventListener('abort',cancel);await activeAcp?.catch(()=>{});});
   external?.addEventListener('abort',cancel,{once:true});
   return session;
  };
- return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:id==='codex'?prepareCodex:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
+ return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:id==='codex'?prepareCodex:id===containerAcpId?prepareAcp:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
   const session=createSession(spec,services);
   try{return await session.run();}finally{await session.close();}
  }};

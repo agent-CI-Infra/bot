@@ -355,7 +355,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     mode=role==='qa'?'rebuilt_from_task_records':recover==='external_session_pending'?null:protocolRecovery(recover)??(recover==='new_session'?'rebuilt_from_task_records':plan.mode);
    }
    s.run('UPDATE task_runs SET run_context=?,resume_from_run_id=?,admission=?,protocol_recovery=?,operation_id=? WHERE id=?',JSON.stringify(ctx),previous??null,JSON.stringify(admission),mode,operationId,runId);
-   const initialCliVersion=wrapped.harnessBinding?.cli_version??(typeof (wrapped.harnessPreparation as any)?.version==='string'?(wrapped.harnessPreparation as any).version:undefined)??(['claude_code','codex'].includes(driver.id)?driver.runtime?.version:undefined);
+   const initialCliVersion=wrapped.harnessBinding?.cli_version??(typeof (wrapped.harnessPreparation as any)?.version==='string'?(wrapped.harnessPreparation as any).version:undefined)??(driver.tool_volume?driver.runtime?.version:undefined);
    if(initialCliVersion)recordRunCliVersion(s,runId,initialCliVersion);
    if(ctx.task_id===null)stop('role_run_protocol_invalid','waiting_configuration','Task RoleRun requires task scope.');
    const runCapabilities=[...gatewayCapabilities(snapshot),'tools:invoke','model:invoke',...(githubReadScopes(resolved.definition.permissions).length?['github:read_token']:[]),'events:write','checkpoint:write'];

@@ -1,6 +1,6 @@
 # 部署、升级与运维
 
-本文面向部署和运维 launchpad 的管理员，涵盖 Docker Compose 上手部署、源码构建、版本发布与生产自动部署、常用环境变量、备份恢复、存储与 CLI 工具卷运维及故障排查。服务拓扑与隔离设计见 [系统总体架构与安全边界](../design/architecture.md)。
+本文面向部署和运维 launchpad 的管理员，涵盖 Docker Compose 上手部署、源码构建、版本发布与生产自动部署、常用环境变量、备份恢复、存储与工具卷运维及故障排查。服务拓扑与隔离设计见 [系统总体架构与安全边界](../design/architecture.md)。
 
 ## 1. 准备与快速启动
 
@@ -61,7 +61,8 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_OBSOLETE_FAILURE_DAYS` | `7` | 临时/平台类失败自动移出「待处理」的天数 |
 | `BOT_TRUSTED_PROXIES` | 空 | 密码登录限流信任的代理 IP/CIDR（逗号分隔；仅填受控代理，切勿填 `0.0.0.0/0`） |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许 Webhook 转发的内网主机名白名单（逗号分隔，不支持通配符） |
-| `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 控制面安装与项目电脑只读挂载 Agent CLI（Claude Code / Codex）的目录 |
+| `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 控制面读写 Agent 工具卷的挂载目录，项目电脑在 `/opt/agent-tools` 只读挂载同一卷 |
+| `BOT_ACP_PRODUCT` | `container_acp` | 控制面选用的 ACP 产品标识。该产品的活动版本由工具卷中的选定记录决定 |
 | `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
 | `BOT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | 空 | 未在向导保存 GitHub 登录配置时的部署级 OAuth 默认值 |
@@ -107,7 +108,7 @@ docker compose up -d
 | `internal-keys` | 控制面与 manager 内部认证材料及部署 ID 种子 |
 | `manager-data` | `manager.sqlite`、manager 轨迹与项目笔记卷元数据 |
 | `assistant-homes` | 群聊与管理助手电脑的持久 HOME（可按需备份） |
-| `agent-tools` | 受信任的 Claude Code / Codex CLI 多版本二进制（可随时通过控制台重新安装） |
+| `agent-tools` | 受信任的 Claude Code / Codex CLI 二进制，以及 ACP Python 产品源码、解释器、虚拟环境与版本清单。各版本可并存 |
 | `tunnel-keys` | Cloudflare Tunnel token 文件 |
 
 ### 备份与恢复要点
@@ -116,6 +117,12 @@ docker compose up -d
 - **知识卷恢复（`note_move_uncertain`）**：若项目知识文件因异常移动进入 `note_move_uncertain` 只读保护，切勿手工删除 `.write-history` 里的 pending journal、改 file ID 或直接降级镜像。标准恢复步骤：① 停止该项目的任务派发、项目电脑与访问该卷的 manager 操作；② 对当前整个笔记卷（含 `.write-history`、历史索引与 blob）做只读备份；③ 选取移动前停写状态下生成的整卷备份，在同版 manager/runner 隔离环境中验证目录、正文与历史可读；④ 在停写状态下用验证过的完整备份替换原卷（备份后的新增改动对照第 ② 步通过正常保存接口补录）；⑤ 恢复同版服务并验证读正常后再开放写入。
 - **全局存储与按天数清理（「全局设置 → 存储」）**：超级管理员可查看整机/Launchpad/项目空间占比，配置轨迹文件、manager 重复正文（默认 2 天）、已完成/失败任务工作区（默认 1 天 / 7 天）和 Webhook 正文的保留天数，并按需触发「立即回收」；飞书群聊与私聊记录的保留天数及手工清理在「飞书会话」页（`#/conversations`）按会话配置（仅超管），存储页做汇总展示。
 - **Agent CLI 工具卷（「全局设置 → Agent CLI 工具卷」）**：仅超管可用，用于在线校验 SHA-256 安装或清理容器化 `claude_code` / `codex` 版本（运行中任务使用的版本自动受保护不可删除）。
+
+### 安装与维护容器内 ACP 产品
+
+1. 在与项目电脑架构和系统兼容的独立 Linux 安装环境中，准备 `uv`、可信产品源码或发行包内容，以及固定 Python 补丁版本和依赖锁的预设。以可写方式将本部署的 `agent-tools` 卷挂载到 `/opt/agent-tools`。项目电脑使用同一卷的只读挂载。
+2. 用 `node scripts/install-acp-product.mjs hash-source --source ./product-source` 核对预设中固定的源码摘要，再运行 `node scripts/install-acp-product.mjs install --product container_acp --version 1.0.0 --source ./product-source --preset ./preset.json` 安装并选定该版本。预设字段与锁文件格式见 [ACP 产品安装设计](../design/agent-and-harness-runtime.md#安装-python-产品)。
+3. 用 `node scripts/install-acp-product.mjs select --product container_acp --version 1.0.0` 切换到已安装版本。新的运行读取选定版本，在途运行继续使用已绑定版本。只有在确认旧版本已取消选定且没有在途运行使用它后，才运行 `node scripts/install-acp-product.mjs remove --product container_acp --version <旧版本>` 清理。
 
 ## 5. 故障排查速查
 

@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createToolDispatch } from './tool-dispatch.mjs';
@@ -32,39 +35,12 @@ function buildMcpToolResult(reply) {
   };
 }
 
-/**
- * Starts the stdio MCP server `bot` over arbitrary readable/writable streams.
- * Exported as a function so unit tests can exercise framing, cancellation and parallel calls directly,
- * and executed automatically when invoked as `node /opt/runner/mcp-bridge.mjs <agentDir>`.
- */
-export function startMcpBridge({
-  agentDir,
-  input = process.stdin,
-  output = process.stdout,
-  token = process.env.BOT_RUN_TOKEN || '',
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  pollMs = 25,
-}) {
+function createMcpHandler(agentDir, token, timeoutMs, pollMs) {
   if (!agentDir || typeof agentDir !== 'string') throw new Error('mcp_bridge_agent_dir_required');
   const dir = resolve(agentDir);
   const toolsFile = dir + '/mcp-tools.json';
   const dispatch = createToolDispatch(dir, { token, kind: 'mcp_tool', timeoutMs, pollMs });
   const inFlight = new Map();
-  let framing = null; // 'line' | 'content-length'
-  let buffer = Buffer.alloc(0);
-  let closed = false;
-
-  const send = payload => {
-    if (closed) return;
-    const json = JSON.stringify(payload);
-    if (framing === 'content-length') {
-      const bytes = Buffer.from(json, 'utf8');
-      output.write(`Content-Length: ${bytes.length}\r\n\r\n`);
-      output.write(bytes);
-    } else {
-      output.write(json + '\n');
-    }
-  };
 
   const loadTools = async () => {
     const raw = await readFile(toolsFile, 'utf8').catch(err => {
@@ -84,7 +60,7 @@ export function startMcpBridge({
       }));
   };
 
-  const handleMessage = async message => {
+  const handleMessage = async (message, send, signal) => {
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       send({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'invalid_request' } });
       return;
@@ -94,7 +70,7 @@ export function startMcpBridge({
     const isNotification = id === undefined;
 
     if (method === 'notifications/cancelled') {
-      const targetKey = params?.requestId !== undefined ? String(params.requestId) : null;
+      const targetKey = params?.requestId !== undefined ? JSON.stringify(params.requestId) : null;
       if (targetKey && inFlight.has(targetKey)) inFlight.get(targetKey).abort();
       return;
     }
@@ -156,20 +132,24 @@ export function startMcpBridge({
         ? params.arguments
         : {};
       const controller = new AbortController();
-      const key = String(id);
+      const key = JSON.stringify(id);
+      if (inFlight.has(key)) {
+        send({ jsonrpc: '2.0', id, error: { code: -32600, message: 'request_id_in_use' } });
+        return;
+      }
       inFlight.set(key, controller);
       try {
         // Always forward to control plane even when not in tools/list so unapproved attempts
         // are authoritatively rejected and recorded as capability_denied.
-        const reply = await dispatch(name, args, { signal: controller.signal, token, timeoutMs });
-        if (controller.signal.aborted) return;
+        const reply = await dispatch(name, args, { signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, token, timeoutMs });
+        if (controller.signal.aborted || signal?.aborted) return;
         send({
           jsonrpc: '2.0',
           id,
           result: buildMcpToolResult(reply),
         });
       } catch (err) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !signal?.aborted) {
           send({
             jsonrpc: '2.0',
             id,
@@ -185,6 +165,104 @@ export function startMcpBridge({
     send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'method_not_found' } });
   };
 
+  return {
+    handleMessage,
+    close() {
+      for (const controller of inFlight.values()) controller.abort();
+      inFlight.clear();
+    },
+  };
+}
+
+/** Stateless Streamable HTTP. The bearer authenticates the same run as the stdio bridge. */
+export async function startMcpHttp({ agentDir, token, signal, timeoutMs = DEFAULT_TIMEOUT_MS, pollMs = 25 }) {
+  if (!token) throw new Error('mcp_http_token_required');
+  const expected = Buffer.from(`Bearer ${token}`);
+  const handler = createMcpHandler(agentDir, token, timeoutMs, pollMs);
+  let authority;
+  const server = createServer(async (req, res) => {
+    const reply = (status, payload) => {
+      if (res.destroyed || res.writableEnded) return;
+      if (payload === undefined) res.writeHead(status).end();
+      else res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
+    };
+    if (req.headers.host !== authority || (req.headers.origin && req.headers.origin !== `http://${authority}`)) return reply(403);
+    if (req.url !== '/mcp') return reply(404);
+    const presented = Buffer.from(req.headers.authorization ?? '');
+    if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) return reply(401);
+    if (req.method !== 'POST') {
+      res.setHeader('Allow', 'POST');
+      return reply(405);
+    }
+    if ((req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') return reply(415);
+    const controller = new AbortController();
+    res.once('close', () => controller.abort());
+    let id = null;
+    try {
+      const chunks = [];
+      let length = 0;
+      for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+        length += chunk.length;
+        if (length > MAX_FRAME_BYTES) {
+          res.setHeader('Connection', 'close');
+          return reply(413);
+        }
+        chunks.push(chunk);
+      }
+      let message;
+      try { message = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { return reply(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse_error' } }); }
+      id = message?.id ?? null;
+      if (message?.jsonrpc !== '2.0' || Array.isArray(message)) {
+        return reply(400, { jsonrpc: '2.0', id, error: { code: -32600, message: 'invalid_request' } });
+      }
+      await handler.handleMessage(message, payload => reply(200, payload), controller.signal);
+      reply(202);
+    } catch {
+      reply(500, { jsonrpc: '2.0', id, error: { code: -32603, message: 'mcp_dispatch_failed' } });
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  authority = `127.0.0.1:${server.address().port}`;
+  let closing;
+  const close = () => closing ??= new Promise(resolveClose => {
+    signal?.removeEventListener('abort', close);
+    handler.close();
+    server.close(resolveClose);
+    server.closeAllConnections();
+  });
+  signal?.addEventListener('abort', close, { once: true });
+  if (signal?.aborted) await close();
+  return { url: `http://${authority}/mcp`, close };
+}
+
+/** Starts the stdio MCP server over newline or Content-Length framing. */
+export function startMcpBridge({
+  agentDir,
+  input = process.stdin,
+  output = process.stdout,
+  token = process.env.BOT_RUN_TOKEN || '',
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  pollMs = 25,
+}) {
+  const handler = createMcpHandler(agentDir, token, timeoutMs, pollMs);
+  let framing = null;
+  let buffer = Buffer.alloc(0);
+  let closed = false;
+
+  const send = payload => {
+    if (closed) return;
+    const json = JSON.stringify(payload);
+    if (framing === 'content-length') {
+      const bytes = Buffer.from(json, 'utf8');
+      output.write(`Content-Length: ${bytes.length}\r\n\r\n`);
+      output.write(bytes);
+    } else {
+      output.write(json + '\n');
+    }
+  };
+
   const dispatchFrame = rawText => {
     const trimmed = rawText.trim();
     if (!trimmed) return;
@@ -195,10 +273,10 @@ export function startMcpBridge({
       send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse_error' } });
       return;
     }
-    if (Array.isArray(parsed)) {
-      for (const item of parsed) void handleMessage(item);
-    } else {
-      void handleMessage(parsed);
+    for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
+      void handler.handleMessage(item, send).catch(() => {
+        send({ jsonrpc: '2.0', id: item?.id ?? null, error: { code: -32603, message: 'mcp_dispatch_failed' } });
+      });
     }
   };
 
@@ -261,8 +339,7 @@ export function startMcpBridge({
     if (closed) return;
     closed = true;
     input.off('data', onData);
-    for (const controller of inFlight.values()) controller.abort();
-    inFlight.clear();
+    handler.close();
   };
 
   input.on('data', onData);

@@ -122,6 +122,7 @@ test('新增角色、删除内置角色（含 Coordinator）并重载，只有 M
     await goRolePage(page, { role: 'security' });
     await (await promptEditor(page, '角色提示词')).fill('检查输入边界并记录证据。');
     await openRoleFormAdvanced(page);
+    await page.getByLabel('security Agent 后端', { exact: true }).selectOption('container_acp');
     await page.getByLabel('security 项目任务与协作权限', { exact: true }).selectOption('read');
     await consoleSave(page).click();
     // The first save leaves the defaults (#1068).

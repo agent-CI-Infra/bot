@@ -1,0 +1,24 @@
+export interface AcpProductLaunch {
+  args: string[];
+  mcp: 'http' | 'stdio';
+  access: 'full' | 'native';
+  untrustedCheckout: boolean;
+  env: Record<string, string>;
+  answers: Record<string, unknown>;
+  sidecars: {name: string; args: string[]; healthPath: string}[];
+}
+export interface AcpProductManifest {
+  schema: 'bot.acp-product/1';
+  id: string;
+  version: string;
+  python: string;
+  interpreter?: string;
+  source: string;
+  sourceSha256: string;
+  lockSha256: string;
+  launch: AcpProductLaunch;
+}
+export const acpProductId: RegExp;
+export const acpVersion: RegExp;
+export function validateAcpLaunch(launch: unknown): AcpProductLaunch;
+export function readAcpProduct(root: string, id: string, version?: string): AcpProductManifest;

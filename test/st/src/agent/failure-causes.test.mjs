@@ -43,6 +43,10 @@ test('causes separate outages, GitHub settings, GitHub refusals, the model, the 
   const waiting=explainFailure('github_response_unknown','retry_wait'),gaveUp=explainFailure('github_response_unknown','failed');
   assert.deepEqual([waiting.label,waiting.automatic],['外部服务或网络波动',true]);assert.match(waiting.action,/自动重试/);assert.match(gaveUp.action,/点「重试」/);
   assert.match(explainFailure('github_permission_403','waiting_permission').action,/GitHub App/);
+  const acp = explainFailure('acp_product_not_installed','waiting_configuration');
+  assert.deepEqual([acp.cause, acp.automatic, acp.attempt_retry], ['environment', true, false]);
+  assert.match(acp.action,/agent-tools 卷安装并选定兼容的 ACP 产品版本/);
+  for (const code of ['acp_lease_expired', 'acp_process_exited', 'disk_full']) assert.equal(failureCause(code), 'environment');
   assert.match(explainFailure('github_publication_unknown','waiting_publication').action,/先再查一次，确实没有才重新发送/);
   assert.match(explainFailure('tool_operation_conflict','failed').action,/反馈给 bot 维护者/);
   assert.match(explainFailure('pull_request_head_changed','superseded').action,/无需处理/);

@@ -41,7 +41,8 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
 在「项目设置 → 角色」配置项目协作角色（默认包含 Manager、Dev、Reviewer、Test、QA 等）：
 
 - **跟随默认与自定义**：未修改过的项目自动跟随当前版本的推荐配置（默认推荐 `Pi` 后端）；一旦保存自定义修改即转为项目独立版本，随时可点击「恢复默认」回到跟随内置默认（历史版本保留可查）。
-- **单页表单编辑**：支持按角色配置名称、启停状态、职责说明、完整可编辑提示词、Agent 后端（`pi`、`native`、`process`、`claude_code`、`codex`）、角色覆写模型、技能包、预算（轮次、输出 token、命令超时、累计用量上限）与逐项权限。Manager 与 QA 为必需角色，不可停用或删除。
+- **单页表单编辑**：支持按角色配置名称、启停状态、职责说明、完整可编辑提示词、Agent 后端（`pi`、`native`、`process`、`claude_code`、`codex`、`container_acp`）、角色覆写模型、技能包、预算（轮次、输出 token、命令超时、累计用量上限）与逐项权限。Manager 与 QA 为必需角色，不可停用或删除。
+- **容器内 ACP**：Dev、Test、Reviewer、UX 和自定义角色可选。管理员先安装并选定兼容产品，角色继续使用平台配置的模型和用量统计。Manager、Coordinator、QA 及服务角色的选项中没有该后端。当前交付已用 Python 协议替身验证。iCode 和 WorkSwarm 各自由后续集成提供预设。详见 [容器内 ACP](../design/agent-and-harness-runtime.md#容器内-acp)。
 - **两类细粒度权限**：
   - **平台权限**：`delegation`（委派角色）、`project_tasks`（其他任务读/写）、`project_memory`（项目共享知识读/写）。
   - **GitHub 资源权限**：`github_issues`、`github_pull_requests`、`github_actions`、`github_contents`（无/只读/读写），以及 `github_checks`、`github_statuses`（无/只读）。默认仅 Manager 具备 GitHub 写权限，其余内置角色只读。

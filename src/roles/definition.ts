@@ -5,7 +5,7 @@ import { stop, TaskError } from '../agent/common.js';
 import { selectedModel, visibleModel, openModel } from '../agent/model.js';
 import { rolePool, systemInstructions, roleTemplate, requiredRoles, configuredRoles } from './pool.js';
 import { roleKind, builtinKinds, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
-import { harnesses } from './harness.js';
+import { harnesses, runsInTaskCheckout } from './harness.js';
 import { defaultPermissions, migratePermissions, normalizePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
@@ -699,8 +699,8 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   if (!harnessOverride && harness.version !== definition.harness_ref.version) return stop('harness_version_unavailable', 'waiting_configuration', `${field}.harness_ref.version：固定的是 ${definition.harness_ref.version}，当前注册的是 ${harness.version}。`);
   const modelSource: HarnessModelSource = !harnessOverride ? (definition.harness_ref.model_source ?? 'gateway') : 'gateway';
   assertHarnessModelSourceImplemented(modelSource, `${field}.harness_ref.model_source`);
-  // Worker-only container CLIs must enforce their declared kinds even for legacy bindings and explicit overrides.
-  if(['claude_code','codex'].includes(harness.id)&&!harness.kinds.includes(definition.kind))return stop('harness_role_unsupported','waiting_configuration',`${field}.harness_ref.id：${harness.id} 未声明 ${definition.kind} 能力。`);
+  // Container backends must enforce their declared kinds even for legacy bindings and explicit overrides.
+  if(runsInTaskCheckout(harness)&&!harness.kinds.includes(definition.kind))return stop('harness_role_unsupported','waiting_configuration',`${field}.harness_ref.id：${harness.id} 未声明 ${definition.kind} 能力。`);
   // Resolve the model in order, and keep the precise reason when a configured one is not usable.
   let model: ReturnType<typeof openModel>, source: RoleSnapshot['model']['source'], profile: { api: string | null; tool_calls: boolean | null; structured_output: string | null } = { api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }, profileHash: string | null;
   const hasConfigOverride = (harness.id === 'claude_code' && Boolean(process.env.BOT_CLAUDE_CODE_CONFIG)) || (harness.id === 'codex' && Boolean(process.env.BOT_CODEX_CONFIG));
