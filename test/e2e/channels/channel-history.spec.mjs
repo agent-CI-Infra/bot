@@ -1,14 +1,16 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
-import { channelFixture, envelope, post } from '../../fixtures/channel-fixture.mjs';
+import { bindFixture, channelFixture, envelope, post } from '../../fixtures/channel-fixture.mjs';
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
-  test(`local chat history, coverage and explicit resync at ${viewport.width}px (protocol fixtures)`, async ({ page }) => {
+  test(`local chat history, connector filter, explicit resync and retention in Feishu conversations at ${viewport.width}px (#1228)`, async ({ page }) => {
     test.setTimeout(90000);
     const f = await channelFixture(), { h, service, id, wire } = f, errors = [];
     page.on('pageerror', e => errors.push(e.message));
     service.historySync.close();
     try {
+      wire.state.appName = '研发协作助手'; wire.state.tenantName = '示例企业';
+      h.store.run("UPDATE channel_connectors SET app_name='研发协作助手',tenant_name='示例企业' WHERE id=?", id);
       for (let i = 0; i < 125; i++) {
         const e = envelope(`discussion ${String(i).padStart(3, '0')}`, { sender: { sender_id: { open_id: 'user-' + i % 3 } },
           message: { chat_id: 'oc_continuous', chat_type: 'group', thread_id: i % 2 ? 'omt_fixture' : '', create_time: String(Date.now() - (130 - i) * 86400000) } });
@@ -17,19 +19,47 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       }
       const secret = envelope('确认绑定 fixture-private-confirmation', { message: { chat_id: 'oc_continuous', chat_type: 'group' } });
       await post(h, id, secret);
-      expect(h.store.get('SELECT count(*) n FROM channel_chats').n).toBe(1);
-      await page.setViewportSize(viewport); await page.goto(h.admin + '/#/settings/feishu/' + id + '/4');
-      await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+      const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_continuous'");
+      expect(chat).toBeTruthy();
+
+      // Step 1: Feishu app detail page no longer embeds the large local-history form; it links to #/conversations?connector=<id>.
+      await page.setViewportSize(viewport);
+      await page.goto(h.admin + '/#/settings/feishu/' + id);
+      await page.getByLabel('用户名', { exact: true }).fill('administrator');
+      await page.getByLabel('密码', { exact: true }).fill(f.password);
       await page.getByRole('button', { name: '登录', exact: true }).click();
-      await expect(page.getByRole('heading', { name: '本地消息与历史同步' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '连接健康与收发记录', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '本地消息与历史同步' })).toHaveCount(0);
+      const convLink = page.getByRole('link', { name: '查看该应用的飞书会话', exact: true });
+      await expect(convLink).toHaveAttribute('href', '#/conversations?connector=' + id);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      mkdirSync('.tmp/issue-1228', { recursive: true });
+      await convLink.evaluate(node => node.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: `.tmp/issue-1228/app-detail-${viewport.width}.png` });
+
+      // Step 2: Follow the link into #/conversations?connector=<id>, verify active connector filter and open the chat.
+      await convLink.click();
+      await expect(page).toHaveURL(new RegExp('#/conversations\\?connector=' + id + '$'));
+      await expect(page.locator('.channel-filter-banner')).toContainText('按应用筛选：研发协作助手 · 示例企业');
+      await expect(page.getByRole('link', { name: '显示全部会话', exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/issue-1228/conversations-filter-${viewport.width}.png` });
+      await page.locator('.channel-chat-choice').first().click();
+      await expect(page).toHaveURL(new RegExp('#/conversations/' + chat.id + '\\?connector=' + id + '$'));
+
+      // Step 3: Expand local search inside the conversation and verify full search, pagination, attachments, and redaction.
+      const searchFold = page.locator('.channel-local-search');
+      await searchFold.locator('summary').click();
       const results = page.getByLabel('本地消息搜索结果');
-      await expect(results).toContainText('discussion 000'); await expect(results.locator('article')).toHaveCount(50);
+      await expect(results).toContainText('discussion 000');
+      await expect(results.locator('article')).toHaveCount(50);
       await expect(results).toContainText('附件：image-1 · 待下载');
       expect(wire.state.resourceRequests).toHaveLength(0);
       await page.getByRole('button', { name: '读取下一页本地消息' }).click();
       await expect(results.locator('article')).toHaveCount(100);
       await page.getByRole('button', { name: '读取下一页本地消息' }).click();
-      await expect(results.locator('article')).toHaveCount(126); await expect(results).toContainText('discussion 124');
+      await expect(results.locator('article')).toHaveCount(126);
+      await expect(results).toContainText('discussion 124');
       await expect(results).not.toContainText('fixture-private-confirmation');
       await page.getByLabel('发送者 ID', { exact: true }).fill('user-1');
       await page.getByRole('button', { name: '搜索本地记录', exact: true }).click();
@@ -38,15 +68,47 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await page.getByRole('button', { name: '搜索本地记录', exact: true }).click();
       await expect(results).toContainText('这不代表飞书历史中从未存在');
       expect(wire.state.historyRequests).toHaveLength(0);
-      await page.getByRole('button', { name: '显式重新同步可见历史' }).click();
-      await expect(page.getByRole('status').filter({ hasText: '同步：正在同步' })).toBeVisible();
-      await page.getByLabel('保留天数（留空保留至显式清理）').fill('30');
-      await page.getByRole('button', { name: '保存本地保留策略' }).click();
-      await expect(page.getByRole('status').filter({ hasText: '保留策略：30 天' })).toBeVisible();
-      expect(wire.state.historyRequests).toHaveLength(0); expect(wire.sent).toHaveLength(0);
+
+      // Step 4: Expand sync & usage details and trigger explicit visible-history resync.
+      const syncFold = page.locator('.channel-sync-details');
+      await syncFold.locator('summary').click();
+      await syncFold.getByRole('button', { name: '显式重新同步可见历史', exact: true }).click();
+      await expect(syncFold.getByRole('status')).toContainText('同步：正在同步');
+      await syncFold.evaluate(node => node.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: `.tmp/issue-1228/conversations-sync-${viewport.width}.png` });
+
+      // Step 5: Expand super-admin retention & cleanup panel, save retention days, and verify cleanup confirm dialog.
+      const retentionFold = page.locator('.channel-retention-details');
+      await retentionFold.locator('summary').click();
+      await retentionFold.getByLabel('保留天数（留空保留至显式清理）').fill('30');
+      await retentionFold.getByRole('button', { name: '保存本地保留策略', exact: true }).click();
+      await expect(retentionFold.getByRole('status')).toContainText('保留策略：30 天');
+      expect(wire.state.historyRequests).toHaveLength(0);
+      expect(wire.sent).toHaveLength(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      mkdirSync('.tmp/channel-history-245', { recursive: true });
-      await page.screenshot({ path: `.tmp/channel-history-245/history-${viewport.width}.png`, fullPage: true });
+      await retentionFold.evaluate(node => node.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: `.tmp/issue-1228/conversations-admin-${viewport.width}.png` });
+
+      // Step 6: Non-super-admin personal chat owner sees local search & resync, but NEVER sees super-admin retention/cleanup.
+      const ordinary = await f.member('conv-owner-e2e', { repository_ids: ['101'] });
+      bindFixture(h, id, ordinary.id, 'ou_e2e_owner');
+      await post(h, id, envelope('my private message', { sender: { sender_id: { open_id: 'ou_e2e_owner' } }, message: { chat_id: 'oc_e2e_owner', chat_type: 'p2p' } }));
+      const p2pChat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_e2e_owner'");
+      await page.evaluate(() => api('/api/auth/logout', 'POST', {}));
+      await page.goto(h.admin + '/#/conversations/' + p2pChat.id);
+      await page.reload();
+      await page.getByLabel('用户名', { exact: true }).fill('conv-owner-e2e');
+      await page.getByLabel('密码', { exact: true }).fill(ordinary.password);
+      await page.getByRole('button', { name: '登录', exact: true }).click();
+      await expect(page.getByRole('heading', { name: '飞书会话', exact: true })).toBeVisible();
+      await expect(page.locator('.channel-retention-details')).toBeHidden();
+      await page.locator('.channel-sync-details summary').click();
+      await expect(page.getByRole('button', { name: '显式重新同步可见历史', exact: true })).toBeVisible();
+      await page.locator('.channel-local-search summary').click();
+      await expect(page.getByLabel('本地消息搜索结果')).toContainText('my private message');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.locator('.channel-local-search').evaluate(node => node.scrollIntoView({ block: 'start' }));
+      await page.screenshot({ path: `.tmp/issue-1228/conversations-member-${viewport.width}.png` });
       expect(errors).toEqual([]);
     } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
   });

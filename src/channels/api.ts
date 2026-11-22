@@ -16,7 +16,8 @@ export class ChannelApi {
     const console = new ChannelConsole(this.service);
     const chatName = /^\/api\/channels\/chats\/([a-f0-9]{48})\/name$/.exec(path);
     if (chatName && method === 'POST') { fields(input, []); return console.refreshName(actor, chatName[1]!); }
-    if (path === '/api/channels/conversations' && method === 'GET') return console.list(actor, Number(url.searchParams.get('offset') ?? 0));
+    if (path === '/api/channels/conversations' && method === 'GET')
+      return console.list(actor, Number(url.searchParams.get('offset') ?? 0), url.searchParams.get('connector_id') || undefined);
     const consoleChat = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(timeline|tasks|turns\/([a-f0-9]{48}))$/.exec(path);
     if (consoleChat && method === 'GET') {
       if (consoleChat[2] === 'timeline') return console.timeline(actor, consoleChat[1]!, url);
@@ -92,7 +93,8 @@ export class ChannelApi {
           this.service.ledger.cleanup(id, Number(input.before), Number(input.expected_revision));
           store.audit(actor.principal_id, 'channel.history.cleaned', id);
         } else if (method !== 'GET') return fail(405, 'method_not_allowed');
-        return this.service.ledger.diagnostics(id);
+        const currentRevision = Number(store.get('SELECT revision FROM channel_chats WHERE id=?', id)?.revision ?? chat.revision);
+        return { ...this.service.ledger.diagnostics(id), revision: currentRevision };
       }
       return fail(405, 'method_not_allowed');
     }

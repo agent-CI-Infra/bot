@@ -6,6 +6,7 @@ import type { Row, Store } from '../storage/database.js';
 import type { ChannelEvent } from './types.js';
 import type { ChannelService } from './service.js';
 import { chatProfile } from './profiles.js';
+import { canManageApplication } from './applications.js';
 import { managementAssistant } from '../service-roles/roles.js';
 import { commands } from '../management/catalog.js';
 import { managementFailure, managementStates } from '../management/presentation.js';
@@ -51,16 +52,30 @@ export class ChannelConsole {
     const owner = chat.chat_type !== 'p2p' || this.service.store.get('SELECT 1 FROM channel_personal_owners WHERE chat_id=? AND principal_id=?', chat.id, actor.principal_id);
     return { ...profile, ...(owner ? {} : { binding_id: null, can_refresh_name: false }) };
   }
-  list(actor: ActorContext, offset: number): Json {
+  list(actor: ActorContext, offset: number, connectorId?: string): Json {
     pageOffset(offset);
     const store = this.service.store;
-    const chats = store.all('SELECT h.*,c.app_name,c.tenant_name,c.enabled AS connection_enabled FROM channel_chats h LEFT JOIN channel_connectors c ON c.id=h.connector_id ORDER BY h.last_received_at DESC,h.id')
-      .filter(chat => { try { this.chat(actor, chat.id); return true; } catch (error) { if (denied(error)) return false; throw error; } });
-    return { conversations: chats.slice(offset, offset + 50).map(chat => ({ id: chat.id, chat_id: chat.chat_id, type: chat.chat_type,
+    const all = store.all(
+      `SELECT h.*,c.app_name,c.tenant_name,c.enabled AS connection_enabled FROM channel_chats h
+       LEFT JOIN channel_connectors c ON c.id=h.connector_id
+       ${connectorId ? 'WHERE h.connector_id=?' : ''}
+       ORDER BY h.last_received_at DESC,h.id`,
+      ...(connectorId ? [connectorId] : []),
+    );
+    const chats = all.filter(chat => { try { this.chat(actor, chat.id); return true; } catch (error) { if (denied(error)) return false; throw error; } });
+    let connector: Json | null = null;
+    if (connectorId) {
+      const row = store.get('SELECT id,app_id,app_name,tenant_name,owner_tenant,created_by FROM channel_connectors WHERE id=?', connectorId);
+      if (row && (chats.length > 0 || canManageApplication(actor, row))) {
+        connector = { id: row.id, app_name: row.app_name || '', tenant_name: row.tenant_name || '' };
+      }
+    }
+    return { conversations: chats.slice(offset, offset + 50).map(chat => ({ id: chat.id, chat_id: chat.chat_id, connector_id: chat.connector_id, type: chat.chat_type,
       ...this.profile(actor, chat), state: chat.state, connection_enabled: !!chat.connection_enabled,
       last_received_at: chat.last_received_at, binding: chat.chat_type === 'group' ? this.service.serviceBindings.get(chat.id)?.enabled === 1 : null })),
       total: chats.length, next_offset: offset + 50 < chats.length ? offset + 50 : null,
-      counts: { private: chats.filter(c => c.chat_type === 'p2p').length, group: chats.filter(c => c.chat_type === 'group').length } };
+      counts: { private: chats.filter(c => c.chat_type === 'p2p').length, group: chats.filter(c => c.chat_type === 'group').length },
+      ...(connectorId ? { connector } : {}) };
   }
   /** Session rotations keep old inbox/message links, so a logical private chat includes its earlier management sessions. */
   private personalSessions(chat: Row): string[] {
@@ -160,8 +175,15 @@ export class ChannelConsole {
       });
       return { ...turn, messages: progress, ...(rawState ? { state: rawState, state_label: turn.state } : {}), delivery: delivery ? { state: delivery.state, error: delivery.last_error } : null };
     });
+    let canSync = false;
+    if (chat.state === 'active') {
+      try { this.service.authorizeHistory(actor, id); this.service.connector(chat.connector_id); canSync = true; } catch {}
+    }
+    let canManageRetention = false;
+    try { authorize(actor, 'platform.manage'); canManageRetention = true; } catch {}
     return { ...messages, conversation,
-      chat: { id, chat_id: chat.chat_id, type: chat.chat_type, ...this.profile(actor, chat) }, read_at: Date.now() };
+      chat: { id, chat_id: chat.chat_id, connector_id: chat.connector_id, type: chat.chat_type, state: chat.state, revision: chat.revision,
+        can_sync: canSync, can_manage_retention: canManageRetention, ...this.profile(actor, chat) }, read_at: Date.now() };
   }
   /** Event metadata is paginated independently of message history, so a long turn cannot silently truncate. */
   events(actor: ActorContext, chatId: string, turnId: string, after: number): Json {

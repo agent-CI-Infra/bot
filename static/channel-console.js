@@ -106,10 +106,13 @@ const channelTime = value => timestamp(typeof value === 'number' ? value : Date.
 async function renderChannelConsole(request) {
   const page = $('console-page'), owner = me, address = location.hash, root = element('div', '', 'channel-console');
   const alive = () => renderVersion === request && me === owner && location.hash === address && root.isConnected && root.contains(thread);
-  const selected = /^#\/conversations\/([a-f0-9]{48})$/.exec(address)?.[1];
+  const [hashPath, hashQuery = ''] = address.split('?');
+  const selected = /^#\/conversations\/([a-f0-9]{48})$/.exec(hashPath)?.[1];
+  const connectorFilter = new URLSearchParams(hashQuery).get('connector') || '';
+  const conversationHref = id => `#/conversations/${id}${connectorFilter ? '?connector=' + encodeURIComponent(connectorFilter) : ''}`;
   const head = element('div', '', 'console-page-head'), headTop = element('div', '', 'feishu-section-head');
   headTop.append(element('h1', '飞书会话'), channelLink('#/identity/feishu', '返回飞书绑定', 'button-link quiet'));
-  head.append(element('p', '消息与执行', 'eyebrow'), headTop, note('在同一处查看成员消息、助手执行过程和派生任务。'));
+  head.append(element('p', '消息与执行', 'eyebrow'), headTop, note('在同一处查看成员消息、助手执行过程、派生任务与本地消息同步。'));
   const layout = element('div', '', 'channel-console-layout'), sidebar = element('aside', '', 'channel-chat-list'), thread = element('section', '', 'channel-thread'), related = element('aside', '', 'channel-related');
   sidebar.setAttribute('aria-label', '可查看的飞书会话'); thread.setAttribute('aria-label', '当前飞书会话'); related.setAttribute('aria-label', '会话派生任务');
   layout.append(sidebar, thread, related); root.append(head, layout); page.replaceChildren(root);
@@ -120,16 +123,21 @@ async function renderChannelConsole(request) {
     } else target.replaceChildren(consoleState('会话读取失败', readErrorText(err), { tone: 'error', retry }));
   };
   let allChats = [], listOffset = 0, pending = false, messageCursor = null, turnOffset = null, taskOffset = 0, sampledAt = null;
+  let currentChatRevision = null, retentionSeeded = false, searchController = null;
   const search = input('conversation_search', '', { type: 'search', placeholder: '搜索姓名、群名、企业或机器人' }); search.setAttribute('aria-label', '搜索飞书会话');
   const kind = document.createElement('select'); kind.setAttribute('aria-label', '会话类型'); for (const [value, label] of [['', '全部会话'], ['group', '群聊'], ['p2p', '私聊']]) kind.add(new Option(label, value));
+  const filterBanner = element('div', '', 'channel-filter-banner'), filterLabel = element('span', ''), filterClear = channelLink(selected ? '#/conversations/' + selected : '#/conversations', '显示全部会话', 'button-link quiet');
+  filterBanner.append(filterLabel, filterClear);
+  filterBanner.hidden = !connectorFilter;
+  if (connectorFilter) filterLabel.textContent = '当前按飞书应用筛选';
   const listStatus = note('正在读取…'), chatList = element('div'), listMore = button('更多会话', () => readList(true), 'quiet'); listMore.hidden = true;
   const chooser = element('details', '', 'channel-chooser'); chooser.open = !selected || !consoleMedia.matches;
-  chooser.append(element('summary', '切换或搜索会话'), field('搜索', search), field('类型', kind), listStatus, chatList, listMore);
+  chooser.append(element('summary', '切换或搜索会话'), filterBanner, field('搜索', search), field('类型', kind), listStatus, chatList, listMore);
   sidebar.append(element('h2', '会话'), chooser);
   const drawList = () => {
     const keyword = search.value.trim().toLocaleLowerCase(); chatList.replaceChildren();
     for (const chat of allChats.filter(c => (!kind.value || c.type === kind.value) && `${c.display_name} ${c.app_name} ${c.tenant_name} ${c.organization_name} ${c.chat_id}`.toLocaleLowerCase().includes(keyword))) {
-      const row = element('article'), link = channelLink('#/conversations/' + chat.id, '', 'console-link'), name = element('strong'), context = element('small');
+      const row = element('article'), link = channelLink(conversationHref(chat.id), '', 'console-link'), name = element('strong'), context = element('small');
       const describe = () => { name.textContent = `${chat.type === 'p2p' ? '私聊' : '群聊'} · ${channelChatName(chat)}`; context.textContent = `${chat.tenant_name || '企业名称暂未获取'} · ${chat.app_name || '机器人名称暂未获取'}${chat.organization_name ? ' · 应用所属组织：' + chat.organization_name : ''}`; };
       describe(); link.append(name, context);
       link.classList.add('channel-chat-choice'); if (chat.id === selected) link.setAttribute('aria-current', 'page');
@@ -138,18 +146,24 @@ async function renderChannelConsole(request) {
         channelProfileDetails(chat, () => { describe(); if (chat.id === selected) conversationTitle.textContent = channelChatName(chat); }));
       row.append(link, details); chatList.append(row);
     }
-    if (!chatList.childElementCount) chatList.append(note('当前已加载范围没有匹配会话。'));
+    if (!chatList.childElementCount) chatList.append(note(connectorFilter ? '该飞书应用暂无匹配的可见会话。' : '当前已加载范围没有匹配会话。'));
   }; search.addEventListener('input', drawList); kind.addEventListener('change', drawList);
   async function readList(more = false) {
     listMore.disabled = true;
     try {
-      const result = await api('/api/channels/conversations?offset=' + (more ? listOffset : 0)); if (!alive()) return;
+      const query = new URLSearchParams({ offset: String(more ? listOffset : 0) });
+      if (connectorFilter) query.set('connector_id', connectorFilter);
+      const result = await api('/api/channels/conversations?' + query); if (!alive()) return;
       allChats = more ? [...allChats, ...result.conversations] : result.conversations; listOffset = result.next_offset;
+      if (connectorFilter) {
+        const label = result.connector?.app_name ? `${result.connector.app_name}${result.connector.tenant_name ? ' · ' + result.connector.tenant_name : ''}` : '指定飞书应用';
+        filterLabel.textContent = '按应用筛选：' + label;
+      }
       listStatus.textContent = `有权查看 ${result.total} 个 · 群聊 ${result.counts.group} · 私聊 ${result.counts.private}`; listMore.hidden = listOffset === null; drawList();
     } catch (err) { failRead(chatList, err, () => readList(more)); } finally { listMore.disabled = false; }
   }
   if (!selected) {
-    thread.append(consoleState('选择一个飞书会话', '左侧列出你有权查看的群聊和私聊，也可从「飞书绑定」点击任意绑定直接进入。'));
+    thread.append(consoleState('选择一个飞书会话', connectorFilter ? '左侧列出该飞书应用下你有权查看的群聊和私聊，点击任意会话可查看消息、同步历史或配置保留策略。' : '左侧列出你有权查看的群聊和私聊，也可从「飞书绑定」或「飞书连接」直接进入。'));
     related.append(consoleState('执行与任务', '选择会话后，可查看助手步骤、独立任务与交给项目团队的任务。'));
     await readList(); return;
   }
@@ -162,16 +176,90 @@ async function renderChannelConsole(request) {
   const history = element('div', '', 'channel-messages'); history.setAttribute('aria-label', '消息与执行时间线'); history.setAttribute('tabindex', '0');
   const older = element('div', '', 'actions channel-history-actions'), moreMessages = button('更早消息', () => update('messages'), 'quiet'), moreTurns = button('更早执行回合', () => update('turns'), 'quiet');
   moreMessages.hidden = moreTurns.hidden = true; older.append(moreMessages, moreTurns);
-  const diagnostics = element('details', '', 'fold channel-sync-details'), diagnosticText = note(''); diagnostics.append(element('summary', '同步与用量说明'), diagnosticText);
+  const diagnostics = element('details', '', 'fold channel-sync-details'), diagnosticText = note('');
+  const syncStatus = element('p', '', 'muted'); syncStatus.setAttribute('role', 'status');
+  const syncActions = element('div', '', 'actions');
+  const resyncBtn = button('显式重新同步可见历史', async () => {
+    resyncBtn.disabled = true;
+    try {
+      const res = await api(`/api/channels/chats/${selected}/sync`, 'POST', { full: true });
+      if (!alive()) return;
+      syncStatus.textContent = `同步：${channelSyncText(res.sync_state)}。已提交可见历史重新同步请求。`;
+      await update();
+      if (searchController) await searchController.refresh();
+    } catch (err) {
+      if (alive()) syncStatus.textContent = employeeError(readErrorText(err));
+    } finally {
+      if (alive()) resyncBtn.disabled = false;
+    }
+  }, 'quiet');
+  syncActions.append(resyncBtn); syncActions.hidden = true;
+  diagnostics.append(element('summary', '同步与用量说明'), diagnosticText, syncActions, syncStatus);
   const localSearch = element('details', '', 'fold channel-local-search'), searchBody = element('div');
   localSearch.append(element('summary', '搜索本地消息记录'), searchBody);
   localSearch.addEventListener('toggle', () => {
     if (localSearch.open && !localSearch.dataset.loaded) {
       localSearch.dataset.loaded = '1';
-      void channelEmployeeHistory({ chat_id: selected }, searchBody).catch(error);
+      void channelEmployeeHistory({ chat_id: selected }, searchBody, alive).then(ctrl => { if (alive()) searchController = ctrl; }).catch(error);
     }
   });
-  thread.append(toolbar, older, history, diagnostics, localSearch, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
+  const retentionDetails = element('details', '', 'fold channel-retention-details');
+  retentionDetails.hidden = true;
+  const retentionStatus = element('p', '', 'muted'); retentionStatus.setAttribute('role', 'status');
+  const retentionForm = element('form', '', 'project-form');
+  const retentionDays = channelField(retentionForm, '保留天数（留空保留至显式清理）', 'days', '', 'number');
+  retentionDays.min = '1'; retentionDays.max = '3650';
+  const retentionBefore = channelField(retentionForm, '显式清理此时间之前的记录', 'before', '', 'datetime-local');
+  const retentionActions = element('div', '', 'actions');
+  const saveRetentionBtn = button('保存本地保留策略', async () => {
+    if (currentChatRevision === null) return;
+    saveRetentionBtn.disabled = true;
+    try {
+      const value = retentionDays.value.trim() ? Number(retentionDays.value.trim()) : null;
+      const res = await api(`/api/channels/chats/${selected}/retention`, 'PUT', { days: value, expected_revision: currentChatRevision });
+      if (!alive()) return;
+      if (res.revision !== undefined) currentChatRevision = res.revision;
+      retentionStatus.textContent = `保留策略：${res.retention.days === null ? '保留至管理员显式清理' : res.retention.days + ' 天'}。`;
+      await update();
+      if (searchController) await searchController.refresh();
+    } catch (err) {
+      if (alive()) retentionStatus.textContent = readErrorText(err);
+    } finally {
+      if (alive()) saveRetentionBtn.disabled = false;
+    }
+  }, 'quiet');
+  const cleanRetentionBtn = button('清理指定时间之前的本地记录', async () => {
+    if (currentChatRevision === null) return;
+    if (!retentionBefore.value) { retentionStatus.textContent = '请先选择要清理的时间点。'; return; }
+    const beforeMs = new Date(retentionBefore.value).getTime();
+    if (!Number.isFinite(beforeMs)) { retentionStatus.textContent = '请选择有效的时间点。'; return; }
+    const confirmed = await askConfirm({
+      title: '清理本地消息记录',
+      body: ['清理会删除此时间之前的本地消息原文、附件文件及派生摘要，并保留覆盖边界。此操作不可撤销。'],
+      action: '确认清理',
+      danger: true,
+      run: async () => {
+        const res = await api(`/api/channels/chats/${selected}/retention`, 'DELETE', { before: beforeMs, expected_revision: currentChatRevision });
+        if (res.revision !== undefined) currentChatRevision = res.revision;
+        return res;
+      },
+    });
+    if (confirmed && alive()) {
+      retentionStatus.textContent = `已清理 ${timestamp(beforeMs)} 之前的本地记录。保留策略：${confirmed.retention?.days === null ? '保留至管理员显式清理' : confirmed.retention?.days + ' 天'}。`;
+      await update();
+      if (searchController) await searchController.refresh();
+    }
+  }, 'quiet destructive');
+  retentionActions.append(saveRetentionBtn, cleanRetentionBtn);
+  retentionForm.addEventListener('submit', e => { e.preventDefault(); saveRetentionBtn.click(); });
+  retentionForm.append(retentionActions);
+  retentionDetails.append(
+    element('summary', '本地保留与清理'),
+    note('仅超级管理员可配置按会话保留天数或显式清理指定时间之前的本地记录；清理后原文与摘要不可恢复，覆盖边界保留。'),
+    retentionStatus,
+    retentionForm,
+  );
+  thread.append(toolbar, older, history, diagnostics, localSearch, retentionDetails, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
   let messages = new Map(), turns = new Map(), tasks = new Map(), refreshTimer, conversationMode;
   const time = value => typeof value === 'number' ? value : Date.parse(value);
   function drawTimeline() {
@@ -286,7 +374,17 @@ async function renderChannelConsole(request) {
           contextActions.append(channelLink('#/management', '打开管理助手与执行记录', 'button-link quiet'));
         }
       }
-      diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
+      diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。保留策略：${result.retention?.days === null || result.retention?.days === undefined ? '保留至管理员显式清理' : result.retention.days + ' 天'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
+      syncActions.hidden = !result.chat.can_sync;
+      currentChatRevision = result.chat.revision ?? currentChatRevision;
+      retentionDetails.hidden = !result.chat.can_manage_retention;
+      if (result.chat.can_manage_retention) {
+        if (!retentionSeeded) {
+          retentionSeeded = true;
+          retentionDays.value = result.retention?.days == null ? '' : String(result.retention.days);
+          retentionStatus.textContent = `保留策略：${result.retention?.days == null ? '保留至管理员显式清理' : result.retention.days + ' 天'}。`;
+        }
+      }
       drawTimeline(); await readTasks();
     } catch (err) {
       if (sampledAt && ![401, 403, 404].includes(err.status) && alive()) status.textContent = `刷新失败：${readErrorText(err)}。保留 ${channelTime(sampledAt)} 的旧记录，可能已过期。`;

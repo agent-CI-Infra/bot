@@ -51,7 +51,7 @@ function addressTab(hash) {
   // #224-A: the component/state sample page. It has an address of its own so a deep link works, and no #tabs entry:
   // it is the reviewed evidence surface for the design tokens, not a feature users navigate to.
   if (hash === '#/design') return 'design';
-  const name = /^#\/([a-z]+)(?:\/|$)/.exec(hash)?.[1];
+  const name = /^#\/([a-z]+)(?:\/|\?|$)/.exec(hash)?.[1];
   return ['accounts', 'users'].includes(name) ? 'settings' : tabAddresses[name] ? name : null;
 }
 // #936: the address whose page was painted last. A dialog opened from that page belongs to it, so a real address
