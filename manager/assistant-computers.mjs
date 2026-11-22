@@ -38,12 +38,13 @@ export const abandonAfterMs = 120_000;
 const ticketMs = 15_000;
 // Runner operations an assistant computer accepts: a shell command in /workspace, file access below HOME, /workspace and /tmp.
 const types = ['command', 'assistant_read', 'assistant_write', 'assistant_delete'];
-const keys = { command: ['command', 'timeout_ms'], assistant_read: ['path', 'offset', 'limit'], assistant_write: ['path', 'base64', 'offset'], assistant_delete: ['path'] };
+const keys = { command: ['command', 'timeout_ms', 'keep_background'], assistant_read: ['path', 'offset', 'limit'], assistant_write: ['path', 'base64', 'offset'], assistant_delete: ['path'] };
 
 function validateCall(call, harness = false) {
   if(harness&&(call?.type==='workspace_init'||call?.type==='reap'||call?.type?.startsWith('workspace_agent_')||call?.type?.startsWith('workspace_harness_'))){validateProjectCall(call);return;}
   if (!call || typeof call !== 'object' || !types.includes(call.type) || Object.keys(call).some(k => k !== 'type' && !keys[call.type].includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isSafeInteger(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.keep_background !== undefined && typeof call.keep_background !== 'boolean') throw new ManagerError('invalid_runner_request', 400);
   if (call.type !== 'command' && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
 }
 export function validateAssistantSettings(input, hostCpus = null) {
@@ -82,6 +83,7 @@ export class AssistantComputers {
   async setSettings(input) {
     validateAssistantSettings(input, input?.cpus !== undefined ? (await this.host())?.cpus : null);
     this.db.prepare("INSERT INTO settings VALUES('assistant_computers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ ...this.settings(), ...input }));
+    if (input.egress === false && !this.removing.size && ![...this.leases.values()].some(l => l.egress)) await this.removeNetwork();
     return this.settingsView();
   }
   validate(owner) { if (!ownerPattern.test(owner || '')) throw new ManagerError('invalid_assistant_owner', 400); }
@@ -89,12 +91,20 @@ export class AssistantComputers {
   networkName() { return `dbot-${this.deployment}-ac-egress`; }
   labels(owner) { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'assistant', 'department.bot.owner': owner }; }
   networkLabels() { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'assistant' }; }
+  networkValid(network) {
+    return !!network
+      && !Object.entries(this.networkLabels()).some(([k, v]) => network.Labels?.[k] !== v)
+      && network.Internal === false
+      && network.Options?.['com.docker.network.bridge.enable_icc'] === 'false';
+  }
   async ensureNetwork() {
     const name = this.networkName();
     const existing = await this.docker.request('GET', `/networks/${name}`).catch(() => null);
     if (existing) {
       if (Object.entries(this.networkLabels()).some(([k, v]) => existing.Labels?.[k] !== v)) throw new ManagerError('resource_ownership_mismatch', 403);
-      return name;
+      if (this.networkValid(existing)) return name;
+      const removed = await this.docker.request('DELETE', `/networks/${name}`).then(() => true, () => false);
+      if (!removed) throw new ManagerError('assistant_network_misconfigured', 503);
     }
     try {
       await this.docker.request('POST', '/networks/create', {
@@ -104,7 +114,7 @@ export class AssistantComputers {
       });
     } catch (error) {
       const created = await this.docker.request('GET', `/networks/${name}`).catch(() => null);
-      if (!created || Object.entries(this.networkLabels()).some(([k, v]) => created.Labels?.[k] !== v)) throw error;
+      if (!this.networkValid(created)) throw error;
     }
     return name;
   }
@@ -136,7 +146,7 @@ export class AssistantComputers {
     const host = container?.HostConfig ?? {}, config = container?.Config ?? {};
     return container ? { running: !!container.State?.Running, user: config.User ?? null, readonly_rootfs: host.ReadonlyRootfs === true, privileged: host.Privileged === true,
       cap_drop: host.CapDrop ?? [], cap_add: host.CapAdd ?? [], security_opt: host.SecurityOpt ?? [], network_mode: host.NetworkMode ?? null,
-      network_policy: host.NetworkMode === 'none' ? 'none' : host.NetworkMode ? 'internet egress' : null, runtime: host.Runtime ?? null,
+      network_policy: host.NetworkMode === 'none' ? 'none' : host.NetworkMode === this.networkName() ? 'internet egress' : null, runtime: host.Runtime ?? null,
       mounts: (host.Mounts ?? []).map(m => ({ type: m.Type, source: m.Source, target: m.Target, read_only: !!m.ReadOnly, subpath: m.VolumeOptions?.Subpath ?? null })),
       binds: host.Binds ?? [], tmpfs: host.Tmpfs ?? {}, memory: host.Memory ?? 0, memory_swap: host.MemorySwap ?? 0, nano_cpus: host.NanoCpus ?? 0, pids_limit: host.PidsLimit ?? 0,
       ipc_mode: host.IpcMode ?? null, pid_mode: host.PidMode ?? '', userns_mode: host.UsernsMode ?? '' } : null;
@@ -148,6 +158,7 @@ export class AssistantComputers {
     lease.removed = reason;
     const previous = this.removing.get(lease.owner) || Promise.resolve();
     const done = previous.then(() => this.docker.request('DELETE', `/containers/${this.name(lease.owner)}?force=true`))
+      .then(() => { if (!this.settings().egress && ![...this.leases.values()].some(l => l.egress)) return this.removeNetwork(); })
       .catch(error => logFailure(`assistant computer ${lease.owner} removal (${reason}) failed`, error))
       .finally(() => { if (this.removing.get(lease.owner) === done) this.removing.delete(lease.owner); });
     this.removing.set(lease.owner, done);

@@ -45,7 +45,7 @@ async function execute(input) {
     finally { await handle.close(); }
   }
   if (input.type !== 'command') throw new Error('invalid_command');
-  return command(input.command, workspace, input.timeout_ms, { outputFile });
+  return command(input.command, workspace, input.timeout_ms, { outputFile, keepBackground: input.keep_background === true, ...(assistant ? { backgroundDirectory: '/tmp/.bot-bg' } : {}) });
 }
 // Live output of a running command, cut at a UTF-8 character boundary.
 async function tail(input) {

@@ -9,6 +9,7 @@ const files = {
   tunnel: readFileSync('docker/tunnel.Dockerfile', 'utf8'),
   chromium: readFileSync('docker/bot-chromium.sh', 'utf8'),
   desktop: readFileSync('docker/bot-desktop.sh', 'utf8'),
+  imagesWorkflow: readFileSync('.github/workflows/images.yml', 'utf8'),
 };
 
 test('project/assistant computer image preinstalls Chromium and X11 virtual desktop tools while control-plane, manager and tunnel do not', () => {
@@ -36,4 +37,10 @@ test('project/assistant computer image preinstalls Chromium and X11 virtual desk
     assert.equal(text.includes('BOT_BROWSER_EXECUTABLE'), false, `${name} image must not export BOT_BROWSER_EXECUTABLE`);
     assert.equal(/\bchromium\b/.test(text), false, `${name} image must not install chromium`);
   }
+
+  // Image CI workflow must smoke only bot-project-computer (never bot-control-plane) for both Chromium and virtual desktop.
+  assert.match(files.imagesWorkflow, /^\s*bot-project-computer\)\s+smoke=true\s*;;/m);
+  assert.equal(/bot-control-plane[^\n]*smoke=true/.test(files.imagesWorkflow), false, 'images.yml must not run Chromium smoke on bot-control-plane');
+  assert.match(files.imagesWorkflow, /--entrypoint \/usr\/local\/bin\/bot-chromium/);
+  assert.match(files.imagesWorkflow, /--entrypoint \/usr\/local\/bin\/bot-desktop/);
 });

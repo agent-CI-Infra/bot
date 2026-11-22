@@ -171,12 +171,13 @@ test('a project role editor offers no item that does nothing for project roles, 
   assert.ok(!projectCapabilities.includes('roles.publish'));
 });
 
-test('computer and task browser are built-in and always permitted, including for stored legacy deny values (#1206)', () => {
+test('computer tools are built-in and always permitted while the retired browser tool is no longer permitted (#1206, #1214)', () => {
   assert.ok(!permissionItems.some(item => ['computer', 'browser'].includes(item.id)));
   for (const raw of [{ computer: 'deny', browser: 'deny' }, { computer: 'allow', browser: 'deny' }, { repository: 'none', commands: 'deny' }, defaultPermissions('manager', 'controller'), defaultPermissions('dev', 'writer'), fullPermissions()]) {
     const p = normalizePermissions(raw);
     assert.equal(p.computer, undefined);
     assert.equal(p.browser, undefined);
-    for (const tool of ['read_file', 'write_file', 'run_command', 'browser']) assert.equal(permitsTool(p, tool), true, tool);
+    for (const tool of ['read_file', 'write_file', 'run_command']) assert.equal(permitsTool(p, tool), true, tool);
+    assert.equal(permitsTool(p, 'browser'), false, 'retired browser tool must not be permitted');
   }
 });

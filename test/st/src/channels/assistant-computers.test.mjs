@@ -59,6 +59,31 @@ test('an assistant computer is a hardened container with isolated egress by defa
   // The inspected facts the control plane may check against its own policy.
   const facts = f.computers.facts(await f.computers.inspect(id));
   assert.deepEqual([facts.network_mode, facts.network_policy, facts.readonly_rootfs, facts.mounts], [networkName, 'internet egress', true, [{ type: 'volume', source: 'fixture-assistant-homes', target: '/home/assistant', read_only: false, subpath: `${id}/home-1` }]]);
+  // Unexpected network modes never report internet egress.
+  assert.equal(f.computers.facts({ HostConfig: { NetworkMode: 'bridge' } }).network_policy, null);
+  assert.equal(f.computers.facts({ HostConfig: { NetworkMode: 'none' } }).network_policy, 'none');
+});
+
+test('ensureNetwork validates Internal and enable_icc on reuse and recreates misconfigured assistant networks', async t => {
+  const f = fixture(t), id = f.owner(), networkName = f.computers.networkName();
+  // A misconfigured network (ICC not disabled) with our deployment labels is recreated with ICC disabled.
+  f.docker.networks.set(networkName, { Labels: f.computers.networkLabels(), Internal: false, Options: { 'com.docker.network.bridge.enable_icc': 'true' } });
+  await f.acquire(id, 'turn-recreate');
+  assert.deepEqual(f.docker.networks.get(networkName), {
+    Labels: f.computers.networkLabels(),
+    Internal: false,
+    Options: { 'com.docker.network.bridge.enable_icc': 'false' },
+  });
+  await f.computers.release(id, { turn: 'turn-recreate' });
+  await f.computers.remove(id);
+  // A network with wrong ownership labels is refused.
+  f.docker.networks.set(networkName, { Labels: { 'department.bot.deployment': 'other', 'department.bot.kind': 'assistant' }, Internal: false, Options: { 'com.docker.network.bridge.enable_icc': 'false' } });
+  await assert.rejects(f.acquire(id, 'turn-wrong-owner'), /resource_ownership_mismatch/);
+  // A misconfigured network that cannot be deleted fails clearly.
+  f.docker.networks.set(networkName, { Labels: f.computers.networkLabels(), Internal: true, Options: {} });
+  const request = f.docker.request.bind(f.docker);
+  f.docker.request = async (method, path, body) => method === 'DELETE' && path === `/networks/${networkName}` ? Promise.reject(new Error('in use')) : request(method, path, body);
+  await assert.rejects(f.acquire(id, 'turn-locked'), /assistant_network_misconfigured/);
 });
 
 test('a later turn reuses the idle container; a changed fence, HOME generation or mode replaces it', async t => {
@@ -94,6 +119,10 @@ test('operations need the turn holding the computer and an allowlisted runner ty
   const ran = await f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'command', command: 'true', timeout_ms: 5000 } });
   assert.equal(ran.ok, true);
   assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).wait], ['command', 35000]);
+  const bg = await f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'command', command: 'bot-desktop start', timeout_ms: 5000, keep_background: true } });
+  assert.equal(bg.ok, true);
+  assert.equal(f.docker.runs.at(-1).keep_background, true);
+  await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'command', command: 'true', keep_background: 'yes' } }), /invalid_runner_request/);
   await assert.rejects(f.computers.execute(id, { turn: 'other', operation_id: opId(), request: { type: 'command', command: 'true' } }), /assistant_computer_not_acquired/);
   for (const type of ['workspace_command', 'workspace_read', 'reap', 'journal_clear', 'health', 'tasks_remove'])
     await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type, command: 'true' } }), /invalid_runner_request/, type);
@@ -238,8 +267,10 @@ test('settings are bounded and resources apply from the next turn; removal durin
   assert.equal((await f.acquire(id, 't1')).computer.egress, true);
   await f.computers.release(id, { turn: 't1' });
   const next = await f.acquire(id, 't2');
+  await Promise.all([...f.computers.removing.values()]);
   assert.deepEqual([next.reused, next.computer.egress, next.computer.resources], [false, false, { cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 }]);
   assert.deepEqual([host().NanoCpus, host().Memory, host().MemorySwap, host().PidsLimit, host().NetworkMode], [2e9, 1024 * 1024 ** 2, 1024 * 1024 ** 2, 256, 'none']);
+  assert.equal(f.docker.networks.has(f.computers.networkName()), false, 'idle egress network is removed once no egress containers remain');
   assert.match(host().Tmpfs['/tmp'], new RegExp(`size=${256 * 1024 ** 2},`)); assert.match(host().Tmpfs['/workspace'], new RegExp(`size=${1024 * 1024 ** 2},`));
   await f.computers.release(id, { turn: 't2' });
   assert.equal((await f.acquire(id, 't3')).reused, true, 'unchanged resources and egress keep the idle computer');

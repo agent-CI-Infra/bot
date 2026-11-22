@@ -64,11 +64,11 @@ jobs:
       - name: Tags
         id: tags
         run: |
-          # PR and merge-queue builds load the two browser images locally for the smoke step.
+          # PR and merge-queue builds load the project/assistant computer image locally for the smoke step.
           # Publishing to GHCR still uses only the registry tags; load and push cannot be combined.
           smoke=false
           case "${{ matrix.name }}" in
-            bot-control-plane|bot-project-computer) smoke=true ;;
+            bot-project-computer) smoke=true ;;
           esac
           if [ "$PUBLISH" = "true" ]; then
             echo "list=$IMAGE:sha-${GITHUB_SHA::12},$IMAGE:latest" >> "$GITHUB_OUTPUT"
@@ -102,9 +102,9 @@ jobs:
           # nightly.yml -- so a dispatch here is that caller's event, and merge_group is meant to fall empty too.
           cache-to: ${{ (env.PUBLISH == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('type=gha,scope={0}', matrix.name) || '' }}
 
-      # Start the preinstalled browser as the runtime user in the compose sandbox (read-only root,
-      # tmpfs /tmp, no capabilities). This is what catches a missing writable HOME; a build-only job would not.
-      - name: Smoke the Chromium wrapper
+      # Start the preinstalled browser and virtual desktop as the runtime user in the hardened sandbox (read-only root,
+      # tmpfs /tmp, no capabilities). This catches missing writable HOME/XDG paths or broken desktop binaries.
+      - name: Smoke the Chromium and virtual desktop wrappers
         if: env.PUBLISH != 'true' && steps.tags.outputs.smoke == 'true'
         run: |
           docker run --rm --user 10001:10001 --network none --read-only \
@@ -112,6 +112,11 @@ jobs:
             --entrypoint /usr/local/bin/bot-chromium \
             "${{ matrix.name }}:ci" \
             --headless --disable-gpu --user-data-dir=/tmp/ud --dump-dom 'data:text/html,<h1>ok</h1>'
+          docker run --rm --user 10001:10001 --network none --read-only \
+            --tmpfs /tmp:size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+            --entrypoint /usr/local/bin/bot-desktop \
+            "${{ matrix.name }}:ci" \
+            run -- sh -c 'xdpyinfo -display "$DISPLAY" >/dev/null && printf desktop-ok'
 
       # A new GHCR package starts private and the REST API cannot change that; an organization owner makes it public
       # once in the package settings. Until then anonymous pulls fail, so say so in the run instead of failing it.
