@@ -13,7 +13,7 @@ const scheduleTime = (at, zone) => timestampAt(at, zone) || '时间或时区无�
 async function channelSchedules(chatId) {
   const box = element('div', '', 'channel-schedules'); box.setAttribute('aria-label', '定时任务');
   const load = async () => {
-    box.replaceChildren(element('strong', '定时任务'), note('到点后用这里的提示词唤醒本会话的助手，在本会话的权限内查询、汇总或处理，再把结果发回本会话；超出权限的项目和操作会被拒绝。私聊用管理助手和你本人的当前权限，群聊用本群绑定的服务角色和项目范围。模型用量记在对应的服务角色上。'));
+    box.replaceChildren(note('到点后用这里的提示词唤醒本会话的助手，在本会话的权限内查询、汇总或处理，再把结果发回本会话；超出权限的项目和操作会被拒绝。私聊用管理助手和你本人的当前权限，群聊用本群绑定的服务角色和项目范围。模型用量记在对应的服务角色上。'));
     let data;
     try { data = await api('/api/channels/chats/' + chatId + '/schedules'); } catch (err) { box.append(note(scheduleError(readErrorText(err)))); return; }
     const list = element('div');
@@ -31,7 +31,16 @@ async function channelSchedules(chatId) {
       const actions = element('div', '', 'actions'); row.append(actions);
       if (s.can_manage) actions.append(act('立即运行一次', () => api('/api/channels/schedules/' + s.id + '/run', 'POST', {})),
         act(s.state === 'active' ? '暂停' : '恢复', () => api('/api/channels/schedules/' + s.id, 'PATCH', { expected_revision: s.revision, enabled: s.state !== 'active' })),
-        button('编辑', () => fill(s), 'quiet'), act('删除', async () => { if (!confirm('删除定时任务「' + s.name + '」？')) return false; await api('/api/channels/schedules/' + s.id, 'DELETE', { expected_revision: s.revision }); }));
+        button('编辑', () => fill(s), 'quiet'), act('删除', async () => {
+          const confirmed = await askConfirm({
+            title: `删除定时任务「${s.name}」？`,
+            body: ['删除后将停止定时唤醒本会话助手，已记录的历史运行保留。'],
+            action: '确认删除',
+            danger: true,
+          });
+          if (!confirmed) return false;
+          await api('/api/channels/schedules/' + s.id, 'DELETE', { expected_revision: s.revision });
+        }));
       else if (s.state === 'active') actions.append(act('停用（管理员）', () => api('/api/channels/schedules/' + s.id, 'PATCH', { expected_revision: s.revision, enabled: false })));
       row.append(status); list.append(row);
     }

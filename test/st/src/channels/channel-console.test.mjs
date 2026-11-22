@@ -310,15 +310,15 @@ test('the group bindings section does not name every group again on each redraw 
   const page = consoleAgainst(f), data = (await f.admin('/api/channels/service-bindings')).value;
   signInSandbox(page);
   page.run(`var groupData = ${JSON.stringify(data)};`);
-  await page.run('buildGroupBindingsSection(groupData)');
+  await page.run('buildGroupBindingEditor(groupData)');
   await settle(page);
   const attempts = nameLookups(page);
-  assert.ok(attempts > 0, 'the settings section reads the missing name');
+  assert.ok(attempts > 0, 'the group editor reads the missing name');
   await until(() => f.wire.state.chatRequests.length, count => count >= 1);
   const requests = f.wire.state.chatRequests.length;
-  page.run('renderVersion++; buildGroupBindingsSection(groupData, { initialOpen: true })');
+  page.run('renderVersion++; buildGroupBindingEditor(groupData); buildGroupBindingsList(groupData)');
   await settle(page);
-  assert.equal(nameLookups(page), attempts, 'and a redraw of the section does not read any name again');
+  assert.equal(nameLookups(page), attempts, 'and a redraw of the editor or list does not read any name again');
   assert.equal(f.wire.state.chatRequests.length, requests, 'so the provider is not asked again either');
 });
 
@@ -376,13 +376,14 @@ test('conversations list filters by connector_id with authorization isolation an
   assert.deepEqual(ordinaryFiltered.value.conversations, []);
   assert.equal(ordinaryFiltered.value.connector, null);
 
-  // Timeline exposes revision, connector_id, can_sync and can_manage_retention accurately per role.
+  // Timeline exposes revision, connector_id, can_sync, can_manage_retention and can_view_schedules accurately per role.
   const adminTimeline = await admin(`/api/channels/chats/${chat1.id}/timeline`);
   assert.equal(adminTimeline.status, 200);
   assert.equal(adminTimeline.value.chat.connector_id, id);
   assert.equal(adminTimeline.value.chat.revision, chat1.revision);
   assert.equal(adminTimeline.value.chat.can_sync, true);
   assert.equal(adminTimeline.value.chat.can_manage_retention, true);
+  assert.equal(adminTimeline.value.chat.can_view_schedules, true);
 
   // Retention PUT/DELETE return the bumped revision for subsequent optimistic updates.
   const retained = await admin(`/api/channels/chats/${chat1.id}/retention`, 'PUT', { days: 15, expected_revision: adminTimeline.value.chat.revision });
@@ -390,7 +391,7 @@ test('conversations list filters by connector_id with authorization isolation an
   assert.equal(retained.value.retention.days, 15);
   assert.equal(retained.value.revision, chat1.revision + 1);
 
-  // Personal chat owner can view & sync their own active chat, but cannot manage retention.
+  // Personal chat owner can view, sync and manage schedules on their own active chat, but cannot manage retention.
   bindFixture(h, id, ordinary.id, 'ou_ordinary_p2p');
   const p2pPost = await post(h, id, envelope('hello', { sender: { sender_id: { open_id: 'ou_ordinary_p2p' } }, message: { chat_id: 'oc_ordinary_p2p', chat_type: 'p2p' } }));
   await finished(h, p2pPost.value.operation_id);
@@ -399,10 +400,13 @@ test('conversations list filters by connector_id with authorization isolation an
   assert.equal(ownerTimeline.status, 200);
   assert.equal(ownerTimeline.value.chat.can_sync, true);
   assert.equal(ownerTimeline.value.chat.can_manage_retention, false);
+  assert.equal(ownerTimeline.value.chat.can_view_schedules, true);
 
   // Disabling the connector turns can_sync off on timeline.
   h.store.run('UPDATE channel_connectors SET enabled=0 WHERE id=?', id);
   assert.equal((await admin(`/api/channels/chats/${chat1.id}/timeline`)).value.chat.can_sync, false);
+  // Super admins keep read-only diagnostic schedule visibility even on inactive chats.
+  assert.equal((await admin(`/api/channels/chats/${chat1.id}/timeline`)).value.chat.can_view_schedules, true);
 });
 
 

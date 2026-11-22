@@ -26,15 +26,17 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
     await page.screenshot({ path: `.tmp/channel-names/names-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/identity/feishu/groups');
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
-    await expect(binding).toContainText('基础设施讨论群'); await expect(binding).toContainText('所属企业：示例企业');
-    await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
-    await expect(page.getByLabel('助手所在群')).toContainText('基础设施讨论群 · 示例企业 · 研发助手');
+    await expect(binding).toContainText('基础设施讨论群');
+    await binding.getByText('群与应用信息', { exact: true }).click();
+    await expect(binding).toContainText('所属企业：示例企业');
     f.wire.state.chatName = '<img src=x onerror=alert(1)> 更名群';
     await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
     await expect(binding).toContainText(f.wire.state.chatName); await expect(binding.locator('img')).toHaveCount(0);
     f.wire.state.chatCode = 99991672;
     await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
     await expect(binding).toContainText('保留上次读取的名称'); await expect(binding).toContainText(f.wire.state.chatName);
+    await binding.getByRole('link', { name: '配置仓库与权限', exact: true }).click();
+    await expect(page.getByLabel('助手所在群')).toContainText(`${f.wire.state.chatName} · 示例企业 · 研发助手`);
     await page.goto(f.h.admin + '/#/identity/feishu/conversations');
     const conversations = page.getByLabel('可查看的飞书会话');
     await expect(conversations.getByRole('link', { name: /私聊 · 张小明/ })).toBeVisible();
@@ -63,6 +65,7 @@ test('a refused Feishu name is read once, not on every redraw, and the button st
     await page.evaluate(() => { location.hash = '#/conversations'; });
     await expect(page.getByLabel('可查看的飞书会话')).toBeVisible();
     await page.evaluate(() => { location.hash = '#/identity/feishu'; });
+    await binding.getByText('群与应用信息', { exact: true }).click();
     await expect(binding.getByRole('button', { name: '刷新群名称', exact: true })).toBeVisible();
     await page.waitForTimeout(500);
     expect(f.wire.state.chatRequests.length, 'a redraw does not ask the provider again').toBe(first);

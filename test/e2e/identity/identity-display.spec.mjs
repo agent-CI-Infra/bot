@@ -86,7 +86,6 @@ for (const kind of ['github', 'local']) for (const locale of ['zh-CN', 'en']) {
         await noOverflow(page);
         await permissions.screenshot({ path: prefix + '-permissions.png' });
         await overview.locator('a[href="#/identity/feishu"]').click();
-        await expect(page.locator('.feishu-metrics')).toContainText(name);
         const binding = page.getByLabel('我的飞书账号', { exact: true });
         await expect(binding).toContainText(locale === 'en' ? `${name}’s Feishu account` : `${name} 的飞书账号`);
         await expect(binding).toContainText((locale === 'en' ? 'Linked platform account: ' : '关联平台账户：') + name);

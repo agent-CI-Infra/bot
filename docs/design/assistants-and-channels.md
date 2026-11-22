@@ -17,7 +17,7 @@
 
 平台将「项目工作角色」与「平台级服务角色」分离：
 
-- **角色类型**：内置 `management-assistant`（固定全目录权限，与当前用户实时权限取交集）与 `repository-assistant`（群聊默认模板），支持超管新建全局模板或项目管理员新建单项目群助手角色。群聊角色仅承载提示词与模型，权限完全归属群绑定。
+- **角色类型**：内置 `management-assistant`（固定全目录权限，与当前用户实时权限取交集）与 `repository-assistant`（群聊默认模板），支持超管在「全局设置 → 服务角色」新建全局模板，或项目管理员在「项目设置 → 角色 → 群助手角色」（`#/projects/<id>/roles?view=assistant-roles`）新建单项目群助手角色。群聊角色仅承载提示词与模型，权限完全归属群绑定。
 - **独立子任务（`service_role_own_tasks`）**：管理助手与群聊助手均可调用 `start_own_task` / `continue_own_task` 在隔离上下文中深度分析并只带回结论；独立任务沿用当前会话权限与授权围栏，不进入业务 `tasks` 表。
 - **阶段消息与静默结束**：服务角色默认配备 `send_message`（单轮上限 10 条，每并入新消息 +1）用于长任务进度播报；在非 `@` 群消息或会话定时任务中额外提供 `stay_silent`，显式区分「保持安静」与「需要回复」。
 - **模型隔离与计费**：服务角色请求记入 `model_requests.service_role_id`；单仓库群同时关联 `repository_id` 计入项目成本，跨项目群不强行拆分。群绑定强制校验所选模型对范围内全部仓库均已授权，每轮请求前实时复核。
@@ -43,7 +43,7 @@ flowchart LR
   - 每轮执行绑定授权围栏（绑定版本、角色启停、授权人有效权限、历史清理水位）；群成员变动或普通历史消息编辑不破坏围栏，但当前轮源消息撤回或授权真实失效会立即中止该轮并阻断未发出消息。
 - **本地消息账本与历史同步（`ChannelLedger`）**：
   - 以 `(provider, app_id, installation_tenant, chat_id)` 建唯一会话，原文与资源引用密封保存，实时版本优先于历史补读，撤回 tombstone 不可复活；历史同步按 50 条分页并独立分页拉取 thread，查询只读本地账本不回源飞书。
-  - 会话列表（`GET /api/channels/conversations`）支持按 `connector_id` 过滤，统一在「飞书会话」（`#/conversations`）承接本地消息检索、显式历史重同步与超管按会话保留/清理策略。
+  - 会话列表（`GET /api/channels/conversations`）支持按 `connector_id` 过滤，统一在「飞书会话」（`#/conversations`）承接本地消息检索、会话定时任务（`timeline` 返回 `chat.can_view_schedules`，按 `ChannelSchedules.canView` 门控并支持 `?section=schedules` 自动展开）、显式历史重同步与超管按会话保留/清理策略；「个人设置 → 飞书绑定」（`#/identity/feishu`）仅承载个人绑定与群绑定两张列表卡片，并将群配置独立到 `#/identity/feishu/groups/new` 与 `#/identity/feishu/groups/<chat-id>`。
   - 附件按需流式下载（上限 100 MiB），以 AES-256-GCM 密封存于 `channel-resources/` 并校验 SHA-256，与撤回和保留清理级联删除；图片支持原生多模态直传与助手电脑离线处理回读。
 - **回合消息并入与 Outbox 投递**：
   - 回合思考/工具执行期间到达的新消息落库 `channel_turn_inputs`，在下一轮自然模型请求前按序注入上下文，不打断当前推理；开始输出最终文本时暂停并入。

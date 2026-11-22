@@ -7,7 +7,13 @@ function channelOwnerTransfer(binding) {
   box.addEventListener('submit', async event => {
     event.preventDefault(); submit.disabled = true; status.textContent = '';
     const name = owner.selectedOptions[0]?.textContent || '';
-    if (!confirm(`把这个群聊助手的负责人转交给 ${name}？转交后原负责人不能再修改它。`)) { submit.disabled = false; return; }
+    const confirmed = await askConfirm({
+      title: '转交群聊助手负责人',
+      body: [`把这个群聊助手的负责人转交给 ${name}？转交后原负责人不能再修改它。`],
+      action: '确认转交',
+      danger: true,
+    });
+    if (!confirmed) { submit.disabled = false; return; }
     try { await api('/api/channels/chats/' + binding.chat_id + '/service-binding/owner', 'PUT', { owner_id: owner.value, expected_revision: binding.revision }); await start(); }
     catch (err) { status.textContent = employeeError(readErrorText(err)); submit.disabled = false; }
   });
