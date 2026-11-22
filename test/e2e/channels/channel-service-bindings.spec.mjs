@@ -123,9 +123,9 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.getByLabel('消息与执行时间线')).toContainText('Original local group decision');
     await expect(page.getByText('当前群绑定：仓库问答助手 · 范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
     await page.getByText('搜索本地消息记录', { exact: true }).click();
-    await page.getByLabel('查询关键词', { exact: true }).fill('absent-local-term');
+    await page.getByLabel('消息关键词', { exact: true }).fill('absent-local-term');
     await page.getByRole('button', { name: '搜索本地记录', exact: true }).click();
-    await expect(page.getByText('本地已同步范围没有匹配记录；这不代表飞书历史中从未存在。', { exact: true })).toBeVisible();
+    await expect(page.getByText('本地已同步范围没有匹配消息；这不代表飞书历史中从未存在。', { exact: true })).toBeVisible();
     await page.getByRole('link', { name: '返回飞书绑定', exact: true }).click();
     await expect(page).toHaveURL(/#\/identity\/feishu$/);
     await page.getByRole('article', { name: '群聊助手绑定' }).getByRole('button', { name: '停用群聊助手', exact: true }).click();

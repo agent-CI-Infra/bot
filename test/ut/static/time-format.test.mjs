@@ -32,7 +32,6 @@ const FILES = ['app/boot.js', 'knowledge.js', 'channels/feishu-page.js', 'channe
 const ROWS = [
   ['knowledge.js', 'function metadata(file)', /timeText\(file\.created_at, '时间未提供'\)/],
   ['channels/feishu-page.js', '有效期', /timeText\(p\.expires_at\)/],
-  ['channels/transfer.js', 'messages.append(facts', /timestamp\(m\.created_at\)/],
   ['channels/transfer.js', '最后收到事件', /timestamp\(c\.health\.last_received_at\)/],
   ['channels/transfer.js', '未知发送者', /timestamp\(m\.created_at\)/],
   ['project/model-address.js', '目录匹配不唯一', /timeText\(match\.fetched_at\)/],

@@ -77,17 +77,32 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await syncFold.evaluate(node => node.scrollIntoView({ block: 'center' }));
       await page.screenshot({ path: `.tmp/issue-1228/conversations-sync-${viewport.width}.png` });
 
-      // Step 5: Expand super-admin retention & cleanup panel, save retention days, and verify cleanup confirm dialog.
+      // Step 5: Expand super-admin retention & cleanup panel, save retention days, and perform confirmed cleanup.
       const retentionFold = page.locator('.channel-retention-details');
       await retentionFold.locator('summary').click();
       await retentionFold.getByLabel('保留天数（留空保留至显式清理）').fill('30');
       await retentionFold.getByRole('button', { name: '保存本地保留策略', exact: true }).click();
       await expect(retentionFold.getByRole('status')).toContainText('保留策略：30 天');
-      expect(wire.state.historyRequests).toHaveLength(0);
-      expect(wire.sent).toHaveLength(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await retentionFold.evaluate(node => node.scrollIntoView({ block: 'center' }));
       await page.screenshot({ path: `.tmp/issue-1228/conversations-admin-${viewport.width}.png` });
+      // Perform explicit cleanup before 100 days ago and verify confirm dialog, deletion, and formatted policy text.
+      const cutoff = new Date(Date.now() - 100 * 86400000);
+      const pad = n => String(n).padStart(2, '0');
+      const localValue = `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())}T${pad(cutoff.getHours())}:${pad(cutoff.getMinutes())}`;
+      await retentionFold.getByLabel('显式清理此时间之前的记录').fill(localValue);
+      await retentionFold.getByRole('button', { name: '清理指定时间之前的本地记录', exact: true }).click();
+      const cleanDialog = page.getByRole('dialog');
+      await expect(cleanDialog).toContainText('清理本地消息记录');
+      await page.screenshot({ path: `.tmp/issue-1228/cleanup-dialog-${viewport.width}.png` });
+      await cleanDialog.getByRole('button', { name: '确认清理', exact: true }).click();
+      await expect(retentionFold.getByRole('status')).toContainText('已清理');
+      await expect(retentionFold.getByRole('status')).toContainText('保留策略：30 天');
+      await expect(retentionFold.getByRole('status')).not.toContainText('undefined');
+      expect(h.store.get('SELECT count(*) n FROM channel_messages WHERE chat_id=?', chat.id).n).toBeLessThan(126);
+      expect(h.store.get('SELECT retained_after FROM channel_chats WHERE id=?', chat.id).retained_after).toBeGreaterThan(0);
+      expect(wire.state.historyRequests).toHaveLength(0);
+      expect(wire.sent).toHaveLength(0);
 
       // Step 6: Non-super-admin personal chat owner sees local search & resync, but NEVER sees super-admin retention/cleanup.
       const ordinary = await f.member('conv-owner-e2e', { repository_ids: ['101'] });
