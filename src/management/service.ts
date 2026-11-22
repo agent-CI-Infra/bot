@@ -23,6 +23,7 @@ import { commands, commandSchema, querySchema, queries as queryNames, scheduling
 import { configurationPrRemoved } from './configuration-pr.js';
 import type { AssistantComputerService } from '../service-roles/assistant-computers.js';
 import { schedulingCommands } from '../schedules/schema.js';
+import { sameRepositoryName } from './repository-name.js';
 
 export interface ManagementCommand {
   operation: string; target: {project_id:string;task_id?:string}; arguments: Json; expected_revision: string;
@@ -114,7 +115,7 @@ export class ManagementService {
   }
   pendingRepository(actor: ActorContext, selected: unknown): Row | undefined {
     if (typeof selected !== 'string' || !selected) return undefined;
-    return this.pendingRepositories(actor).find(r => r.id === selected || r.full_name === selected);
+    return this.pendingRepositories(actor).find(r => r.id === selected || sameRepositoryName(r.full_name, selected));
   }
   scope(actor:ActorContext,project:string,capability='tasks.read'): Row {
     if(actor.project_id&&actor.project_id!==project)fail(403,'project_scope_mismatch');

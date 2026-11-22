@@ -34,6 +34,7 @@ import { feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, rea
 import { feishuCardInstructions, feishuCardTool, feishuCardToolName, FeishuCardTurn } from '../channels/cards.js';
 import { assertCeiling } from '../projects/ceiling.js';
 import { projectRefusal } from '../tasks/grants.js';
+import { sameRepositoryName } from './repository-name.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -245,7 +246,7 @@ export class ManagementAgent {
       eligible:()=>{if(!canUseComputer())fail(403,'capability_forbidden');},
       notify:text=>progress({text})});
     const repositories=new ServiceRepositories(this.store,new Redactor(),guard,selected=>{
-      const project=this.store.all('SELECT * FROM repositories').find(r=>r.id===selected||r.full_name===selected);
+      const project=this.store.all('SELECT * FROM repositories').find(r=>r.id===selected||sameRepositoryName(r.full_name,selected));
       if(project){this.service.scope(actor,project.id);return project;}
       const pendingRepo=this.service.pendingRepository(actor,selected);
       if(pendingRepo)return pendingRepo;
@@ -257,7 +258,7 @@ export class ManagementAgent {
     const permissions=()=>JSON.parse(serviceRole(this.store,managementAssistant)?.permissions??'{}') as RolePermissions;
     // github_write (#381): the assistant's role permission, and the current user's authority to write tasks in a started project.
     const write=async(args:any)=>{
-      const {repository:selected,...rest}=args,project=this.store.all('SELECT id,full_name FROM repositories').find(r=>r.id===selected||r.full_name===selected);
+      const {repository:selected,...rest}=args,project=this.store.all('SELECT id,full_name FROM repositories').find(r=>r.id===selected||sameRepositoryName(r.full_name,selected));
       if(!project){
         const pendingRepo=this.service.pendingRepository(actor,selected);
         if(pendingRepo)return {repository:pendingRepo.full_name,result:{error:'project_not_started',detail:'This repository is installed but not started yet. Start the repository first with start_repository after the administrator confirms.'}};
