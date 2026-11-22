@@ -34,6 +34,7 @@ services:
       SQLITE_TMPDIR: /tmp
       BOT_DATABASE_PATH: /data/control.sqlite
       BOT_TOOL_RESULTS_DIR: /tool-results
+      BOT_ACP_PRODUCT: "${BOT_ACP_PRODUCT:-container_acp}"
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
@@ -76,8 +77,8 @@ services:
       # Persistent HOME of every assistant computer (#457), one directory per group or person; the control plane reads,
       # writes, measures and deletes them as the computers' own user (10001).
       - assistant-homes:/assistant-homes
-      # Trusted CLI tool volume (#705): written only by verified control-plane install tasks, mounted read-only into
-      # project computers and isolated run containers at /opt/agent-tools.
+      # Trusted CLI and ACP product volume. The control plane and the administrator's ACP installer can write to it.
+      # Project computers and isolated run containers mount it read-only at /opt/agent-tools.
       - agent-tools:/opt/agent-tools
     networks: [control]
     read_only: true
