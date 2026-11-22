@@ -718,12 +718,12 @@ export class Projects {
   async stopAll(repo) {
     for (const row of this.db.prepare('SELECT generation FROM resources WHERE repository_id=?').all(repo)) await this.stopGeneration(repo, row.generation);
   }
-  async provision(repo, { forceSetup = false } = {}) {
+  async provision(repo, { forceSetup = false, deferBuild = false } = {}) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
     // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
     // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
     // memory whether or not the host has swap.
-    const tmpfs = `rw,exec,nosuid,nodev,size=${spec.tmp_mb * mib},mode=1777`, memory = spec.memory_mb * mib, approved = await this.resolveImage(repo, spec);
+    const tmpfs = `rw,exec,nosuid,nodev,size=${spec.tmp_mb * mib},mode=1777`, memory = spec.memory_mb * mib, approved = await this.resolveImage(repo, spec, { deferBuild });
     // Repository variables reach commands through the runner, which reads the names listed in BOT_PROJECT_ENV_KEYS.
     const env = ['HOME=/workspace/home', 'LANG=C.UTF-8', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(spec.env).join(',')}`];
     let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
@@ -849,7 +849,7 @@ export class Projects {
   async readVolumes() { return readDockerVolumes(this.docker); }
   // The approved image, or a two-level precompiled image (global defaults + project overlay). Built via the serial
   // PrecompiledImageBuilder: apt runs via validated package names only, and setup_script ALWAYS runs as UID 10001.
-  async resolveImage(repo, spec, { forceRebuild = false } = {}) {
+  async resolveImage(repo, spec, { forceRebuild = false, deferBuild = false } = {}) {
     const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
     if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
     const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
@@ -862,6 +862,26 @@ export class Projects {
       return approved;
     }
     const record = value => this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({ toolchain, packages: effectivePackages, ...value }), repo);
+    if (deferBuild && !forceRebuild) {
+      const cached = await this.images.checkLayeredCache({ approvedImage: approved, globalSpec: globalEnv, projectSpec, egress: spec.egress });
+      if (cached.cached && cached.image) {
+        const finished_at = new Date().toISOString();
+        const existingOutput = JSON.parse(this.get(repo)?.build || '{}').output || null;
+        record({
+          image_key: cached.image_key, tag: cached.tag, phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
+          state: 'ready', queue_position: null, output: existingOutput, can_cancel: false, finished_at,
+        });
+        this.recordPrecompiledSetup(repo, this.get(repo)?.generation || 1, globalEnv.setup_script, projectSpec.setup_script, 'succeeded', finished_at, existingOutput);
+        return cached.image;
+      }
+      // On startup recovery, do not block manager readiness on multi-minute image builds: bring the container up on
+      // the approved base image now and enqueue the precompiled image build asynchronously in the serial queue.
+      this.startProjectBuild(repo, {
+        approvedImage: approved, toolchain, globalSpec: globalEnv, nextOwn: own, nextSpec: spec,
+        requestedKeys: [], forceRebuild: false, commitSpec: false,
+      });
+      return approved;
+    }
     const handle = this.images.startLayered({
       approvedImage: approved,
       globalSpec: globalEnv,
@@ -909,7 +929,7 @@ export class Projects {
       output: output ? String(output).slice(-8000) : null, finished_at: finishedAt,
     }), repo);
   }
-  startProjectBuild(repo, { approvedImage, toolchain, globalSpec, nextOwn, nextSpec, requestedKeys = [], forceRebuild }) {
+  startProjectBuild(repo, { approvedImage, toolchain, globalSpec, nextOwn, nextSpec, requestedKeys = [], forceRebuild, commitSpec = true }) {
     const existing = this.projectBuildJobs.get(repo);
     if (existing) {
       existing.superseded = true;
@@ -966,8 +986,10 @@ export class Projects {
         if (job.superseded) return;
         const current = this.get(repo);
         if (!current || current.state === 'deleted') return;
-        this.db.prepare('UPDATE projects SET spec=?, spec_revision=spec_revision+1, configured_keys=? WHERE repository_id=?')
-          .run(JSON.stringify(nextOwn), JSON.stringify(requestedKeys), repo);
+        if (commitSpec) {
+          this.db.prepare('UPDATE projects SET spec=?, spec_revision=spec_revision+1, configured_keys=? WHERE repository_id=?')
+            .run(JSON.stringify(nextOwn), JSON.stringify(requestedKeys), repo);
+        }
         this.recordPrecompiledSetup(repo, current.generation, globalSpec.setup_script, projectSpec.setup_script, 'succeeded', finished_at, result.output);
         if (current.desired === 'ready' && current.state !== 'reset_failed') {
           this.background.delete(repo);
@@ -1323,9 +1345,11 @@ export class Projects {
         if (row.state === 'reset_failed') return;
         if (row.desired === 'ready') {
           this.update(row.repository_id, 'recovering', 'ready');
-          await this.provision(row.repository_id);
-          // Preserve the interrupted-build notice so recovery of the old committed spec does not mask the crash.
-          if (interrupted.has(row.repository_id)) this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(interrupted.get(row.repository_id), row.repository_id);
+          await this.provision(row.repository_id, { deferBuild: true });
+          // Preserve the interrupted-build notice when recovery reused a cached image (and did not enqueue a new build).
+          if (interrupted.has(row.repository_id) && !this.projectBuildJobs.has(row.repository_id)) {
+            this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(interrupted.get(row.repository_id), row.repository_id);
+          }
         }
         else this.update(row.repository_id, row.desired, row.desired, row.error);
       } catch (error) { logFailure(`project ${row.repository_id} recovery on start failed`, error); this.update(row.repository_id, row.state === 'resetting' ? 'reset_failed' : 'failed', 'stopped', 'recovery_failed'); }
