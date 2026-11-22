@@ -49,7 +49,7 @@ export class FakeDocker {
       return null;
     }
     if (kind === 'networks') {
-      if (method === 'POST') { if (this.failNetwork) throw new ManagerError('injected_network_failure'); this.networks.set(body.Name, { Labels: body.Labels, Internal: body.Internal }); return {}; }
+      if (method === 'POST') { if (this.failNetwork) throw new ManagerError('injected_network_failure'); this.networks.set(body.Name, { Labels: body.Labels, Internal: body.Internal, Options: body.Options }); return {}; }
       if (method === 'DELETE') { this.networks.delete(name); return {}; }
       return this.networks.get(name) || null;
     }

@@ -44,7 +44,7 @@ docker compose -f docker/compose.yaml -f docker/compose.build.yaml config --quie
 
 - `test/ut/`：单元测试，内层目录与被测源码树一致（`src/<模块>/`、`manager/`、`runner/`、`static/`、`public-board/`、`docker/`、`workflows/`、`scripts/`、`framework/`、`acceptance/`）。
 - `test/st/`：服务与进程内集成测试（启动进程内控制面／SQLite／本地 HTTP 与 runner 夹具），内层目录同样与主被测源码目录一致。
-- `test/e2e/`：浏览器端到端测试（`playwright.config.mjs`、`helpers/`、`browser/browser-runtime.mjs` 及按功能模块划分的 `*.spec.mjs`）。
+- `test/e2e/`：浏览器端到端测试（`playwright.config.mjs`、`helpers/` 及按功能模块划分的 `*.spec.mjs`）。
 - `test/docker/`：真实 Docker 容器与 Compose 系统测试（按 `agent`、`deploy`、`external`、`identity`、`manager`、`projects`、`runner` 分模块）。
 - `test/acceptance/`：面向完整部署栈与测试仓夹具的 AI 剧本验收脚本及 `compose.quick-tunnel.yaml`。
 - `test/live/`：需显式凭据或本机真实 CLI 的实况／协议探针测试（`*.live.test.mjs`、`*-smoke.mjs`、`*-probe.mjs`）。

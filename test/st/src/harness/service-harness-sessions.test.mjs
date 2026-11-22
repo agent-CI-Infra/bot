@@ -44,4 +44,24 @@ for(const backend of ['pi','codex','claude_code'])test(`a non-project service as
  const records=serviceRolesApi(s,principal,'GET',`/api/service-roles/${role.id}/sessions/${binding.id}/events`,{});assert.ok(records.events.length>0);
  assert.throws(()=>serviceRolesApi(s,{...principal,role:'member'},'GET',`/api/service-roles/${role.id}/sessions/${binding.id}/events`,{}));
  assert.equal(s.get('SELECT count(*) n FROM service_harness_sessions').n,1);assert.ok(s.get('SELECT count(*) n FROM service_harness_events').n>0);
+ const sessionEvent=records.events.find(e=>e.type==='harness_session');
+ assert.equal(sessionEvent.data.access.network,true,'assistant computer egress defaults to enabled in service harness sessions');
+});
+
+test('serviceHarnessTurn propagates assistant computer egress=false into harnessAccess.network', { timeout: 60000 }, async t => {
+ const root=mkdtempSync(join(tmpdir(),'bot-service-session-egress-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root),redactor=new Redactor();
+ const model=createServer(async(req,res)=>{let raw='';for await(const part of req)raw+=part;res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'Offline answer'}}],usage:{prompt_tokens:10,completion_tokens:10}}));});model.listen(0,'127.0.0.1');await once(model,'listening');
+ t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
+ s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m',NULL,?,'fixture',?,'now')",'http://127.0.0.1:'+model.address().port+'/v1',s.secrets.seal({value:'fixture-key'},'model:m'));
+ const before=serviceRole(s,managementAssistant);updateServiceRole(s,'admin',managementAssistant,{expected_revision:before.revision,harness:'pi',model_id:'m'});
+ const role=serviceRole(s,managementAssistant);await manager.call('PUT','/v1/projects/101');
+ const computer={egress:false,async sessionWorkspace(task,workspaceId,redactor,log){const workspace=new Workspace(s,manager,{...task,repository_id:'101',workspace_id:workspaceId,generation:1},redactor,async()=>{},log,'service_role_operations');await workspace.call('init',{type:'workspace_init'});return workspace;}};
+ const spec={store:s,task:{id:randomBytes(24).toString('hex'),kind:'management.agent',repository_id:null,service_role_id:role.id,conversation_id:'service-owner-offline',source_message:'one'},redactor,guard:async()=>{},system:'Answer the service conversation.',prompt:JSON.stringify({fixture_mode:'conversation',request:'Respond offline.'}),model:serviceRoleModel(s,role.id),tools:[],execute:async()=>({error:'tool_not_allowed'})};
+ const answer=await runAgent({...spec,adapter:services=>serviceHarnessTurn(spec,services,role,computer,'owner:offline')});
+ assert.equal(typeof answer,'string');assert.ok(answer.length>0);
+ const binding=s.get('SELECT id FROM service_harness_sessions');
+ const principal={id:'admin',role:'super_admin',repositories:[]};
+ const records=serviceRolesApi(s,principal,'GET',`/api/service-roles/${role.id}/sessions/${binding.id}/events`,{});
+ const sessionEvent=records.events.find(e=>e.type==='harness_session');
+ assert.equal(sessionEvent.data.access.network,false,'disabling assistant computer egress disables harnessAccess.network');
 });

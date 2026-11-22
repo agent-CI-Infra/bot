@@ -1,8 +1,7 @@
 import { ManagerError } from './docker.mjs';
-import { normalizePolicy } from '../runner/browser-policy.mjs';
 
-const runnerTypes = ['command','read','write','workspace_init','workspace_source','workspace_tree','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_browser','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_request','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_agent_result','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error','action','args','policy','url','name','selector','text','label'];
+const runnerTypes = ['command','read','write','workspace_init','workspace_source','workspace_tree','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_request','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_agent_result','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
 
 // The control plane's workspace cleanup: list the task directories or shared worktrees, remove a few of them per call
 // (runner/task-dirs.mjs).
@@ -15,15 +14,8 @@ function validIdArray(value) {
   return Array.isArray(value) && value.length <= 512 && value.every(id => typeof id === 'string' && /^[a-f0-9]{48}$/.test(id));
 }
 // A runner request is checked before it can touch the computer, so a malformed one never interrupts other tasks.
-function validateBrowserCall(call) {
-  const actions = ['open', 'see', 'click', 'type', 'screenshot', 'close'];
-  if (!actions.includes(String(call.action || ''))) throw new ManagerError('invalid_runner_request', 400);
-  if (call.action !== 'close' && !normalizePolicy(call.policy)) throw new ManagerError('invalid_runner_request', 400);
-  if (call.args !== undefined && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) throw new ManagerError('invalid_runner_request', 400);
-}
 export function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
-  if (call.type === 'workspace_browser') validateBrowserCall(call);
   if (call.type === 'workspace_agent_result' && (!/^[a-f0-9]{48}$/.test(call.request_id??'') || !Number.isSafeInteger(call.offset) || call.offset<0)) throw new ManagerError('invalid_runner_request',400);
   if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);
   // The three-way integration the control plane starts when a branch fell behind main names the workspace it integrates

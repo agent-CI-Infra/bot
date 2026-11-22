@@ -5,8 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { blobSha, Redactor, sha } from '../../../../dist/agent/common.js';
-import { browserEvidenceDir } from '../../../../dist/browser/runtime.js';
-import { browserEvidenceRoot, runBrowserTool } from '../../../../dist/browser/tools.js';
 import { assertMediaOutsideCode, collectPullRequestMedia, planPullRequestMedia, publishPullRequestMedia, pullRequestSummaryForProgress } from '../../../../dist/github/pull-request-media.js';
 import { Publisher } from '../../../../dist/github/publisher.js';
 import { hostedMediaUrl } from '../../../../dist/github/hosted-pr-media.js';
@@ -34,8 +32,8 @@ test('rejects unselected, wrong Markdown type, unsupported and out-of-scope medi
     ['![A](workspace:x.png)', undefined], ['No reference', ['x.png']], ['![A](workspace:x.mp4)', ['x.mp4']],
     ['[A](workspace:x.png)', ['x.png']], ['![A](workspace:x.svg)', ['x.svg']], ['![A](workspace:../notes/x.png)', ['../notes/x.png']],
     ['![A](workspace:/tmp/x.png)', ['/tmp/x.png']], ['![A](workspace:.git/x.png)', ['.git/x.png']],
+    ['![A](workspace:../browser/evidence/step-1.png)', ['../browser/evidence/step-1.png']],
     ['![A](workspace:../browser/evidence/nested/x.png)', ['../browser/evidence/nested/x.png']],
-    ['![A](workspace:../browser/evidence/step-1.jpg)', ['../browser/evidence/step-1.jpg']],
     ['![A][x]\n\n[x]: workspace:x.png', ['x.png']], ['`![A](workspace:x.png)`\n\n![A](workspace:x.png)', ['x.png']],
   ]) assert.throws(() => planPullRequestMedia(summary, paths), { code: 'pull_request_media_invalid' });
   const diff = [{ path: 'x.png', mode: '100644', sha: 'new' }];
@@ -125,55 +123,6 @@ test('runner reads only selected regular files in the task checkout', async t =>
   assert.equal(calls.filter(call => call.type === 'workspace_export').length, 1);
   for (const path of ['other/outside.png', 'symlink.png', 'hardlink.png', 'directory.png', 'fake.png', 'large.png', 'secret.png', 'missing.png'])
     await assert.rejects(collectPullRequestMedia(workspace, [path]), { code: 'pull_request_media_invalid' });
-});
-
-test('collects only this task’s recorded screenshots from the control-plane evidence directory', async t => {
-  const { store } = await harness(t);
-  store.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");
-  store.run("INSERT INTO repositories VALUES('r','fixture/r','1','a')");
-  const tasks = ['current', 'other'].map(taskId => {
-    store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES(?, 'r','task.request','running','Browser fixture',?)",
-      taskId, JSON.stringify({ browser: { origins: ['https://example.test'] } }));
-    return store.get('SELECT * FROM tasks WHERE id=?', taskId);
-  });
-  const [task, other] = tasks;
-  const workspace = { store, task, redactor: new Redactor(), async guard() {},
-    async deliver() { assert.fail('Control-plane evidence is never read through the runner file export'); },
-  };
-  async function capture(owner, n, bytes = png) {
-    const file = `step-${n}.png`;
-    await runBrowserTool(store, owner, { action: 'screenshot' }, {
-      workspace: { async call() { return { ok: true, step: { id: file, n }, screenshot: { file, base64: bytes.toString('base64') } }; } },
-    });
-  }
-  await capture(task, 1);
-  await capture(other, 2);
-  const evidence = part => '../browser/evidence/' + part;
-  const dir = browserEvidenceDir(browserEvidenceRoot(store), task.id);
-  const [file] = await collectPullRequestMedia(workspace, [evidence('step-1.png')]);
-  assert.equal(file.source, evidence('step-1.png'));
-  assert.equal(file.path, `${sha(png)}.png`);
-  assert.deepEqual(Buffer.from(store.trajectories.getBlob(file.content.$blob), 'base64'), png);
-
-  await writeFile(join(dir, 'step-3.png'), png);
-  for (const name of ['step-2.png', 'step-3.png', '../other/step-2.png'])
-    await assert.rejects(collectPullRequestMedia(workspace, [evidence(name)]), { code: 'pull_request_media_invalid' });
-  const outside = join(browserEvidenceDir(browserEvidenceRoot(store), other.id), 'step-2.png');
-  await rm(join(dir, 'step-1.png'));
-  await symlink(outside, join(dir, 'step-1.png'));
-  await assert.rejects(collectPullRequestMedia(workspace, [evidence('step-1.png')]), { code: 'pull_request_media_invalid' });
-  await rm(join(dir, 'step-1.png'));
-  await link(outside, join(dir, 'step-1.png'));
-  await assert.rejects(collectPullRequestMedia(workspace, [evidence('step-1.png')]), { code: 'pull_request_media_invalid' });
-  await capture(task, 4, Buffer.concat([png, Buffer.alloc(5 * 1024 * 1024)]));
-  await assert.rejects(collectPullRequestMedia(workspace, [evidence('step-4.png')]), { code: 'pull_request_media_invalid' });
-  await capture(task, 5, Buffer.concat([png, Buffer.from('sk-' + 'testOnlyCredential0123456789')]));
-  await assert.rejects(collectPullRequestMedia(workspace, [evidence('step-5.png')]), { code: 'pull_request_media_invalid' });
-  await capture(task, 6);
-  const tampered = Buffer.from(png);
-  tampered[tampered.length - 1] ^= 1;
-  await writeFile(join(dir, 'step-6.png'), tampered);
-  await assert.rejects(collectPullRequestMedia(workspace, [evidence('step-6.png')]), { code: 'pull_request_media_invalid' });
 });
 
 function rawRequest(origin, path, method = 'GET') {

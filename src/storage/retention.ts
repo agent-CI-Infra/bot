@@ -5,7 +5,7 @@ import type { Manager } from '../projects/service.js';
 import { fail, type Json } from '../core/security.js';
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { browserEvidenceRoot } from '../browser/tools.js';
+import { browserEvidenceRoot } from '../browser/evidence.js';
 import { browserEvidenceDir } from '../browser/runtime.js';
 import { pruneCommitChecks } from '../tasks/external-links.js';
 import { pruneEventSubscriptions } from '../tasks/event-subscriptions.js';

@@ -12,7 +12,7 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { beginRun } from '../../../../dist/tasks/trace.js';
 import { removableWorkspaces } from '../../../../dist/projects/workspace-cleanup.js';
 import { externalStorage } from '../../../../dist/external/storage.js';
-import { browserEvidenceRoot } from '../../../../dist/browser/tools.js';
+import { browserEvidenceRoot } from '../../../../dist/browser/evidence.js';
 import { browserEvidenceDir } from '../../../../dist/browser/runtime.js';
 import { harness, setup, testPassword } from '../../../fixtures/helpers.mjs';
 import { managerFixture } from '../../../fixtures/project-manager-fixture.mjs';

@@ -28,10 +28,14 @@ function assistantResourcesBody(view, redraw) {
   if (!computers) return [note('暂时读不到 manager，无法显示助手电脑的资源，稍后再试。')];
   const { settings, defaults, bounds, host } = computers;
   const { grid, changes: changed } = resourceSelects(assistantResourceFields, { values: settings, bounds, host, marked: defaults, mark: '（默认）' });
-  return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'], ['网络', '无']]),
+  const egressEnabled = settings.egress !== false;
+  const egress = checkbox('egress', egressEnabled, '允许访问外网（自由使用预装浏览器访问网页、安装依赖；与控制面内网隔离）');
+  const egressInput = egress.querySelector('input');
+  return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'], ['网络', egressEnabled ? '可访问外网（独立隔离网络）' : '无外网']]),
     note('/tmp 和工作目录放在内存里，写进去的文件计入内存上限；写满时命令收到“磁盘已满”，不影响别的电脑。电脑共用这台主机，分配总量可以超过主机。'),
-    actionForm([grid, note('保存后新建的电脑立即使用新值；已有的电脑在它的下一个回合开始时按新值重建，HOME 保留，/tmp 和工作目录清空，进行中的回合不受影响。')], '保存', async () => {
+    actionForm([grid, egress, note('保存后新建的电脑立即使用新值；已有的电脑在它的下一个回合开始时按新值重建，HOME 保留，/tmp 和工作目录清空，进行中的回合不受影响。')], '保存', async () => {
       const changes = changed();
+      if (egressInput.checked !== egressEnabled) changes.egress = egressInput.checked;
       if (!Object.keys(changes).length) { redraw('没有改动'); return; }
       view.settings = (await api('/api/settings', 'PATCH', { assistant_computers: changes })).settings.assistant_computers;
       redraw('已保存：新建的电脑立即使用，已有的在下一个回合重建');

@@ -2,7 +2,6 @@ import { extname } from 'node:path/posix';
 import { marked } from 'marked';
 import { blobSha, sha, stop, TaskError } from '../agent/common.js';
 import type { Workspace } from '../agent/workspace.js';
-import { isBrowserScreenshotName, readBrowserScreenshot } from '../browser/evidence.js';
 import { publicText, registeredRedactor } from '../core/redaction.js';
 import type { GitHub } from './client.js';
 import { hostedMediaOrigin, hostedMediaType, registerHostedMedia, type HostedPullRequestMedia } from './hosted-pr-media.js';
@@ -10,14 +9,13 @@ import { hostedMediaOrigin, hostedMediaType, registerHostedMedia, type HostedPul
 const maxFiles = 8;
 const MiB = 1024 * 1024;
 const maxTotalBytes = 30 * MiB;
-const browserEvidence = '../browser/evidence/';
 const mediaPrefix = 'workspace:';
 const hashPattern = /^[a-f0-9]{40}$/;
 const assetPath = /^([a-f0-9]{64})\.([a-z0-9]+)$/;
 
 export const pullRequestMediaSchema = {
   type: 'array', maxItems: maxFiles, uniqueItems: true, items: { type: 'string' },
-  description: 'Optional workspace paths explicitly selected for this PR. Use repository-relative files outside the code diff (for example gitignored output), or a recorded browser screenshot such as ../browser/evidence/step-1.png from this task. In summary, use ![Screenshot](workspace:path) for PNG, JPEG, GIF or WebP and [Recording](workspace:path) for MP4 or WebM. Percent-encode spaces and parentheses in the link. Select only media safe to share with anyone who receives the link. Inspect each file for credentials and private content first. When revising an existing description, keep its previously published media lines if they still apply.',
+  description: 'Optional repository-relative workspace paths outside the code diff (for example gitignored output such as .tmp/result.png or .tmp/demo.webm) explicitly selected for this PR. In summary, use ![Screenshot](workspace:path) for PNG, JPEG, GIF or WebP and [Recording](workspace:path) for MP4 or WebM. Percent-encode spaces and parentheses in the link. Select only media safe to share with anyone who receives the link. Inspect each file for credentials and private content first. When revising an existing description, keep its previously published media lines if they still apply.',
 };
 
 const format = (path: string) => extname(path).slice(1).toLowerCase().replace(/^jpeg$/, 'jpg');
@@ -32,12 +30,10 @@ function selectedPaths(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > maxFiles || new Set(value).size !== value.length)
     throw new MediaInputError(`Select up to ${maxFiles} distinct workspace files in media.`);
   for (const path of value) {
-    const local = typeof path === 'string' && path.startsWith(browserEvidence) ? path.slice(browserEvidence.length) : path;
-    if (typeof local !== 'string' || !local || local.length > 1024 || /[\\\x00-\x1f\x7f]/.test(local) ||
-        local.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git') ||
-        (local !== path && !isBrowserScreenshotName(local)))
-      throw new MediaInputError('Use repository-relative media paths or a file from this task’s ../browser/evidence/.');
-    if (!hostedMediaType(format(local)))
+    if (typeof path !== 'string' || !path || path.length > 1024 || /[\\\x00-\x1f\x7f]/.test(path) ||
+        path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git'))
+      throw new MediaInputError('Use repository-relative workspace media paths outside .git.');
+    if (!hostedMediaType(format(path)))
       throw new MediaInputError(`Unsupported media format for ${JSON.stringify(path)}. Use PNG, JPEG, GIF, WebP, MP4 or WebM.`);
   }
   return value;
@@ -162,17 +158,7 @@ export async function collectPullRequestMedia(workspace: Workspace, paths: strin
   for (const source of paths) {
     if (publicText(source, redactor) !== source) throw new MediaInputError('A selected media path contains a credential.');
     const limit = Math.min((video(source) ? 20 : 5) * MiB, maxTotalBytes - total);
-    let media: { bytes: Buffer; blob: string };
-    if (source.startsWith(browserEvidence)) {
-      await workspace.guard();
-      const bytes = await readBrowserScreenshot(workspace.store, String(workspace.task.id), source.slice(browserEvidence.length), limit);
-      if (!bytes)
-        throw new MediaInputError(`Cannot read ${JSON.stringify(source)} as a recorded screenshot for this task within the PR media size limits.`);
-      media = { bytes, blob: blobSha(bytes) };
-    } else {
-      media = await readWorkspaceMedia(workspace, source, limit, redactor);
-    }
-    const { bytes, blob } = media;
+    const { bytes, blob } = await readWorkspaceMedia(workspace, source, limit, redactor);
     total += bytes.length;
     const type = format(source);
     if (!bytesMatch(bytes, type))

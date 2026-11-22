@@ -12,7 +12,7 @@
     "check": "tsc -p tsconfig.json --noEmit && node scripts/check-runtime.mjs",
     "start": "node dist/main.js",
     "test": "npm run build && node test/framework/test-sets.mjs",
-    "test:e2e": "npm run build && node --test --test-concurrency=1 test/e2e/browser/browser-runtime.mjs && playwright test -c test/e2e/playwright.config.mjs",
+    "test:e2e": "npm run build && playwright test -c test/e2e/playwright.config.mjs",
     "test:docker": "npm run build && node test/docker/projects/docker-env.mjs",
     "test:commands:docker": "node test/docker/runner/command-lifecycle-docker.mjs",
     "test:review-session": "npm run build && node --test test/live/review/review-session-runner.mjs",
