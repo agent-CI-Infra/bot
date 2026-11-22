@@ -72,7 +72,7 @@ test('PR #1094: a Manager-controlled review publishes after an attempt bump reus
   h.setBranch('ready');
   // The project runs reviews under its Manager (Native), with the review entry's Dev on Pi.
   const admin = { id: 'admin', role: 'project_admin', repositories: ['101'] }, url = new URL('http://local/api/repositories/101/roles');
-  const roles = ['coordinator', 'test', 'reviewer', 'ux', 'qa', 'manager'].map(role_id => ({ role_id, harness_ref: { id: 'native' } }));
+  const roles = ['test', 'reviewer', 'ux', 'qa', 'manager'].map(role_id => ({ role_id, harness_ref: { id: 'native' } }));
   roleApi(h.store, admin, 'PUT', url, { expected_revision: roleApi(h.store, admin, 'GET', url, {}).revision, enabled: true, controller: { entries: { review: true } },
     roles: [...roles, { role_id: 'dev', harness_ref: { id: 'pi' } }] });
   h.store.run('DELETE FROM task_execution_configs WHERE task_id=?', h.taskId); captureTaskConfiguration(h.store, h.taskId);

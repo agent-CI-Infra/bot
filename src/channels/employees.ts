@@ -42,7 +42,7 @@ export class ChannelEmployees {
     for (const cap of JSON.parse(grant.capabilities)) authorize(actor, cap, { project_id: grant.project_id });
     if (!this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1', grant.project_id)) fail(403, 'channel_employee_project_inactive');
     const role = roleConfiguration(this.store, grant.project_id).roles.find(r => r.role_id === grant.role_id && r.enabled);
-    if (!role || role.kind === 'evaluator' || role.role_id === 'coordinator') fail(403, 'channel_employee_role_unavailable');
+    if (!role || role.kind === 'evaluator') fail(403, 'channel_employee_role_unavailable');
     return this.binding(chat, grant.maintainer_id, grant.binding_id);
   }
   /** Called in the verified ingress transaction before ACK, so old tokens cannot race audience changes. */

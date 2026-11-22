@@ -687,7 +687,7 @@ export function genericRefusal(
   }
   if (role) {
     const targetRole = roleConfiguration(store, repo).roles.find(r => r.role_id === role && r.enabled);
-    if (!targetRole || targetRole.kind === 'evaluator' || role === 'coordinator') {
+    if (!targetRole || targetRole.kind === 'evaluator') {
       return { work: role, code: 'task_executor_unavailable', reason: `角色「${role}」不存在、已停用或不可作为执行角色。` };
     }
   }
@@ -917,7 +917,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
           continue;
         }
       }
-      const roleMatch = roleConfiguration(store, String(context.event.repository_id)).roles.find(r => r.role_id === id && r.enabled && r.kind !== 'evaluator' && id !== 'coordinator');
+      const roleMatch = roleConfiguration(store, String(context.event.repository_id)).roles.find(r => r.role_id === id && r.enabled && r.kind !== 'evaluator');
       if (roleMatch) {
         role ??= roleMatch.role_id;
         continue;
@@ -932,7 +932,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   if (role !== null) {
     const configRoles = roleConfiguration(store, String(context.event.repository_id)).roles;
     const found = configRoles.find(r => r.role_id === role);
-    if (!found || found.kind === 'evaluator' || role === 'coordinator') {
+    if (!found || found.kind === 'evaluator') {
       failDecision('dispatch_role_invalid', `Role "${role}" is not an available worker role in this project.`);
     }
   }

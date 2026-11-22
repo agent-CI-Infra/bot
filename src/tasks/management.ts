@@ -117,7 +117,7 @@ export function taskExecutor(store: Store, caller: TaskCaller, requested?: strin
   // A human API call has no calling role and retains the existing project-team entry.
   if (!executor) return null;
   const target = roleOf(store, caller.project_id, executor);
-  if (!target || target.kind === 'evaluator' || executor === 'coordinator') return fail(403, 'task_executor_unavailable');
+  if (!target || target.kind === 'evaluator') return fail(403, 'task_executor_unavailable');
   if (executor !== caller.role && caller.kind !== 'operator') {
     const source = roleOf(store, caller.project_id, caller.role!);
     if (caller.permissions?.delegation !== 'allow' || source?.permissions.delegation !== 'allow') fail(403, 'task_delegation_forbidden');
@@ -131,7 +131,7 @@ export function assertManagedTask(store: Store, caller: TaskCaller, id: string, 
   if (caller.kind === 'operator' || caller.kind === 'event') return task;
   const origin = store.get('SELECT owner_key FROM task_origins WHERE task_id=?', id);
   // A worker's live assignment grants evidence access, never authority to change its enclosing task.
-  const controller = caller.role !== 'coordinator' && roleOf(store, caller.project_id, caller.role!)?.kind === 'controller';
+  const controller = roleOf(store, caller.project_id, caller.role!)?.kind === 'controller';
   const assigned = (!write || controller) && caller.source_task_id === id && caller.source_run_id && store.get(
     "SELECT 1 FROM task_runs WHERE id=? AND task_id=? AND role=? AND status='running'", caller.source_run_id, id, caller.role!);
   const familyRead=!write&&caller.source_task_id&&caller.source_run_id&&store.get(

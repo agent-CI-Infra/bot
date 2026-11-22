@@ -4,7 +4,7 @@ import { hasActiveEventSubscriptions, nextEventSubscriptionTimeout, onSubscripti
 import { taskReadScopes } from '../tasks/management.js';
 import { claimQueuedTask } from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
-import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
+import {resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {integratedPublication,applyIntegration} from '../tasks/integration.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -123,19 +123,19 @@ export class TaskEngine {
   // The parallel runner calls last granted by the manager, per repository.
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;private readonly merging=new Map<string,Promise<unknown>>();
-  readonly rules:RuleService;readonly coordinator:CoordinationWorker;
+  readonly rules:RuleService;
   // #713: moves tasks nobody needs to act on out of 待处理; main.ts runs it in the background, run() for its own work.
   readonly obsolete:ObsoleteSweep;
   readonly botPrWake:BotPrWakeScanner;
   // Decides the Manager events in the background; a decided event's new tasks start on the next tick.
   readonly dispatcher:Dispatcher;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.obsolete=new ObsoleteSweep(store);this.botPrWake=new BotPrWakeScanner(store,githubUrl);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl,manager),()=>queueMicrotask(()=>this.tick()));}
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.obsolete=new ObsoleteSweep(store);this.botPrWake=new BotPrWakeScanner(store,githubUrl);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl,manager),()=>queueMicrotask(()=>this.tick()));}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
     // A previous process may have stopped between checkpoints; never charge server downtime as task runtime.
     this.store.run('UPDATE task_metrics SET active_since=NULL,complete=0 WHERE active_since IS NOT NULL');
-    this.store.run('DELETE FROM task_claims');interruptRuns(this.store);this.coordinator.recover();
+    this.store.run('DELETE FROM task_claims');interruptRuns(this.store);
     this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     resumeFinishedReviews(this.store);
@@ -144,7 +144,7 @@ export class TaskEngine {
   }
   tick(){
     if(this.closing)return;
-    this.coordinator.tick();resumeParentTasks(this.store,id=>this.active.has(id));resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeExpiredEventSubscriptions(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
+    resumeParentTasks(this.store,id=>this.active.has(id));resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeExpiredEventSubscriptions(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
     for(const request of this.store.all("SELECT m.* FROM task_merge_requests m JOIN tasks t ON t.id=m.task_id WHERE m.state IN ('waiting','queued','cancelling') AND m.next_run_at<=? AND (m.state='cancelling' OR t.status IN ('pr_opened','completed'))",Date.now())){
       if(this.active.has(request.task_id)||this.merging.has(request.task_id))continue;
       this.store.run('UPDATE task_merge_requests SET next_run_at=? WHERE task_id=?',Date.now()+15000,request.task_id);
@@ -217,7 +217,7 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;onSubscriptionWake(null);if(this.timer)clearInterval(this.timer);await this.botPrWake.close();await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;await this.coordinator.close();}
+  async close(){this.closing=true;onSubscriptionWake(null);if(this.timer)clearInterval(this.timer);await this.botPrWake.close();await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;}
   // Issues whose development is not shown as it is (#1047): a write to retry, or a development that ended or paused outside a
   // run (a person cancelled it, the Issue was closed). A running development settles its Issue itself. One sweep at a time,
   // with one GitHub client per project.
@@ -495,8 +495,7 @@ export class TaskEngine {
         await validate();
         if(policyHash!==policyHashFor(artifacts))stop('acceptance_context_changed','retry_wait','验收期间必需验证策略变化，将重新验收。');
         if(['pass','pass_with_issues'].includes(verdict.outcome)){records.stage(id,candidate.id,candidate.revision,verdict,token,{policy_hash:policyHash});return {ok:true};}
-        const result=records.decide(id,candidate.id,candidate.revision,verdict,'running',false,token);
-        if((result as any).coordination_requested)stop('task_coordination_requested','waiting_coordination',String((result as any).coordination_requested));
+        records.decide(id,candidate.id,candidate.revision,verdict,'running',false,token);
         if(verdict.outcome==='needs_human')traceEvent(this.store,id,'qa_help_suggestion',{reason:verdict.reason,gaps:verdict.gaps},task.trace_run_id,'role:qa');
         // Continue this same execution when called as a tool; a finished report retries with explicit feedback.
         this.store.run("UPDATE tasks SET status='running',phase=? WHERE id=?",task.phase,id);

@@ -363,7 +363,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .role-tile p{margin:0;font-size:var(--font-size-1);line-height:1.55;overflow-wrap:anywhere}.role-tile-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.role-tile-head strong{font-size:var(--font-size-2)}
 .role-executor{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px}
 .role-disabled{opacity:.6}.role-framework{border-style:dashed;background:#fbfcfd}
-.roles-delegation>h4{margin-top:14px}.role-coordinator{display:grid;grid-template-columns:minmax(0,420px);margin-top:6px}
+.roles-delegation>h4{margin-top:14px}
 @media(max-width:900px){.role-lanes{grid-template-columns:minmax(0,1fr)}.role-lane-arrow{justify-self:center;transform:rotate(90deg)}}
 /* The Manager page: the prompt editor with its sections, the work type table, event switches and the latest decisions. */
 .manager-holder,.manager-page,.project-triggers-page{display:grid;gap:16px;min-width:0}.manager-prompt textarea.code{min-height:320px;width:100%;box-sizing:border-box}

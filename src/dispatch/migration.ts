@@ -48,7 +48,6 @@ const isBuiltinSectionBody = (id: string, rawBody: string): boolean => {
 
 const roleModelPriority: Record<string, readonly string[]> = {
   manager: ['manager'],
-  coordinator: ['coordinator'],
   reviewer: ['review.pr', 'review.issue', 'reply', 'release.observe', 'release.notes'],
   dev: ['development.issue', 'development.pr', 'task.development', 'actions.failures', 'task.request'],
   test: ['test'],

@@ -761,7 +761,7 @@ test('Claude configuration rejects invalid profiles but controller roles can sel
   await assert.rejects(roleRuns.prepare(f.spec,'dev',undefined,'claude_code'),{code:'claude_configuration_invalid'});
   writeFileSync(f.file,JSON.stringify(f.config));
   const admin={id:'admin',role:'project_admin',repositories:['r']},url=new URL('http://local/api/repositories/r/roles');
-  for(const role of ['manager','coordinator']){
+  for(const role of ['manager']){
     const current=roleApi(f.s,admin,'GET',url,{});
     const saved=roleApi(f.s,admin,'PUT',url,{expected_revision:current.configuration.revision,enabled:true,roles:[{role_id:role,harness_ref:{id:'claude_code'}}]});
     assert.equal(saved.configuration.roles.find(r=>r.role_id===role).harness_ref.id,'claude_code');

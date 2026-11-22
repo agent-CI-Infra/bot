@@ -55,7 +55,7 @@ export class RoleConversations {
       return { id: prior.id, message: String(this.store.secrets.open(prior.reply,'conversation-reply:'+prior.id).message), replayed:true };
     }
     const resolved = resolveRole(this.store,source.caller.project_id,source.caller.role,'conversation'), snapshot = resolved.snapshot;
-    if (snapshot.kind === 'evaluator' || snapshot.role_id === 'coordinator') return fail(403,'conversation_role_unavailable');
+    if (snapshot.kind === 'evaluator') return fail(403,'conversation_role_unavailable');
     if (snapshot.environment.id.startsWith('isolated-')) return stop('unsupported_capability','waiting_configuration','当前会话入口尚未提供隔离运行环境，不能退回共享环境。');
     const driver = roleHarness(snapshot.harness.id), budget = runBudget(snapshot), id = randomId(), lease = randomId(), controller = new AbortController();
     let instance:Row|undefined;

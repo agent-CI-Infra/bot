@@ -38,13 +38,13 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
 
 ## 4. 项目角色池与默认配置
 
-在「项目设置 → 角色」配置项目协作角色（默认包含 Manager、Dev、Reviewer、Test、QA 等）：
+在「项目设置 → 角色」配置项目协作角色（默认角色池为 `Manager`、`Developer`、`Tester`、`Reviewer`、`UX reviewer` 与 `Independent QA`；原独立 `Task Coordinator` 已退役，项目事件分派、任务内多角色编排与跨任务排期/依赖等待统一由 `Manager` 承担）：
 
-- **跟随默认与自定义**：未修改过的项目自动跟随当前版本的推荐配置（默认推荐 `Pi` 后端）；一旦保存自定义修改即转为项目独立版本，随时可点击「恢复默认」回到跟随内置默认（历史版本保留可查）。
+- **跟随默认与自定义**：未修改过的项目自动跟随当前版本的推荐配置（默认推荐 `Pi` 后端）；一旦保存自定义修改即转为项目独立版本，随时可点击「恢复默认」回到跟随内置默认（历史版本保留可查）。升级前保存过 `coordinator` 的旧项目配置读取与重存时会自动平滑过滤，历史修订与任务详情快照保持只读可读。
 - **单页表单编辑**：支持按角色配置名称、启停状态、职责说明、完整可编辑提示词、Agent 后端（`pi`、`native`、`process`、`claude_code`、`codex`、`icode`、`container_acp`）、角色覆写模型、技能包、预算（轮次、输出 token、命令超时、累计用量上限）与逐项权限。Manager 与 QA 为必需角色，不可停用或删除。
-- **iCode**：Dev、Test、Reviewer、UX 和自定义角色可选，在项目电脑中使用平台模型与用量统计。管理员安装并选用版本后，角色后端列表显示实际选用版本、就绪状态和未就绪原因。Manager、Coordinator、QA 及服务角色的选项中没有 iCode。安装操作见 [安装与维护容器内 ACP 产品](deployment-and-operations.md#安装与维护容器内-acp-产品)。
+- **iCode**：Dev、Test、Reviewer、UX 和自定义角色可选，在项目电脑中使用平台模型与用量统计。管理员安装并选用版本后，角色后端列表显示实际选用版本、就绪状态和未就绪原因。Manager、QA 及服务角色的选项中没有 iCode。安装操作见 [安装与维护容器内 ACP 产品](deployment-and-operations.md#安装与维护容器内-acp-产品)。
 - **两类细粒度权限**：
-  - **平台权限**：`delegation`（委派角色）、`project_tasks`（其他任务读/写）、`project_memory`（项目共享知识读/写）。
+  - **平台权限**：`delegation`（委派角色）、`project_tasks`（同项目其他任务只读查询 `list_project_tasks`/`read_project_task`，读写还可修改任务、声明依赖等待 `wait_for_tasks`、调整优先级与关联任务）、`project_memory`（项目共享知识读/写）。
   - **GitHub 资源权限**：`github_issues`、`github_pull_requests`、`github_actions`、`github_contents`（无/只读/读写），以及 `github_checks`、`github_statuses`（无/只读）。默认仅 Manager 具备 GitHub 写权限，其余内置角色只读。
   - **内置基础能力**：使用虚拟电脑（文件与命令）是所有工作角色的内置能力，不单独设权限开关。
 - **内置可选开发 Skill**：平台随包提供 `roadmap-decomposition`（Manager 默认自动加载）、`layered-ci-gates`（已确认 CI 改动任务自动加载）、`test-driven-development` 与 `systematic-debugging`（可在角色配置中按需绑定给 Dev）。

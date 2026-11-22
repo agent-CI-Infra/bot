@@ -2,9 +2,9 @@ import {traceClean} from './trace.js';
 import {historyData,unreadable} from '../storage/payloads.js';
 import {childTaskContext} from './children.js';
 import {captureTaskConfiguration} from './configuration.js';
-import {followupDecision,followupTarget,followupRefusal,recordFollowupRelation,coordinateFollowup,completedFollowupTarget} from './followups.js';
+import {followupDecision,followupTarget,followupRefusal,recordFollowupRelation,completedFollowupTarget} from './followups.js';
 import {setTaskPriority,taskRelations} from './priority.js';
-import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,decideCoordination,type CoordinationRequest} from './coordination.js';
+import {coordinationContext} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
 import { taskControllerReads, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import { stop } from '../agent/common.js';
@@ -19,7 +19,7 @@ export interface Evidence { source: string; version: string; verified: boolean; 
 export interface Candidate { id: string; revision: number; artifacts: Artifact[]; evidence: Evidence[]; claims: unknown; created_at: string; coordination_version?: string }
 export type Outcome = 'pass' | 'pass_with_issues' | 'return' | 'insufficient_evidence' | 'needs_human';
 export interface Residual { key: string; description: string; evidence: string; impact: string; nonblocking_reason: string; goal: string; criteria: string[]; conditions?:string; workaround?:string; delivery_impact?:string }
-export interface Verdict { pass?: boolean; issues?: string[]; coordination?: CoordinationRequest; outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
+export interface Verdict { pass?: boolean; issues?: string[]; outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
 const hash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 const outcomes = new Set(['pass','pass_with_issues','return','insufficient_evidence','needs_human']);
 export function validateVerdict(value: any): Verdict {
@@ -45,9 +45,8 @@ export function validateVerdict(value: any): Verdict {
   const passing = ['pass','pass_with_issues'].includes(value.outcome);
   const coreComplete = value.core_complete ?? passing, evidenceComplete = value.required_evidence_complete ?? passing, acceptableRisk = value.acceptable_risk ?? true;
   if ([coreComplete, evidenceComplete, acceptableRisk].some(v => typeof v !== 'boolean')) throw new Error('invalid_acceptance_result');
-  if (value.coordination!==undefined&&(!validCoordination(value.coordination)||value.outcome!=='needs_human')) throw new Error('invalid_acceptance_coordination');
   if (passing && (!coreComplete || !evidenceComplete || !acceptableRisk || value.gaps.length)) throw new Error('acceptance_core_incomplete');
-  if (!passing && !value.gaps.length && !value.coordination) throw new Error('acceptance_gap_required');
+  if (!passing && !value.gaps.length) throw new Error('acceptance_gap_required');
   if (value.outcome === 'pass_with_issues' ? !residuals.length : residuals.length) throw new Error('acceptance_residual_mismatch');
   const keys = new Set();
   for (const r of residuals) {
@@ -64,7 +63,6 @@ export function validateVerdict(value: any): Verdict {
     core_complete: coreComplete,
     required_evidence_complete: evidenceComplete,
     acceptable_risk: acceptableRisk,
-    ...(value.coordination ? { coordination: value.coordination } : {}),
   };
 }
 export class TaskRecords {
@@ -154,9 +152,6 @@ export class TaskRecords {
   }
 
   tool(id: string, name: string, args: any, access?:MemoryAccess) {
-    if(name==='decide_coordination'){if(!taskControllerReads(this.store,id,access))return {error:'requesting_manager_required'};return decideCoordination(this.store,id,args,'role:'+access!.role);}
-    if(name==='read_coordination')return coordinationContext(this.store,id);
-    if(name==='acknowledge_coordination')return acknowledgeCoordination(this.store,id,args);
     if(name==='record_scope_difference')return recordScopeDifference(this.store,id,args);
     if(name==='read_task_history'){
       const offset=args?.offset??0,limit=args?.limit??10;
@@ -177,11 +172,10 @@ export class TaskRecords {
     const current=this.get(id);
     if(!Array.isArray(artifacts)||!artifacts.length||artifacts.some(a=>!a||!a.kind||!a.reference||!a.version)||!Array.isArray(evidence)||evidence.some(e=>!e||!e.source||!e.version||typeof e.verified!=='boolean'))throw new Error('invalid_task_candidate');
     const executionRevision=this.store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',id)?.revision??JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input||'{}').configuration_revision??1;
-    const coordination_version=coordinationVersion(this.store,id);
-    const key=hash({...(coordination_version?{coordination_version}:{}),revision:current.revision,execution_revision:executionRevision,artifacts,evidence,claims});
+    const key=hash({revision:current.revision,execution_revision:executionRevision,artifacts,evidence,claims});
     if(current.candidate?.id===key)return current.candidate;
     if(['completed','succeeded','pr_opened'].includes(current.progress.status))throw new Error('task_already_delivered');
-    const candidate={id:key,...(coordination_version?{coordination_version}:{}),revision:current.revision,artifacts,evidence,claims,created_at:new Date().toISOString()};
+    const candidate={id:key,revision:current.revision,artifacts,evidence,claims,created_at:new Date().toISOString()};
     this.store.run('UPDATE task_records SET candidate=?,acceptance=NULL,pending=NULL WHERE task_id=?',JSON.stringify(candidate),id);this.history(id,'candidate',candidate);return candidate;
     });
   }
@@ -189,7 +183,6 @@ export class TaskRecords {
   stage(id: string, candidateId: string, revision: number, verdict: Verdict, token?: string, binding?: {policy_hash:string}) {
     return this.atomic(()=>{
     this.assertClaim(id,token);validateVerdict(verdict);const current=this.get(id);
-    assertCoordinationCurrent(this.store,id,current.candidate);
     if(current.candidate?.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
     this.store.run('UPDATE task_records SET pending=? WHERE task_id=?',JSON.stringify({...verdict,...binding,candidate_id:candidateId,revision}),id);
     this.history(id,'acceptance_staged',{...verdict,candidate_id:candidateId,revision});
@@ -203,7 +196,6 @@ export class TaskRecords {
       this.assertClaim(id,token);
       const current=this.get(id),task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
       if(!current.candidate||current.candidate.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
-      if(['pass','pass_with_issues'].includes(verdict.outcome))assertCoordinationCurrent(this.store,id,current.candidate);
       if(['cancelled','superseded'].includes(task.status))throw new Error('task_cancelled');
       const evaluated=this.store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance_evaluated' AND json_extract(data,'$.candidate_id')=? ORDER BY id DESC LIMIT 1",id,candidateId);
       const evaluationRef=evaluated?'task_history:'+evaluated.id:null;
@@ -229,7 +221,6 @@ export class TaskRecords {
         if(supplement){
           child=target.id;
           if(target.status!=='running')setTaskPriority(this.store,child,decision.priority,decision.reason,'role:manager');
-          coordinateFollowup(this.store,target,target,task,current.candidate!,residual,decision);
         }else{
           child=randomId();const now=new Date().toISOString();
           const input={request:residual.goal,contract:{goal:residual.goal,scope:current.contract.scope,criteria:residual.criteria,endpoint:'artifact',completeness:'inherited',source:{parent_task:id,parent_revision:current.revision,candidate_id:candidateId,residual:residual.key}},
@@ -239,7 +230,7 @@ export class TaskRecords {
           captureTaskConfiguration(this.store,child);
           const assessed=!String(followupPlan?.manager_ref).startsWith('framework:');
           this.history(child,assessed?'priority_assessed':'priority_defaulted',{priority:decision.priority,reason:decision.reason,evidence_refs:decision.evidence_refs,actor:assessed?'manager':'framework'});
-          if(target){recordFollowupRelation(this.store,{...task,id:child},current.candidate!,residual,{...decision,action:completedFollowupTarget(target)?'recurrence':'related'},target.id);coordinateFollowup(this.store,this.store.get('SELECT * FROM tasks WHERE id=?',child)!,target,task,current.candidate!,residual,decision);}
+          if(target){recordFollowupRelation(this.store,{...task,id:child},current.candidate!,residual,{...decision,action:completedFollowupTarget(target)?'recurrence':'related'},target.id);}
         }
         recordFollowupRelation(this.store,task,current.candidate!,residual,decision,child);
         this.store.run('INSERT INTO task_followups VALUES(?,?,?,?)',id,candidateId,residual.key,child);followups.push(child);

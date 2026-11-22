@@ -7,7 +7,7 @@ const phaseLabels = { prepare: '准备工作区', model: '模型执行', validat
 const own = (map, key) => Object.hasOwn(map, key) ? map[key] : undefined;
 const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP', claude_code: 'Claude Code', codex: 'Codex', icode: 'iCode' };
 const harnessName = id => own(harnessNames, id) || id || '—';
-const builtinRoleIds = new Set(['manager', 'dev', 'test', 'reviewer', 'ux', 'qa', 'coordinator']);
+const builtinRoleIds = new Set(['manager', 'dev', 'test', 'reviewer', 'ux', 'qa']);
 const roleLabel = (id, name) => name || id;
 const acceptanceLabels = { pass: '通过', pass_with_issues: '带问题通过', return: '退回修改', insufficient_evidence: '证据不足', needs_human: '需要人决定' };
 const shortId = value => value ? String(value).slice(0, 12) : '—';

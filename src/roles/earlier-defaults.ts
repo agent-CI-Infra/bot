@@ -10,7 +10,6 @@ import type { RolePermissions } from './permissions.js';
  * current defaults from now on, and the list only serves the migration.
  */
 export const earlierTemplates: Record<string, readonly string[]> = {
-  coordinator: ['91b2d351d6f7e111', '6574306eaea75460'],
   manager: ['94ac7f8c52c1cdba', '6f99e38ca94e5973', '8c6ead431f6b19b1', '667b585053ce1015', '85e9a35552dbf0e8', '6ce47803abb2548f', 'bde408bb999ba69b'],
   dev: ['9147d0d01a14e5ae', 'b597c306ffaf6638'],
   test: ['b8b51c1cec64e139', 'aca4aff03a4e6b83'],
@@ -26,7 +25,6 @@ export const earlierTemplates: Record<string, readonly string[]> = {
  * migration:1068 compares). Each entry is the difference of an earlier default from today's.
  */
 export const earlierPermissions: Record<string, readonly RolePermissions[]> = {
-  coordinator: [{ project_memory: 'none' }],
   manager: [{ project_memory: 'none' }],
   test: [{ project_memory: 'read' }],
   reviewer: [{ project_memory: 'read' }],

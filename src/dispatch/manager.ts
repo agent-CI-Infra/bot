@@ -362,7 +362,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   const system = rolePrompt(role);
   const ceiling = projectCeiling(store, repositoryId);
   const workerRoles = roleConfiguration(store, repositoryId).roles
-    .filter(r => r.enabled && r.kind !== 'evaluator' && !['manager', 'coordinator'].includes(r.role_id))
+    .filter(r => r.enabled && r.kind !== 'evaluator' && r.role_id !== 'manager')
     .map(r => ({ role_id: r.role_id, name: r.name, responsibility: r.responsibility }));
   const roleLines = workerRoles.map(r => `- ${r.role_id}（${r.name}）：${r.responsibility}`);
   const unavailable = context.unavailable.map(entry => `- ${entry.id}（${legacyKindName(entry.work) ?? entry.work}）：${entry.reason}`);

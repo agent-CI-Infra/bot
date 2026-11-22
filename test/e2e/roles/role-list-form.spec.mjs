@@ -29,7 +29,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(table.getByRole('columnheader', { name: 'Agent 后端', exact: true })).toHaveCount(0);
     await expect(table.getByRole('columnheader', { name: '模型', exact: true })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
-    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Project controller', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
     await page.screenshot({ path: `${out}/list-1440.png`, fullPage: true });
 
     await openRoleFromList(page, 'Developer');
@@ -48,7 +48,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     const crumb = page.getByTestId('role-list-link');
     await expect(crumb).toHaveText('← 角色列表');
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Developer', exact: true })).toHaveAttribute('aria-current', 'page');
-    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Project controller', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
     await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
     await (await promptEditor(page, '角色提示词')).fill('先读复现，再改代码。');
     const save = consoleSave(page);

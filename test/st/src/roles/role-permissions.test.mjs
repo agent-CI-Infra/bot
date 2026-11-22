@@ -13,7 +13,7 @@ test('legacy GitHub and coordination subsets survive reads and identical saves w
   assert.ok(permissionTools(policy).includes('read_file'));assert.ok(permissionTools(policy).includes('run_command'));
   assert.equal(resourceAllowed(policy,'issues','create'),true);assert.equal(resourceAllowed(policy,'issues','read'),false);
   assert.equal(resourceAllowed(policy,'issues','reply'),false);assert.equal(resourceAllowed(policy,'pull_requests','create'),false);
-  assert.ok(permissionTools(policy).includes('request_task_coordination'));assert.ok(!permissionTools(policy).includes('manage_project_task'));
+  assert.ok(permissionTools(policy).includes('wait_for_tasks'));assert.ok(!permissionTools(policy).includes('manage_project_task'));
   assert.equal(permitsManagement(policy,'task.cancel',true),false);
   assert.deepEqual(updatePermissions(policy,policy),policy);
   const changed=updatePermissions(policy,{github_issues:'read'});
@@ -44,7 +44,7 @@ test('only the Manager writes by default; write offers github_write on its resou
   const manager=defaultPermissions('manager','controller');
   // Actions write (starting workflows, #1072) follows Issues write.
   assert.deepEqual(['issues','pull_requests','contents','actions','checks','statuses'].map(r=>manager['github_'+r]),['write','write','write','write','read','read']);
-  for(const [id,kind] of [['coordinator','controller'],['dev','writer'],['test','observer'],['reviewer','observer'],['ux','observer'],['qa','evaluator'],['custom','observer']]){
+  for(const [id,kind] of [['dev','writer'],['test','observer'],['reviewer','observer'],['ux','observer'],['qa','evaluator'],['custom','observer']]){
     const p=defaultPermissions(id,kind);
     assert.ok(['issues','pull_requests','contents','actions','checks','statuses'].every(r=>p['github_'+r]==='read'),id);
     assert.ok(!permissionTools(p).includes('github_write'),id);

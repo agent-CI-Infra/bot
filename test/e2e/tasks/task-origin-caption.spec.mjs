@@ -22,7 +22,7 @@ test('任务详情和待处理列表的来源用白话写明从哪来、交给�
       { role_id: 'custom-checker', name: '复核小组' },
     ] });
     expect(saved.status).toBe(200);
-    origin(h.store, 'foreign-review', 'role', 'coordinator', 'dev', null, '202');
+    origin(h.store, 'foreign-review', 'role', 'manager', 'dev', null, '202');
     origin(h.store, 'developing', 'event', 'manager', 'dev');
     origin(h.store, 'source-review', 'role', 'manager', 'retired-role');
     origin(h.store, 'reviewing', 'operator', null, 'reviewer');
@@ -36,7 +36,7 @@ test('任务详情和待处理列表的来源用白话写明从哪来、交给�
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const expected = [
-      ['foreign-review', '来源：角色委派 · Task Coordinator交给Developer'],
+      ['foreign-review', '来源：角色委派 · Manager交给Developer'],
       ['developing', '来源：GitHub 事件 · 调度组交给Dev'],
       ['source-review', '来源：角色委派 · 调度组交给retired-role'],
       ['reviewing', '来源：有人手动创建 · 交给Reviewer'],

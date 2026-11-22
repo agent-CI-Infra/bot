@@ -46,7 +46,7 @@ test('a trusted organization administrator starts an unstarted repository and ap
     if (steps === 4) {
       const afterManager = obs.at(-1).after_revision;
       const cfg = obs[1];
-      const working = roleConfiguration(h.store, '103').roles.filter(r => r.enabled && r.role_id !== 'coordinator');
+      const working = roleConfiguration(h.store, '103').roles.filter(r => r.enabled);
       return [call(4,
         ['management_command', { operation: 'roles.update', target: { project_id: '103' }, expected_revision: afterManager,
           arguments: { expected_revision: cfg.roles.configuration.revision,
@@ -82,7 +82,7 @@ test('a trusted organization administrator starts an unstarted repository and ap
   const policy = h.store.get("SELECT * FROM policies WHERE repository_id='103'");
   assert.deepEqual([projectCeiling(h.store, '103'), policy.test_command, policy.review_language, !!policy.actions_failures_enabled], ['develop', 'npm test', 'zh', true]);
   assert.match(dispatchPrompt(h.store, '103'), /## 本仓库约定[\s\S]*kind\/ 前缀表示问题类型/);
-  const roles = roleConfiguration(h.store, '103').roles.filter(r => r.enabled && r.role_id !== 'coordinator');
+  const roles = roleConfiguration(h.store, '103').roles.filter(r => r.enabled);
   assert.ok(roles.length > 1 && roles.every(r => r.persona_prompt.includes('## 本仓库约定')));
 
   assert.deepEqual(github.created.map(c => c.body.name), ['kind/bug', 'bot-developing', 'bot-developed']);

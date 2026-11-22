@@ -10,7 +10,7 @@ const version = (value: unknown) => createHash('sha256').update(JSON.stringify(v
 
 /** A role's kind selects its runtime contract and workspace, independently of its editable permissions. */
 export type RoleKind = 'controller' | 'writer' | 'observer' | 'evaluator';
-export const builtinKinds: Record<string, RoleKind> = { coordinator:'controller', manager: 'controller', dev: 'writer', test: 'observer', reviewer: 'observer', ux: 'observer', qa: 'evaluator' };
+export const builtinKinds: Record<string, RoleKind> = { manager: 'controller', dev: 'writer', test: 'observer', reviewer: 'observer', ux: 'observer', qa: 'evaluator' };
 export const roleKind = (id: string): RoleKind => Object.hasOwn(builtinKinds, id) ? builtinKinds[id]! : 'observer';
 
 /**
@@ -41,10 +41,8 @@ export const nominationSchema = { type: 'object', properties: { result_ref: { ty
   summary:{type:'string',description:'Optional. Leave it out to publish the summary of the result you nominate exactly as the developer wrote it; that is the default. delegate_role returns each Dev result\'s summary; the latest one from earlier runs is latest_dev_result in your input. '
     +'Write one only when that text states something wrong or leaves out something a reader needs; then start from it and keep its language and structure, since yours replaces it whole. Preserve any Markdown references to media selected by the developer. For a development it is the public pull request description on GitHub: '+pullRequestSummaryRules},
   change_title:{type:'string',description:'Optional. Omit it to keep the change_title of the result you nominate (for a development, the commit subject and pull request title).'} }, required: ['result_ref'], additionalProperties: false };
-export const coordinationResultSchema={type:'object',properties:{summary:{type:'string'},outcome:{type:'string',enum:['notices','needs_human']},notices:{type:'array',items:{type:'object',properties:{task_id:{type:'string'},message:{type:'string'},action:{type:'string',enum:['review','rework']}},required:['task_id','message','action'],additionalProperties:false}}},required:['summary','outcome','notices'],additionalProperties:false};
 const schemas = [
   { id: 'delivery-nomination', kinds: ['controller'], tool: 'nominate_delivery', schema: nominationSchema },
-  { id: 'coordination-result', kinds: ['controller'], tool: 'submit_coordination', schema: coordinationResultSchema },
   { id: 'entry-delivery', kinds: ['writer'], tool: null, schema: null, description: 'The entry point\'s own submission: submit_delivery, finish_review or the event workflow finish tool.' },
   { id: 'role-findings', kinds: ['observer'], tool: 'submit_role_result', schema: findingsSchema },
   { id: 'acceptance-verdict', kinds: ['evaluator'], tool: 'submit_acceptance', schema: null, description: 'The framework acceptance verdict validated by validateVerdict.' }
