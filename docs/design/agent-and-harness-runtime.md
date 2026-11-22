@@ -38,7 +38,7 @@
 | `process` | 独立 Node 子进程 | 隔离事件循环、JSON-line RPC 通信，不继承控制面环境变量与凭据。 |
 | `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持原生直连或显式回环模型中转（`runner/model-relay.mjs`）。 |
 | `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账。 |
-| `icode`、`container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
+| `icode`、`workswarm`、`container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
 
 - **容器内短期 Git/`gh` 只读凭证**：`claude_code`、`codex`、`icode` 和 `container_acp` 使用运行级身份，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
@@ -50,6 +50,12 @@
 `session/new` 和 `session/load` 均接收工作区路径与本次运行的 MCP 配置。支持 `loadSession` 且会话可读时记录 `native_resume`。其余续跑从授权的任务记录重建并记录 `rebuilt_from_task_records`。平台立即响应许可请求并记录 `permission` 事件，产品预设可提供私有请求的即时答复。未注册的请求立即收到 JSON-RPC `-32601`。
 
 HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bearer 凭据，和 stdio 共享工具清单、权限检查与提交校验。产品预设用 `{relay}`、`{token}`、`{model}` 填入模型地址、运行令牌与已解析的模型。中转请求沿用平台模型用量账本。取消时 runner 先发 `session/cancel`，随后回收整组进程。看门狗在控制面停止续租后也会执行该流程。配套进程各有回环端口、探活路径和独立运行目录，整组随运行结束。
+
+#### WorkSwarm
+
+`workswarm` 复用容器 ACP 和模型邮箱，启动独立的 AgentServer 与 Gateway 并探测两个回环 WebSocket。每次运行提供独立 HOME、数据目录和三个回环端口。配套服务退出、取消、超时和租约失效由 ACP 运行回收逻辑处理。runner 核对 ACP 版本和产品版本。WorkSwarm 不支持 `session/load`，恢复时标记 `rebuilt_from_task_records`。
+
+WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm 自己的 `mcp.servers` 注册受运行令牌保护的回环 MCP。WorkSwarm 在独立目录启动，禁用钩子，通过平台工具读写任务检出和执行命令。runner 准备工作目录时跳过上游配置模板合并，核对默认拒绝和平台 MCP 工具许可表后才启动配套服务。模型中转仅提供许可的任务工具，任务邮箱再次按角色权限检查。ACP 会话声明无人可交互。Gateway 自带调度器仍启动，平台不创建定时任务或配置 WorkSwarm 自带消息渠道。
 
 #### iCode
 

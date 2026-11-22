@@ -916,6 +916,50 @@ test('preserves tool-result images, multi-byte UTF-8 across chunks, text-tool-te
   ]);
 });
 
+test('WorkSwarm relay forwards only granted tools and omits an empty tool list', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-allowed-tools-'));
+  const allowedName = 'mcp_bot_read_file';
+  const relay = await startModelRelay({ agentDir: dir, allowedTools: new Set([allowedName]), pollMs: 10 });
+  t.after(async () => {
+    await relay.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const granted = { type: 'function', function: { name: allowedName } };
+  const native = { type: 'function', function: { name: 'native_fixture' } };
+  const submissions = [
+    { tools: [native, granted], tool_choice: { type: 'function', function: { name: native.function.name } } },
+    { tools: [native], tool_choice: 'required' },
+  ];
+  for (const [index, body] of submissions.entries()) {
+    const controller = new AbortController();
+    const pending = fetch(`${relay.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer fixture-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'model', messages: [{ role: 'user', content: String(index) }], ...body }),
+      signal: controller.signal,
+    }).catch(() => {});
+    try {
+      const requests = join(dir, 'model-requests');
+      let forwarded;
+      const deadline = Date.now() + 3000;
+      while (!forwarded && Date.now() < deadline) {
+        forwarded = readdirSync(requests).filter(name => name.endsWith('.json'))
+          .map(name => JSON.parse(readFileSync(join(requests, name), 'utf8')).body)
+          .find(request => request.messages[0].content === String(index));
+        if (!forwarded) await new Promise(resolve => setTimeout(resolve, 15));
+      }
+      assert.ok(forwarded, 'expected request in the relay mailbox');
+      if (index === 0) assert.deepEqual(forwarded.tools, [granted]);
+      else assert.ok(!Object.hasOwn(forwarded, 'tools'));
+      assert.ok(!Object.hasOwn(forwarded, 'tool_choice'));
+    } finally {
+      controller.abort();
+      await pending;
+    }
+  }
+});
+
 test('model relay close() resolves promptly when a slow client disconnects during response backpressure', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'relay-drain-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

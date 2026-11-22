@@ -21,7 +21,8 @@ import { roleHarness } from '../../../../dist/roles/harness.js';
 import { SubmissionError } from '../../../../dist/roles/submission-error.js';
 import { serviceRolesApi } from '../../../../dist/service-roles/api.js';
 import { Store } from '../../../../dist/storage/database.js';
-import { icodeTestedVersion, readAcpProduct } from '../../../../runner/acp-products.mjs';
+import { icodeTestedVersion, readAcpProduct, workswarmLaunch, workswarmRelease } from '../../../../runner/acp-products.mjs';
+import { configureWorkSwarm } from '../../../../runner/workswarm.mjs';
 import { configureICode, icodeAnswer } from '../../../../runner/icode.mjs';
 import { writeICodeProduct } from '../../../fixtures/icode-product.mjs';
 
@@ -424,3 +425,90 @@ for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires', 'f
     await noProcesses(run);
   });
 }
+
+
+test('WorkSwarm pins the interpreter, wheel and dependency lock', t => {
+  const root = mkdtempSync(join(tmpdir(), 'workswarm-install-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const tools = join(root, 'tools'), source = join(root, 'source');
+  mkdirSync(tools);
+  mkdirSync(source);
+  writeFileSync(join(source, workswarmRelease.wheel), 'unrecognized artifact');
+  const call = version => spawnSync(process.execPath, [resolve('scripts/install-acp-product.mjs'),
+    'install', '--root', tools, '--product', 'workswarm', '--version', version, '--source', source], { encoding: 'utf8' });
+  assert.match(call('0.0.1').stderr, /workswarm_release_unsupported/);
+  assert.match(call(workswarmRelease.version).stderr, /acp_source_hash_mismatch/);
+  assert.deepEqual(readdirSync(join(tools, 'acp', 'workswarm')), []);
+});
+
+test('WorkSwarm prepares the private profile without importing template tool grants', async t => {
+  const home = mkdtempSync(join(tmpdir(), 'workswarm-profile-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const modules = join(home, 'modules');
+  const common = join(modules, 'jiuwenswarm', 'common');
+  mkdirSync(common, { recursive: true });
+  writeFileSync(join(modules, 'yaml.py'), 'from json import loads as safe_load\n');
+  writeFileSync(join(common, 'utils.py'), `
+import json
+import os
+from pathlib import Path
+
+def prepare_runtime_workspace(*, migrate_config=True):
+    if migrate_config or os.environ.get("FIXTURE_CHANGES_POLICY") == "1":
+        path = Path(os.environ["JIUWENSWARM_DATA_DIR"]) / "config" / "config.yaml"
+        config = json.loads(path.read_text())
+        config["permissions"]["tools"]["native_fixture"] = "allow"
+        path.write_text(json.dumps(config))
+`);
+  const relay = process.env.BOT_ACP_RELAY_URL;
+  process.env.BOT_ACP_RELAY_URL = 'http://127.0.0.1:4321';
+  t.after(() => {
+    if (relay === undefined) delete process.env.BOT_ACP_RELAY_URL;
+    else process.env.BOT_ACP_RELAY_URL = relay;
+  });
+  writeFileSync(join(home, 'mcp-tools.json'), JSON.stringify([{ name: 'read_file' }]));
+  const configure = (target, overrides = {}) => configureWorkSwarm({
+    model: 'chosen-model', acp_model: { interface_type: 'openai-chat-completions', context_window: 16000, max_output_tokens: 1024 },
+  }, target, { agent: 1234, web: 1235, gateway: 1236 }, { url: 'http://127.0.0.1:4322/mcp' }, 'test-run-token', home, {
+    executable: 'python3', environment: { ...process.env, PYTHONPATH: modules, PYTHONDONTWRITEBYTECODE: '1', ...overrides },
+  });
+  const { env, workspace } = await configure(home);
+  const cfg = json(join(home, 'data/config/config.yaml'));
+  assert.equal(workspace, join(home, 'workspace'));
+  assert.equal(env.JIUWENSWARM_DATA_DIR, join(home, 'data'));
+  assert.equal(env.JIUWENSWARM_RUNTIME_SOCKET, 'worker.sock');
+  assert.equal(env.JIUWENSWARM_RUNTIME_WORKSPACE_READY, '1');
+  assert.deepEqual([env.AGENT_SERVER_PORT, env.WEB_PORT, env.GATEWAY_PORT], ['1234', '1235', '1236']);
+  assert.deepEqual([env.AGENT_SERVER_HOST, env.WEB_HOST, env.GATEWAY_HOST], Array(3).fill('127.0.0.1'));
+  assert.equal(cfg.models.defaults[0].model_client_config.api_base, 'http://127.0.0.1:4321/v1');
+  assert.equal(cfg.models.defaults[0].model_client_config.api_key, '${API_KEY}');
+  assert.deepEqual(cfg.mcp.servers[0].headers, { Authorization: 'Bearer test-run-token' });
+  assert.deepEqual(cfg.permissions.defaults, { '*': 'deny' });
+  assert.deepEqual(cfg.permissions.tools, { mcp_bot_read_file: 'allow' });
+  assert.equal(cfg.hooks.disable_all_hooks, true);
+  assert.ok(!('channels' in cfg) && !('cron' in cfg));
+  assert.deepEqual(workswarmLaunch.sidecars.map(s => s.name), ['agent-server', 'gateway']);
+  assert.deepEqual(roleHarness('workswarm').capabilities.recovery, ['rebuilt_from_task_records']);
+  await assert.rejects(configure(join(home, 'changed-policy'), { FIXTURE_CHANGES_POLICY: '1' }),
+    /WorkSwarm permissions changed during workspace preparation/);
+});
+
+test('concurrent WorkSwarm runs reserve distinct ports and release only their own reservations', t => {
+  const root = mkdtempSync(join(tmpdir(), 'workswarm-ports-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const module = pathToFileURL(resolve('runner/workswarm.mjs')).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { readdir } from 'node:fs/promises';
+    import { reserveWorkSwarmPorts, releaseWorkSwarmPorts } from ${JSON.stringify(module)};
+    const dev = 'a'.repeat(48), reviewer = 'b'.repeat(48);
+    const allocated = await Promise.all([reserveWorkSwarmPorts(dev), reserveWorkSwarmPorts(reviewer)]);
+    assert.equal(new Set(allocated.flatMap(Object.values)).size, 6);
+    await releaseWorkSwarmPorts(dev);
+    const directory = process.env.BOT_LOCAL_WORKSPACE + '/.workswarm-ports';
+    assert.deepEqual((await readdir(directory)).sort(), Object.values(allocated[1]).map(String).sort());
+    await releaseWorkSwarmPorts(reviewer);
+    assert.deepEqual(await readdir(directory), []);
+  `], { env: { ...process.env, BOT_LOCAL_EXECUTION: 'true', BOT_LOCAL_WORKSPACE: root }, encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+});

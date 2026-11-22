@@ -13,7 +13,8 @@ import { startModelRelay } from './model-relay.mjs';
 import { local, runnerRoot, tasksDirectory } from './paths.mjs';
 import { bashProfile, loginProfile } from './login-profile.mjs';
 import { ACP_LEASE_MS, acpLeaseFile, acpRunHome, reapAcpDescendants } from './acp-lease.mjs';
-import { icodeProductId } from './acp-products.mjs';
+import { releaseWorkSwarmPorts, workSwarmToolNames } from './workswarm.mjs';
+import { icodeProductId, requiresAcpRunHome, workswarmProductId } from './acp-products.mjs';
 import { createTokenExchange } from './token-exchange.mjs';
 
 const ID48_RE = /^[a-f0-9]{48}$/;
@@ -127,7 +128,8 @@ const bootLine = await readFile('/proc/1/stat', 'utf8').catch(() => '');
 const boot = bootLine ? bootLine.slice(bootLine.lastIndexOf(')') + 2).split(' ')[19] : 'local';
 
 let instanceId = null;
-let icode = false;
+let isolatedAcpHome = false;
+let workswarm = false;
 let hasWrittenRunning = false;
 
 let currentState = {
@@ -208,8 +210,11 @@ try {
 
   const harness = rawConfig.harness;
   const acp = harness === 'container_acp';
-  icode = acp && rawConfig.acp_product?.id === icodeProductId;
-  if (icode && (local || !instanceId)) throw new Error('icode_requires_project_computer');
+  const productId = rawConfig.acp_product?.id;
+  const icode = acp && productId === icodeProductId;
+  workswarm = acp && productId === workswarmProductId;
+  isolatedAcpHome = acp && requiresAcpRunHome(productId);
+  if (isolatedAcpHome && (local || !instanceId)) throw new Error(productId + '_requires_project_computer');
   if (!acp && harness !== 'claude_code' && harness !== 'codex') throw new Error('unsupported_container_harness');
 
   const executable = mapToolsPath(rawConfig.executable);
@@ -221,9 +226,9 @@ try {
   const tasksBase = await ensureSafeDirectory(tasksDirectory, dirname(tasksDirectory));
   const stateWorkspaceDir = await ensureSafeDirectory(`${tasksBase}/${stateWorkspaceId}`, tasksBase);
   const cliStateRoot = await ensureSafeDirectory(`${stateWorkspaceDir}/cli-state/${sessionKey}`, stateWorkspaceDir);
-  const homeDir = icode ? await ensureSafeDirectory(acpRunHome(agentDir, instanceId), agentDir)
+  const homeDir = isolatedAcpHome ? await ensureSafeDirectory(acpRunHome(agentDir, instanceId), agentDir)
     : await ensureSafeDirectory(`${cliStateRoot}/home`, cliStateRoot);
-  const tmpDir = icode ? await ensureSafeDirectory(join(homeDir, 'tmp'), homeDir)
+  const tmpDir = isolatedAcpHome ? await ensureSafeDirectory(join(homeDir, 'tmp'), homeDir)
     : await ensureSafeDirectory(`${agentDir}/tmp`, agentDir);
   const wrapperBinDir = await ensureSafeDirectory(`${agentDir}/bin`, agentDir);
 
@@ -244,7 +249,12 @@ try {
 
   const gateway = rawConfig.model_transport === 'gateway';
   if (acp && (!gateway || !instanceId)) throw new Error('acp_launch_invalid');
-  if(gateway) relay = await startModelRelay({ agentDir, signal: runAbort.signal });
+  if(gateway) relay = await startModelRelay({
+    agentDir, signal: runAbort.signal,
+    ...(workswarm ? {
+      allowedTools: new Set(await workSwarmToolNames(agentDir)),
+    } : {}),
+  });
   const nativeModel = gateway ? undefined : rawConfig.native_model;
   if(nativeModel?.key)addSecret(nativeModel.key);
   credHelper = await startCredentialHelperServer({ agentDir, runToken, addSecret, signal: runAbort.signal });
@@ -452,7 +462,7 @@ try {
   await writeState({
     state: 'running',
     cli_pid: cliChild.pid ?? null,
-    ...(acp ? { harness, ...(icode ? { acp_product_id: icodeProductId } : {}) } : {}),
+    ...(acp ? { harness, ...(isolatedAcpHome ? { acp_product_id: productId } : {}) } : {}),
     model_transport: gateway ? 'gateway' : 'direct',
     relay_url: relay?.url ?? null,
     session_id: sessionId,
@@ -546,7 +556,8 @@ try {
         : 'failed';
 
   if (acp) await reapAcpDescendants(instanceId);
-  if (icode) await rm(acpRunHome(agentDir, instanceId), { recursive: true, force: true }).catch(() => {});
+  if (workswarm) await releaseWorkSwarmPorts(instanceId);
+  if (isolatedAcpHome) await rm(acpRunHome(agentDir, instanceId), { recursive: true, force: true }).catch(() => {});
   await shutdown({
     state: finalState,
     exit_code: exitResult.code,
@@ -565,8 +576,9 @@ try {
   try { process.kill(-process.pid, 'SIGTERM'); } catch {}
   process.exit(0);
 } catch (err) {
-  if (icode && !local && instanceId) {
+  if (isolatedAcpHome && !local && instanceId) {
     await reapAcpDescendants(instanceId);
+    if (workswarm) await releaseWorkSwarmPorts(instanceId);
     await rm(acpRunHome(agentDir, instanceId), { recursive: true, force: true }).catch(() => {});
   }
   await shutdown({

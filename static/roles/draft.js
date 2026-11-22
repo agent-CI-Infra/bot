@@ -173,7 +173,8 @@ function roleBackendRuntimeBox(role, state) {
         ? `${info.name} CLI 已就绪，但模型 ${targetModelName} 连通探测或最近请求失败（${conn.detail || conn.error || '请求失败'}）。`
         : `${info.name} 容器运行配置已就绪（${conn?.state === 'ok' ? '最近连通正常' : '模型连通性未探测'}）。`;
   head.append(badge(statusLabel, statusTone), ' ', summaryText);
-  const unselectedVersion = info.id === 'icode' ? (rt.cli_installed ? '尚未选用' : '未安装') : '无可用兼容版本';
+  const operatorInstalled = info.id === 'icode' || info.id === 'workswarm';
+  const unselectedVersion = operatorInstalled ? (rt.cli_installed ? '尚未选用' : '未安装') : '无可用兼容版本';
   box.append(head, facts([
     ['工具卷', `${rt.volume_root}（${rt.volume_present ? '已挂载' : '未挂载'}）`],
     ['兼容版本范围', rt.compatible_range || '—'],
@@ -183,7 +184,7 @@ function roleBackendRuntimeBox(role, state) {
   ]));
   // #740: an uninstalled tool volume used to end here. A super administrator gets the way in; anyone else is told who
   // can install it, because global settings only offers 存储 to a project administrator.
-  if (!cliReady && info.id !== 'icode') {
+  if (!cliReady && !operatorInstalled) {
     if (typeof me === 'object' && me && me.role === 'super_admin') box.append(consoleLink('#/settings/agent-tools', '打开工具卷设置', '安装或清理 Claude Code 与 Codex 的版本'));
     else box.append(note('请平台管理员在「全局设置 → Agent CLI 工具卷」中安装兼容版本。'));
   }

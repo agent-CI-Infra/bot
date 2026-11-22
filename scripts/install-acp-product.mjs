@@ -3,7 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { acpProductExecutable, acpProductId, acpVersion, icodeProductId, icodeReleases, readAcpProduct, validateAcpLaunch } from '../runner/acp-products.mjs';
+import { pathToFileURL } from 'node:url';
+import { acpProductExecutable, acpProductId, acpVersion, icodeProductId, icodeReleases, readAcpProduct, validateAcpLaunch, workswarmLaunch, workswarmProductId, workswarmRelease } from '../runner/acp-products.mjs';
 
 const [action, ...args] = process.argv.slice(2);
 const { values: options } = parseArgs({ args, options: {
@@ -57,7 +58,15 @@ function stageSource(source, target) {
 function install() {
   if (options.archive) return installICode();
   if (options.product === icodeProductId) throw new Error('icode_offline_archive_required');
-  const preset = JSON.parse(readFileSync(options.preset, 'utf8'));
+  const workswarm = options.product === workswarmProductId;
+  if (workswarm && (options.version !== workswarmRelease.version || process.platform !== 'linux' || options.preset)) {
+    throw new Error('workswarm_release_unsupported');
+  }
+  const preset = workswarm ? {
+    python: workswarmRelease.python, lock: 'uv.lock',
+    source: 'https://github.com/openJiuwen-ai/jiuwenswarm/commit/' + workswarmRelease.commit,
+    sourceSha256: workswarmRelease.sourceSha256, launch: workswarmLaunch,
+  } : JSON.parse(readFileSync(options.preset, 'utf8'));
   const launch = validateAcpLaunch(preset.launch);
   if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(preset.python ?? '') ||
       !['uv.lock', 'requirements.txt'].includes(preset.lock) ||
@@ -85,9 +94,27 @@ function install() {
     const interpreter = options['python-executable'] ? realpathSync(options['python-executable']) : undefined;
     const python = interpreter ?? preset.python;
     const pythonMode = interpreter ? '--no-managed-python' : '--managed-python';
-    if (!interpreter) uv('python', 'install', '--no-bin', preset.python);
+    if (!interpreter) {
+      if (workswarm) {
+        const catalog = execFileSync('uv', ['python', 'list', '--only-downloads', python], { env, cwd: project, encoding: 'utf8' });
+        if (!catalog.trim()) {
+          throw new Error(`workswarm_python_unavailable: This uv catalog does not provide CPython ${python} for this platform. Use a uv build that lists it (verified with uv 0.13.9), or pass --python-executable for an existing CPython ${python}.`);
+        }
+      }
+      uv('python', 'install', '--no-bin', preset.python);
+    }
     uv('venv', pythonMode, '--no-python-downloads', '--python', python, venv);
-    if (preset.lock === 'uv.lock') uv('sync', '--locked', '--no-dev', '--no-editable', pythonMode, '--no-python-downloads', '--python', python);
+    if (workswarm) {
+      const dependencies = execFileSync('uv', ['export', '--frozen', '--no-dev', '--no-emit-project',
+        '--no-annotate', '--no-header', '--format', 'requirements.txt'], { env, cwd: project, encoding: 'utf8' });
+      const wheel = pathToFileURL(join(project, workswarmRelease.wheel));
+      const requirements = join(scratch, 'requirements.txt');
+      writeFileSync(requirements, dependencies + '\nworkswarm @ ' + wheel + ' --hash=sha256:' + workswarmRelease.wheelSha256 + '\n');
+      // The upstream lock includes a source-only dependency (jieba).
+      uv('pip', 'sync', '--no-config', '--require-hashes', '--python', join(venv, 'bin', 'python'), requirements);
+      execFileSync(join(venv, 'bin', 'python'), ['-c',
+        'from importlib.metadata import version; import sys; assert version("workswarm") == sys.argv[1]', options.version], { env, cwd: project });
+    } else if (preset.lock === 'uv.lock') uv('sync', '--locked', '--no-dev', '--no-editable', pythonMode, '--no-python-downloads', '--python', python);
     else uv('pip', 'sync', '--no-config', '--require-hashes', '--only-binary', ':all:', '--python', join(venv, 'bin', 'python'), 'requirements.txt');
     execFileSync(join(venv, 'bin', 'python'), ['-c', `import sys; assert sys.version.split()[0] == ${JSON.stringify(preset.python)}`], { env, cwd: project });
     const manifest = { schema: 'bot.acp-product/1', id: options.product, version: options.version, python: preset.python,

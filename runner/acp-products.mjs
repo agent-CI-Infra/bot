@@ -15,6 +15,29 @@ export const icodeReleases = new Map([['0.36.0', {
   },
 }]]);
 
+export const workswarmProductId = 'workswarm';
+export const workswarmRelease = Object.freeze({
+  version: '0.2.9',
+  commit: '453dce3054babf7f3a7000c8e57e068de01d8d2e',
+  python: '3.13.18',
+  wheel: 'workswarm-0.2.9-py3-none-any.whl',
+  wheelSha256: '241ed07f9a23f989984b68474e2b5147ad6907323c92fb8d139be8da6705130f',
+  lockSha256: '5db141a6503cc93fa27d6defc3a97aed121e3fbc65ea2d395789956680f48c6e',
+  sourceSha256: '670e84322d2296672edfa1edb34d580051484958e1fda31f841dcd4963e83e94',
+});
+export const workswarmLaunch = {
+  args: ['-m', 'agent_gateway.channel_manager.protocol.acp.acp_connect',
+    '--gateway-url', 'ws://127.0.0.1:{port:gateway}/acp'],
+  mcp: 'http', access: 'native', untrustedCheckout: true, env: {}, answers: {},
+  sidecars: [
+    { name: 'agent-server', args: ['-m', 'jiuwenswarm.server.app_agentserver', '--dotenv', '{state}/data/config/.env'],
+      healthPath: '/', healthTransport: 'websocket' },
+    { name: 'gateway', args: ['-m', 'agent_gateway.app_gateway', '--dotenv', '{state}/data/config/.env'],
+      healthPath: '/acp', healthTransport: 'websocket' },
+  ],
+};
+export const requiresAcpRunHome = id => id === icodeProductId || id === workswarmProductId;
+
 export const acpProductExecutable = id => id === icodeProductId ? 'bin/icode' : 'venv/bin/python';
 const strings = value => Array.isArray(value) && value.every(item => typeof item === 'string');
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -26,6 +49,7 @@ export function validateAcpLaunch(launch) {
       !object(launch.answers) || Object.keys(launch.answers).some(method => !/^_[\w-]+\/[\w/-]+$/.test(method)) ||
       !Array.isArray(launch.sidecars) || launch.sidecars.some(sidecar => !object(sidecar) ||
         !acpProductId.test(sidecar.name ?? '') || !strings(sidecar.args) ||
+        (sidecar.healthTransport !== undefined && sidecar.healthTransport !== 'websocket') ||
         typeof sidecar.healthPath !== 'string' || !/^\/(?!\/)[\w/.-]*$/.test(sidecar.healthPath)) ||
       new Set(launch.sidecars.map(sidecar => sidecar.name)).size !== launch.sidecars.length) {
     throw new Error('invalid_acp_product_launch');
@@ -48,6 +72,10 @@ export function readAcpProduct(root, id, selected) {
     if (!expected || manifest.distribution !== 'linux-offline' || manifest.sourceSha256 !== expected) {
       throw new Error('icode_release_unsupported');
     }
+  } else if (id === workswarmProductId && (version !== workswarmRelease.version ||
+      manifest.python !== workswarmRelease.python || manifest.sourceSha256 !== workswarmRelease.sourceSha256 ||
+      manifest.lockSha256 !== workswarmRelease.lockSha256)) {
+    throw new Error('workswarm_release_unsupported');
   } else if (!hash.test(manifest.lockSha256 ?? '')) {
     throw new Error('invalid_acp_product_manifest');
   }

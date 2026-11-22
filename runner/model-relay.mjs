@@ -67,6 +67,7 @@ export async function startModelRelay({
   pollMs = 25,
   idleTimeoutMs = defaultRelayIdleMs,
   maxBodyBytes = defaultMaxRequestBytes,
+  allowedTools,
 }) {
   if (!agentDir || typeof agentDir !== 'string') throw new Error('model_relay_agent_dir_required');
   const reqDir = agentDir + '/model-requests';
@@ -144,6 +145,17 @@ export async function startModelRelay({
         const raw = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
         body = JSON.parse(raw);
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('not_object');
+        if (allowedTools && Array.isArray(body.tools)) {
+          // WorkSwarm includes its native tools in provider requests even when its permission policy denies them.
+          body.tools = body.tools.filter(tool => allowedTools.has(tool?.function?.name ?? tool?.name));
+          const selected = body.tool_choice?.function?.name ?? body.tool_choice?.name;
+          if (!body.tools.length) {
+            delete body.tools;
+            delete body.tool_choice;
+          } else if (selected && !allowedTools.has(selected)) {
+            delete body.tool_choice;
+          }
+        }
       } catch {
         sendError(400, 'invalid_request_error');
         inflight.delete(tracker);
