@@ -181,9 +181,10 @@ export class ChannelConsole {
     }
     let canManageRetention = false;
     try { authorize(actor, 'platform.manage'); canManageRetention = true; } catch {}
+    const canViewSchedules = this.service.schedules.canView(actor, chat);
     return { ...messages, conversation,
       chat: { id, chat_id: chat.chat_id, connector_id: chat.connector_id, type: chat.chat_type, state: chat.state, revision: chat.revision,
-        can_sync: canSync, can_manage_retention: canManageRetention, ...this.profile(actor, chat) }, read_at: Date.now() };
+        can_sync: canSync, can_manage_retention: canManageRetention, can_view_schedules: canViewSchedules, ...this.profile(actor, chat) }, read_at: Date.now() };
   }
   /** Event metadata is paginated independently of message history, so a long turn cannot silently truncate. */
   events(actor: ActorContext, chatId: string, turnId: string, after: number): Json {

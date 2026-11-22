@@ -54,7 +54,7 @@ async function channelBindingOverview(data) {
   more.append(
     element('summary', t('feishu.more_actions')),
     channelLink('#/identity/feishu?create=personal', t('feishu.create_personal'), 'button-link quiet'),
-    channelLink('#/identity/feishu?create=group', t('feishu.create_group'), 'button-link quiet'),
+    channelLink('#/identity/feishu/groups/new', t('feishu.create_group'), 'button-link quiet'),
     channelLink('#/conversations', t('feishu.view_conversations'), 'button-link quiet')
   );
   links.append(more);
@@ -85,7 +85,7 @@ async function channelBindingOverview(data) {
         for (const b of groups) {
           const row = element('div', '', 'feishu-summary-row'), name = element('strong', channelChatName(b.chat)), rowActions = element('div', '', 'actions');
           if (b.can_view !== false) rowActions.append(channelLink('#/conversations/' + b.chat_id, t('feishu.view_history'), 'button-link quiet'));
-          rowActions.append(channelLink('#/identity/feishu?group=' + b.chat_id, t('feishu.configure'), 'button-link quiet'));
+          rowActions.append(channelLink('#/identity/feishu/groups/' + b.chat_id, t('feishu.configure'), 'button-link quiet'));
           row.append(name,
             channelProfileDetails(b.chat, () => { name.textContent = channelChatName(b.chat); }),
             note(`${( { active: t('feishu.state.active'), paused: t('feishu.state.paused'), disabled: t('feishu.state.disabled') } )[b.state] || b.state} · ${b.service_role.name || t('feishu.role_deleted')} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
@@ -108,11 +108,13 @@ async function renderChannelConsole(request) {
   const alive = () => renderVersion === request && me === owner && location.hash === address && root.isConnected && root.contains(thread);
   const [hashPath, hashQuery = ''] = address.split('?');
   const selected = /^#\/conversations\/([a-f0-9]{48})$/.exec(hashPath)?.[1];
-  const connectorFilter = new URLSearchParams(hashQuery).get('connector') || '';
+  const hashParams = new URLSearchParams(hashQuery);
+  const connectorFilter = hashParams.get('connector') || '';
+  const requestedSection = hashParams.get('section') || '';
   const conversationHref = id => `#/conversations/${id}${connectorFilter ? '?connector=' + encodeURIComponent(connectorFilter) : ''}`;
   const head = element('div', '', 'console-page-head'), headTop = element('div', '', 'feishu-section-head');
   headTop.append(element('h1', '飞书会话'), channelLink('#/identity/feishu', '返回飞书绑定', 'button-link quiet'));
-  head.append(element('p', '消息与执行', 'eyebrow'), headTop, note('在同一处查看成员消息、助手执行过程、派生任务与本地消息同步。'));
+  head.append(element('p', '消息与执行', 'eyebrow'), headTop, note('在同一处查看成员消息、助手执行过程、会话定时任务、派生任务与本地消息同步。'));
   const layout = element('div', '', 'channel-console-layout'), sidebar = element('aside', '', 'channel-chat-list'), thread = element('section', '', 'channel-thread'), related = element('aside', '', 'channel-related');
   sidebar.setAttribute('aria-label', '可查看的飞书会话'); thread.setAttribute('aria-label', '当前飞书会话'); related.setAttribute('aria-label', '会话派生任务');
   layout.append(sidebar, thread, related); root.append(head, layout); page.replaceChildren(root);
@@ -176,6 +178,20 @@ async function renderChannelConsole(request) {
   const history = element('div', '', 'channel-messages'); history.setAttribute('aria-label', '消息与执行时间线'); history.setAttribute('tabindex', '0');
   const older = element('div', '', 'actions channel-history-actions'), moreMessages = button('更早消息', () => update('messages'), 'quiet'), moreTurns = button('更早执行回合', () => update('turns'), 'quiet');
   moreMessages.hidden = moreTurns.hidden = true; older.append(moreMessages, moreTurns);
+  const schedulesDetails = element('details', '', 'fold channel-schedules-details'), schedulesBody = element('div');
+  schedulesDetails.hidden = true;
+  schedulesDetails.append(element('summary', '定时任务'), schedulesBody);
+  let schedulesOpenedFromQuery = false;
+  const ensureSchedulesLoaded = async () => {
+    if (schedulesDetails.dataset.loaded) return;
+    schedulesDetails.dataset.loaded = '1';
+    schedulesBody.replaceChildren(note('正在读取定时任务…'));
+    const content = await channelSchedules(selected);
+    if (alive() && schedulesBody.isConnected) schedulesBody.replaceChildren(content);
+  };
+  schedulesDetails.addEventListener('toggle', () => {
+    if (schedulesDetails.open) void ensureSchedulesLoaded().catch(error);
+  });
   const diagnostics = element('details', '', 'fold channel-sync-details'), diagnosticText = note('');
   const syncStatus = element('p', '', 'muted'); syncStatus.setAttribute('role', 'status');
   const syncActions = element('div', '', 'actions');
@@ -261,7 +277,7 @@ async function renderChannelConsole(request) {
     retentionStatus,
     retentionForm,
   );
-  thread.append(toolbar, older, history, diagnostics, localSearch, retentionDetails, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
+  thread.append(toolbar, older, history, schedulesDetails, diagnostics, localSearch, retentionDetails, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
   let messages = new Map(), turns = new Map(), tasks = new Map(), refreshTimer, conversationMode;
   const time = value => typeof value === 'number' ? value : Date.parse(value);
   function drawTimeline() {
@@ -347,7 +363,7 @@ async function renderChannelConsole(request) {
     for (const task of result.own_tasks) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.title), state(task.state));
       if (task.last_conclusion) { const detail = element('details'); detail.append(element('summary', '查看最近结论'), element('p', task.last_conclusion, 'channel-message-body')); row.append(detail); } own.append(row); }
     if (!result.own_tasks.length) own.append(note('当前会话暂无可见独立任务。'));
-    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu?group=' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围与权限档位'));
+    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu/groups/' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围、权限与助手角色'));
   }
   async function update(more) {
     if (pending || !alive()) return; pending = true; refresh.disabled = moreMessages.disabled = moreTurns.disabled = true; clearTimeout(refreshTimer);
@@ -369,12 +385,20 @@ async function renderChannelConsole(request) {
         const scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
         bindingMeta.textContent = `当前群绑定：${b.service_role.name || '服务角色已删除'} · 范围：${scopeText}`;
         bindingMeta.hidden = false;
-        if (result.conversation.can_manage) contextActions.append(channelLink('#/identity/feishu?group=' + selected, '配置仓库与权限', 'button-link quiet'));
+        if (result.conversation.can_manage) contextActions.append(channelLink('#/identity/feishu/groups/' + selected, '配置仓库与权限', 'button-link quiet'));
       } else {
         bindingMeta.hidden = true;
         if (result.conversation.mode === 'management' && result.conversation.can_continue) {
           contextActions.append(channelLink('#/management', '打开管理助手与执行记录', 'button-link quiet'));
         }
+      }
+      const canViewSchedules = !!result.chat.can_view_schedules;
+      schedulesDetails.hidden = !canViewSchedules;
+      if (canViewSchedules && requestedSection === 'schedules' && !schedulesOpenedFromQuery) {
+        schedulesOpenedFromQuery = true;
+        schedulesDetails.open = true;
+        void ensureSchedulesLoaded().catch(error);
+        schedulesDetails.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       }
       diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。保留策略：${result.retention?.days === null || result.retention?.days === undefined ? '保留至管理员显式清理' : result.retention.days + ' 天'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
       syncActions.hidden = !result.chat.can_sync;

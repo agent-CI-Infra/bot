@@ -25,10 +25,10 @@ function rolesConsole() {
     let saveRoles = async () => {};
     holder.replaceChildren(); roleDraftStatus = null;
     const requestedView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
-    const auxiliaryView = !current.item && requestedView === 'skills' ? 'skills' : '';
+    const auxiliaryView = !current.item && (requestedView === 'skills' || requestedView === 'assistant-roles') ? requestedView : '';
     const fields = element('fieldset', '', 'role-editor-fields'); fields.disabled = !!state.busy;
     const role = state.draft.roles.find(role => role.role_id === current.item);
-    // #566: overview is a list; a role (or skills) page only has a back crumb, not a tab strip of every role.
+    // #566: overview is a list; a role (or auxiliary) page only has a back crumb, not a tab strip of every role.
     const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
     if (current.item || auxiliaryView) {
       const back = element('a', '← 角色列表');
@@ -40,6 +40,11 @@ function rolesConsole() {
         here.href = `#/projects/${id}/roles/${current.item}`;
         here.setAttribute('aria-current', 'page');
         nav.append(here);
+      } else if (auxiliaryView === 'assistant-roles') {
+        const here = element('a', '群助手角色');
+        here.href = `#/projects/${id}/roles?view=assistant-roles`;
+        here.setAttribute('aria-current', 'page');
+        nav.append(here);
       } else {
         const here = element('a', '技能包目录');
         here.href = `#/projects/${id}/roles?view=skills`;
@@ -48,8 +53,10 @@ function rolesConsole() {
       }
     } else {
       const skills = element('a', '技能包目录'); skills.href = `#/projects/${id}/roles?view=skills`; skills.dataset.testid = 'role-skills-link';
-      nav.append(skills);
+      const assistantRoles = element('a', '群助手角色'); assistantRoles.href = `#/projects/${id}/roles?view=assistant-roles`; assistantRoles.dataset.testid = 'role-assistant-roles-link';
+      nav.append(skills, assistantRoles);
     }
+    if (auxiliaryView === 'assistant-roles') { renderAssistantRoles(); return; }
     if (auxiliaryView === 'skills') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSkillsWorkspace(state, draw)); }
     else if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));
     else if (role) {
@@ -119,7 +126,34 @@ function rolesConsole() {
       const heading = comparison.querySelector('h3'); heading.tabIndex = -1; heading.focus({ preventScroll: true });
     }
   };
+  const renderAssistantRoles = () => {
+    holder.replaceChildren();
+    const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
+    const back = element('a', '← 角色列表');
+    back.href = `#/projects/${id}/roles`;
+    back.dataset.testid = 'role-list-link';
+    const here = element('a', '群助手角色');
+    here.href = `#/projects/${id}/roles?view=assistant-roles`;
+    here.setAttribute('aria-current', 'page');
+    nav.append(back, here);
+    const mount = element('div', '', 'feishu-assistant-roles-mount');
+    holder.append(nav, mount);
+    const projectMeta = { id, full_name: target.repository?.full_name || id };
+    const loadAssistantRoles = async () => {
+      if (!live() || !mount.isConnected) return;
+      mount.replaceChildren(consoleState('正在读取项目群助手角色', '正在核对本项目的专属飞书群助手角色与可用模型。'));
+      try {
+        const section = await buildProjectRolesSection(projectMeta, () => { void loadAssistantRoles(); });
+        if (live() && mount.isConnected) mount.replaceChildren(section);
+      } catch (err) {
+        if (live() && mount.isConnected) mount.replaceChildren(consoleState('项目群助手角色读取失败', readErrorText(err), { tone: 'error', retry: () => { void loadAssistantRoles(); } }));
+      }
+    };
+    void loadAssistantRoles();
+  };
   const read = async () => {
+    const requestedView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
+    if (!current.item && requestedView === 'assistant-roles') { renderAssistantRoles(); return; }
     const revision = ++request; holder.replaceChildren(note('正在读取角色配置…'), message); message.textContent = '';
     try {
       const data = await api(`/api/repositories/${id}/roles`);
@@ -136,5 +170,10 @@ function rolesConsole() {
       if (![401,403].includes(err.status)) holder.replaceChildren(note('角色配置读取失败，当前状态未知。保留的草稿尚未提交。'), message, button('重试读取角色配置', read));
     }
   };
-  holder.append(note('正在读取角色配置…')); void read(); return [holder];
+  const initialView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
+  if (!current.item && initialView === 'assistant-roles') {
+    holder.append(note('正在读取项目群助手角色…'));
+    void Promise.resolve().then(() => { if (live()) renderAssistantRoles(); });
+  } else { holder.append(note('正在读取角色配置…')); void read(); }
+  return [holder];
 }

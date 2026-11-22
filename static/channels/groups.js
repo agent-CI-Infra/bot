@@ -26,6 +26,10 @@ function groupTaskScope(binding) {
     (controls || tasks === 'write') && '追加说明和取消', (controls || tasks === 'write' && !legacy) && '修改约定', tasks === 'write' && '暂停和重试'];
   return '保留旧权限 · ' + (rights.filter(Boolean).join('、') || '无法访问任务');
 }
+function groupTaskShort(binding) {
+  const option = groupTaskOptions.find(([id]) => id === binding.task_mode);
+  return option ? option[1] : groupTaskScope(binding);
+}
 const githubLevelName = level => githubLevelOptions.find(([id]) => id === level)?.[1] || level;
 const groupPermissionModeLabels = { none: '无权限', read: '只读', write: '读写', deny: '不允许', allow: '允许', custom: '保留旧权限' };
 // Per-item controls for one permission group (GitHub items when custom, or platform capabilities directly visible).
@@ -60,19 +64,27 @@ function bindingGithubSummary(b, items) {
 function bindingPlatformSummary(b, items) {
   const open = items.filter(item => item.group === 'platform' && item.id !== 'project_tasks' && !['none', 'deny'].includes(b.permissions[item.id]))
     .map(item => `${item.name} ${groupPermissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
-  return open.length ? open.join('；') : '未开放共享知识、项目设置和项目定时';
+  return open.length ? open.join('；') : '未开放额外平台能力';
+}
+function bindingStateBadgeClass(state) {
+  if (state === 'active') return 'feishu-binding-badge feishu-binding-badge-success';
+  if (state === 'paused') return 'feishu-binding-badge feishu-binding-badge-warning';
+  return 'feishu-binding-badge feishu-binding-badge-muted';
 }
 
-// Group bindings list + on-demand creator/permission editor.
-async function buildGroupBindingsSection(data, { initialOpen = false, initialChat = null } = {}) {
-  const root = element('div'), editorWrap = element('div', '', 'feishu-creator-panel'), form = element('form', '', 'project-form');
-  editorWrap.id = 'feishu-group-editor';
-  editorWrap.hidden = !initialOpen;
+// Standalone group binding configuration view (#/identity/feishu/groups/new or #/identity/feishu/groups/<chat-id>).
+function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { location.hash = '#/identity/feishu'; } } = {}) {
+  const section = element('section', '', 'side-card feishu-group-editor-card');
+  section.id = 'feishu-group-editor';
+  const form = element('form', '', 'project-form');
 
-  const editorHead = element('div', '', 'feishu-creator-head'), editorTitle = element('strong', '创建群绑定');
-  editorHead.append(editorTitle, button('收起配置', () => { editorWrap.hidden = true; }, 'quiet'));
-  editorWrap.append(editorHead,
-    note('第一个配置的维护人成为该群助手负责人（需已绑定个人飞书、在该群中，并对所选仓库或组织有配置权限）；之后负责人、所属组织管理员和超级管理员均可在此修改仓库范围、权限档位与助手角色。'));
+  const head = element('div', '', 'feishu-detail-head');
+  const titleWrap = element('div', '', 'feishu-detail-title');
+  const editorTitle = element('h2', '创建群绑定');
+  titleWrap.append(editorTitle);
+  head.append(titleWrap, channelLink('#/identity/feishu', '← 返回飞书绑定', 'button-link quiet'));
+  section.append(head,
+    note('第一个配置的维护人成为该群助手负责人（需已绑定个人飞书、在该群中，并对所选仓库或组织有配置权限）；之后负责人、所属组织管理员和超级管理员均可在此修改仓库范围、权限与助手角色。'));
 
   const chatOrganization = new Map([...data.chats.map(c => [c.id, c.organization || null]), ...data.bindings.map(b => [b.chat_id, b.chat.organization || null])]);
   const profiles = new Map([...data.chats.map(c => [c.id, c]), ...data.bindings.map(b => [b.chat_id, b.chat])]);
@@ -107,16 +119,19 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   if (repoFilter) repoFilter.setAttribute('aria-label', '筛选可选择的仓库');
   const repoCounter = note('');
   const repositories = element('div', '', 'role-choices feishu-repo-grid'); repositories.setAttribute('aria-label', '可选择的仓库');
+  const projectById = new Map(data.projects.map(p => [p.id, p]));
   const boxes = new Map(data.projects.map(p => {
     const wrap = checkbox('binding_repository:' + p.id, false, p.full_name);
     repositories.append(wrap); return [p.id, wrap.querySelector('input')];
   }));
   const projectOrganization = new Map(data.projects.map(p => [p.id, p.organization]));
 
+  let updateRoleLinks = () => {};
   const updateRepoCounter = () => {
     const allowed = [...boxes.values()].filter(control => control.closest('label').dataset.orgHidden !== '1');
     const checked = allowed.filter(control => control.checked);
     repoCounter.textContent = allowed.length ? `已勾选 ${checked.length} / ${allowed.length} 个你有配置权限的仓库` : '当前群所属组织下暂无可配置仓库';
+    updateRoleLinks();
   };
   const applyRepoVisibility = () => {
     const keyword = repoFilter ? repoFilter.value.trim().toLocaleLowerCase() : '';
@@ -135,7 +150,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   if (data.projects.length > 2) {
     repoToolbar.append(
       button('全选可见仓库', () => { for (const [, c] of boxes) if (!c.closest('label').hidden) c.checked = true; updateRepoCounter(); }, 'quiet'),
-      button('清空勾选', () => { for (const [, c] of boxes) c.checked = false; updateRepoCounter(); }, 'quiet')
+      button('清空勾选', () => { for (const [, c] of boxes) c.checked = false; updateRepoCounter(); }, 'quiet'),
     );
   }
   if (repoFilter) repositoriesWrap.append(repoFilter);
@@ -224,11 +239,28 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   form.append(presetBar, githubFieldset, taskModes, platformFieldset,
     element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按以上权限配置使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
 
-  // The assistant role: its prompt and model only.
-  // Global templates, then the roles of projects this person configures (#849), which fit only groups scoped to that project.
+  // The assistant role: its prompt and model only. Direct links jump to project settings -> roles?view=assistant-roles.
   const role = channelSelect(form, '助手角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.project ? `（${r.project.full_name} 专属）` : '') + (r.recommended ? '（推荐）' : '')]));
   const roleNote = note('');
-  form.append(roleNote, note(me.role === 'super_admin' ? '助手角色只决定提示词和模型，不决定群能做什么；角色在「全局设置 → 服务角色」维护。' : '助手角色只决定提示词和模型，不决定群能做什么。'));
+  const roleLinks = element('div', '', 'feishu-project-role-links');
+  updateRoleLinks = () => {
+    roleLinks.replaceChildren();
+    const checkedIds = repositoriesKind.checked
+      ? [...boxes].filter(([, control]) => control.checked && control.closest('label').dataset.orgHidden !== '1').map(([id]) => id)
+      : [];
+    const linkedProjects = checkedIds.length === 1 && projectById.has(checkedIds[0])
+      ? [projectById.get(checkedIds[0])]
+      : data.projects.slice(0, 3);
+    if (linkedProjects.length) {
+      roleLinks.append(element('span', '在项目设置中维护专属群助手角色：', 'muted'));
+      for (const p of linkedProjects) {
+        roleLinks.append(channelLink(`#/projects/${p.id}/roles?view=assistant-roles`, `${p.full_name} 群助手角色`, 'button-link quiet'));
+      }
+    }
+    if (me.role === 'super_admin') roleLinks.append(channelLink('#/settings/service-roles', '管理全局服务角色', 'button-link quiet'));
+    roleLinks.hidden = !roleLinks.childElementCount;
+  };
+  form.append(roleNote, note('助手角色只决定提示词和模型，不决定群能做什么。'), roleLinks);
 
   const participation = channelSelect(form, '助手发言范围', 'binding_participation', participationOptions);
   form.append(note('注意：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。所有获准消息都会存入本地；扩大发言范围会增加模型用量，用量记在服务角色上，不计入项目。'));
@@ -236,7 +268,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   const ownership = note(''); ownership.setAttribute('role', 'status');
   const save = element('button', '保存群聊助手'); save.type = 'submit';
   const submitActions = element('div', '', 'actions');
-  submitActions.append(save, button('取消', () => { editorWrap.hidden = true; }, 'quiet'));
+  submitActions.append(save, button('取消', onClose, 'quiet'));
   form.append(ownership, status, submitActions);
 
   let expected = 0;
@@ -253,12 +285,12 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     organizationField.hidden = !organizationKind.checked;
     orgScopeNote.hidden = !organizationKind.checked;
     updateOrgNote();
+    updateRoleLinks();
   };
   const fill = () => {
     const current = data.bindings.find(b => b.chat_id === chat.value), organizationOnly = chatOrganization.get(chat.value) || null;
     expected = current?.revision || 0;
     editorTitle.textContent = current ? `配置仓库与权限 · ${channelChatName(current.chat)}` : '创建群绑定';
-    // An organization app's group offers only that organization's repositories and the organization itself.
     for (const [id, control] of boxes) {
       const hidden = !!organizationOnly && projectOrganization.get(id) !== organizationOnly;
       control.closest('label').dataset.orgHidden = hidden ? '1' : '0';
@@ -271,7 +303,6 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     ownership.textContent = locked ? `这个群的助手由 ${current.owner || '原负责人'} 负责；只有负责人、所属组织的管理员和超级管理员可以修改。` : current?.owner ? '负责人：' + current.owner : '';
     save.disabled = unavailable || locked;
     role.value = current?.enabled && data.service_roles.some(r => r.id === current.service_role.id) ? current.service_role.id : (data.service_roles.find(r => r.recommended) || data.service_roles[0])?.id || '';
-    // A disabled binding is enabled again at its last permissions; a new one starts at GitHub read, tasks none, project_memory read.
     const initial = current?.permissions ? { ...current.permissions } : defaultPermissions();
     const ghLevel = current?.github_level || 'read';
     for (const [id, control] of githubControls) control.checked = id === ghLevel;
@@ -294,47 +325,37 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     try {
       const ghLevel = chosenGithubLevel(), taskMode = selectedTaskMode();
       const permissions = { ...(ghLevel === 'custom' ? githubEdited : githubPresetOf(ghLevel)), ...platformEdited };
-      // The task selector controls creation too. Omitting both fields preserves an older split grant on an unrelated edit.
       if (taskMode !== 'custom') permissions.project_tasks = taskMode;
       await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', { service_role_id: role.value, scope: selected, participation: participation.value,
         permissions, enabled: true, expected_revision: expected });
-      if (location.hash.includes('?')) history.replaceState(null, '', '#/identity/feishu');
+      history.replaceState(null, '', '#/identity/feishu');
       await start();
     } catch (err) { status.textContent = bindingSaveError(err); save.disabled = false; }
   });
 
-  if (!chats.size) editorWrap.append(note('尚无可选择的群。请先完成个人绑定，在机器人已加入的目标群发一条消息，再刷新本页。'));
-  if (!data.projects.length && !data.organizations.length) editorWrap.append(note('当前没有可配置的仓库。个人绑定不会增加项目权限。'));
-  if (!data.service_roles.length) editorWrap.append(note('当前没有可用于群聊的服务角色，请联系超级管理员。'));
-  editorWrap.append(form);
+  if (!chats.size) section.append(note('尚无可选择的群。请先完成个人绑定，在机器人已加入的目标群发一条消息，再刷新本页。'));
+  if (!data.projects.length && !data.organizations.length) section.append(note('当前没有可配置的仓库。个人绑定不会增加项目权限。'));
+  if (!data.service_roles.length) section.append(note('当前没有可用于群聊的服务角色，请联系超级管理员。'));
+  section.append(form);
 
-  const selectTargetChat = targetChatId => {
-    if (targetChatId && [...chat.options].some(o => o.value === targetChatId)) chat.value = targetChatId;
-    else if (!targetChatId) {
-      const unbound = data.chats.find(c => !data.bindings.some(b => b.chat_id === c.id && b.enabled));
-      if (unbound && [...chat.options].some(o => o.value === unbound.id)) chat.value = unbound.id;
-    }
-    if (chats.size) fill();
-  };
-  selectTargetChat(initialChat);
-
-  const openEditor = (targetChatId = null) => {
-    editorWrap.hidden = false;
-    status.textContent = '';
-    selectTargetChat(targetChatId);
-    editorWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    (targetChatId ? repositoriesKind : chat).focus({ preventScroll: true });
-  };
-
-  root.append(editorWrap);
-
-  const list = element('div', '', 'feishu-binding-list');
-  list.setAttribute('aria-label', '飞书群绑定列表');
-  if (!data.bindings.length) {
-    list.append(element('p', '当前尚无已绑定的飞书群。点击「创建群绑定」可为机器人所在群配置仓库范围与权限档位。', 'muted'));
+  if (targetChatId && [...chat.options].some(o => o.value === targetChatId)) chat.value = targetChatId;
+  else if (!targetChatId) {
+    const unbound = data.chats.find(c => !data.bindings.some(b => b.chat_id === c.id && b.enabled));
+    if (unbound && [...chat.options].some(o => o.value === unbound.id)) chat.value = unbound.id;
   }
+  if (chats.size) fill();
+  else updateRoleLinks();
 
-  for (const b of data.bindings) {
+  return section;
+}
+
+// Scannable group bindings list for #/identity/feishu (active/paused first, disabled folded).
+function buildGroupBindingsList(data) {
+  const root = element('div');
+  const activeOrPaused = data.bindings.filter(b => b.state !== 'disabled');
+  const disabledBindings = data.bindings.filter(b => b.state === 'disabled');
+
+  const buildRow = b => {
     const row = element('article', '', 'feishu-binding-row channel-binding');
     const scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
     const canViewChat = b.can_view !== false;
@@ -346,60 +367,79 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
 
     const mainRow = element('div', '', 'feishu-row-main'), info = element('div', '', 'feishu-row-info'), actions = element('div', '', 'actions feishu-row-actions');
     const titleWrap = element('div', '', 'feishu-row-title'), groupName = element('strong', channelChatName(b.chat));
-    const badge = element('span', `${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'}`,
-      'feishu-binding-badge' + (b.state === 'active' ? '' : ' feishu-binding-badge-muted'));
-    titleWrap.append(groupName, badge);
+    const stateBadge = element('span', bindingStates[b.state] || b.state, bindingStateBadgeClass(b.state));
+    const roleBadge = element('span', b.service_role.name || '服务角色已删除', 'feishu-binding-badge');
+    titleWrap.append(groupName, stateBadge, roleBadge);
 
-    info.append(titleWrap,
-      note('项目范围：' + scopeText),
-      ...(b.scope.organization && b.enabled ? [note(b.reachable.length ? `可达仓库（${b.reachable.length}）：${b.reachable.join('、')}` : '当前组织范围下暂无可达仓库')] : []),
-      note('GitHub 权限：' + bindingGithubSummary(b, data.permission_items)),
-      note('项目任务权限：' + groupTaskScope(b)),
-      note('平台能力：' + bindingPlatformSummary(b, data.permission_items)),
-      note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation)),
-      note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
-      channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); updateOption(b.chat); }),
+    const participationLabel = participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation;
+    const permSummary = `GitHub ${bindingGithubSummary(b, data.permission_items)} · 项目任务 ${groupTaskShort(b)} · 平台 ${bindingPlatformSummary(b, data.permission_items)}`;
+    const ownerLine = `发言范围：${participationLabel} · 负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '（最近修改：' + b.configured_by + '）' : ''}`;
+    const profileDetails = element('details', '', 'feishu-chat-profile-fold');
+    profileDetails.append(element('summary', '群与应用信息'), channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); }));
+
+    info.append(
+      titleWrap,
+      note('项目范围：' + scopeText + (b.scope.organization && b.enabled ? `（可达 ${b.reachable.length} 个仓库）` : '')),
+      note('权限：' + permSummary),
+      note(ownerLine),
+      profileDetails,
       ...(b.paused.length ? [note('暂停的仓库（配置人权限已变化）：' + b.paused.join('、'))] : []),
       ...(b.model_gaps?.length ? [note('助手角色的模型没有授权给：' + b.model_gaps.join('、') + '。本群暂停回答，直到换一个对范围内每个项目都可用的角色或调整范围。')] : []),
       ...(b.migrated ? [note('由旧群员工自动迁移为仓库问答助手。')] : []),
       ...(b.error ? [note(employeeError(b.error))] : []),
-      ...(!canViewChat ? [note('需要该群负责人或拥有全部绑定范围的配置权限才能查看聊天记录。')] : []));
+      ...(!canViewChat ? [note('需要该群负责人或拥有全部绑定范围的配置权限才能查看聊天记录。')] : []),
+    );
 
-    const scheduleDrawer = element('div', '', 'feishu-row-drawer'); scheduleDrawer.hidden = true;
     const transferDrawer = element('div', '', 'feishu-row-drawer'); transferDrawer.hidden = true;
 
     if (canViewChat) actions.append(channelLink('#/conversations/' + b.chat_id, '查看聊天记录', 'button-link quiet'));
-    if (b.can_manage) actions.append(button(b.enabled ? '配置仓库与权限' : '重新启用并配置', () => openEditor(b.chat_id), 'quiet'));
-    if (b.enabled && b.can_manage) {
-      actions.append(button('定时任务', async () => {
-        scheduleDrawer.hidden = !scheduleDrawer.hidden;
-        if (!scheduleDrawer.hidden && !scheduleDrawer.dataset.loaded) {
-          scheduleDrawer.dataset.loaded = '1';
-          scheduleDrawer.replaceChildren(note('正在读取定时任务…'));
-          scheduleDrawer.replaceChildren(await channelSchedules(b.chat_id));
-        }
-      }, 'quiet'));
-    }
+    if (b.can_manage) actions.append(channelLink('#/identity/feishu/groups/' + b.chat_id, b.enabled ? '配置仓库与权限' : '重新启用并配置', 'button-link quiet'));
+    if (b.enabled && b.can_manage) actions.append(channelLink(`#/conversations/${b.chat_id}?section=schedules`, '定时任务', 'button-link quiet'));
     if (b.can_transfer) {
       transferDrawer.append(channelOwnerTransfer(b));
       actions.append(button('转交负责人', () => { transferDrawer.hidden = !transferDrawer.hidden; }, 'quiet'));
     }
     if (b.enabled && b.can_manage) {
       actions.append(button('停用群聊助手', async () => {
-        try { await api('/api/channels/chats/' + b.chat_id + '/service-binding', 'PUT', { enabled: false, expected_revision: b.revision }); await start(); }
-        catch (err) { error(err); }
-      }, 'quiet'));
+        const confirmed = await askConfirm({
+          title: '停用群聊助手',
+          body: [`停用「${channelChatName(b.chat)}」的群聊助手后，本群将不再响应机器人消息，本群定时任务也会暂停；已保存的历史记录保留，随时可重新启用。`],
+          action: '确认停用',
+          danger: true,
+          run: () => api('/api/channels/chats/' + b.chat_id + '/service-binding', 'PUT', { enabled: false, expected_revision: b.revision }),
+        });
+        if (confirmed) await start();
+      }, 'quiet destructive'));
     }
 
     mainRow.append(info, actions);
-    row.append(mainRow, transferDrawer, scheduleDrawer);
-    list.append(row);
+    row.append(mainRow, transferDrawer);
+    return row;
+  };
+
+  const list = element('div', '', 'feishu-binding-list');
+  list.setAttribute('aria-label', '飞书群绑定列表');
+  if (!activeOrPaused.length) {
+    list.append(element('p', disabledBindings.length
+      ? '当前没有生效中的飞书群绑定，可在下方展开已停用记录重新启用，或点击「创建群绑定」。'
+      : '当前尚无已绑定的飞书群。点击「创建群绑定」可为机器人所在群配置仓库范围、权限与助手角色。', 'muted'));
   }
+  for (const b of activeOrPaused) list.append(buildRow(b));
   root.append(list);
+
+  if (disabledBindings.length) {
+    const disabledFold = element('details', '', 'fold feishu-history-fold');
+    disabledFold.open = activeOrPaused.length === 0;
+    disabledFold.append(element('summary', `已停用的群绑定（${disabledBindings.length}）`));
+    const disabledList = element('div', '', 'feishu-binding-list');
+    for (const b of disabledBindings) disabledList.append(buildRow(b));
+    disabledFold.append(disabledList);
+    root.append(disabledFold);
+  }
 
   const legacy = data.legacy_employees.filter(g => g.enabled);
   if (legacy.length) {
-    const old = element('div', '', 'feishu-binding-list'); old.append(element('h4', '旧群员工'), note('旧群员工已不再接收群消息，只用于继续核验升级前已创建的任务。确认这些任务不再需要后可以停用。'));
+    const old = element('div', '', 'feishu-binding-list'); old.append(element('h3', '旧群员工'), note('旧群员工已不再接收群消息，只用于继续核验升级前已创建的任务。确认这些任务不再需要后可以停用。'));
     for (const g of legacy) {
       const row = element('article', '', 'feishu-binding-row channel-binding');
       row.append(element('strong', `仍有效 · ${g.full_name} · ${g.role_id}`), note(`未结束的任务：${g.open_tasks} 个`), button('停用旧群员工授权', async () => {
@@ -411,6 +451,5 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     root.append(old);
   }
 
-  return { root, editorWrap, openEditor };
+  return root;
 }
-

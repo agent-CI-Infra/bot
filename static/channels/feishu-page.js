@@ -1,11 +1,23 @@
-// Unified Feishu bindings page (#/identity/feishu): personal bindings and group bindings sit on one page as scannable lists,
-// with explicit Create buttons, per-group repository & role permission configuration, and one-click chat history access.
+// Feishu bindings page (#/identity/feishu): two clean stacked cards (personal identity bindings & group chat assistants),
+// plus a dedicated group binding configuration route (#/identity/feishu/groups/new and #/identity/feishu/groups/<chat-id>).
+// Chat schedules live inside Feishu Conversations (#/conversations/<chat-id>?section=schedules), and project-scoped
+// group assistant roles live inside Project Settings -> Roles (#/projects/<id>/roles?view=assistant-roles).
 async function renderFeishuBindingsPage(panel, current) {
-  const request = renderVersion, queryIndex = location.hash.indexOf('?');
-  const params = new URLSearchParams(queryIndex >= 0 ? location.hash.slice(queryIndex + 1) : '');
+  const request = renderVersion;
+  const [hashPath, hashQuery = ''] = location.hash.split('?');
+  const params = new URLSearchParams(hashQuery);
   const challenge = /^[a-f0-9]{48}$/.test(params.get('challenge') || '') ? params.get('challenge') : null;
   const queryCreate = params.get('create'), querySection = params.get('section');
   const queryGroup = /^[a-f0-9]{48}$/.test(params.get('group') || '') ? params.get('group') : null;
+  const routeGroupNew = /^#\/identity\/feishu\/groups\/new$/.test(hashPath);
+  const routeGroupMatch = /^#\/identity\/feishu\/groups\/([a-f0-9]{48})$/.exec(hashPath);
+  const routeGroupChat = routeGroupMatch?.[1] || queryGroup || null;
+  const isGroupEditorRoute = routeGroupNew || Boolean(routeGroupChat) || queryCreate === 'group';
+
+  if (isGroupEditorRoute) {
+    await renderFeishuGroupEditorView(panel, current, routeGroupChat);
+    return;
+  }
 
   panel.replaceChildren(consoleState('正在读取飞书绑定', '正在核对本人的飞书绑定与获准管理的群绑定。'));
   let data;
@@ -18,46 +30,27 @@ async function renderFeishuBindingsPage(panel, current) {
   if (typeof notePersonalApps === 'function') notePersonalApps(data);
 
   const activePersonal = data.bindings.filter(b => b.status === 'active' && (!b.expires_at || b.expires_at > Date.now()));
-  const overview = element('section', '', 'side-card feishu-overview');
-  overview.setAttribute('aria-label', '飞书绑定概览');
-  overview.append(note('在同一页查看与管理个人飞书绑定和群绑定。列表直接展示仓库范围与权限档位，点击已建立会话的绑定条目（或「查看聊天记录」）即可查看聊天记录。'));
+  const inactivePersonal = data.bindings.filter(b => !activePersonal.includes(b));
 
-  let openPersonalCreator = () => {}, openGroupEditor = null, pendingGroupEditor = false, pendingGroupChat = null, retryGroups = null;
-  const requestGroupEditor = (chatId = null) => {
-    if (openGroupEditor) { openGroupEditor(chatId); return; }
-    pendingGroupEditor = true; pendingGroupChat = chatId;
-    groupSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    if (retryGroups) retryGroups();
-  };
-
-  const topActions = element('div', '', 'feishu-page-actions');
+  // Compact top bar: brief orientation + global refresh and conversations entry.
+  const topBar = element('div', '', 'feishu-top-bar');
+  const topActions = element('div', '', 'actions');
   topActions.append(
-    button('创建个人绑定', () => openPersonalCreator()),
-    button('创建群绑定', () => requestGroupEditor(null)),
     button('刷新飞书绑定状态', () => start().catch(error), 'quiet'),
-    channelLink('#/conversations', '查看全部飞书会话', 'button-link quiet')
+    channelLink('#/conversations', '查看全部飞书会话', 'button-link quiet'),
   );
-  overview.append(topActions);
+  topBar.append(note('管理本人的飞书身份绑定与飞书群聊助手；会话定时任务请进入对应飞书会话配置。'), topActions);
 
-  const metrics = element('div', '', 'feishu-metrics');
-  const metric = (name, value, hint) => {
-    const box = element('div', '', 'feishu-metric');
-    box.append(element('span', name), element('strong', value), element('small', hint));
-    metrics.append(box); return box;
-  };
-  metric(t('feishu.bound_identities'), String(activePersonal.length), t('feishu.current_account', { name: userDisplayName(me) }));
-  const privateCount = metric('本人私聊', '—', '正在读取');
-  const groupCount = metric('维护的群', '—', '正在读取');
-  overview.append(metrics);
-  const showMetric = (node, value, hint) => { node.querySelector('strong').textContent = String(value); node.querySelector('small').textContent = hint; };
-
-  // Section 1: Personal Bindings (#feishu-identity)
+  // Card 1: Personal Identity Bindings (#feishu-identity)
   const personalSection = element('section', '', 'side-card'), nameLookups = [];
   personalSection.id = 'feishu-identity';
   const personalHead = element('div', '', 'feishu-section-head'), personalActions = element('div', '', 'actions');
-  personalHead.append(element('h3', '飞书身份绑定'), personalActions);
+  let openPersonalCreator = () => {};
+  const createPersonalBtn = button('创建个人绑定', () => openPersonalCreator(), activePersonal.length ? 'quiet' : '');
+  personalActions.append(createPersonalBtn);
   if (me.role === 'super_admin') personalActions.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link quiet'));
   else if (data.can_manage_applications) personalActions.append(channelLink('#/identity/feishu-apps', '连接或管理本组织的飞书应用', 'button-link quiet'));
+  personalHead.append(element('h2', '飞书身份绑定'), personalActions);
   personalSection.append(personalHead,
     note('将本人的飞书账号关联到当前平台账户（本地账户和 GitHub 登录均可使用）。私聊使用管理助手并按当前账户实际获准的项目权限执行，绑定本身不会增加仓库权限。'));
 
@@ -98,14 +91,12 @@ async function renderFeishuBindingsPage(panel, current) {
     '生成并复制完整绑定消息，在这个私聊中发送一次。本页会自动读取服务端确认结果。']) steps.append(element('li', caption));
   if (data.applications.length) {
     const flow = element('div', '', 'feishu-binding-layout'), main = element('div'), help = element('aside', '', 'feishu-binding-help');
-    help.append(element('h4', '找不到机器人？'), note('请先登录飞书，再打开机器人名片。也可在飞书中搜索机器人的名称；仍不可见时，请联系管理员检查应用发布和可用范围。'),
+    help.append(element('h3', '找不到机器人？'), note('请先登录飞书，再打开机器人名片。也可在飞书中搜索机器人的名称；仍不可见时，请联系管理员检查应用发布和可用范围。'),
       note('绑定串五分钟内有效，只能使用一次。仅发送到本人与所选机器人的私聊，请勿转发。复制或打开私聊不代表绑定成功。'));
     main.append(steps); flow.append(main, help); personalCreator.append(flow);
     const apps = element('div'); apps.setAttribute('aria-label', '可绑定的飞书应用');
     const label = a => `${a.tenant_name || '企业名称暂未获取'} · ${a.app_name || '机器人名称暂未获取'}${a.organization ? ' · 组织 ' + a.organization + ' 的应用' : ''}`;
     const active = a => data.bindings.some(b => b.status === 'active' && b.connector === a.id + ':' + a.app_id);
-    // The console issues the code for the chosen bot (#236): the private-chat message that carries it completes the
-    // binding in one step, and this page only shows 已绑定 after it reads the binding back from the server.
     const consoleBind = async (a, slot) => {
       steps.hidden = false;
       const box = element('div', '', 'channel-binding-console'); box.setAttribute('aria-label', '控制台发起的绑定');
@@ -210,33 +201,26 @@ async function renderFeishuBindingsPage(panel, current) {
     personalSection.append(pending);
   }
 
-  const personalList = element('div', '', 'feishu-binding-list');
-  personalList.setAttribute('aria-label', '个人飞书绑定列表');
-  if (!data.bindings.length && !data.pending.length) {
-    personalList.append(element('p', '尚未绑定飞书身份。可通过上方向导或点击「创建个人绑定」关联本人飞书账号。', 'muted'));
-  }
-
   const personalRowEntries = [];
-  for (const b of data.bindings) {
-    const row = element('article', '', 'feishu-binding-row channel-binding'), active = b.status === 'active';
+  const buildPersonalRow = b => {
+    const row = element('article', '', 'feishu-binding-row channel-binding'), active = b.status === 'active' && (!b.expires_at || b.expires_at > Date.now());
     const name = () => { const value = typeof b.display_name === 'string' ? b.display_name.trim() : ''; return value && value !== b.external_actor ? value : ''; };
     const stateLabel = active ? '已绑定' : b.status === 'revoked' ? '已解绑' : '需要重新认证';
     const mainRow = element('div', '', 'feishu-row-main'), info = element('div', '', 'feishu-row-info'), rowActions = element('div', '', 'actions feishu-row-actions');
     const titleWrap = element('div', '', 'feishu-row-title'), title = element('strong');
-    const renderName = () => { title.textContent = `${name() || t('feishu.account_of', { name: userDisplayName(me) })} · ${stateLabel}`; };
+    const renderName = () => { title.textContent = name() || t('feishu.account_of', { name: userDisplayName(me) }); };
     renderName();
-    titleWrap.append(title);
-    if (active) titleWrap.append(element('span', '私聊管理助手', 'feishu-binding-badge'));
-    else titleWrap.append(element('span', stateLabel, 'feishu-binding-badge feishu-binding-badge-muted'));
+    const stateBadge = element('span', stateLabel, 'feishu-binding-badge ' + (active ? 'feishu-binding-badge-success' : 'feishu-binding-badge-muted'));
+    titleWrap.append(title, stateBadge);
+    if (b.connection_enabled === 0) titleWrap.append(element('span', '连接已停用', 'feishu-binding-badge feishu-binding-badge-warning'));
+    else if (b.connection_enabled === null) titleWrap.append(element('span', '原连接不可用', 'feishu-binding-badge feishu-binding-badge-muted'));
 
     row.setAttribute('aria-label', '我的飞书账号');
-    info.append(titleWrap, note(channelChatContext(b)), note(t('feishu.linked_account', { name: userDisplayName(me) })));
+    info.append(titleWrap, note(`${channelChatContext(b)} · ${t('feishu.linked_account', { name: userDisplayName(me) })}`));
     const chatHint = note(active ? '正在核对私聊会话记录…' : '需要恢复时，可在原飞书私聊发送 /reauth，或点击「重新绑定」生成新绑定串。');
     info.append(chatHint);
     const nameStatus = note(name() ? '' : '飞书姓名暂不可读取，当前显示关联的平台账户。'); nameStatus.setAttribute('role', 'status');
     info.append(nameStatus);
-    if (b.connection_enabled === 0) info.append(note('此机器人连接已停用。'));
-    else if (b.connection_enabled === null) info.append(note('原机器人连接已不可用。'));
 
     const chatActionSlot = element('span', '', 'feishu-inline-actions');
     rowActions.append(chatActionSlot);
@@ -245,8 +229,6 @@ async function renderFeishuBindingsPage(panel, current) {
       const refreshName = async () => {
         if (refresh.disabled) return;
         refresh.disabled = true; nameStatus.textContent = '正在读取飞书姓名…';
-        // #870: an attempt counts at once, so a redraw while this one is in flight does not start a second one; a success
-        // clears it again. The key is the identity id the console passes as `binding_id`, so both entries share one mark.
         channelNameFailures.add(channelNameKey(b));
         try {
           const result = await channelNameRequest('/api/channels/bindings/' + encodeURIComponent(b.id) + '/name');
@@ -262,135 +244,160 @@ async function renderFeishuBindingsPage(panel, current) {
       };
       const refresh = button('刷新飞书姓名', refreshName, 'quiet');
       rowActions.append(refresh);
-      // A missing name is filled in once per binding; after a refusal the reader's own button still retries it.
       if (!name() && channelNameAutoRead(b)) nameLookups.push(refreshName);
     }
 
     const connectorId = typeof b.connector === 'string' ? b.connector.split(':')[0] : '';
     if (active) {
       rowActions.append(button('解除飞书绑定', async () => {
-        if (!confirm('解除绑定后，这个飞书身份不能继续管理项目。继续？')) return;
-        try { await api('/api/identity/bindings/' + b.id, 'DELETE', {}); await start(); } catch (err) { error(err); }
-      }, 'quiet'));
+        const confirmed = await askConfirm({
+          title: '解除飞书绑定',
+          body: ['解除绑定后，这个飞书身份将无法继续通过私聊管理项目，本私聊的定时任务也会暂停。'],
+          action: '确认解除',
+          danger: true,
+          run: () => api('/api/identity/bindings/' + b.id, 'DELETE', {}),
+        });
+        if (confirmed) await start();
+      }, 'quiet destructive'));
     } else if (data.applications.some(a => a.id === connectorId)) {
       rowActions.append(button('重新绑定', () => openPersonalCreator(connectorId), 'quiet'));
     }
 
-    const scheduleDrawer = element('div', '', 'feishu-row-drawer'); scheduleDrawer.hidden = true;
     mainRow.append(info, rowActions);
-    row.append(mainRow, scheduleDrawer);
+    row.append(mainRow);
 
     let primaryChatId = null;
     makeFeishuRowClickable(row, () => primaryChatId ? '#/conversations/' + primaryChatId : '', () => {
       if (active) chatHint.textContent = '尚未建立私聊记录：请先在飞书中向该机器人发送一条普通消息，之后即可点击查看聊天记录。';
     });
-    personalRowEntries.push({ binding: b, active, row, chatHint, chatActionSlot, scheduleDrawer, setPrimaryChat: id => { primaryChatId = id; } });
-    personalList.append(row);
-  }
-  const orphanChatsSlot = element('div');
-  personalSection.append(personalList, orphanChatsSlot);
+    personalRowEntries.push({ binding: b, active, row, chatHint, chatActionSlot, setPrimaryChat: id => { primaryChatId = id; } });
+    return row;
+  };
 
-  // Section 2: Group Bindings (#feishu-group-bindings)
+  const personalList = element('div', '', 'feishu-binding-list');
+  personalList.setAttribute('aria-label', '个人飞书绑定列表');
+  if (!activePersonal.length && !data.pending.length) {
+    personalList.append(element('p', inactivePersonal.length ? '当前没有生效中的个人飞书绑定，可在上方重新绑定。' : '尚未绑定飞书身份。可通过上方向导或点击「创建个人绑定」关联本人飞书账号。', 'muted'));
+  }
+  for (const b of activePersonal) personalList.append(buildPersonalRow(b));
+  personalSection.append(personalList);
+
+  if (inactivePersonal.length) {
+    const historyFold = element('details', '', 'fold feishu-history-fold');
+    historyFold.open = activePersonal.length === 0;
+    historyFold.append(element('summary', `历史绑定记录（${inactivePersonal.length}）`));
+    const historyList = element('div', '', 'feishu-binding-list');
+    for (const b of inactivePersonal) historyList.append(buildPersonalRow(b));
+    historyFold.append(historyList);
+    personalSection.append(historyFold);
+  }
+
+  // Card 2: Group Chat Assistants (#feishu-group-bindings)
   const groupSection = element('section', '', 'side-card');
   groupSection.id = 'feishu-group-bindings';
   const groupHead = element('div', '', 'feishu-section-head'), groupHeadActions = element('div', '', 'actions');
-  groupHead.append(element('h3', '飞书群聊助手'), groupHeadActions);
-  if (me.role === 'super_admin') groupHeadActions.append(channelLink('#/settings/service-roles', '管理助手角色', 'button-link quiet'));
+  groupHeadActions.append(channelLink('#/identity/feishu/groups/new', '创建群绑定', 'button-link quiet'));
+  if (me.role === 'super_admin') groupHeadActions.append(channelLink('#/settings/service-roles', '全局服务角色', 'button-link quiet'));
+  groupHead.append(element('h2', '飞书群聊助手'), groupHeadActions);
+  const projectRolesLinksSlot = element('div', '', 'feishu-project-role-links');
+  projectRolesLinksSlot.hidden = true;
   groupSection.append(groupHead,
-    note('为机器人所在的群选择仓库范围（可按单个仓库勾选或授权整个组织）、GitHub 权限、项目任务权限、平台能力和助手角色。群里的每个人，包括没有平台账号的人和外部成员，都按本群配置使用助手，不核对发言人；点击条目可查看群聊天记录。'));
+    note('为机器人所在的群配置仓库范围、GitHub 权限、项目任务权限、平台能力与助手角色。群内所有成员按本群配置使用助手，点击条目可查看群聊天记录。'),
+    projectRolesLinksSlot);
   const groupBody = element('div');
   groupBody.append(consoleState('正在读取群绑定', '个人飞书绑定已就绪，正在读取可查看或管理的群绑定。'));
   groupSection.append(groupBody);
 
-  panel.replaceChildren(overview, personalSection, groupSection);
+  panel.replaceChildren(topBar, personalSection, groupSection);
 
   // Names are presentation metadata: fill missing names asynchronously without blocking rendering.
   void (async () => { for (const lookup of nameLookups) { if (request !== renderVersion) break; await lookup(); } })();
 
-  // Pair personal bindings with private chats asynchronously so personal chat history & timers are one click away.
+  // Pair personal bindings with private chats asynchronously so chat history & schedules links are one click away.
   void api('/api/channels/employees').then(result => {
     if (!current() || !personalSection.isConnected) return;
     const belongs = (binding, chat) => binding.connector === chat.connector_id + ':' + chat.app_id && binding.external_actor === chat.actor_id && binding.external_tenant === chat.actor_tenant;
-    const activeMatched = result.personal_chats.filter(c => activePersonal.some(b => belongs(b, c)));
-    showMetric(privateCount, activeMatched.length, '当前绑定对应的私聊' + (result.personal_chats.length > activeMatched.length ? `；另有 ${result.personal_chats.length - activeMatched.length} 个历史会话` : ''));
-    const pairedIds = new Set();
     for (const entry of personalRowEntries) {
       const chats = result.personal_chats.filter(c => belongs(entry.binding, c));
-      for (const c of chats) pairedIds.add(c.id);
       entry.chatActionSlot.replaceChildren();
       if (chats.length) {
         entry.setPrimaryChat(chats[0].id);
         entry.row.classList.add('feishu-binding-clickable');
-        entry.chatHint.textContent = `${entry.active ? '私聊会话已建立' : '保留历史私聊记录'}（${chats.length} 个） · 点击此条或「查看聊天记录」查看消息与执行回执`;
+        entry.chatHint.textContent = `${entry.active ? '私聊会话已建立' : '保留历史私聊记录'}（${chats.length} 个） · 点击此条进入会话记录`;
         chats.forEach((chat, index) => {
           entry.chatActionSlot.append(channelLink('#/conversations/' + chat.id, chats.length > 1 ? `查看聊天记录 ${index + 1}` : '查看聊天记录', 'button-link quiet'));
         });
         if (entry.active) {
-          entry.chatActionSlot.append(button('定时任务', async () => {
-            entry.scheduleDrawer.hidden = !entry.scheduleDrawer.hidden;
-            if (!entry.scheduleDrawer.hidden && !entry.scheduleDrawer.dataset.loaded) {
-              entry.scheduleDrawer.dataset.loaded = '1';
-              entry.scheduleDrawer.replaceChildren(note('正在读取定时任务…'));
-              entry.scheduleDrawer.replaceChildren(await channelSchedules(chats[0].id));
-            }
-          }, 'quiet'));
+          entry.chatActionSlot.append(channelLink(`#/conversations/${chats[0].id}?section=schedules`, '定时任务', 'button-link quiet'));
         }
       } else if (entry.active) {
-        entry.chatHint.textContent = '身份已绑定，尚无私聊记录；请先在飞书给该机器人发送一条普通消息，之后点击即可查看聊天记录。';
+        entry.chatHint.textContent = '身份已绑定，尚无私聊记录；请先在飞书给该机器人发送一条普通消息，之后即可查看聊天记录。';
       }
     }
-    const unmatched = result.personal_chats.filter(c => !pairedIds.has(c.id));
-    if (unmatched.length) {
-      const historyFold = element('details', '', 'fold');
-      historyFold.append(element('summary', `其他历史私聊记录（${unmatched.length}）`));
-      const historyList = element('div', '', 'feishu-binding-list');
-      for (const chat of unmatched) {
-        const row = element('article', '', 'feishu-binding-row channel-binding feishu-binding-clickable');
-        const mainRow = element('div', '', 'feishu-row-main'), info = element('div', '', 'feishu-row-info'), actions = element('div', '', 'actions feishu-row-actions');
-        const nameNode = element('strong', '私信 · ' + channelChatName(chat));
-        info.append(nameNode, channelProfileDetails(chat, () => { nameNode.textContent = '私信 · ' + channelChatName(chat); }));
-        actions.append(channelLink('#/conversations/' + chat.id, '查看聊天记录', 'button-link quiet'));
-        mainRow.append(info, actions); row.append(mainRow);
-        makeFeishuRowClickable(row, () => '#/conversations/' + chat.id);
-        historyList.append(row);
-      }
-      historyFold.append(historyList);
-      orphanChatsSlot.replaceChildren(historyFold);
-    }
-  }).catch(() => {
-    if (current() && personalSection.isConnected) showMetric(privateCount, '未知', '读取失败，可刷新重试');
-  });
+  }).catch(() => {});
 
   // Load group bindings independently: a slow or failed group read never blocks personal binding actions.
   const loadGroups = async () => {
-    retryGroups = null;
     groupBody.replaceChildren(consoleState('正在读取群绑定', '正在核对你有权查看或管理的飞书群绑定与仓库范围。'));
     try {
       const groupData = await api('/api/channels/service-bindings');
       if (!current() || !groupSection.isConnected) return;
-      const manageable = groupData.bindings.filter(b => b.can_manage), activeGroups = manageable.filter(b => b.enabled);
-      showMetric(groupCount, activeGroups.length, `另有 ${manageable.length - activeGroups.length} 个已停用；按管理权限统计`);
-      const initialChat = pendingGroupChat || queryGroup;
-      const initialOpen = pendingGroupEditor || queryCreate === 'group' || Boolean(initialChat) || (querySection === 'groups' && !groupData.bindings.length);
-      pendingGroupEditor = false; pendingGroupChat = null;
-      const rendered = await buildGroupBindingsSection(groupData, { initialOpen, initialChat });
-      if (!current() || !groupSection.isConnected) return;
-      openGroupEditor = rendered.openEditor;
-      groupBody.replaceChildren(rendered.root);
-      // Project administrators manage their projects' assistant roles next to the groups that use them (#849).
-      if (groupData.projects.length) void buildProjectRolesSection(groupData, () => { void loadGroups(); }).then(roles => {
-        if (current() && groupBody.isConnected && groupBody.contains(rendered.root)) groupBody.append(roles);
-      }).catch(err => { if (current() && groupBody.isConnected) groupBody.append(consoleState('项目群助手角色读取失败', readErrorText(err), { tone: 'error' })); });
-      if (initialOpen) rendered.editorWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      else if (querySection === 'groups') groupSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Legacy #/identity/feishu/groups -> #/identity/feishu?section=groups opens creation directly when no groups exist yet.
+      if (querySection === 'groups' && !groupData.bindings.length) {
+        await renderFeishuGroupEditorView(panel, current, null, groupData);
+        return;
+      }
+      renderProjectRoleLinksBar(projectRolesLinksSlot, groupData.projects || []);
+      groupBody.replaceChildren(buildGroupBindingsList(groupData));
+      if (querySection === 'groups') groupSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
       if (!current() || !groupSection.isConnected) return;
-      showMetric(groupCount, '未知', '读取失败，可重试');
-      retryGroups = () => { void loadGroups(); };
       groupBody.replaceChildren(consoleState('飞书群绑定读取失败', readErrorText(err), { tone: 'error', retry: () => { void loadGroups(); } }));
     }
   };
   void loadGroups();
+}
+
+function renderProjectRoleLinksBar(slot, projects) {
+  slot.replaceChildren();
+  if (!projects.length) { slot.hidden = true; return; }
+  slot.hidden = false;
+  slot.append(element('span', '项目群助手角色（在项目设置中维护）：', 'muted'));
+  const shown = projects.slice(0, 4);
+  for (const p of shown) {
+    slot.append(channelLink(`#/projects/${p.id}/roles?view=assistant-roles`, p.full_name, 'button-link quiet'));
+  }
+  if (projects.length > shown.length) {
+    const more = element('details', '', 'feishu-more-projects');
+    more.append(element('summary', `其余 ${projects.length - shown.length} 个项目`));
+    const rest = element('div', '', 'feishu-inline-actions');
+    for (const p of projects.slice(shown.length)) {
+      rest.append(channelLink(`#/projects/${p.id}/roles?view=assistant-roles`, p.full_name, 'button-link quiet'));
+    }
+    more.append(rest);
+    slot.append(more);
+  }
+}
+
+async function renderFeishuGroupEditorView(panel, current, targetChatId, preloaded = null) {
+  if (!preloaded) panel.replaceChildren(consoleState('正在读取群绑定配置', '正在核对可配置的飞书群、仓库范围与助手角色。'));
+  let groupData = preloaded;
+  if (!groupData) {
+    try { groupData = await api('/api/channels/service-bindings'); }
+    catch (err) {
+      if (current()) {
+        const back = channelLink('#/identity/feishu', '← 返回飞书绑定', 'button-link quiet');
+        panel.replaceChildren(back, consoleState('飞书群绑定读取失败', readErrorText(err), { tone: 'error', retry: () => renderFeishuGroupEditorView(panel, current, targetChatId) }));
+      }
+      return;
+    }
+  }
+  if (!current()) return;
+  const editorCard = buildGroupBindingEditor(groupData, {
+    targetChatId,
+    onClose: () => { location.hash = '#/identity/feishu'; },
+  });
+  panel.replaceChildren(editorCard);
 }
 
 const employeeErrors = { channel_employee_revalidation_required: '群成员正在重新核验，受保护动作暂时暂停。', channel_employee_member_required: '你或来源成员当前不在这个群中。',
@@ -410,4 +417,3 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_service_model_unavailable: '助手角色的模型没有授权给本群范围内的全部项目，本群暂停回答。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);
-

@@ -51,8 +51,8 @@ for (const width of [1440, 390]) {
       await page.getByRole('button', { name: '创建个人绑定', exact: true }).click();
       await expect(page.locator('.feishu-binding-steps')).toBeHidden();
       await expect(app(page, f.id).getByRole('button', { name: '重新绑定', exact: true })).toBeVisible();
-      page.once('dialog', dialog => dialog.accept());
       await binding.getByRole('button', { name: '解除飞书绑定', exact: true }).click();
+      await page.getByRole('dialog').getByRole('button', { name: '确认解除', exact: true }).click();
       await expect(binding).toContainText('已解绑');
       const next = await issue(page, f.id, width === 390); await redeem(f, next, actor);
       await expect(binding).toContainText('已绑定', { timeout: 15000 });
@@ -63,7 +63,8 @@ for (const width of [1440, 390]) {
       await page.goto(f.h.admin + '/#/projects'); await page.goto(f.h.admin + '/#/identity/feishu');
       await expect(binding).toContainText('已绑定');
       await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('飞书绑定');
-      await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
+      await page.getByRole('link', { name: '创建群绑定', exact: true }).click();
+      await expect(page).toHaveURL(/#\/identity\/feishu\/groups\/new$/);
       await expect(page.locator('#feishu-group-editor')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(errors).toEqual([]);

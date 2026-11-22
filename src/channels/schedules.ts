@@ -87,6 +87,10 @@ export class ChannelSchedules {
   private readable(actor: ActorContext, chat: Row): boolean {
     try { this.manage(actor, chat); return true; } catch (error) { if (!(error instanceof HttpError) || !this.platform(actor)) throw error; return false; }
   }
+  /** Whether the actor may inspect this chat's timers in the conversation console. */
+  canView(actor: ActorContext, chat: Row): boolean {
+    try { this.readable(actor, chat); return true; } catch (error) { if (error instanceof HttpError) return false; throw error; }
+  }
   private schedule(id: string): Row {
     const row = this.store.get("SELECT * FROM channel_schedules WHERE id=? AND state<>'deleted'", id);
     if (!row) return fail(404, 'channel_schedule_not_found');
