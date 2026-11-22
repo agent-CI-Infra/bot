@@ -46,6 +46,10 @@ test('causes separate outages, GitHub settings, GitHub refusals, the model, the 
   const acp = explainFailure('acp_product_not_installed','waiting_configuration');
   assert.deepEqual([acp.cause, acp.automatic, acp.attempt_retry], ['environment', true, false]);
   assert.match(acp.action,/agent-tools 卷安装并选定兼容的 ACP 产品版本/);
+  const icode = explainFailure('icode_protocol_unsupported','needs_help');
+  assert.deepEqual([icode.cause, icode.automatic, icode.attempt_retry], ['environment', false, false]);
+  assert.match(icode.action,/agent-tools 卷中选用的 iCode 版本.*官方 Linux 离线包/);
+  assert.equal(automaticState('icode_protocol_unsupported','needs_help'), 'needs_help');
   for (const code of ['acp_lease_expired', 'acp_process_exited', 'disk_full']) assert.equal(failureCause(code), 'environment');
   const acpExit = explainFailure('acp_process_exited','retry_wait');
   assert.equal(acpExit.automatic, true);

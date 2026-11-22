@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { Redactor, TaskError } from '../../../../dist/agent/common.js';
@@ -19,7 +21,9 @@ import { roleHarness } from '../../../../dist/roles/harness.js';
 import { SubmissionError } from '../../../../dist/roles/submission-error.js';
 import { serviceRolesApi } from '../../../../dist/service-roles/api.js';
 import { Store } from '../../../../dist/storage/database.js';
-import { readAcpProduct } from '../../../../runner/acp-products.mjs';
+import { icodeTestedVersion, readAcpProduct } from '../../../../runner/acp-products.mjs';
+import { configureICode, icodeAnswer } from '../../../../runner/icode.mjs';
+import { writeICodeProduct } from '../../../fixtures/icode-product.mjs';
 
 const id = 'container_acp';
 const uvAvailable = spawnSync('uv', ['--version']).status === 0;
@@ -180,6 +184,145 @@ test('ACP installer verifies inputs and switches the selected version after a su
   assert.deepEqual(selected(), first);
   assert.deepEqual(readdirSync(product).sort(), ['1.0.0', 'selected']);
 });
+
+test('iCode installs only the executable from a verified offline archive and preserves an existing selection on rejection', t => {
+  const root = mkdtempSync(join(tmpdir(), 'icode-install-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const tools = join(root, 'tools'), source = join(root, 'source'), archive = join(root, 'icode.tar.gz');
+  mkdirSync(tools);
+  mkdirSync(source);
+  const executable = '#!/bin/sh\nexit 0\n';
+  writeFileSync(join(source, 'icode'), executable);
+  writeFileSync(join(source, 'extra.txt'), 'ignored package content');
+  execFileSync('tar', ['-czf', archive, '-C', source, 'icode', 'extra.txt']);
+  const script = resolve('scripts/install-acp-product.mjs');
+  const dataImport = code => ['--import', 'data:text/javascript,' + encodeURIComponent(code)];
+  const install = (args, preload = []) => spawnSync(process.execPath, [...preload, script, 'install',
+    '--root', tools, '--product', 'icode', '--version', icodeTestedVersion, ...args], { encoding: 'utf8' });
+
+  // Pin the tiny synthetic archive in the installer subprocess. The production release map remains unchanged.
+  const products = pathToFileURL(resolve('runner/acp-products.mjs')).href;
+  const sha256 = hash(readFileSync(archive));
+  const fixtureRelease = dataImport(`import { icodeReleases } from ${JSON.stringify(products)};\n` +
+    `icodeReleases.get(${JSON.stringify(icodeTestedVersion)}).sha256[process.arch] = ${JSON.stringify(sha256)};`);
+  const installed = install(['--archive', archive], fixtureRelease);
+  assert.equal(installed.status, 0, installed.stderr);
+  const product = join(tools, 'acp', 'icode'), versionDir = join(product, icodeTestedVersion);
+  const selected = join(product, 'selected'), manifestPath = join(versionDir, 'manifest.json');
+  assert.equal(readFileSync(selected, 'utf8'), icodeTestedVersion + '\n');
+  assert.equal(readFileSync(join(versionDir, 'bin', 'icode'), 'utf8'), executable);
+  assert.deepEqual(readdirSync(join(versionDir, 'bin')), ['icode']);
+  assert.deepEqual(readdirSync(versionDir).sort(), ['bin', 'manifest.json']);
+  const manifest = readFileSync(manifestPath, 'utf8');
+  assert.deepEqual([JSON.parse(manifest).distribution, JSON.parse(manifest).sourceSha256], ['linux-offline', sha256]);
+
+  for (const [args, preload, error] of [
+    [[], [], /icode_offline_archive_required/],
+    [['--archive', archive], [], /icode_archive_hash_mismatch/],
+    [['--archive', archive], dataImport("Object.defineProperty(process, 'arch', { value: 'ia32' });"), /icode_release_unsupported/],
+  ]) {
+    const rejected = install(args, preload);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, error);
+    assert.equal(readFileSync(selected, 'utf8'), icodeTestedVersion + '\n');
+    assert.equal(readFileSync(manifestPath, 'utf8'), manifest);
+    assert.deepEqual(readdirSync(product).sort(), [icodeTestedVersion, 'selected']);
+  }
+});
+
+const inputAnswer = { values: ['No human is available. Use your judgment based on the task.'], note: '' };
+
+test('iCode config restricts project inputs and builtins, and selects the model relay protocol', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'icode-config-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cases = [
+    { type: 'openai-chat-completions', provider: 'openai', style: 'chat_completions', files: 'write', trusted: true, commands: true,
+      projectSkills: true, tools: ['filesystem.read', 'search', 'filesystem.write', 'shell'] },
+    { type: 'openai-responses', provider: 'openai', style: 'responses', files: 'read', trusted: false, commands: false,
+      projectSkills: false, tools: ['filesystem.read', 'search'] },
+    { type: 'anthropic-messages', provider: 'anthropic', style: undefined, files: 'none', trusted: true, commands: false,
+      projectSkills: false, tools: [] },
+  ];
+  for (const { type, provider, style, files, trusted, commands, projectSkills, tools } of cases) {
+    const home = join(root, type);
+    await configureICode({
+      model: 'test-model', acp_model: { interface_type: type, context_window: 100000, max_output_tokens: 4096, image_input: false },
+      execution_access: { fileTools: files, workspace: 'write', commands, trustedCheckout: trusted },
+    }, { HOME: home, BOT_ACP_RELAY_URL: 'http://127.0.0.1:3210' });
+    const profile = json(join(home, '.chrys', 'models', 'launchpad.yaml'));
+    const agent = json(join(home, '.chrys', 'agents', 'launchpad.yaml'));
+    assert.deepEqual(json(join(home, '.chrys', 'settings.yaml')), {
+      project: { config_enabled: false, hooks_enabled: false, skills_enabled: projectSkills },
+    });
+    assert.deepEqual(agent.memory.files, projectSkills ? ['AGENTS.md'] : []);
+    assert.deepEqual(agent.skills, { auto_load_user_agents_skills: false, auto_load_cwd_agents_skills: projectSkills,
+      ...(commands ? {} : { script_extensions: [] }) });
+    assert.deepEqual(agent.tools.builtins, ['ask_user', 'todo', ...tools]);
+    assert.equal(agent.model.profile_id, profile.id);
+    assert.equal(profile.provider, provider);
+    assert.equal(profile.api_style, style);
+    assert.equal(profile.base_url, 'http://127.0.0.1:3210' + (provider === 'openai' ? '/v1' : ''));
+    assert.equal(profile.api_key, '{{BOT_RUN_TOKEN}}');
+  }
+  assert.deepEqual(icodeAnswer({ questions: [{}] }), { answers: [inputAnswer], cancelled: false });
+  assert.deepEqual(icodeAnswer({ questions: [{}, {}] }), { answers: [inputAnswer, inputAnswer], cancelled: false });
+  assert.deepEqual(icodeAnswer({}), { cancelled: true });
+});
+
+async function driveICodeEntry(t, handshake) {
+  const root = mkdtempSync(join(tmpdir(), 'icode-entry-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rootTools = join(root, 'tools'), agentDir = join(root, 'agent'), home = join(root, 'home');
+  mkdirSync(agentDir);
+  mkdirSync(home);
+  const executable = '#!/usr/bin/env python3\n' + readFileSync('test/fixtures/acp-product/fixture.py', 'utf8');
+  const { directory } = writeICodeProduct(rootTools, executable, {
+    env: { FIXTURE_RUN: '{run}', FIXTURE_ICODE: handshake, FIXTURE_PRODUCT_SOURCE: '{product}' },
+  });
+  const instanceId = newId();
+  writeFileSync(join(agentDir, 'harness.json'), JSON.stringify({
+    acp_product: readAcpProduct(rootTools, 'icode'), instance_id: instanceId, model: 'fixture',
+    acp_model: { interface_type: 'openai-chat-completions', context_window: 10000, max_output_tokens: 1024, image_input: false },
+  }));
+
+  // The local runner correctly rejects iCode. Exercise the ACP entry point without changing that restriction.
+  const child = spawn(process.execPath, [resolve('runner/acp-entry.mjs'), agentDir, join(directory, 'bin', 'icode')], {
+    cwd: root, signal: AbortSignal.timeout(20_000),
+    env: { ...process.env, HOME: home, BOT_RUN_TOKEN: 'fixture-run-token', BOT_ACP_RELAY_URL: 'http://127.0.0.1:3210' },
+  });
+  const closed = once(child, 'close');
+  const frames = [];
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  for await (const line of createInterface({ input: child.stdout })) {
+    const frame = JSON.parse(line);
+    frames.push(frame);
+    if (frame.type === 'ready') child.stdin.write(JSON.stringify({ text: 'Answer the questions.' }) + '\n');
+    if (frame.type === 'turn') child.stdin.end();
+  }
+  const [status] = await closed;
+  return { frames, status, stderr, run: join(agentDir, 'acp-' + instanceId) };
+}
+
+test('iCode negotiates HTTP MCP, answers only the current session and closes it', async t => {
+  const { frames, status, stderr, run } = await driveICodeEntry(t, 'supported');
+  assert.equal(status, 0, JSON.stringify(frames) + stderr);
+  assert.equal(frames.find(frame => frame.event?.type === 'configuration').event.agent.version, icodeTestedVersion);
+  assert.equal(frames.find(frame => frame.type === 'turn').stop_reason, 'end_turn');
+  assert.deepEqual(json(join(run, 'wrong-session.json')), { cancelled: true });
+  assert.deepEqual(json(join(run, 'input.json')), { answers: [inputAnswer, inputAnswer], cancelled: false });
+  assert.equal(json(join(run, 'close.json')), true);
+});
+
+for (const mode of ['wrong-protocol', 'wrong-version', 'no-http', 'no-close']) {
+  test(`iCode rejects the ${mode} handshake before creating a session`, async t => {
+    const { frames, status, run } = await driveICodeEntry(t, mode);
+    assert.equal(status, 1);
+    assert.equal(frames.find(frame => frame.type === 'fault')?.code, 'icode_protocol_unsupported');
+    assert.equal(frames.some(frame => frame.type === 'ready'), false);
+    assert.equal(existsSync(join(run, 'session.json')), false);
+  });
+}
 
 test('ACP role kinds are declared in project configuration and refused for service roles', () => {
   const store = new Store(':memory:', randomBytes(32));

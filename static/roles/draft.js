@@ -173,11 +173,12 @@ function roleBackendRuntimeBox(role, state) {
         ? `${info.name} CLI 已就绪，但模型 ${targetModelName} 连通探测或最近请求失败（${conn.detail || conn.error || '请求失败'}）。`
         : `${info.name} 容器运行配置已就绪（${conn?.state === 'ok' ? '最近连通正常' : '模型连通性未探测'}）。`;
   head.append(badge(statusLabel, statusTone), ' ', summaryText);
+  const unselectedVersion = info.id === 'icode' ? (rt.cli_installed ? '尚未选用' : '未安装') : '无可用兼容版本';
   box.append(head, facts([
     ['工具卷', `${rt.volume_root}（${rt.volume_present ? '已挂载' : '未挂载'}）`],
     ['兼容版本范围', rt.compatible_range || '—'],
     ['已安装版本', rt.installed_versions?.length ? rt.installed_versions.join(', ') : (rt.config_override ? '本地配置覆盖' : '未安装')],
-    ['当前选用版本', rt.selected_version || (rt.config_override ? '本地配置覆盖' : info.id === 'icode' ? '尚未选用' : '无可用兼容版本')],
+    ['当前选用版本', rt.selected_version || (rt.config_override ? '本地配置覆盖' : unselectedVersion)],
     ['容器内模型中转', relayText],
   ]));
   // #740: an uninstalled tool volume used to end here. A super administrator gets the way in; anyone else is told who

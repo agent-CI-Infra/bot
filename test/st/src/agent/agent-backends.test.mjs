@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
@@ -21,6 +21,7 @@ import { requestCoordination, CoordinationWorker } from '../../../../dist/tasks/
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
+import { writeICodeProduct } from '../../../fixtures/icode-product.mjs';
 
 const tool = (name, properties = {}, required = []) => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'c_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -57,7 +58,7 @@ async function fixture(t, respond) {
   const put = body => roleApi(s, admin, 'PUT', url, { enabled: true, expected_revision: roleApi(s, admin, 'GET', url, {}).revision, ...body }).configuration;
   const task = s.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {};
   const workspace = new Workspace(s, manager, task, redactor, guard, () => {});
-  return { s, manager, requests, task, redactor, guard, workspace, put, view: () => roleApi(s, admin, 'GET', url, {}) };
+  return { root, s, manager, requests, task, redactor, guard, workspace, put, view: () => roleApi(s, admin, 'GET', url, {}) };
 }
 
 test('new roles default to Pi; general backends preserve role authority and container backends also support controllers', async t => {
@@ -297,6 +298,39 @@ test('container backend runtime_status checks resolved model selection and repor
   codex = agentBackends(f.s, '101', toolsRoot).find(b => b.id === 'codex');
   assert.equal(codex.runtime_status.connectivity.state, 'failed');
   assert.match(codex.runtime_status.connectivity.detail, /401/);
+});
+
+test('iCode runtime status distinguishes an absent volume, installation, selection and model', async t => {
+  const f = await fixture(t, () => ({ content: 'pong' }));
+  const toolsRoot = join(f.root, 'tools');
+  const status = () => agentBackends(f.s, '101', toolsRoot).find(b => b.id === 'icode').runtime_status;
+  assert.equal(status().reason_code, 'agent_tools_volume_missing');
+  mkdirSync(toolsRoot);
+  assert.equal(status().reason_code, 'acp_product_not_installed');
+  assert.equal(status().cli_installed, false);
+
+  const { product, directory, manifest } = writeICodeProduct(toolsRoot);
+  const selected = join(product, 'selected');
+  unlinkSync(selected);
+  assert.equal(status().reason_code, 'acp_product_not_selected');
+  assert.deepEqual(status().installed_versions, [manifest.version]);
+  assert.equal(status().selected_version, null);
+
+  writeFileSync(selected, manifest.version + '\n');
+  const manifestPath = join(directory, 'manifest.json');
+  writeFileSync(manifestPath, JSON.stringify({ ...manifest, sourceSha256: '0'.repeat(64) }));
+  assert.equal(status().reason_code, 'acp_product_invalid');
+  assert.deepEqual(status().installed_versions, []);
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+
+  f.s.run("UPDATE policies SET model_id=NULL WHERE repository_id='101'");
+  assert.equal(status().reason_code, 'model_not_configured');
+  assert.equal(status().selected_version, manifest.version);
+  f.s.run("UPDATE policies SET model_id='m' WHERE repository_id='101'");
+  const ready = status();
+  assert.equal(ready.ready, true);
+  assert.equal(ready.reason_code, null);
+  assert.deepEqual(ready.resolved_model, { id: 'm', name: 'fixture', source: 'project' });
 });
 
 // #1042: readiness follows the driver's own declaration. A driver that declares it runs in the workspace with task

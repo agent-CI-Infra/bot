@@ -230,7 +230,7 @@ const cliReasonMessages: Record<string, (label: string, root: string, range: str
     `工具卷中已安装的 ${label} 版本（${versions.join('、') || '无'}）不在兼容范围 ${range} 内。`,
 };
 
-function backendModel(cli: string, store?: Store, repositoryId?: string, workflow?: string) {
+function backendModel(cli: string, store?: Store, repositoryId?: string) {
   let modelCount = store ? 0 : 1;
   let resolvedModel: BackendResolvedModel | null = null;
   let resolvedModelRow: Row | null = null;
@@ -245,7 +245,7 @@ function backendModel(cli: string, store?: Store, repositoryId?: string, workflo
       )?.n ?? 0,
     );
     try {
-      const opened = selectedModel(store, repositoryId, workflow);
+      const opened = selectedModel(store, repositoryId);
       resolvedModel = { id: String(opened.id), name: String(opened.model), source: 'project' };
       resolvedModelRow = store.get('SELECT id,model_name,version,updated_at FROM models WHERE id=?', opened.id) ?? null;
     } catch (err) {
@@ -288,7 +288,6 @@ function containerCliStatus(
   store?: Store,
   repositoryId?: string,
   toolsRoot?: string,
-  workflow = 'development.issue',
 ): BackendRuntimeStatus {
   const root = toolsRoot ?? process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT;
   const inspected = inspectAgentTools(root);
@@ -339,7 +338,7 @@ function containerCliStatus(
   };
 }
 
-function icodeStatus(store?: Store, repositoryId?: string, toolsRoot?: string, workflow?: string): BackendRuntimeStatus {
+function icodeStatus(store?: Store, repositoryId?: string, toolsRoot?: string): BackendRuntimeStatus {
   const root = toolsRoot ?? process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT;
   const directory = join(root, 'acp', icodeProductId);
   const volumePresent = existsSync(root);
@@ -377,7 +376,7 @@ function icodeStatus(store?: Store, repositoryId?: string, toolsRoot?: string, w
       }
     }
   }
-  const model = backendModel(icodeProductId, store, repositoryId, workflow);
+  const model = backendModel(icodeProductId, store, repositoryId);
   if (selected && !model.modelRelayReady) {
     reasonCode = model.modelErrorCode ?? 'model_not_configured';
     reason = relayUnavailable('iCode', model.modelCount);
@@ -422,7 +421,7 @@ function declaredRuntimeStatus(h: RegisteredRoleHarness): BackendRuntimeStatus {
   };
 }
 
-export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: string, workflow = 'development.issue') {
+export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: string) {
   return [...harnesses]
     .sort((a, b) => Number(b.id === recommendedBackend) - Number(a.id === recommendedBackend))
     .map(h => {
@@ -430,9 +429,9 @@ export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: 
       // driver that declares workspace execution reports its declaration, and a control-plane driver has no volume to
       // report. Adding a backend no longer means editing a list of two ids.
       const runtime_status = h.id === icodeProductId
-        ? icodeStatus(store, repositoryId, toolsRoot, workflow)
+        ? icodeStatus(store, repositoryId, toolsRoot)
         : h.tool_volume
-        ? containerCliStatus(h.tool_volume, store, repositoryId, toolsRoot, workflow)
+        ? containerCliStatus(h.tool_volume, store, repositoryId, toolsRoot)
         // Task tools alone do not place a driver in the project computer: a control-plane driver reports its evidence
         // through the platform and has no workspace install path to describe (#1192 review F2).
         : h.environment === 'workspace' && h.capabilities.raw_evidence === 'task_tools' ? declaredRuntimeStatus(h) : null;

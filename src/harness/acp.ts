@@ -85,7 +85,10 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): Non
           const frame = JSON.parse(buffer.slice(0, end));
           buffer = buffer.slice(end + 1);
           if (frame.type === 'ready') ready.resolve(frame);
-          else if (frame.type === 'fault') fault.reject(new TaskError(frame.code, 'retry_wait', spec.redactor.text(String(frame.message))));
+          else if (frame.type === 'fault') {
+            const state = frame.code === 'icode_protocol_unsupported' ? 'needs_help' : 'retry_wait';
+            fault.reject(new TaskError(frame.code, state, spec.redactor.text(String(frame.message))));
+          }
           else if (frame.type === 'turn') turn.resolve(frame.stop_reason);
           else if (frame.type === 'event') {
             emit(frame.event);

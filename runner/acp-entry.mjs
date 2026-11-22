@@ -256,13 +256,13 @@ try {
   agent = start(executable, launch.args.map(arg => expand(arg)), env, 'agent', true);
   consumeProtocol(agent.stdout, frame => handle(frame, launch.answers));
   const initialized = await request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'launchpad', version: '1' } }, STARTUP_MS);
-  if (initialized?.protocolVersion !== 1) throw new AcpError('acp_protocol_version_unsupported');
-  const capabilities = initialized.agentCapabilities ?? {};
+  const capabilities = initialized?.agentCapabilities ?? {};
   supportsClose = Object.hasOwn(capabilities.sessionCapabilities ?? {}, 'close');
-  if (icode && (initialized.agentInfo?.version !== config.acp_product.version ||
+  if (icode && (initialized?.protocolVersion !== 1 || initialized.agentInfo?.version !== config.acp_product.version ||
       capabilities.mcpCapabilities?.http !== true || !supportsClose)) {
-    throw new AcpError('icode_protocol_unsupported', 'iCode did not report the installed version and required HTTP MCP and session close capabilities.');
+    throw new AcpError('icode_protocol_unsupported', 'iCode must report ACP v1, the selected release version, HTTP MCP, and session close.');
   }
+  if (initialized?.protocolVersion !== 1) throw new AcpError('acp_protocol_version_unsupported');
   event({ type: 'configuration', protocol_version: 1, capabilities, agent: initialized.agentInfo });
   const sessionParams = { cwd: root, mcpServers: [mcpServer] };
   let recoveryMode = config.resume ? 'rebuilt_from_task_records' : 'new_session';
