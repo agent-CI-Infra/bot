@@ -27,13 +27,20 @@ function fixture(t, extra = {}) {
   return { directory, homes, docker, db, computers, home, owner, acquire };
 }
 
-test('an assistant computer is a hardened container without network whose only persistent mount is its owner HOME generation', async t => {
+test('an assistant computer is a hardened container with isolated egress by default whose only persistent mount is its owner HOME generation', async t => {
   const f = fixture(t), id = f.owner(), turn = opId();
   const ready = await f.acquire(id, turn);
-  assert.deepEqual([ready.state, ready.reused, ready.computer.state, ready.computer.turn], ['ready', false, 'busy', turn]);
+  assert.deepEqual([ready.state, ready.reused, ready.computer.state, ready.computer.turn, ready.computer.egress], ['ready', false, 'busy', turn, true]);
   const created = f.docker.containers.get(f.computers.name(id)), host = created.HostConfig;
+  const networkName = f.computers.networkName();
   assert.deepEqual([created.Config.User, host.ReadonlyRootfs, host.CapDrop, host.SecurityOpt, host.Privileged, host.NetworkMode, host.IpcMode, host.Init],
-    ['10001:10001', true, ['ALL'], ['no-new-privileges:true'], false, 'none', 'private', true]);
+    ['10001:10001', true, ['ALL'], ['no-new-privileges:true'], false, networkName, 'private', true]);
+  const net = f.docker.networks.get(networkName);
+  assert.deepEqual(net, {
+    Labels: { 'department.bot.deployment': 'fixture', 'department.bot.kind': 'assistant' },
+    Internal: false,
+    Options: { 'com.docker.network.bridge.enable_icc': 'false' },
+  });
   assert.ok(!('Runtime' in host), 'Docker\'s default runtime, never one named by a setting');
   assert.equal(host.Memory, host.MemorySwap, 'no swap beyond the memory limit');
   // The default resources: 1 CPU, 2048 MiB, 512 processes, 512 MiB each for /tmp and the working directory.
@@ -51,7 +58,7 @@ test('an assistant computer is a hardened container without network whose only p
   assert.equal(f.docker.runs.at(-1).type, 'health');
   // The inspected facts the control plane may check against its own policy.
   const facts = f.computers.facts(await f.computers.inspect(id));
-  assert.deepEqual([facts.network_mode, facts.readonly_rootfs, facts.mounts], ['none', true, [{ type: 'volume', source: 'fixture-assistant-homes', target: '/home/assistant', read_only: false, subpath: `${id}/home-1` }]]);
+  assert.deepEqual([facts.network_mode, facts.network_policy, facts.readonly_rootfs, facts.mounts], [networkName, 'internet egress', true, [{ type: 'volume', source: 'fixture-assistant-homes', target: '/home/assistant', read_only: false, subpath: `${id}/home-1` }]]);
 });
 
 test('a later turn reuses the idle container; a changed fence, HOME generation or mode replaces it', async t => {
@@ -166,6 +173,7 @@ test('reconcile keeps only the computers of turns the control plane still runs; 
   const restarted = new AssistantComputers({ docker: f.docker, db: f.db, deployment: 'fixture', image: 'approved', homes: f.homes });
   assert.equal(await restarted.recover(), 1);
   assert.deepEqual([...f.docker.containers.keys()], ['other-deployment']);
+  assert.equal(f.docker.networks.has(f.computers.networkName()), false, 'recover cleans up leftover assistant egress network');
 });
 
 test('removing a computer that is still going away waits for that removal instead of failing', async t => {
@@ -214,7 +222,7 @@ test('settings are bounded and resources apply from the next turn; removal durin
   const view = await f.computers.settingsView();
   assert.deepEqual([view.settings, view.host], [assistantDefaults, { cpus: 8, memory_mb: 32768 }]);
   for (const bad of [{}, { idle_minutes: 0 }, { max_containers: 1.5 }, { max_lifetime_minutes: 5 }, { cpus: 0.1 }, { cpus: 1.234 }, { memory_mb: 100 }, { pids: 10 },
-    { tmp_mb: 1.5 }, { workspace_mb: 20000 }, { runtime: 'runc' }, { other: 1 }])
+    { tmp_mb: 1.5 }, { workspace_mb: 20000 }, { egress: 'yes' }, { runtime: 'runc' }, { other: 1 }])
     await assert.rejects(f.computers.setSettings(bad), /invalid_assistant_settings/, JSON.stringify(bad));
   await assert.rejects(f.computers.setSettings({ cpus: 12 }), /cpus_exceed_host/);
   // A runtime saved by an earlier version is dropped: every computer runs on Docker's default runtime.
@@ -222,18 +230,23 @@ test('settings are bounded and resources apply from the next turn; removal durin
   assert.deepEqual(f.computers.settings(), { ...assistantDefaults, idle_minutes: 7 });
   assert.equal((await f.computers.setSettings({ idle_minutes: 10 })).settings.idle_minutes, 10);
   assert.ok(!JSON.parse(f.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get().value).runtime);
-  // New resources: the running turn keeps its computer; the owner's next turn replaces the idle one with the new limits.
+  // New resources and egress: the running turn keeps its computer; the owner's next turn replaces the idle one with the new limits.
   const id = f.owner(), host = () => f.docker.containers.get(f.computers.name(id)).HostConfig;
   await f.acquire(id, 't1');
-  await f.computers.setSettings({ cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 });
+  await f.computers.setSettings({ cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024, egress: false });
   assert.deepEqual((await f.acquire(id, 't1')).computer.resources, { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 });
+  assert.equal((await f.acquire(id, 't1')).computer.egress, true);
   await f.computers.release(id, { turn: 't1' });
   const next = await f.acquire(id, 't2');
-  assert.deepEqual([next.reused, next.computer.resources], [false, { cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 }]);
-  assert.deepEqual([host().NanoCpus, host().Memory, host().MemorySwap, host().PidsLimit], [2e9, 1024 * 1024 ** 2, 1024 * 1024 ** 2, 256]);
+  assert.deepEqual([next.reused, next.computer.egress, next.computer.resources], [false, false, { cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 }]);
+  assert.deepEqual([host().NanoCpus, host().Memory, host().MemorySwap, host().PidsLimit, host().NetworkMode], [2e9, 1024 * 1024 ** 2, 1024 * 1024 ** 2, 256, 'none']);
   assert.match(host().Tmpfs['/tmp'], new RegExp(`size=${256 * 1024 ** 2},`)); assert.match(host().Tmpfs['/workspace'], new RegExp(`size=${1024 * 1024 ** 2},`));
   await f.computers.release(id, { turn: 't2' });
-  assert.equal((await f.acquire(id, 't3')).reused, true, 'unchanged resources keep the idle computer');
+  assert.equal((await f.acquire(id, 't3')).reused, true, 'unchanged resources and egress keep the idle computer');
+  await f.computers.release(id, { turn: 't3' });
+  await f.computers.setSettings({ egress: true });
+  const backOnline = await f.acquire(id, 't4');
+  assert.deepEqual([backOnline.reused, backOnline.computer.egress, host().NetworkMode], [false, true, f.computers.networkName()]);
   // A reconcile while the container is being created.
   const other = f.owner(), health = f.docker.runner.bind(f.docker);
   f.docker.runner = async (...args) => { await f.computers.reconcile({ turns: [] }); return health(...args); };
@@ -255,7 +268,8 @@ test('the manager API serves assistant computers to the control plane', async t 
   assert.equal((await manager.call('POST', `/v1/assistant-computers/${id}/execute`, { turn: 'turn-1', operation_id: opId(), request: { type: 'command', command: 'true' } })).ok, true);
   assert.equal((await manager.call('POST', `/v1/assistant-computers/${id}/renew`, { turn: 'turn-1' })).state, 'busy');
   assert.equal((await manager.call('GET', '/v1/assistant-computers')).computers[0].owner, id);
-  assert.equal((await manager.call('GET', '/v1/assistant-computers/' + id)).container.network_mode, 'none');
+  assert.equal((await manager.call('GET', '/v1/assistant-computers/' + id)).container.network_mode, f.computers.networkName());
+  assert.equal((await manager.call('GET', '/v1/assistant-computers/' + id)).container.network_policy, 'internet egress');
   assert.equal((await manager.call('POST', `/v1/assistant-computers/${id}/release`, { turn: 'turn-1' })).state, 'idle');
   assert.equal((await manager.call('PUT', '/v1/assistant-computers/settings', { max_containers: 3 })).settings.max_containers, 3);
   assert.equal((await manager.call('POST', '/v1/assistant-computers/reconcile', { turns: [] })).removed, 1);
@@ -265,9 +279,10 @@ test('the manager API serves assistant computers to the control plane', async t 
 
 test('in an assistant computer, HOME is the persistent mount and package caches go to /tmp', () => {
   const read = env => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', "const m = await import('./runner/command.mjs'); process.stdout.write(JSON.stringify(m.environment));"], { env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' }));
-  const assistant = read({ BOT_COMPUTER_KIND: 'assistant' }), project = read({});
-  assert.deepEqual([assistant.HOME, assistant.XDG_CACHE_HOME, assistant.PIP_CACHE_DIR, assistant.UV_CACHE_DIR, assistant.npm_config_cache, assistant.TMPDIR],
-    ['/home/assistant', '/tmp/.cache', '/tmp/.cache/pip', '/tmp/.cache/uv', '/tmp/.npm', '/tmp']);
+  const assistant = read({ BOT_COMPUTER_KIND: 'assistant', BOT_BROWSER_EXECUTABLE: '/usr/local/bin/bot-chromium' }), project = read({ BOT_BROWSER_EXECUTABLE: '/usr/local/bin/bot-chromium' });
+  assert.deepEqual([assistant.HOME, assistant.XDG_CACHE_HOME, assistant.PIP_CACHE_DIR, assistant.UV_CACHE_DIR, assistant.npm_config_cache, assistant.TMPDIR, assistant.BOT_BROWSER_EXECUTABLE],
+    ['/home/assistant', '/tmp/.cache', '/tmp/.cache/pip', '/tmp/.cache/uv', '/tmp/.npm', '/tmp', '/usr/local/bin/bot-chromium']);
   assert.match(assistant.PATH, /^\/home\/assistant\/\.local\/bin:/);
   assert.equal(project.HOME, '/workspace/home'); assert.equal(project.XDG_CACHE_HOME, undefined);
+  assert.equal(project.BOT_BROWSER_EXECUTABLE, '/usr/local/bin/bot-chromium');
 });

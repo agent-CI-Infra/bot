@@ -31,7 +31,7 @@ export const assistantComputerTools = [
   fn('read_file', 'Read a UTF-8 file of your computer (at most 1 MiB is returned).', { path }, ['path']),
   fn('write_file', 'Write a UTF-8 file on your computer, replacing it. Temporary files belong in /tmp; write to HOME (~/...) only data worth keeping for later turns.', { path, content: { type: 'string' } }, ['path', 'content']),
   fn('delete_file', 'Delete a file or a directory (with its contents) on your computer, in HOME or a temporary area. Use it to clean up HOME, for example when it is over its size limit.', { path }, ['path']),
-  fn('run_command', `Run a non-interactive /bin/sh command on your computer: no network, working directory /workspace, HOME persistent, /tmp temporary. Times out after timeout_seconds (default 120, at most ${commandSecondsLimit}; a smaller configured maximum lowers that default).`,
+  fn('run_command', `Run a non-interactive /bin/sh command on your computer: working directory /workspace, HOME persistent, /tmp temporary. Chromium ($BOT_BROWSER_EXECUTABLE / bot-chromium) and X11 virtual desktop tools (bot-desktop, xvfb-run, Xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg) are preinstalled for CLI, CDP and desktop-level browser or GUI tasks. Times out after timeout_seconds (default 120, at most ${commandSecondsLimit}; a smaller configured maximum lowers that default).`,
     { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: commandSecondsLimit, description: `Optional timeout in seconds; the configured maximum is ${commandSecondsLimit}.` } }, ['command']),
 ];
 export const assistantComputerNames = assistantComputerTools.map(t => t.function.name);
@@ -50,7 +50,7 @@ export function assistantCommandTimeout(value: unknown, limit = commandSecondsLi
   return seconds;
 }
 /** Prompt text shared by the assistants that offer the computer tools. */
-export const computerInstructions = (shared: string) => ` Your computer (read_file, write_file, delete_file, run_command when offered) has no network. HOME (~) persists across turns and ${shared}; temporary files go to /tmp or the working directory, which are cleared a few minutes after a turn ends, and only data worth reusing later belongs in HOME (package caches already go to /tmp). HOME has a size limit: when a tool reports it read-only, delete what is no longer needed with delete_file or ask an administrator to clear it in the console.`;
+export const computerInstructions = (shared: string) => ` Your computer (read_file, write_file, delete_file, run_command when offered) has Chromium ($BOT_BROWSER_EXECUTABLE / bot-chromium) and X11 virtual desktop tools (bot-desktop, xvfb-run, Xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg) preinstalled for direct CLI, CDP, screenshot, recording and desktop-level operation; outbound internet access follows the assistant computer egress setting (isolated from the control plane network). HOME (~) persists across turns and ${shared}; temporary files go to /tmp or the working directory, which are cleared a few minutes after a turn ends, and only data worth reusing later belongs in HOME (package caches already go to /tmp). HOME has a size limit: when a tool reports it read-only, delete what is no longer needed with delete_file or ask an administrator to clear it in the console.`;
 
 export interface ComputerOwner { kind: 'group' | 'person'; subject: string; tenant: string }
 /** What decides the HOME generation: a new binding or service role, or a narrower repository scope, starts a new one. */
@@ -58,8 +58,8 @@ export interface HomeFacts { binding?: string; role?: string; repositories: stri
 export const ownerId = (owner: ComputerOwner) => digest(`assistant-computer:${owner.kind}:${owner.tenant}:${owner.subject}`).slice(0, 32);
 const homeDefaults = { home_limit_gb: 5, retention_days: 30, total_alert_gb: 50 };
 const homeBounds: Record<string, [number, number]> = { home_limit_gb: [1, 1024], retention_days: [1, 3650], total_alert_gb: [1, 1_000_000] };
-// The manager keeps and checks the container settings: timers, capacity and each computer's resources.
-const managerKeys = ['idle_minutes', 'max_containers', 'max_lifetime_minutes', 'cpus', 'memory_mb', 'pids', 'tmp_mb', 'workspace_mb'];
+// The manager keeps and checks the container settings: timers, capacity, network egress and each computer's resources.
+const managerKeys = ['idle_minutes', 'max_containers', 'max_lifetime_minutes', 'cpus', 'memory_mb', 'pids', 'tmp_mb', 'workspace_mb', 'egress'];
 
 /** HOME paths below the generation directory: no empty, '.' or '..' segment; null for the HOME root itself. */
 function homeRelative(value: string): string | null {
@@ -361,6 +361,7 @@ export class AssistantComputer {
   private home?: { id: string; generation: number; mode: 'rw' | 'ro'; directory: string };
   private held = false;
   private heartbeat?: ReturnType<typeof setInterval>;
+  egress = true;
   constructor(readonly service: AssistantComputerService, readonly options: TurnOptions) {}
   private async prepare(runtime=false) {
     if (!this.service.available()) fail(409, 'computer_not_configured');
@@ -389,7 +390,10 @@ export class AssistantComputer {
         if (!retried && error instanceof HttpError && error.code === 'assistant_computer_released') { retried = true; return { state: 'released' }; }
         throw error;
       });
-      if (result?.state === 'ready') break;
+      if (result?.state === 'ready') {
+        this.egress = typeof result?.computer?.egress === 'boolean' ? result.computer.egress : true;
+        break;
+      }
       if (result?.state === 'released') continue;
       if (!told && this.options.notify) {
         told = true;
@@ -430,7 +434,7 @@ export class AssistantComputer {
     const owner=await this.computer(true);
     const transport={call:async(method:string,path:string,input?:Json)=>{
       await this.options.check();
-      if(method==='GET')return {state:'ready',generation:this.home!.generation,computer:{egress:false}};
+      if(method==='GET')return {state:'ready',generation:this.home!.generation,computer:{egress:this.egress}};
       if(method!=='POST'||!input?.request)fail(400,'invalid_runner_request');
       const result=await this.service.manager!.call('POST',`/v1/assistant-computers/${owner}/execute`,{turn:this.options.turn,operation_id:input!.operation_id,request:input!.request});
       await this.options.check();return result;

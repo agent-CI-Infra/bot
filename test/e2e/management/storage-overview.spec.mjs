@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { account, harness, repository, setup } from '../../fixtures/helpers.mjs';
 import { managerFixture } from '../../fixtures/project-manager-fixture.mjs';
 import { storageScan } from '../../../runner/storage-scan.mjs';
-import { browserEvidenceRoot } from '../../../dist/browser/tools.js';
+import { browserEvidenceRoot } from '../../../dist/browser/evidence.js';
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 
 test('the administrator can inspect shares and reclaim expired files from storage settings', async ({ page }) => {

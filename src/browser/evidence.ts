@@ -1,14 +1,69 @@
-import { constants, existsSync, readFileSync, realpathSync } from 'node:fs';
-import { open, readlink, realpath } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Store } from '../storage/database.js';
 import { type Actor, scope } from '../app/auth.js';
 import { fail } from '../core/security.js';
-import { redactBrowserValue, redactRecordedUrl } from './policy.js';
 import { browserEvidenceDir } from './runtime.js';
-import { browserEvidenceRoot, evidenceFileDigest } from './tools.js';
+
+const pngMagic = Buffer.from('89504e470d0a1a0a', 'hex');
+const secretQuery = /^(?:token|secret|password|passwd|pwd|authorization|access_token|id_token|refresh_token|api[_-]?key)$/i;
+
+export function browserEvidenceRoot(store: Store): string {
+  return store.path === ':memory:' ? join(tmpdir(), 'bot-browser-evidence') : join(dirname(store.path), 'browser-evidence');
+}
+
+export function removeBrowserEvidence(store: Store, taskIds: readonly string[]): void {
+  const root = browserEvidenceRoot(store);
+  for (const id of taskIds) {
+    if (!id) continue;
+    try { rmSync(browserEvidenceDir(root, id), { recursive: true, force: true }); } catch { /* already gone or unreadable */ }
+  }
+}
+
+export function evidenceFileDigest(path: string): string | null {
+  if (!existsSync(path)) return null;
+  const bytes = readFileSync(path);
+  if (!bytes.subarray(0, 8).equals(pngMagic)) return null;
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function originOf(value: string): string | null {
+  let url: URL;
+  try { url = new URL(value); } catch { return null; }
+  if (url.username || url.password) return null;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.hostname === '0.0.0.0' || url.hostname === '::' || url.hostname === '[::]') return null;
+  return url.origin;
+}
+
+export function redactRecordedUrl(value: string): string | null {
+  if (!value) return null;
+  if (value === 'about:blank' || String(value).startsWith('about:')) return value;
+  let url: URL;
+  try { url = new URL(value); } catch { return String(value).startsWith('/') ? value : (originOf(value) ? value : null); }
+  if (url.username || url.password) return originOf(value);
+  for (const key of [...url.searchParams.keys()]) {
+    if (secretQuery.test(key) || /(?:token|secret|password|passwd|authorization|api[_-]?key)/i.test(key))
+      url.searchParams.set(key, '[redacted]');
+  }
+  if (/(?:token|secret|password|access_token|id_token|authorization)/i.test(url.hash)) url.hash = '#redacted';
+  return url.toString();
+}
+
+export function redactBrowserValue(value: unknown, depth = 0): unknown {
+  if (depth > 8) return '[omitted]';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(item => redactBrowserValue(item, depth + 1));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (/^(?:token|secret|password|authorization|cookie|private_key|set-cookie|passwd|pwd)$/i.test(key)) return [key, '[redacted]'];
+    if (typeof item === 'string' && /^(?:url|href|location|redirect)$/i.test(key)) return [key, redactRecordedUrl(item)];
+    return [key, redactBrowserValue(item, depth + 1)];
+  }));
+}
 
 export type BrowserEvidenceList = {
   task_id: string;
@@ -78,33 +133,6 @@ export function resolveEvidenceFile(store: Store, taskId: string, name: string):
   const real = realpathSync(path);
   if (real !== join(root, name) && !real.startsWith(root + '/')) return null;
   return real;
-}
-
-/** An explicitly selected screenshot must still match the evidence recorded for this task. */
-export async function readBrowserScreenshot(store: Store, taskId: string, name: string, maxBytes: number): Promise<Buffer | null> {
-  if (!isBrowserScreenshotName(name)) return null;
-  const root = resolve(browserEvidenceRoot(store)), dir = browserEvidenceDir(root, taskId);
-  try {
-    if (dirname(dir) !== root || await realpath(dir) !== dir) return null;
-    const shot = recordedSteps(dir).find(step => step?.screenshot?.file === name)?.screenshot;
-    if (!Number.isSafeInteger(shot?.bytes) || shot.bytes < 1 || shot.bytes > maxBytes) return null;
-    const path = join(dir, name);
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      const info = await handle.stat();
-      // Confirm the opened file as well, in case its parent was replaced after the directory check.
-      if (!info.isFile() || info.nlink !== 1 || info.size !== shot.bytes || await readlink(`/proc/self/fd/${handle.fd}`) !== path) return null;
-      const buffer = Buffer.alloc(info.size + 1);
-      let length = 0;
-      while (length < buffer.length) {
-        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
-        if (!bytesRead) break;
-        length += bytesRead;
-      }
-      const bytes = buffer.subarray(0, length);
-      return length === info.size && createHash('sha256').update(bytes).digest('hex') === shot.sha256 ? bytes : null;
-    } finally { await handle.close(); }
-  } catch { return null; }
 }
 
 /** Authenticated GET for the step list (JSON) or one PNG. Returns true when this request was handled. */

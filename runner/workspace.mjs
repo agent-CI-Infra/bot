@@ -10,7 +10,6 @@ import {withWorkspaceLock} from './workspace-lock.mjs';
 import {clearStaleGitLocks,lockGraceMs} from './git-locks.mjs';
 import { Notes } from './notes.mjs';
 import { tasksDirectory, worktreesDirectory, workspaceRoot as projectRoot } from './paths.mjs';
-import { runWorkspaceBrowser } from './browser-session.mjs';
 import { ArtifactArchiveError, extractArtifactZip, MAX_ARTIFACT_COMPRESSED_BYTES } from './artifact-zip.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
@@ -55,7 +54,6 @@ async function savePatch(dir,untracked,context,name){
 }
 export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=storeRoot,notesRoot=projectRoot+'/project-notes',worktreeRoot=worktreesDirectory){
   if(!id48.test(input.workspace_id||''))throw new Error('invalid_workspace');
-  if(input.type==='workspace_browser')return runWorkspaceBrowser(input);
   const root=`${workspaceRoot}/${input.workspace_id}`,repo=root+'/repo';
   const notes=new Notes(notesRoot),linkNotes=async()=>{
     try{await symlink(notesRoot,root+'/notes');}catch(error){if(error.code!=='EEXIST'||await readlink(root+'/notes')!==notesRoot)throw new Error('invalid_notes_link');}

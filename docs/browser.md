@@ -1,47 +1,27 @@
-# 任务浏览器与执行证据
+# 电脑预装浏览器与系统桌面环境
 
-任务可以在**项目电脑上的独立真实浏览器**里打开事先允许的站点，并把每一步和截图留下来事后查看。控制面只负责派发动作、收回并展示证据，**不会在控制面进程里启动 Chromium**，也不会在项目电脑不可用时悄悄改回控制面执行。这是 harness 的通用能力，供巡检等预置工作流复用，不是把外部产品的界面搬进控制台。
+项目电脑与助手电脑共用基础容器镜像（`docker/project-computer.Dockerfile`），预装 Chromium 浏览器与 X11 虚拟桌面套件。平台**不再提供受限的内置 `browser` 工具或 `input.browser.origins` 源白名单**（#1214）；Agent 在具备命令执行权限的电脑里可直接通过命令行、CDP（Chrome DevTools Protocol）和系统桌面级工具自由驱动浏览器与图形界面。
 
-## 启用
+## 预装工具
 
-在任务 `input.browser` 里声明允许访问的源：
+- **Chromium 与中文字体**：`chromium`、`fonts-liberation`、`fonts-noto-cjk`，通过稳定包装脚本 `/usr/local/bin/bot-chromium`（环境变量 `BOT_BROWSER_EXECUTABLE`）启动；默认追加 `--no-sandbox --disable-dev-shm-usage --disable-gpu`，并将 profile/crashpad 目录定向到 `/tmp/bot-chromium-home`（可通过 `BOT_BROWSER_HOME` 覆写），在只读根文件系统及只读 `HOME` 下也能正常运行。
+- **X11 虚拟桌面与桌面级操作**：`xvfb`（`Xvfb`、`xvfb-run`）、轻量窗口管理器 `openbox`、`xdotool`、`wmctrl`、`xclip`、`scrot`、`ffmpeg`、`x11-utils`（`xdpyinfo`、`xwininfo`）以及 `imagemagick`、`python3-pil`。
+- **便捷桌面包装 `/usr/local/bin/bot-desktop`**：
+  - 一次性命令：`bot-desktop run [--size 1440x900x24] [--display :99] -- <command...>`，自动选择空闲 `DISPLAY` 启动 `Xvfb`（`-nolisten tcp`）与 `openbox`，执行命令并在退出时清理桌面进程与临时 XDG 目录。
+  - 常驻虚拟桌面：`bot-desktop start [--size 1440x900x24] [--display :99]`（配合 `keep_background: true` 或后台运行），就绪后输出 `DISPLAY=:N`，后续命令可直接配合 `DISPLAY=:N` 使用 `bot-chromium`、`xdotool`、`wmctrl`、`scrot` 或 `ffmpeg -f x11grab`。
+- **控制面不安装 Chromium**：Chromium 与桌面工具仅预装在项目电脑/助手电脑镜像中；控制面、manager 与 tunnel 镜像均不安装浏览器。
 
-```json
-{
-  "browser": {
-    "origins": ["http://127.0.0.1:8080"],
-    "allow_destructive": false,
-    "timeout_ms": 60000
-  }
-}
-```
+## 隔离与网络边界
 
-只有列出了至少一个合法 `http`/`https` 源时，任务才会得到 `browser` 工具。地址里不能带账号口令，也不能是 `0.0.0.0` 或未指定地址。浏览器发出的每个 HTTP 请求都要落在这些源上，包括跳转、iframe 和图片、脚本、XHR 等子资源；未允许的请求会被拦截，不会到达目标主机。默认只允许观察、打开、点击和输入。
+- **容器级隔离保持不变**：项目电脑与助手电脑均以非特权用户（UID 10001）、只读根文件系统、`cap_drop: [ALL]`、`no-new-privileges` 和独立资源上限运行；虚拟桌面仅存在于容器内部，不接触宿主机桌面或宿主机浏览器会话。
+- **项目电脑网络**：默认开启外网（`BOT_PROJECT_EGRESS=true`），使用项目独立 bridge 网络（与 `control` 内网隔离），可在项目设置「机器配置」里按仓库开关 `egress`。
+- **助手电脑网络**：默认开启外网（`egress: true`），使用独立且关闭容器间通信（`enable_icc=false`）的 bridge 网络，允许访问外网但与 `control` 内网及其他助手容器隔离；超级管理员可在全局设置「助手电脑」关闭 `egress`，关闭后恢复为 `NetworkMode: 'none'`（无外网）。
+- **PR 正文媒体**：任务在工作区（如 gitignore 目录）生成的截图（PNG/JPEG/GIF/WebP）与录屏（MP4/WebM）可直接通过 PR 交付工具的 `media` 参数托管并嵌入 PR 正文，详见[统一任务调度与对象 Manager](workflows.md)。
 
-任务浏览器不再作为角色或群绑定的独立权限项设限（#1206）：所有角色在任务列出允许源（`input.browser.origins`）且运行在项目电脑上时均可使用该工具，存量配置中旧的拒绝值统一按允许处理；源站白名单、无外网助手电脑边界与凭据脱敏规则不变。
+## 历史浏览器证据（只读兼容）
 
-删除、支付、结算等**字面匹配**到的动作需要 `allow_destructive` 为 `true`，或给出允许的路径前缀。这是启发式规则，不能完整识别所有破坏性操作：通用的「确认」、自定义控件或未出现在规则里的文案仍可能改动数据。不要把这项检查当成完善的支付或删除防护。
+早期版本由旧 `browser` 工具记录在 `bot-data/browser-evidence/` 的历史截图与步骤仍保留只读查看、存储统计与按「轨迹正文」保留天数清理的能力：
 
-## 运行时边界
-
-- 真实 Chromium 只在项目电脑上启动。控制面通过既有的 `workspace.call` / `workspace_browser` 授权路径派发动作，并经同一条执行接口收回截图；不另建旁路。没有项目电脑、助手电脑（无外网）或电脑上找不到 Chromium 时，任务得到明确错误（`browser_computer_unavailable` 或 `browser_runtime_unavailable`），不会用假页面代替，也不会改在控制面启动。
-- 项目电脑为每个任务工作区保持一个浏览器守护进程和全新用户目录（Playwright `launchPersistentContext`），不读取主机桌面、已有浏览器会话或其中的 cookie。可执行文件按 `BOT_BROWSER_EXECUTABLE`、Playwright 已安装路径、系统 Chromium 的顺序解析。
-- 生产项目电脑镜像是否预装 Chromium 由 [#916](https://github.com/agent-CI-Infra/bot/issues/916) 跟踪；该改动在独立的 PR 中，不随本能力在控制面镜像里安装或启动浏览器。镜像尚未部署时，任务会如实失败。
-- 任务浏览器不是默认的公网出口，只向本任务列出的源发 HTTP 请求。`about:`、`data:`、`blob:` 视为页内资源放行。文档和导航请求按跳转逐跳校验，避免 302 把页面带到未允许的源（该路径会保留跳转响应里的 `Set-Cookie`）。文档、跳转以及脚本、图片、XHR 等子资源都按跳转逐跳校验，未允许的目标不会被联系。EventSource / SSE 为避免在本进程整包缓冲响应体，仍用放行方式处理，因此**已被允许源上的 EventSource 若再 302 到未允许源，仍可能发出一次请求**。WebSocket 在会话里被关闭。每个文档加载前会移除 `RTCPeerConnection` 等构造函数，页面无法建立 WebRTC 对等连接（不依赖无效的 Chromium 启动参数）。这是关闭这些能力，而不是声称已经把非 HTTP 通道全部拦截或审计。被 SIGKILL 打断时，进程可能来不及执行这些关闭动作。
-- 单次动作超时、任务取消或工作区回收时关闭浏览器并删除临时用户目录；已经写下的截图和步骤保留，供事后查看。两次动作之间会话保持打开，直到任务结束、取消或超时。进程正常退出时也会清理仍登记的临时目录；被 SIGKILL 打断时，目录可能残留。
-- 向可识别的口令或密钥字段（`type=password`，或名称含 password/token/secret 等）输入后，本轮不再保存新截图，并删除本会话里已经写下的截图。`execution_evidence`、步骤清单、控制面与管理器持久化的工作区操作记录，以及 runner 日志记录，都会去掉已识别字段的输入文本和截图 `base64`。派给浏览器守护进程的那一次在途请求仍带有明文，执行路径需要把文本交给页面；磁盘上的记录不应再保留这些内容。未识别的输入框（例如普通文本框或 contenteditable）仍可能把密钥写进截图或步骤记录。不能保证识别出所有密钥字段，也不能保证在进程被强杀或磁盘被另外复制时零泄漏。
-
-## 查看证据
-
-步骤元数据（路径、校验和、尺寸、结果）记在任务的 `execution_evidence` 里，任务的截图保存在数据库旁的 `browser-evidence/` 目录（位于 `bot-data` 卷，与 `control.sqlite`、`trajectories/` 一起）。控制台任务详情在有证据时显示「浏览器证据」；截图按需加载，列表最多展示最近 80 步。接口：
-
-- `GET /api/tasks/:id/browser-evidence`：步骤列表（JSON）。
-- `GET /api/tasks/:id/browser-evidence/step-N.png`：对应截图。鉴权与读取任务详情相同：未登录返回 401；超级管理员可看全部；其他用户只能读取自己被授权仓库下的任务。只提供步骤清单里出现过、且校验和能对上的 PNG。非法的百分号编码返回 400。
-
-已结束任务的截图目录沿用存储设置里的「轨迹正文」保留天数；没有对应任务的目录会在日常清理中删除。删除项目并且要求同时删除证据时，也会去掉该项目任务的截图目录。未设置保留天数则一直保留。
-
-任务明确选中浏览器截图用于 [PR 正文媒体](workflows.md) 时，Bot 会托管单独的文件副本并生成随机访问链接。任务证据仍按本节设置保留，托管副本随来源项目管理。任何获得链接的人都能读到副本，包括从私有 PR 转发链接的情况。选择前应检查画面是否包含口令、会话信息或其他敏感数据。已知凭据检查只能匹配文件字节，无法识别画面或音轨里呈现的所有内容。
-
-## 测试
-
-默认 `npm test` 只覆盖策略、权限与接口，不启动浏览器。真实浏览器验收在 `npm run test:e2e` 中的 `test/e2e/browser/browser-runtime.mjs`：经 LocalManager / 项目电脑执行路径，对本地受控夹具打开页面、截图，拦截跳转、跨源子资源以及子资源 302，关闭 WebSocket，并在接收端计数为 0 时证明未允许的主机没有被联系；同时检查工作区操作记录中不出现口令和截图 `base64`。超时会关闭会话。生产镜像里的只读根文件系统启动由独立 PR 覆盖，本文件的 e2e 不在那种镜像里跑。本机或 CI 未安装 Chromium 时该测试失败，不会跳过算通过。测试不访问线上站点，也不会向外部门户或仓库写 Issue。
+- `GET /api/tasks/:id/browser-evidence`：步骤列表（JSON，自动脱敏凭据字段与令牌查询参数）。
+- `GET /api/tasks/:id/browser-evidence/step-N.png`：对应 PNG 截图。鉴权与任务详情一致，校验文件名、目录边界与 SHA-256。
+- 删除项目并要求删除证据时同步删除对应历史目录。

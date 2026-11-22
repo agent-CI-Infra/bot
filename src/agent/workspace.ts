@@ -13,7 +13,6 @@ import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
 import { operationRequestText, operationResult } from '../storage/payloads.js';
 import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.js';
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
-import { sanitizeBrowserTrajectory } from '../../runner/browser-policy.mjs';
 import { sanitizeAgentPollTrajectory } from '../../runner/image-budget.mjs';
 import { MAX_ARTIFACT_COMPRESSED_BYTES } from '../../runner/artifact-zip.mjs';
 
@@ -91,7 +90,7 @@ export class Workspace {
     const trajectories=this.store.trajectories,scope=trajectories.scopeOf(this.task);
     if(!row){
       // Conversation rows were sealed before: they keep no fields of the request at all, only its ref and hash.
-      const recordedInput=['workspace_agent_config','workspace_harness_config','workspace_agent_token'].includes(input.request?.type)?{...input,request:{...input.request,base64:'[redacted]'}}:input.request?.type==='workspace_browser'?sanitizeBrowserTrajectory(input):input;
+      const recordedInput=['workspace_agent_config','workspace_harness_config','workspace_agent_token'].includes(input.request?.type)?{...input,request:{...input.request,base64:'[redacted]'}}:input;
       if(scope)this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state,request_ref,request_sha256) VALUES(?,?,?,NULL,'pending',?,?)`,id,this.task.id,
         conversation?'{}':JSON.stringify(payloadHeader(recordedInput)),trajectories.append(scope,'tool_call',id,recordedInput),digest);
       else this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state,request_sha256) VALUES(?,?,?,NULL,'pending',?)`,id,this.task.id,conversation?this.store.secrets.seal(recordedInput,'conversation-operation:'+id+':request'):JSON.stringify(recordedInput),digest);
@@ -99,7 +98,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import'].includes(request.type)?0:request.type==='workspace_browser'? (Number(request.timeout_ms)>0?Number(request.timeout_ms)+120000:180000) :request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
     operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
@@ -115,9 +114,8 @@ export class Workspace {
     let result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
     if(request.type==='workspace_command'&&scope)result=await commandResult(result,id,async offset=>this.manager.call('GET',`/v1/projects/${this.task.repository_id}/output/${id}?offset=${offset}`),
       new ResultSession(this.store,scope,()=>projectResultOwner(this.task.repository_id),this.guard));
-    // A repeated call replays this result: it is on disk before the row points to it. Browser screenshot bytes and typed
-    // text stay off the stored record; the in-memory result still carries them so evidence can be persisted.
-    const storedResult=request.type==='workspace_browser'?sanitizeBrowserTrajectory(result):request.type==='workspace_agent_poll'?sanitizeAgentPollTrajectory(result):result;
+    // A repeated call replays this result: it is on disk before the row points to it.
+    const storedResult=request.type==='workspace_agent_poll'?sanitizeAgentPollTrajectory(result):result;
     let resultRef:string|null=null;
     if(scope){resultRef=trajectories.append(scope,'tool_result',id,storedResult);await trajectories.sync(resultRef);}
     await this.guard();

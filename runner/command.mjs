@@ -14,6 +14,7 @@ const projectEnvironment = Object.fromEntries(String(process.env.BOT_PROJECT_ENV
 // An assistant's HOME is persistent and has a size limit: package caches go to /tmp, which ends with the computer.
 const caches = assistant ? { XDG_CACHE_HOME:'/tmp/.cache', PIP_CACHE_DIR:'/tmp/.cache/pip', UV_CACHE_DIR:'/tmp/.cache/uv', npm_config_cache:'/tmp/.npm' } : {};
 export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, ...caches,
+  ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
   ...(/^[a-f0-9]{48}$/.test(process.env.BOT_OPERATION_ID || '') ? { BOT_OPERATION_ID: process.env.BOT_OPERATION_ID } : {}),
   PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };

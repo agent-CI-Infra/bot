@@ -49,10 +49,8 @@ import { TaskRecords, type Verdict } from './service.js';
 import { evaluateDelivery, shouldRunQa, skipQa } from './acceptance.js';
 import { HttpError, randomId } from '../core/security.js';
 import { covers, projectCeiling } from '../projects/ceiling.js';
-import { browserPolicyOf } from '../browser/policy.js';
 import { actionsFailurePrompt } from '../actions/analysis.js';
 import { lateSchedules } from '../actions/late-schedules.js';
-import { browserTool, browserToolNames, closeBrowserOnComputer, runBrowserTool } from '../browser/tools.js';
 import { milestoneTool, milestoneToolName, reportMilestone, settleProgress, startProgress } from '../review/progress.js';
 import { repositoryLabels } from '../review/labels.js';
 import { continuationContext } from '../review/continuation.js';
@@ -1005,7 +1003,6 @@ export async function runRequest(
             ...taskTools,
             ...eventSubscriptionTools,
             ...memoryTools,
-            ...(browserPolicyOf(task) && (!roleRuns || taskRolePolicies(store, task).every(policy => permitsTool(policy, 'browser'))) ? [browserTool] : []),
           ]),
           requestPrefix: `execution:${execution}:`,
           maxTurns: roleRuns ? 64 : entryMaxTurns(),
@@ -1136,7 +1133,6 @@ export async function runRequest(
               records.history(task.id, 'execution_evidence', { execution, name, version: (result as any).blob_sha || 'unknown', arguments: redactor.clean(args), result: redactor.clean(result) }, spaces.runId);
               return result;
             }
-            if (browserToolNames.includes(name)) return runBrowserTool(store, task, args, { guard, workspace });
             if (eventSubscriptionToolNames.includes(name)) {
               return executeTaskSubscriptionTool(store, actorTask, name, redactor.clean(args), { log });
             }
@@ -1326,7 +1322,6 @@ export async function runRequest(
   } finally {
     if (issueProgressActive()) await settleProgress(store, String(task.id), connectProgressClient).catch(() => false);
     await readTokens.revoke();
-    await closeBrowserOnComputer(workspace, task);
     await workspace.release(false);
   }
 }

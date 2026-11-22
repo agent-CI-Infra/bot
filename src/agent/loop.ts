@@ -30,9 +30,7 @@ import { eventSubscriptionToolNames, eventSubscriptionTools, executeTaskSubscrip
 import { permissionTools } from '../roles/permissions.js';
 import { workspaceInstructions, workspaceTool, workspaceToolNames, workspaceTools } from './workspace-tools.js';
 import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
-import { browserPolicyOf } from '../browser/policy.js';
 import { milestoneTool, milestoneToolName } from '../review/progress.js';
-import { browserTool, closeBrowserOnComputer, runBrowserTool } from '../browser/tools.js';
 
 export type ReviewConversation = import('./pi.js').PiConversation;
 /** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
@@ -42,7 +40,7 @@ type LoopLimits = Pick<AgentSpec<unknown>, 'modelAttempts'> & { validateSubmissi
 export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation, platform, limits); }
   // A token the agent exchanged is useless after the model phase; revoke it however the phase ends.
-  finally { await closeBrowserOnComputer(workspace, task); await tokens?.revoke(); }
+  finally { await tokens?.revoke(); }
 }
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   // Permissions and a reply task's prompt are read from trusted storage here, for every caller and every attempt. A task of a
@@ -77,10 +75,6 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},workspace);};}
   // An Issue's development reports its milestones on the Issue's status comment (#1047): the engine offers the handler.
   if (platform[milestoneToolName]) profile.tools.push(milestoneTool as any);
-  if (browserPolicyOf(task)) {
-    profile.tools.push(browserTool as any);
-    platform[browserTool.function.name] = async (_id, args) => { await guard(); return runBrowserTool(store, task, args, { guard, workspace }); };
-  }
   // Legacy review and Actions analysis under the project controller, and development under its team, run through runTeam below.
   const entry = String(task.kind).startsWith('review.') ? 'review' : profileKind === 'actions.failures' ? 'actions' : null;
   const team = !!entry && controlled(store, task, entry) || profile.completion === 'publication' && !!createPullRequest && controlled(store, task, 'development');

@@ -4,7 +4,7 @@ import { fail, fields, type Json } from '../core/security.js';
 import { type InstallationSync } from '../app/installations.js';
 import { dropUninstalledIntegrations } from './integrations.js';
 import { type ProjectService } from './service.js';
-import { removeBrowserEvidence } from '../browser/tools.js';
+import { removeBrowserEvidence } from '../browser/evidence.js';
 
 // The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
 export interface RunningTasks { working(repositoryId: string): Promise<unknown>[] }

@@ -15,7 +15,6 @@ import { LedgerMigration, Trajectories, TrajectoryExpiry, inputHeader, trajector
 import { DiskGuard } from './disk.mjs';
 import { IncrementalVacuum } from './compaction.mjs';
 import { isCleanupCall, validateCall } from './project-runner-calls.mjs';
-import { sanitizeBrowserTrajectory } from '../runner/browser-policy.mjs';
 import { sanitizeAgentPollTrajectory } from '../runner/image-budget.mjs';
 
 export { validateCall };
@@ -76,11 +75,9 @@ export function sanitizeTrajectoryInput(input) {
   if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_tool'].includes(input.request.type) && typeof input.request.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
   }
-  if (input?.request?.type === 'workspace_browser') return sanitizeBrowserTrajectory(sanitizeTrajectoryValue(input));
   return sanitizeTrajectoryValue(input);
 }
 export function sanitizeTrajectoryResult(type, result) {
-  if (type === 'workspace_browser') return sanitizeBrowserTrajectory(sanitizeTrajectoryValue(result));
   if (type === 'workspace_agent_poll' || type === 'workspace_harness_poll') return sanitizeAgentPollTrajectory(sanitizeTrajectoryValue(result));
   if ((type === 'workspace_agent_request' || type === 'workspace_agent_model_request') && result && typeof result === 'object' && typeof result.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...result, base64: '[omitted]' });
@@ -736,7 +733,7 @@ export class Projects {
             // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
             const request = command ? { ...call, timeout_ms: limit } : call,
-              timeout = command ? (limit === null ? 0 : limit + 60000) : call.type === 'workspace_browser' ? (Number(call.timeout_ms) > 0 ? Number(call.timeout_ms) + 120000 : 180000) : ['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import','tasks_remove','worktrees_remove'].includes(call.type) ? 0 : ['tasks_list','worktrees_list'].includes(call.type) ? 300000 : 90000;
+              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import','tasks_remove','worktrees_remove'].includes(call.type) ? 0 : ['tasks_list','worktrees_list'].includes(call.type) ? 300000 : 90000;
             result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
             if (['tasks_remove', 'worktrees_remove'].includes(call.type) && result.ok && result.result?.removed?.length) {
               // Exclude the pre-cleanup total until the next background check scans the volume.

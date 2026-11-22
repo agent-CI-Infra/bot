@@ -18,14 +18,16 @@ import { logFailure, resourceBounds, validResource, validateCall as validateProj
  * Capacity is max_containers: an idle container used longest ago gives way, otherwise new owners wait in arrival order.
  *
  * Hardening: uid 10001, read-only root, every capability dropped, no-new-privileges, init,
- * no network at all, private IPC, CPU/memory (no swap)/PID limits, tmpfs workspace and /tmp, Docker's default runtime.
+ * isolated network (configurable egress, default enabled on a dedicated ICC-disabled bridge network isolated from the
+ * control network; when egress is disabled, no network at all), private IPC, CPU/memory (no swap)/PID limits, tmpfs
+ * workspace and /tmp, Docker's default runtime.
  * The only persistent mount is the owner's current HOME generation, a subpath of the shared HOME volume, never its parent.
  */
 const mib = 1024 * 1024, ownerPattern = /^[a-f0-9]{32}$/, idPattern = /^[a-f0-9]{48}$/, turnPattern = /^[A-Za-z0-9_-]{1,64}$/;
 export const assistantHome = '/home/assistant';
-// Timers and capacity, then each computer's resources: the project computers' resources in the same bounds, plus the size
-// of the tmpfs working directory. tmpfs contents (/tmp and /workspace) count against the memory limit.
-export const assistantDefaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 };
+// Timers and capacity, then each computer's resources and egress: the project computers' resources in the same bounds,
+// plus the size of the tmpfs working directory. tmpfs contents (/tmp and /workspace) count against the memory limit.
+export const assistantDefaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true };
 const timerBounds = { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 7 * 24 * 60] };
 const sizeBounds = { ...resourceBounds, workspace_mb: resourceBounds.tmp_mb }, resourceKeys = Object.keys(sizeBounds);
 const bounds = { ...timerBounds, ...sizeBounds };
@@ -48,6 +50,7 @@ export function validateAssistantSettings(input, hostCpus = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.keys(input).some(k => !Object.hasOwn(assistantDefaults, k))) throw new ManagerError('invalid_assistant_settings', 400);
   for (const [key, [min, max]] of Object.entries(timerBounds)) if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || input[key] < min || input[key] > max)) throw new ManagerError('invalid_assistant_settings', 400);
   for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key], sizeBounds)) throw new ManagerError('invalid_assistant_settings', 400);
+  if (input.egress !== undefined && typeof input.egress !== 'boolean') throw new ManagerError('invalid_assistant_settings', 400);
   // Docker refuses to create a container that is given more CPUs than the host has.
   if (hostCpus && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
   return input;
@@ -83,7 +86,34 @@ export class AssistantComputers {
   }
   validate(owner) { if (!ownerPattern.test(owner || '')) throw new ManagerError('invalid_assistant_owner', 400); }
   name(owner) { return `dbot-${this.deployment}-ac-${owner}`; }
+  networkName() { return `dbot-${this.deployment}-ac-egress`; }
   labels(owner) { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'assistant', 'department.bot.owner': owner }; }
+  networkLabels() { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'assistant' }; }
+  async ensureNetwork() {
+    const name = this.networkName();
+    const existing = await this.docker.request('GET', `/networks/${name}`).catch(() => null);
+    if (existing) {
+      if (Object.entries(this.networkLabels()).some(([k, v]) => existing.Labels?.[k] !== v)) throw new ManagerError('resource_ownership_mismatch', 403);
+      return name;
+    }
+    try {
+      await this.docker.request('POST', '/networks/create', {
+        Name: name, Driver: 'bridge', Internal: false, CheckDuplicate: true,
+        Options: { 'com.docker.network.bridge.enable_icc': 'false' },
+        Labels: this.networkLabels(),
+      });
+    } catch (error) {
+      const created = await this.docker.request('GET', `/networks/${name}`).catch(() => null);
+      if (!created || Object.entries(this.networkLabels()).some(([k, v]) => created.Labels?.[k] !== v)) throw error;
+    }
+    return name;
+  }
+  async removeNetwork() {
+    const name = this.networkName();
+    const existing = await this.docker.request('GET', `/networks/${name}`).catch(() => null);
+    if (!existing || Object.entries(this.networkLabels()).some(([k, v]) => existing.Labels?.[k] !== v)) return;
+    await this.docker.request('DELETE', `/networks/${name}`).catch(error => logFailure(`assistant egress network ${name} removal failed`, error));
+  }
   lock(owner, fn) { const previous = this.locks.get(owner) || Promise.resolve(), next = previous.then(fn, fn); const tail = next.catch(() => {}); this.locks.set(owner, tail); tail.then(() => { if (this.locks.get(owner) === tail) this.locks.delete(owner); }); return next; }
   async volume() {
     if (this.volumeName) return this.volumeName;
@@ -93,7 +123,7 @@ export class AssistantComputers {
   }
   view(lease) {
     return { owner: lease.owner, state: lease.state, turn: lease.turn, fence: lease.fence, home: { generation: lease.generation, mode: lease.mode },
-      resources: lease.resources, image: lease.image, created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
+      resources: lease.resources, egress: lease.egress, image: lease.image, created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
   }
   list() { return { computers: [...this.leases.values()].filter(l => l.state !== 'creating').map(l => this.view(l)), waiting: this.waiting.length, settings: this.settings() }; }
   /** Inspected facts of the owner's container, for the control plane's own policy check and for tests. */
@@ -105,7 +135,8 @@ export class AssistantComputers {
   facts(container) {
     const host = container?.HostConfig ?? {}, config = container?.Config ?? {};
     return container ? { running: !!container.State?.Running, user: config.User ?? null, readonly_rootfs: host.ReadonlyRootfs === true, privileged: host.Privileged === true,
-      cap_drop: host.CapDrop ?? [], cap_add: host.CapAdd ?? [], security_opt: host.SecurityOpt ?? [], network_mode: host.NetworkMode ?? null, runtime: host.Runtime ?? null,
+      cap_drop: host.CapDrop ?? [], cap_add: host.CapAdd ?? [], security_opt: host.SecurityOpt ?? [], network_mode: host.NetworkMode ?? null,
+      network_policy: host.NetworkMode === 'none' ? 'none' : host.NetworkMode ? 'internet egress' : null, runtime: host.Runtime ?? null,
       mounts: (host.Mounts ?? []).map(m => ({ type: m.Type, source: m.Source, target: m.Target, read_only: !!m.ReadOnly, subpath: m.VolumeOptions?.Subpath ?? null })),
       binds: host.Binds ?? [], tmpfs: host.Tmpfs ?? {}, memory: host.Memory ?? 0, memory_swap: host.MemorySwap ?? 0, nano_cpus: host.NanoCpus ?? 0, pids_limit: host.PidsLimit ?? 0,
       ipc_mode: host.IpcMode ?? null, pid_mode: host.PidMode ?? '', userns_mode: host.UsernsMode ?? '' } : null;
@@ -152,7 +183,7 @@ export class AssistantComputers {
         // between turns. A changed fence, HOME generation or mode never keeps it.
         const held = lease.state === 'busy' && lease.turn === turn;
         const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && lease.image === this.image && (!input.harness || lease.harness)
-          && (held || (JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
+          && (held || (lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
           const reused = lease.state === 'idle';
@@ -173,7 +204,7 @@ export class AssistantComputers {
         }
         this.waiting = this.waiting.filter(t => t.owner !== owner);
       }
-      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: resourcesOf(settings), image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
+      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: resourcesOf(settings), egress: settings.egress, image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
       this.leases.set(owner, lease);
       try {
         await this.create(lease);
@@ -199,11 +230,12 @@ export class AssistantComputers {
     // A container left by an earlier lease of this owner (a failed removal) is never reused.
     if (await this.inspect(owner)) await this.docker.request('DELETE', `/containers/${name}?force=true`);
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
+    const networkMode = lease.egress ? await this.ensureNetwork() : 'none';
     const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
     const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
       Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant'], Labels: this.labels(owner),
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
-        Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: 'none',
+        Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: networkMode,
         Mounts: [...results, { Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[])],
         // Programs run from both, as on a work computer; Docker mounts a tmpfs noexec unless `exec` is given.
         Tmpfs: { '/workspace': `rw,exec,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,exec,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
@@ -303,7 +335,8 @@ export class AssistantComputers {
     const filters = encodeURIComponent(JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, 'department.bot.kind=assistant'] }));
     const containers = await this.docker.request('GET', `/containers/json?all=1&filters=${filters}`) || [];
     for (const container of containers) await this.docker.request('DELETE', `/containers/${container.Id}?force=true`).catch(error => logFailure('leftover assistant computer removal failed', error));
+    await this.removeNetwork();
     return containers.length;
   }
-  async shutdown() { await Promise.all([...this.leases.values()].map(lease => this.discard(lease, 'manager_stopped'))); await Promise.all([...this.removing.values()]); }
+  async shutdown() { await Promise.all([...this.leases.values()].map(lease => this.discard(lease, 'manager_stopped'))); await Promise.all([...this.removing.values()]); await this.removeNetwork(); }
 }

@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv python3-dev python-is-python3 \
       python3-pil imagemagick \
       chromium fonts-liberation fonts-noto-cjk \
+      xvfb openbox xdotool wmctrl xclip scrot ffmpeg x11-utils \
     && pip3 install --break-system-packages --no-cache-dir uv \
     && corepack enable \
     && dpkg-query -W -f '${Package}\n' | sort > /tmp/image-packages \
@@ -20,10 +21,11 @@ COPY runner /opt/runner
 RUN for file in /opt/runner/*.mjs; do node --check "$file"; done
 COPY LICENSE NOTICE /opt/licenses/
 COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
-RUN chmod 755 /usr/local/bin/bot-chromium && chmod -R a-w /opt/runner /opt/bot
-# Preinstalled browser for task harness (#916). Assistant computers reuse this image but still have no network.
+COPY docker/bot-desktop.sh /usr/local/bin/bot-desktop
+RUN chmod 755 /usr/local/bin/bot-chromium /usr/local/bin/bot-desktop && chmod -R a-w /opt/runner /opt/bot
+# Preinstalled browser and X11 virtual desktop tools for project and assistant computers (#1214).
 ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium
-LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium"
+LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium, xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg"
 USER 10001:10001
 WORKDIR /workspace
 CMD ["node", "/opt/runner/idle.mjs"]

@@ -6,7 +6,7 @@ import { loadConsole } from '../../fixtures/console-page.mjs';
 const scripts = ['static/app.js', 'static/views.js', 'static/project.js', 'static/settings.js', 'static/onboarding.js'];
 const settle = () => new Promise(resolve => setTimeout(resolve, 30));
 const gib = 1024 ** 3;
-const defaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 };
+const defaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true };
 const computers = { settings: { ...defaults }, defaults,
   bounds: { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 10080], cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384], workspace_mb: [16, 16384] },
   host: { cpus: 4, memory_mb: 16384 }, usage: { computers: 2, busy: 1, waiting: 0 } };
@@ -45,11 +45,15 @@ test('the assistant computer category saves timers and HOME limits together, eac
   assert.deepEqual(resources.querySelectorAll('select').map(node => node.name), ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'workspace_mb']);
   assert.deepEqual(select('cpus').querySelectorAll('option').map(node => node.textContent), ['0.5 核', '1 核（默认）', '2 核', '4 核'], 'no size above the host');
   assert.match(text(resources), /4 CPU · 16 GB 内存/);
+  assert.match(text(resources), /可访问外网（独立隔离网络）/);
   assert.doesNotMatch(text(panel), /运行时/);
-  select('memory_mb').value = '4096'; select('workspace_mb').value = '1024';
+  const egressBox = resources.querySelectorAll('input').find(node => node.name === 'egress');
+  assert.equal(egressBox.checked, true);
+  select('memory_mb').value = '4096'; select('workspace_mb').value = '1024'; egressBox.checked = false;
   await resources.querySelector('form').listeners.submit[0]({ preventDefault() {} }); await settle();
-  assert.deepEqual(saved, { assistant_computers: { memory_mb: 4096, workspace_mb: 1024 } });
+  assert.deepEqual(saved, { assistant_computers: { memory_mb: 4096, workspace_mb: 1024, egress: false } });
   assert.match(text(section('每台电脑的资源')), /已保存：新建的电脑立即使用，已有的在下一个回合重建/);
+  assert.match(text(section('每台电脑的资源')), /无外网/);
   // The HOME list: the total over the alert threshold is an alert, each HOME shows its use, state and sealed generations.
   const list = section('HOME 占用');
   assert.match(text(list), /所有 HOME 合计 60\.00 GB，超过告警值 50\.00 GB/);

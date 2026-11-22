@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { browserEvidenceDir } from '../../../dist/browser/runtime.js';
-import { browserEvidenceRoot } from '../../../dist/browser/tools.js';
+import { browserEvidenceRoot } from '../../../dist/browser/evidence.js';
 
 const png = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../fixtures/browser-site/evidence-card.png'));
 const pngSha = createHash('sha256').update(png).digest('hex');
