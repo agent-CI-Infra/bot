@@ -145,6 +145,7 @@ const codeActions: Record<string,string> = {
   acp_protocol_unsupported:'ACP 外部后端已下线；请在项目「角色」页改用 Pi、Claude Code 或 Codex 并保存配置后重试。',
   acp_mcp_http_unsupported:'ACP 外部后端已下线；请在项目「角色」页改用 Pi、Claude Code 或 Codex 并保存配置后重试。',
   acp_product_not_installed:'请平台管理员在 agent-tools 卷安装并选定兼容的 ACP 产品版本。安装后任务会自动继续。',
+  acp_process_exited:'容器内 ACP 进程异常退出。请查看本次运行日志后重试。',
   subscription_mode_not_implemented:'供应商订阅模式接口当前仅作预留，尚未实现；请在「角色」页将模型来源切回「平台网关」后再试。',
   container_workspace_required:'Claude Code 与 Codex 需要项目容器或隔离运行容器工作区；请确认已配置虚拟电脑或隔离运行环境后再试。',
   agent_tools_volume_missing:'未挂载只读 CLI 工具卷 /opt/agent-tools；请确认已配置 agent-tools 卷并由管理员通过 POST /api/agent-tools/install 安装对应 CLI。',
