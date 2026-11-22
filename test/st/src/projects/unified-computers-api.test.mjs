@@ -13,6 +13,7 @@ import { ManagementService } from '../../../../dist/management/service.js';
 import { RuleService, computerRequest, consoleComputer, rememberConsoleComputer } from '../../../../dist/rules/service.js';
 import { TaskCommands } from '../../../../dist/tasks/commands.js';
 import { claimQueuedTask } from '../../../../dist/tasks/priority.js';
+import { ProjectService, startProjectRuntime } from '../../../../dist/projects/service.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 
 const id = () => randomBytes(24).toString('hex');
@@ -433,7 +434,24 @@ test('claimQueuedTask gates on toolchain_pending during deferred build/switch, c
   h.store.run("DELETE FROM task_claims WHERE task_id='t-queued'");
   h.store.run("UPDATE tasks SET status='queued', claim_token=NULL WHERE id='t-queued'");
 
-  // 0c. Admin cancellation of deferred build also clears toolchain_pending and sets toolchain_missing=true.
+  // 0c. Admin configure rebuild while degraded on bare base: buildInFlight clears toolchain_missing during the active rebuild.
+  f.docker.onBuild = ({ options }) => new Promise((_resolve, reject) => {
+    options?.signal?.addEventListener('abort', () => reject(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true })), { once: true });
+  });
+  await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { packages: ['jq'], setup_script: 'echo ok', rebuild: true } });
+  await new Promise(r => setImmediate(r));
+  const duringAdminRebuild = f.projects.describe('101').computer;
+  assert.equal(duringAdminRebuild.build.state, 'building');
+  assert.ok(!duringAdminRebuild.build.deferred);
+  assert.equal(duringAdminRebuild.toolchain_missing, false, 'active admin rebuild must not falsely report toolchain_missing');
+  f.projects.cancelBuild('101');
+  await f.projects.waitForBuild('101');
+  assert.equal(f.projects.describe('101').computer.toolchain_missing, true, 'cancelled admin rebuild on bare base reports toolchain_missing again');
+
+  // 0d. Admin cancellation of deferred build also clears toolchain_pending and sets toolchain_missing=true.
+  f.docker.onBuild = ({ options }) => new Promise((_resolve, reject) => {
+    options?.signal?.addEventListener('abort', () => reject(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true })), { once: true });
+  });
   await f.projects.recover();
   await new Promise(r => setImmediate(r));
   f.projects.cancelBuild('101');
@@ -480,4 +498,69 @@ test('claimQueuedTask gates on toolchain_pending during deferred build/switch, c
   // 4. After refresh completes and toolchain_pending clears, claimQueuedTask claims t-queued normally.
   const claimed = claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now());
   assert.equal(claimed?.id, 't-queued');
+});
+
+test('startProjectRuntime fails closed on manager_not_ready and starts engine immediately without blocking healthy repos behind slow pending operations', { timeout: 60_000 }, async t => {
+  const f = managerFixture(t);
+  let managerNotReady = false;
+  let slowConfigureGate = null;
+  const wrappedManager = {
+    async call(method, path, input, timeoutMs) {
+      if (managerNotReady) fail(503, 'manager_not_ready');
+      if (method === 'POST' && path === '/v1/projects/101/configure' && slowConfigureGate) {
+        await slowConfigureGate.promise;
+      }
+      return f.manager.call(method, path, input, timeoutMs);
+    },
+  };
+  const h = await harness(t, wrappedManager);
+  const { admin } = await setup(h);
+  const a = await account(admin);
+  await repository(admin, a.id, '101');
+  await repository(admin, a.id, '202');
+  for (let i = 0; i < 2; i++) await h.projects.reconcile();
+
+  // Part A: Simultaneous restart where manager returns manager_not_ready.
+  // Saved rows start with stale toolchain_pending=0, and 101 has a queued task.
+  h.store.run("UPDATE project_environments SET toolchain_pending=0 WHERE repository_id IN ('101','202')");
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-101','101','review.pr','queued','q','{}',1,0)");
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-202','202','review.pr','queued','q','{}',2,0)");
+
+  managerNotReady = true;
+  let startedCount = 0;
+  const fakeEngine = { start() { startedCount++; } };
+  const startupProjects = new ProjectService(h.store, wrappedManager);
+
+  const firstPass = startProjectRuntime(startupProjects, fakeEngine);
+  assert.equal(startedCount, 1, 'engine.start() must run immediately without waiting for reconcile()');
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'fail-closed gate must refuse claims immediately after startup');
+  await firstPass;
+  // Even after the failed (manager_not_ready) first reconcile pass returns, toolchain_pending MUST remain 1!
+  assert.equal(h.store.get("SELECT toolchain_pending FROM project_environments WHERE repository_id='101'").toolchain_pending, 1);
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'manager_not_ready must NOT clear startup toolchain_pending gate');
+
+  // Part B: Manager becomes ready, while repo 101 has a slow pending configure operation in environment_operations
+  // and repo 202 is healthy. startProjectRuntime must start the engine immediately AND sync repo 202 so repo 202
+  // claims its task without waiting for repo 101's slow configure operation.
+  managerNotReady = false;
+  slowConfigureGate = Promise.withResolvers();
+  t.after(() => slowConfigureGate?.resolve());
+  const opId = id();
+  const opInput = JSON.stringify({ operation_id: opId, generation: 1, request: { env: { SLOW: '1' } } });
+  h.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", opId, '101', 'configure', opInput);
+
+  const slowPass = startProjectRuntime(startupProjects, fakeEngine);
+  assert.equal(startedCount, 2, 'engine.start() must not block behind a slow pending configure operation');
+  // Fast read-only state sync completes while 101's slow configure is still held open.
+  await startupProjects.syncStates();
+  assert.equal(h.store.get("SELECT toolchain_pending FROM project_environments WHERE repository_id='202'").toolchain_pending, 0);
+  const claimed202 = claimQueuedTask(h.store, '202', "kind='review.pr'", 1, Date.now());
+  assert.equal(claimed202?.id, 't-202', 'healthy repo 202 must claim tasks without waiting for repo 101 slow pending op');
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'repo 101 remains gated while its pending configure is in flight');
+
+  slowConfigureGate.resolve();
+  await slowPass;
+  assert.equal(h.store.get("SELECT state FROM environment_operations WHERE id=?", opId).state, 'completed');
+  const claimed101 = claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now());
+  assert.equal(claimed101?.id, 't-101', 'repo 101 claims queued task once slow pending configure completes');
 });

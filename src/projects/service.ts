@@ -88,6 +88,7 @@ export class ManagerClient implements Manager {
 }
 export class ProjectService {
   private syncing: Promise<void> | null = null;
+  private stateSyncing: Promise<void> | null = null;
   // Projects being deleted, and the reconciliation step running for a project right now. Reconciliation leaves a project
   // that is being deleted alone, so it cannot start or recreate its computer while the deletion runs.
   private readonly removing = new Set<string>();
@@ -100,6 +101,14 @@ export class ProjectService {
   // computer; one answered start clears it.
   private readonly notesRetries = new Map<string, { attempts: number, at: number }>();
   constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
+  /**
+   * Fail closed at control-plane startup before TaskEngine starts: mark every saved project_environments row
+   * toolchain_pending=1 so queued tasks cannot claim against stale rows persisted before a restart/upgrade.
+   * Each repository's flag is updated only once GET /v1/projects/:id succeeds and save() writes live state.
+   */
+  markStartupPending(): void {
+    this.store.run('UPDATE project_environments SET toolchain_pending=1');
+  }
   save(row: Row): void {
     if (!row) return;
     this.store.run(`INSERT INTO project_environments(repository_id,generation,state,desired,error,started_at,revision,toolchain_pending) VALUES(?,?,?,?,?,?,?,?)
@@ -108,9 +117,29 @@ export class ProjectService {
       OR (excluded.generation=project_environments.generation AND excluded.revision>=project_environments.revision)`,
     row.repository_id, row.generation, row.state, row.desired, row.error || null, row.started_at || null, row.revision || 0, (row as any).computer?.toolchain_pending ? 1 : 0);
   }
+  /**
+   * Fast read-only state sync across repositories, decoupled from long-running pending environment_operations
+   * so one repository's slow start/configure/refresh never delays toolchain_pending sync for healthy repositories.
+   */
+  async syncStates(): Promise<void> {
+    if (this.stateSyncing) return this.stateSyncing;
+    this.stateSyncing = (async () => {
+      for (const repo of this.store.all('SELECT r.id FROM repositories r JOIN policies p ON p.repository_id=r.id')) {
+        if (this.removing.has(repo.id)) continue;
+        try {
+          const state = await this.manager.call('GET', '/v1/projects/' + repo.id, undefined, 10_000);
+          if (state && !this.removing.has(repo.id)) this.save(state);
+        } catch {
+          // Fail closed: keep existing toolchain_pending (1 after markStartupPending) while manager is not ready or unavailable.
+        }
+      }
+    })().finally(() => { this.stateSyncing = null; });
+    return this.stateSyncing;
+  }
   async reconcile(): Promise<void> {
-    if (this.syncing) return this.syncing;
-    this.syncing = this.sync().finally(() => { this.syncing = null; }); return this.syncing;
+    const states = this.syncStates();
+    if (this.syncing) { await states; return this.syncing; }
+    this.syncing = states.then(() => this.sync()).finally(() => { this.syncing = null; }); return this.syncing;
   }
   private async sync(): Promise<void> {
     // Retry persisted intentions with their original id, never create another reset after a lost response.
@@ -418,4 +447,19 @@ export class ProjectService {
     });
     return { environment: await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', String(input.operation_id))!) };
   }
+}
+
+/**
+ * Control-plane startup sequence: fail closed by marking saved project_environments rows toolchain_pending=1,
+ * start TaskEngine immediately without blocking on long-running pending environment_operations, and launch
+ * background reconciliation so each repository's live toolchain_pending clears once the manager answers.
+ */
+export function startProjectRuntime(
+  projects: Pick<ProjectService, 'markStartupPending' | 'reconcile'>,
+  engine: { start(): void },
+  onError: (error: unknown) => void = error => console.error('[projects] reconciliation failed:', error),
+): Promise<void> {
+  projects.markStartupPending();
+  engine.start();
+  return projects.reconcile().catch(onError);
 }

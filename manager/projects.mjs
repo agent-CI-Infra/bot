@@ -351,7 +351,7 @@ export class Projects {
       imagePending
       || (isDeferredBuild && buildInFlight)
     );
-    const toolchainMissing = wantsPrecompiled && !toolchainPending && (
+    const toolchainMissing = wantsPrecompiled && !toolchainPending && !buildInFlight && (
       (isDeferredBuild && ['failed', 'cancelled'].includes(String(buildInfo?.state || '')))
       || (!!this.approvedImageId && resource?.image === this.approvedImageId)
     );

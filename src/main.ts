@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Store } from './storage/database.js';
 import { createControlPlane } from './server.js';
-import { ManagerClient, ProjectService } from './projects/service.js';
+import { ManagerClient, ProjectService, startProjectRuntime } from './projects/service.js';
 import { NotesReclaimer } from './projects/reclaim.js';
 import { TaskEngine } from './agent/engine.js';
 import { InstallationSync } from './app/installations.js';
@@ -62,9 +62,9 @@ const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCach
 engine.obsolete.start();
 engine.botPrWake.start();
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
-// Complete the first environment reconcile (syncing toolchain_pending / manager state) before starting the task engine
-// so a restarted control plane cannot claim queued tasks against a stale toolchain_pending=0 row.
-void projects.reconcile().catch(error => console.error('[projects] initial reconciliation failed:', error)).finally(() => engine.start());
+// Fail closed on saved project_environments before starting TaskEngine immediately, then reconcile in the background
+// so slow pending operations never delay engine startup and manager_not_ready never clears the startup gate.
+void startProjectRuntime(projects, engine);
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
 // A count read from the environment, or the default when unset; a value that is not a positive integer stops startup
 // instead of turning into NaN, which would make a threshold that never fires (#771).
