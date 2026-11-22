@@ -155,6 +155,11 @@ test('global administrator connects an app through the 3-step wizard, manages it
     await expect(page).toHaveURL(new RegExp(c.id + '/setup/2$'));
     await expect(page.getByText('绑定后直接在私聊发送', { exact: false })).toContainText('确认收到助手回复后即完成接入');
     await expect(page.getByText('/project', { exact: false })).toHaveCount(0);
+    await page.screenshot({ path: '.tmp/issue-1220/wizard-step3-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/issue-1220/wizard-step3-390.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('link', { name: '进入应用管理页', exact: true }).click();
     await expect(page).toHaveURL(new RegExp('/#/settings/feishu/' + c.id + '$'));
     // Management detail page edits credentials in-place without forcing a step jump.
@@ -190,9 +195,14 @@ test('global administrator connects an app through the 3-step wizard, manages it
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/issue-1220/list-390.png' });
     // Delete cli_wizard from the list via the confirm dialog.
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('group', { name: 'cli_wizard', exact: true }).getByRole('button', { name: '删除', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('删除飞书应用连接');
+    await page.screenshot({ path: '.tmp/issue-1220/delete-dialog-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/issue-1220/delete-dialog-390.png' });
     await dialog.getByRole('button', { name: '确认删除', exact: true }).click();
     await expect(page.getByRole('group', { name: 'cli_wizard', exact: true })).toHaveCount(0);
     expect(f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'")).toBeUndefined();
@@ -338,6 +348,20 @@ test('enterprise long connections show collapsible event/callback guide and dele
     await f.admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: current.revision, enabled: false });
     await page.reload();
     await expect(steps.nth(0).getByRole('button', { name: '立即启用连接' })).toBeVisible();
+    // Capture detail page diagnostics/history and delete danger zone at 1440px and 390px.
+    const diagHeading = page.getByRole('heading', { name: '连接健康与收发记录', exact: true });
+    const dangerCard = page.locator('.feishu-danger-zone');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await diagHeading.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-diag-1440.png' });
+    await dangerCard.evaluate(node => { node.scrollIntoView({ block: 'end' }); });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-delete-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await diagHeading.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-diag-390.png' });
+    await dangerCard.evaluate(node => { node.scrollIntoView({ block: 'center' }); });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-delete-390.png' });
     // Delete from detail page danger zone redirects back to the list.
     await page.getByRole('button', { name: '删除此飞书应用连接', exact: true }).click();
     const dialog = page.getByRole('dialog');

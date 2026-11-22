@@ -65,8 +65,11 @@ export class ChannelLedger {
     if (existing) {
       // Recall events omit chat_type. Only an authenticated message establishes a private/group audience.
       if(event.kind==='message'&&existing.type_verified&&existing.chat_type!==event.chat_type)fail(403,'channel_chat_type_changed');
-      this.store.run('UPDATE channel_chats SET connector_id=?,last_received_at=?,chat_type=?,type_verified=? WHERE id=?', event.connector_id, Date.now(),
-        event.kind==='message'?event.chat_type:existing.chat_type,event.kind==='message'?1:existing.type_verified,existing.id);
+      const revive = existing.state === 'connector_deleted';
+      this.store.run('UPDATE channel_chats SET connector_id=?,last_received_at=?,chat_type=?,type_verified=?,state=?,context_revision=context_revision+? WHERE id=?',
+        event.connector_id, Date.now(),
+        event.kind==='message'?event.chat_type:existing.chat_type, event.kind==='message'?1:existing.type_verified,
+        revive ? 'active' : existing.state, revive ? 1 : 0, existing.id);
       return this.store.get('SELECT * FROM channel_chats WHERE id=?', existing.id)!;
     }
     const id = randomId();

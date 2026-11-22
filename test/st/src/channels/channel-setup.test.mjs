@@ -502,6 +502,13 @@ test('deleting a Feishu connector checks management authority and revision, revo
   await finished(h, groupPost.value.operation_id);
   const groupChat = h.store.get("SELECT * FROM channel_chats WHERE connector_id=? AND chat_id='oc_del_group'", id);
   assert.ok(groupChat);
+  // Also create a chat already disbanded by Feishu so reconnect must NOT revive it.
+  const disbandedMsg = await post(h, id, envelope('before disband', { message: { chat_id: 'oc_disbanded_group', chat_type: 'group' } }));
+  await finished(h, disbandedMsg.value.operation_id);
+  const disbandedEvent = await post(h, id, { schema: '2.0', header: { event_id: 'evt_disband_del', event_type: 'im.chat.disbanded_v1', create_time: String(Date.now()), token: credentials.verification_token, app_id: 'cli_fixture', tenant_key: 'install-tenant' }, event: { chat_id: 'oc_disbanded_group' } });
+  await finished(h, disbandedEvent.value.operation_id);
+  const disbandedChat = h.store.get("SELECT * FROM channel_chats WHERE connector_id=? AND chat_id='oc_disbanded_group'", id);
+  assert.equal(disbandedChat.state, 'archived');
   const bound = await admin('/api/channels/chats/' + groupChat.id + '/service-binding', 'PUT', {
     service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0,
   });
@@ -513,12 +520,15 @@ test('deleting a Feishu connector checks management authority and revision, revo
   assert.equal(timer.status, 201, JSON.stringify(timer.value));
   const issued = await admin('/api/channels/bindings/issue', 'POST', { connector_id: id });
   assert.equal(issued.status, 201);
-  // Seed a queued inbox/outbox item to confirm deletion terminates in-flight items.
-  f.service.close();
-  h.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES('del_in_1',?,'evt_del_1','dedup_del_1',?,'queued',?)",
+  // Seed in-flight/queued/sending/registered items to confirm deletion terminates all non-terminal items.
+  h.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES('del_in_1',?,'evt_del_1','dedup_del_1',?,'submitted',?)",
     id, h.store.secrets.seal({}, 'channel-event:del_in_1'), Date.now());
   h.store.run("INSERT INTO channel_outbox(id,connector_id,idempotency_key,payload,state,next_attempt,created_at) VALUES('del_out_1',?,'key_del_1',?,'queued',?,?)",
     id, h.store.secrets.seal({}, 'channel-outbox:del_out_1'), Date.now() + 60_000, Date.now());
+  h.store.run("INSERT INTO channel_outbox(id,connector_id,idempotency_key,payload,state,next_attempt,created_at) VALUES('del_out_2',?,'key_del_2',?,'sending',?,?)",
+    id, h.store.secrets.seal({}, 'channel-outbox:del_out_2'), Date.now() + 60_000, Date.now());
+  h.store.run("INSERT INTO channel_outbox(id,connector_id,idempotency_key,payload,state,next_attempt,created_at) VALUES('del_out_3',?,'key_del_3',?,'registered',?,?)",
+    id, h.store.secrets.seal({}, 'channel-outbox:del_out_3'), Date.now() + 60_000, Date.now());
 
   const connectorRow = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
   const orgAdmin = await member('del-org-admin', { organization_ids: ['10'] });
@@ -549,16 +559,42 @@ test('deleting a Feishu connector checks management authority and revision, revo
   assert.equal(h.store.get('SELECT count(*) n FROM channel_bind_requests WHERE connector_id=?', id).n, 0);
   assert.equal(h.store.get("SELECT state,error FROM channel_inbox WHERE id='del_in_1'").error, 'channel_connector_deleted');
   assert.equal(h.store.get("SELECT state,last_error FROM channel_outbox WHERE id='del_out_1'").last_error, 'channel_connector_deleted');
-  assert.equal(h.store.get('SELECT state FROM channel_chats WHERE id=?', groupChat.id).state, 'archived');
-  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='channel.connector.deleted' AND resource_id=?", id));
+  assert.equal(h.store.get("SELECT state,last_error FROM channel_outbox WHERE id='del_out_2'").last_error, 'channel_connector_deleted');
+  assert.equal(h.store.get("SELECT state,last_error FROM channel_outbox WHERE id='del_out_3'").last_error, 'channel_connector_deleted');
+  assert.equal(h.store.get('SELECT state FROM channel_chats WHERE id=?', chat.id).state, 'connector_deleted');
+  assert.equal(h.store.get('SELECT state FROM channel_chats WHERE id=?', groupChat.id).state, 'connector_deleted');
+  assert.equal(h.store.get('SELECT state FROM channel_chats WHERE id=?', disbandedChat.id).state, 'archived');
+  const auditRow = h.store.get("SELECT resource_id,repository_id FROM audit WHERE action='channel.connector.deleted' AND resource_id=?", id);
+  assert.ok(auditRow);
+  assert.equal(auditRow.repository_id, null);
   // Historical local messages remain readable by platform admin after deletion.
   assert.equal((await admin('/api/channels/chats/' + chat.id + '/messages')).status, 200);
-  // The (app_id, installation_tenant) slot is freed so the same app can be connected again.
+  // Reconnecting the same app frees (app_id, installation_tenant), revives chats paused by deletion
+  // (without reviving Feishu-disbanded chats), and processes new messages end-to-end.
   const recreated = await admin('/api/channels/connectors', 'POST', {
-    app_id: connectorRow.app_id, application_type: 'enterprise', transport: 'websocket', enabled: true,
-    credentials: { app_secret: credentials.app_secret }, expected_revision: 0,
+    app_id: connectorRow.app_id, application_type: 'enterprise', transport: 'http', enabled: true,
+    credentials, expected_revision: 0,
   });
   assert.equal(recreated.status, 201, JSON.stringify(recreated.value));
+  const newId = recreated.value.connector_id;
+  assert.equal(h.store.get('SELECT state,connector_id FROM channel_chats WHERE id=?', chat.id).state, 'active');
+  assert.equal(h.store.get('SELECT state,connector_id FROM channel_chats WHERE id=?', chat.id).connector_id, newId);
+  assert.equal(h.store.get('SELECT state,connector_id FROM channel_chats WHERE id=?', groupChat.id).state, 'active');
+  assert.equal(h.store.get('SELECT state FROM channel_chats WHERE id=?', disbandedChat.id).state, 'archived');
+  // Deliver a fresh p2p message through the reconnected connector and verify it completes with an outbound reply.
+  const afterReconnect = await post(h, newId, envelope('/bind', { message: { chat_id: chat.chat_id, chat_type: 'p2p' } }));
+  assert.equal(afterReconnect.status, 200, JSON.stringify(afterReconnect.value));
+  const inboxAfter = await finished(h, afterReconnect.value.operation_id);
+  assert.equal(inboxAfter.state, 'completed');
+  assert.equal(inboxAfter.error, null);
+  assert.ok(h.store.get('SELECT id FROM channel_outbox WHERE connector_id=? AND source_event=?', newId, afterReconnect.value.operation_id));
+  // Meanwhile a mentioned message to the Feishu-disbanded chat is still rejected as inactive.
+  const toDisbanded = await post(h, newId, envelope('@_user_1 still archived', {
+    message: { chat_id: 'oc_disbanded_group', chat_type: 'group', mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Fixture bot' }] },
+  }));
+  const disbandedResult = await finished(h, toDisbanded.value.operation_id);
+  assert.equal(disbandedResult.state, 'failed');
+  assert.equal(disbandedResult.error, 'channel_chat_inactive');
 
   // Organization app deletion: creator and org admin may delete; foreign org admin cannot.
   const repoAdmin = await member('del-repo-admin', { repository_ids: ['101'] });

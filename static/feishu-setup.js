@@ -16,7 +16,7 @@ function feishuEnabledInfo(c) {
 function feishuActivityInfo(c) {
   if (!c.enabled) return { text: '未运行', variant: 'muted' };
   if (c.transport === 'http') {
-    if (c.health.last_error) return { text: '回调异常', variant: 'danger' };
+    if (c.health.last_error) return { text: '最近有错误', variant: 'danger' };
     if (c.health.last_received_at) return { text: 'HTTP 回调活跃', variant: 'success' };
     return { text: 'HTTP 回调待收事件', variant: 'info' };
   }
