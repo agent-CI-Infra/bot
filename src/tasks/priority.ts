@@ -43,6 +43,7 @@ export const queueEligible="status IN ('queued','retry_wait','waiting_configurat
 /** Claim the current first eligible row under a write transaction, not a stale pre-read list. */
 export function claimQueuedTask(s:Store,repo:string,kinds:string,limit:number,now=Date.now(),excluded:string[]=[]):Row|undefined{
  return s.transaction(()=>{
+ if(s.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'",repo))return;
  if(s.get("SELECT count(*) n FROM task_claims c JOIN tasks t ON t.id=c.task_id WHERE c.repository_id=? AND t.status='running'",repo)!.n>=limit)return;
  const exclusion=excluded.length?' AND id NOT IN ('+excluded.map(()=>'?').join(',')+')':'';
  const task=s.get(`SELECT * FROM tasks WHERE repository_id=? AND ${kinds} AND ${queueEligible}${exclusion} ORDER BY priority,queue_seq,id LIMIT 1`,repo,now,...excluded);if(!task)return;

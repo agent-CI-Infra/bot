@@ -12,6 +12,7 @@ import { harness, setup, account, repository, testPassword } from '../../../fixt
 import { ManagementService } from '../../../../dist/management/service.js';
 import { RuleService, computerRequest, consoleComputer, rememberConsoleComputer } from '../../../../dist/rules/service.js';
 import { TaskCommands } from '../../../../dist/tasks/commands.js';
+import { claimQueuedTask } from '../../../../dist/tasks/priority.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 
 const id = () => randomBytes(24).toString('hex');
@@ -384,4 +385,48 @@ test('F1 & F2: async/sync console spec sync preserves unapplied rule_imports.com
   assert.deepEqual(mergedPartial.packages, ['jq', 'ripgrep', 'tree']);
   assert.deepEqual(mergedPartial.env, { A: '1', B: '2', C: '3' });
   assert.deepEqual(JSON.parse(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer), { packages: ['tree'], env: { C: '3' } });
+});
+
+test('claimQueuedTask respects pending environment_operations and reconcile refreshes image_pending only once idle', { timeout: 60_000 }, async t => {
+  const f = managerFixture(t);
+  const h = await harness(t, f.manager);
+  const { admin } = await setup(h);
+  const a = await account(admin);
+  await repository(admin, a.id, '101');
+  for (let i = 0; i < 2; i++) await h.projects.reconcile();
+
+  // Configure a precompiled image on 101, then simulate base image upgrade + recover() so image_pending becomes true.
+  await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { packages: ['jq'], setup_script: 'echo ok' } });
+  await f.projects.waitForBuild('101');
+  f.docker.images.set('approved', { Id: 'sha256:upgraded-base-claim-gate', Size: 10 * mib });
+  await f.projects.recover();
+  await f.projects.waitForBuild('101');
+  const pendingState = f.projects.describe('101').computer;
+  assert.equal(pendingState.image_pending, true);
+  assert.equal(pendingState.image, 'sha256:upgraded-base-claim-gate');
+
+  // 1. While a task holds a claim on 101, reconcile() MUST NOT refresh/interrupt the container.
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-running','101','review.pr','running','r','{}',1,0)");
+  h.store.run("INSERT INTO task_claims(task_id,repository_id,token,claimed_at) VALUES('t-running','101','tok-1',?)", new Date().toISOString());
+  await h.projects.reconcile();
+  assert.equal(f.projects.describe('101').computer.image, 'sha256:upgraded-base-claim-gate', 'reconcile must not interrupt a claimed task');
+  assert.equal(f.projects.describe('101').computer.image_pending, true);
+
+  // 2. While a pending environment_operations row exists, claimQueuedTask MUST refuse to claim new tasks on that repo.
+  h.store.run("DELETE FROM task_claims WHERE task_id='t-running'");
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id='t-running'");
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-queued','101','review.pr','queued','q','{}',2,0)");
+  h.store.run("INSERT INTO environment_operations VALUES('op-pending','101','refresh','{}','pending',NULL)");
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'claimQueuedTask must not claim while refresh is pending');
+  h.store.run("DELETE FROM environment_operations WHERE id='op-pending'");
+
+  // 3. Once idle (no task_claims), reconcile() issues refresh, switches container to the new precompiled image, and clears image_pending.
+  await h.projects.reconcile();
+  const switched = f.projects.describe('101').computer;
+  assert.equal(switched.image_pending, false);
+  assert.equal(switched.image, 'sha256:' + switched.build.tag.split(':')[1]);
+
+  // 4. After refresh completes, claimQueuedTask claims t-queued normally.
+  const claimed = claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now());
+  assert.equal(claimed?.id, 't-queued');
 });
