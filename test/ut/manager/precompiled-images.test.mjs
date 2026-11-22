@@ -572,7 +572,11 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
     request: { packages: ['jq'], setup_script: 'echo slow-sdk' },
   });
   await f.projects.waitForBuild('101');
-  const revBefore = f.projects.describe('101').computer.spec_revision;
+  const prevBuilt = f.projects.describe('101').computer;
+  const revBefore = prevBuilt.spec_revision;
+  const prevImageId = prevBuilt.image;
+  // Ensure FakeDocker can inspect the previous precompiled image by ID (as real Docker does).
+  f.docker.images.set(prevImageId, { Id: prevImageId, Size: 3 * mib });
 
   // Simulate upgrading the approved base image to a new digest so 101's precompiled image is no longer cached,
   // and hold the Docker build in flight while calling recover().
@@ -585,11 +589,12 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
   });
   f.docker.images.set('approved', { Id: 'sha256:upgraded-base-v4', Size: 10 * mib });
 
-  // recover() MUST finish immediately without waiting for the slow Docker build, leaving 101 ready on the new base!
+  // recover() MUST finish immediately without waiting for the slow Docker build, preserving the previous precompiled
+  // image while rebuilding in the background so existing tools remain available!
   await f.projects.recover();
   const duringBuild = f.projects.describe('101');
   assert.equal(duringBuild.state, 'ready', 'project container must come up ready immediately during recover()');
-  assert.equal(duringBuild.computer.image, 'sha256:upgraded-base-v4');
+  assert.equal(duringBuild.computer.image, prevImageId, 'recover() preserves previous precompiled image during background rebuild when still present in Docker');
   assert.ok(['queued', 'building'].includes(duringBuild.computer.build.state), duringBuild.computer.build.state);
   assert.equal(duringBuild.computer.spec_revision, revBefore);
 
@@ -600,5 +605,6 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
   assert.equal(afterBuild.state, 'ready');
   assert.equal(afterBuild.computer.build.state, 'ready');
   assert.equal(afterBuild.computer.image, 'sha256:' + afterBuild.computer.build.tag.split(':')[1]);
+  assert.notEqual(afterBuild.computer.image, prevImageId);
   assert.equal(afterBuild.computer.spec_revision, revBefore, 'recovery rebuild must not bump spec_revision');
 });
