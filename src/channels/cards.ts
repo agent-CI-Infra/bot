@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto';
+import { closeSync, constants, existsSync, fdatasyncSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { Row, Store } from '../storage/database.js';
 import { fail, HttpError, randomId, type Json } from '../core/security.js';
 import { cardText } from './format.js';
@@ -1571,6 +1574,121 @@ export function interactiveCardStorage(store: Store): void {
   `);
 }
 
+export const cardSpecFileMarker = 'file';
+const cardFileIdPattern = /^[a-zA-Z0-9_-]{2,120}$/;
+
+function writeAll(fd: number, data: Buffer): void {
+  for (let offset = 0; offset < data.length;) offset += writeSync(fd, data, offset, data.length - offset);
+}
+
+/** Sealed interactive card spec file path under channel-cards/, sharded by the first two ID characters. */
+export function channelCardPath(store: Store, id: string): string {
+  if (!cardFileIdPattern.test(id)) return fail(400, 'channel_card_invalid');
+  const root = resolve(store.channelCardsDir);
+  const target = resolve(root, id.slice(0, 2), id + '.enc');
+  if (!target.startsWith(root + sep)) return fail(400, 'channel_card_invalid');
+  return target;
+}
+
+function writeEncryptedCardSpec(store: Store, id: string, payload: Json): string {
+  const target = channelCardPath(store, id);
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  const sealed = store.secrets.sealBytes(Buffer.from(JSON.stringify(payload), 'utf8'), 'channel-interactive-card:' + id);
+  const temporary = `${target}.${randomBytes(6).toString('hex')}.tmp`;
+  const fd = openSync(temporary, 'wx', 0o600);
+  try { writeAll(fd, sealed); fdatasyncSync(fd); }
+  catch (error) { closeSync(fd); rmSync(temporary, { force: true }); throw error; }
+  closeSync(fd);
+  renameSync(temporary, target);
+  return target;
+}
+
+function readEncryptedCardSpec(store: Store, id: string): { spec: SanitizedCardSpec; footer_note?: string; console_url?: string } | null {
+  const target = channelCardPath(store, id);
+  let fd: number;
+  try { fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    if (code === 'ELOOP') return fail(409, 'channel_card_integrity');
+    throw error;
+  }
+  let sealed: Buffer;
+  try {
+    if (!fstatSync(fd).isFile()) return fail(409, 'channel_card_integrity');
+    sealed = readFileSync(fd);
+  } finally { closeSync(fd); }
+  try {
+    const parsed = JSON.parse(store.secrets.openBytes(sealed, 'channel-interactive-card:' + id).toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.spec) return fail(409, 'channel_card_integrity');
+    return parsed as { spec: SanitizedCardSpec; footer_note?: string; console_url?: string };
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    return fail(409, 'channel_card_integrity');
+  }
+}
+
+export function removeCardSpecFile(store: Store, id: string): { removed: boolean; bytes: number } {
+  const target = channelCardPath(store, id);
+  let bytes = 0, removed = false;
+  try {
+    const st = lstatSync(target);
+    if (st.isFile()) bytes = st.size;
+    rmSync(target, { force: true });
+    removed = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error;
+  }
+  try { rmdirSync(dirname(target)); } catch { /* Shard directory is still non-empty or already removed. */ }
+  return { removed, bytes };
+}
+
+export function removeCardSpecFiles(store: Store, ids: Iterable<string>): { removed: number; bytes: number; failed: number } {
+  let removed = 0, bytes = 0, failed = 0;
+  for (const id of new Set(ids)) {
+    try {
+      const one = removeCardSpecFile(store, id);
+      if (one.removed) { removed++; bytes += one.bytes; }
+    } catch (error) {
+      failed++;
+      console.error('[channel-cards] removing card spec file failed for ' + id + ':', error);
+    }
+  }
+  return { removed, bytes, failed };
+}
+
+/** Sweeps unreferenced encrypted card spec files and stale temp files left by crashes or cascaded chat deletions. */
+export function sweepOrphanChannelCards(store: Store, now = Date.now(), graceMs = 3600_000): { count: number; bytes: number; failed: number } {
+  const result = { count: 0, bytes: 0, failed: 0 };
+  const root = resolve(store.channelCardsDir);
+  if (!existsSync(root)) return result;
+  let shards;
+  try { shards = readdirSync(root, { withFileTypes: true }); }
+  catch (error) { result.failed++; console.error('[channel-cards] orphan sweep failed reading root:', error); return result; }
+  const cutoff = now - graceMs;
+  for (const shard of shards) {
+    if (!shard.isDirectory() || !/^[a-zA-Z0-9_-]{2}$/.test(shard.name)) continue;
+    const shardDir = join(root, shard.name);
+    let entries;
+    try { entries = readdirSync(shardDir, { withFileTypes: true }); }
+    catch (error) { result.failed++; console.error('[channel-cards] orphan sweep failed reading shard ' + shard.name + ':', error); continue; }
+    for (const entry of entries) {
+      const path = join(shardDir, entry.name);
+      const encMatch = /^([a-zA-Z0-9_-]{2,120})\.enc$/.exec(entry.name);
+      const isTmp = /^[a-zA-Z0-9_-]{2,120}\.enc\.[a-f0-9]{12}\.tmp$/.test(entry.name);
+      if (!encMatch && !isTmp) continue;
+      let st;
+      try { st = lstatSync(path); } catch (error) { result.failed++; console.error('[channel-cards] orphan sweep stat failed:', error); continue; }
+      if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+      if (encMatch && store.get('SELECT 1 FROM channel_interactive_cards WHERE id=?', encMatch[1]!)) continue;
+      try { rmSync(path, { force: true }); result.count++; result.bytes += st.size; }
+      catch (error) { result.failed++; console.error('[channel-cards] orphan sweep remove failed:', error); }
+    }
+    try { rmdirSync(shardDir); } catch { /* Non-empty shard stays. */ }
+  }
+  return result;
+}
+
 export class ChannelInteractiveCards {
   constructor(private readonly store: Store) {}
   create(input: {
@@ -1581,13 +1699,25 @@ export class ChannelInteractiveCards {
   }): { id: string; rendered: Json; summary: string } {
     const id = randomId(), now = input.now ?? Date.now();
     const { card, summary } = renderFeishuCard(input.spec, input.state, id, { footerNote: input.footer_note, consoleUrl: input.console_url });
-    this.store.run(
-      `INSERT INTO channel_interactive_cards(id,connector_id,chat_id,chat_type,owner_kind,owner_id,fence,spec,state,revision,expires_at,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)`,
-      id, input.connector_id, input.chat_id, input.chat_type, input.owner_kind, input.owner_id, input.fence,
-      this.store.secrets.seal({ spec: input.spec, footer_note: input.footer_note, console_url: input.console_url }, 'channel-interactive-card:' + id),
-      JSON.stringify(input.state), now + feishuCardTtlMs, now, now,
-    );
+    // Write and fdatasync the immutable sealed spec file before committing the lightweight SQLite row so DB rows
+    // never point to missing files and subsequent state updates never rewrite large specs inside SQLite/WAL.
+    writeEncryptedCardSpec(this.store, id, {
+      spec: input.spec as unknown as Json,
+      ...(input.footer_note !== undefined ? { footer_note: input.footer_note } : {}),
+      ...(input.console_url !== undefined ? { console_url: input.console_url } : {}),
+    });
+    try {
+      this.store.run(
+        `INSERT INTO channel_interactive_cards(id,connector_id,chat_id,chat_type,owner_kind,owner_id,fence,spec,state,revision,expires_at,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)`,
+        id, input.connector_id, input.chat_id, input.chat_type, input.owner_kind, input.owner_id, input.fence,
+        cardSpecFileMarker,
+        JSON.stringify(input.state), now + feishuCardTtlMs, now, now,
+      );
+    } catch (error) {
+      try { removeCardSpecFile(this.store, id); } catch { /* Best-effort cleanup of uncommitted file. */ }
+      throw error;
+    }
     return { id, rendered: card, summary };
   }
   attachMessage(id: string, remoteMessageId: string, outboxId?: string): void {
@@ -1598,6 +1728,12 @@ export class ChannelInteractiveCards {
     return this.store.get('SELECT * FROM channel_interactive_cards WHERE id=? AND connector_id=?', id, connectorId);
   }
   openSpec(row: Row): { spec: SanitizedCardSpec; footer_note?: string; console_url?: string } {
+    if (String(row.spec) === cardSpecFileMarker) {
+      const loaded = readEncryptedCardSpec(this.store, String(row.id));
+      if (!loaded) return fail(409, 'channel_card_unavailable');
+      return loaded;
+    }
+    // Backward-compatible fallback for pre-upgrade rows whose sealed spec still lives inline in SQLite.
     return this.store.secrets.open(row.spec, 'channel-interactive-card:' + row.id) as unknown as { spec: SanitizedCardSpec; footer_note?: string; console_url?: string };
   }
   saveState(id: string, expectedRevision: number, state: InteractiveCardState): number | null {
@@ -1606,7 +1742,24 @@ export class ChannelInteractiveCards {
       JSON.stringify(state), next, Date.now(), id, expectedRevision).changes;
     return changed ? next : null;
   }
-  prune(now = Date.now()): void {
-    this.store.run('DELETE FROM channel_interactive_cards WHERE expires_at<?', now - 7 * 24 * 3600_000);
+  prune(now = Date.now()): { count: number; files: number; bytes: number; failed: number } {
+    const cutoff = now - 7 * 24 * 3600_000;
+    const result = { count: 0, files: 0, bytes: 0, failed: 0 };
+    const rows = this.store.all('SELECT id, spec FROM channel_interactive_cards WHERE expires_at<?', cutoff);
+    if (!rows.length) return result;
+    const fileIds = rows.filter(r => String(r.spec) === cardSpecFileMarker).map(r => String(r.id));
+    result.count = rows.length;
+    this.store.transaction(() => {
+      this.store.run('DELETE FROM channel_interactive_cards WHERE expires_at<?', cutoff);
+      if (fileIds.length) {
+        this.store.afterCommit(() => {
+          const removed = removeCardSpecFiles(this.store, fileIds);
+          result.files += removed.removed;
+          result.bytes += removed.bytes;
+          result.failed += removed.failed;
+        });
+      }
+    });
+    return result;
   }
 }
