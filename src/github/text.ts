@@ -77,11 +77,23 @@ const words = {
   zh: { review: (n: number, at: string, sha: string) => `第 ${n} 次检视，更新于 ${at}，检视提交 ${sha}`, reply: (actor: string, url: string, what: Prompted) => what === 'label' ? `；回应 @${actor} 加的标签` : `；回应 @${actor} 的${link({ comment: '评论', edit: '修改', review: '检视', review_comment: '行内评论' }[what], url)}`,
     alert: (n: number, items: string) => `需要人工处理 ${n} 项：${items}。汇总见文末。`, heading: (n: number) => `需要人工处理（${n} 项）`, inline: '行内意见', mark: '需要人工处理',
     resolved: (n: number, items: string) => `已关闭 ${n} 条后续提交已修复的行内意见：${items}。`, open: (n: number, items: string) => `之前的行内意见仍未解决 ${n} 条：${items}。`, join: '；', list: '、',
-    behavior: (files: string[]) => `这些文件改变了 bot 的行为，需要维护者决定是否接受：${files.join('、')}` },
+    behavior: (files: string[]) => `这些文件改变了 bot 的行为，需要维护者决定是否接受：${files.join('、')}`,
+    conclusions: {
+      ready_for_development: '**自动开发状态**：可开发（问题清晰，条件满足时将进入自动开发）',
+      needs_information: '**自动开发状态**：暂不可开发（需补充信息）',
+      human_decision_required: '**自动开发状态**：暂不可开发（需人工决定）',
+      no_code_change: '**自动开发状态**：无需改代码',
+    } as Record<string, string> },
   en: { review: (n: number, at: string, sha: string) => `Review ${n}, updated ${at}, reviewed commit ${sha}`, reply: (actor: string, url: string, what: Prompted) => what === 'label' ? `; responding to the label @${actor} added` : `; responding to @${actor}'s ${link({ comment: 'comment', edit: 'edit', review: 'review', review_comment: 'inline comment' }[what], url)}`,
     alert: (n: number, items: string) => `Needs a person (${n}): ${items}. Summary at the end.`, heading: (n: number) => `Needs a person (${n})`, inline: 'inline comment', mark: 'Needs a person',
     resolved: (n: number, items: string) => `Resolved ${n} inline comment(s) fixed by later commits: ${items}.`, open: (n: number, items: string) => `Still open from earlier reviews (${n}): ${items}.`, join: '; ', list: ', ',
-    behavior: (files: string[]) => `These files change the bot's behavior; a maintainer decides whether to accept them: ${files.join(', ')}` },
+    behavior: (files: string[]) => `These files change the bot's behavior; a maintainer decides whether to accept them: ${files.join(', ')}`,
+    conclusions: {
+      ready_for_development: '**Auto-development status**: Ready for development',
+      needs_information: '**Auto-development status**: Not ready — needs more information',
+      human_decision_required: '**Auto-development status**: Not ready — human decision required',
+      no_code_change: '**Auto-development status**: No code change needed',
+    } as Record<string, string> },
 };
 // One line of a finding for the lists: the model's human_action, else the first line of the finding. Heading and quote
 // markers at the start and bold or italic stars go. Code spans and underscores stay, so names such as `total_value` and
@@ -112,9 +124,11 @@ export const markHuman = (language: 'zh' | 'en', finding: any) => finding.requir
 // they are seen on opening the comment and found again at its end. A comment that later reviews edit says which review
 // it shows and, when a person's comment asked for it, whom it answers.
 export function summaryComment(o: { language: 'zh' | 'en', review?: { count: number, at: string, sha: string, actor?: string | null, url?: string | null, what?: Prompted },
-  overview: string, discussion: string[], coverage: string, human: HumanItem[], resolved: Place[], open?: Place[] }): string {
+  conclusion?: string | null, overview: string, discussion: string[], coverage: string, human: HumanItem[], resolved: Place[], open?: Place[] }): string {
   const w = words[o.language], parts: string[] = [];
   if (o.review && o.review.count > 1) parts.push(`*${w.review(o.review.count, o.review.at, o.review.sha.slice(0, 7))}${o.review.actor ? w.reply(o.review.actor, o.review.url || '', o.review.what || 'comment') : ''}*`);
+  const conclusionLine = o.conclusion && Object.hasOwn(w.conclusions, o.conclusion) ? w.conclusions[o.conclusion] : '';
+  if (conclusionLine) parts.push(conclusionLine);
   // Items run together in one sentence there, so each loses its own closing punctuation.
   const brief = (text: string) => line(text, 120).replace(/[。．.；;，,、:：\s]+$/u, '');
   if (o.human.length) parts.push(`> [!IMPORTANT]\n> ${w.alert(o.human.length, o.human.map(item => brief(item.text)).join(w.join))}`);

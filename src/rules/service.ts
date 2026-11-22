@@ -143,18 +143,20 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   return { files: rows, computer: consoleComputer, computer_sources: computerSources, review_label: labels.review_label, development_label: labels.development_label,
     retired_files: Object.keys(files).filter(retiredPath).sort() };
 }
-// The bot's review label (empty: none), the development label automatic development waits for (#935) and the label the
-// bot keeps on an Issue while it develops it (#1047; empty: none), as project settings. A project without its own keeps the
-// built-in names; a project saved before the developing label existed has NULL there and gets the built-in one.
-export interface Labels { review_label: string; development_label: string; developing_label: string }
-export const defaultDevelopmentLabel = 'bot-develop', defaultDevelopingLabel = 'bot-developing';
-export const defaultLabels: Labels = { review_label: 'bot-reviewed', development_label: defaultDevelopmentLabel, developing_label: defaultDevelopingLabel };
-const labelKeys = ['review_label', 'development_label', 'developing_label'] as const;
+// The bot's review label (empty: none), the development label automatic development waits for (#935), the label the
+// bot keeps on an Issue while it develops it (#1047; empty: none), and the label it puts on an Issue that cannot be
+// developed automatically without human input or decision (#1215; empty: none), as project settings. A project without
+// its own keeps the built-in names; a project saved before a label column existed has NULL there and gets the built-in one.
+export interface Labels { review_label: string; development_label: string; developing_label: string; needs_human_label: string }
+export const defaultDevelopmentLabel = 'bot-develop', defaultDevelopingLabel = 'bot-developing', defaultNeedsHumanLabel = 'bot-needs-human';
+export const defaultLabels: Labels = { review_label: 'bot-reviewed', development_label: defaultDevelopmentLabel, developing_label: defaultDevelopingLabel, needs_human_label: defaultNeedsHumanLabel };
+const labelKeys = ['review_label', 'development_label', 'developing_label', 'needs_human_label'] as const;
 export function projectLabels(store: Store, repositoryId: string): Labels {
   if (!store.hasTable('project_labels')) return { ...defaultLabels };
-  const row = store.get('SELECT review_label,development_label,developing_label FROM project_labels WHERE repository_id=?', repositoryId);
+  const row = store.get('SELECT review_label,development_label,developing_label,needs_human_label FROM project_labels WHERE repository_id=?', repositoryId);
   return row ? { review_label: String(row.review_label), development_label: String(row.development_label) || defaultDevelopmentLabel,
-    developing_label: row.developing_label == null ? defaultDevelopingLabel : String(row.developing_label) } : { ...defaultLabels };
+    developing_label: row.developing_label == null ? defaultDevelopingLabel : String(row.developing_label),
+    needs_human_label: row.needs_human_label == null ? defaultNeedsHumanLabel : String(row.needs_human_label) } : { ...defaultLabels };
 }
 /** A label as GitHub takes it: at most 50 characters, no surrounding space or control characters. Only the development label must be set. */
 export function validLabel(value: unknown, key: keyof Labels): string {
@@ -164,8 +166,9 @@ export function validLabel(value: unknown, key: keyof Labels): string {
 export function saveLabels(store: Store, repositoryId: string, change: Partial<Labels>): Labels {
   const next = { ...projectLabels(store, repositoryId), ...Object.fromEntries(Object.entries(change).filter(([, v]) => v !== undefined)) } as Labels;
   for (const key of labelKeys) validLabel(next[key], key);
-  store.run(`INSERT INTO project_labels(repository_id,review_label,development_label,developing_label) VALUES(?,?,?,?) ON CONFLICT(repository_id)
-    DO UPDATE SET review_label=excluded.review_label,development_label=excluded.development_label,developing_label=excluded.developing_label`, repositoryId, next.review_label, next.development_label, next.developing_label);
+  store.run(`INSERT INTO project_labels(repository_id,review_label,development_label,developing_label,needs_human_label) VALUES(?,?,?,?,?) ON CONFLICT(repository_id)
+    DO UPDATE SET review_label=excluded.review_label,development_label=excluded.development_label,developing_label=excluded.developing_label,needs_human_label=excluded.needs_human_label`,
+    repositoryId, next.review_label, next.development_label, next.developing_label, next.needs_human_label);
   return next;
 }
 // The first `key: value` line of a rule text; a JSON string keeps the exact characters. The value ends with its line:
@@ -185,10 +188,14 @@ export function developmentLabel(store: Store, repositoryId: string) {
 export function developingLabel(store: Store, repositoryId: string) {
   return projectLabels(store, repositoryId).developing_label;
 }
-/** The bot's own review, development and developing labels: no agent chooses them for a pull request (#845) or an Issue. */
+/** The label an Issue carries when the bot cannot develop it automatically and needs human input or decision (#1215); empty when disabled. */
+export function needsHumanLabel(store: Store, repositoryId: string) {
+  return projectLabels(store, repositoryId).needs_human_label;
+}
+/** The bot's own review, development, developing and needs-human labels: no agent chooses them for a pull request (#845) or an Issue. */
 export function ownLabels(store: Store, repositoryId: string): string[] {
   const labels = projectLabels(store, repositoryId);
-  return [labels.review_label, labels.development_label, labels.developing_label].filter(Boolean);
+  return [labels.review_label, labels.development_label, labels.developing_label, labels.needs_human_label].filter(Boolean);
 }
 export const rulesUpdateRemoved = '规则文件和它们的控制台覆盖已不再使用：检视、开发和标签的规则改在 Manager 提示词对应的章节（PUT /api/repositories/:id/manager，管理命令 manager.update）和角色配置（管理命令 roles.update）里修改，标签名在项目设置里修改。';
 /**
@@ -215,8 +222,10 @@ export class RuleService {
     if (!store.all('PRAGMA table_info(policies)').some(r => r.name === 'rule_overrides')) store.db.exec("ALTER TABLE policies ADD COLUMN rule_overrides TEXT NOT NULL DEFAULT '{}'");
     store.db.exec('CREATE TABLE IF NOT EXISTS repository_rule_sources(repository_id TEXT PRIMARY KEY,sha TEXT NOT NULL,files TEXT NOT NULL,updated_at TEXT NOT NULL)');
     store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');
-    store.db.exec('CREATE TABLE IF NOT EXISTS project_labels(repository_id TEXT PRIMARY KEY,review_label TEXT NOT NULL,development_label TEXT NOT NULL,developing_label TEXT)');
-    if (!store.all('PRAGMA table_info(project_labels)').some(r => r.name === 'developing_label')) store.db.exec('ALTER TABLE project_labels ADD COLUMN developing_label TEXT');
+    store.db.exec('CREATE TABLE IF NOT EXISTS project_labels(repository_id TEXT PRIMARY KEY,review_label TEXT NOT NULL,development_label TEXT NOT NULL,developing_label TEXT,needs_human_label TEXT)');
+    const labelCols = new Set(store.all('PRAGMA table_info(project_labels)').map(r => String(r.name)));
+    if (!labelCols.has('developing_label')) store.db.exec('ALTER TABLE project_labels ADD COLUMN developing_label TEXT');
+    if (!labelCols.has('needs_human_label')) store.db.exec('ALTER TABLE project_labels ADD COLUMN needs_human_label TEXT');
     // Review guidance and the review label used to be policy fields that fed the console layer of the rule files. Move
     // them into that layer once, before the .bot/ import below takes the label from it; existing overrides win as before.
     store.transaction(() => {

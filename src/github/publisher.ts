@@ -147,7 +147,8 @@ export class Publisher {
     const resolved=await this.resolveFixed((result.resolved_comments||[]).map(Number).filter((id:number)=>!still.has(id)).map((id:number)=>earlier.get(id)).filter(Boolean),result.reviewed_sha,objectNumber);
     // Every review publishes one summary discussion comment, even when all findings are inline; later reviews of the same
     // Issue or PR edit it.
-    const count=this.earlierReviews(objectNumber),body=summaryComment({language,overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),
+    const count=this.earlierReviews(objectNumber),body=summaryComment({language,conclusion:!pr&&typeof result.conclusion==='string'?result.conclusion:null,
+      overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),
       review:{count:count+1,at:new Date().toISOString().replace('T',' ').slice(0,16)+' UTC',sha:result.reviewed_sha,actor:options.trigger?.actor,url:options.trigger?.url,what:options.trigger?.what}});
     outputs.push({...await this.summary(body,objectNumber),...(resolved.length?{resolved_threads:resolved.map(r=>r.id)}:{})});
     await this.validate();return outputs;
@@ -228,6 +229,23 @@ export class Publisher {
     const path=this.github.path(`/issues/${objectNumber}/labels`),payload={labels:names},wanted=names.map(name=>name.toLowerCase());
     return this.effect('label','label',payload,()=>this.github.request('POST',path,payload),async()=>{
       const labels=await this.github.pages(path),have=new Set(labels.map(l=>String(l.name).toLowerCase()));return wanted.every(name=>have.has(name))?labels:null;
+    },true);
+  }
+  async ensureLabel(label:{name:string;color:string;description:string}){
+    if(!await this.github.request('GET',this.github.path('/labels/'+encodeURIComponent(label.name)),undefined,true)){
+      await this.github.request('POST',this.github.path('/labels'),label).catch(error=>{
+        if(!(error instanceof TaskError&&error.code==='github_http_422'))throw error;
+      });
+    }
+  }
+  async removeLabel(name:string,objectNumber=this.resolveTarget().number){
+    const path=this.github.path(`/issues/${objectNumber}/labels/${encodeURIComponent(name)}`);
+    return this.effect('remove-label:'+name.toLowerCase(),'label',{remove:name},async()=>{
+      await this.github.request('DELETE',path,undefined,true);
+      return {removed:name};
+    },async()=>{
+      const labels=await this.github.pages(this.github.path(`/issues/${objectNumber}/labels`));
+      return labels.some(l=>String(l.name).toLowerCase()===name.toLowerCase())?null:{removed:name};
     },true);
   }
   async branch(candidate:any){

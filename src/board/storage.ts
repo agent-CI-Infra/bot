@@ -1,9 +1,11 @@
 import type { Store } from '../storage/database.js';
 import { commitChecksStorage } from '../tasks/external-links.js';
+import { grantStorage } from '../tasks/grants.js';
 
 // Keep a small object projection at ingestion time; board reads never load task inputs or delivery bodies.
 export function boardStorage(store: Store): void {
   commitChecksStorage(store);
+  grantStorage(store);
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS board_objects(
       repository_id TEXT NOT NULL REFERENCES repositories(id), object_type TEXT NOT NULL CHECK(object_type IN ('issue','pr')),
@@ -14,6 +16,23 @@ export function boardStorage(store: Store): void {
     CREATE INDEX IF NOT EXISTS board_repo_recent ON board_objects(repository_id,last_seen DESC,object_type,object_number);
     CREATE INDEX IF NOT EXISTS board_type_recent ON board_objects(object_type,last_seen DESC);
     CREATE INDEX IF NOT EXISTS board_number_recent ON board_objects(object_number,last_seen DESC);
+    CREATE TABLE IF NOT EXISTS board_issue_tasks(
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      object_number INTEGER NOT NULL CHECK(object_number>0),
+      role_kind TEXT NOT NULL CHECK(role_kind IN ('review','development')),
+      status TEXT NOT NULL,
+      error_code TEXT,
+      conclusion TEXT,
+      recommendation TEXT,
+      human_action TEXT,
+      pr_number INTEGER,
+      pr_url TEXT,
+      no_changes INTEGER NOT NULL DEFAULT 0,
+      summary TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS board_issue_tasks_repo_num ON board_issue_tasks(repository_id,object_number,role_kind,updated_at DESC,created_at DESC);
     CREATE INDEX IF NOT EXISTS board_task_object ON tasks(repository_id,object_number,kind,created_at DESC);
     CREATE INDEX IF NOT EXISTS board_task_latest ON tasks(repository_id,object_number,kind,coalesce(nullif(updated_at,''),created_at) DESC,created_at DESC);
     -- Everything the board needs from a task (see latestTasks in api.ts), so card lists never read a tasks row.
@@ -46,7 +65,8 @@ export function boardStorage(store: Store): void {
     const body = `CASE WHEN json_valid(${json}) THEN ${json} ELSE '{}' END`;
     const obj = arrayPath ? `CASE WHEN j.type='object' THEN j.value ELSE '{}' END` : `CASE WHEN json_type(${body},'$.pull_request')='object' THEN json_extract(${body},'$.pull_request')
       WHEN json_type(${body},'$.issue')='object' THEN json_extract(${body},'$.issue') ELSE '{}' END`;
-    const type = arrayPath ? "'pr'" : isTask ? `CASE WHEN ${source}.kind IN ('review.pr','development.pr') THEN 'pr' ELSE 'issue' END`
+    const type = arrayPath ? "'pr'" : isTask
+      ? `CASE WHEN ${source}.kind IN ('review.pr','development.pr') THEN 'pr' WHEN ${source}.kind='task.request' AND json_extract(${body},'$.target.type') IN ('issue','pr') THEN json_extract(${body},'$.target.type') ELSE 'issue' END`
       : `CASE WHEN json_type(${body},'$.pull_request')='object' OR json_type(${body},'$.issue.pull_request')='object' THEN 'pr' ELSE 'issue' END`;
     const number = isTask ? `${source}.object_number` : arrayPath ? `json_extract(${obj},'$.number')` : `coalesce(json_extract(${obj},'$.number'),CASE WHEN ${obj}<>'{}' THEN json_extract(${body},'$.number') END)`;
     const time = isTask ? `${source}.created_at` : `${source}.received_at`;
@@ -54,7 +74,7 @@ export function boardStorage(store: Store): void {
     const knownTitle = `CASE WHEN typeof(${title})='text' AND length(trim(${title}))>0 THEN substr(${title},1,1000) END`;
     const knownState = `CASE WHEN json_extract(${obj},'$.state') IN ('open','closed') THEN json_extract(${obj},'$.state') END`;
     const knownDraft = `CASE WHEN json_type(${obj},'$.draft') IN ('true','false') THEN json_extract(${obj},'$.draft') END`;
-    const valid = isTask ? `${source}.kind IN ('review.issue','review.pr','development.issue','development.pr')`
+    const valid = isTask ? `(${source}.kind IN ('review.issue','review.pr','development.issue','development.pr') OR (${source}.kind='task.request' AND json_extract(${body},'$.target.type') IN ('issue','pr')))`
       : `${source}.status='accepted' AND ${source}.duplicate=0 AND ${source}.body_complete=1`;
     return `${insert} SELECT ${source}.repository_id,${type},${number},
       ${knownTitle},${knownState},${knownDraft},
@@ -71,8 +91,53 @@ export function boardStorage(store: Store): void {
   // A published PR is already known through its source task, even before its webhook arrives.
   const published = (where: string) => `${insert} SELECT s.repository_id,'pr',json_extract(s.result,'$.pr_number'),NULL,NULL,NULL,
     '','','',coalesce(nullif(s.updated_at,''),s.created_at) FROM tasks s
-    WHERE ${where} AND s.kind='development.issue' AND json_valid(s.result)
+    WHERE ${where} AND (s.kind='development.issue' OR (s.kind='task.request' AND json_valid(s.input) AND json_extract(s.input,'$.target.type')='issue')) AND json_valid(s.result)
     AND typeof(json_extract(s.result,'$.pr_number'))='integer' AND json_extract(s.result,'$.pr_number') BETWEEN 1 AND 9007199254740991 ${upsert};`;
+  const issueRoleExpr = `CASE
+      WHEN s.kind='development.issue' THEN 'development'
+      WHEN s.kind='review.issue' THEN 'review'
+      WHEN s.kind='task.request' AND json_valid(s.input) AND json_extract(s.input,'$.target.type')='issue' THEN
+        CASE
+          WHEN EXISTS(SELECT 1 FROM task_write_grants g WHERE g.task_id=s.id AND json_valid(g.writes) AND EXISTS(SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))
+            OR (json_valid(s.result) AND (typeof(json_extract(s.result,'$.pr_number'))='integer' OR json_extract(s.result,'$.delivery')='pull_request')) THEN 'development'
+          WHEN EXISTS(SELECT 1 FROM task_write_grants g WHERE g.task_id=s.id AND json_valid(g.writes) AND EXISTS(SELECT 1 FROM json_each(g.writes) WHERE value='review'))
+            OR (json_valid(s.result) AND (json_type(s.result,'$.review_delivery')='object' OR typeof(json_extract(s.result,'$.conclusion'))='text'))
+            OR json_extract(s.input,'$.executor_role')='reviewer' THEN 'review'
+          WHEN json_extract(s.input,'$.executor_role')='dev' THEN 'development'
+          ELSE NULL
+        END
+      ELSE NULL END`;
+  const issueTaskProjection = (where: string) => `INSERT INTO board_issue_tasks(
+      task_id,repository_id,object_number,role_kind,status,error_code,conclusion,recommendation,human_action,pr_number,pr_url,no_changes,summary,created_at,updated_at)
+    SELECT s.id,s.repository_id,s.object_number,(${issueRoleExpr}),s.status,s.error_code,
+      CASE WHEN json_valid(s.result) AND typeof(coalesce(json_extract(s.result,'$.conclusion'),json_extract(s.result,'$.review_delivery.conclusion')))='text'
+        THEN substr(coalesce(json_extract(s.result,'$.conclusion'),json_extract(s.result,'$.review_delivery.conclusion')),1,64) END,
+      CASE WHEN json_valid(s.result) AND typeof(coalesce(json_extract(s.result,'$.recommendation'),json_extract(s.result,'$.review_delivery.recommendation')))='text'
+        THEN substr(coalesce(json_extract(s.result,'$.recommendation'),json_extract(s.result,'$.review_delivery.recommendation')),1,500) END,
+      CASE WHEN json_valid(s.result) THEN substr((
+        SELECT coalesce(nullif(trim(json_extract(f.value,'$.human_action')),''),trim(json_extract(f.value,'$.body')))
+        FROM json_each(CASE
+          WHEN json_type(s.result,'$.findings')='array' THEN json_extract(s.result,'$.findings')
+          WHEN json_type(s.result,'$.review_delivery.findings')='array' THEN json_extract(s.result,'$.review_delivery.findings')
+          ELSE '[]' END) f
+        WHERE json_type(f.value)='object' AND json_extract(f.value,'$.requires_human_decision')=1
+        LIMIT 1),1,500) END,
+      CASE WHEN json_valid(s.result) AND typeof(json_extract(s.result,'$.pr_number'))='integer' AND json_extract(s.result,'$.pr_number') BETWEEN 1 AND 9007199254740991
+        THEN json_extract(s.result,'$.pr_number') END,
+      CASE WHEN json_valid(s.result) AND typeof(json_extract(s.result,'$.pr_url'))='text'
+        THEN substr(json_extract(s.result,'$.pr_url'),1,500) END,
+      CASE WHEN json_valid(s.result) AND json_extract(s.result,'$.status')='no_changes' THEN 1 ELSE 0 END,
+      CASE WHEN typeof(s.summary)='text' THEN substr(s.summary,1,300) END,
+      s.created_at,coalesce(nullif(s.updated_at,''),s.created_at)
+    FROM tasks s
+    WHERE ${where} AND s.repository_id IS NOT NULL
+      AND typeof(s.object_number)='integer' AND s.object_number BETWEEN 1 AND 9007199254740991
+      AND (${issueRoleExpr}) IS NOT NULL
+    ON CONFLICT(task_id) DO UPDATE SET
+      repository_id=excluded.repository_id,object_number=excluded.object_number,role_kind=excluded.role_kind,
+      status=excluded.status,error_code=excluded.error_code,conclusion=excluded.conclusion,
+      recommendation=excluded.recommendation,human_action=excluded.human_action,pr_number=excluded.pr_number,
+      pr_url=excluded.pr_url,no_changes=excluded.no_changes,summary=excluded.summary,updated_at=excluded.updated_at;`;
   // Triggers also cover executor updates, retries and cancellations without changing execution policy.
   // On tasks, status/lease/phase updates only advance last_seen; input and result JSON are parsed only when those columns change.
   for (const operation of ['INSERT','UPDATE'] as const) {
@@ -81,12 +146,16 @@ export function boardStorage(store: Store): void {
   }
   // Another worker can open this database concurrently; it must never observe half-replaced task triggers.
   store.transaction(()=>store.db.exec(`
-    CREATE TRIGGER IF NOT EXISTS board_tasks_insert AFTER INSERT ON tasks BEGIN
-      ${projection('tasks', 's', 's.rowid=NEW.rowid')} ${published('s.rowid=NEW.rowid')} END;
+    DROP TRIGGER IF EXISTS board_tasks_insert;
+    CREATE TRIGGER board_tasks_insert AFTER INSERT ON tasks BEGIN
+      ${projection('tasks', 's', 's.rowid=NEW.rowid')} ${published('s.rowid=NEW.rowid')} ${issueTaskProjection('s.rowid=NEW.rowid')} END;
     DROP TRIGGER IF EXISTS board_tasks_update;
     DROP TRIGGER IF EXISTS board_tasks_update_input;
     DROP TRIGGER IF EXISTS board_tasks_update_seen;
     DROP TRIGGER IF EXISTS board_tasks_update_published;
+    DROP TRIGGER IF EXISTS board_issue_tasks_update;
+    DROP TRIGGER IF EXISTS board_issue_tasks_grants_insert;
+    DROP TRIGGER IF EXISTS board_issue_tasks_grants_update;
     CREATE TRIGGER board_tasks_update_input AFTER UPDATE OF repository_id, kind, object_number, input, created_at ON tasks
     WHEN NEW.repository_id IS NOT OLD.repository_id OR NEW.kind IS NOT OLD.kind OR NEW.object_number IS NOT OLD.object_number
       OR NEW.input IS NOT OLD.input OR NEW.created_at IS NOT OLD.created_at
@@ -95,19 +164,35 @@ export function boardStorage(store: Store): void {
     END;
     CREATE TRIGGER board_tasks_update_seen AFTER UPDATE OF updated_at ON tasks
     WHEN NEW.updated_at IS NOT OLD.updated_at
-      AND NEW.kind IN ('review.issue','review.pr','development.issue','development.pr')
+      AND (NEW.kind IN ('review.issue','review.pr','development.issue','development.pr')
+        OR (NEW.kind='task.request' AND json_valid(NEW.input) AND json_extract(NEW.input,'$.target.type') IN ('issue','pr')))
       AND NEW.repository_id IS NOT NULL
       AND typeof(NEW.object_number)='integer' AND NEW.object_number BETWEEN 1 AND 9007199254740991
     BEGIN
-      ${insert} VALUES(NEW.repository_id, CASE WHEN NEW.kind IN ('review.pr','development.pr') THEN 'pr' ELSE 'issue' END, NEW.object_number,
-        NULL, NULL, NULL, '', '', '', coalesce(nullif(NEW.updated_at,''), NEW.created_at))
+      ${insert} VALUES(NEW.repository_id,
+        CASE WHEN NEW.kind IN ('review.pr','development.pr') THEN 'pr' WHEN NEW.kind='task.request' THEN json_extract(NEW.input,'$.target.type') ELSE 'issue' END,
+        NEW.object_number, NULL, NULL, NULL, '', '', '', coalesce(nullif(NEW.updated_at,''), NEW.created_at))
       ON CONFLICT(repository_id,object_type,object_number) DO UPDATE SET last_seen=max(board_objects.last_seen,excluded.last_seen);
     END;
     CREATE TRIGGER board_tasks_update_published AFTER UPDATE OF repository_id, kind, result, updated_at, created_at ON tasks
-    WHEN NEW.kind='development.issue' AND NEW.result IS NOT NULL
+    WHEN (NEW.kind='development.issue' OR (NEW.kind='task.request' AND json_valid(NEW.input) AND json_extract(NEW.input,'$.target.type')='issue'))
+      AND NEW.result IS NOT NULL
       AND (NEW.result IS NOT OLD.result OR NEW.updated_at IS NOT OLD.updated_at OR NEW.kind IS NOT OLD.kind OR NEW.repository_id IS NOT OLD.repository_id OR NEW.created_at IS NOT OLD.created_at)
     BEGIN
       ${published('s.rowid=NEW.rowid')}
+    END;
+    CREATE TRIGGER board_issue_tasks_update AFTER UPDATE OF repository_id, kind, status, error_code, object_number, input, result, summary, updated_at, created_at ON tasks
+    WHEN NEW.repository_id IS NOT OLD.repository_id OR NEW.kind IS NOT OLD.kind OR NEW.status IS NOT OLD.status
+      OR NEW.error_code IS NOT OLD.error_code OR NEW.object_number IS NOT OLD.object_number OR NEW.input IS NOT OLD.input
+      OR NEW.result IS NOT OLD.result OR NEW.summary IS NOT OLD.summary OR NEW.updated_at IS NOT OLD.updated_at
+    BEGIN
+      ${issueTaskProjection('s.rowid=NEW.rowid')}
+    END;
+    CREATE TRIGGER board_issue_tasks_grants_insert AFTER INSERT ON task_write_grants BEGIN
+      ${issueTaskProjection('s.id=NEW.task_id')}
+    END;
+    CREATE TRIGGER board_issue_tasks_grants_update AFTER UPDATE OF writes ON task_write_grants WHEN NEW.writes IS NOT OLD.writes BEGIN
+      ${issueTaskProjection('s.id=NEW.task_id')}
     END;
   `));
   if (!store.get("SELECT 1 FROM settings WHERE key='board_projection_v1'")) {
@@ -126,6 +211,21 @@ export function boardStorage(store: Store): void {
         }
       }
       store.run("INSERT INTO settings VALUES('board_projection_v1','1')");
+    });
+  }
+  if (!store.get("SELECT 1 FROM settings WHERE key='board_issue_tasks_v1'")) {
+    store.transaction(() => {
+      let after = 0;
+      for (;;) {
+        const rows = store.all('SELECT rowid FROM tasks WHERE rowid>? ORDER BY rowid LIMIT 250', after);
+        if (!rows.length) break;
+        const end = Number(rows.at(-1)!.rowid);
+        store.db.exec(projection('tasks', 's', `s.rowid>${after} AND s.rowid<=${end}`));
+        store.db.exec(published(`s.rowid>${after} AND s.rowid<=${end}`));
+        store.db.exec(issueTaskProjection(`s.rowid>${after} AND s.rowid<=${end}`));
+        after = end;
+      }
+      store.run("INSERT INTO settings VALUES('board_issue_tasks_v1','1')");
     });
   }
 }

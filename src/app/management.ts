@@ -350,8 +350,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','base_branch',
         'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','role_concurrency','command_timeout_seconds','delivery_gates',
-        'review_label','development_label','developing_label','auto_merge_policy']);
-      for (const key of ['review_label', 'development_label', 'developing_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
+        'review_label','development_label','developing_label','needs_human_label','auto_merge_policy']);
+      for (const key of ['review_label', 'development_label', 'developing_label', 'needs_human_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
       if (body.auto_merge_policy !== undefined && !isAutoMergePolicy(body.auto_merge_policy)) fail(400, 'invalid_auto_merge_policy', 'auto_merge_policy');
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       const commandTimeout = body.command_timeout_seconds === undefined || body.command_timeout_seconds === null ? body.command_timeout_seconds
@@ -399,8 +399,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         }
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
         if (commandTimeout !== undefined) store.run('UPDATE policies SET command_timeout_seconds=? WHERE repository_id=?', commandTimeout as number | null, id);
-        if (body.review_label !== undefined || body.development_label !== undefined || body.developing_label !== undefined)
-          saveLabels(store, id, { review_label: body.review_label as string | undefined, development_label: body.development_label as string | undefined, developing_label: body.developing_label as string | undefined });
+        if (body.review_label !== undefined || body.development_label !== undefined || body.developing_label !== undefined || body.needs_human_label !== undefined)
+          saveLabels(store, id, { review_label: body.review_label as string | undefined, development_label: body.development_label as string | undefined, developing_label: body.developing_label as string | undefined, needs_human_label: body.needs_human_label as string | undefined });
         // A PATCH changes the limits it names and leaves every other role alone: the body is a delta, not the whole map.
         if (roleConcurrencyLimits !== undefined) store.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify({ ...roleConcurrency(store, id), ...roleConcurrencyLimits }), id);
         return { policy: policyView(store, store.get('SELECT * FROM policies WHERE repository_id=?', id), id)!, execution_available: true, role_concurrency_default: null, task_concurrency_default: defaultConcurrency(store) };

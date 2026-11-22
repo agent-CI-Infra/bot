@@ -274,6 +274,18 @@ test('a development PR body links its Issue once, also when the summary already 
   assert.match(implementationText(candidate('Closes #31'), 3).body, /^Closes #3$/m);
 });
 
+test('Issue review summaryComment renders localized auto-development status header when conclusion is provided (#1215)', () => {
+  const base = { overview: 'Summary.', discussion: [], coverage: 'Reviewed commit: x', resolved: [], human: [] };
+  assert.match(summaryComment({ ...base, language: 'zh', conclusion: 'ready_for_development' }), /^\*\*自动开发状态\*\*：可开发/);
+  assert.match(summaryComment({ ...base, language: 'zh', conclusion: 'needs_information' }), /^\*\*自动开发状态\*\*：暂不可开发（需补充信息）/);
+  assert.match(summaryComment({ ...base, language: 'zh', conclusion: 'human_decision_required' }), /^\*\*自动开发状态\*\*：暂不可开发（需人工决定）/);
+  assert.match(summaryComment({ ...base, language: 'zh', conclusion: 'no_code_change' }), /^\*\*自动开发状态\*\*：无需改代码/);
+  assert.match(summaryComment({ ...base, language: 'en', conclusion: 'needs_information' }), /^\*\*Auto-development status\*\*: Not ready — needs more information/);
+  assert.match(summaryComment({ ...base, language: 'en', conclusion: 'human_decision_required' }), /^\*\*Auto-development status\*\*: Not ready — human decision required/);
+  // Without conclusion (PR reviews), no status header is prepended.
+  assert.equal(summaryComment({ ...base, language: 'en' }).startsWith('Summary.'), true);
+});
+
 test('a direct software request never invents an Issue link or numbered title',()=>{
   const candidate={summary:'Deliver the scoped change.',implementation_goal:'Add the verified feature',validation:{source:'policy',command:'make test',exit_code:0},remote_sha:'a'.repeat(40)};
   for(const issue of [null,0,undefined]){

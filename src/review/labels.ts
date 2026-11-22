@@ -10,6 +10,20 @@ export function developingIssueLabel(name: string) {
   if (!name || name.toLowerCase() === developedLabel.name) return null;
   return { name, color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops' };
 }
+export function needsHumanIssueLabel(name: string) {
+  if (!name || name.toLowerCase() === developedLabel.name) return null;
+  return { name, color: 'd93f0b', description: 'The bot cannot develop this Issue automatically and needs human input or decision' };
+}
+/** Whether a published Issue review indicates the Issue needs human input or decision before automatic development (#1215). */
+export function reviewNeedsHuman(result: any): boolean {
+  const conclusion = typeof result?.conclusion === 'string' ? result.conclusion : '';
+  if (conclusion === 'needs_information' || conclusion === 'human_decision_required') return true;
+  return Array.isArray(result?.findings) && result.findings.some((f: any) => f?.requires_human_decision === true);
+}
+export function hasLabelName(labels: unknown, target: string): boolean {
+  const wanted = target.trim().toLowerCase();
+  return !!wanted && names(labels).some(name => name.toLowerCase() === wanted);
+}
 
 // Opt-in, veto, hold and gate labels are human or automation decisions.
 export const reservedLabel = (name: string) => /^(agent|pr|gate)\//i.test(name) || /^(blocker|priority\/critical)$/i.test(name);
