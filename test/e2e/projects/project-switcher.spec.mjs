@@ -166,7 +166,7 @@ test('mobile range bar stays visible on board, inbox and projects; drawer is sea
     await login(page, h, password);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
-      for (const hash of ['#/board', '#/projects/101/inbox', '#/projects/101/overview']) {
+      for (const hash of ['#/projects', '#/projects/101/inbox', '#/projects/101/overview']) {
         await page.goto(h.admin + '/' + hash);
         await expect(page.locator('#console-mobile-project')).toBeVisible();
         await expect(page.locator('#console-mobile-nav')).toBeVisible();

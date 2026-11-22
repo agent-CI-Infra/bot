@@ -31,7 +31,7 @@ test('#737 标题随路由更新：列表、控制台页、全局设置、项目
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page).toHaveTitle('项目' + zh);
     // A console page and a list page name themselves, not the page the reader came from.
-    for (const [hash, title] of [['#/inbox', '待处理'], ['#/board', '任务看板'], ['#/costs', '用量与成本'], ['#/settings/models', '全局设置']]) {
+    for (const [hash, title] of [['#/inbox', '待处理'], ['#/costs', '用量与成本'], ['#/settings/models', '全局设置']]) {
       await page.evaluate(address => { location.hash = address; }, hash);
       await expect(page).toHaveTitle(title + zh);
     }
@@ -51,8 +51,8 @@ test('#737 标题随路由更新：列表、控制台页、全局设置、项目
     await page.evaluate(() => { location.hash = '#/nonexistent'; });
     await expect(page.locator('#console-page [data-page-not-found="console"]')).toBeVisible();
     await expect(page).toHaveTitle('找不到页面' + zh);
-    await page.evaluate(() => { location.hash = '#/board'; });
-    await expect(page).toHaveTitle('任务看板' + zh);
+    await page.evaluate(() => { location.hash = '#/costs'; });
+    await expect(page).toHaveTitle('用量与成本' + zh);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
@@ -67,8 +67,8 @@ test('#737 英文界面下页面名与 404 前缀都是英文', async ({ page })
     await signIn(page, password, enLogin);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page).toHaveTitle('Projects' + en);
-    await page.evaluate(() => { location.hash = '#/board'; });
-    await expect(page).toHaveTitle('Task board' + en);
+    await page.evaluate(() => { location.hash = '#/costs'; });
+    await expect(page).toHaveTitle('Usage & costs' + en);
     await page.evaluate(() => { location.hash = '#/nonexistent'; });
     await expect(page).toHaveTitle('Page not found' + en);
     // Switching the interface language recomputes the title the route already set instead of leaving the old one.
@@ -99,8 +99,8 @@ test('#737 登录页的标题是界面名，切换语言也不冒充任何控制
     // Signing out ends the page the reader was on; the sign-in screen is back to the chrome name.
     await signIn(page, password, zhLogin);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
-    await page.evaluate(() => { location.hash = '#/board'; });
-    await expect(page).toHaveTitle('任务看板' + zh);
+    await page.evaluate(() => { location.hash = '#/costs'; });
+    await expect(page).toHaveTitle('用量与成本' + zh);
     await page.locator('#logout').click();
     await expect(page.locator('#access')).toBeVisible();
     await expect(page).toHaveTitle('launchpad 管理');
@@ -126,10 +126,10 @@ test('#737 真实的地址变化把焦点移到新页面标题，同地址重绘
     await expect(page.locator('#costs-panel')).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.activeElement?.id || null)).toBe('page-title');
     expect(await active()).toEqual({ id: 'page-title', tag: 'H1', text: '用量与成本' });
-    // The board hides its list toolbar, so the page has no visible heading to land on and the skip link's target gets it.
-    await page.locator('#tabs').getByRole('link', { name: '任务看板', exact: true }).click();
-    await expect(page.locator('#board-panel')).toBeVisible();
-    await expect.poll(() => page.evaluate(() => document.activeElement?.id || null)).toBe('main-content');
+    // Navigating to inbox moves focus to its heading.
+    await page.locator('#tabs').getByRole('link', { name: '待处理', exact: true }).click();
+    await expect(page.locator('.console-inbox')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.activeElement?.tagName || null)).toBe('H1');
     // A redraw of the same address (a poll, a locale refresh) must not move the focus a reader already set.
     await page.locator('#tabs').getByRole('link', { name: '项目', exact: true }).focus();
     await page.evaluate(() => route());
@@ -152,11 +152,11 @@ test('#737 390 宽度跟随手机底部导航切换页面也会把焦点交给�
     await page.goto(h.admin + '/#/projects');
     await signIn(page, password, zhLogin);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
-    // The phone navigates through its own list of destinations (#481); those links carry data-page, not data-tab.
-    await page.locator('#console-mobile-nav a[data-page="board"]').click();
-    await expect(page.locator('#board-panel')).toBeVisible();
-    await expect(page).toHaveTitle('任务看板' + zh);
-    await expect.poll(() => page.evaluate(() => document.activeElement?.id || null)).toBe('main-content');
+    // The phone navigates through its own list of destinations; those links carry data-page, not data-tab.
+    await page.locator('#console-mobile-nav a[data-page="inbox"]').click();
+    await expect(page.locator('.console-inbox')).toBeVisible();
+    await expect(page).toHaveTitle('待处理' + zh);
+    await expect.poll(() => page.evaluate(() => document.activeElement?.tagName || null)).toBe('H1');
     // A console page in the same list lands on its own heading rather than the skip-link target.
     await page.locator('#console-mobile-nav a[data-page="more"]').click();
     await expect(page.locator('#console-page h1')).toBeVisible();

@@ -1,7 +1,8 @@
-// Project workbench (#952, #1215): three focused views under #/projects/:id/overview —
+// Project workbench (#952, #1215, #1222): four focused views under #/projects/:id/overview —
 // 1. Default "角色视图" (Role View): live occupancy, configured capacity limits, running tasks and genuinely attributable queues per role.
 // 2. "任务视图" (Task List View): single-row task list with associated Issue/PR/Actions badges and inline Role Flow Diagram.
 // 3. "Issue 进展" (Issue Auto-Development View): per-Issue lifecycle status, linked PRs, why an Issue could not be developed, and expandable dispatch/task chain.
+// 4. "PR 进展" (Pull Request Progress View): per-PR review/revision/CI status, Bot PR & source Issue badges, and expandable dispatch/task chain.
 
 const workspaceTaskGroups = [
   ['all', '全部'],
@@ -36,6 +37,25 @@ const issueStatusMeta = {
   pending: ['待检视', ''],
 };
 
+const workspacePrGroups = [
+  ['all', '全部'],
+  ['needs_attention', '需人工处理'],
+  ['revising', '跟进修改中'],
+  ['reviewing', '检视中'],
+  ['reviewed', '已检视'],
+  ['draft', '草稿'],
+  ['pending', '待检视'],
+];
+
+const prStatusMeta = {
+  needs_attention: ['需人工处理', 'danger'],
+  revising: ['跟进修改中', 'info'],
+  reviewing: ['检视中', 'info'],
+  reviewed: ['已检视', 'success'],
+  draft: ['草稿', ''],
+  pending: ['待检视', ''],
+};
+
 const dispatchDecisionMeta = {
   create: ['创建任务', 'info'],
   continue: ['续接任务', 'info'],
@@ -53,8 +73,11 @@ function parseWorkbenchRoute(item) {
   if (!item || item === 'roles') return { view: 'roles', group: 'all', offset: 0 };
   if (item === 'tasks') return { view: 'tasks', group: 'all', offset: 0 };
   if (item === 'issues') return { view: 'issues', group: 'all', offset: 0 };
+  if (item === 'prs') return { view: 'prs', group: 'all', offset: 0 };
   const issueRoute = /^issues\.(all|pr_opened|developing|needs_human|needs_information|human_decision_required|blocked|skipped|pending)(?:\.(\d+))?$/.exec(item);
   if (issueRoute) return { view: 'issues', group: issueRoute[1], offset: Number(issueRoute[2] || 0) };
+  const prRoute = /^prs\.(all|needs_attention|revising|reviewing|reviewed|draft|pending)(?:\.(\d+))?$/.exec(item);
+  if (prRoute) return { view: 'prs', group: prRoute[1], offset: Number(prRoute[2] || 0) };
   const prefixed = /^tasks\.(all|active|queued|attention|completed)(?:\.(\d+))?$/.exec(item);
   if (prefixed) return { view: 'tasks', group: prefixed[1], offset: Number(prefixed[2] || 0) };
   const legacy = /^(all|active|queued|attention|completed)(?:\.(\d+))?$/.exec(item);
@@ -264,10 +287,11 @@ function renderWorkbenchTaskRow(row) {
   return item;
 }
 
-function renderIssueChainPanel(detail, repoId, issueNumber) {
+function renderIssueChainPanel(detail, repoId, objectNumber) {
   const panel = element('div', '', 'issue-chain-panel');
-  panel.dataset.issueChain = String(issueNumber);
-  const issue = detail.issue || {};
+  if (detail.pr) panel.dataset.prChain = String(objectNumber);
+  else panel.dataset.issueChain = String(objectNumber);
+  const issue = detail.issue || detail.pr || {};
   if (issue.review?.recommendation || issue.review?.human_action) {
     const summaryBox = element('div', '', 'issue-chain-block');
     summaryBox.append(element('h3', '检视结论与建议', 'issue-chain-heading'));
@@ -427,6 +451,86 @@ function renderWorkbenchIssueRow(item, { expanded, detail, loading, err, onToggl
   return row;
 }
 
+function renderWorkbenchPrRow(item, { expanded, detail, loading, err, onToggle }) {
+  const row = element('article', '', 'workbench-issue-row workbench-pr-row' + (expanded ? ' is-expanded' : ''));
+  row.dataset.prNumber = String(item.number);
+  row.dataset.prStatus = item.status;
+
+  // Col 1: PR number, title, GitHub link, Bot PR / source Issue / CI badges
+  const infoCol = element('div', '', 'issue-col issue-col-info');
+  const headLine = element('div', '', 'issue-title-line');
+  const numSpan = element('strong', `#${item.number}`, 'issue-num-tag');
+  const titleSpan = element('span', item.title || `PR #${item.number}`, 'issue-title-text');
+  titleSpan.title = item.title || `PR #${item.number}`;
+  headLine.append(numSpan, titleSpan);
+  if (item.url) {
+    const gh = link(item.url, '↗', 'issue-gh-link');
+    gh.setAttribute('aria-label', `在 GitHub 打开 PR #${item.number}`);
+    gh.title = '在 GitHub 打开';
+    headLine.append(gh);
+  }
+  infoCol.append(headLine);
+  const sub = element('div', '', 'issue-row-sub');
+  if (item.is_bot_pr) sub.append(badge('Bot PR', 'info'));
+  if (item.bot_pr?.source_issue_number) {
+    const srcText = `← Issue #${item.bot_pr.source_issue_number}`;
+    const srcNode = item.bot_pr.source_issue_url ? link(item.bot_pr.source_issue_url, srcText, 'issue-pr-link') : element('span', srcText, 'issue-pr-link');
+    sub.append(srcNode);
+  }
+  if (item.draft) sub.append(badge('草稿', ''));
+  if (item.github_state === 'closed') sub.append(badge('已关闭', ''));
+  if (item.checks && item.checks.total > 0) {
+    const c = item.checks;
+    const cls = c.failed > 0 ? 'check-pill-fail' : c.running > 0 ? 'check-pill-running' : 'check-pill-pass';
+    const txt = c.failed > 0 ? `CI ${c.failed} 失败` : c.running > 0 ? 'CI 运行中' : `CI ${c.passed}/${c.total} ✓`;
+    sub.append(element('span', txt, `task-check-pill ${cls}`));
+  }
+  if (sub.childElementCount) infoCol.append(sub);
+
+  // Col 2: PR status badge
+  const statusCol = element('div', '', 'issue-col issue-col-status');
+  const [stLabel, stTone] = prStatusMeta[item.status] || [item.status, ''];
+  statusCol.append(badge(stLabel, stTone));
+
+  // Col 3: Reason + next step
+  const reasonCol = element('div', '', 'issue-col issue-col-reason');
+  reasonCol.append(element('p', item.reason || '—', 'issue-reason-text'));
+  if (item.next_step) reasonCol.append(element('p', `下一步：${item.next_step}`, 'muted issue-next-step'));
+
+  // Col 4: Activity time & toggle detail chain
+  const actionCol = element('div', '', 'issue-col issue-col-actions');
+  const actIso = item.last_activity || '';
+  const rel = typeof waitedFor === 'function' ? waitedFor(actIso) : null;
+  const fullTime = timestamp(actIso) || '—';
+  const timeSpan = element('span', rel ? `${rel}前` : fullTime, 'muted task-updated-text');
+  if (actIso) timeSpan.dataset.updatedAt = actIso;
+  timeSpan.title = fullTime;
+  const toggleBtn = button(expanded ? '收起链路' : '查看链路', () => onToggle(item.number), 'quiet issue-chain-toggle');
+  toggleBtn.setAttribute('aria-expanded', String(!!expanded));
+  toggleBtn.setAttribute('aria-label', `${expanded ? '收起' : '查看'} PR #${item.number} 的处理链路`);
+  toggleBtn.dataset.prToggle = String(item.number);
+  actionCol.append(timeSpan, toggleBtn);
+
+  row.append(infoCol, statusCol, reasonCol, actionCol);
+
+  if (expanded) {
+    if (loading) {
+      const box = element('div', '', 'issue-chain-panel');
+      box.append(element('p', '正在读取该 PR 的决策与任务链路…', 'muted'));
+      row.append(box);
+    } else if (err) {
+      const box = element('div', '', 'issue-chain-panel');
+      const alertP = element('p', `链路读取失败：${readErrorText(err)}`, 'view-error');
+      alertP.setAttribute('role', 'alert');
+      box.append(alertP);
+      row.append(box);
+    } else if (detail) {
+      row.append(renderIssueChainPanel(detail, item.repository_id, item.number));
+    }
+  }
+  return row;
+}
+
 function workspaceOverview() {
   const parsed = parseWorkbenchRoute(current.item);
   if (!parsed) return [pageNotFoundState(current.id)];
@@ -435,12 +539,16 @@ function workspaceOverview() {
   const { view: viewMode, group, offset } = parsed;
   const size = 10;
   const issueSize = 20;
+  const prSize = 20;
   const taskAddress = (key, next = 0) => key === 'all' && !next
     ? `#/projects/${id}/overview/tasks`
     : `#/projects/${id}/overview/${key}${next ? '.' + next : ''}`;
   const issueAddress = (key, next = 0) => key === 'all' && !next
     ? `#/projects/${id}/overview/issues`
     : `#/projects/${id}/overview/issues.${key}${next ? '.' + next : ''}`;
+  const prAddress = (key, next = 0) => key === 'all' && !next
+    ? `#/projects/${id}/overview/prs`
+    : `#/projects/${id}/overview/prs.${key}${next ? '.' + next : ''}`;
 
   const root = element('section', '', 'workspace-overview');
   const alive = () => root.isConnected && me?.id === owner && current?.id === id && current.section === 'overview' && location.hash === routeKey;
@@ -472,7 +580,14 @@ function workspaceOverview() {
   issueTab.append(element('span', 'Issue 进展'), issueTotalBadge);
   if (viewMode === 'issues') issueTab.setAttribute('aria-current', 'page');
 
-  viewTabs.append(roleTab, taskTab, issueTab);
+  const prTab = element('a', '', 'workbench-tab');
+  prTab.href = `#/projects/${id}/overview/prs`;
+  prTab.dataset.workbenchView = 'prs';
+  const prTotalBadge = element('span', '—', 'workbench-tab-count');
+  prTab.append(element('span', 'PR 进展'), prTotalBadge);
+  if (viewMode === 'prs') prTab.setAttribute('aria-current', 'page');
+
+  viewTabs.append(roleTab, taskTab, issueTab, prTab);
 
   const rightBar = element('div', '', 'workbench-right-bar');
   const liveSummary = element('div', '', 'workbench-live-stats');
@@ -639,6 +754,84 @@ function workspaceOverview() {
   issuePaging.setAttribute('aria-label', 'Issue 进展分页');
   issueSection.append(issueToolbar, issueSubPills, issueStatus, issueHead, issueRows, issuePaging);
 
+  // Pull Request Progress Section (#1222)
+  const prSection = element('section', '', 'workbench-pr-section');
+  prSection.hidden = viewMode !== 'prs';
+  prSection.append(element('h2', 'PR 进展', 'sr-only'));
+  const prPills = element('nav', '', 'workspace-metrics workbench-filter-pills');
+  prPills.setAttribute('aria-label', 'PR 进展状态范围');
+  const prCounts = new Map();
+  for (const [key, caption] of workspacePrGroups) {
+    const a = element('a', '', 'workbench-filter-pill');
+    a.href = prAddress(key, 0);
+    a.dataset.prGroup = key;
+    if (viewMode === 'prs' && key === group) a.setAttribute('aria-current', 'page');
+    const count = element('strong', '—');
+    a.append(element('span', caption), count);
+    prCounts.set(key, count);
+    prPills.append(a);
+  }
+
+  let prSearchQuery = '';
+  let prBotOnly = false;
+  let prIncludeClosed = false;
+  let prSearchTimer = null;
+  const prSearchInput = element('input', '', 'workbench-task-search');
+  prSearchInput.type = 'search';
+  prSearchInput.placeholder = '搜索 PR 编号或标题…';
+  prSearchInput.setAttribute('aria-label', '搜索 PR');
+  prSearchInput.addEventListener('input', () => {
+    clearTimeout(prSearchTimer);
+    prSearchTimer = setTimeout(() => {
+      prSearchQuery = prSearchInput.value.trim();
+      prSignature = '';
+      void loadPrs();
+    }, 180);
+  });
+
+  const prBotLabel = element('label', '', 'workbench-issue-closed-check');
+  const prBotCheck = document.createElement('input');
+  prBotCheck.type = 'checkbox';
+  prBotCheck.checked = false;
+  prBotCheck.addEventListener('change', () => {
+    prBotOnly = prBotCheck.checked;
+    prSignature = '';
+    void loadPrs();
+  });
+  prBotLabel.append(prBotCheck, document.createTextNode('仅 Bot PR'));
+
+  const prClosedLabel = element('label', '', 'workbench-issue-closed-check');
+  const prClosedCheck = document.createElement('input');
+  prClosedCheck.type = 'checkbox';
+  prClosedCheck.checked = false;
+  prClosedCheck.addEventListener('change', () => {
+    prIncludeClosed = prClosedCheck.checked;
+    prSignature = '';
+    void loadPrs();
+  });
+  prClosedLabel.append(prClosedCheck, document.createTextNode('含已关闭'));
+
+  const prControls = element('div', '', 'workbench-issue-controls');
+  prControls.append(prSearchInput, prBotLabel, prClosedLabel);
+
+  const prToolbar = element('div', '', 'workbench-task-toolbar');
+  prToolbar.append(prPills, prControls);
+
+  const prStatus = note('正在读取 PR 进展…');
+  prStatus.classList.add('workspace-pr-status');
+  prStatus.setAttribute('role', 'status');
+  const prHead = element('div', '', 'workbench-issue-head');
+  prHead.append(
+    element('span', 'PR'),
+    element('span', '当前状态'),
+    element('span', '检视与检查情况'),
+    element('span', '最近活动 / 链路'),
+  );
+  const prRows = element('div', '', 'workspace-issue-rows workspace-pr-rows');
+  const prPaging = element('nav', '', 'console-inbox-paging');
+  prPaging.setAttribute('aria-label', 'PR 进展分页');
+  prSection.append(prToolbar, prStatus, prHead, prRows, prPaging);
+
   // Compact Workbench Footer (quick links + honest environment status)
   const footer = element('footer', '', 'workbench-footer');
   const healthStatus = note('正在读取环境记录…');
@@ -655,15 +848,26 @@ function workspaceOverview() {
   quickLinks.children[2].href = `#/projects/${id}/machine`;
   footer.append(healthStatus, quickLinks);
 
-  root.append(roleSection, taskSection, issueSection, footer);
+  root.append(
+    roleSection,
+    taskSection,
+    ...(viewMode === 'issues' ? [issueSection] : []),
+    ...(viewMode === 'prs' ? [prSection] : []),
+    footer,
+  );
 
-  let pending = false, lastRoles = null, lastTasks = null, lastIssues = null, lastHealth = null;
-  let roleSignature = '', signature = '', issueSignature = '', taskReqSeq = 0, issueReqSeq = 0;
+  let pending = false, lastRoles = null, lastTasks = null, lastIssues = null, lastPrs = null, lastHealth = null;
+  let roleSignature = '', signature = '', issueSignature = '', prSignature = '', taskReqSeq = 0, issueReqSeq = 0, prReqSeq = 0;
   let latestIssuesList = [];
+  let latestPrsList = [];
   const expandedIssues = new Set();
   const issueDetails = new Map();
   const issueDetailLoading = new Set();
   const issueDetailErrors = new Map();
+  const expandedPrs = new Set();
+  const prDetails = new Map();
+  const prDetailLoading = new Set();
+  const prDetailErrors = new Map();
 
   const rowKey = row => JSON.stringify([row.id, row.repository_id, row.kind, row.object_number, row.status, row.priority, row.summary, row.error_code, row.updated_at, row.external, row.role_flow]);
 
@@ -881,6 +1085,96 @@ function workspaceOverview() {
     } finally { if (req === issueReqSeq) issueRows.removeAttribute('aria-busy'); }
   }
 
+  function renderPrListNodes() {
+    const focusedToggle = prRows.contains(document.activeElement) ? document.activeElement.dataset?.prToggle : null;
+    if (!latestPrsList.length) {
+      prRows.replaceChildren(consoleState(
+        offset ? '本页已没有 PR' : ((prSearchQuery || prBotOnly) ? '没有匹配筛选条件的 PR' : '当前筛选下没有 PR'),
+        offset ? 'PR 状态可能已变化，可返回上一页。' : '这里只统计系统已接收事件或任务关联过的 PR；没有条目不代表仓库没有开放 PR。',
+      ));
+      return;
+    }
+    prRows.replaceChildren(...latestPrsList.map(item => renderWorkbenchPrRow(item, {
+      expanded: expandedPrs.has(item.number),
+      detail: prDetails.get(item.number) || null,
+      loading: prDetailLoading.has(item.number),
+      err: prDetailErrors.get(item.number) || null,
+      onToggle: togglePrChain,
+    })));
+    if (focusedToggle) prRows.querySelector(`[data-pr-toggle="${CSS.escape(focusedToggle)}"]`)?.focus({ preventScroll: true });
+  }
+
+  async function togglePrChain(prNumber) {
+    if (expandedPrs.has(prNumber)) {
+      expandedPrs.delete(prNumber);
+      renderPrListNodes();
+      return;
+    }
+    expandedPrs.add(prNumber);
+    prDetailLoading.add(prNumber);
+    prDetailErrors.delete(prNumber);
+    renderPrListNodes();
+    try {
+      const detail = await api(`/api/board/prs/${encodeURIComponent(id)}/${prNumber}`);
+      if (!alive()) return;
+      prDetails.set(prNumber, detail);
+    } catch (err) {
+      if (!alive() || revoke(err)) return;
+      prDetailErrors.set(prNumber, err);
+    } finally {
+      prDetailLoading.delete(prNumber);
+      if (alive() && viewMode === 'prs') renderPrListNodes();
+    }
+  }
+
+  async function loadPrs() {
+    const req = ++prReqSeq;
+    if (viewMode === 'prs') prRows.setAttribute('aria-busy', 'true');
+    try {
+      const effectiveOffset = (prSearchQuery || prBotOnly || prIncludeClosed) ? 0 : offset;
+      const params = new URLSearchParams({
+        repository_id: id,
+        status: viewMode === 'prs' ? group : 'all',
+        limit: viewMode === 'prs' ? String(prSize) : '1',
+        offset: viewMode === 'prs' ? String(effectiveOffset) : '0',
+      });
+      if (viewMode === 'prs' && prBotOnly) params.set('bot_only', '1');
+      if (viewMode === 'prs' && prIncludeClosed) params.set('include_closed', '1');
+      if (viewMode === 'prs' && prSearchQuery) params.set('q', prSearchQuery);
+      const data = await api('/api/board/prs?' + params);
+      if (!alive() || req !== prReqSeq) return;
+      lastPrs = data.sampled_at;
+      if (!prSearchQuery && !prBotOnly && !prIncludeClosed) prTotalBadge.textContent = String(data.counts?.all ?? '—');
+      for (const [key, count] of prCounts) count.textContent = String(data.counts?.[key] ?? 0);
+      if (viewMode !== 'prs') return;
+
+      prStatus.classList.remove('view-error');
+      prStatus.setAttribute('role', 'status');
+      const total = data.total ?? 0;
+      const shown = data.prs?.length ? `显示 ${effectiveOffset + 1}–${effectiveOffset + data.prs.length} 项 · ` : '';
+      prStatus.textContent = `${total} 个 PR · Bot PR ${data.counts?.bot_pr ?? 0} · 需人工 ${data.counts?.needs_attention ?? 0} · ${shown}更新于 ${timestamp(lastPrs)}`;
+
+      const nextSig = JSON.stringify(data.prs || []);
+      if (prSignature !== nextSig || !prRows.childElementCount) {
+        prSignature = nextSig;
+        latestPrsList = data.prs || [];
+        renderPrListNodes();
+      } else {
+        refreshWorkbenchTimes(prRows);
+      }
+
+      const hasNext = Boolean(data.has_more), pageKey = `prs:${group}:${effectiveOffset}:${hasNext}`;
+      if (prPaging.dataset.pageKey !== pageKey) {
+        prPaging.dataset.pageKey = pageKey; prPaging.replaceChildren();
+        if (effectiveOffset) prPaging.append(consoleLink(prAddress(group, Math.max(0, effectiveOffset - prSize)), '上一页'));
+        if (hasNext && !prSearchQuery && !prBotOnly && !prIncludeClosed) prPaging.append(consoleLink(prAddress(group, effectiveOffset + prSize), '下一页'));
+      }
+    } catch (err) {
+      if (!alive() || req !== prReqSeq || revoke(err)) return;
+      expired(prStatus, err, lastPrs);
+    } finally { if (req === prReqSeq) prRows.removeAttribute('aria-busy'); }
+  }
+
   async function environment() {
     try {
       const [data, repo] = await Promise.all([api(`/api/environments/${id}`), api(`/api/repositories/${id}`)]);
@@ -900,7 +1194,7 @@ function workspaceOverview() {
   async function update() {
     if (!alive() || pending) return;
     pending = true; refresh.disabled = true;
-    try { await Promise.all([loadRoleBoard(), tasks(), loadIssues(), environment()]); }
+    try { await Promise.all([loadRoleBoard(), tasks(), loadIssues(), loadPrs(), environment()]); }
     finally { pending = false; refresh.disabled = false; }
   }
 

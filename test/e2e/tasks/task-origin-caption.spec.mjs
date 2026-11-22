@@ -9,7 +9,7 @@ const out = '.tmp/task-origin-caption-699';
 const origin = (store, task, kind, from, to, conversation = null, project = '101') => store.run(`INSERT INTO task_origins(task_id,source_kind,project_id,source_role,conversation_id,owner_key,executor_role,config_revision,created_at)
   VALUES(?,?,?,?,?,?,?,1,?)`, task, kind, project, from, conversation, 'fixture', to, '2026-10-01T12:00:00.000Z');
 
-test('看板卡片和任务详情的来源用白话写明从哪来、交给了谁', async ({ page }) => {
+test('任务详情和待处理列表的来源用白话写明从哪来、交给了谁', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -31,46 +31,35 @@ test('看板卡片和任务详情的来源用白话写明从哪来、交给了�
     origin(h.store, 'reviewed', 'mystery', 'manager', 'qa');
     origin(h.store, 'developed-review', 'role', 'manager', 'custom-checker');
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(h.admin + '/#/board');
+    await page.goto(h.admin + '/#/tasks/developing');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-    const card = (key, category) => page.locator(`[data-card-key="${key}"][data-card-category="${category}"]`);
     const expected = [
-      ['202/issue/1', 'review.issue', '来源：角色委派 · Task Coordinator交给Developer'],
-      ['101/issue/3', 'development.issue', '来源：GitHub 事件 · 调度组交给Dev'],
-      ['101/issue/3', 'review.issue', '来源：角色委派 · 调度组交给retired-role'],
-      ['101/pr/2', 'review.pr', '来源：有人手动创建 · 交给Reviewer'],
-      ['101/issue/4', 'development.issue', '来源：连续会话 · Dev自己执行'],
-      ['101/issue/5', 'review.issue', '来源：角色委派 · 按原执行流程处理'],
-      ['101/issue/1', 'review.issue', '来源：其他来源 · 调度组交给Independent QA'],
-      ['101/issue/4', 'review.issue', '来源：角色委派 · 调度组交给复核小组']
+      ['foreign-review', '来源：角色委派 · Task Coordinator交给Developer'],
+      ['developing', '来源：GitHub 事件 · 调度组交给Dev'],
+      ['source-review', '来源：角色委派 · 调度组交给retired-role'],
+      ['reviewing', '来源：有人手动创建 · 交给Reviewer'],
+      ['developed', '来源：连续会话 · Dev自己执行'],
+      ['failed-review', '来源：角色委派 · 按原执行流程处理'],
+      ['reviewed', '来源：其他来源 · 调度组交给Independent QA'],
+      ['developed-review', '来源：角色委派 · 调度组交给复核小组']
     ];
-    for (const [key, category, caption] of expected) await expect(card(key, category)).toContainText(caption);
-    const board = page.locator('#board-panel');
-    for (const raw of ['event', 'operator', 'mystery', 'manager →', '→ dev', '（委派）', 'chat-7f3c']) await expect(board).not.toContainText(raw);
-    await card('101/issue/3', 'development.issue').scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `${out}/board-1440.png` });
-    // The task detail uses the same sentence.
-    await card('101/issue/3', 'development.issue').locator('.board-card-title').click();
-    await expect(page.locator('#task-title')).toHaveText('开发 · Issue #3');
-    await expect(page.locator('#task-view').getByText('来源：GitHub 事件 · 调度组交给Dev', { exact: true }).first()).toBeVisible();
-    await page.screenshot({ path: `${out}/task-1440.png` });
-    await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click();
-    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-    await page.setViewportSize({ width: 390, height: 844 });
-    // A phone shows one group at a time; open the one that holds the development card.
-    const group = page.getByLabel('当前分组', { exact: true });
-    const label = await group.locator('option', { hasText: '开发 / 跟进 / 发版中' }).textContent();
-    await group.selectOption({ label });
-    await card('101/issue/3', 'development.issue').scrollIntoViewIfNeeded();
-    await expect(card('101/issue/3', 'development.issue')).toContainText('来源：GitHub 事件 · 调度组交给Dev');
-    await page.screenshot({ path: `${out}/board-390.png` });
-    // The inbox receives task list data rather than board cards or a single task detail.
+    for (const [taskId, caption] of expected) {
+      await page.goto(h.admin + '/#/tasks/' + taskId);
+      await expect(page.locator('#task-view').getByText(caption, { exact: true }).first()).toBeVisible();
+      for (const raw of ['event', 'operator', 'mystery', 'manager →', '→ dev', '（委派）', 'chat-7f3c']) {
+        await expect(page.locator('#task-external-bar')).not.toContainText(raw);
+      }
+      if (taskId === 'developing') await page.screenshot({ path: `${out}/task-1440.png` });
+    }
+    // The inbox receives task list data and shows the same plain-language caption.
     h.store.run("UPDATE tasks SET status='needs_help' WHERE id='developing'");
     await page.goto(h.admin + '/#/inbox/all');
     await expect(page.locator('.console-attention-row[data-task-id="developing"]')).toContainText('来源：GitHub 事件 · 调度组交给Dev');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('.console-attention-row[data-task-id="developing"]')).toContainText('来源：GitHub 事件 · 调度组交给Dev');
+    await page.screenshot({ path: `${out}/inbox-390.png` });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

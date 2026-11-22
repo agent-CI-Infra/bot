@@ -666,11 +666,13 @@ test('#1122 persistent Object Manager thread links follow-up PR comments & Issue
     assert.equal(detail.status, 200, id);
     assert.equal(detail.value.task.id, id);
   }
-  const board = await admin('/api/board/cards?repository_id=101');
-  assert.equal(board.status, 200);
-  assert.ok(board.value.cards.some(c => c.object_number === 11 && c.card_category === 'review.pr'));
-  assert.ok(board.value.cards.some(c => c.object_number === 12 && c.card_category === 'development.issue'));
-  assert.ok(board.value.cards.some(c => c.object_number === 13 && c.card_category === 'reply'));
+  const prs = await admin('/api/board/prs?repository_id=101');
+  assert.equal(prs.status, 200);
+  assert.ok(prs.value.prs.some(p => p.number === 11 && p.review?.task_id === 'hist-rev'));
+  const issues = await admin('/api/board/issues?repository_id=101');
+  assert.equal(issues.status, 200);
+  assert.ok(issues.value.issues.some(i => i.number === 12 && i.development?.task_id === 'hist-dev'));
+  assert.equal((await admin('/api/board/cards?repository_id=101')).status, 410);
 
   const costs = await admin('/api/costs?timezone=UTC');
   assert.equal(costs.status, 200);

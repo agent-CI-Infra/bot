@@ -27,7 +27,7 @@ test('runtime pauses during queue and waits, accumulates retries and is live onl
   h.store.run("UPDATE task_metrics SET active_since=? WHERE task_id='timed'",Date.now()-2000);h.store.run("UPDATE tasks SET status='succeeded' WHERE id='timed'");
   const final=(await admin('/api/tasks/timed')).value.task.metrics;assert.ok(final.runtime_ms>=paused+2000);assert.equal(final.running,false);
   assert.equal((await admin('/api/tasks?kind=review')).value.tasks[0].metrics.runtime_ms,final.runtime_ms);
-  assert.equal((await admin('/api/board/cards/101/issue/1/tasks')).value.tasks[0].metrics.runtime_ms,final.runtime_ms);
+  assert.equal((await admin('/api/board/issues/101/1')).value.tasks[0].id,'timed');
 });
 test('cost uses the request price snapshot, subtracts cache from input and counts usage once',async t=>{
   const {h,admin,model}=await fixture(t);metricTask(h.store,'priced');const task=h.store.get("SELECT * FROM tasks WHERE id='priced'");

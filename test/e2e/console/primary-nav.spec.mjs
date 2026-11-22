@@ -37,7 +37,7 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, 'nav-member', password);
     const desktop = await visiblePrimaryCaptions(page);
-    expect(desktop).toEqual(['项目', '任务看板', '待处理', '管理助手', '更多功能', '个人设置']);
+    expect(desktop).toEqual(['项目', '待处理', '管理助手', '更多功能', '个人设置']);
     for (const name of ['用量与成本', '存储', '全局设置']) {
       await expect(page.locator('#console-sidebar').getByRole('link', { name, exact: true })).toBeHidden();
     }
@@ -68,14 +68,14 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
 
     await page.setViewportSize({ width: 768, height: 900 });
     await expect(page.locator('#console-sidebar')).toBeVisible();
-    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '任务看板', '待处理', '管理助手', '更多功能', '个人设置']);
+    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '待处理', '管理助手', '更多功能', '个人设置']);
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(768);
     await page.screenshot({ path: `${out}/nav-member-768.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('#console-sidebar')).toBeHidden();
     await expect(page.locator('#console-mobile-nav')).toBeVisible();
-    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '任务', '待处理', '助手', '更多']);
+    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '待处理', '助手', '更多']);
     const boxes = await page.locator('#console-mobile-nav a').evaluateAll(nodes =>
       nodes.map(n => ({ width: n.getBoundingClientRect().width, height: n.getBoundingClientRect().height })));
     expect(boxes.every(b => b.width >= 44 && b.height >= 44)).toBe(true);

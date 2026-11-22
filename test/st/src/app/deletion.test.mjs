@@ -123,8 +123,11 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   assert.equal((await admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision,
     standing_rules: [{ id: 'issues', event: 'issue.opened', action: 'create', work: 'review.issue', reason: 'fixture' }] })).status, 200);
   assert.ok(h.store.get("SELECT 1 FROM manager_rules WHERE repository_id='101'"));
-  const field = (await admin('/api/board/fields', 'POST', { name: 'Priority' })).value.field, option = (await admin(`/api/board/fields/${field.id}/options`, 'POST', { name: 'High' })).value.option;
-  assert.equal((await admin('/api/board/cards/101/issue/5', 'PATCH', { field_id: field.id, option_id: option.id })).status, 200);
+  const adminUser = h.store.get("SELECT id FROM users ORDER BY rowid LIMIT 1").id;
+  const field = { id: 'f-del-priority' };
+  h.store.run("INSERT INTO board_fields(id,user_id,name) VALUES(?,?,?)", field.id, adminUser, 'Priority');
+  h.store.run("INSERT INTO board_options(id,field_id,name,position) VALUES('opt-del-high',?,'High',0)", field.id);
+  h.store.run("INSERT INTO board_values(user_id,repository_id,object_type,object_number,field_id,option_id) VALUES(?,'101','issue',5,?,'opt-del-high')", adminUser, field.id);
   assert.ok(h.store.get("SELECT 1 FROM external_events WHERE repository_id='101'"));
   for(const repoId of ['101','202']){h.store.run("INSERT INTO dispatch_events(id,repository_id,event_key,type,source,summary,facts,options,state,created_at) VALUES(?,?,?,'probe','fixture','failure cleanup','{}','[]','failed',?)",'failure-'+repoId,repoId,'failure-'+repoId,now);h.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)','failure-'+repoId,1,now,JSON.stringify({code:'fixture_failure'}),0,0);h.store.run("INSERT INTO github_repository_member_cache(installation_ref,repository_id,owner_id,full_name,tier,in_installation,etag,synced_at,checked_at,dirty,failures,last_error,next_retry_at) VALUES('github.com/123/77',?,'10',?,'full',1,NULL,1,1,0,0,NULL,0)",repoId,'fixture/project-'+repoId);h.store.run("INSERT INTO github_repository_collaborators(installation_ref,repository_id,github_user_id,login,role) VALUES('github.com/123/77',?,'42','member','write')",repoId);h.store.run("INSERT INTO github_repository_assignees VALUES('github.com/123/77',?,'42','member')",repoId);h.store.run("INSERT INTO event_subscriptions(id,repository_id,task_id,events,hints,note,state,timeout_at,created_at,updated_at) VALUES(?,?,?,'[\"workflow_run\"]','{}','fixture','active',9999999999999,?,?)",'sub-'+repoId,repoId,'done-'+repoId,now,now);}
   // The running task stops at its next checkpoint once it is cancelled, as the engine's guard does.

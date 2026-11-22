@@ -141,9 +141,9 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
       await cdp.send('Emulation.clearDeviceMetricsOverride'); await cdp.detach();
     }
     await page.getByRole('button', { name: '关闭', exact: true }).click();
-    await page.goto(f.h.admin + '/#/board');
-    const card = page.locator('.board-card').filter({ hasText: 'Read the current repository and produce an observed report.' });
-    await expect(card).toHaveCount(1); await card.locator('.board-card-title').click();
+    await page.goto(f.h.admin + '/#/projects/101/overview/tasks.all');
+    const row = page.locator('.workbench-task-row').filter({ hasText: 'Read the current repository and produce an observed report.' });
+    await expect(row).toHaveCount(1); await row.locator('button').first().click();
     await expect(page.locator('#task-badges')).toContainText('已完成'); expect(errors).toEqual([]);
   } finally { f.releaseQA(); await running; await f.close(); }
 });

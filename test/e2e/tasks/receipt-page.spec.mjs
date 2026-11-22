@@ -203,7 +203,7 @@ test('leaving a failed receipt and coming back in the same document reads it aga
 
     // #545: leaving the address for another page keeps the document alive, so nothing but the page's own bookkeeping can
     // make the next visit read again. A person who saw one failure must not be parked on it for the rest of the session.
-    await page.evaluate(() => { location.hash = '#/board'; });
+    await page.evaluate(() => { location.hash = '#/projects'; });
     await expect(panel).toBeHidden();
     const reread = page.waitForRequest(request => new URL(request.url()).pathname === '/api/management/commands/' + receipt.id, { timeout: 8000 });
     await page.evaluate(id => { location.hash = '#/management/commands/' + id; }, receipt.id);

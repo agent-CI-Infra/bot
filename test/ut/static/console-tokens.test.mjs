@@ -39,16 +39,6 @@ test('every var() a sheet reads is declared by shell.css, locally, at runtime, o
   }
 });
 
-test('#482 board.css reads shared colour, radius and typography tokens instead of a second theme', () => {
-  const source = read('static/board.css').replace(/\/\*[\s\S]*?\*\//g, '');
-  assert.deepEqual(source.match(/#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})\b/gi) ?? [],
-    [], 'board colours must be shared tokens, including borders, shadows and stage colours');
-  assert.deepEqual(source.match(/font-size:\s*\d+(?:\.\d+)?px/gi) ?? [],
-    [], 'board text must use the shared type scale');
-  assert.match(source, /\.board-option\[aria-pressed=true\]\{background:var\(--color-brand\);color:var\(--color-text-inverse\);border-color:var\(--color-brand\)\}/);
-  assert.match(source, /\.board-card:focus-within\{outline:2px solid var\(--focus-ring\)/);
-});
-
 // #551: the leftover teal palette in style.css was a second theme. Login, projects and
 // identity must read the shared tokens so the same heading / body / muted level looks
 // the same on every page. New hard-coded values of those colours are a regression.
@@ -103,7 +93,7 @@ test('#551 management.css and views.css no longer hard-code leftover colours, an
 const LIGHT_LEFTOVER = ['#637c89', '#5b7481', '#52707d'];
 
 test('#563 module sheets and the usage chart no longer hard-code light leftover teals', () => {
-  for (const name of ['static/costs.css', 'static/views.css', 'static/board.css', 'static/costs.js', 'static/management.css']) {
+  for (const name of ['static/costs.css', 'static/views.css', 'static/workspace.css', 'static/costs.js', 'static/management.css']) {
     const source = read(name);
     for (const colour of LIGHT_LEFTOVER) {
       assert.equal(source.toLowerCase().includes(colour), false,
@@ -152,9 +142,4 @@ test('#584 neutral status badges keep AA text contrast and the info alert ring s
   assert.match(source, /\.status-info\.status-alert\{box-shadow:inset 0 0 0 1px var\(--color-info-border\)\}/);
   assert.ok(contrast(shellHex('--color-status-neutral'), shellHex('--color-status-neutral-bg')) >= 4.5, 'neutral badge text must stay at WCAG AA for 12px text');
   assert.ok(contrast(shellHex('--color-info-border'), shellHex('--color-info-bg')) >= 1.3, 'info alert ring must be distinguishable from the info badge fill');
-});
-
-test('#482 board empty text keeps AA contrast on the shared neutral column surface', () => {
-  assert.match(read('static/board.css'), /\.board-empty\{[^}]*color:var\(--color-status-neutral\)/);
-  assert.ok(contrast(shellHex('--color-status-neutral'), shellHex('--color-status-neutral-bg')) >= 4.5);
 });

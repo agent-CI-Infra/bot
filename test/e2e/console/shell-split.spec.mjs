@@ -47,12 +47,12 @@ test('desktop keeps one sticky header over the workspace beside a full-height ra
     mkdirSync(out, { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, password);
-    await page.goto(h.admin + '/#/projects/101/board');
-    await expect(page.locator('#board-panel')).toBeVisible();
-    await expect(page.locator('#console-context')).toHaveText('fixture / project-101 / 任务看板');
+    await page.goto(h.admin + '/#/projects/101/inbox');
+    await expect(page.locator('.console-inbox')).toBeVisible();
+    await expect(page.locator('#console-context')).toHaveText('fixture / project-101 / 待处理');
     await expect(page.locator('#console-project-header [data-permission]')).toBeVisible();
     await desktopFrame(page);
-    await page.screenshot({ path: `${out}/board-1440.png`, fullPage: true });
+    await page.screenshot({ path: `${out}/inbox-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/basic');
     await expect(page.locator('#console-project-header .project-head h1')).toHaveText('基本设置');
@@ -100,14 +100,14 @@ test('mobile keeps the header fixed and navigation reachable without a second lo
     await login(page, h, password);
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 700 });
-      await page.goto(h.admin + '/#/projects/101/board');
-      await expect(page.locator('#board-panel')).toBeVisible();
-      await expect(page.locator('#console-context')).toHaveText('fixture / project-101 / 任务看板');
+      await page.goto(h.admin + '/#/projects/101/inbox');
+      await expect(page.locator('.console-inbox')).toBeVisible();
+      await expect(page.locator('#console-context')).toHaveText('fixture / project-101 / 待处理');
       await expect(page.locator('#console-project-header [data-permission]')).toBeVisible();
       await unifiedHeader(page);
       await expect(page.locator('#console-sidebar')).toBeHidden();
       await expect(page.locator('#console-mobile-nav')).toBeVisible();
-      await page.screenshot({ path: `${out}/board-${width}.png`, fullPage: true });
+      await page.screenshot({ path: `${out}/inbox-${width}.png`, fullPage: true });
 
       await page.goto(h.admin + '/#/projects/101/basic');
       await expect(page.locator('#console-project-header .project-head h1')).toHaveText('基本设置');

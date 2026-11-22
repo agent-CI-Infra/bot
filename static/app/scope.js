@@ -1,5 +1,5 @@
 // Addresses own project scope. Pages without a project dimension retain the last resolved scope in this session.
-const projectConsolePages = ['board', 'inbox', 'costs', 'management', 'new-task'];
+const projectConsolePages = ['inbox', 'costs', 'management', 'new-task'];
 let consoleScopeOwner = null, consoleRetainedScope = null, consoleTaskScope = null;
 const consoleLastScopeKey = () => 'console-last-scope:' + me.id;
 function projectConsoleRoute(route) {
