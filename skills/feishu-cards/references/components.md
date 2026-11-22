@@ -46,8 +46,11 @@ All examples below are passed inside the `card` argument of `set_feishu_card`.
 Place `table` directly in root `elements` or top-level `view.elements` (never inside `column_set` or `collapsible_panel`).
 
 - `page_size`: integer `1..10` (default `5`). When `rows.length > page_size`, Feishu renders native client-side pagination/scrolling.
+- `row_height`: `"low"` (default), `"middle"`, `"high"`, `"auto"`, or pixel height in `"32px"`..`"124px"`.
 - `freeze_first_column`: `true` freezes the first column when columns scroll horizontally.
-- `data_type`: `"text"`, `"lark_md"` (links & inline formatting), `"options"` (colored badges), `"number"`, or `"date"` (ms timestamp or ISO string).
+- `columns[].width`: `"auto"`, pixel width in `"80px"`..`"600px"`, or percentage `"1%"`..`"100%"` (values outside range are clamped).
+- `header_style`: `background_style` accepts `"none"` or `"grey"`; `text_size` accepts `"normal"` or `"heading"`; `text_color` accepts `"default"` or `"grey"`.
+- `data_type`: `"text"`, `"lark_md"` (links & inline formatting), `"options"` (colored badges; use `"neutral"` for gray pills), `"number"`, or `"date"` (ms timestamp or ISO string).
 
 ```json
 {

@@ -1,4 +1,4 @@
-import { publicContent } from '../core/redaction.js';
+import { publicContent, publicText } from '../core/redaction.js';
 import { Redactor } from '../agent/common.js';
 import { createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders } from 'node:http';
@@ -173,12 +173,25 @@ export class FeishuAdapter implements ChannelAdapter {
       if (path.startsWith('/im/v1/chats/') && data.code === 99991672) fail(403, 'channel_audience_permission_required');
       if (path.startsWith('/contact/v3/users/') && data.code === 99991672) fail(403, 'channel_user_name_permission_required');
       if (path === '/application/v6/scopes' && (!r.ok || data.code !== 0)) fail(502, 'channel_scope_check_unavailable');
+      const logCardRejected = () => {
+        const redactor = this.publicationRedactor();
+        for (const key of ['app_secret', 'verification_token', 'encrypt_key', 'app_ticket']) redactor.add(this.secret[key]);
+        redactor.add(token); redactor.add(appToken);
+        const msg = typeof data?.msg === 'string' ? publicText(data.msg, redactor).slice(0, 300) : '';
+        console.warn('feishu_card_rejected', { method: init.method ?? 'POST', status: r.status, code: data?.code ?? null, ...(msg ? { msg } : {}) });
+      };
       if (path.startsWith('/im/v1/messages/') && init.method === 'PATCH' && (!r.ok || data.code !== 0)) {
         if (data.code === 200750) fail(400, 'channel_card_expired');
-        if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) fail(400, 'channel_card_rejected');
+        if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) {
+          logCardRejected();
+          fail(400, 'channel_card_rejected');
+        }
       }
       if (message?.fields?.msg_type === 'interactive' && (!r.ok || data.code !== 0)) {
-        if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) fail(400, 'channel_card_rejected');
+        if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) {
+          logCardRejected();
+          fail(400, 'channel_card_rejected');
+        }
       }
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;
