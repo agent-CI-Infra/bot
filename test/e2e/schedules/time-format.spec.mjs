@@ -49,11 +49,12 @@ async function login(page, f, hash) {
   await page.getByRole('button', { name: /^(登录|Sign in)$/ }).click();
 }
 
-test('a file row in the knowledge page reads its time with the shared clock, not the browser language', async ({ page }) => {
+test('a file preview in the knowledge page reads its time with the shared clock, not the browser language', async ({ page }) => {
   const f = await knowledge(page);
   try {
     await f.admin('/api/repositories/101/notes/clock.txt', 'PUT', { content: 'clock\n' });
     await f.login();
+    await page.getByRole('button', { name: '文件 clock.txt', exact: true }).click();
     const row = page.locator('.knowledge-main').getByText(/^v1 · /);
     await expect(row).toBeVisible();
     await expect(row).toContainText(new RegExp('^v1 · ' + CLOCK + ' · '));

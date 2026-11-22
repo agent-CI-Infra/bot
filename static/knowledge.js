@@ -30,10 +30,14 @@ function knowledgeSection() {
   if (params.size || history.state?.knowledge === repo) Object.assign(state, { directory: params.get('directory') || '', file: params.get('file'), revision: params.has('revision') ? Number(params.get('revision')) : null, screen: params.get('history') === '1' ? 'history' : params.has('file') ? 'preview' : 'directory', query: params.get('query') || '', trash: params.get('deleted') === '1' });
   knowledgeViews.set(repo, state);
   if (!saved) history.replaceState({ ...history.state, knowledge: repo }, '', location.href);
-  for (let path = state.directory; path; path = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '') state.expanded.add(path);
+  const parentOf = path => path.slice(0, Math.max(0, path.lastIndexOf('/')));
+  const expandPath = directory => {
+    for (let path = directory; path; path = parentOf(path)) state.expanded.add(path);
+  };
+  expandPath(state.directory);
   const status = element('div', '', 'knowledge-status'), workspace = element('div', '', 'knowledge-layout');
   status.setAttribute('role', 'alert'); root.append(status, workspace);
-  let epoch = 0, listing = null, selected = null, versions = null, busy = false, editing = false, conflict = null;
+  let epoch = 0, listing = null, results = null, selected = null, versions = null, busy = false, editing = false, conflict = null;
   const live = token => root.isConnected && knowledgeIdentity() === owner && current?.id === repo && current.section === 'knowledge' && token === epoch;
   const url = id => endpoint + '/' + encodeURIComponent(id);
   const locationText = path => path || '全部文件';
@@ -48,12 +52,17 @@ function knowledgeSection() {
     const address = `#/projects/${repo}/knowledge${next.size ? '?' + next : ''}`;
     if (location.hash !== address) history.pushState({ knowledge: repo }, '', address);
   };
-  const capture = () => { const panel = root.querySelector('.knowledge-history'); if (panel) state.historyScroll = panel.scrollTop; };
+  const capture = () => {
+    const history = workspace.querySelector('.knowledge-history');
+    const tree = workspace.querySelector('.knowledge-tree-scroll');
+    if (history) state.historyScroll = history.scrollTop;
+    if (tree?.getClientRects().length) state.treeScroll = tree.scrollTop;
+  };
   const leave = async () => !knowledgeUnsaved() || await askConfirm({ title: '离开未保存的文件？', body: ['草稿仅在本次登录期间保留。'], action: '离开文件' });
   const failure = (error, retry, token) => {
     if (!live(token)) return;
     if ([401, 403].includes(error.status) || error.code === 'repository_not_found') {
-      ++epoch; knowledgeViews.delete(repo); knowledgeEditor = null; selected = null; versions = null; listing = null;
+      ++epoch; knowledgeViews.delete(repo); knowledgeEditor = null; selected = null; versions = null; listing = null; results = null;
       workspace.replaceChildren(); status.replaceChildren(note('文件访问权限已失效。请重新登录或联系管理员。')); return;
     }
     const message = error.code === 'note_move_uncertain' ? '文件移动的归属无法确认，本项目知识区已暂停读写。请联系部署维护者按「知识文件恢复」说明停写、备份并恢复一致的完整知识卷；重试不会解除此状态。' : readErrorText(error);
@@ -64,8 +73,14 @@ function knowledgeSection() {
   async function loadDirectory(repaint = true) {
     const token = ++epoch; status.replaceChildren(note('正在读取文件…'));
     try {
-      const data = await api(endpoint + '?' + new URLSearchParams({ directory: state.directory, query: state.query, deleted_only: state.trash ? '1' : '0' }));
-      if (!live(token)) return false; listing = data; status.replaceChildren(); if (repaint) draw(); return true;
+      const read = params => api(endpoint + '?' + new URLSearchParams(params));
+      const [treeData, filtered] = await Promise.all([
+        read({ directory: state.directory, recursive: '1' }),
+        state.query || state.trash ? read({ directory: state.directory, query: state.query, deleted_only: state.trash ? '1' : '0' }) : null,
+      ]);
+      if (!live(token)) return false;
+      listing = treeData; results = filtered;
+      status.replaceChildren(); if (repaint) draw(); return true;
     } catch (error) { failure(error, loadDirectory, token); return false; }
   }
   async function loadFile(id, revision = null) {
@@ -73,6 +88,10 @@ function knowledgeSection() {
     try {
       const data = await api(url(id) + (revision ? '?revision=' + revision : ''));
       if (!live(token)) return; selected = data.file; conflict = null;
+      if (!revision && !state.trash && state.directory !== selected.directory) {
+        state.directory = selected.directory;
+        expandPath(state.directory); routeState();
+      }
       if (!revision && state.drafts.has(id) && !selected.readonly && selected.can_edit !== false) editing = true;
       status.replaceChildren(); draw();
     } catch (error) { failure(error, () => loadFile(id, revision), token); }
@@ -90,11 +109,13 @@ function knowledgeSection() {
   }
   async function directory(path, trash = false) {
     if (!await leave()) return; capture(); editing = false; knowledgeEditor = null; state.directory = path; state.query = ''; state.trash = trash; state.file = null; state.revision = null; state.screen = 'directory'; selected = null; versions = null;
-    for (let path = state.directory; path; path = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '') state.expanded.add(path);
+    expandPath(path);
     routeState(); await loadDirectory();
   }
-  async function openFile(id, revision = null) {
+  async function openFile(id, revision = null, target = {}) {
     if (!await leave()) return; capture(); editing = false; knowledgeEditor = null; selected = null;
+    Object.assign(state, target);
+    if (!state.trash) expandPath(state.directory);
     state.moreOpen = false; state.file = id; state.revision = revision; state.screen = 'preview'; routeState(); draw(); await loadFile(id, revision);
     if (live(epoch) && !revision && state.drafts.has(id)) { editing = true; draw(); }
   }
@@ -129,24 +150,68 @@ function knowledgeSection() {
   }
   function tree() {
     const aside = element('aside', '', 'knowledge-tree'); aside.setAttribute('aria-label', '文件目录');
-    aside.append(element('h3', '目录'), actionButton('全部文件', () => directory('')));
-    const rows = element('div', '', 'knowledge-tree-rows');
-    const visit = parent => {
-      for (const path of (listing?.directories || []).filter(path => path && (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '') === parent)) {
-        const row = element('div', '', 'knowledge-tree-row'), expanded = state.expanded.has(path);
-        const toggle = actionButton(expanded ? '▾' : '▸', () => { capture(); if (expanded) state.expanded.delete(path); else state.expanded.add(path); draw(); });
-        toggle.setAttribute('aria-label', (expanded ? '收起目录 ' : '展开目录 ') + path); toggle.setAttribute('aria-expanded', String(expanded));
-        const open = actionButton('▱ ' + path.split('/').at(-1), () => directory(path)); open.setAttribute('aria-label', '目录 ' + path); open.title = path;
-        if (path === state.directory && !state.trash) open.setAttribute('aria-current', 'location');
-        row.style.paddingInlineStart = (path.split('/').length - 1) * 14 + 'px'; row.append(toggle, open); rows.append(row); if (expanded) visit(path);
-      }
-    }; visit('');
-    for (const file of (listing?.files || []).filter(file => !state.trash && file.directory === state.directory)) {
-      const open = actionButton('▤ ' + file.name, () => openFile(file.id)); open.setAttribute('aria-label', '文件 ' + file.path); open.title = file.path;
-      if (file.id === (selected?.id || state.file)) open.setAttribute('aria-current', 'page');
-      const row = element('div', '', 'knowledge-tree-row'); row.append(open); rows.append(row);
+    const folders = new Map(), files = new Map();
+    for (const path of listing?.directories || []) {
+      if (!path) continue;
+      const parent = parentOf(path);
+      if (!folders.has(parent)) folders.set(parent, []);
+      folders.get(parent).push(path);
     }
-    aside.append(rows, actionButton('已删除文件', () => directory('', true))); return aside;
+    for (const file of listing?.files || []) {
+      if (!files.has(file.directory)) files.set(file.directory, []);
+      files.get(file.directory).push(file);
+    }
+    const entry = (name, icon, action, key) => {
+      const control = actionButton(name, action, 'quiet knowledge-tree-entry');
+      control.replaceChildren(consoleIcon(icon), element('span', name));
+      control.dataset.knowledgeControl = key;
+      return control;
+    };
+    const all = entry('全部文件', 'folder', () => directory(''), 'folder:');
+    if (!state.directory && !state.trash && !state.file) all.setAttribute('aria-current', 'location');
+    const trash = entry('已删除文件', 'tray', () => directory('', true), 'trash');
+    if (state.trash) trash.setAttribute('aria-current', 'location');
+    const branch = (parent, depth) => {
+      // Keep deeply nested names readable in the side pane.
+      const items = element('ul', '', depth > 0 && depth <= 5 ? 'knowledge-tree-items knowledge-tree-branch' : 'knowledge-tree-items');
+      items.setAttribute('role', 'list');
+      for (const path of folders.get(parent) || []) {
+        const item = element('li', '', 'knowledge-tree-folder'), row = element('div', '', 'knowledge-tree-row');
+        const open = entry(path.split('/').at(-1), 'folder', () => directory(path), 'folder:' + path);
+        open.setAttribute('aria-label', '目录 ' + path); open.title = path;
+        if (path === state.directory && !state.trash && !state.file) open.setAttribute('aria-current', 'location');
+        item.append(row); items.append(item);
+        if (folders.has(path) || files.has(path)) {
+          let children;
+          const sync = () => {
+            const expanded = state.expanded.has(path);
+            toggle.setAttribute('aria-label', (expanded ? '收起目录 ' : '展开目录 ') + path);
+            toggle.setAttribute('aria-expanded', String(expanded));
+            if (expanded) { children = branch(path, depth + 1); item.append(children); }
+            else children?.remove();
+          };
+          const toggle = actionButton('', () => {
+            if (state.expanded.has(path)) state.expanded.delete(path);
+            else state.expanded.add(path);
+            sync();
+          }, 'quiet knowledge-tree-toggle');
+          toggle.dataset.knowledgeControl = 'toggle:' + path;
+          row.append(toggle); sync();
+        }
+        row.append(open);
+      }
+      for (const file of files.get(parent) || []) {
+        const open = entry(file.name, 'file', () => openFile(file.id, null, { directory: file.directory, query: '', trash: false }), 'file:' + file.id);
+        open.setAttribute('aria-label', '文件 ' + file.path); open.title = file.path;
+        if (file.id === state.file && !state.trash) open.setAttribute('aria-current', 'page');
+        const row = element('li', '', 'knowledge-tree-row'); row.append(open); items.append(row);
+      }
+      return items;
+    };
+    const scroll = element('div', '', 'knowledge-tree-scroll');
+    scroll.append(branch('', 0));
+    aside.append(element('h2', '文件目录'), all, scroll, trash);
+    return aside;
   }
   function metadata(file) { return note(`v${file.revision ?? '未知'} · ${timeText(file.created_at, '时间未提供')} · ${actor(file.actor)} · ${fileBytes(file.bytes)}`); }
   function directoriesPage(main) {
@@ -171,19 +236,25 @@ function knowledgeSection() {
       const items = element('ul'); for (const row of quarantined) items.append(element('li', `${readable(row.path)} · 名字含控制字符，无法打开`));
       panel.append(items); main.append(panel);
     }
-    const rows = element('ul', '', 'knowledge-file-list');
-    if (!state.query && !state.trash) for (const path of listing.directories.filter(path => path && (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '') === state.directory)) {
-      const row = element('li'); row.append(actionButton('▱ ' + path.split('/').at(-1), () => directory(path)), note('文件夹')); rows.append(row);
+    if (state.trash || state.query) {
+      const rows = element('ul', '', 'knowledge-file-list');
+      for (const file of results?.files || []) {
+        const target = state.trash ? {} : { directory: file.directory };
+        const row = element('li'), open = actionButton(file.name, () => openFile(file.id, null, target)); open.title = file.path;
+        row.append(open, note(file.path), metadata(file)); rows.append(row);
+      }
+      main.append(rows.children.length ? rows : note(state.trash ? '没有已删除文件。' : '没有匹配的文件。'));
+    } else {
+      const hasEntries = listing.files.some(file => file.directory === state.directory)
+        || listing.directories.some(path => path && parentOf(path) === state.directory);
+      main.append(note(hasEntries ? '选择文件以预览内容。' : '这个目录是空的。'));
     }
-    for (const file of listing.files) {
-      const row = element('li'), open = actionButton(file.name, () => openFile(file.id)); open.title = file.path;
-      row.append(open, note(`${state.query || state.trash ? file.path + ' · ' : ''}${file.binary ? '无法预览的文件' : /\.md$/i.test(file.name) ? 'Markdown' : '文本'}${file.readonly ? ' · 只读' : ''}`), metadata(file)); rows.append(row);
-    }
-    main.append(rows.children.length ? rows : note(state.trash ? '没有已删除文件。' : '这个目录是空的。'));
     if (!write()) main.append(note('当前权限只能读取文件。'));
   }
   function preview(main) {
-    main.append(actionButton('← 返回目录', () => directory(state.directory, state.trash)));
+    const back = actionButton('← 返回目录', () => directory(state.directory, state.trash), 'quiet knowledge-back');
+    back.dataset.knowledgeControl = 'back';
+    main.append(back);
     const file = selected; if (!file) { main.append(note('正在读取文件内容…')); return; }
     const heading = element('div', '', 'knowledge-file-heading'); heading.append(element('h2', file.name), element('p', file.path, 'knowledge-path'), metadata(file)); main.append(heading);
     if (file.historical) main.append(element('p', `正在查看 v${file.revision} · 只读，当前仍为 v${file.current_revision}`, 'knowledge-version-notice'), actionButton('返回当前版本', () => openFile(state.file)));
@@ -247,7 +318,7 @@ function knowledgeSection() {
   }
   function historyPanel() {
     const panel = element('aside', '', 'knowledge-history'); panel.setAttribute('aria-label', '文件历史');
-    panel.append(element('h3', '历史版本'), actionButton('← 返回文件', async () => { capture(); state.screen = 'preview'; routeState(); draw(); }));
+    panel.append(element('h2', '历史版本'), actionButton('← 返回文件', async () => { capture(); state.screen = 'preview'; routeState(); draw(); }));
     if (!versions) panel.append(note('历史尚未读取成功。'));
     for (const version of versions || []) {
       // A move entry is the only record of the old path once the file no longer exists under it (the file-tree manager records
@@ -258,15 +329,31 @@ function knowledgeSection() {
     requestAnimationFrame(() => { if (panel.isConnected) panel.scrollTop = state.historyScroll; }); return panel;
   }
   function draw() {
-    capture(); knowledgeEditor = null; root.dataset.scene = state.screen; workspace.replaceChildren(tree());
-    const main = element('div', '', 'knowledge-main'); main.append(crumbs());
-    if (state.file) preview(main); else directoriesPage(main);
-    workspace.append(main); if (state.screen === 'history') workspace.append(historyPanel());
+    const focused = workspace.contains(document.activeElement) && document.activeElement.dataset.knowledgeControl;
+    capture(); knowledgeEditor = null; root.dataset.scene = state.screen;
+    const main = element('div', '', 'knowledge-main');
+    if (state.file) preview(main);
+    else { if (state.directory) main.append(crumbs()); directoriesPage(main); }
+    renderPanes(main);
+    if (focused) {
+      const replacement = workspace.querySelector('[data-knowledge-control="' + CSS.escape(focused) + '"]');
+      const target = replacement?.getClientRects().length ? replacement
+        : state.screen === 'preview' ? main.querySelector('.knowledge-back')
+        : workspace.querySelector('.knowledge-tree > .knowledge-tree-entry');
+      target?.focus({ preventScroll: true });
+    }
+  }
+  function renderPanes(main) {
+    const sidebar = tree(), detail = element('div', '', 'knowledge-detail');
+    detail.append(main);
+    if (state.screen === 'history') detail.append(historyPanel());
+    workspace.replaceChildren(sidebar, detail);
+    if (state.treeScroll) sidebar.querySelector('.knowledge-tree-scroll').scrollTop = state.treeScroll;
   }
   async function directoryDialog(remove) {
     if (remove) {
       if (!await askConfirm({ title: `删除空目录 ${state.directory}？`, body: ['只删除空目录；文件的历史记录继续保留。'], action: '删除目录', danger: true })) return;
-      const parent = state.directory.includes('/') ? state.directory.slice(0, state.directory.lastIndexOf('/')) : '';
+      const parent = parentOf(state.directory);
       await mutation('DELETE', `/api/repositories/${repo}/knowledge-directories`, { path: state.directory }, () => directory(parent)); return;
     }
     pathDialog('新建文件夹', '', async path => mutation('POST', `/api/repositories/${repo}/knowledge-directories`, { path: (state.directory ? state.directory + '/' : '') + path }, () => loadDirectory()));
@@ -282,7 +369,7 @@ function knowledgeSection() {
   function moveDialog() {
     const file = selected;
     pathDialog('重命名或移动', file.path, path => mutation('POST', url(file.id) + '/move', { path, expected_revision: file.current_revision }, async result => {
-      state.directory = result.file.directory; state.query = ''; state.trash = false; routeState(); await refresh();
+      state.directory = result.file.directory; expandPath(state.directory); state.query = ''; state.trash = false; routeState(); await refresh();
     }));
   }
   async function createFile() {
@@ -295,7 +382,7 @@ function knowledgeSection() {
       const path = (state.directory ? state.directory + '/' : '') + name.value, token = epoch; busy = true; submit.disabled = true;
       try { const result = await api(endpoint, 'POST', { path, content: body.value }); if (!live(token)) return; state.drafts.delete(key); knowledgeEditor = null; busy = false; if (!await loadDirectory()) return; await openFile(result.file.id); }
       catch (error) { failure(error, refresh, token); } finally { busy = false; submit.disabled = false; }
-    }); main.append(crumbs(), form); workspace.replaceChildren(tree(), main); root.dataset.scene = 'preview'; knowledgeEditor = { root, draft }; body.focus();
+    }); main.append(crumbs(), form); root.dataset.scene = 'preview'; renderPanes(main); knowledgeEditor = { root, draft }; body.focus();
   }
   draw(); void refresh(); return [root];
 }

@@ -472,6 +472,7 @@ consoleIcon.shapes = {
   bot: [['rect', { x: '5', y: '8', width: '14', height: '11', rx: '2.5' }], ['path', { d: 'M12 8V4.5M9.5 4.5h5' }], ['circle', { cx: '9.2', cy: '13', r: '1' }], ['circle', { cx: '14.8', cy: '13', r: '1' }]],
   download: [['path', { d: 'M12 4v11' }], ['path', { d: 'M8 11.5 12 15.5 16 11.5' }], ['path', { d: 'M5 19h14' }]],
   folder: [['path', { d: 'M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2.5h7A1.5 1.5 0 0 1 20.5 10v7.5a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z' }]],
+  file: [['path', { d: 'M6 4h8l4 4v12H6zM14 4v4h4M9 12h6M9 16h6' }]],
   message: [['path', { d: 'M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8A1.5 1.5 0 0 1 19 16.5H9L5 20v-3.5H5A1.5 1.5 0 0 1 3.5 15V7A1.5 1.5 0 0 1 5 5.5z' }]],
   link: [['circle', { cx: '12', cy: '12', r: '8.5' }], ['path', { d: 'M12 8v8M8 12h8' }]],
   // consoleState() marks: an empty tray, and an alert for a failed read.

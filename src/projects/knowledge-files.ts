@@ -59,8 +59,11 @@ export async function knowledgeFilesApi(store:Store,manager:Manager|undefined,us
     if(method==='GET'){
       const directory=filePath(url.searchParams.get('directory')??'',true),query=url.searchParams.get('query')??'',trash=url.searchParams.get('deleted_only')==='1',include=url.searchParams.get('include_deleted')==='1';
       if(query.length>200)fail(400,'invalid_note_query');
-      const disk=await call('GET','?'+new URLSearchParams({directory,query,include_deleted:include?'1':'0',deleted_only:trash?'1':'0'}));
-      const legacy=(directory===''||query||trash?oldFiles():[]).filter(f=>(trash?f.deleted:include||!f.deleted)&&f.path.toLowerCase().includes(query.toLowerCase()));
+      const recursive=url.searchParams.get('recursive')==='1';
+      const params=new URLSearchParams({directory,query,include_deleted:include?'1':'0',deleted_only:trash?'1':'0'});
+      if(recursive)params.set('recursive','1');
+      const disk=await call('GET','?'+params);
+      const legacy=(directory===''||query||trash||recursive?oldFiles():[]).filter(f=>(trash?f.deleted:include||!f.deleted)&&f.path.toLowerCase().includes(query.toLowerCase()));
       return {...disk,can_write:writable(),files:[...disk.files,...legacy].map(present).sort((a,b)=>a.path.localeCompare(b.path))};
     }
     if(method==='POST'){

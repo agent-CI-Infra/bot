@@ -102,10 +102,13 @@ test('directory HTTP API keeps stable ids, legacy aliases, exact history and emp
  assert.equal((await admin(endpoint+'?revision=1')).value.file.content,'old bytes\n');assert.equal((await admin(endpoint)).value.file.path,'docs/renamed.txt');
  const newFile=await admin(base,'POST',{path:'old.txt',content:'new identity'});assert.equal(newFile.status,201);assert.notEqual(newFile.value.file.id,original.id);assert.equal((await admin(endpoint)).value.file.content,'old bytes\n');
  const nested=await admin(base+'?directory=docs');assert.deepEqual(nested.value.files.map(file=>file.id),[original.id]);
+ const recursive=await admin(base+'?recursive=1');assert.deepEqual(recursive.value.files.map(file=>file.path),['docs/renamed.txt','old.txt']);
+ assert.ok(recursive.value.files.every(file=>!Object.hasOwn(file,'content')));
  assert.equal((await admin(base+'?query=renamed')).value.files[0].path,'docs/renamed.txt');
  assert.equal((await admin(endpoint+'/move','POST',{path:'old.txt',expected_revision:2})).status,409);
  assert.equal((await admin(endpoint,'PUT',{content:'stale',expected_revision:1})).status,409);
  assert.equal((await admin(endpoint,'DELETE',{expected_revision:2})).value.file.revision,3);
+ assert.deepEqual((await admin(base+'?recursive=1')).value.files.map(file=>file.path),['old.txt']);
  assert.equal((await admin(dirs,'DELETE',{path:'docs/empty'})).status,200);assert.equal((await admin(dirs,'DELETE',{path:'docs'})).status,200);
  assert.equal((await admin(base+'?deleted_only=1')).value.files[0].id,original.id);
  const restored=await admin(endpoint+'/restore','POST',{revision:1,expected_revision:3});assert.equal(restored.value.file.revision,4);assert.equal(restored.value.file.content,'old bytes\n');
@@ -114,7 +117,7 @@ test('directory HTTP API keeps stable ids, legacy aliases, exact history and emp
  for(const path of ['../escape','/absolute','C:/absolute','docs//bad','docs/../escape','docs/\\bad','.git/entry','.write-history/file-tree.json'])assert.equal((await admin(dirs,'POST',{path})).status,400,path);
  assert.equal((await admin(dirs,'DELETE',{path:''})).status,400);
  const actor=knowledgeActor(h.store,'tree-reader','101',['tasks.read','knowledge.read']),user={id:actor.principal_id,role:'project_admin',repositories:['101'],context:actor};
- const result=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base+'?directory=docs'),{});assert.equal(result.can_write,false);assert.equal(result.files[0].readonly,true);assert.equal(result.files[0].can_move,false);
+ const result=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base+'?recursive=1'),{});assert.equal(result.can_write,false);assert.equal(result.files[0].path,'docs/renamed.txt');assert.equal(result.files[0].readonly,true);assert.equal(result.files[0].can_move,false);
  await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'POST',new URL('http://local'+dirs),{path:'forbidden'}),/capability_forbidden/);
  await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local/api/repositories/202/knowledge-files'),{}),/repository_forbidden/);
 });
