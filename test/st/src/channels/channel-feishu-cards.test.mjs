@@ -211,7 +211,7 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   assert.equal(followRes.value.toast.type, 'success');
   assert.match(followRes.value.toast.content, /刷新数据/);
   await until(() => f.wire.sent.some(s => s.msg_type === 'post' && JSON.stringify(s.content).includes('已按你的点击重新查询完成')));
-  assert.equal(seenFollowup, '请重新查询并刷新最新结果');
+  assert.equal(seenFollowup, '[卡片操作：刷新数据] 请重新查询并刷新最新结果');
 
   // 5) Authorization fence: disabling group binding invalidates old interactive card
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);

@@ -236,18 +236,20 @@ function requireSafeUrl(value: unknown, origin: string, path: string): string {
 /** Sanitize Markdown used inside Card JSON 2.0: allow only safe http(s) links, block raw img_key and unsafe HTML tags. */
 export function sanitizeCardMarkdown(raw: string, origin = '', clean: (s: string) => string = s => s): string {
   let out = clean(raw);
-  // Block Markdown image syntax (prevents forged img_key like ![x](img_v2_...)) and turn web images into safe links.
-  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt: string, href: string) => {
+  // Block Markdown image syntax (prevents forged img_key like ![x](img_v2_...) with or without optional title) and turn web images into safe links.
+  out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt: string, target: string) => {
+    const href = target.trim().split(/\s+/)[0] ?? '';
     const url = safeCardUrl(href, origin);
     const label = alt.trim() || '图片';
     return url ? `[图片：${label}](${url})` : `[图片：${label}]`;
   });
   // Sanitize Markdown links: drop javascript:, data:, file:, feishu custom schemes, etc.
-  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label: string, href: string) => {
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, target: string) => {
+    const href = target.trim().split(/\s+/)[0] ?? '';
     const url = safeCardUrl(href, origin);
     return url ? `[${label}](${url})` : label;
   });
-  // Block raw HTML <img> tags and unsafe <link> tags; allow only harmless Feishu <font color='...'> and <text_tag color='...'>.
+  // Block raw HTML <img>, <at>, <script> and unsafe <link> tags; allow only harmless Feishu <font color='...'> and <text_tag color='...'>.
   out = out.replace(/<(\/?)([a-zA-Z][a-zA-Z0-9_-]*)([^>]*)>/g, (full, slash: string, tag: string, attrs: string) => {
     const lower = tag.toLowerCase();
     if (lower === 'font' || lower === 'text_tag') {
@@ -259,6 +261,18 @@ export function sanitizeCardMarkdown(raw: string, origin = '', clean: (s: string
     return full.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   });
   return out;
+}
+
+/** Sanitize plain fragments interpolated inside markdown wrappers (**title**, <text_tag>...</text_tag>): no raw tags, no forged img_key. */
+function sanitizeCardInlineFragment(raw: string, origin = '', clean: (s: string) => string = s => s): string {
+  let out = clean(raw);
+  out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt: string) => `[图片：${alt.trim() || '图片'}]`);
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, target: string) => {
+    const href = target.trim().split(/\s+/)[0] ?? '';
+    const url = safeCardUrl(href, origin);
+    return url ? `[${label}](${url})` : label;
+  });
+  return out.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function cleanText(value: unknown, clean: (s: string) => string, maxLen: number, path: string, allowEmpty = false): string {
@@ -562,8 +576,8 @@ function sanitizePaginatedList(el: Json, origin: string, clean: (s: string) => s
   const pageSize = el.page_size === undefined ? 5 : Number(el.page_size);
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 10) cardFail('card_invalid', `${path}.page_size must be an integer between 1 and 10.`);
   if (!Array.isArray(el.items) || el.items.length > 200) cardFail('card_invalid', `${path}.items must be an array of at most 200 entries.`);
-  const title = el.title === undefined ? undefined : cleanText(el.title, clean, 120, `${path}.title`);
-  const emptyText = el.empty_text === undefined ? '暂无匹配条目' : cleanText(el.empty_text, clean, 120, `${path}.empty_text`);
+  const title = el.title === undefined ? undefined : sanitizeCardInlineFragment(cleanText(el.title, clean, 120, `${path}.title`), origin);
+  const emptyText = el.empty_text === undefined ? '暂无匹配条目' : sanitizeCardMarkdown(cleanText(el.empty_text, clean, 120, `${path}.empty_text`), origin);
 
   const columns = display === 'table' ? sanitizeTableColumns(el.columns, clean, `${path}.columns`) : undefined;
   const rawFilters = el.filters === undefined ? [] : Array.isArray(el.filters) ? el.filters : cardFail('card_invalid', `${path}.filters must be an array.`);
@@ -605,15 +619,15 @@ function sanitizePaginatedList(el: Json, origin: string, clean: (s: string) => s
       return { row, filters: meta };
     }
     const content = sanitizeCardMarkdown(cleanText(itemObj.content ?? itemObj.description ?? itemObj.title ?? '', clean, 1200, `${path}.items[${idx}].content`), origin, s => s);
-    const itemTitle = itemObj.title === undefined ? undefined : cleanText(itemObj.title, clean, 120, `${path}.items[${idx}].title`);
+    const itemTitle = itemObj.title === undefined ? undefined : sanitizeCardInlineFragment(cleanText(itemObj.title, clean, 120, `${path}.items[${idx}].title`), origin);
     const url = itemObj.url === undefined ? undefined : requireSafeUrl(itemObj.url, origin, `${path}.items[${idx}].url`);
     const linkLabel = itemObj.link_label === undefined ? '查看' : cleanText(itemObj.link_label, clean, 24, `${path}.items[${idx}].link_label`);
     const badges = itemObj.badges === undefined ? [] : Array.isArray(itemObj.badges) ? itemObj.badges.slice(0, 4).map((b, bi) => {
-      if (typeof b === 'string') return { text: cleanText(b, clean, 24, `${path}.items[${idx}].badges[${bi}]`), color: 'neutral' };
+      if (typeof b === 'string') return { text: sanitizeCardInlineFragment(cleanText(b, clean, 24, `${path}.items[${idx}].badges[${bi}]`), origin), color: 'neutral' };
       const bo = asObject(b, `${path}.items[${idx}].badges[${bi}]`);
       const color = bo.color === undefined ? 'neutral' : String(bo.color);
       if (!tagColors.has(color)) cardFail('card_invalid', `${path}.items[${idx}].badges[${bi}].color is invalid.`);
-      return { text: cleanText(bo.text, clean, 24, `${path}.items[${idx}].badges[${bi}].text`), color };
+      return { text: sanitizeCardInlineFragment(cleanText(bo.text, clean, 24, `${path}.items[${idx}].badges[${bi}].text`), origin), color };
     }) : cardFail('card_invalid', `${path}.items[${idx}].badges must be an array.`);
     const fieldsObj = itemObj.fields && typeof itemObj.fields === 'object' && !Array.isArray(itemObj.fields) ? itemObj.fields as Json : itemObj;
     for (const f of filterDefs) {
@@ -993,7 +1007,7 @@ function renderPaginatedListBlock(
   const slice = filtered.slice(start, start + list.page_size);
 
   const headingParts: string[] = [];
-  if (list.title) headingParts.push(`**${list.title}**`);
+  if (list.title) headingParts.push(`**${sanitizeCardInlineFragment(list.title)}**`);
   headingParts.push(`共 ${totalItems} 条` + (totalItems !== list.items.length ? `（总计 ${list.items.length} 条）` : '') + (totalPages > 1 ? ` · 第 ${page + 1}/${totalPages} 页` : ''));
   out.push({ tag: 'markdown', content: headingParts.join(' · '), text_size: list.title ? 'normal' : 'notation' });
 
@@ -1039,7 +1053,7 @@ function renderPaginatedListBlock(
   }
 
   if (!slice.length) {
-    out.push({ tag: 'markdown', content: list.empty_text, text_size: 'notation' });
+    out.push({ tag: 'markdown', content: sanitizeCardMarkdown(list.empty_text), text_size: 'notation' });
   } else if (list.display === 'table' && list.columns) {
     out.push({
       tag: 'table',
@@ -1052,8 +1066,8 @@ function renderPaginatedListBlock(
     });
   } else {
     for (const entry of slice) {
-      const badges = Array.isArray(entry.badges) ? (entry.badges as { text: string; color: string }[]).map(b => `<text_tag color='${b.color}'>${b.text}</text_tag>`).join(' ') : '';
-      const head = [entry.title ? `**${entry.title}**` : '', badges].filter(Boolean).join(' ');
+      const badges = Array.isArray(entry.badges) ? (entry.badges as { text: string; color: string }[]).map(b => `<text_tag color='${b.color}'>${sanitizeCardInlineFragment(b.text)}</text_tag>`).join(' ') : '';
+      const head = [entry.title ? `**${sanitizeCardInlineFragment(String(entry.title))}**` : '', badges].filter(Boolean).join(' ');
       const body = [head, String(entry.content ?? '')].filter(Boolean).join('\n');
       if (entry.url) {
         out.push({
@@ -1199,8 +1213,11 @@ export function renderFeishuCard(
   }
 
   const footerBits: string[] = [];
-  if (options.footerNote) footerBits.push(options.footerNote);
-  if (options.consoleUrl) footerBits.push(`[登录后台查看](${options.consoleUrl})`);
+  if (options.footerNote) footerBits.push(sanitizeCardInlineFragment(options.footerNote));
+  if (options.consoleUrl) {
+    const safeConsole = safeCardUrl(options.consoleUrl);
+    if (safeConsole) footerBits.push(`[登录后台查看](${safeConsole})`);
+  }
   if (footerBits.length) {
     bodyElements.push({ tag: 'markdown', content: footerBits.join(' · '), text_size: 'notation' });
   }

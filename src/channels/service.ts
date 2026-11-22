@@ -543,7 +543,7 @@ export class ChannelService {
       thread_id: '', parent_id: event.message_id, root_id: '',
       created_at: now, updated_at: now, received_at: now,
       kind: 'message', message_type: 'text', sender_type: 'user', addressed: true,
-      content: outcome.prompt, command_text: outcome.prompt,
+      content: `[卡片操作：${outcome.label}] ${outcome.prompt}`, command_text: `[卡片操作：${outcome.label}] ${outcome.prompt}`,
       raw_content: JSON.stringify({ text: `[卡片操作：${outcome.label}] ${outcome.prompt}`, card_id: cardRow.id, card_message_id: event.message_id }),
       mentions: chat.chat_type === 'group' ? [{ key: '@_card', actor_id: c.bot_open_id, name: c.app_name || '', is_self: true }] : [],
     };
