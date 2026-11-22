@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { acpVersion, icodeProductId, icodeReleases, icodeTestedVersion, readAcpProduct } from '../../runner/acp-products.mjs';
+import { acpVersion, icodeProductId, icodeReleases, icodeTestedVersion, readAcpProduct, workswarmProductId, workswarmRelease } from '../../runner/acp-products.mjs';
 import type { Store, Row } from '../storage/database.js';
 import {
   DEFAULT_AGENT_TOOLS_ROOT,
@@ -25,6 +25,7 @@ const names: Record<string, string> = {
   codex: 'Codex',
   container_acp: '容器内 ACP',
   [icodeProductId]: 'iCode',
+  [workswarmProductId]: 'WorkSwarm',
 };
 
 export interface ModelConnectivityStatus {
@@ -338,20 +339,23 @@ function containerCliStatus(
   };
 }
 
-function icodeStatus(store?: Store, repositoryId?: string, toolsRoot?: string): BackendRuntimeStatus {
+function acpReleaseStatus(id: typeof icodeProductId | typeof workswarmProductId, store?: Store, repositoryId?: string, toolsRoot?: string): BackendRuntimeStatus {
   const root = toolsRoot ?? process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT;
-  const directory = join(root, 'acp', icodeProductId);
+  const directory = join(root, 'acp', id);
+  const icode = id === icodeProductId;
+  const name = icode ? 'iCode' : 'WorkSwarm';
+  const tested = icode ? icodeTestedVersion : workswarmRelease.version;
   const volumePresent = existsSync(root);
-  const supportedVersions = [...icodeReleases]
+  const supportedVersions = icode ? [...icodeReleases]
     .filter(([, release]) => Object.hasOwn(release.sha256, process.arch))
-    .map(([version]) => version);
+    .map(([version]) => version) : [tested];
   let selected: string | null = null;
   let installed: string[] = [];
   let reasonCode: string | null = null;
   let reason: string | null = null;
   if (!volumePresent) {
     reasonCode = 'agent_tools_volume_missing';
-    reason = `工具卷 ${DEFAULT_AGENT_TOOLS_ROOT} 未挂载，无法安装 iCode。`;
+    reason = `工具卷 ${DEFAULT_AGENT_TOOLS_ROOT} 未挂载，无法安装 ${name}。`;
   } else if (!supportedVersions.length) {
     reasonCode = 'icode_arch_unsupported';
     reason = '当前项目电脑架构没有受支持的 iCode Linux 离线包。';
@@ -359,33 +363,34 @@ function icodeStatus(store?: Store, repositoryId?: string, toolsRoot?: string): 
     try {
       installed = readdirSync(directory).filter(version => {
         if (!acpVersion.test(version)) return false;
-        try { readAcpProduct(root, icodeProductId, version); return true; }
+        try { readAcpProduct(root, id, version); return true; }
         catch { return false; }
       }).sort();
-      selected = readAcpProduct(root, icodeProductId).version;
+      selected = readAcpProduct(root, id).version;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? (error as Error).message;
       if (code === 'ENOENT' && !existsSync(join(directory, 'selected'))) {
         reasonCode = installed.length ? 'acp_product_not_selected' : 'acp_product_not_installed';
         reason = installed.length
-          ? '尚未选用 iCode 版本，请由平台管理员选用已安装的版本。'
-          : `尚未安装 iCode ${icodeTestedVersion}，请由平台管理员安装官方 Linux 离线包。`;
+          ? `尚未选用 ${name} 版本，请由平台管理员选用已安装的版本。`
+          : icode ? `尚未安装 iCode ${tested}，请由平台管理员安装官方 Linux 离线包。`
+            : `尚未安装 WorkSwarm ${tested}，请由平台管理员按部署文档安装。`;
       } else {
         reasonCode = 'acp_product_invalid';
-        reason = '无法读取当前选用的 iCode 版本。请检查工具卷中的安装并重新选用已验证的版本。';
+        reason = `无法读取当前选用的 ${name} 版本。请检查工具卷中的安装并重新选用已验证的版本。`;
       }
     }
   }
-  const model = backendModel(icodeProductId, store, repositoryId);
+  const model = backendModel(id, store, repositoryId);
   if (selected && !model.modelRelayReady) {
     reasonCode = model.modelErrorCode ?? 'model_not_configured';
-    reason = relayUnavailable('iCode', model.modelCount);
+    reason = relayUnavailable(name, model.modelCount);
   }
   return {
     source: 'tool_volume', ready: reasonCode === null, status: reasonCode === null ? 'ready' : 'unavailable',
     volume_root: DEFAULT_AGENT_TOOLS_ROOT, volume_present: volumePresent, cli_installed: installed.length > 0,
     installed_versions: installed, compatible_versions: installed, incompatible_versions: [],
-    selected_version: selected, compatible_range: supportedVersions.join('、'), tested_version: icodeTestedVersion,
+    selected_version: selected, compatible_range: supportedVersions.join('、'), tested_version: tested,
     node_version: null, config_override: false, model_relay_ready: model.modelRelayReady,
     model_count: model.modelCount, resolved_model: model.resolvedModel, connectivity: model.connectivity,
     reason_code: reasonCode, reason, subscription: null,
@@ -428,8 +433,8 @@ export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: 
       // The readiness row comes from what the driver declares (#1042): a tool-volume CLI is inspected there, any other
       // driver that declares workspace execution reports its declaration, and a control-plane driver has no volume to
       // report. Adding a backend no longer means editing a list of two ids.
-      const runtime_status = h.id === icodeProductId
-        ? icodeStatus(store, repositoryId, toolsRoot)
+      const runtime_status = h.id === icodeProductId || h.id === workswarmProductId
+        ? acpReleaseStatus(h.id, store, repositoryId, toolsRoot)
         : h.tool_volume
         ? containerCliStatus(h.tool_volume, store, repositoryId, toolsRoot)
         // Task tools alone do not place a driver in the project computer: a control-plane driver reports its evidence

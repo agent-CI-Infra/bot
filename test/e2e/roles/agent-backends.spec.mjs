@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
+import { workswarmLaunch, workswarmRelease } from '../../../runner/acp-products.mjs';
 import { consoleSave, compareWithServer, confirmDiscard } from '../helpers/console-save.mjs';
 
 test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与模型来源', async ({ page }) => {
@@ -55,7 +56,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       const picker = page.getByTestId('role-form').getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
-      const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp', 'icode'] : [];
+      const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp', 'icode', 'workswarm'] : [];
       expect(optionValues).toEqual(['pi', 'claude_code', 'codex', ...acp, 'native', 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
       for (const backend of ['pi', 'native', 'process']) expect(await optionDisabled(backend)).toBe(false);
@@ -74,6 +75,39 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await acpPicker.evaluate(el => el.scrollIntoView({ block: 'center' }));
       await page.screenshot({ path: `.tmp/agent-backends/acp-${width}.png` });
+    }
+    await acpPicker.selectOption('workswarm');
+    const swarmStatus = page.getByTestId('backend-runtime-status');
+    await expect(swarmStatus).toContainText('WorkSwarm');
+    await expect(swarmStatus).toContainText('0.2.9');
+    await expect(swarmStatus).toContainText('未就绪');
+    await expect(swarmStatus.getByRole('link', { name: '打开工具卷设置' })).toHaveCount(0);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await swarmStatus.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `.tmp/agent-backends/workswarm-${width}.png` });
+    }
+    const swarmRoot = join(toolsDir, 'acp', 'workswarm');
+    const swarmVersion = join(swarmRoot, workswarmRelease.version);
+    mkdirSync(join(swarmVersion, 'venv', 'bin'), { recursive: true });
+    writeFileSync(join(swarmVersion, 'venv', 'bin', 'python'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(swarmVersion, 'manifest.json'), JSON.stringify({
+      schema: 'bot.acp-product/1', id: 'workswarm', version: workswarmRelease.version,
+      python: workswarmRelease.python, source: 'fixture', sourceSha256: workswarmRelease.sourceSha256,
+      lockSha256: workswarmRelease.lockSha256, launch: workswarmLaunch,
+    }));
+    writeFileSync(join(swarmRoot, 'selected'), workswarmRelease.version + '\n');
+    await page.reload();
+    await goRolePage(page, { role: 'dev' });
+    await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('workswarm');
+    await expect(swarmStatus).toContainText('WorkSwarm 容器运行配置已就绪');
+    await expect(swarmStatus).toContainText('0.2.9');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await swarmStatus.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `.tmp/agent-backends/workswarm-ready-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'manager' });

@@ -142,6 +142,21 @@ node scripts/install-acp-product.mjs select --product icode --version 0.36.0
 
 v0.36.0 已在 x86_64 Docker 项目电脑验证。平台仅提供 HTTP MCP 和平台模型中转，iCode 的交互式人工回答、stdio / SSE MCP、供应商订阅、仓库钩子及仓库自带 MCP 配置均不可用。项目角色选择 iCode 后使用该角色当前的文件和命令权限。实际模型与用量由运行记录和模型账本记录。
 
+#### WorkSwarm
+
+WorkSwarm `0.2.9` 固定至上游提交 `453dce3054babf7f3a7000c8e57e068de01d8d2e`，使用 uv 管理 Python `3.13.18`。准备目录，仅放该提交的 `pyproject.toml`、`uv.lock` 和官方发布的 `workswarm-0.2.9-py3-none-any.whl`。安装器校验三文件的合并摘要和官方 wheel SHA-256，并按锁文件导出的哈希安装依赖。[发布资产](https://github.com/openJiuwen-ai/jiuwenswarm/releases/tag/v0.2.9) · [锁文件](https://github.com/openJiuwen-ai/jiuwenswarm/blob/453dce3054babf7f3a7000c8e57e068de01d8d2e/uv.lock)
+
+官方 wheel 的 SHA-256 为 `241ed07f9a23f989984b68474e2b5147ad6907323c92fb8d139be8da6705130f`，`uv.lock` 的 SHA-256 为 `5db141a6503cc93fa27d6defc3a97aed121e3fbc65ea2d395789956680f48c6e`。
+
+在 Linux 安装容器中挂载本部署的工具卷到 `/opt/agent-tools`。安装环境需具备 Node.js、uv 和依赖下载网络。先运行 `uv python list --only-downloads 3.13.18`，确认 uv 的下载目录包含当前架构的构建。uv `0.13.9` 已在 Linux x86_64 验证。若已有兼容的 Python `3.13.18`，也可在安装命令附加 `--python-executable` 指定路径，并确保项目电脑可从相同路径访问解释器。安装成功后默认选用固定版本。
+
+```sh
+node scripts/install-acp-product.mjs install --product workswarm --version 0.2.9 --source ./workswarm-release
+node scripts/install-acp-product.mjs select --product workswarm --version 0.2.9
+```
+
+项目「角色配置」中可选 WorkSwarm，并查看已安装和当前选用版本。模型使用 Chat Completions 或 Anthropic Messages。容器内运行时会核对 ACP 握手报告版本。Gateway 0.1.0 启动时会启动定时调度器，平台不预置定时任务，Gateway 的创建接口仍可用且新建任务默认启用。
+
 #### 通用 Python 产品
 
 1. 在与项目电脑架构和系统兼容的独立 Linux 安装环境中，准备 `uv`、可信产品源码或发行包内容，以及固定 Python 补丁版本和依赖锁的预设。以可写方式将本部署的 `agent-tools` 卷挂载到 `/opt/agent-tools`。项目电脑使用同一卷的只读挂载。

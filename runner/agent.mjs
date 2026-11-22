@@ -6,7 +6,8 @@ import {environment,workspaceTag} from './command.mjs';
 import {local,runnerRoot} from './paths.mjs';
 import {volume} from './disk.mjs';
 import {acpLeaseFile,acpRunHome,reapAcpDescendants} from './acp-lease.mjs';
-import {icodeProductId} from './acp-products.mjs';
+import {releaseWorkSwarmPorts} from './workswarm.mjs';
+import {requiresAcpRunHome,workswarmProductId} from './acp-products.mjs';
 
 async function readRequestId(path){
   const fh=await open(path,'r').catch(()=>null);
@@ -154,7 +155,8 @@ async function terminateHarnessState(state,currentBoot,root,workspaceId){
   }
   if(acp){
     await reapAcpDescendants(state.instance_id);
-    if(state.acp_product_id===icodeProductId&&/^[a-f0-9]{48}$/.test(state.instance_id||'')){
+    if(state.acp_product_id===workswarmProductId) await releaseWorkSwarmPorts(state.instance_id);
+    if(requiresAcpRunHome(state.acp_product_id)&&/^[a-f0-9]{48}$/.test(state.instance_id||'')){
       await rm(acpRunHome(root+'/agent',state.instance_id),{recursive:true,force:true}).catch(()=>{});
     }
   }

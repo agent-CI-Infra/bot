@@ -6,9 +6,10 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMcpHttp } from './mcp-bridge.mjs';
-import { icodeProductId, validateAcpLaunch } from './acp-products.mjs';
+import { icodeProductId, validateAcpLaunch, workswarmProductId } from './acp-products.mjs';
 
 import { configureICode, icodeAnswer } from './icode.mjs';
+import { configureWorkSwarm, releaseWorkSwarmPorts, reserveWorkSwarmPorts } from './workswarm.mjs';
 
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const STARTUP_MS = 15_000;
@@ -19,7 +20,7 @@ const abort = new AbortController();
 const children = [];
 let agent, sessionId, mcp, prompting = false, closing = false, cancelled = false;
 let sequence = 0;
-let icode = false, supportsClose = false, retiring;
+let icode = false, supportsClose = false, retiring, workSwarmInstance;
 const pending = new Map();
 const write = frame => process.stdout.write(JSON.stringify(frame) + '\n');
 const event = body => write({ type: 'event', event: body });
@@ -53,8 +54,8 @@ function close(error) {
   }
 }
 
-function start(executable, args, env, name, protocol = false) {
-  const child = spawn(executable, args, { cwd: root, env, stdio: [protocol ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+function start(executable, args, env, name, protocol = false, cwd = root) {
+  const child = spawn(executable, args, { cwd, env, stdio: [protocol ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   children.push(child);
   child.stderr.pipe(process.stderr, { end: false });
   if (!protocol) child.stdout.pipe(process.stderr, { end: false });
@@ -180,13 +181,33 @@ async function loopbackPort() {
   return port;
 }
 
-async function waitHealthy(url) {
-  const deadline = Date.now() + STARTUP_MS;
+function websocketReady(url, signal) {
+  return new Promise(resolve => {
+    const socket = new WebSocket(url);
+    const finish = ready => {
+      signal.removeEventListener('abort', abortProbe);
+      socket.close();
+      resolve(ready);
+    };
+    const abortProbe = () => finish(false);
+    socket.addEventListener('open', () => finish(true), { once: true });
+    socket.addEventListener('error', () => finish(false), { once: true });
+    if (signal.aborted) abortProbe();
+    else signal.addEventListener('abort', abortProbe, { once: true });
+  });
+}
+
+async function waitHealthy(url, transport) {
+  const deadline = Date.now() + (transport === 'websocket' ? 60_000 : STARTUP_MS);
   while (Date.now() < deadline) {
     const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(500)]);
-    const response = await fetch(url, { signal, redirect: 'error' }).catch(() => null);
-    await response?.body?.cancel();
-    if (response?.ok) return;
+    if (transport === 'websocket') {
+      if (await websocketReady(url, signal)) return;
+    } else {
+      const response = await fetch(url, { signal, redirect: 'error' }).catch(() => null);
+      await response?.body?.cancel();
+      if (response?.ok) return;
+    }
     await delay(50, undefined, { signal: abort.signal });
   }
   throw new AcpError('acp_sidecar_unhealthy');
@@ -206,6 +227,7 @@ try {
   const config = JSON.parse(await readFile(join(agentDir, 'harness.json'), 'utf8'));
   const launch = validateAcpLaunch(config.acp_product.launch);
   icode = config.acp_product.id === icodeProductId;
+  const workswarm = config.acp_product.id === workswarmProductId;
   const executable = process.argv[3];
   const productDir = icode ? dirname(dirname(executable)) : dirname(dirname(dirname(executable)));
   const runDir = join(agentDir, 'acp-' + config.instance_id);
@@ -217,12 +239,15 @@ try {
   };
   // Close provisional listeners before starting the sidecars; each process binds its own per-run loopback port.
   const allocated = new Set();
-  for (const sidecar of launch.sidecars) {
+  const allocate = async () => {
     let port;
     do { port = await loopbackPort(); } while (allocated.has(port));
     allocated.add(port);
-    variables[`port:${sidecar.name}`] = String(port);
-  }
+    return port;
+  };
+  workSwarmInstance = workswarm ? config.instance_id : undefined;
+  const ports = workswarm ? await reserveWorkSwarmPorts(workSwarmInstance) : null;
+  for (const sidecar of launch.sidecars) variables[`port:${sidecar.name}`] = String(ports?.[sidecar.name] ?? await allocate());
   const expand = (template, values = variables) => template.replace(/\{(product|state|run|model|relay|token|workspace|access|port:[\w-]+)\}/g, (_, key) => {
     if (!Object.hasOwn(values, key)) throw new AcpError('acp_invalid_launch_variable', key);
     return values[key];
@@ -231,17 +256,6 @@ try {
     ...Object.fromEntries(Object.entries(launch.env).map(([key, value]) => [key, expand(value, values)])),
     BOT_ACP_INSTANCE_ID: config.instance_id,
   });
-  for (const sidecar of launch.sidecars) {
-    if (closing) break;
-    const state = join(runDir, sidecar.name);
-    const tmp = join(state, 'tmp');
-    await mkdir(tmp, { recursive: true, mode: 0o700 });
-    if (closing) break;
-    const values = { ...variables, state };
-    start(executable, sidecar.args.map(arg => expand(arg, values)), { ...environment(values), HOME: state, TMPDIR: tmp }, sidecar.name);
-  }
-  await Promise.all(launch.sidecars.map(sidecar => waitHealthy(`http://127.0.0.1:${variables[`port:${sidecar.name}`]}${sidecar.healthPath}`)));
-  if (closing) throw new AcpError('acp_connection_closed');
   let mcpServer;
   if (launch.mcp === 'http') {
     mcp = await startMcpHttp({ agentDir, token, signal: abort.signal });
@@ -249,11 +263,30 @@ try {
   } else {
     mcpServer = { name: 'bot', command: process.execPath, args: [join(import.meta.dirname, 'mcp-bridge.mjs'), agentDir], env: [{ name: 'BOT_RUN_TOKEN', value: token }] };
   }
+  const swarm = workswarm ? await configureWorkSwarm(config, variables.state, {
+    gateway: ports.gateway, agent: ports['agent-server'], web: ports.web,
+  }, mcp, token, agentDir, { executable, environment: environment(), signal: abort.signal }) : null;
+  for (const sidecar of launch.sidecars) {
+    if (closing) break;
+    const state = swarm ? variables.state : join(runDir, sidecar.name);
+    const tmp = join(state, 'tmp');
+    await mkdir(tmp, { recursive: true, mode: 0o700 });
+    if (closing) break;
+    const values = { ...variables, state };
+    start(executable, sidecar.args.map(arg => expand(arg, values)),
+      { ...environment(values), HOME: state, TMPDIR: tmp, ...swarm?.env },
+      sidecar.name, false, swarm?.workspace);
+  }
+  await Promise.all(launch.sidecars.map(sidecar => {
+    const scheme = sidecar.healthTransport === 'websocket' ? 'ws' : 'http';
+    return waitHealthy(`${scheme}://127.0.0.1:${variables[`port:${sidecar.name}`]}${sidecar.healthPath}`, sidecar.healthTransport);
+  }));
+  if (workswarm) await releaseWorkSwarmPorts(workSwarmInstance);
   if (closing) throw new AcpError('acp_connection_closed');
-  const env = environment();
+  const env = { ...environment(), ...swarm?.env };
   if (icode) await configureICode(config, env);
   if (closing) throw new AcpError('acp_connection_closed');
-  agent = start(executable, launch.args.map(arg => expand(arg)), env, 'agent', true);
+  agent = start(executable, launch.args.map(arg => expand(arg)), env, 'agent', true, swarm?.workspace);
   consumeProtocol(agent.stdout, frame => handle(frame, launch.answers));
   const initialized = await request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'launchpad', version: '1' } }, STARTUP_MS);
   const capabilities = initialized?.agentCapabilities ?? {};
@@ -262,11 +295,16 @@ try {
       capabilities.mcpCapabilities?.http !== true || !supportsClose)) {
     throw new AcpError('icode_protocol_unsupported', 'iCode must report ACP v1, the selected release version, HTTP MCP, and session close.');
   }
+  if (workswarm && initialized?.agentInfo?.version !== config.acp_product.version) {
+    throw new AcpError('workswarm_protocol_unsupported', 'WorkSwarm did not report the selected release version.');
+  }
   if (initialized?.protocolVersion !== 1) throw new AcpError('acp_protocol_version_unsupported');
   event({ type: 'configuration', protocol_version: 1, capabilities, agent: initialized.agentInfo });
-  const sessionParams = { cwd: root, mcpServers: [mcpServer] };
+  const sessionParams = swarm
+    ? { cwd: swarm.workspace, mcpServers: [], mcp: ['bot'], supports_user_interaction: false }
+    : { cwd: root, mcpServers: [mcpServer] };
   let recoveryMode = config.resume ? 'rebuilt_from_task_records' : 'new_session';
-  if (config.resume && config.session_id && capabilities.loadSession === true) {
+  if (!workswarm && config.resume && config.session_id && capabilities.loadSession === true) {
     sessionId = config.session_id; // During load the agent can replay session/update notifications.
     try {
       await request('session/load', { ...sessionParams, sessionId }, STARTUP_MS);
@@ -302,5 +340,6 @@ try {
     }
   });
 } catch (error) {
+  await releaseWorkSwarmPorts(workSwarmInstance);
   close(error);
 }

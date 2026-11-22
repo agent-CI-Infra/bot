@@ -24,7 +24,7 @@ import { piAdapter,piRuntime } from '../agent/pi.js';
 import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 import type { RoleKind } from './catalog.js';
 import type { HarnessCapabilities } from './protocol.js';
-import { icodeProductId } from '../../runner/acp-products.mjs';
+import { icodeProductId, workswarmProductId } from '../../runner/acp-products.mjs';
 import { acpHarness, containerAcpId, prepareAcp } from '../harness/acp.js';
 import { codexAppServer } from '../harness/app-server.js';
 /** The worker cannot access provider credentials or obtain arbitrary tools. */
@@ -106,6 +106,8 @@ export const harnesses:RegisteredRoleHarness[]=[
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  containerAcp,
  {...containerAcp,id:icodeProductId},
+ {...containerAcp,id:workswarmProductId,model_api:['openai-chat-completions','anthropic-messages'],
+  capabilities:{...containerAcp.capabilities,recovery:['rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
@@ -114,7 +116,7 @@ export const harnesses:RegisteredRoleHarness[]=[
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
 export const runsInTaskCheckout = (driver: RoleHarnessMetadata) => driver.environment === 'workspace' && driver.capabilities?.raw_evidence === 'task_tools';
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],['pi',piHarness]]);
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],[workswarmProductId,spec=>acpHarness(spec,workswarmProductId)],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
@@ -203,7 +205,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
 }
 export function roleHarness(id:string){
  if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);
- const isAcp=id===containerAcpId||id===icodeProductId;
+ const isAcp=id===containerAcpId||id===icodeProductId||id===workswarmProductId;
  const createSession=<T>(spec:AgentSpec<T>,services:AgentServices)=>{
   const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
   const external=spec.cancelSignal;

@@ -1,6 +1,6 @@
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
-import { icodeProductId, readAcpProduct, type AcpProductManifest } from '../../runner/acp-products.mjs';
+import { icodeProductId, readAcpProduct, workswarmProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
 import { TaskError, stop } from '../agent/common.js';
 import type { RuntimeModel } from '../agent/model.js';
 import type { AgentSpec } from '../agent/runtime.js';
@@ -22,7 +22,7 @@ function deferred<T>() {
 }
 
 export async function prepareAcp<T>(spec: AgentSpec<T>, backend = containerAcpId): Promise<AcpProductManifest> {
-  const id = backend === icodeProductId ? icodeProductId : process.env.BOT_ACP_PRODUCT ?? containerAcpId;
+  const id = backend === icodeProductId || backend === workswarmProductId ? backend : process.env.BOT_ACP_PRODUCT ?? containerAcpId;
   let product: AcpProductManifest;
   try {
     product = readAcpProduct(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, id);
@@ -45,6 +45,10 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): Non
       return stop('harness_permission_mismatch', 'waiting_configuration', '此 ACP 产品未声明可在外部 PR 或未合入分支中执行。');
     }
     const model = (spec.model ?? executionModel(spec.store, spec.task)) as RuntimeModel;
+    const workswarm = product.id === workswarmProductId;
+    if (workswarm && model.protocol?.interface_type === 'openai-responses') {
+      return stop('workswarm_model_protocol_unsupported', 'waiting_configuration', '请选择支持 Chat Completions 或 Anthropic Messages 的 WorkSwarm 模型。');
+    }
     const revision = spec.harnessBinding?.harness_revision ?? contentHash(product);
     const binding = spec.harnessState?.value;
     const resumeId = binding?.harness === backend && binding.revision === revision && typeof binding.sessionId === 'string' &&
@@ -86,7 +90,7 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): Non
           buffer = buffer.slice(end + 1);
           if (frame.type === 'ready') ready.resolve(frame);
           else if (frame.type === 'fault') {
-            const state = frame.code === 'icode_protocol_unsupported' ? 'needs_help' : 'retry_wait';
+            const state = ['icode_protocol_unsupported', 'workswarm_protocol_unsupported'].includes(frame.code) ? 'needs_help' : 'retry_wait';
             fault.reject(new TaskError(frame.code, state, spec.redactor.text(String(frame.message))));
           }
           else if (frame.type === 'turn') turn.resolve(frame.stop_reason);
@@ -98,7 +102,9 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): Non
       } catch (error) { fault.reject(error); }
     };
     try {
-      return await withContainerHarnessSession(spec, {
+      return await withContainerHarnessSession(workswarm
+        ? { ...spec, containerOptions: { ...spec.containerOptions, keepRawTools: true } }
+        : spec, {
         cli: containerAcpId, backendId: backend, acpProduct: product, primaryModel: model, model: model.model,
         resume: rebuilding, sessionId: resumeId, sessionKey: spec.harnessSessionKey ?? spec.roleRun?.instance_id,
         manualCancel: cancel,

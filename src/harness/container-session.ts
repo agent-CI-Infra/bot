@@ -1,4 +1,4 @@
-import { acpProductExecutable, icodeProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
+import { acpProductExecutable, icodeProductId, workswarmProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -306,6 +306,7 @@ export async function withContainerHarnessSession<T, R>(
 
   const acp = launch.cli === 'container_acp';
   const icode = acp && launch.acpProduct?.id === icodeProductId;
+  const workswarm = acp && launch.acpProduct?.id === workswarmProductId;
   const connectionMode = acp ? 'gateway' : modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
   const supported = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
   const nativeModel = connectionMode === 'direct' ? nativeModelConnection(launch.primaryModel, launch.fileProvider ?? spec.containerOptions?.fileProvider,supported) : undefined;
@@ -324,7 +325,7 @@ export async function withContainerHarnessSession<T, R>(
     workspaceId: transport.workspaceId,
     primaryModel: launch.primaryModel,
     fileProvider: launch.fileProvider ?? spec.containerOptions?.fileProvider,
-    allowVisibleModels: !icode,
+    allowVisibleModels: !icode && !workswarm,
     guard: spec.guard,
     beforeModel: spec.beforeModel,
     maxOutputTokens: launch.maxOutputTokens ?? spec.maxOutputTokens,
@@ -352,7 +353,7 @@ export async function withContainerHarnessSession<T, R>(
     instance_id: instanceId,
     harness: launch.cli,
     ...(acp ? { acp_product: launch.acpProduct, acp_local_lease_ms: launch.acpLocalLeaseMs } : {}),
-    ...(icode ? { acp_model: {
+    ...(icode || workswarm ? { acp_model: {
       interface_type: launch.primaryModel?.protocol?.interface_type ?? 'openai-chat-completions',
       context_window: launch.primaryModel?.capabilities?.context_window ?? 128000,
       max_output_tokens: Math.min(spec.maxOutputTokens ?? 8192, launch.primaryModel?.capabilities?.max_output_tokens ?? 8192),
