@@ -1,6 +1,7 @@
-// Project workbench (#952): two focused views under #/projects/:id/overview —
+// Project workbench (#952, #1215): three focused views under #/projects/:id/overview —
 // 1. Default "角色视图" (Role View): live occupancy, configured capacity limits, running tasks and genuinely attributable queues per role.
 // 2. "任务视图" (Task List View): single-row task list with associated Issue/PR/Actions badges and inline Role Flow Diagram.
+// 3. "Issue 进展" (Issue Auto-Development View): per-Issue lifecycle status, linked PRs, why an Issue could not be developed, and expandable dispatch/task chain.
 
 const workspaceTaskGroups = [
   ['all', '全部'],
@@ -9,6 +10,37 @@ const workspaceTaskGroups = [
   ['attention', '需关注'],
   ['completed', '已完成'],
 ];
+
+const workspaceIssueGroups = [
+  ['all', '全部'],
+  ['pr_opened', '已开 PR'],
+  ['developing', '开发中'],
+  ['needs_human', '开发不了 · 需人工'],
+  ['skipped', '无需 / 暂不开发'],
+  ['pending', '待检视'],
+];
+
+const workspaceIssueSubGroups = [
+  ['needs_information', '需补充信息'],
+  ['human_decision_required', '需人工决定'],
+  ['blocked', '开发受阻'],
+];
+
+const issueStatusMeta = {
+  pr_opened: ['已开 PR', 'success'],
+  developing: ['开发中', 'info'],
+  needs_information: ['需补充信息', 'warning'],
+  human_decision_required: ['需人工决定', 'warning'],
+  blocked: ['开发受阻', 'danger'],
+  skipped: ['无需 / 暂不开发', ''],
+  pending: ['待检视', ''],
+};
+
+const dispatchDecisionMeta = {
+  create: ['创建任务', 'info'],
+  continue: ['续接任务', 'info'],
+  ignore: ['跳过 / 忽略', ''],
+};
 
 const roleDutyLabels = {
   controller: '主控编排',
@@ -20,6 +52,9 @@ const roleDutyLabels = {
 function parseWorkbenchRoute(item) {
   if (!item || item === 'roles') return { view: 'roles', group: 'all', offset: 0 };
   if (item === 'tasks') return { view: 'tasks', group: 'all', offset: 0 };
+  if (item === 'issues') return { view: 'issues', group: 'all', offset: 0 };
+  const issueRoute = /^issues\.(all|pr_opened|developing|needs_human|needs_information|human_decision_required|blocked|skipped|pending)(?:\.(\d+))?$/.exec(item);
+  if (issueRoute) return { view: 'issues', group: issueRoute[1], offset: Number(issueRoute[2] || 0) };
   const prefixed = /^tasks\.(all|active|queued|attention|completed)(?:\.(\d+))?$/.exec(item);
   if (prefixed) return { view: 'tasks', group: prefixed[1], offset: Number(prefixed[2] || 0) };
   const legacy = /^(all|active|queued|attention|completed)(?:\.(\d+))?$/.exec(item);
@@ -229,6 +264,144 @@ function renderWorkbenchTaskRow(row) {
   return item;
 }
 
+function renderIssueChainPanel(detail, repoId, issueNumber) {
+  const panel = element('div', '', 'issue-chain-panel');
+  panel.dataset.issueChain = String(issueNumber);
+  const issue = detail.issue || {};
+  if (issue.review?.recommendation || issue.review?.human_action) {
+    const summaryBox = element('div', '', 'issue-chain-block');
+    summaryBox.append(element('h3', '检视结论与建议', 'issue-chain-heading'));
+    if (issue.review.human_action) summaryBox.append(element('p', `需人工处理：${issue.review.human_action}`, 'issue-chain-highlight'));
+    if (issue.review.recommendation) summaryBox.append(element('p', issue.review.recommendation, 'muted issue-chain-text'));
+    panel.append(summaryBox);
+  }
+
+  const tasksBlock = element('div', '', 'issue-chain-block');
+  tasksBlock.append(element('h3', `关联任务（${(detail.tasks || []).length}）`, 'issue-chain-heading'));
+  if (!detail.tasks?.length) {
+    tasksBlock.append(element('p', '暂无关联任务记录。', 'muted issue-chain-text'));
+  } else {
+    const list = element('div', '', 'issue-chain-list');
+    for (const item of detail.tasks) {
+      const row = element('div', '', 'issue-chain-item');
+      const roleCaption = item.role_kind === 'development' ? '开发' : item.role_kind === 'review' ? '检视' : '通用';
+      const open = button(item.summary || `任务 ${shortId(item.id)}`, () => openTask(item.id).catch(error), 'btn-text linkish issue-chain-link');
+      open.dataset.attentionTask = item.id;
+      const meta = element('div', '', 'issue-chain-meta');
+      meta.append(badge(roleCaption, item.role_kind === 'development' ? 'info' : ''), state(item.status));
+      if (item.updated_at) meta.append(element('span', timestamp(item.updated_at) || item.updated_at, 'muted issue-chain-time'));
+      row.append(meta, open);
+      if (item.error_cause?.label || item.error_cause?.action) {
+        row.append(element('p', [item.error_cause.label, item.error_cause.action].filter(Boolean).join('：'), 'muted issue-chain-text'));
+      }
+      list.append(row);
+    }
+    tasksBlock.append(list);
+  }
+  panel.append(tasksBlock);
+
+  const dispatchBlock = element('div', '', 'issue-chain-block');
+  dispatchBlock.append(element('h3', `Manager 分派记录（${(detail.dispatch_events || []).length}）`, 'issue-chain-heading'));
+  if (!detail.dispatch_events?.length) {
+    dispatchBlock.append(element('p', '暂无 Manager 分派决策记录。', 'muted issue-chain-text'));
+  } else {
+    const list = element('div', '', 'issue-chain-list');
+    for (const ev of detail.dispatch_events.slice(0, 8)) {
+      const row = element('div', '', 'issue-chain-item');
+      const meta = element('div', '', 'issue-chain-meta');
+      const [decLabel, decTone] = ev.state === 'filtered'
+        ? ['已过滤', '']
+        : (dispatchDecisionMeta[ev.decision] || [ev.state === 'pending' || ev.state === 'dispatching' ? '等待分派' : (ev.decision || ev.state), '']);
+      meta.append(badge(decLabel, decTone), element('span', ev.summary || ev.type, 'issue-chain-ev-title'));
+      if (ev.decided_at || ev.created_at) meta.append(element('span', timestamp(ev.decided_at || ev.created_at) || '', 'muted issue-chain-time'));
+      row.append(meta);
+      if (ev.reason) row.append(element('p', ev.reason, 'muted issue-chain-text'));
+      list.append(row);
+    }
+    dispatchBlock.append(list);
+  }
+  panel.append(dispatchBlock);
+  return panel;
+}
+
+function renderWorkbenchIssueRow(item, { expanded, detail, loading, err, onToggle }) {
+  const row = element('article', '', 'workbench-issue-row' + (expanded ? ' is-expanded' : ''));
+  row.dataset.issueNumber = String(item.number);
+  row.dataset.issueStatus = item.status;
+
+  // Col 1: Issue number, title, GitHub link
+  const infoCol = element('div', '', 'issue-col issue-col-info');
+  const headLine = element('div', '', 'issue-title-line');
+  const numSpan = element('strong', `#${item.number}`, 'issue-num-tag');
+  const titleSpan = element('span', item.title || `Issue #${item.number}`, 'issue-title-text');
+  titleSpan.title = item.title || `Issue #${item.number}`;
+  headLine.append(numSpan, titleSpan);
+  if (item.url) {
+    const gh = link(item.url, '↗', 'issue-gh-link');
+    gh.setAttribute('aria-label', `在 GitHub 打开 Issue #${item.number}`);
+    gh.title = '在 GitHub 打开';
+    headLine.append(gh);
+  }
+  infoCol.append(headLine);
+  const sub = element('div', '', 'issue-row-sub');
+  if (item.github_state === 'closed') sub.append(badge('已关闭', ''));
+  if (item.pr) {
+    const prText = `→ PR #${item.pr.number}`;
+    const prNode = item.pr.url ? link(item.pr.url, prText, 'issue-pr-link') : element('span', prText, 'issue-pr-link');
+    sub.append(prNode);
+    if (item.pr.checks && item.pr.checks.total > 0) {
+      const c = item.pr.checks;
+      const cls = c.failed > 0 ? 'check-pill-fail' : c.running > 0 ? 'check-pill-running' : 'check-pill-pass';
+      const txt = c.failed > 0 ? `CI ${c.failed} 失败` : c.running > 0 ? 'CI 运行中' : `CI ${c.passed}/${c.total} ✓`;
+      sub.append(element('span', txt, `task-check-pill ${cls}`));
+    }
+  }
+  if (sub.childElementCount) infoCol.append(sub);
+
+  // Col 2: Auto-development status badge
+  const statusCol = element('div', '', 'issue-col issue-col-status');
+  const [stLabel, stTone] = issueStatusMeta[item.status] || [item.status, ''];
+  statusCol.append(badge(stLabel, stTone));
+
+  // Col 3: Outcome or reason why not developed + next step
+  const reasonCol = element('div', '', 'issue-col issue-col-reason');
+  reasonCol.append(element('p', item.reason || '—', 'issue-reason-text'));
+  if (item.next_step) reasonCol.append(element('p', `下一步：${item.next_step}`, 'muted issue-next-step'));
+
+  // Col 4: Activity time & toggle detail chain
+  const actionCol = element('div', '', 'issue-col issue-col-actions');
+  const actIso = item.last_activity || '';
+  const rel = typeof waitedFor === 'function' ? waitedFor(actIso) : null;
+  const fullTime = timestamp(actIso) || '—';
+  const timeSpan = element('span', rel ? `${rel}前` : fullTime, 'muted task-updated-text');
+  if (actIso) timeSpan.dataset.updatedAt = actIso;
+  timeSpan.title = fullTime;
+  const toggleBtn = button(expanded ? '收起链路' : '查看链路', () => onToggle(item.number), 'quiet issue-chain-toggle');
+  toggleBtn.setAttribute('aria-expanded', String(!!expanded));
+  toggleBtn.setAttribute('aria-label', `${expanded ? '收起' : '查看'} Issue #${item.number} 的处理链路`);
+  toggleBtn.dataset.issueToggle = String(item.number);
+  actionCol.append(timeSpan, toggleBtn);
+
+  row.append(infoCol, statusCol, reasonCol, actionCol);
+
+  if (expanded) {
+    if (loading) {
+      const box = element('div', '', 'issue-chain-panel');
+      box.append(element('p', '正在读取该 Issue 的决策与任务链路…', 'muted'));
+      row.append(box);
+    } else if (err) {
+      const box = element('div', '', 'issue-chain-panel');
+      const alertP = element('p', `链路读取失败：${readErrorText(err)}`, 'view-error');
+      alertP.setAttribute('role', 'alert');
+      box.append(alertP);
+      row.append(box);
+    } else if (detail) {
+      row.append(renderIssueChainPanel(detail, item.repository_id, item.number));
+    }
+  }
+  return row;
+}
+
 function workspaceOverview() {
   const parsed = parseWorkbenchRoute(current.item);
   if (!parsed) return [pageNotFoundState(current.id)];
@@ -236,9 +409,13 @@ function workspaceOverview() {
   const id = current.id, owner = me.id, routeKey = location.hash;
   const { view: viewMode, group, offset } = parsed;
   const size = 10;
+  const issueSize = 20;
   const taskAddress = (key, next = 0) => key === 'all' && !next
     ? `#/projects/${id}/overview/tasks`
     : `#/projects/${id}/overview/${key}${next ? '.' + next : ''}`;
+  const issueAddress = (key, next = 0) => key === 'all' && !next
+    ? `#/projects/${id}/overview/issues`
+    : `#/projects/${id}/overview/issues.${key}${next ? '.' + next : ''}`;
 
   const root = element('section', '', 'workspace-overview');
   const alive = () => root.isConnected && me?.id === owner && current?.id === id && current.section === 'overview' && location.hash === routeKey;
@@ -263,7 +440,14 @@ function workspaceOverview() {
   taskTab.append(element('span', '任务视图'), taskTotalBadge);
   if (viewMode === 'tasks') taskTab.setAttribute('aria-current', 'page');
 
-  viewTabs.append(roleTab, taskTab);
+  const issueTab = element('a', '', 'workbench-tab');
+  issueTab.href = `#/projects/${id}/overview/issues`;
+  issueTab.dataset.workbenchView = 'issues';
+  const issueTotalBadge = element('span', '—', 'workbench-tab-count');
+  issueTab.append(element('span', 'Issue 进展'), issueTotalBadge);
+  if (viewMode === 'issues') issueTab.setAttribute('aria-current', 'page');
+
+  viewTabs.append(roleTab, taskTab, issueTab);
 
   const rightBar = element('div', '', 'workbench-right-bar');
   const liveSummary = element('div', '', 'workbench-live-stats');
@@ -349,6 +533,87 @@ function workspaceOverview() {
   paging.setAttribute('aria-label', '总览任务分页');
   taskSection.append(taskToolbar, taskStatus, taskHead, rows, paging);
 
+  // Issue Auto-Development Progress Section (#1215)
+  const issueSection = element('section', '', 'workbench-issue-section');
+  issueSection.hidden = viewMode !== 'issues';
+  issueSection.append(element('h2', 'Issue 进展', 'sr-only'));
+  const issuePills = element('nav', '', 'workspace-metrics workbench-filter-pills');
+  issuePills.setAttribute('aria-label', 'Issue 自动开发状态范围');
+  const issueCounts = new Map();
+  const inNeedsHumanGroup = ['needs_human', 'needs_information', 'human_decision_required', 'blocked'].includes(group);
+  for (const [key, caption] of workspaceIssueGroups) {
+    const a = element('a', '', 'workbench-filter-pill');
+    a.href = issueAddress(key, 0);
+    a.dataset.issueGroup = key;
+    if (viewMode === 'issues' && (key === group || (key === 'needs_human' && inNeedsHumanGroup))) a.setAttribute('aria-current', 'page');
+    const count = element('strong', '—');
+    a.append(element('span', caption), count);
+    issueCounts.set(key, count);
+    issuePills.append(a);
+  }
+
+  const issueSubPills = element('nav', '', 'workbench-issue-subpills');
+  issueSubPills.setAttribute('aria-label', '不可开发原因细分');
+  issueSubPills.hidden = !(viewMode === 'issues' && inNeedsHumanGroup);
+  for (const [key, caption] of workspaceIssueSubGroups) {
+    const a = element('a', '', 'workbench-filter-pill workbench-sub-pill');
+    a.href = issueAddress(key, 0);
+    a.dataset.issueGroup = key;
+    if (viewMode === 'issues' && key === group) a.setAttribute('aria-current', 'page');
+    const count = element('strong', '—');
+    a.append(element('span', caption), count);
+    issueCounts.set(key, count);
+    issueSubPills.append(a);
+  }
+
+  let issueSearchQuery = '';
+  let issueIncludeClosed = false;
+  let issueSearchTimer = null;
+  const issueSearchInput = element('input', '', 'workbench-task-search');
+  issueSearchInput.type = 'search';
+  issueSearchInput.placeholder = '搜索 Issue 编号或标题…';
+  issueSearchInput.setAttribute('aria-label', '搜索 Issue');
+  issueSearchInput.addEventListener('input', () => {
+    clearTimeout(issueSearchTimer);
+    issueSearchTimer = setTimeout(() => {
+      issueSearchQuery = issueSearchInput.value.trim();
+      issueSignature = '';
+      void loadIssues();
+    }, 180);
+  });
+
+  const closedLabel = element('label', '', 'workbench-issue-closed-check');
+  const closedCheck = document.createElement('input');
+  closedCheck.type = 'checkbox';
+  closedCheck.checked = false;
+  closedCheck.addEventListener('change', () => {
+    issueIncludeClosed = closedCheck.checked;
+    issueSignature = '';
+    void loadIssues();
+  });
+  closedLabel.append(closedCheck, document.createTextNode('含已关闭'));
+
+  const issueControls = element('div', '', 'workbench-issue-controls');
+  issueControls.append(issueSearchInput, closedLabel);
+
+  const issueToolbar = element('div', '', 'workbench-task-toolbar');
+  issueToolbar.append(issuePills, issueControls);
+
+  const issueStatus = note('正在读取 Issue 自动开发进展…');
+  issueStatus.classList.add('workspace-issue-status');
+  issueStatus.setAttribute('role', 'status');
+  const issueHead = element('div', '', 'workbench-issue-head');
+  issueHead.append(
+    element('span', 'Issue'),
+    element('span', '自动开发状态'),
+    element('span', '结果与原因'),
+    element('span', '最近活动 / 链路'),
+  );
+  const issueRows = element('div', '', 'workspace-issue-rows');
+  const issuePaging = element('nav', '', 'console-inbox-paging');
+  issuePaging.setAttribute('aria-label', 'Issue 进展分页');
+  issueSection.append(issueToolbar, issueSubPills, issueStatus, issueHead, issueRows, issuePaging);
+
   // Compact Workbench Footer (quick links + honest environment status)
   const footer = element('footer', '', 'workbench-footer');
   const healthStatus = note('正在读取环境记录…');
@@ -365,10 +630,15 @@ function workspaceOverview() {
   quickLinks.children[2].href = `#/projects/${id}/machine`;
   footer.append(healthStatus, quickLinks);
 
-  root.append(roleSection, taskSection, footer);
+  root.append(roleSection, taskSection, issueSection, footer);
 
-  let pending = false, lastRoles = null, lastTasks = null, lastHealth = null;
-  let roleSignature = '', signature = '', taskReqSeq = 0;
+  let pending = false, lastRoles = null, lastTasks = null, lastIssues = null, lastHealth = null;
+  let roleSignature = '', signature = '', issueSignature = '', taskReqSeq = 0, issueReqSeq = 0;
+  let latestIssuesList = [];
+  const expandedIssues = new Set();
+  const issueDetails = new Map();
+  const issueDetailLoading = new Set();
+  const issueDetailErrors = new Map();
 
   const rowKey = row => JSON.stringify([row.id, row.repository_id, row.kind, row.object_number, row.status, row.priority, row.summary, row.error_code, row.updated_at, row.external, row.role_flow]);
 
@@ -497,6 +767,95 @@ function workspaceOverview() {
     } finally { if (req === taskReqSeq) rows.removeAttribute('aria-busy'); }
   }
 
+  function renderIssueListNodes() {
+    const focusedToggle = issueRows.contains(document.activeElement) ? document.activeElement.dataset?.issueToggle : null;
+    if (!latestIssuesList.length) {
+      issueRows.replaceChildren(consoleState(
+        offset ? '本页已没有 Issue' : (issueSearchQuery ? '没有匹配搜索条件的 Issue' : '当前筛选下没有 Issue'),
+        offset ? 'Issue 状态可能已变化，可返回上一页。' : '这里只统计系统已接收事件或任务关联过的 Issue；没有条目不代表仓库没有开放 Issue。',
+      ));
+      return;
+    }
+    issueRows.replaceChildren(...latestIssuesList.map(item => renderWorkbenchIssueRow(item, {
+      expanded: expandedIssues.has(item.number),
+      detail: issueDetails.get(item.number) || null,
+      loading: issueDetailLoading.has(item.number),
+      err: issueDetailErrors.get(item.number) || null,
+      onToggle: toggleIssueChain,
+    })));
+    if (focusedToggle) issueRows.querySelector(`[data-issue-toggle="${CSS.escape(focusedToggle)}"]`)?.focus({ preventScroll: true });
+  }
+
+  async function toggleIssueChain(issueNumber) {
+    if (expandedIssues.has(issueNumber)) {
+      expandedIssues.delete(issueNumber);
+      renderIssueListNodes();
+      return;
+    }
+    expandedIssues.add(issueNumber);
+    issueDetailLoading.add(issueNumber);
+    issueDetailErrors.delete(issueNumber);
+    renderIssueListNodes();
+    try {
+      const detail = await api(`/api/board/issues/${encodeURIComponent(id)}/${issueNumber}`);
+      if (!alive()) return;
+      issueDetails.set(issueNumber, detail);
+    } catch (err) {
+      if (!alive() || revoke(err)) return;
+      issueDetailErrors.set(issueNumber, err);
+    } finally {
+      issueDetailLoading.delete(issueNumber);
+      if (alive() && viewMode === 'issues') renderIssueListNodes();
+    }
+  }
+
+  async function loadIssues() {
+    const req = ++issueReqSeq;
+    if (viewMode === 'issues') issueRows.setAttribute('aria-busy', 'true');
+    try {
+      const effectiveOffset = (issueSearchQuery || issueIncludeClosed) ? 0 : offset;
+      const params = new URLSearchParams({
+        repository_id: id,
+        status: viewMode === 'issues' ? group : 'all',
+        limit: viewMode === 'issues' ? String(issueSize) : '1',
+        offset: viewMode === 'issues' ? String(effectiveOffset) : '0',
+      });
+      if (viewMode === 'issues' && issueIncludeClosed) params.set('include_closed', '1');
+      if (viewMode === 'issues' && issueSearchQuery) params.set('q', issueSearchQuery);
+      const data = await api('/api/board/issues?' + params);
+      if (!alive() || req !== issueReqSeq) return;
+      lastIssues = data.sampled_at;
+      if (!issueSearchQuery && !issueIncludeClosed) issueTotalBadge.textContent = String(data.counts?.all ?? '—');
+      for (const [key, count] of issueCounts) count.textContent = String(data.counts?.[key] ?? 0);
+      if (viewMode !== 'issues') return;
+
+      issueStatus.classList.remove('view-error');
+      issueStatus.setAttribute('role', 'status');
+      const total = data.total ?? 0;
+      const shown = data.issues?.length ? `显示 ${effectiveOffset + 1}–${effectiveOffset + data.issues.length} 项 · ` : '';
+      issueStatus.textContent = `${total} 个 Issue · 已开 PR ${data.counts?.pr_opened ?? 0} · 需人工 ${data.counts?.needs_human ?? 0} · ${shown}更新于 ${timestamp(lastIssues)}`;
+
+      const nextSig = JSON.stringify(data.issues || []);
+      if (issueSignature !== nextSig || !issueRows.childElementCount) {
+        issueSignature = nextSig;
+        latestIssuesList = data.issues || [];
+        renderIssueListNodes();
+      } else {
+        refreshWorkbenchTimes(issueRows);
+      }
+
+      const hasNext = Boolean(data.has_more), pageKey = `issues:${group}:${effectiveOffset}:${hasNext}`;
+      if (issuePaging.dataset.pageKey !== pageKey) {
+        issuePaging.dataset.pageKey = pageKey; issuePaging.replaceChildren();
+        if (effectiveOffset) issuePaging.append(consoleLink(issueAddress(group, Math.max(0, effectiveOffset - issueSize)), '上一页'));
+        if (hasNext && !issueSearchQuery && !issueIncludeClosed) issuePaging.append(consoleLink(issueAddress(group, effectiveOffset + issueSize), '下一页'));
+      }
+    } catch (err) {
+      if (!alive() || req !== issueReqSeq || revoke(err)) return;
+      expired(issueStatus, err, lastIssues);
+    } finally { if (req === issueReqSeq) issueRows.removeAttribute('aria-busy'); }
+  }
+
   async function environment() {
     try {
       const [data, repo] = await Promise.all([api(`/api/environments/${id}`), api(`/api/repositories/${id}`)]);
@@ -516,7 +875,7 @@ function workspaceOverview() {
   async function update() {
     if (!alive() || pending) return;
     pending = true; refresh.disabled = true;
-    try { await Promise.all([loadRoleBoard(), tasks(), environment()]); }
+    try { await Promise.all([loadRoleBoard(), tasks(), loadIssues(), environment()]); }
     finally { pending = false; refresh.disabled = false; }
   }
 

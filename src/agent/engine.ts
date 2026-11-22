@@ -47,7 +47,7 @@ import { actionableFinding, developmentGoal, developmentApproved, carryRevisionR
 import { BotPrWakeScanner, carryUnconsumedTaskUpdates } from '../review/bot-pr-wake.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
-import { classificationLabels, repositoryLabels } from '../review/labels.js';
+import { classificationLabels, hasLabelName, needsHumanIssueLabel, repositoryLabels, reviewNeedsHuman } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
@@ -57,7 +57,7 @@ import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, skillFilePath, computerRequest, projectLabels, developingLabel } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, skillFilePath, computerRequest, projectLabels, developingLabel, needsHumanLabel } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { pendingReviewUpdates, resultCoverage, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
 import { continueFinishedReview, continuationContext, continuationUpdates, resumeFinishedReviews } from '../review/continuation.js';
@@ -839,7 +839,7 @@ export class TaskEngine {
           }
           // Labels are checked against the repository before any branch is published, so a refusal can be corrected in the
           // same tool conversation (#845); the publisher adds the accepted ones once the pull request exists.
-          const labels=await checkPullRequestLabels(github,args.labels,[input.review_label,input.development_label,developingLabel(this.store,task.repository_id)]);
+          const labels=await checkPullRequestLabels(github,args.labels,[input.review_label,input.development_label,developingLabel(this.store,task.repository_id),needsHumanLabel(this.store,task.repository_id)]);
           if('error' in labels)return labels;
           if(input.integration){
             const checked=await workspace!.call('integration-check:'+requestId,{type:'workspace_integration_check'});
@@ -935,7 +935,7 @@ export class TaskEngine {
           }
           if(writes.includes('labels')&&result.labels?.length){
             const current=(seen||await github.object(task.kind,task.object_number)).labels;
-            const names=classificationLabels(result.labels,input.repository_labels,current,[input.review_label,input.development_label,developingLabel(this.store,task.repository_id)]);
+            const names=classificationLabels(result.labels,input.repository_labels,current,[input.review_label,input.development_label,developingLabel(this.store,task.repository_id),needsHumanLabel(this.store,task.repository_id)]);
             if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
           }
           if(outputs.length)log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
@@ -952,8 +952,14 @@ export class TaskEngine {
           // publisher.review ends by validating the object, so its labels are current.
           if(writes.includes('labels')){
             const label=input.review_label,current=(seen||await github.object(task.kind,task.object_number)).labels;
-            const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label,developingLabel(this.store,task.repository_id)])];
+            const nhName=needsHumanLabel(this.store,task.repository_id);
+            const nhDef=task.kind==='review.issue'?needsHumanIssueLabel(nhName):null;
+            const wantNeedsHuman=!!nhDef&&reviewNeedsHuman(result);
+            const hasNeedsHuman=!!nhDef&&hasLabelName(current,nhDef.name);
+            if(wantNeedsHuman&&nhDef)await publisher.ensureLabel(nhDef);
+            const names=[...(label?[label]:[]),...(wantNeedsHuman&&nhDef?[nhDef.name]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label,developingLabel(this.store,task.repository_id),nhName])];
             if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
+            if(nhDef&&!wantNeedsHuman&&hasNeedsHuman)await publisher.removeLabel(nhDef.name);
           }
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0,...(o.resolved_threads?{resolved_threads:o.resolved_threads.length}:{})})});
           result={...result,outputs};

@@ -8,6 +8,7 @@ import { GitHub } from '../../../../dist/github/client.js';
 import { Redactor, sha, TaskError } from '../../../../dist/agent/common.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { dueProgress, renderProgress, reportMilestone, settleProgress, startProgress } from '../../../../dist/review/progress.js';
+import { publishReviewDelivery } from '../../../../dist/tasks/github-write.js';
 import { recordBasis } from '../../../../dist/dispatch/basis.js';
 
 // #1047: what an Issue development shows on its Issue. A fake GitHub for Issue #5: labels by name, the Issue's labels and
@@ -25,6 +26,8 @@ async function fixture(t) {
     if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
     const named = /^\/repos\/fixture\/project-101\/labels\/(.+)$/.exec(path);
     if (named) return state.repositoryLabels.includes(named[1]) ? send({ name: named[1] }) : send({ message: 'Not Found' }, 404);
+    if (path === repo + '/issues/5' && req.method === 'GET') return send({ number: 5, title: 'parsePairs', body: 'body', state: 'open', labels: state.labels.map(name => ({ name })) });
+    if (path === repo + '/labels' && req.method === 'GET') return send(state.repositoryLabels.map(name => ({ name, description: '' })));
     if (path === repo + '/labels' && req.method === 'POST') { state.created.push(body); state.repositoryLabels.push(body.name); return send(body, 201); }
     if (path === repo + '/issues/5/labels' && req.method === 'POST') { for (const name of body.labels) if (!state.labels.includes(name)) state.labels.push(name); return send(state.labels.map(name => ({ name }))); }
     const label = /^\/repos\/fixture\/project-101\/issues\/5\/labels\/(.+)$/.exec(path);
@@ -201,39 +204,51 @@ test('a retry after a lost answer finds the comment it made instead of creating 
   assert.equal(dueProgress(f.h.store, Date.now() + 7200_000).length, 0, 'a development given up is not swept again');
 });
 
-test('a development that stops without a pull request takes the label off and says why and what a person can do', async t => {
+test('a development that stops without a pull request takes the developing label off, marks needs-human when actionable and says why', async t => {
   const f = await fixture(t);
   const cases = [
     // The agent's own reason wins; else the summary of an unchanged tree; else the control plane's stop.
-    [{ status: 'completed', result: JSON.stringify({ status: 'no_changes', summary: 'The change needs a decision on the file format.' }) }, null, /\*\*Status\*\*: Stopped[\s\S]*The change needs a decision on the file format\./],
+    [{ status: 'completed', result: JSON.stringify({ status: 'no_changes', summary: 'The change needs a decision on the file format.' }) }, null, /\*\*Status\*\*: Stopped[\s\S]*The change needs a decision on the file format\./, true],
     [{ status: 'failed', error_code: 'create_pull_request_required' }, { milestone: 'stopped', reason: 'Two designs fit; a maintainer must pick one.', human_action: 'Choose escaping or splitting at the first "=".' },
-      /\*\*Reason\*\*: Two designs fit; a maintainer must pick one\.[\s\S]*\*\*What a person needs to do\*\*: Choose escaping/],
-    [{ status: 'cancelled', error_code: 'object_closed_or_draft' }, null, /The Issue was closed, so the development was cancelled\./],
-    [{ status: 'cancelled', error_code: 'user_cancel' }, null, /Someone cancelled this development in the console\./],
-    [{ status: 'waiting_permission', error_code: 'development_not_approved' }, null, /The development label was removed[\s\S]*Add the development label again/],
-    [{ status: 'failed', error_code: 'model_http_400' }, null, /The development failed \(model_http_400\)\.[\s\S]*press Retry/],
+      /\*\*Reason\*\*: Two designs fit; a maintainer must pick one\.[\s\S]*\*\*What a person needs to do\*\*: Choose escaping/, true],
+    [{ status: 'cancelled', error_code: 'object_closed_or_draft' }, null, /The Issue was closed, so the development was cancelled\./, false],
+    [{ status: 'cancelled', error_code: 'user_cancel' }, null, /Someone cancelled this development in the console\./, false],
+    [{ status: 'waiting_permission', error_code: 'development_not_approved' }, null, /The development label was removed[\s\S]*Add the development label again/, true],
+    [{ status: 'failed', error_code: 'model_http_400' }, null, /The development failed \(model_http_400\)\.[\s\S]*press Retry/, true],
   ];
-  for (const [state, milestone, expected] of cases) {
-    const task = f.task(); startProgress(f.h.store, task, f.issue); await settleProgress(f.h.store, task.id, f.github);
+  for (const [state, milestone, expected, expectNeedsHuman] of cases) {
+    const task = f.task();
+    // Pass live Issue labels as real GitHub fetches do: starting development clears any prior bot-needs-human label.
+    startProgress(f.h.store, task, { ...f.issue, labels: f.state.labels.map(name => ({ name })) });
+    await settleProgress(f.h.store, task.id, f.github);
     assert.deepEqual(f.state.labels, ['bot-developing']);
     if (milestone) assert.equal(reportMilestone(f.h.store, task.id, milestone).recorded, true);
     // The development ended outside a run (or the run left it): the sweep finds it by its status.
     f.set(task.id, state);
     assert.deepEqual(dueProgress(f.h.store).map(row => row.task_id), [task.id]);
     assert.equal(await settleProgress(f.h.store, task.id, f.github), true);
-    assert.deepEqual(f.state.labels, [], JSON.stringify(state));
+    assert.deepEqual(f.state.labels, expectNeedsHuman ? ['bot-needs-human'] : [], JSON.stringify(state));
     assert.match(f.state.comments.at(-1).body, expected);
     assert.equal(f.state.comments.filter(c => c.body.includes(task.id)).length, 1);
   }
-  // A paused development waits for a person: the label comes off; retried, it goes back on and the comment says so.
-  const paused = f.task(); startProgress(f.h.store, paused, f.issue); await settleProgress(f.h.store, paused.id, f.github);
+  // A paused development waits for a person: the developing label comes off and needs-human goes on; retried, it flips back.
+  const paused = f.task(); startProgress(f.h.store, paused, { ...f.issue, labels: f.state.labels.map(name => ({ name })) }); await settleProgress(f.h.store, paused.id, f.github);
+  assert.deepEqual(f.state.labels, ['bot-developing']);
   f.set(paused.id, { status: 'paused', error_code: 'user_pause' }); await settleProgress(f.h.store, paused.id, f.github);
-  assert.deepEqual(f.state.labels, []); assert.match(f.state.comments.at(-1).body, /\*\*Status\*\*: Paused[\s\S]*Press Retry/);
+  assert.deepEqual(f.state.labels, ['bot-needs-human']); assert.match(f.state.comments.at(-1).body, /\*\*Status\*\*: Paused[\s\S]*Press Retry/);
   assert.equal(f.row(paused.id).final, 0, 'a pause is not the end');
   f.set(paused.id, { status: 'running', error_code: null });
   startProgress(f.h.store, f.h.store.get('SELECT * FROM tasks WHERE id=?', paused.id), f.issue); await settleProgress(f.h.store, paused.id, f.github);
   assert.deepEqual(f.state.labels, ['bot-developing']); assert.match(f.state.comments.at(-1).body, /\*\*Status\*\*: In development/);
   assert.doesNotMatch(f.state.comments.at(-1).body, /#### Stopped/);
+
+  // Disabling needs_human_label leaves no label even when development fails.
+  assert.equal((await f.admin('/api/repositories/101/policy', 'PATCH', { needs_human_label: '' })).status, 200);
+  f.state.labels = [];
+  const disabledTask = f.task(); startProgress(f.h.store, disabledTask, f.issue); await settleProgress(f.h.store, disabledTask.id, f.github);
+  f.set(disabledTask.id, { status: 'failed', error_code: 'model_http_400' });
+  await settleProgress(f.h.store, disabledTask.id, f.github);
+  assert.deepEqual(f.state.labels, []);
 });
 
 test('the comment speaks the Issue\'s language, and a project without a developing label gets the comment only', async t => {
@@ -259,4 +274,53 @@ test('the engine sweep settles a development that ended outside its run', async 
   engine.tick(); await engine.progressSweep;
   assert.deepEqual(f.state.labels, []); assert.match(f.state.comments[0].body, /Someone cancelled this development/);
   assert.equal(f.row(task.id).final, 1);
+});
+
+test('Issue post_review adds needs_human_label on needs_information/human_decision_required and removes it when ready (#1215)', async t => {
+  const f = await fixture(t);
+  // Seed token/account/installation details so publishReviewDelivery connects to the fake GitHub server.
+  const reviewTask = (id) => {
+    const now = new Date().toISOString();
+    f.h.store.run(
+      `INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at,updated_at) VALUES(?,'101','task.request','running','review',?,5,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',?,?)`,
+      id, JSON.stringify({ target: { type: 'issue', number: 5 } }), now, now,
+    );
+    f.h.store.run('INSERT INTO task_write_grants VALUES(?,?,1,?)', id, JSON.stringify(['review']), now);
+    return f.h.store.get('SELECT * FROM tasks WHERE id=?', id);
+  };
+
+  // Round 1: needs_information -> creates & adds bot-needs-human + bot-reviewed, and renders status header
+  const t1 = reviewTask('rev-nh-1');
+  const out1 = await publishReviewDelivery(f.h.store, t1, {
+    target: { type: 'issue', number: 5 },
+    key: null,
+    summary: '缺少复现步骤。',
+    findings: [{ id: 'F1', format: 'discussion', body: '请补充复现输入', requires_human_decision: true, human_action: '补充复现输入' }],
+    resolved_comments: [],
+    labels: [],
+    conclusion: 'needs_information',
+    recommendation: '需要补充复现步骤。',
+  }, new Redactor(), async () => {}, () => {}, f.url);
+  assert.equal(out1.ok, true);
+  assert.ok(f.state.labels.includes('bot-reviewed'));
+  assert.ok(f.state.labels.includes('bot-needs-human'));
+  assert.ok(f.state.created.some(l => l.name === 'bot-needs-human' && l.color === 'd93f0b'));
+  assert.match(f.state.comments[0].body, /\*\*自动开发状态\*\*：暂不可开发（需补充信息）/);
+
+  // Round 2: ready_for_development -> removes bot-needs-human and updates status header
+  const t2 = reviewTask('rev-nh-2');
+  const out2 = await publishReviewDelivery(f.h.store, t2, {
+    target: { type: 'issue', number: 5 },
+    key: null,
+    summary: '问题已确认，可以直接修复。',
+    findings: [],
+    resolved_comments: [],
+    labels: [],
+    conclusion: 'ready_for_development',
+    recommendation: '可直接开发。',
+  }, new Redactor(), async () => {}, () => {}, f.url);
+  assert.equal(out2.ok, true);
+  assert.ok(f.state.labels.includes('bot-reviewed'));
+  assert.equal(f.state.labels.includes('bot-needs-human'), false);
+  assert.match(f.state.comments[0].body, /\*\*自动开发状态\*\*：可开发/);
 });

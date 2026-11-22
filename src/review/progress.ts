@@ -3,8 +3,8 @@ import type { GitHub } from '../github/client.js';
 import { Redactor, sha, TaskError } from '../agent/common.js';
 import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
 import { taskBasis } from '../dispatch/basis.js';
-import { developedLabel, developingIssueLabel } from './labels.js';
-import { developingLabel } from '../rules/service.js';
+import { developedLabel, developingIssueLabel, hasLabelName, needsHumanIssueLabel } from './labels.js';
+import { developingLabel, needsHumanLabel } from '../rules/service.js';
 import { reviewLanguage, testEvidence } from '../github/text.js';
 
 /**
@@ -21,9 +21,13 @@ import { reviewLanguage, testEvidence } from '../github/text.js';
 export function progressStorage(store: Store) {
   store.db.exec(`CREATE TABLE IF NOT EXISTS issue_development_progress(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
     repository_id TEXT NOT NULL,number INTEGER NOT NULL,language TEXT NOT NULL,label TEXT,label_on INTEGER NOT NULL DEFAULT 0,
+    needs_human_label TEXT,needs_human_on INTEGER NOT NULL DEFAULT 0,
     comment_id TEXT,posting INTEGER NOT NULL DEFAULT 0,milestones TEXT NOT NULL DEFAULT '{}',body_sha TEXT,settled_status TEXT,
     pending INTEGER NOT NULL DEFAULT 1,final INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,error TEXT,
     created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`);
+  const cols = new Set(store.all('PRAGMA table_info(issue_development_progress)').map(r => String(r.name)));
+  if (!cols.has('needs_human_label')) store.db.exec('ALTER TABLE issue_development_progress ADD COLUMN needs_human_label TEXT');
+  if (!cols.has('needs_human_on')) store.db.exec('ALTER TABLE issue_development_progress ADD COLUMN needs_human_on INTEGER NOT NULL DEFAULT 0');
   store.db.exec('CREATE INDEX IF NOT EXISTS issue_development_progress_open ON issue_development_progress(final,next_at)');
 }
 
@@ -110,14 +114,22 @@ export function startProgress(store: Store, task: Row, issue: any) {
   const setting = store.get('SELECT review_language FROM policies WHERE repository_id=?', task.repository_id)?.review_language;
   const start = { ...(basis ? { basis } : {}), ...(manager?.reason ? { reason: excerpt(manager.reason, maxText, redactor) } : {}),
     ...(brief?.goal ? { goal: excerpt(brief.goal, maxText * 2, redactor) } : {}), ...(Array.isArray(brief?.criteria) ? { criteria: brief.criteria.slice(0, 12).map((c: unknown) => excerpt(c, maxItem, redactor)) } : {}) };
-  store.run(`INSERT INTO issue_development_progress(task_id,repository_id,number,language,label,milestones,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
+  const nhLabel = needsHumanLabel(store, task.repository_id) || null;
+  const nhOn = nhLabel && hasLabelName(issue?.labels, nhLabel) ? 1 : 0;
+  store.run(`INSERT INTO issue_development_progress(task_id,repository_id,number,language,label,needs_human_label,needs_human_on,milestones,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(task_id) DO NOTHING`, id, task.repository_id, Number(task.object_number), reviewLanguage(setting, `${issue?.title ?? ''}\n${issue?.body ?? ''}`),
-    developingLabel(store, task.repository_id) || null, JSON.stringify({ start }), now, now);
+    developingLabel(store, task.repository_id) || null, nhLabel, nhOn, JSON.stringify({ start }), now, now);
 }
 
 // Stopped: the development is not working and waits for a person or has ended without a pull request. Ended: it is over.
-const stoppedStates = new Set(['failed', 'cancelled', 'superseded', 'waiting_permission', 'needs_help', 'paused']);
+const stoppedStates = new Set(['failed', 'cancelled', 'superseded', 'waiting_permission', 'waiting_configuration', 'waiting_environment', 'waiting_publication', 'needs_replan', 'needs_help', 'paused']);
 const endedStates = new Set(['completed', 'succeeded', 'pr_opened', 'failed', 'cancelled', 'superseded']);
+const silentStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel']);
+function needsHumanWhenStopped(task: Row, now: ReturnType<typeof state>): boolean {
+  if (!now.stopped) return false;
+  if (now.status === 'superseded' || silentStopCodes.has(String(task.error_code ?? ''))) return false;
+  return true;
+}
 /** Where the development is, from the task as the engine left it. */
 function state(task: Row) {
   const result = (() => { try { return JSON.parse(task.result || 'null'); } catch { return null; } })(), status = String(task.status);
@@ -217,12 +229,15 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
   const now = state(task), number = Number(row.number);
   const wanted = !now.pr && !now.stopped ? developingIssueLabel(String(row.label ?? '')) : null;
   const changeDeveloping = !!wanted !== !!row.label_on;
+  const nhDef = needsHumanIssueLabel(String(row.needs_human_label ?? ''));
+  const wantNeedsHuman = !!nhDef && needsHumanWhenStopped(task, now);
+  const changeNeedsHuman = !!nhDef && wantNeedsHuman !== !!row.needs_human_on;
   const markDeveloped = !!now.pr && row.settled_status !== now.status;
   const update = (fields: Record<string, unknown>) => store.run(`UPDATE issue_development_progress SET ${Object.keys(fields).map(key => key + '=?').join(',')},updated_at=? WHERE task_id=?`,
     ...Object.values(fields) as any[], new Date().toISOString(), taskId);
   const settled = () => update({ settled_status: now.status, pending: 0, final: now.ended ? 1 : 0, failures: 0, next_at: 0, error: null });
   try {
-    if (typeof client === 'function' && !changeDeveloping && !markDeveloped && sha(renderProgress(row, task, configuredRedactor(store))) === row.body_sha) {
+    if (typeof client === 'function' && !changeDeveloping && !changeNeedsHuman && !markDeveloped && sha(renderProgress(row, task, configuredRedactor(store))) === row.body_sha) {
       settled();
       return true;
     }
@@ -231,6 +246,11 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
       if (wanted) await addIssueLabel(github, number, wanted);
       else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(row.label)}`), undefined, true);
       update({ label_on: wanted ? 1 : 0 });
+    }
+    if (changeNeedsHuman && nhDef) {
+      if (wantNeedsHuman) await addIssueLabel(github, number, nhDef);
+      else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(nhDef.name)}`), undefined, true);
+      update({ needs_human_on: wantNeedsHuman ? 1 : 0 });
     }
     // The PR label and the linked comment can succeed independently. Keep the row pending until both are on GitHub.
     let labelError: unknown;

@@ -8,7 +8,7 @@ import { effectiveWrites } from './grants.js';
 import { scheduledIssueOperationAllowed } from './schedule-write.js';
 import { Publisher, publicationScope } from '../github/publisher.js';
 import { inlineLocation, reviewConclusions } from '../review/findings.js';
-import { classificationLabels, repositoryLabels } from '../review/labels.js';
+import { classificationLabels, hasLabelName, needsHumanIssueLabel, repositoryLabels, reviewNeedsHuman } from '../review/labels.js';
 import { behaviorPath, projectLabels } from '../rules/service.js';
 import { reviewLanguage } from '../github/text.js';
 import { covers, projectCeiling, ceilingMessage } from '../projects/ceiling.js';
@@ -392,17 +392,24 @@ export async function publishReviewDelivery(
 
     const labelsCfg = projectLabels(store, String(task.repository_id));
     const rLabel = labelsCfg.review_label;
+    const nhLabelDef = normalized.target.type === 'issue' ? needsHumanIssueLabel(labelsCfg.needs_human_label) : null;
+    const wantNeedsHuman = !!nhLabelDef && reviewNeedsHuman(reviewPayload);
+    const hasNeedsHuman = !!nhLabelDef && hasLabelName(targetObj?.labels ?? [], nhLabelDef.name);
     let appliedLabels: string[] = [];
-    if (rLabel || normalized.labels.length) {
+    if (rLabel || normalized.labels.length || wantNeedsHuman) {
       const available = normalized.labels.length ? repositoryLabels(await github.pages(github.path('/labels'))) : [];
       const chosen = classificationLabels(
         normalized.labels,
         available,
         targetObj?.labels ?? [],
-        [labelsCfg.review_label, labelsCfg.development_label, labelsCfg.developing_label],
+        [labelsCfg.review_label, labelsCfg.development_label, labelsCfg.developing_label, labelsCfg.needs_human_label],
       );
-      appliedLabels = [...(rLabel ? [rLabel] : []), ...chosen];
+      if (wantNeedsHuman && nhLabelDef) await publisher.ensureLabel(nhLabelDef);
+      appliedLabels = [...(rLabel ? [rLabel] : []), ...(wantNeedsHuman && nhLabelDef ? [nhLabelDef.name] : []), ...chosen];
       if (appliedLabels.length) await publisher.labels(appliedLabels, normalized.target.number);
+    }
+    if (nhLabelDef && !wantNeedsHuman && hasNeedsHuman) {
+      await publisher.removeLabel(nhLabelDef.name, normalized.target.number);
     }
 
     const summaryCommentOut = outputs.at(-1);

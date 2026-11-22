@@ -67,13 +67,14 @@ function basicSection() {
     form => save(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })), { editable, draftKey: 'branch', hideActions: true });
   // The review and development labels are project settings (#935): the review label marks a published review (empty: none),
   // and a person adds the development label to ask for development. The developing label is on an Issue while the bot
-  // develops it (#1047; empty: none).
+  // develops it (#1047; empty: none). The needs-human label marks Issues that cannot be developed automatically (#1215; empty: none).
   const labels = settingsForm('标签', [field('检视标签', input('review_label', policy.review_label ?? '', { maxLength: 50, placeholder: '留空表示检视后不加标签' })),
     field('开发标签', input('development_label', policy.development_label ?? '', { maxLength: 50, required: true })),
     field('开发中标签', input('developing_label', policy.developing_label ?? '', { maxLength: 50, placeholder: '留空表示开发时不加标签' })),
-    note('检视结论发布后 bot 给 Issue 或 PR 加检视标签；人给 Issue 加上开发标签，表示要求 bot 开发它；bot 开发 Issue 期间给它加开发中标签，开出 PR 或停下时去掉，仓库没有这个标签时 bot 先创建。标签最长 50 个字符，首尾不能有空格。')],
-    form => save(changed({ review_label: form.elements.review_label.value, development_label: form.elements.development_label.value, developing_label: form.elements.developing_label.value },
-      { review_label: policy.review_label ?? '', development_label: policy.development_label ?? '', developing_label: policy.developing_label ?? '' })), { editable, draftKey: 'labels', hideActions: true });
+    field('需人工标签', input('needs_human_label', policy.needs_human_label ?? '', { maxLength: 50, placeholder: '留空表示不加标签' })),
+    note('检视结论发布后 bot 给 Issue 或 PR 加检视标签；人给 Issue 加上开发标签，表示要求 bot 开发它；bot 开发 Issue 期间给它加开发中标签，开出 PR 或停下时去掉；Issue 缺信息、需人工决定或开发受阻未开出 PR 时加需人工标签，进入开发或开出 PR 后去掉。仓库没有开发中或需人工标签时 bot 先创建。标签最长 50 个字符，首尾不能有空格。')],
+    form => save(changed({ review_label: form.elements.review_label.value, development_label: form.elements.development_label.value, developing_label: form.elements.developing_label.value, needs_human_label: form.elements.needs_human_label.value },
+      { review_label: policy.review_label ?? '', development_label: policy.development_label ?? '', developing_label: policy.developing_label ?? '', needs_human_label: policy.needs_human_label ?? '' })), { editable, draftKey: 'labels', hideActions: true });
   advanced.append(tech);
   const layout = element('div', '', 'project-settings-layout');
   layout.append(info, summary, branch, labels, ...globalProjectControls(), advanced);

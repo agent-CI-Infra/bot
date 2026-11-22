@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 行为指南、检视 Issue、检视 PR、开发与跟进 bot PR、标签用法 | 内置规则是 [`docs/prompts/`](prompts/README.md) 的原文；项目自己的约定写在「角色」页 reviewer、dev 等角色的指令里，或写进 Manager 提示词（#1122 起 Manager 提示词是一整份，不再按章节覆盖） | `roles.update`、`manager.update` |
 | 各角色的提示词、模型、权限和预算 | 「角色」页的各个角色 | `roles.update` |
-| 检视标签、开发标签、开发中标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label`、`developing_label` |
+| 检视标签、开发标签、开发中标签、需人工标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label`、`developing_label`、`needs_human_label` |
 | 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 「机器配置」 | `POST /api/environments/:id/configure` |
 | 仓库自己的 skill | 仓库基准分支的 `.agents/skills/<名称>/`（含 `SKILL.md` 及配套文本文件） | 走正常 PR 开发流程提交仓库变更（合入基准分支后生效） |
 
@@ -54,11 +54,12 @@
 
 ## 检视和开发标签
 
-在「项目设置 → 基本 → 标签」里设置，或用 `project.update` 的 `review_label`、`development_label`、`developing_label`：
+在「项目设置 → 基本 → 标签」里设置，或用 `project.update` 的 `review_label`、`development_label`、`developing_label`、`needs_human_label`：
 
 - **检视标签**：检视评论发布后，控制面给 Issue 或 PR 加上这个标签。默认 `bot-reviewed`；留空表示不加。
 - **开发标签**：有人（不是 App）给 Issue 加上这个标签，是[自动开发](#自动开发什么时候开始)的依据之一，比较时不区分大小写。默认 `bot-develop`，不能留空：不想让 bot 自动开发，请把项目的能力上限设在「可开发并开 PR」以下。
 - **开发中标签**（#1047）：bot 开发一个 Issue 期间，控制面给它加上这个标签；PR 开出（或 bot 自己的 PR 更新）后去掉，开发没有产出 PR 就停下（失败、取消、暂停、开发标签被去掉、无需改动）时也去掉，重新开始时再加上。仓库没有这个标签时控制面先创建（颜色 `fbca04`，带说明）。不论开发的依据是标签、维护者的评论还是 Manager 的规则都加。默认 `bot-developing`；留空表示不加。开发开始时记下当时的名字，中途改设置不影响去掉哪一个。管理助手为能力上限设为 `develop` 的仓库补齐标签时会一并创建它（仓库已有时不改）。
+- **需人工标签**（#1215）：Issue 检视结论为「需补充信息」或「需人工决定」（或存在需要人工处理的检视意见），或开发在开放 Issue 上失败、暂停、受阻、无改动结束且未开出 PR 时，控制面给 Issue 加上这个标签（仓库没有时先创建，颜色 `d93f0b`）；后续重新检视结论为可开发/无需改代码、进入开发或开出 PR 后自动去掉。默认 `bot-needs-human`；留空表示不加。
 - **已开 PR 标签**：bot 为 Issue 创建 PR，或更新了这个 Issue 对应的 bot PR 后，控制面在来源 Issue 上保留 `bot-developed`。没有产出 PR 的开发结束时不会加它。同一 Issue 之后再开发或取消开发，已有标记仍保留。能力上限设为 `develop` 时管理助手接入也会一并创建它，仓库缺少时控制面会在首次使用时创建。
 - 名字最长 50 个字符，不能有首尾空白和控制字符，不合法时报 `invalid_label`。
 - 模型在 `labels` 和 `development` 章节开头读到检视标签和开发标签的名字；agent 不能给 PR 选这些状态和触发标签，检视也不会把它们当分类标签加。

@@ -5,6 +5,7 @@ import { taskOriginsForDisplay } from '../tasks/origin-display.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { legacyKindName } from '../projects/legacy-kinds.js';
 import { actionStatuses, actionStatusSQL, autoStoppedSQL, settledStatusSQL } from '../app/task-states.js';
+import { boardIssueDetail, listBoardIssues } from './issues.js';
 // Saved views and links from before #207 may name a custom workflow; its cards are reply cards now.
 const customWorkflowId = /^custom\.[a-f0-9]{12}$/;
 
@@ -136,6 +137,9 @@ function pagination(url: URL) {
 export function boardApi(store: Store, user: Actor, method: string, url: URL, body: Json): Json | undefined {
   const path = url.pathname;
   if (!path.startsWith('/api/board')) return undefined;
+  if (method === 'GET' && path === '/api/board/issues') return listBoardIssues(store, user, url);
+  const issueDetail = /^\/api\/board\/issues\/([^/]+)\/([1-9]\d*)$/.exec(path);
+  if (method === 'GET' && issueDetail) return boardIssueDetail(store, user, issueDetail[1]!, Number(issueDetail[2]!));
   if (method === 'GET' && path === '/api/board') {
     const customFields = store.all('SELECT id,name FROM board_fields WHERE user_id=? ORDER BY rowid LIMIT 30', user.id)
       .map(f => ({ ...f, options: store.all('SELECT id,name FROM board_options WHERE field_id=? ORDER BY position,id LIMIT 50', f.id) }));
