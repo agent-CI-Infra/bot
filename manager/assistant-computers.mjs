@@ -201,17 +201,25 @@ export class AssistantComputers {
     return this.lock(owner, async () => {
       const now = Date.now(), settings = this.settings(), globalEnv = this.effectiveGlobal();
       let targetImage = globalEnv.image;
-      // Validate the exact stored image ID (not only the tag): containers are created from image ID, so if the stored
-      // ID was pruned after a tag move/rebuild, resolve the tag's current ID only if it matches the approved base; else
-      // fall back to the approved base image and ask the manager to reconcile in the background.
+      // Validate BOTH the live approved base image digest AND the stored image ID (not only the tag):
+      // if the approved base image changed before the next 5s reconcile timer or the stored ID was pruned,
+      // adopt a moved tag only when its base label matches the current approved base; otherwise fall back
+      // immediately to the approved base image and trigger background reconciliation.
       if (targetImage !== this.image) {
-        const presentById = await this.docker.request('GET', `/images/${encodeURIComponent(targetImage)}/json`).catch(() => null);
-        if (!presentById?.Id) {
-          const presentByTag = globalEnv.tag
+        const [approvedImg, presentById] = await Promise.all([
+          this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`).catch(() => null),
+          this.docker.request('GET', `/images/${encodeURIComponent(targetImage)}/json`).catch(() => null),
+        ]);
+        const currentApprovedId = approvedImg?.Id || globalEnv.base_image_id || null;
+        const storedBaseMatches = !currentApprovedId || !globalEnv.base_image_id || globalEnv.base_image_id === currentApprovedId;
+        const idBaseLabel = presentById?.Config?.Labels?.['department.bot.base_image_id'];
+        const idValid = storedBaseMatches && !!presentById?.Id && (!currentApprovedId || !idBaseLabel || idBaseLabel === currentApprovedId);
+        if (!idValid) {
+          const presentByTag = storedBaseMatches && globalEnv.tag
             ? await this.docker.request('GET', `/images/${encodeURIComponent(globalEnv.tag)}/json`).catch(() => null)
             : null;
           const tagBase = presentByTag?.Config?.Labels?.['department.bot.base_image_id'];
-          const tagValid = !!presentByTag?.Id && (!globalEnv.base_image_id || !tagBase || tagBase === globalEnv.base_image_id);
+          const tagValid = storedBaseMatches && !!presentByTag?.Id && (!currentApprovedId || !tagBase || tagBase === currentApprovedId);
           targetImage = tagValid ? presentByTag.Id : this.image;
           globalEnv.onStaleImage?.();
         }

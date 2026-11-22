@@ -545,4 +545,20 @@ test('F3 & F4: failed/cancelled global build does not retry in a 5s check loop, 
   const staleTurn = await f.assistants.acquire(owner, { turn: 't-stale-tag', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
   assert.equal(staleTurn.computer.image, 'approved', 'assistant must fall back to approved base when stored.id is missing and tag has stale base_image_id');
   await f.assistants.release(owner, { turn: 't-stale-tag' });
+
+  // F7: approved base image changes while manager is running and BEFORE the 5s reconcile timer fires,
+  // while the old precompiled image ID still exists in Docker -> acquire() must STILL immediately detect
+  // the base upgrade and use the newly approved base image!
+  await f.projects.setDefaults({ packages: ['jq'], setup_script: 'echo f7-test' });
+  await f.projects.waitForGlobalBuild();
+  const f7Saved = f.projects.currentGlobalImage();
+  assert.ok(f7Saved?.id);
+  f.docker.images.set(f7Saved.id, { Id: f7Saved.id, Size: 2 * mib, Config: { Labels: { 'department.bot.base_image_id': f7Saved.base_image_id } } });
+  // Upgrade 'approved' without calling reconcileGlobalImage() first!
+  f.docker.images.set('approved', { Id: 'sha256:new-approved-v3', Size: 10 * mib });
+  const immediateTurn = await f.assistants.acquire(owner, { turn: 't-f7', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(immediateTurn.computer.image, 'approved', 'acquire() must immediately detect approved base image upgrade without waiting for 5s check timer');
+  await f.assistants.release(owner, { turn: 't-f7' });
+  await f.projects.reconcilingGlobal;
+  await f.projects.waitForGlobalBuild();
 });
