@@ -61,8 +61,8 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_OBSOLETE_FAILURE_DAYS` | `7` | 临时/平台类失败自动移出「待处理」的天数 |
 | `BOT_TRUSTED_PROXIES` | 空 | 密码登录限流信任的代理 IP/CIDR（逗号分隔；仅填受控代理，切勿填 `0.0.0.0/0`） |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许 Webhook 转发的内网主机名白名单（逗号分隔，不支持通配符） |
-| `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 控制面读写 Agent 工具卷的挂载目录，项目电脑在 `/opt/agent-tools` 只读挂载同一卷 |
-| `BOT_ACP_PRODUCT` | `container_acp` | 控制面选用的 ACP 产品标识。该产品的活动版本由工具卷中的选定记录决定 |
+| `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 非 Compose 启动时可指定的控制面工具卷目录。标准 Compose 固定在 `/opt/agent-tools` 挂载该卷，项目电脑只读挂载 |
+| `BOT_ACP_PRODUCT` | `container_acp` | 可在 Compose 的 `.env` 中设置。控制面按此标识从工具卷读取产品及其选定版本 |
 | `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
 | `BOT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | 空 | 未在向导保存 GitHub 登录配置时的部署级 OAuth 默认值 |
