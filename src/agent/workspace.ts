@@ -108,6 +108,7 @@ export class Workspace {
       // after its retention window cannot be answered: a new attempt runs with new operation ids.
       if(code==='disk_full')return stop('disk_full','waiting_environment',`manager 的数据盘空间不足，调用未完成：${what}`);
       if(code==='operation_result_expired')return stop('operation_result_expired','waiting_environment',`manager 中这次调用的结果已过保留期被删除：${what}`);
+      if(code==='invalid_runner_request')return stop('invalid_runner_request','failed',`Manager rejected runner request: ${what}`);
       return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${what}`);
     }
     finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}

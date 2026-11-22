@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
+import { once } from 'node:events';
 import { link, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { blobSha, Redactor, sha } from '../../../../dist/agent/common.js';
-import { assertMediaOutsideCode, collectPullRequestMedia, planPullRequestMedia, publishPullRequestMedia, pullRequestSummaryForProgress } from '../../../../dist/github/pull-request-media.js';
+import { assertMediaOutsideCode, collectPullRequestMedia, planMarkdownMedia, planPullRequestMedia, publishHostedMedia, publishPullRequestMedia, pullRequestSummaryForProgress } from '../../../../dist/github/pull-request-media.js';
 import { Publisher } from '../../../../dist/github/publisher.js';
 import { hostedMediaUrl } from '../../../../dist/github/hosted-pr-media.js';
+import { githubWrite } from '../../../../dist/github/write.js';
+import { publishReviewDelivery, validateReviewDelivery } from '../../../../dist/tasks/github-write.js';
 import { harness } from '../../../fixtures/helpers.mjs';
 import { Store } from '../../../../dist/storage/database.js';
 import { workspace as runWorkspace } from '../../../../runner/workspace.mjs';
@@ -197,4 +200,129 @@ test('hosting issues independent random links with private bytes and exposes onl
   assert.throws(() => publishPullRequestMedia(github, [imageAsset]), { code: 'pull_request_media_origin_missing' });
   store.run("DELETE FROM repositories WHERE id='r'");
   assert.equal((await rawRequest(h.admin, path)).status, 404);
+});
+
+test('github_write and post_review attach hosted workspace media to Issue/PR comments and reviews', async t => {
+  const h = await harness(t);
+  const store = h.store;
+  store.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,?,'now')", store.secrets.seal({ token: 'fixture-bot-token' }, 'account:a'));
+  store.run("INSERT INTO repositories VALUES('r','fixture/r','10','a')");
+  store.run("INSERT INTO policies(repository_id,enabled,review_enabled,development_enabled,capability_ceiling) VALUES('r',1,1,0,'comment')");
+  store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: 'https://files.example.test' }));
+
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const reqPath = new URL(req.url, 'http://fixture').pathname, body = raw ? JSON.parse(raw) : null;
+    requests.push({ method: req.method, path: reqPath, body });
+    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    if (reqPath === '/user') return send({ id: 99, login: 'fixture-bot' });
+    if (reqPath === '/repositories/r') return send({ id: 'r', owner: { id: '10' }, full_name: 'fixture/r', default_branch: 'main' });
+    if (reqPath === '/repos/fixture/r/issues/12') return send({ number: 12, title: 'UI Issue', body: 'Need screenshot', labels: [] });
+    if (reqPath === '/repos/fixture/r/issues/12/comments' && req.method === 'POST') return send({ id: 301, html_url: 'https://github.com/fixture/r/issues/12#issuecomment-301', body: body.body }, 201);
+    if (reqPath === '/repos/fixture/r/issues/12/comments' && req.method === 'GET') return send([]);
+    if (reqPath === '/repos/fixture/r/pulls/7') return send({ number: 7, title: 'UI PR', body: 'Changed layout', head: { sha: 'a'.repeat(40) }, labels: [] });
+    if (reqPath === '/repos/fixture/r/pulls/7/files') return send([{ filename: 'ui.js', status: 'modified', patch: '@@ -1,1 +1,2 @@\n const a = 1;\n+const b = 2;\n' }]);
+    if (reqPath === '/repos/fixture/r/pulls/7/reviews' && req.method === 'POST') return send({ id: 401, html_url: 'https://github.com/fixture/r/pull/7#pullrequestreview-401', body: body.body }, 200);
+    if (reqPath === '/repos/fixture/r/issues/7/comments' && req.method === 'POST') return send({ id: 402, html_url: 'https://github.com/fixture/r/pull/7#issuecomment-402', body: body.body }, 201);
+    if (reqPath === '/repos/fixture/r/issues/7/comments' && req.method === 'GET') return send([]);
+    if (reqPath === '/repos/fixture/r/pulls/7/comments' && req.method === 'GET') return send([]);
+    if (reqPath === '/repos/fixture/r/issues/7/labels') return send(req.method === 'POST' ? (body.labels || []).map(name => ({ name })) : []);
+    if (reqPath === '/repos/fixture/r/labels') return send([]);
+    send({ message: 'Not Found' }, 404);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const apiUrl = 'http://127.0.0.1:' + server.address().port;
+  const repository = store.get("SELECT * FROM repositories WHERE id='r'");
+
+  const workspace = {
+    store, task: { repository_id: 'r' }, redactor: new Redactor(),
+    async deliver(request) {
+      if (request.type === 'workspace_export') return request.path === '.tmp/shot.png' ? { sha: blobSha(png), size: png.length } : { error: 'not_found' };
+      if (request.type === 'workspace_blob') return { size: png.length, base64: png.toString('base64') };
+      throw new Error('unexpected ' + request.type);
+    },
+  };
+  let collectCalls = 0;
+  const collectMedia = async paths => { collectCalls++; return collectPullRequestMedia(workspace, paths); };
+
+  // 1. Issue comment with media succeeds at comment ceiling with only issues: write!
+  const write = (args, withWorkspace = true) => githubWrite({
+    store, repository, redactor: new Redactor(), guard: async () => {}, apiUrl,
+    scope: 'task:comment-media', actor: { kind: 'task', role: 'reviewer', task_id: 't1' },
+    allowed: resource => resource === 'issues' || resource === 'pull_requests',
+    ...(withWorkspace ? { collectMedia } : {}),
+  }, args);
+
+  const commentRes = await write({
+    method: 'POST', path: '/issues/12/comments', key: 'shot-comment',
+    body: { body: 'Verified UI:\n\n![Shot](workspace:.tmp/shot.png)' },
+    media: ['.tmp/shot.png'],
+  });
+  assert.equal(commentRes.status, 201);
+  const postedComment = requests.find(r => r.method === 'POST' && r.path === '/repos/fixture/r/issues/12/comments');
+  const match = /https:\/\/files\.example\.test(\/pr-media\/[a-f0-9]{64})/.exec(postedComment.body.body);
+  assert.ok(match, 'comment body rewrote workspace: link to hosted /pr-media URL');
+  assert.doesNotMatch(postedComment.body.body, /workspace:/);
+  const served = await rawRequest(h.admin, match[1]);
+  assert.equal(served.status, 200);
+  assert.deepEqual(served.bytes, png);
+
+  // Replay with same key returns cached response without re-collecting or minting another token.
+  const tokenCountBefore = store.get('SELECT COUNT(*) c FROM hosted_pr_media').c;
+  const replay = await write({
+    method: 'POST', path: '/issues/12/comments', key: 'shot-comment',
+    body: { body: 'Verified UI:\n\n![Shot](workspace:.tmp/shot.png)' },
+    media: ['.tmp/shot.png'],
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(collectCalls, 1);
+  assert.equal(store.get('SELECT COUNT(*) c FROM hosted_pr_media').c, tokenCountBefore);
+
+  // 2. PR review via github_write supports media referenced in both review body and inline comment body.
+  const reviewRes = await write({
+    method: 'POST', path: '/pulls/7/reviews', key: 'shot-review',
+    body: { event: 'COMMENT', body: 'Summary:\n![S1](workspace:.tmp/shot.png)', comments: [{ path: 'ui.js', line: 2, body: 'Inline:\n![S2](workspace:.tmp/shot.png)' }] },
+    media: ['.tmp/shot.png'],
+  });
+  assert.equal(reviewRes.status, 200);
+  const postedReview = requests.find(r => r.method === 'POST' && r.path === '/repos/fixture/r/pulls/7/reviews');
+  assert.match(postedReview.body.body, /https:\/\/files\.example\.test\/pr-media\/[a-f0-9]{64}/);
+  assert.match(postedReview.body.comments[0].body, /https:\/\/files\.example\.test\/pr-media\/[a-f0-9]{64}/);
+
+  // 3. Error cases: unsupported route, no workspace, unlisted workspace link, missing public origin.
+  assert.equal((await write({ method: 'POST', path: '/issues/12/labels', key: 'bad-route', body: { labels: ['bug'] }, media: ['.tmp/shot.png'] })).error, 'github_write_media_unsupported_route');
+  assert.equal((await write({ method: 'POST', path: '/issues/12/comments', key: 'no-ws', body: { body: '![Shot](workspace:.tmp/shot.png)' }, media: ['.tmp/shot.png'] }, false)).error, 'github_write_media_unavailable');
+  assert.equal((await write({ method: 'POST', path: '/issues/12/comments', key: 'unlisted', body: { body: '![Shot](workspace:.tmp/shot.png)' } })).error, 'pull_request_media_invalid');
+
+  // 4. post_review validation & publication with media.
+  const now = new Date().toISOString();
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at,updated_at) VALUES('rev-media','r','task.request','running','Review',?,7,?,?,?)",
+    JSON.stringify({ generic: true, target: { type: 'pr', number: 7 } }), 'a'.repeat(40), now, now);
+  const reviewTask = store.get("SELECT * FROM tasks WHERE id='rev-media'");
+  const badReview = validateReviewDelivery(reviewTask, { pull_number: 7, summary: '![Shot](workspace:.tmp/shot.png)' });
+  assert.equal(badReview.ok, false);
+  assert.equal(badReview.error.error, 'pull_request_media_invalid');
+  const checkedReview = validateReviewDelivery(reviewTask, { pull_number: 7, summary: 'Review evidence:\n![ReviewShot](workspace:.tmp/shot.png)', media: ['.tmp/shot.png'] });
+  assert.equal(checkedReview.ok, true);
+  assert.deepEqual(checkedReview.value.media_paths, ['.tmp/shot.png']);
+  const reviewMedia = await collectPullRequestMedia(workspace, checkedReview.value.media_paths);
+  const published = await publishReviewDelivery(store, reviewTask, { ...checkedReview.value, media: reviewMedia }, new Redactor(), async () => {}, () => {}, apiUrl);
+  assert.equal(published.ok, true);
+  const reviewSummaryComment = requests.find(r => r.method === 'POST' && r.path === '/repos/fixture/r/issues/7/comments');
+  assert.match(reviewSummaryComment.body.body, /https:\/\/files\.example\.test\/pr-media\/[a-f0-9]{64}/);
+  assert.doesNotMatch(reviewSummaryComment.body.body, /workspace:/);
+
+  // 5. Missing public origin refuses comment media cleanly without posting.
+  const commentCountBefore = requests.filter(r => r.path === '/repos/fixture/r/issues/12/comments').length;
+  store.run("UPDATE settings SET value=? WHERE key='onboarding.public'", JSON.stringify({ origin: 'http://127.0.0.1' }));
+  assert.equal((await write({ method: 'POST', path: '/issues/12/comments', key: 'no-origin', body: { body: '![Shot](workspace:.tmp/shot.png)' }, media: ['.tmp/shot.png'] })).error, 'pull_request_media_origin_missing');
+  assert.equal(requests.filter(r => r.path === '/repos/fixture/r/issues/12/comments').length, commentCountBefore);
+
+  // Also check planMarkdownMedia & publishHostedMedia directly for issue-only permission.
+  assert.equal(planMarkdownMedia(['a', '![x](workspace:.tmp/shot.png)'], ['.tmp/shot.png']).paths.length, 1);
+  store.run("UPDATE settings SET value=? WHERE key='onboarding.public'", JSON.stringify({ origin: 'https://files.example.test' }));
+  const hostedByIssuesOnly = publishHostedMedia({ store, repository: { id: 'r' }, redactor: new Redactor(), installationPermissions: { issues: 'write' }, permissions: { issues: 'write' } }, reviewMedia);
+  assert.ok(hostedMediaUrl(hostedByIssuesOnly, reviewMedia[0].path));
 });

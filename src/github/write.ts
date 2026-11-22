@@ -6,6 +6,8 @@ import { digest, randomId } from '../core/security.js';
 import { covers, projectCeiling, resourceLevel } from '../projects/ceiling.js';
 import { autoMergePolicy, githubMaintainer, isBotPullRequest, mergeBoundary, mergeNeedsRequest, principalMaintainer, type AutoMergePolicy } from './merge-policy.js';
 import { mergeQueue } from './merge-queue.js';
+import { hostedMediaUrl } from './hosted-pr-media.js';
+import { commentMediaSchema, planMarkdownMedia, publishHostedMedia, type StoredMedia } from './pull-request-media.js';
 
 /**
  * github_write: one GitHub write tool for every agent, shaped like the GitHub REST API (#381).
@@ -49,6 +51,8 @@ export interface WriteContext {
    * platform principal, or null when the sender is not linked to one. Absent where no person's message drives the call.
    */
   speaker?: () => string | null;
+  /** Optional workspace media collector (for attaching screenshots/recordings to comments, issues, PRs and reviews). */
+  collectMedia?: (paths: string[]) => Promise<StoredMedia[] | undefined>;
 }
 
 // One route: `shared` routes act on an Issue or a pull request by number (GitHub keeps both under /issues), `comment` routes on
@@ -112,10 +116,11 @@ const description = 'Write to GitHub through the control plane, exactly like the
   + 'POST /actions/runs/99/rerun, POST /actions/runs/99/rerun-failed-jobs, POST /actions/runs/99/rerun-pending-jobs, POST /actions/runs/99/cancel, POST /actions/runs/99/force-cancel, or POST /actions/jobs/88/rerun manage Actions runs and jobs. '
   + 'PUT /pulls/7/merge {sha?, merge_method?} merges the pull request, or adds it to the merge queue when its base branch requires one (the answer says queued); it needs Contents and Pull requests write and is allowed only as the project\'s auto-merge policy says (your instructions state it). Writes that move the default branch without a pull request follow the same policy. '
   + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
-  + 'Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
+  + 'Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. To attach workspace screenshots or recordings to a comment, Issue, PR or review, pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path). key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
   + 'Use github_read to check state before writing; write only what your task needs.';
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
   body: { type: 'object', description: 'The REST request body. Omit when the route takes none.' }, key: { type: 'string', maxLength: 120 },
+  media: commentMediaSchema,
   merge_request: { type: 'string', maxLength: 500, description: 'Only with PUT /pulls/{n}/merge or a write that moves the default branch, when the auto-merge policy needs a maintainer\'s explicit request for it: the link to their comment, review or review comment on this pull request (for a default-branch write, on the Issue or pull request where they asked), or "current_message" when the message you are answering in a Feishu or management conversation asks for it. The control plane checks that the person has write access to the repository.' } };
 /** What an agent is told about github_write in one project; it applies only where the tool is among its tools. */
 export const githubWriteInstructions = (policy: AutoMergePolicy) => ' If github_write is among your tools, your role may write to this repository on GitHub through the control plane, shaped like the GitHub REST API. Use it only for what this task and its prompt ask for (for example a comment, a label or a follow-up Issue), read the current state with github_read first, keep one stable key per intended write and never use it to approve a pull request unless the task explicitly asks for that. Never push to another author\'s branch or to the default branch unless a person explicitly asked for that push (in a GitHub comment, in Feishu or in the task they created); then cite that request where you report the write. '
@@ -231,6 +236,37 @@ const urlOf = (value: any): string | null => {
   return typeof url === 'string' && /^https:\/\//.test(url) ? url : null;
 };
 
+function extractHumanMediaTexts(entry: Route, body: unknown): string[] {
+  if (!entry.human || !body || typeof body !== 'object' || Array.isArray(body)) return [];
+  const obj = body as Record<string, unknown>;
+  const texts: string[] = [];
+  if (typeof obj.body === 'string') texts.push(obj.body);
+  if (entry.human === 'review' && Array.isArray(obj.comments)) {
+    for (const item of obj.comments) {
+      if (item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).body === 'string') {
+        texts.push((item as Record<string, unknown>).body as string);
+      }
+    }
+  }
+  return texts;
+}
+
+function applyHumanMediaTexts(entry: Route, body: unknown, rendered: string[]): unknown {
+  if (!entry.human || !body || typeof body !== 'object' || Array.isArray(body)) return body;
+  const obj = body as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...obj };
+  let idx = 0;
+  if (typeof obj.body === 'string') out.body = rendered[idx++];
+  if (entry.human === 'review' && Array.isArray(obj.comments)) {
+    out.comments = obj.comments.map(item =>
+      item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).body === 'string'
+        ? { ...(item as Record<string, unknown>), body: rendered[idx++] }
+        : item,
+    );
+  }
+  return out;
+}
+
 const now = () => new Date().toISOString();
 /**
  * One github_write call. Returns what the agent sees: GitHub's useful answer, or an error it can act on. A rate limit is
@@ -240,10 +276,10 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   const { store, redactor: base, repository } = context;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return { error: 'invalid_arguments' };
   const input = args as Record<string, unknown>, method = String(input.method ?? '').toUpperCase(), path = writePath(input.path), key = typeof input.key === 'string' ? input.key.trim() : '';
-  if (Object.keys(input).some(name => !['method', 'path', 'body', 'key', 'merge_request'].includes(name)) || !(writeMethods as readonly string[]).includes(method) || !path || !key || key.length > 120
+  if (Object.keys(input).some(name => !['method', 'path', 'body', 'key', 'merge_request', 'media'].includes(name)) || !(writeMethods as readonly string[]).includes(method) || !path || !key || key.length > 120
     || input.body !== undefined && (input.body === null || typeof input.body !== 'object')
     || input.merge_request !== undefined && (typeof input.merge_request !== 'string' || input.merge_request.length > 500))
-    return { error: 'invalid_arguments', detail: 'github_write takes method (POST, PATCH, PUT or DELETE), a repository-relative path without a query, an optional JSON object body, a key of up to 120 characters and, only for a merge, an optional merge_request.' };
+    return { error: 'invalid_arguments', detail: 'github_write takes method (POST, PATCH, PUT or DELETE), a repository-relative path without a query, an optional JSON object body, a key of up to 120 characters, optional media paths for Markdown routes and, only for a merge, an optional merge_request.' };
   if (input.body !== undefined && Buffer.byteLength(JSON.stringify(input.body)) > 1024 * 1024) return { error: 'github_write_body_too_large', detail: 'The request body exceeds 1 MiB.' };
   // Every known credential of this deployment is redacted, not only the ones this caller holds.
   const redactor = registeredRedactor(store);
@@ -272,10 +308,25 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
   if (entry.resource === 'contents' && /^\/contents\/\.github\/workflows(?:\/|$)/i.test(decodedPath(path)))
     return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request: a development task a project administrator confirmed as a CI change, reviewed and merged by people.');
+  const mediaTexts = extractHumanMediaTexts(entry, input.body);
+  let mediaPlan: ReturnType<typeof planMarkdownMedia> | null = null;
+  if (input.media !== undefined || mediaTexts.some(text => text.includes('workspace:'))) {
+    if (!entry.human) return refuse('github_write_media_unsupported_route', 'media can only be attached to routes with Markdown body text (Issues, pull requests, comments, and reviews).');
+    try { mediaPlan = planMarkdownMedia(mediaTexts, input.media); }
+    catch (error) {
+      if (error instanceof TaskError) return refuse(error.code, error.detail);
+      throw error;
+    }
+    if (mediaPlan.paths.length && !context.collectMedia) {
+      return refuse('github_write_media_unavailable', 'This github_write caller has no task workspace to read workspace media files.');
+    }
+  }
   let body: unknown;
   try { body = sanitize(entry, input.body, redactor, `<!-- dept-bot-write:${marker} -->`); }
   catch (error) { if (error instanceof Unsendable) return refuse(error.code, error.detail); throw error; }
-  const requestDigest = digest(JSON.stringify([String(repository.id), method, path, body ?? null]));
+  const requestDigest = mediaPlan?.paths.length
+    ? digest(JSON.stringify([String(repository.id), method, path, body ?? null, mediaPlan.paths]))
+    : digest(JSON.stringify([String(repository.id), method, path, body ?? null]));
   // Answered from the ledger: a key that already reached GitHub (or may have) is never sent again.
   const earlier = () => {
     const row = store.get("SELECT * FROM github_writes WHERE scope=? AND key=? AND state IN ('sent','inflight','unknown') ORDER BY rowid DESC LIMIT 1", context.scope, key);
@@ -374,16 +425,42 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
       const policy = autoMergePolicy(store, repositoryId);
       if (mergeNeedsRequest(policy, true)) return refuse('auto_merge_not_allowed', moveRefusal(policy, moving.branch, 'The policy changed while the write was prepared.'), { policy, default_branch: moving.branch });
     }
+    let collectedMedia: StoredMedia[] | undefined;
+    if (mediaPlan?.paths.length) {
+      try { collectedMedia = await context.collectMedia!(mediaPlan.paths); }
+      catch (error) {
+        if (error instanceof TaskError) return refuse(error.code, error.detail);
+        throw error;
+      }
+    }
     // No await between this check and the inflight record: one key reaches GitHub at most once.
     const again = earlier();
     if (again) return again;
+    let effectiveBody: unknown = input.body;
+    if (collectedMedia?.length && mediaPlan) {
+      let hosted;
+      try { hosted = publishHostedMedia(github, collectedMedia); }
+      catch (error) {
+        if (error instanceof TaskError) return refuse(error.code, error.detail);
+        throw error;
+      }
+      const bySource = new Map(collectedMedia.map(file => [file.source, file.path]));
+      let missingUrl = false;
+      const rendered = mediaPlan.renderAll(source => {
+        const url = hostedMediaUrl(hosted, bySource.get(source) ?? '');
+        if (!url) { missingUrl = true; return ''; }
+        return url;
+      });
+      if (missingUrl) return refuse('pull_request_media_unconfirmed', 'The hosted media has no confirmed URL.');
+      effectiveBody = applyHumanMediaTexts(entry, input.body, rendered);
+    }
     const id = randomId(), time = now();
     store.run('INSERT INTO github_writes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, context.scope, key, String(repository.id), JSON.stringify(context.actor), method, path,
       requestDigest, 'inflight', null, null, null, null, time, time, marker);
     sending = true;
     try {
       // Token issuance may have registered a new exact value since the idempotency digest was computed.
-      const outgoing = () => sanitize(entry, input.body, registeredRedactor(store, redactor), `<!-- dept-bot-write:${marker} -->`);
+      const outgoing = () => sanitize(entry, effectiveBody, registeredRedactor(store, redactor), `<!-- dept-bot-write:${marker} -->`);
       let response: any, url: string | null = null;
       if (merging?.queued) {
         // The base branch requires a merge queue: the same merge is GitHub's enqueuePullRequest, pinned to the head the agent

@@ -813,7 +813,7 @@ export class TaskEngine {
         input.context={...input.context,acceptance_feedback:records.get(id).acceptance};
         if(adapterId==='actions.failures')delete input.context.work_prompt;
         const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
-        const write=taskGithubWrite(this.store,task,redactor,guard,this.githubUrl);
+        const write=taskGithubWrite(this.store,task,redactor,guard,this.githubUrl,()=>workspace??undefined);
         // The milestones of an Issue's development go to its status comment (#1047); the control plane writes the comment.
         if(task.kind==='development.issue')platform[milestoneToolName]=async(_callId,args)=>{
           const recorded=reportMilestone(this.store,id,redactor.clean(args));

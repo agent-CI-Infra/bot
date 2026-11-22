@@ -505,6 +505,28 @@ test('the project computer accepts the control plane\'s three-way integration ca
  assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
 });
 
+test('the project computer accepts conflict import and merge check calls through validateCall', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const workspace = 'a'.repeat(48), base = 'b'.repeat(40), head = 'c'.repeat(40), tree = 'd'.repeat(40);
+  const call = () => f.docker.runs.at(-1);
+  const importReq = { type: 'workspace_import_commits', workspace_id: workspace, commits: [], conflict_base_sha: base, pr_head_sha: head };
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: importReq });
+  assert.deepEqual([call().type, call().conflict_base_sha, call().pr_head_sha], ['workspace_import_commits', base, head]);
+  const verifyReq = { type: 'workspace_verify_merge', workspace_id: workspace, base_sha: base, head_sha: head, head_tree_sha: tree };
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: verifyReq });
+  assert.deepEqual([call().type, call().base_sha, call().head_sha, call().head_tree_sha], ['workspace_verify_merge', base, head, tree]);
+  const count = f.docker.runs.length;
+  for (const bad of [
+    { type: 'workspace_import_commits', workspace_id: workspace, conflict_base_sha: base },
+    { type: 'workspace_import_commits', workspace_id: workspace, commits: [], conflict_base_sha: 'not-a-sha' },
+    { type: 'workspace_verify_merge', workspace_id: workspace, base_sha: base, head_sha: 'bad', head_tree_sha: tree },
+    { type: 'workspace_command', workspace_id: workspace, command: 'true', conflict_base_sha: base },
+    { type: 'workspace_command', workspace_id: workspace, command: 'true', base_sha: base },
+  ]) await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: bad }), /invalid_runner_request/, JSON.stringify(bad));
+  assert.equal(f.docker.runs.length, count);
+  assert.equal(f.projects.get('101').state, 'ready');
+});
+
 test('the project computer rejects the retired workspace_browser runner call type', async t => {
   const f = fixture(t); await f.projects.register('101');
   const count = f.docker.runs.length;

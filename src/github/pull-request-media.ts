@@ -18,6 +18,11 @@ export const pullRequestMediaSchema = {
   description: 'Optional repository-relative workspace paths outside the code diff (for example gitignored output such as .tmp/result.png or .tmp/demo.webm) explicitly selected for this PR. In summary, use ![Screenshot](workspace:path) for PNG, JPEG, GIF or WebP and [Recording](workspace:path) for MP4 or WebM. Percent-encode spaces and parentheses in the link. Select only media safe to share with anyone who receives the link. Inspect each file for credentials and private content first. When revising an existing description, keep its previously published media lines if they still apply.',
 };
 
+export const commentMediaSchema = {
+  type: 'array', maxItems: maxFiles, uniqueItems: true, items: { type: 'string' },
+  description: 'Optional repository-relative workspace paths (for example .tmp/result.png or .tmp/demo.webm) explicitly selected to attach in Markdown body text (Issue/PR comments, reviews, Issues or PR descriptions). Use ![Screenshot](workspace:path) for PNG, JPEG, GIF or WebP and [Recording](workspace:path) for MP4 or WebM. Percent-encode spaces and parentheses in the link. Select only media safe to share with anyone who receives the link and inspect each file for credentials first.',
+};
+
 const format = (path: string) => extname(path).slice(1).toLowerCase().replace(/^jpeg$/, 'jpg');
 const video = (path: string) => ['mp4', 'webm'].includes(format(path));
 
@@ -40,63 +45,83 @@ function selectedPaths(value: unknown): string[] {
 }
 
 /** Keep the source Markdown, including code and ordinary destinations. Ambiguous repeated source spans are refused. */
-export function planPullRequestMedia(summary: string, value: unknown) {
-  if (typeof summary !== 'string') throw new MediaInputError('Use a Markdown string for the pull request summary.');
+export function planMarkdownMedia(texts: string[], value: unknown) {
+  if (!Array.isArray(texts) || texts.some(text => typeof text !== 'string'))
+    throw new MediaInputError('Use Markdown strings for media references.');
   const paths = selectedPaths(value);
   type Reference = { path: string; destination: string; href: string; count: number; text: string };
-  const references = new Map<string, Reference>();
-  if (paths.length || summary.includes(mediaPrefix)) {
-    marked.walkTokens(marked.lexer(summary), token => {
-      if (token.type !== 'image' && token.type !== 'link') return;
-      const explicit = token.href.startsWith(mediaPrefix);
-      if (!explicit && (!paths.length || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(token.href))) return;
-      let path: string;
-      try { path = decodeURIComponent(explicit ? token.href.slice(mediaPrefix.length) : token.href.replace(/^\.\//, '')); }
-      catch {
-        if (!explicit) return;
-        throw new MediaInputError('A workspace: link contains invalid percent encoding.');
+  type Edit = Reference & { start: number; raw: string };
+  const linked = new Set<string>();
+  const perTextEdits: Edit[][] = texts.map(text => {
+    const references = new Map<string, Reference>();
+    if (paths.length || text.includes(mediaPrefix)) {
+      marked.walkTokens(marked.lexer(text), token => {
+        if (token.type !== 'image' && token.type !== 'link') return;
+        const explicit = token.href.startsWith(mediaPrefix);
+        if (!explicit && (!paths.length || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(token.href))) return;
+        let path: string;
+        try { path = decodeURIComponent(explicit ? token.href.slice(mediaPrefix.length) : token.href.replace(/^\.\//, '')); }
+        catch {
+          if (!explicit) return;
+          throw new MediaInputError('A workspace: link contains invalid percent encoding.');
+        }
+        if (!paths.includes(path)) {
+          if (!explicit) return;
+          throw new MediaInputError(`The workspace link for ${JSON.stringify(path)} must name a selected media file.`);
+        }
+        if ((token.type === 'image') === video(path))
+          throw new MediaInputError(`Use ${video(path) ? 'a Markdown link' : 'Markdown image syntax'} for ${JSON.stringify(path)}.`);
+        const destination = [...token.raw.matchAll(/\]\(\s*<?([^\s<>)]+)/g)].filter(match => match[1] === token.href);
+        if (destination.length !== 1) throw new MediaInputError('Use an inline Markdown link or image for each media file.');
+        const previous = references.get(token.raw);
+        if (previous) previous.count++;
+        else references.set(token.raw, { path, destination: destination[0]![0], href: token.href, count: 1, text: token.text });
+      });
+    }
+    for (const reference of references.values()) linked.add(reference.path);
+    const edits: Edit[] = [];
+    for (const [raw, reference] of references) {
+      let offset = 0, count = 0;
+      while ((offset = text.indexOf(raw, offset)) !== -1) {
+        edits.push({ ...reference, start: offset, raw });
+        count++;
+        offset += raw.length;
       }
-      if (!paths.includes(path)) {
-        if (!explicit) return;
-        throw new MediaInputError(`The workspace link for ${JSON.stringify(path)} must name a selected media file.`);
-      }
-      if ((token.type === 'image') === video(path))
-        throw new MediaInputError(`Use ${video(path) ? 'a Markdown link' : 'Markdown image syntax'} for ${JSON.stringify(path)}.`);
-      const destination = [...token.raw.matchAll(/\]\(\s*<?([^\s<>)]+)/g)].filter(match => match[1] === token.href);
-      if (destination.length !== 1) throw new MediaInputError('Use an inline Markdown link or image for each media file.');
-      const previous = references.get(token.raw);
-      if (previous) previous.count++;
-      else references.set(token.raw, { path, destination: destination[0]![0], href: token.href, count: 1, text: token.text });
-    });
-  }
-  const linked = new Set([...references.values()].map(reference => reference.path));
+      if (count !== reference.count) throw new MediaInputError('A workspace: reference is ambiguous. Give each media reference distinct link text.');
+    }
+    edits.sort((a, b) => b.start - a.start);
+    for (let index = 1; index < edits.length; index++) {
+      const edit = edits[index]!;
+      if (edit.start + edit.raw.length > edits[index - 1]!.start)
+        throw new MediaInputError('Use separate Markdown links or images for workspace media.');
+    }
+    return edits;
+  });
   for (const path of paths) if (!linked.has(path))
     throw new MediaInputError(`Add a Markdown reference in summary for ${JSON.stringify(path)}.`);
-  const edits: (Reference & { start: number; raw: string })[] = [];
-  for (const [raw, reference] of references) {
-    let offset = 0, count = 0;
-    while ((offset = summary.indexOf(raw, offset)) !== -1) {
-      edits.push({ ...reference, start: offset, raw });
-      count++;
-      offset += raw.length;
-    }
-    if (count !== reference.count) throw new MediaInputError('A workspace: reference is ambiguous. Give each media reference distinct link text.');
-  }
-  edits.sort((a, b) => b.start - a.start);
-  for (let index = 1; index < edits.length; index++) {
-    const edit = edits[index]!;
-    if (edit.start + edit.raw.length > edits[index - 1]!.start)
-      throw new MediaInputError('Use separate Markdown links or images for workspace media.');
-  }
   return {
     paths,
+    renderAll(url?: (path: string) => string) {
+      return texts.map((text, index) => {
+        let result = text;
+        for (const edit of perTextEdits[index]!) {
+          const replacement = url ? edit.raw.replace(edit.destination, () => edit.destination.slice(0, -edit.href.length) + url(edit.path)) : edit.text;
+          result = result.slice(0, edit.start) + replacement + result.slice(edit.start + edit.raw.length);
+        }
+        return result;
+      });
+    },
+  };
+}
+
+/** Keep the source Markdown, including code and ordinary destinations. Ambiguous repeated source spans are refused. */
+export function planPullRequestMedia(summary: string, value: unknown) {
+  if (typeof summary !== 'string') throw new MediaInputError('Use a Markdown string for the pull request summary.');
+  const plan = planMarkdownMedia([summary], value);
+  return {
+    paths: plan.paths,
     render(url?: (path: string) => string) {
-      let result = summary;
-      for (const edit of edits) {
-        const replacement = url ? edit.raw.replace(edit.destination, () => edit.destination.slice(0, -edit.href.length) + url(edit.path)) : edit.text;
-        result = result.slice(0, edit.start) + replacement + result.slice(edit.start + edit.raw.length);
-      }
-      return result;
+      return plan.renderAll(url)[0]!;
     },
   };
 }
@@ -114,7 +139,7 @@ const bytesMatch = (bytes: Buffer, type: string) => {
   }
 };
 
-type StoredMedia = { source: string; path: string; blob: string; content: { $blob: string } };
+export type StoredMedia = { source: string; path: string; blob: string; content: { $blob: string } };
 export type CandidateMedia = { media?: StoredMedia[]; hosted_media?: HostedPullRequestMedia; summary: string };
 
 export function pullRequestSummaryForProgress(candidate: CandidateMedia): string {
@@ -181,9 +206,26 @@ export function mediaPublicationError(error: unknown) {
   throw error;
 }
 
-export function publishPullRequestMedia(github: GitHub, media: StoredMedia[]): HostedPullRequestMedia {
-  if (!github.installationPermissions || github.permissions.contents !== 'write' || github.permissions.pull_requests !== 'write')
-    return stop('pull_request_media_permission', 'waiting_permission', 'PR media needs the target repository’s GitHub App installation with Contents and Pull requests write permissions.');
+export function publishHostedMedia(
+  github: GitHub,
+  media: StoredMedia[],
+  requiredPermissions?: readonly ('contents' | 'pull_requests' | 'issues')[],
+): HostedPullRequestMedia {
+  if (requiredPermissions?.length) {
+    if (!github.installationPermissions || !requiredPermissions.every(permission => github.permissions[permission] === 'write')) {
+      return stop(
+        'pull_request_media_permission',
+        'waiting_permission',
+        'PR media needs the target repository’s GitHub App installation with Contents and Pull requests write permissions.',
+      );
+    }
+  } else if (github.installationPermissions && !['issues', 'pull_requests', 'contents'].some(permission => github.permissions[permission] === 'write')) {
+    return stop(
+      'pull_request_media_permission',
+      'waiting_permission',
+      'Hosted media needs the target repository’s GitHub App installation with Issues, Pull requests or Contents write permission.',
+    );
+  }
   const origin = hostedMediaOrigin(github.store);
   if (!origin) return stop('pull_request_media_origin_missing', 'waiting_configuration', 'Configure the Bot’s public HTTPS address to publish PR media.');
   const repositoryId = String(github.repository.id);
@@ -204,4 +246,8 @@ export function publishPullRequestMedia(github: GitHub, media: StoredMedia[]): H
   const tokens = Object.fromEntries(entries.map(({ item, type, bytes }) => [item.path,
     registerHostedMedia(github.store, repositoryId, item.content.$blob, type, bytes)]));
   return { origin, tokens };
+}
+
+export function publishPullRequestMedia(github: GitHub, media: StoredMedia[]): HostedPullRequestMedia {
+  return publishHostedMedia(github, media, ['contents', 'pull_requests']);
 }

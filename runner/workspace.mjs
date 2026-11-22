@@ -511,14 +511,12 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       const baseInHead=await isAncestor(baseCommit,headCommit);
       const prInHead=(await isAncestor(prCommit,headCommit))||Boolean(prLocalCommit&&await isAncestor(prLocalCommit,headCommit));
       const gitMerged=(baseInHead&&prInHead)||(prInHead&&mergeHead===baseCommit)||(baseInHead&&(mergeHead===prCommit||(Boolean(prLocalCommit)&&mergeHead===prLocalCommit)));
+      const rebased=baseInHead&&!prInHead&&mergeHead!==prCommit&&!(prLocalCommit&&mergeHead===prLocalCommit);
       const alreadyAncestor=await isAncestor(baseCommit,prCommit);
       const prAlreadyInBase=await isAncestor(prCommit,baseCommit);
-      if(!alreadyAncestor&&!prAlreadyInBase){
+      if(!alreadyAncestor&&!prAlreadyInBase&&!gitMerged&&!rebased){
         if(candidateTree===input.head_tree_sha||candidateTree===prTreeSha){
-          return {ok:false,reason:'tree_unchanged_from_pr_head',candidate_tree:candidateTree,git_merged:false,...unlocked};
-        }
-        if(candidateTree===baseTreeSha){
-          return {ok:false,reason:'tree_unchanged_from_base',candidate_tree:candidateTree,git_merged:false,...unlocked};
+          return {ok:false,reason:'tree_unchanged_from_pr_head',candidate_tree:candidateTree,git_merged:false,rebased:false,...unlocked};
         }
       }
       const treeMap=async treeish=>{
@@ -532,22 +530,14 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
         }
         return map;
       };
-      const mergeBase=await git(['merge-base',baseCommit,prCommit]).then(b=>b.toString().trim(),()=>null);
-      if(!mergeBase&&!alreadyAncestor&&!prAlreadyInBase){
-        return {ok:false,reason:'merge_base_missing',candidate_tree:candidateTree,...unlocked};
-      }
-      const [oMap,bMap,pMap,cMap]=await Promise.all([
-        treeMap(mergeBase),
+      const [bMap,pMap,cMap]=await Promise.all([
         treeMap(baseCommit),
         treeMap(prCommit),
         treeMap(candidateTree),
       ]);
-      const isCommitEntry=v=>typeof v==='string'&&v.includes(':commit:');
       const isBlobEntry=v=>typeof v==='string'&&v.includes(':blob:');
       const markerFiles=[];
-      const allPaths=new Set([...oMap.keys(),...bMap.keys(),...pMap.keys(),...cMap.keys()]);
-      for(const name of allPaths){
-        const cSha=cMap.get(name);
+      for(const [name,cSha] of cMap){
         if(!isBlobEntry(cSha)||(cSha===bMap.get(name)&&cSha===pMap.get(name)))continue;
         if(cSha!==bMap.get(name)&&cSha!==pMap.get(name)){
           const bytes=await readFile(await path(name)).catch(()=>null);
@@ -555,21 +545,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
         }
       }
       if(markerFiles.length)return {ok:false,reason:'conflict_markers_present',files:markerFiles.slice(0,50),candidate_tree:candidateTree,...unlocked};
-      if(mergeBase&&!alreadyAncestor&&!prAlreadyInBase){
-        const missingBase=[],missingPr=[],unmergedConflicts=[];
-        for(const name of allPaths){
-          const o=oMap.get(name),b=bMap.get(name),p=pMap.get(name),c=cMap.get(name);
-          const effectiveC=c===undefined&&isCommitEntry(b)&&p===b?p:c;
-          if(b!==o&&p===o&&effectiveC!==b)missingBase.push(name);
-          else if(p!==o&&b===o&&effectiveC!==p)missingPr.push(name);
-          else if(b!==o&&b===p&&effectiveC!==b)missingPr.push(name);
-          else if(b!==o&&p!==o&&b!==p&&(effectiveC===p||effectiveC===b||effectiveC===o||(effectiveC===undefined&&b!==undefined&&p!==undefined)))unmergedConflicts.push(name);
-        }
-        if(missingBase.length)return {ok:false,reason:'base_changes_missing',files:missingBase.slice(0,50),candidate_tree:candidateTree,...unlocked};
-        if(missingPr.length)return {ok:false,reason:'pr_changes_missing',files:missingPr.slice(0,50),candidate_tree:candidateTree,...unlocked};
-        if(unmergedConflicts.length)return {ok:false,reason:'conflicting_files_unmerged',files:unmergedConflicts.slice(0,50),candidate_tree:candidateTree,...unlocked};
-      }
-      return {ok:true,candidate_tree:candidateTree,git_merged:gitMerged,...unlocked};
+      return {ok:true,candidate_tree:candidateTree,git_merged:gitMerged,rebased,...unlocked};
     });
   }
   if(input.type==='workspace_restore'){

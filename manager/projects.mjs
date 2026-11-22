@@ -733,7 +733,7 @@ export class Projects {
             // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
             const request = command ? { ...call, timeout_ms: limit } : call,
-              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import','tasks_remove','worktrees_remove'].includes(call.type) ? 0 : ['tasks_list','worktrees_list'].includes(call.type) ? 300000 : 90000;
+              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import','tasks_remove','worktrees_remove'].includes(call.type) ? 0 : ['tasks_list','worktrees_list'].includes(call.type) ? 300000 : 90000;
             result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
             if (['tasks_remove', 'worktrees_remove'].includes(call.type) && result.ok && result.result?.removed?.length) {
               // Exclude the pre-cleanup total until the next background check scans the volume.
