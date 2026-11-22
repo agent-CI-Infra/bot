@@ -2,7 +2,7 @@ import { configuredRedactor, registeredRedactor, publicText } from '../core/reda
 import { TaskRecords } from '../tasks/service.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, confineActor, confinedTenant, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, confineActor, confinedTenant, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { ManagementAgent } from '../management/agent.js';
 import type { RequestNotice } from '../management/onboarding-requests.js';
@@ -25,7 +25,8 @@ import type { Manager } from '../projects/service.js';
 import { TaskError } from '../agent/common.js';
 import { ChannelReactions } from './reactions.js';
 import { ChannelMedia, MediaTurn } from './media.js';
-import { markdownPosts } from './format.js';
+import { cardText, markdownPosts } from './format.js';
+import { applyInteractiveCardAction, ChannelInteractiveCards, FeishuCardTurn, renderFeishuCard, type StagedFeishuCard } from './cards.js';
 import { asksForHelp, assistantMessage, ChannelTurnMessages } from './turn-messages.js';
 import { ChannelMembers } from './members.js';
 
@@ -59,10 +60,12 @@ export class ChannelService {
   readonly schedules: ChannelSchedules;
   readonly turnMessages: ChannelTurnMessages;
   readonly members: ChannelMembers;
+  readonly cards: ChannelInteractiveCards;
   private readonly business = new Map<string,Promise<void>>();
   // GitHub checks Feishu turns started (#846), and when the latest one of each principal ended.
   private readonly renewals = new Map<string,Promise<void>>();
   private readonly renewed = new Map<string,number>();
+  private lastCardPrune = 0;
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
   private busy = false;
@@ -74,9 +77,10 @@ export class ChannelService {
     this.reactions = new ChannelReactions(store, (c, guard) => this.adapter(c, guard), e => this.source(e));
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
-    this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl,this.media);
+    this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl,this.media,options.origin??'');
     this.turnMessages = new ChannelTurnMessages(store);
     this.members = new ChannelMembers(store, (c, guard) => this.adapter(c, guard));
+    this.cards = new ChannelInteractiveCards(store);
     this.serviceSessions.members = this.members;
     management.incomingHistory = id => this.turnMessages.history(id);
     const senderName = (chat: Row) => { const name = this.members.namer(chat); return (event: ChannelEvent) => name({ id: event.actor_id, tenant: event.actor_tenant }); };
@@ -126,6 +130,16 @@ export class ChannelService {
     management.conversationSchedules=(actor,conversation)=>{
       const chat=personalChat(conversation);if(!chat||chat.chat_type!=='p2p')return;
       return args=>this.schedules.conversation(chat.id,{actor},args);
+    };
+    management.feishuCard=(actor,conversation,input,clean)=>{
+      const source=String(input.source_message??'');
+      if(source.startsWith('schedule:')){
+        const row=store.get("SELECT s.chat_id FROM channel_schedule_runs r JOIN channel_schedules s ON s.id=r.schedule_id WHERE r.id=? AND s.kind='personal'",source.slice(9));
+        return row?new FeishuCardTurn(this.options.origin??'',clean):undefined;
+      }
+      if(actor.channel==='web')return;
+      const chat=personalChat(conversation);if(!chat||chat.chat_type!=='p2p')return;
+      return new FeishuCardTurn(this.options.origin??'',clean);
     };
     management.sourceContext=(conversation,context)=>{
       const chat=personalChat(conversation);if(!chat)return context;
@@ -199,7 +213,12 @@ export class ChannelService {
   start(): void {
     for (const chat of this.store.all("SELECT h.id FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.state='active' AND c.enabled=1 AND c.app_id=h.app_id AND c.installation_tenant=h.installation_tenant")) this.ledger.resync(chat.id);
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
-    this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); void this.schedules.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
+    this.syncTimer = setInterval(() => {
+      void this.historySync.tick().catch(() => {});
+      void this.employees.tick().catch(() => {});
+      void this.schedules.tick().catch(() => {});
+      if (Date.now() - this.lastCardPrune > 3600_000) { this.lastCardPrune = Date.now(); this.cards.prune(); }
+    }, 1000); this.syncTimer.unref();
   }
   close(): void { this.stopped = true; this.schedules.close(); this.reactions.close(); this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
   async drain():Promise<void>{await Promise.allSettled([...this.business.values(),this.reactions.drain(),this.schedules.drain()]);}
@@ -313,6 +332,9 @@ export class ChannelService {
   private accept(c: Row, data: Json): Json {
     const event = this.adapter(c).normalize(data);
     if (!event) return { state: 'ignored' };
+    if (event.kind === 'card' && event.card_action?.card_id && event.card_action?.act) {
+      return this.handleCardAction(c, event);
+    }
     const previous = this.store.get('SELECT id,state FROM channel_inbox WHERE connector_id=? AND (event_id=? OR dedup_key=?)', c.id, event.event_id,
       event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id);
     if (previous) return { operation_id: previous.id, state: previous.state, duplicate: true };
@@ -416,6 +438,124 @@ export class ChannelService {
   }
   /** Queues a card to a chat once per key; the protection is checked again right before sending. */
   post(chat: Row, message: string, key: string, source: string, protection: Json): string { return this.queue(this.chatEvent(chat), card(message), key, source, protection); }
+  personalCardFence(chat: Row, principalId: string): string {
+    return digest(JSON.stringify(['personal-card', chat.id, principalId, revision(this.store, principalId), chat.context_revision]));
+  }
+  private prepareRichCard(chat: Row, staged: StagedFeishuCard, owner: { kind: 'personal' | 'group'; id: string; fence: string }, options?: { footerNote?: string; consoleUrl?: string }): { content: Json; card_id?: string; fallback_text: string } {
+    if (staged.interactive) {
+      const created = this.cards.create({
+        connector_id: chat.connector_id, chat_id: chat.id, chat_type: chat.chat_type as 'p2p' | 'group',
+        owner_kind: owner.kind, owner_id: owner.id, fence: owner.fence,
+        spec: staged.spec, state: staged.state, footer_note: options?.footerNote, console_url: options?.consoleUrl,
+      });
+      return { content: created.rendered, card_id: created.id, fallback_text: staged.fallback_text || created.summary };
+    }
+    const rendered = renderFeishuCard(staged.spec, staged.state, '', { footerNote: options?.footerNote, consoleUrl: options?.consoleUrl });
+    return { content: rendered.card, fallback_text: staged.fallback_text || rendered.summary };
+  }
+  /** Queues a rich Feishu Card JSON 2.0 (static or interactive) to a chat once per key. */
+  postCard(chat: Row, staged: StagedFeishuCard, key: string, source: string, protection: Json, owner: { kind: 'personal' | 'group'; id: string; fence: string }, options?: { footerNote?: string; consoleUrl?: string }): string {
+    return this.queueRichCard(this.chatEvent(chat), chat, staged, key, source, protection, owner, options);
+  }
+  private queueRichCard(e: ChannelEvent, chat: Row, staged: StagedFeishuCard, key: string, source: string, protection: Json, owner: { kind: 'personal' | 'group'; id: string; fence: string }, options?: { resources?: string[]; replyTo?: boolean; footerNote?: string; consoleUrl?: string }): string {
+    const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key);
+    if (previous) return previous.id;
+    const prepared = this.prepareRichCard(chat, staged, owner, { footerNote: options?.footerNote, consoleUrl: options?.consoleUrl });
+    return this.queue(e, prepared.content, key, source, protection, false, false, undefined, options?.resources ?? [], !!options?.replyTo,
+      { rich_card: true, ...(prepared.card_id ? { card_id: prepared.card_id } : {}), card_fallback: prepared.fallback_text });
+  }
+  private guardInteractiveCard(cardRow: Row, chat: Row, actor?: { actor_id: string; actor_tenant: string }): void {
+    if (chat.state !== 'active') fail(403, 'channel_chat_inactive');
+    if (Date.now() > Number(cardRow.expires_at)) fail(409, 'channel_card_expired');
+    if (cardRow.owner_kind === 'personal') {
+      const owner = this.schedules.owner(chat, String(cardRow.owner_id));
+      if (actor && (owner.actor_id !== actor.actor_id || owner.actor_tenant !== actor.actor_tenant)) fail(403, 'channel_card_actor_forbidden');
+      if (this.personalCardFence(chat, String(cardRow.owner_id)) !== cardRow.fence) fail(409, 'conversation_source_changed');
+      return;
+    }
+    const binding = this.serviceBindings.active(chat.id);
+    if (!binding || binding.id !== cardRow.owner_id) return fail(409, 'conversation_source_changed');
+    this.serviceBindings.assertUsable(binding);
+    if (this.serviceBindings.fence(chat.id) !== cardRow.fence) fail(409, 'conversation_source_changed');
+  }
+  private handleCardAction(c: Row, event: ChannelEvent): Json {
+    if (!c.enabled) fail(403, 'channel_connector_inactive');
+    const previous = this.store.get('SELECT id FROM channel_inbox WHERE connector_id=? AND (event_id=? OR dedup_key=?)', c.id, event.event_id, 'card:' + event.event_id);
+    if (previous) return { toast: { type: 'info', content: '操作已处理' } };
+    const action = event.card_action!;
+    const cardRow = this.cards.get(action.card_id!, c.id);
+    const toast = (type: 'info' | 'success' | 'warning' | 'error', content: string) => ({ toast: { type, content } });
+    const recordIgnored = () => {
+      const id = randomId();
+      this.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,'completed',?)",
+        id, c.id, event.event_id, 'card:' + event.event_id, this.store.secrets.seal(event, 'channel-event:' + id), Date.now());
+      this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', Date.now(), c.id);
+    };
+    if (!cardRow) { recordIgnored(); return toast('warning', '卡片已失效，无法更新'); }
+    const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', cardRow.chat_id);
+    if (!chat || chat.chat_id !== event.chat_id || chat.app_id !== event.app_id || chat.installation_tenant !== event.installation_tenant) {
+      recordIgnored(); return toast('warning', '卡片会话不匹配');
+    }
+    if (cardRow.remote_message_id && cardRow.remote_message_id !== event.message_id) {
+      recordIgnored(); return toast('warning', '卡片消息不匹配');
+    }
+    try {
+      this.guardInteractiveCard(cardRow, chat, { actor_id: event.actor_id, actor_tenant: event.actor_tenant });
+    } catch (error) {
+      recordIgnored();
+      const code = errorCode(error);
+      if (code === 'channel_card_expired') return toast('warning', '卡片已超过 14 天可更新期限');
+      if (code === 'channel_card_actor_forbidden') return toast('error', '无权操作他人的私聊卡片');
+      return toast('error', '权限或会话状态已变化，旧卡片已失效');
+    }
+    const { spec, footer_note, console_url } = this.cards.openSpec(cardRow);
+    const currentState = JSON.parse(cardRow.state);
+    const outcome = applyInteractiveCardAction(spec, currentState, cardRow.id, action.act!, action.option);
+    if (outcome.kind === 'invalid') { recordIgnored(); return toast('warning', outcome.toast); }
+    if (outcome.kind === 'update') {
+      const { card: nextCard } = renderFeishuCard(spec, outcome.nextState, cardRow.id, { footerNote: footer_note, consoleUrl: console_url });
+      let queued = false;
+      this.store.transaction(() => {
+        const nextRev = this.cards.saveState(cardRow.id, Number(cardRow.revision), outcome.nextState);
+        if (!nextRev) return;
+        const inboxId = randomId();
+        this.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,chat_ref,created_at) VALUES(?,?,?,?,?,'completed',?,?)",
+          inboxId, c.id, event.event_id, 'card:' + event.event_id, this.store.secrets.seal(event, 'channel-event:' + inboxId), chat.id, Date.now());
+        this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', Date.now(), c.id);
+        this.queue(
+          { ...this.chatEvent(chat), actor_id: event.actor_id, actor_tenant: event.actor_tenant, message_id: event.message_id },
+          nextCard, `card-update:${cardRow.id}:${nextRev}`, inboxId,
+          { kind: 'card_update', card_id: cardRow.id, chat_id: chat.id, owner_kind: cardRow.owner_kind, owner_id: cardRow.owner_id, fence: cardRow.fence },
+          false, false, event.message_id, [], false, { rich_card: true, card_id: cardRow.id },
+        );
+        queued = true;
+      });
+      return queued ? toast('info', outcome.toast) : toast('info', '卡片正在更新，请稍候');
+    }
+    // Follow-up action: enter the standard inbound message pipeline attributed to the clicking user.
+    const now = Date.now();
+    const synthetic: ChannelEvent = {
+      provider: 'feishu', connector_id: c.id, connector_revision: c.revision,
+      app_id: c.app_id, installation_tenant: c.installation_tenant,
+      actor_tenant: event.actor_tenant, actor_id: event.actor_id,
+      chat_id: chat.chat_id, chat_type: chat.chat_type as 'p2p' | 'group',
+      message_id: 'card-act-' + event.event_id, event_id: event.event_id,
+      thread_id: '', parent_id: event.message_id, root_id: '',
+      created_at: now, updated_at: now, received_at: now,
+      kind: 'message', message_type: 'text', sender_type: 'user', addressed: true,
+      content: outcome.prompt, command_text: outcome.prompt,
+      raw_content: JSON.stringify({ text: `[卡片操作：${outcome.label}] ${outcome.prompt}`, card_id: cardRow.id, card_message_id: event.message_id }),
+      mentions: chat.chat_type === 'group' ? [{ key: '@_card', actor_id: c.bot_open_id, name: c.app_name || '', is_self: true }] : [],
+    };
+    const inboxId = randomId();
+    this.store.transaction(() => {
+      this.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,chat_ref,created_at) VALUES(?,?,?,?,?,'queued',?,?)",
+        inboxId, c.id, event.event_id, 'card:' + event.event_id, this.store.secrets.seal(synthetic, 'channel-event:' + inboxId), chat.id, now);
+      this.ledger.accept(synthetic);
+      this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', now, c.id);
+    });
+    return toast('success', `已发起：${outcome.label}`);
+  }
   /**
    * A start request notice (#933) to each person's own private chats with the bot, through an application of the repository's
    * organization or the platform's own (never another organization's), queued durably. People without one are skipped: the
@@ -489,10 +629,10 @@ export class ChannelService {
     this.serviceBindings.assertUsable(binding);
     if (!this.serviceBindings.reachable(binding, project, ['tasks.read'])) fail(403, 'channel_service_scope_paused');
   }
-  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = [], replyTo = false): string {
+  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = [], replyTo = false, extra?: { rich_card?: boolean; card_id?: string; card_fallback?: string }): string {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key); if (previous) return previous.id;
     const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, resources,format_version:2,
-      ...(!direct&&(replyTo||e.thread_id)&&e.message_id?{reply_to:e.message_id,...(e.thread_id?{reply_in_thread:true}:{})}:{}),...(update ? { message_id: update } : {}) };
+      ...(!direct&&(replyTo||e.thread_id)&&e.message_id&&!e.message_id.startsWith('card-act-')?{reply_to:e.message_id,...(e.thread_id?{reply_in_thread:true}:{})}:{}),...(update ? { message_id: update } : {}), ...(extra ?? {}) };
     this.store.run('INSERT INTO channel_outbox(id,connector_id,idempotency_key,source_event,payload,state,next_attempt,created_at) VALUES(?,?,?,?,?,?,?,?)', id, e.connector_id, key, source ?? null,
       this.store.secrets.seal({ event: {...e,content:'',raw_content:''}, delivery, protection }, 'channel-outbox:' + id), registered ? 'registered' : 'queued', Date.now(), Date.now());
     return id;
@@ -630,8 +770,13 @@ export class ChannelService {
     const target=this.turnMessages.replyEvent(result.id);
     this.store.transaction(()=>{
       // An explicit stay_silent (#489) or an empty answer sends nothing.
-      const outbox=!result.silent&&(result.message.trim()||result.attachments?.length)?this.queue(target??e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
-        false,false,undefined,result.attachments,!!target):undefined;
+      const outbox = !result.silent && result.card
+        ? this.queueRichCard(target ?? e, chat, result.card, row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
+            { kind: 'group', id: binding.id, fence: result.fence }, { resources: result.attachments, replyTo: !!target })
+        : !result.silent && (result.message.trim() || result.attachments?.length)
+          ? this.queue(target ?? e, card(result.message), row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
+              false, false, undefined, result.attachments, !!target)
+          : undefined;
       this.turnMessages.complete(result.id,outbox);
       this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
     });
@@ -648,11 +793,19 @@ export class ChannelService {
     const message=this.store.get('SELECT * FROM management_messages WHERE id=?',row.message_id)!;
     if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
     const selected=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='attachments' ORDER BY sequence DESC LIMIT 1",row.message_id);
+    const cardEvent=m.state==='completed'?this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='feishu_card' ORDER BY sequence DESC LIMIT 1",row.message_id):undefined;
+    const failedOps=cardEvent?this.store.get("SELECT count(*) n FROM management_commands WHERE source_conversation=? AND source_message=? AND state<>'succeeded'",message.conversation_id,message.source_message)!.n:0;
+    const stagedCard=cardEvent&&!failedOps?JSON.parse(cardEvent.data).card as StagedFeishuCard:undefined;
     const attachments=m.state==='completed'&&selected?JSON.parse(selected.data):{};
     const target=this.turnMessages.replyEvent(message.id);
     this.store.transaction(()=>{
-      const outbox=this.queue(target??e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
-        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message.id,resource_fence:attachments.fence??''},false,false,undefined,attachments.resource_ids??[],!!target);
+      const prot={principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
+        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message.id,resource_fence:attachments.fence??''};
+      const outbox=stagedCard
+        ? this.queueRichCard(target??e,chat,stagedCard,row.id+':result',row.id,prot,
+            {kind:'personal',id:actor.principal_id,fence:this.personalCardFence(chat,actor.principal_id)},
+            {resources:attachments.resource_ids??[],replyTo:!!target,consoleUrl:this.options.origin?this.url():undefined})
+        : this.queue(target??e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,prot,false,false,undefined,attachments.resource_ids??[],!!target);
       if(m.state==='completed')this.turnMessages.complete(message.id,outbox);
       this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
     });
@@ -660,6 +813,29 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
+    if (protection?.kind === 'card_update') {
+      const guard = () => {
+        this.source(event); if (this.stopped) fail(409, 'channel_stopped');
+        const cardRow = this.cards.get(String(protection.card_id), c.id);
+        const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', String(protection.chat_id));
+        if (!cardRow || !chat) return fail(409, 'channel_card_stale');
+        this.guardInteractiveCard(cardRow, chat);
+      };
+      guard();
+      const remote = await this.adapter(c, guard).update(delivery);
+      if (!this.stopped) {
+        const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', String(protection.chat_id));
+        this.store.transaction(() => {
+          if (chat && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, remote)) {
+            this.ledger.merge(chat, { message_id: remote, sender_id: c.bot_open_id, sender_tenant: c.installation_tenant, sender_type: 'app',
+              message_type: 'interactive', content: cardText(delivery.content), raw_content: JSON.stringify(delivery.content),
+              created_at: Date.now(), updated_at: Date.now(), parent_id: '', root_id: '', thread_id: '', deleted: false }, 'live');
+          }
+          this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?", remote, row.id);
+        });
+      }
+      return;
+    }
     if(['employee','personal_conversation','personal_task','service_binding','service_binding_notice','service_task','channel_schedule','onboarding_request'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
@@ -704,7 +880,7 @@ export class ChannelService {
         // Private timer results and private-chat task results are personal replies: they join no group's context.
         if(protection.kind==='personal_task'||protection.kind==='onboarding_request'||protection.kind==='channel_schedule'&&!protection.binding_id)return;
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
-        const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':String((part.content.elements as any)?.[0]?.text?.content??'');
+        const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':cardText(part.content);
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');
         const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
         this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
@@ -739,10 +915,11 @@ export class ChannelService {
   private async sendParts(row:Row,event:ChannelEvent,delivery:ChannelDelivery,protection:Json|undefined,guard:()=>void,record?:(remote:string,part:ChannelDelivery)=>void):Promise<string>{
     const store=this.store;
     if(!store.get('SELECT 1 FROM channel_outbox_parts WHERE outbox_id=?',row.id))store.transaction(()=>{
-      const parts:{delivery:ChannelDelivery;resource_id?:string;legacy?:boolean}[]=[];
+      const parts:{delivery:ChannelDelivery;resource_id?:string;legacy?:boolean;card_id?:string;fallback?:string}[]=[];
       const elements=delivery.content.elements as any[]|undefined;
       // A pre-upgrade send may already have reached Feishu with the old UUID and interactive payload.
       if(row.attempts>0&&delivery.format_version!==2){parts.push({delivery:{...delivery,resources:undefined,message_type:'interactive'},legacy:true});}
+      else if(delivery.rich_card){parts.push({delivery:{...delivery,resources:undefined,message_type:'interactive'},...(delivery.card_id?{card_id:delivery.card_id}:{}),...(delivery.card_fallback?{fallback:delivery.card_fallback}:{})});}
       else if(elements?.some(el=>el.tag==='action'&&el.actions?.some((a:any)=>a.value))){parts.push({delivery:{...delivery,resources:undefined,message_type:'interactive'}});}
       else{
         let value=String(elements?.[0]?.text?.content??'');
@@ -791,12 +968,31 @@ export class ChannelService {
       if(part.first_attempt&&Date.now()-part.first_attempt>55*60_000)fail(409,'channel_delivery_unknown');
       store.run("UPDATE channel_outbox_parts SET state='sending',first_attempt=coalesce(first_attempt,?) WHERE outbox_id=? AND part=?",Date.now(),row.id,part.part);
       const check=()=>{guard();if(payload.resource_id)checkResource();};
-      last=await this.adapter(this.source(event),check).send(next,digest(payload.legacy?row.id:row.id+':'+part.part));
-      if(this.stopped)fail(409,'channel_stopped');
-      store.transaction(()=>{
-        store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?",last,row.id,part.part);
-        record?.(last,next);
-      });
+      try {
+        last=await this.adapter(this.source(event),check).send(next,digest(payload.legacy?row.id:row.id+':'+part.part));
+        if(this.stopped)fail(409,'channel_stopped');
+        store.transaction(()=>{
+          store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?",last,row.id,part.part);
+          if(payload.card_id)this.cards.attachMessage(String(payload.card_id),last,row.id);
+          record?.(last,next);
+        });
+      } catch (error) {
+        // If Feishu definitively rejected a rich Card JSON 2.0 (HTTP 400 / card schema error), degrade gracefully to native post Markdown.
+        if (!(error instanceof HttpError && error.code === 'channel_card_rejected' && next.rich_card)) throw error;
+        const fallbackText = String(payload.fallback || cardText(next.content));
+        const fallbackPosts = markdownPosts(publicText(fallbackText, configuredRedactor(store)), this.options.origin);
+        const sentFallbacks: { id: string; part: ChannelDelivery }[] = [];
+        for (let fi = 0; fi < fallbackPosts.length; fi++) {
+          const fallbackPart: ChannelDelivery = { ...next, rich_card: undefined, card_id: undefined, card_fallback: undefined, content: fallbackPosts[fi]!, message_type: 'post' };
+          last = await this.adapter(this.source(event), check).send(fallbackPart, digest(row.id + ':' + part.part + ':fallback:' + fi));
+          sentFallbacks.push({ id: last, part: fallbackPart });
+        }
+        if (this.stopped) fail(409, 'channel_stopped');
+        store.transaction(() => {
+          store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?", last, row.id, part.part);
+          for (const item of sentFallbacks) record?.(item.id, item.part);
+        });
+      }
     }
     return last;
   }

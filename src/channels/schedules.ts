@@ -4,6 +4,7 @@ import { TaskError } from '../agent/common.js';
 import { assertCurrent, authorize, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { localParts, nextTime, parseCron, previewTimes } from '../schedules/time.js';
 import type { ChannelService } from './service.js';
+import type { StagedFeishuCard } from './cards.js';
 
 // Prompt-driven timers mounted on a Feishu chat (#330). A private chat's timer runs its owner's management assistant; a bound
 // group's timer runs the group's service role. The prompt is only the task: tools, projects and permissions stay the chat's own
@@ -315,12 +316,18 @@ export class ChannelSchedules {
     guard();
     const message = this.store.get('SELECT * FROM management_messages WHERE id=?', String(sent.id))!;
     const answer = this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1", message.id);
+    const cardEvent = this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='feishu_card' ORDER BY sequence DESC LIMIT 1", message.id);
     const operations = this.store.get('SELECT count(*) n FROM management_commands WHERE source_conversation=? AND source_message=?', conversation, message.source_message)!.n;
+    const failedOps = this.store.get("SELECT count(*) n FROM management_commands WHERE source_conversation=? AND source_message=? AND state<>'succeeded'", conversation, message.source_message)!.n;
     const reply = answer ? JSON.parse(answer.data) : {};
-    if (message.state === 'completed' && !operations && (reply.silent || !String(reply.text ?? '').trim())) { this.finish(run, 'silent', null); return; }
+    const stagedCard = message.state === 'completed' && !failedOps && cardEvent ? JSON.parse(cardEvent.data).card as StagedFeishuCard : undefined;
+    if (message.state === 'completed' && !operations && (reply.silent || (!String(reply.text ?? '').trim() && !stagedCard))) { this.finish(run, 'silent', null); return; }
     const error = this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1", message.id);
-    const outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${this.host.personalReply(actor, message)}`, 'channel-schedule:' + run, 'schedule:' + run,
-      { kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, principal_id: actor.principal_id, authorization_revision: actor.authorization_revision });
+    const protection = { kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, principal_id: actor.principal_id, authorization_revision: actor.authorization_revision };
+    const outbox = stagedCard && !reply.silent
+      ? this.host.postCard(chat, stagedCard, 'channel-schedule:' + run, 'schedule:' + run, protection,
+          { kind: 'personal', id: actor.principal_id, fence: this.host.personalCardFence(chat, actor.principal_id) }, { footerNote: `定时任务「${row.name}」` })
+      : this.host.post(chat, `定时任务「${row.name}」\n\n${this.host.personalReply(actor, message)}`, 'channel-schedule:' + run, 'schedule:' + run, protection);
     this.finish(run, message.state === 'completed' ? 'completed' : 'failed', message.state === 'completed' ? null : error ? JSON.parse(error.data).error : message.state, outbox);
   }
   /** One turn of the group's bound service role, with the group's scope and permissions; the group's live answers wait. */
@@ -344,7 +351,12 @@ export class ChannelSchedules {
       guard();
       this.store.transaction(()=>{
         let outbox: string | undefined;
-        if (result.silent || !result.message.trim()) { this.finish(run, 'silent', null); }
+        if (result.silent || (!result.message.trim() && !result.card)) { this.finish(run, 'silent', null); }
+        else if (result.card) {
+          outbox = this.host.postCard(chat, result.card, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence),
+            { kind: 'group', id: binding.id, fence: result.fence }, { footerNote: `定时任务「${row.name}」` });
+          this.finish(run, 'completed', null, outbox);
+        }
         else {
           outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
           this.finish(run, 'completed', null, outbox);

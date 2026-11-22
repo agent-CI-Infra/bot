@@ -82,10 +82,10 @@ export function transport() {
       return Response.json({ code: state.chatCode, data: { name: state.chatName, description: 'must-not-retain-group-description' } });
     }
     const request = JSON.parse(init.body);
-    if(receipts.has(request.uuid))return Response.json({code:0,data:{message_id:receipts.get(request.uuid)}});
+    if(request.uuid&&receipts.has(request.uuid))return Response.json({code:0,data:{message_id:receipts.get(request.uuid)}});
     if(state.sendHandler){const response=await state.sendHandler(url,init,request);if(response)return response;}
     sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
-    const remote='remote-'+sent.length;receipts.set(request.uuid,remote);
+    const remote='remote-'+sent.length;if(request.uuid)receipts.set(request.uuid,remote);
     if(state.lostSendResponses){state.lostSendResponses--;throw new Error('fixture_response_lost_after_accept');}
     return Response.json({ code: 0, data: { message_id: remote } });
   } };
