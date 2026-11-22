@@ -64,7 +64,7 @@ for incoming in iter(read, None):
     request_id = incoming.get("id")
     if method == "initialize":
         assert params["protocolVersion"] == 1 and params["clientCapabilities"] == {}
-        out(id=request_id, result={"protocolVersion": 1, "agentCapabilities": {"loadSession": supports_load}})
+        out(id=request_id, result={"protocolVersion": 1, "agentCapabilities": {"loadSession": supports_load, "sessionCapabilities": {"close": {}}}})
     elif method in ("session/new", "session/load"):
         assert params["cwd"] == os.getcwd() and len(params["mcpServers"]) == 1
         mcp = params["mcpServers"][0]
@@ -79,6 +79,10 @@ for incoming in iter(read, None):
             (Path.home() / session).touch()
         record("session.json", {"method": method, "session": session})
         out(id=request_id, result={"sessionId": session} if method == "session/new" else {})
+    elif method == "session/close":
+        assert params["sessionId"] == session
+        record("close.json", True)
+        out(id=request_id, result={})
     elif method == "session/prompt":
         assert params["sessionId"] == session
         text = params["prompt"][0]["text"]

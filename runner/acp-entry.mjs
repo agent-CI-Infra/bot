@@ -6,7 +6,9 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMcpHttp } from './mcp-bridge.mjs';
-import { validateAcpLaunch } from './acp-products.mjs';
+import { icodeProductId, validateAcpLaunch } from './acp-products.mjs';
+
+import { configureICode, icodeAnswer } from './icode.mjs';
 
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const STARTUP_MS = 15_000;
@@ -17,6 +19,7 @@ const abort = new AbortController();
 const children = [];
 let agent, sessionId, mcp, prompting = false, closing = false, cancelled = false;
 let sequence = 0;
+let icode = false, supportsClose = false, retiring;
 const pending = new Map();
 const write = frame => process.stdout.write(JSON.stringify(frame) + '\n');
 const event = body => write({ type: 'event', event: body });
@@ -108,6 +111,15 @@ function handleUpdate(update) {
   }
 }
 
+function closeSession() {
+  // Keep the transport and MCP alive while the server closes its session and stops its background commands.
+  retiring ??= (async () => {
+    if (sessionId && supportsClose) await request('session/close', { sessionId }, cancelled ? 500 : 1500).catch(() => {});
+    close();
+  })();
+  return retiring;
+}
+
 function handle(frame, answers) {
   if (frame?.jsonrpc !== '2.0' || Array.isArray(frame)) throw new AcpError('acp_invalid_frame');
   const { id, method, params } = frame;
@@ -124,6 +136,9 @@ function handle(frame, answers) {
       const outcome = option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' };
       send({ id, result: { outcome } });
       event({ type: 'permission', allowed: Boolean(option), tool_call_id: params?.toolCall?.toolCallId, ...outcome });
+    } else if (icode && method === '_chrys/request_input') {
+      const result = params?.sessionId === sessionId && sessionId && !cancelled ? icodeAnswer(params) : { cancelled: true };
+      send({ id, result });
     } else if (Object.hasOwn(answers, method)) {
       send({ id, result: answers[method] });
     } else {
@@ -183,15 +198,16 @@ function cancel() {
   if (!sessionId || !agent) return close();
   try { send({ method: 'session/cancel', params: { sessionId } }); }
   catch { return close(); }
-  setTimeout(() => close(), 750).unref();
+  setTimeout(() => void closeSession(), 500).unref();
 }
 process.on('SIGTERM', cancel);
 
 try {
   const config = JSON.parse(await readFile(join(agentDir, 'harness.json'), 'utf8'));
   const launch = validateAcpLaunch(config.acp_product.launch);
+  icode = config.acp_product.id === icodeProductId;
   const executable = process.argv[3];
-  const productDir = dirname(dirname(dirname(executable)));
+  const productDir = icode ? dirname(dirname(executable)) : dirname(dirname(dirname(executable)));
   const runDir = join(agentDir, 'acp-' + config.instance_id);
   await mkdir(runDir, { mode: 0o700 });
   const variables = {
@@ -234,11 +250,19 @@ try {
     mcpServer = { name: 'bot', command: process.execPath, args: [join(import.meta.dirname, 'mcp-bridge.mjs'), agentDir], env: [{ name: 'BOT_RUN_TOKEN', value: token }] };
   }
   if (closing) throw new AcpError('acp_connection_closed');
-  agent = start(executable, launch.args.map(arg => expand(arg)), environment(), 'agent', true);
+  const env = environment();
+  if (icode) await configureICode(config, env);
+  if (closing) throw new AcpError('acp_connection_closed');
+  agent = start(executable, launch.args.map(arg => expand(arg)), env, 'agent', true);
   consumeProtocol(agent.stdout, frame => handle(frame, launch.answers));
   const initialized = await request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'launchpad', version: '1' } }, STARTUP_MS);
   if (initialized?.protocolVersion !== 1) throw new AcpError('acp_protocol_version_unsupported');
   const capabilities = initialized.agentCapabilities ?? {};
+  supportsClose = Object.hasOwn(capabilities.sessionCapabilities ?? {}, 'close');
+  if (icode && (initialized.agentInfo?.version !== config.acp_product.version ||
+      capabilities.mcpCapabilities?.http !== true || !supportsClose)) {
+    throw new AcpError('icode_protocol_unsupported', 'iCode did not report the installed version and required HTTP MCP and session close capabilities.');
+  }
   event({ type: 'configuration', protocol_version: 1, capabilities, agent: initialized.agentInfo });
   const sessionParams = { cwd: root, mcpServers: [mcpServer] };
   let recoveryMode = config.resume ? 'rebuilt_from_task_records' : 'new_session';
@@ -260,7 +284,7 @@ try {
   write({ type: 'ready', session_id: sessionId, recoveryMode });
 
   const input = createInterface({ input: process.stdin });
-  input.once('close', () => close());
+  input.once('close', () => void closeSession());
   input.on('line', async line => {
     if (closing || prompting) return;
     prompting = true;
@@ -270,7 +294,7 @@ try {
       const result = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt.text }] });
       if (typeof result?.stopReason !== 'string') throw new AcpError('acp_invalid_prompt_response');
       write({ type: 'turn', stop_reason: result.stopReason });
-      if (cancelled) close();
+      if (cancelled) void closeSession();
     } catch (error) {
       close(error);
     } finally {

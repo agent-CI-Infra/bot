@@ -120,6 +120,28 @@ docker compose up -d
 
 ### 安装与维护容器内 ACP 产品
 
+#### iCode
+
+iCode 使用官方 Linux 离线包。v0.36.0 对应上游提交 `78802f87d07f053fe560d680e4696c2bf322e2c2`。在与项目电脑同架构的 Linux 安装容器中，将本部署的 `agent-tools` 卷挂载到 `/opt/agent-tools` 并允许安装器写入。安装环境需要 Node.js 和 `tar`，离线包包含 Python 运行时。
+
+| 架构 | 资产 | SHA-256 |
+| --- | --- | --- |
+| x86_64 | `icode-linux-x86_64-v0.36.0-offline.tar.gz` | `3688097aaa6fd2a6eed530e19fb6046a0e6d8d58ace4b07d8490bea18cef2e00` |
+| aarch64 | `icode-linux-aarch64-v0.36.0-offline.tar.gz` | `3212c67b84d58eea1d515ce0b13e73e6efac5fbeb6ed7804ccee13cfc5a7865e` |
+
+从 [iCode v0.36.0 发布页](https://github.com/openJiuwen-ai/iCode/releases/tag/v0.36.0) 下载对应资产。安装器核对本架构的 SHA-256，安装后自动选用该版本。
+
+```sh
+node scripts/install-acp-product.mjs install --product icode --version 0.36.0 --archive ./icode-linux-x86_64-v0.36.0-offline.tar.gz
+node scripts/install-acp-product.mjs select --product icode --version 0.36.0
+```
+
+升级时使用平台已核验并记录哈希的新版本，重复安装命令。可用 `select` 切回仍安装的受支持版本。旧版运行结束、且版本已取消选用后，可用 `remove --product icode --version <旧版本>` 清理。安装状态可在项目「角色配置」的后端可用性中查看，角色后端选用「iCode」。
+
+v0.36.0 已在 x86_64 Docker 项目电脑验证。平台仅提供 HTTP MCP 和平台模型中转，iCode 的交互式人工回答、stdio / SSE MCP、供应商订阅、仓库钩子及仓库自带 MCP 配置均不可用。项目角色选择 iCode 后使用该角色当前的文件和命令权限。实际模型与用量由运行记录和模型账本记录。
+
+#### 通用 Python 产品
+
 1. 在与项目电脑架构和系统兼容的独立 Linux 安装环境中，准备 `uv`、可信产品源码或发行包内容，以及固定 Python 补丁版本和依赖锁的预设。以可写方式将本部署的 `agent-tools` 卷挂载到 `/opt/agent-tools`。项目电脑使用同一卷的只读挂载。
 2. 用 `node scripts/install-acp-product.mjs hash-source --source ./product-source` 核对预设中固定的源码摘要，再运行 `node scripts/install-acp-product.mjs install --product container_acp --version 1.0.0 --source ./product-source --preset ./preset.json` 安装并选定该版本。预设字段与锁文件格式见 [ACP 产品安装设计](../design/agent-and-harness-runtime.md#安装-python-产品)。
 3. 用 `node scripts/install-acp-product.mjs select --product container_acp --version 1.0.0` 切换到已安装版本。新的运行读取选定版本，在途运行继续使用已绑定版本。只有在确认旧版本已取消选定且没有在途运行使用它后，才运行 `node scripts/install-acp-product.mjs remove --product container_acp --version <旧版本>` 清理。

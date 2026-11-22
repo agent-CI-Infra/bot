@@ -36,7 +36,7 @@ function roleBackendAvailabilityCard(state) {
   if (!containerBackends.length) return null;
   const section = card('容器内 Agent 后端可用性');
   section.dataset.testid = 'backend-availability-card';
-  section.append(note('在项目电脑内执行的后端列在这里：Claude Code 与 Codex 从只读工具卷 /opt/agent-tools 加载二进制并经容器内模型中转调用平台模型；其他后端按它自己的声明显示就绪状态，安装与版本由产品自身管理。'));
+  section.append(note('Claude Code、Codex 和 iCode 从项目电脑的只读工具卷加载，并使用平台模型中转。'));
   const { table, body } = projectTable(['后端', '状态', '已安装版本', '兼容范围', '说明'], '容器内 Agent 后端状态');
   for (const backend of containerBackends) {
     const rt = backend.runtime_status;

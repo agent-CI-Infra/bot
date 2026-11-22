@@ -5,7 +5,8 @@ import {spawn} from 'node:child_process';
 import {environment,workspaceTag} from './command.mjs';
 import {local,runnerRoot} from './paths.mjs';
 import {volume} from './disk.mjs';
-import {acpLeaseFile} from './acp-lease.mjs';
+import {acpLeaseFile,acpRunHome,reapAcpDescendants} from './acp-lease.mjs';
+import {icodeProductId} from './acp-products.mjs';
 
 async function readRequestId(path){
   const fh=await open(path,'r').catch(()=>null);
@@ -143,12 +144,19 @@ async function terminateHarnessState(state,currentBoot,root,workspaceId){
   const harnessAlive=state.pid?await isLiveHarnessProcess(state.pid,state.boot,currentBoot,root):false;
   const cliOwned=state.cli_pid?await isOwnedChildProcess(state.cli_pid,state.pid,workspaceId):false;
   const groupMembers=!harnessAlive&&state.pid?await findTaggedGroupMembers(state.pid,workspaceId):[];
-  if(!harnessAlive&&!cliOwned&&!groupMembers.length)return false;
+  const acp=state.harness==='container_acp';
+  if(!harnessAlive&&!cliOwned&&!groupMembers.length&&!acp)return false;
   if(cliOwned)try{process.kill(state.cli_pid,'SIGKILL');}catch{}
   if(harnessAlive){
     try{process.kill(-state.pid,'SIGKILL');}catch{try{process.kill(state.pid,'SIGKILL');}catch{}}
   }else{
     for(const pid of groupMembers)try{process.kill(pid,'SIGKILL');}catch{}
+  }
+  if(acp){
+    await reapAcpDescendants(state.instance_id);
+    if(state.acp_product_id===icodeProductId&&/^[a-f0-9]{48}$/.test(state.instance_id||'')){
+      await rm(acpRunHome(root+'/agent',state.instance_id),{recursive:true,force:true}).catch(()=>{});
+    }
   }
   for(const deadline=Date.now()+2000;Date.now()<deadline;){
     const stillHarness=state.pid?await isLiveHarnessProcess(state.pid,state.boot,currentBoot,root):false;
@@ -442,7 +450,8 @@ export async function agentOperation(input,root){
         stdio:['ignore',out.fd,out.fd],
       });
       childPid=child.pid;
-      await writeFile(dir+'/harness-state.json',JSON.stringify({state:'starting',pid:child.pid,boot,...(targetInstanceId?{instance_id:targetInstanceId}:{})}),{mode:0o600});
+      const acp = cfg.harness === 'container_acp' ? { harness: cfg.harness, acp_product_id: cfg.acp_product?.id } : {};
+      await writeFile(dir+'/harness-state.json',JSON.stringify({state:'starting',pid:child.pid,boot,...acp,...(targetInstanceId?{instance_id:targetInstanceId}:{})}),{mode:0o600});
       child.unref();
     }finally{await out.close();}
     for(const end=Date.now()+15000;Date.now()<end;){
@@ -551,7 +560,8 @@ export async function agentOperation(input,root){
     if(mode==='kill'&&state){
       await terminateHarnessState(state,boot,root,input.workspace_id);
       const latest=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
-      if(!latest||!state.instance_id||latest.instance_id===state.instance_id){
+      if((!latest||!state.instance_id||latest.instance_id===state.instance_id) &&
+        (state.harness!=='container_acp'||['starting','running'].includes(latest?.state??state.state))){
         await writeFile(dir+'/harness-state.json.tmp',JSON.stringify({...state,...(latest||{}),state:'interrupted'}),{mode:0o600});
         await rename(dir+'/harness-state.json.tmp',dir+'/harness-state.json');
       }

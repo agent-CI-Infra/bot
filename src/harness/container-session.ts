@@ -1,4 +1,4 @@
-import type { AcpProductManifest } from '../../runner/acp-products.mjs';
+import { acpProductExecutable, icodeProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -54,6 +54,7 @@ export interface ContainerHarnessLaunch {
   claudeHomeOverride?: string;
   cli: AgentToolCli | 'container_acp';
   acpProduct?: AcpProductManifest;
+  backendId?: string;
   acpLocalLeaseMs?: number;
   model: string;
   systemPrompt?: string;
@@ -278,7 +279,7 @@ export async function withContainerHarnessSession<T, R>(
   } else if (launch.cli === 'container_acp') {
     if (!launch.acpProduct) return stop('acp_product_not_installed', 'waiting_configuration');
     const { id, version } = launch.acpProduct;
-    executable = `${DEFAULT_AGENT_TOOLS_ROOT}/acp/${id}/${version}/venv/bin/python`;
+    executable = `${DEFAULT_AGENT_TOOLS_ROOT}/acp/${id}/${version}/${acpProductExecutable(id)}`;
     cliVersion = version;
   } else {
     const selected = selectCompatibleCliVersion(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, launch.cli);
@@ -295,7 +296,7 @@ export async function withContainerHarnessSession<T, R>(
   if (boundRunId && spec.store.get('SELECT 1 FROM task_runs WHERE id=?', boundRunId)) {
     recordRunCliVersion(spec.store, String(boundRunId), cliVersion);
   } else if (spec.task?.id && spec.store.hasTable('role_conversation_turns') && spec.store.get('SELECT 1 FROM role_conversation_turns WHERE id=?', spec.task.id)) {
-    recordConversationCliVersion(spec.store, String(spec.task.id), launch.cli, cliVersion);
+    recordConversationCliVersion(spec.store, String(spec.task.id), launch.backendId ?? launch.cli, cliVersion);
   }
   const runRow = boundRunId
     ? spec.store.get('SELECT lease_epoch FROM task_runs WHERE id=?', boundRunId)
@@ -304,6 +305,7 @@ export async function withContainerHarnessSession<T, R>(
   const runId = String(boundRunId ?? randomId());
 
   const acp = launch.cli === 'container_acp';
+  const icode = acp && launch.acpProduct?.id === icodeProductId;
   const connectionMode = acp ? 'gateway' : modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
   const supported = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
   const nativeModel = connectionMode === 'direct' ? nativeModelConnection(launch.primaryModel, launch.fileProvider ?? spec.containerOptions?.fileProvider,supported) : undefined;
@@ -322,7 +324,7 @@ export async function withContainerHarnessSession<T, R>(
     workspaceId: transport.workspaceId,
     primaryModel: launch.primaryModel,
     fileProvider: launch.fileProvider ?? spec.containerOptions?.fileProvider,
-    allowVisibleModels: true,
+    allowVisibleModels: !icode,
     guard: spec.guard,
     beforeModel: spec.beforeModel,
     maxOutputTokens: launch.maxOutputTokens ?? spec.maxOutputTokens,
@@ -350,6 +352,12 @@ export async function withContainerHarnessSession<T, R>(
     instance_id: instanceId,
     harness: launch.cli,
     ...(acp ? { acp_product: launch.acpProduct, acp_local_lease_ms: launch.acpLocalLeaseMs } : {}),
+    ...(icode ? { acp_model: {
+      interface_type: launch.primaryModel?.protocol?.interface_type ?? 'openai-chat-completions',
+      context_window: launch.primaryModel?.capabilities?.context_window ?? 128000,
+      max_output_tokens: Math.min(spec.maxOutputTokens ?? 8192, launch.primaryModel?.capabilities?.max_output_tokens ?? 8192),
+      image_input: launch.primaryModel?.capabilities?.image_input ?? false,
+    } } : {}),
     model_transport: connectionMode,
     ...(nativeModel ? { native_model: nativeModel } : {}),
     ...(launch.modelProvider ? { model_provider: launch.modelProvider } : {}),
@@ -584,7 +592,8 @@ export async function withContainerHarnessSession<T, R>(
         if (polled?.error === 'disk_full') {
           stop('disk_full', 'waiting_environment', '项目容器工作卷空间不足，容器内 Agent 已停止。');
         }
-        if (polled?.error && !(acp && polled.state === 'interrupted' && polled.error === 'acp_lease_expired')) {
+        const leaseExpired = acp && polled?.state === 'interrupted' && polled.error === 'acp_lease_expired';
+        if (polled?.error && !leaseExpired) {
           stop('execution_interrupted', 'waiting_environment', `轮询容器内 ${launch.cli} 失败：${spec.redactor.text(String(polled.detail || polled.error))}。`);
         }
         if (
@@ -594,6 +603,12 @@ export async function withContainerHarnessSession<T, R>(
         ) {
           superseded = true;
           stop('execution_interrupted', 'waiting_environment', `容器内 ${launch.cli} 会话已被新运行接管或进程身份不匹配。`);
+        }
+
+        if (leaseExpired && !cancelSignaled) {
+          cancelSignaled = true;
+          dispatcher.halt();
+          await modelGateway?.close();
         }
 
         const prevOffset = stdoutOffset;

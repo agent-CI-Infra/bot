@@ -11,14 +11,19 @@ export interface AcpProductManifest {
   schema: 'bot.acp-product/1';
   id: string;
   version: string;
-  python: string;
+  python?: string;
+  distribution?: 'linux-offline';
   interpreter?: string;
   source: string;
   sourceSha256: string;
-  lockSha256: string;
+  lockSha256?: string;
   launch: AcpProductLaunch;
 }
 export const acpProductId: RegExp;
 export const acpVersion: RegExp;
 export function validateAcpLaunch(launch: unknown): AcpProductLaunch;
 export function readAcpProduct(root: string, id: string, version?: string): AcpProductManifest;
+export const icodeProductId: 'icode';
+export const icodeTestedVersion: string;
+export const icodeReleases: ReadonlyMap<string, { commit: string; sha256: Partial<Record<string, string>> }>;
+export function acpProductExecutable(id: string): string;
