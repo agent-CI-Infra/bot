@@ -355,10 +355,22 @@ test('single-flight build sharing isolates egress policy and resource ceilings, 
   gates[1].succeed();
   await f.projects.waitForBuild('202');
   await new Promise(r => setImmediate(r));
-  // 303 had egress=false so even though tag matched, its build job checks local cache or runs with networkmode=none.
+  // F5: 303 has egress=false so it MUST NOT reuse 202's egress=true image; it gets a distinct image key/tag and runs with networkmode=none.
+  assert.equal(f.projects.describe('303').computer.build.state, 'building');
+  assert.equal(gates.length, 3);
+  assert.equal(gates[2].options.networkmode, 'none');
+  assert.notEqual(gates[2].tag, gates[1].tag, 'egress=false must produce a distinct image tag from egress=true');
+  gates[2].succeed();
   await f.projects.waitForBuild('303');
   assert.equal(f.projects.describe('202').computer.build.state, 'ready');
   assert.equal(f.projects.describe('303').computer.build.state, 'ready');
+
+  // Sequential check: a new project with egress=false reuses 303's no-egress image, NOT 202's egress image.
+  f.docker.onBuild = null;
+  await f.projects.register('404');
+  await f.projects.operate('404', 'configure', { operation_id: opId(), generation: 1, request: { egress: false, setup_script: 'echo heavy-sdk' } });
+  assert.equal(f.projects.describe('404').computer.build.tag, gates[2].tag);
+  assert.equal(f.docker.buildCalls.length, 3, 'reused cached egress=false image with zero extra builds');
 });
 
 test('recovery reconciles interrupted builds, base image upgrades invalidate stale global precompiled image, and corrupt rows / queued parents stay safe', async t => {
@@ -453,4 +465,84 @@ test('recovery reconciles interrupted builds, base image upgrades invalidate sta
   f.docker.images.delete(rebuilt.tag);
   const fallbackTurn = await f.assistants.acquire(owner, { turn: 't-fallback', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
   assert.equal(fallbackTurn.computer.image, 'approved');
+});
+
+test('F3 & F4: failed/cancelled global build does not retry in a 5s check loop, and stale image check validates stored image ID not just tag', async t => {
+  const f = fixture(t);
+  const owner = hex(16);
+  mkdirSync(join(f.homes, owner, 'home-1'), { recursive: true });
+
+  // F3: failing global build records backoff + attempt cap; repeated check() calls must NOT rebuild every 5s.
+  let buildAttempts = 0;
+  f.docker.onBuild = () => {
+    buildAttempts++;
+    return Promise.reject(Object.assign(new ManagerError('image_build_failed', 502), { output: 'bad package\n' }));
+  };
+  await f.projects.setDefaults({ packages: ['broken-pkg'], setup_script: 'exit 1' });
+  await f.projects.waitForGlobalBuild();
+  assert.equal(buildAttempts, 1);
+  assert.equal((await f.projects.defaultsView()).build.state, 'failed');
+
+  // Simulate multiple 5-second health checks AND concurrent reconcileGlobalImage calls: zero extra builds inside backoff!
+  await Promise.all([f.projects.check(), f.projects.reconcileGlobalImage(), f.projects.reconcileGlobalImage()]);
+  await f.projects.check();
+  await f.projects.waitForGlobalBuild();
+  assert.equal(buildAttempts, 1, 'check() must not immediately retry a failed global build');
+
+  // Even advancing past backoff stops at the 3-attempt cap and never loops forever.
+  for (let i = 0; i < 6; i++) {
+    f.projects.globalReconcileState.nextRetryAt = 0;
+    await f.projects.check();
+    await f.projects.reconcilingGlobal;
+    await f.projects.waitForGlobalBuild();
+  }
+  assert.equal(buildAttempts, 3, 'automatic reconcile retries are strictly capped at 3 attempts');
+
+  // Cancelled global build is NEVER auto-retried by check().
+  let cancelCount = 0;
+  f.docker.onBuild = ({ options }) => new Promise((_resolve, reject) => {
+    cancelCount++;
+    options?.signal?.addEventListener('abort', () => reject(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true })), { once: true });
+  });
+  await f.projects.setDefaults({ packages: ['other-pkg'], setup_script: 'sleep 99' });
+  await new Promise(r => setImmediate(r));
+  f.projects.cancelGlobalBuild();
+  await f.projects.waitForGlobalBuild();
+  assert.equal(cancelCount, 1);
+  await f.projects.check();
+  await f.projects.check();
+  assert.equal(cancelCount, 1, 'cancelled global build must never auto-retry on check()');
+
+  // F4: stored image ID missing while tag was moved to a rebuilt image on the SAME approved base -> adopt new ID!
+  f.docker.onBuild = null;
+  await f.projects.setDefaults({ packages: ['jq'], setup_script: 'echo ok' });
+  await f.projects.waitForGlobalBuild();
+  const saved = f.projects.currentGlobalImage();
+  assert.ok(saved?.id && saved?.tag);
+
+  // Simulate tag moved to a new ID (sha256:rebuilt-moved-id) with matching base_image_id, while old saved.id was pruned!
+  f.docker.images.delete(saved.id);
+  f.docker.images.set(saved.tag, {
+    Id: 'sha256:rebuilt-moved-id',
+    Size: 3 * mib,
+    Config: { Labels: { 'department.bot.base_image_id': saved.base_image_id } },
+  });
+  f.docker.images.set('sha256:rebuilt-moved-id', f.docker.images.get(saved.tag));
+
+  const movedTurn = await f.assistants.acquire(owner, { turn: 't-moved', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(movedTurn.computer.image, 'sha256:rebuilt-moved-id', 'assistant must use verified existing ID, not deleted stored.id');
+  await f.projects.reconcileGlobalImage();
+  assert.equal(f.projects.currentGlobalImage().id, 'sha256:rebuilt-moved-id', 'reconcile updates stored id to match verified tag');
+  await f.assistants.release(owner, { turn: 't-moved' });
+
+  // Simulate tag belonging to a DIFFERENT base_image_id while stored.id is pruned -> assistant must fall back to approved base!
+  f.docker.images.delete('sha256:rebuilt-moved-id');
+  f.docker.images.set(saved.tag, {
+    Id: 'sha256:wrong-base-img',
+    Size: 3 * mib,
+    Config: { Labels: { 'department.bot.base_image_id': 'sha256:old-stale-base' } },
+  });
+  const staleTurn = await f.assistants.acquire(owner, { turn: 't-stale-tag', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(staleTurn.computer.image, 'approved', 'assistant must fall back to approved base when stored.id is missing and tag has stale base_image_id');
+  await f.assistants.release(owner, { turn: 't-stale-tag' });
 });

@@ -10,9 +10,9 @@ function machineSection(globalSettings = false) {
   const ownOverlay = pc.own || {};
   const globalDefaults = pc.global_defaults || { packages: [], setup_script: '', env: {} };
   const shown={...pc,...effective,
-    packages: pc.own ? (ownOverlay.packages || []) : (effective.packages || []),
-    setup_script: pc.own ? (ownOverlay.setup_script || '') : (effective.setup_script || ''),
-    env: pc.own ? (ownOverlay.env || {}) : (effective.env || {}),
+    packages: current.rules?.computer ? (effective.packages || []) : (pc.own ? (ownOverlay.packages || []) : (effective.packages || [])),
+    setup_script: current.rules?.computer ? (effective.setup_script || '') : (pc.own ? (ownOverlay.setup_script || '') : (effective.setup_script || '')),
+    env: current.rules?.computer ? (effective.env || {}) : (pc.own ? (ownOverlay.env || {}) : (effective.env || {})),
     network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   // A resource left empty follows the global default; own() is the value the project sets.
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
