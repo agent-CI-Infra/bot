@@ -138,6 +138,8 @@ node scripts/install-acp-product.mjs select --product icode --version 0.36.0
 
 升级时使用平台已核验并记录哈希的新版本，重复安装命令。可用 `select` 切回仍安装的受支持版本。旧版运行结束、且版本已取消选用后，可用 `remove --product icode --version <旧版本>` 清理。安装状态可在项目「角色配置」的后端可用性中查看，角色后端选用「iCode」。
 
+如果项目电脑内的 iCode 不满足 ACP 握手要求，任务会暂停并等待处理。核对工具卷中选用的版本，重新安装并选用受支持的离线包，然后重试任务。
+
 v0.36.0 已在 x86_64 Docker 项目电脑验证。平台仅提供 HTTP MCP 和平台模型中转，iCode 的交互式人工回答、stdio / SSE MCP、供应商订阅、仓库钩子及仓库自带 MCP 配置均不可用。项目角色选择 iCode 后使用该角色当前的文件和命令权限。实际模型与用量由运行记录和模型账本记录。
 
 #### 通用 Python 产品

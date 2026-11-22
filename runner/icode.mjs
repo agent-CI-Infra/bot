@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 const modelId = '1c0de000000000000000000000000001';
 const agentId = '1c0de000000000000000000000000002';
-const noInput = '无人可答，请按任务自行判断';
+const noInput = 'No human is available. Use your judgment based on the task.';
 
 export function icodeAnswer(params) {
   if (!Array.isArray(params?.questions)) return { cancelled: true };
@@ -31,7 +31,7 @@ export async function configureICode(config, env) {
     'models/launchpad.yaml': {
       id: modelId, name: 'Launchpad', model_id: config.model,
       provider: anthropic ? 'anthropic' : 'openai',
-      api_style: model.interface_type === 'openai-responses' ? 'responses' : 'chat_completions',
+      ...(anthropic ? {} : { api_style: model.interface_type === 'openai-responses' ? 'responses' : 'chat_completions' }),
       base_url: env.BOT_ACP_RELAY_URL + (anthropic ? '' : '/v1'),
       api_key: '{{BOT_RUN_TOKEN}}', bypass_proxy: true, stream: true,
       max_context_tokens: model.context_window, max_output_tokens: model.max_output_tokens,

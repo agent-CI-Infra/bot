@@ -52,8 +52,12 @@ if sys.argv[1] == "sidecar":
         server.serve_forever()
     sys.exit(0)
 
-background = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(120)"], start_new_session=True)
-record("pids.json", [os.getpid(), background.pid])
+icode = os.environ.get("FIXTURE_ICODE")
+if icode:
+    assert Path(os.environ["FIXTURE_PRODUCT_SOURCE"]) == Path(__file__).parent.parent / "source"
+else:
+    background = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(120)"], start_new_session=True)
+    record("pids.json", [os.getpid(), background.pid])
 print("fixture diagnostic", file=sys.stderr, flush=True)
 session = None
 mcp = None
@@ -64,7 +68,14 @@ for incoming in iter(read, None):
     request_id = incoming.get("id")
     if method == "initialize":
         assert params["protocolVersion"] == 1 and params["clientCapabilities"] == {}
-        out(id=request_id, result={"protocolVersion": 1, "agentCapabilities": {"loadSession": supports_load, "sessionCapabilities": {"close": {}}}})
+        capabilities = {"loadSession": supports_load}
+        if icode != "no-close":
+            capabilities["sessionCapabilities"] = {"close": {}}
+        result = {"protocolVersion": 2 if icode == "wrong-protocol" else 1, "agentCapabilities": capabilities}
+        if icode:
+            capabilities["mcpCapabilities"] = {"http": icode != "no-http"}
+            result["agentInfo"] = {"name": "icode", "version": "0.0.0" if icode == "wrong-version" else "0.36.0"}
+        out(id=request_id, result=result)
     elif method in ("session/new", "session/load"):
         assert params["cwd"] == os.getcwd() and len(params["mcpServers"]) == 1
         mcp = params["mcpServers"][0]
@@ -105,8 +116,17 @@ for incoming in iter(read, None):
             {"kind": "reject_once", "optionId": "reject"}, {"kind": "allow_once", "optionId": "allow"}
         ]})
         assert read()["result"]["outcome"] == {"outcome": "selected", "optionId": "allow"}
-        out(id=743, method="_fixture/input", params={"sessionId": session})
-        assert read()["result"] == {"answer": "unattended"}
+        if icode:
+            questions = [{"id": "one", "question": "Proceed?"}, {"id": "two", "question": "How?"}]
+            out(id=742, method="_chrys/request_input", params={"sessionId": "another", "questions": questions})
+            record("wrong-session.json", read()["result"])
+            out(id=743, method="_chrys/request_input", params={"sessionId": session, "questions": questions})
+            record("input.json", read()["result"])
+            out(id=request_id, result={"stopReason": "end_turn"})
+            continue
+        else:
+            out(id=743, method="_fixture/input", params={"sessionId": session})
+            assert read()["result"] == {"answer": "unattended"}
         out(id=744, method="fs/read_text_file", params={"sessionId": session})
         assert read()["error"]["code"] == -32601
         headers = {item["name"]: item["value"] for item in mcp["headers"]}
