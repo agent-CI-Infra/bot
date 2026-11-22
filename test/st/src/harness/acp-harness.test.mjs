@@ -332,7 +332,7 @@ test('ACP role kinds are declared in project configuration and refused for servi
     for (const backend of [id, 'icode']) {
       const metadata = backends.find(item => item.id === backend);
       for (const role of ['dev', 'test', 'reviewer', 'ux', 'custom']) assert.ok(metadata.kinds.includes(roleKind(role)));
-      for (const role of ['manager', 'coordinator', 'qa']) {
+      for (const role of ['manager', 'qa']) {
         assert.ok(!metadata.kinds.includes(roleKind(role)));
         assert.throws(() => resolveRole(store, '1', role, 'development.issue', { harness: backend }), error => error.code === 'harness_role_unsupported');
       }

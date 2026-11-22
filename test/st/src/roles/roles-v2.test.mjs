@@ -58,7 +58,7 @@ async function fixture(t, handler) {
   const task = s.get("SELECT * FROM tasks WHERE id='t'");
   // These existing scenarios explicitly exercise Native workers; new-backend defaults have separate coverage.
   const put = body => {
-    const given = body.roles ?? [], ids = ['coordinator', 'dev', 'test', 'reviewer', 'ux', 'qa'];
+    const given = body.roles ?? [], ids = ['dev', 'test', 'reviewer', 'ux', 'qa'];
     const roles = [...ids.map(role_id => ({ role_id, harness_ref: { id: 'native' }, ...given.find(r => r.role_id === role_id) })), ...given.filter(r => !ids.includes(r.role_id))];
     return roleApi(s, admin, 'PUT', rolesUrl, { expected_revision: roleApi(s, admin, 'GET', rolesUrl, {}).revision, enabled: true, ...body, roles }).configuration;
   };
@@ -198,7 +198,7 @@ test('only Manager and QA are protected; deleted built-in roles stay deleted thr
   f.put({});
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, expected_revision: roleApi(f.s, admin, 'GET', rolesUrl, {}).revision, ...body }).configuration;
   for (const id of ['manager', 'qa']) rejects(() => put({ deleted_roles: [id] }), 'role_required', 'roles.' + id);
-  put({ deleted_roles: ['dev', 'test', 'reviewer', 'ux', 'coordinator'], roles: [{ role_id: 'security', persona_prompt: 'Inspect security.' }] });
+  put({ deleted_roles: ['dev', 'test', 'reviewer', 'ux'], roles: [{ role_id: 'security', persona_prompt: 'Inspect security.' }] });
   let roles = roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles;
   assert.deepEqual(roles.map(role => role.role_id).sort(), ['manager', 'qa', 'security']);
   assert.throws(() => resolveRole(f.s, 'r', 'dev', 'task.request'), { code: 'unknown_role' });
@@ -424,7 +424,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'decide_coordination', 'delegate_role', 'delegate_roles', 'finish_coordination', 'grant_writes', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_skill', 'read_task_history', 'read_task_record', 'read_tool_result', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'set_task_priority', 'wait_for_children', 'wait_for_tasks'].filter(name => session.parsed.tools.some(t => t.function.name === 'delegate_roles') || name !== 'delegate_roles'));
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['create_task', 'delegate_role', 'delegate_roles', 'finish_coordination', 'grant_writes', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'read_child_tasks', 'read_managed_task', 'read_project_task', 'read_skill', 'read_task_history', 'read_task_record', 'read_tool_result', 'record_progress', 'record_scope_difference', 'relate_task', 'set_task_priority', 'wait_for_children', 'wait_for_tasks'].filter(name => session.parsed.tools.some(t => t.function.name === 'delegate_roles') || name !== 'delegate_roles'));
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));
@@ -684,8 +684,8 @@ test('old V2 review/Actions entries keep Pi through reads and identical saves; o
   for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'old-' + kind, kind))), ['pi', 'entry_executor']);
   assert.equal(f.s.get("SELECT value FROM settings WHERE key='roles:r'").value, raw);
   assert.equal(f.s.get('SELECT count(*) n FROM role_config_revisions').n, 1);
-  // Development, ordinary RoleRun, QA and Coordinator resolution still use their own saved backend.
-  for (const role of ['dev', 'qa', 'coordinator']) assert.deepEqual(harness(resolveRole(f.s, 'r', role, 'development.issue').snapshot), ['native', 'role']);
+  // Development, ordinary RoleRun and QA resolution still use their own saved backend.
+  for (const role of ['dev', 'qa']) assert.deepEqual(harness(resolveRole(f.s, 'r', role, 'development.issue').snapshot), ['native', 'role']);
   f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
   assert.equal(roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles.find(r => r.role_id === 'dev').entry_harness_source, undefined);
   assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'echoed'))), ['pi', 'entry_executor']);

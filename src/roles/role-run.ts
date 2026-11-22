@@ -41,8 +41,8 @@ export function roleRunStorage(s: Store) {
  * The scheduler's lease for one assignment scope. Only control-plane code that starts a run calls this; adapters, workers
  * and tools never choose an epoch. Epochs increase per task, so a run, its tokens, events and checkpoints are told apart
  * even across scopes. Taking a scope over revokes the previous run's tokens; its later results are stale. claim is the
- * task claim the caller executes under (an engine execution); a run outside the task claim, such as a coordinator with
- * its own worker claim, passes null and is not ended by the task being claimed again.
+ * task claim the caller executes under (an engine execution); a run outside the task claim passes null and is not ended
+ * by the task being claimed again.
  */
 export function allocateLease(s: Store, taskId: string, scope: string, runId: string, claim: string | null = null) {
   return s.transaction(() => {

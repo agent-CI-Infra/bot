@@ -57,9 +57,9 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     for (const { id, text } of described) { expect(id).not.toMatch(/\s/); expect(text).toContain('不能关闭'); }
     expect(new Set(described.map(entry => entry.id)).size).toBe(described.length);
 
-    await openRoleFromList(page, 'Project controller');
+    await openRoleFromList(page, 'Manager');
     await expect(page.getByLabel('启用角色', { exact: true })).toBeDisabled();
-    await expect(page.getByTestId('role-enable-reason')).toContainText('Project controller是必需角色，不能关闭');
+    await expect(page.getByTestId('role-enable-reason')).toContainText('Manager是必需角色，不能关闭');
     const requiredBox = await page.evaluate(() => {
       const input = document.querySelector('.role-form input[type=checkbox]:disabled, .roles-page input[type=checkbox]:disabled');
       return { cursor: input ? getComputedStyle(input).cursor : 'missing', width: input?.getBoundingClientRect().width };

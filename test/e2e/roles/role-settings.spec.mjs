@@ -109,7 +109,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
   } finally { await h.stop(); }
 });
 
-test('新增角色、删除内置角色（含 Coordinator）并重载，只有 Manager 和 QA 两个必需角色不可删除', async ({ page }) => {
+test('新增角色、删除内置角色并重载，只有 Manager 和 QA 两个必需角色不可删除', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
@@ -127,14 +127,12 @@ test('新增角色、删除内置角色（含 Coordinator）并重载，只有 M
     await consoleSave(page).click();
     // The first save leaves the defaults (#1068).
     await expect(page.locator('.flash')).toHaveText('角色配置已保存为自定义配置，不再跟随内置默认。新任务使用新配置；收回权限会阻止后续调用');
-    for (const name of ['Project controller', 'Independent QA']) {
+    for (const name of ['Manager', 'Independent QA']) {
       await goRolePage(page, { role: name });
       await openRoleFormAdvanced(page);
       await expect(page.getByRole('button', { name: '删除这个角色', exact: true })).toHaveCount(0);
     }
-    await goRolePage(page, { role: 'Task Coordinator' });
-    await openRoleFormAdvanced(page);
-    await expect(page.getByRole('button', { name: '删除这个角色', exact: true })).toHaveCount(1);
+    await expect(page.getByTestId('role-list-coordinator')).toHaveCount(0);
     await goRolePage(page, { role: 'Reviewer' });
     await openRoleFormAdvanced(page);
     await page.getByRole('button', { name: '删除这个角色', exact: true }).click();

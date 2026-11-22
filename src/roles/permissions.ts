@@ -41,7 +41,7 @@ export const basicTools = ['read_file','read_version_file','compare_versions','w
   'search_conversation_history','read_conversation_message','read_conversation_summary',
   'read_managed_task','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task',
   'search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
-  'read_coordination','acknowledge_coordination','start_agent','dispatch',
+  'start_agent','dispatch',
   'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
   'finish_analysis','finish_observation','finish_release_notes','submit_acceptance',
   // Framework deliveries: a tested PR from the task's candidate, or a granted Actions rerun.
@@ -61,7 +61,7 @@ const github = (item: PermissionItem) => ({ ...item, group: 'github' });
 export const retiredPermissionItems = ['playbooks', 'computer', 'browser'] as const;
 export const permissionItems: PermissionItem[] = [
   platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task','list_managed_tasks','create_task','manage_task','grant_writes'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
-  platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','decide_coordination','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务，决定协调重试或撤回建议，并参与共享调度。自己的任务、已收到的通知默认可用。')),
+  platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','wait_for_tasks','set_task_priority','relate_task'],'查询同项目其他任务；读写还可修改任务、声明依赖等待（wait_for_tasks）、调整优先级和关联任务。自己的任务与子任务默认可用。')),
   platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
   platform(access('project_configuration','项目设置与角色配置',['management_query'],['management_command'],'按操作核对项目配置、角色和共享规则的读取或修改权限；不会增加操作者授权。')),
   platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理仓库的项目级定时任务和事件通知订阅，目标与收件人仍受项目范围限制；不影响飞书群或私聊自己的会话定时任务。')),
@@ -213,7 +213,7 @@ export function permissionTools(value: RolePermissions): string[] {
     const item = permissionItems.find(item => item.id === 'project_tasks')!;
     if (['read','write'].includes(p.legacy_project_tasks!) || p.legacy_delegation_controls==='allow') item.read.forEach(name => tools.add(name));
     if (p.legacy_project_tasks === 'write' || p.legacy_delegation_controls==='allow') tools.add('manage_project_task');
-    if (p.legacy_coordination === 'write') ['decide_coordination','request_task_coordination','wait_for_tasks','submit_coordination'].forEach(name => tools.add(name));
+    if (p.legacy_coordination === 'write') tools.add('wait_for_tasks');
     if (p.legacy_nomination === 'allow') ['set_task_priority','relate_task'].forEach(name => tools.add(name));
   }
   if (['project_tasks','project_memory','project_configuration','schedules'].some(id => ['read','write'].includes(p[id]!))) tools.add('management_query');
@@ -258,7 +258,7 @@ export function defaultPermissions(id: string, kind: RoleKind): RolePermissions 
   for (const resource of githubResources) p[keyOf(resource)] = id === 'manager' && (githubWriteResources as readonly string[]).includes(resource) ? 'write' : 'read';
   p.github_actions = p.github_issues === 'write' ? 'write' : p.github_actions!;
   p.project_memory = 'write';
-  if (kind === 'controller') { p.project_tasks = 'write'; if (id !== 'coordinator') p.delegation = 'allow'; }
+  if (kind === 'controller') { p.project_tasks = 'write'; p.delegation = 'allow'; }
   return p;
 }
 export function migratePermissions(role: { role_id: string; kind: RoleKind; permissions?: RolePermissions; capability_policy_ref?: { id: string } }): RolePermissions {
@@ -279,7 +279,7 @@ export function permissionSnapshot(permissions: RolePermissions, kind?: RoleKind
     (name !== 'write_file' || !['observer','evaluator'].includes(kind??'')) &&
     (!['subscribe_event','cancel_event_subscription'].includes(name) || kind !== 'evaluator')), has = (tool: string) => tools.includes(tool);
   return { id: 'permissions', version: hash({permissions,tools}), tools, permissions:normalizePermissions(permissions), authorities: {
-    query_facts: has('read_task_record') || has('read_project_task'), delegate: has('delegate_role'), coordinate: has('request_task_coordination') || has('submit_coordination'),
+    query_facts: has('read_task_record') || has('read_project_task'), delegate: has('delegate_role'), coordinate: has('wait_for_tasks'),
     nominate: has('nominate_delivery'), edit_candidate: has('write_file'), decide_acceptance: has('submit_acceptance'),
     finish_task: false, override_qa: false, publish: false, merge: false, grant_permissions: false
   } };

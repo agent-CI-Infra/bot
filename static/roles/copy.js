@@ -7,8 +7,7 @@ function consoleLocale() {
 
 const roleCatalogDuties = {
   zh: {
-    coordinator: '处理明确的跨任务协调请求，没有产品执行或验收权限。',
-    manager: '为单个任务协调项目流程：查询任务事实、委派有范围的工作、把交付提给独立验收。',
+    manager: '负责项目事件分派、任务内多角色编排与跨任务排期及依赖协调。',
     dev: '在入口已有的权限范围内实现或调查任务。',
     test: '独立测试既定的交付候选。',
     reviewer: '独立检视既定候选，找出可处理的缺陷。',
@@ -16,8 +15,7 @@ const roleCatalogDuties = {
     qa: '在全新上下文中判定该候选是否满足任务约定。',
   },
   en: {
-    coordinator: 'Resolves explicit cross-task coordination requests without product execution or acceptance authority.',
-    manager: 'Coordinates the project flow for one task: queries task facts, delegates bounded work, nominates a delivery for independent QA.',
+    manager: 'Manages project event dispatch, coordinates multi-role task execution, and handles cross-task scheduling and dependencies.',
     dev: "Implements or investigates the task within the entry point's existing authority.",
     test: 'Independently tests the fixed candidate.',
     reviewer: 'Independently inspects the fixed candidate for actionable defects.',
@@ -26,7 +24,12 @@ const roleCatalogDuties = {
   }
 };
 
-const allCatalogDuties = new Set([...Object.values(roleCatalogDuties.zh), ...Object.values(roleCatalogDuties.en)]);
+const retiredCatalogDuties = [
+  '为单个任务协调项目流程：查询任务事实、委派有范围的工作、把交付提给独立验收。',
+  'Coordinates the project flow for one task: queries task facts, delegates bounded work, nominates a delivery for independent QA.',
+];
+
+const allCatalogDuties = new Set([...Object.values(roleCatalogDuties.zh), ...Object.values(roleCatalogDuties.en), ...retiredCatalogDuties]);
 
 function isCatalogRoleDuty(id, duty) {
   if (!duty) return true;

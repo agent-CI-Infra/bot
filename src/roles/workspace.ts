@@ -83,7 +83,7 @@ export function roleBackendWorkspace(workspaceOrGetter:Workspace|(()=>Workspace)
   }
   // Only a run interrupted by a control-plane crash can leave a session to reattach. A cancelled or failed run released its
   // workspace; its next run is rebuilt from task records, never reported as native resume.
-  if(!runtime?.guidance_retired&&!['qa','coordinator'].includes(String(instance.role))&&runtime?.workspace_id&&runtime.generation===task.generation&&last?.status==='interrupted'){
+  if(!runtime?.guidance_retired&&String(instance.role)!=='qa'&&runtime?.workspace_id&&runtime.generation===task.generation&&last?.status==='interrupted'){
    const previous=new Workspace(store,workspace.manager,{...task,workspace_id:runtime.workspace_id},workspace.redactor,workspace.guard,workspace.log);
    // Only a session still running is reattached. One that already ended is rebuilt from task records: its submission
    // may be stale by now, and the delegations it made are reused from their durable results.

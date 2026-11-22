@@ -45,7 +45,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const roles = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
+    const roles = ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     await openRoleAdvanced(page);
     await expect(page.getByTestId('backend-availability-card')).toBeVisible();
     await expect(page.getByTestId('backend-availability-card')).toContainText('Claude Code');

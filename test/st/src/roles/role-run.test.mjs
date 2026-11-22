@@ -500,7 +500,7 @@ test('#1121 retired isolated environment profiles in settings and frozen task_ex
   assert.equal(frozen.roles.find(r => r.role_id === 'qa').environment_profile_ref.id, 'evaluation-checkout');
 });
 
-test('a run started under the task claim ends when the task is claimed again; a run outside the task claim (a coordinator) does not', async t => {
+test('a run started under the task claim ends when the task is claimed again; a run outside the task claim does not', async t => {
   let s, reclaim = false;
   const f = await fixture(t, (body, turn) => {
     if (turn === 1) { if (reclaim) s.run("UPDATE tasks SET claim_token='claim-B' WHERE id='t'"); return call('read_task_record', { ref: 'task:t' }); }
@@ -510,19 +510,19 @@ test('a run started under the task claim ends when the task is claimed again; a 
   s.run("UPDATE tasks SET claim_token='claim-A' WHERE id='t'");
   reclaim = true;
   await assert.rejects(runRole({ ...f.spec, task: { ...f.task, claim_token: 'claim-A' } }, 'dev', 'claimed-assignment'), { code: 'lease_epoch_stale' });
-  // The coordinator runs its role with claim_token null on its task copy, under its own worker claim.
+  // A run outside the task claim passes claim_token null and is not ended when the task is claimed again.
   s.run("UPDATE tasks SET claim_token='claim-C' WHERE id='t'");
-  const g = await fixture(t, (body, turn) => { if (turn === 1) g.s.run("UPDATE tasks SET claim_token='claim-D' WHERE id='t'"); return call('finish', { summary: 'coordinated' }); });
+  const g = await fixture(t, (body, turn) => { if (turn === 1) g.s.run("UPDATE tasks SET claim_token='claim-D' WHERE id='t'"); return call('finish', { summary: 'independent' }); });
   g.s.run("UPDATE tasks SET claim_token='claim-C' WHERE id='t'");
-  assert.equal((await runRole({ ...g.spec, task: { ...g.task, claim_token: null, active_role: 'coordinator' } }, 'dev', 'outside-claim')).result.summary, 'coordinated');
+  assert.equal((await runRole({ ...g.spec, task: { ...g.task, claim_token: null } }, 'dev', 'outside-claim')).result.summary, 'independent');
 });
 
-test('a save keeps the coordination defaults of #190/#192 next to the validated environment profile', async t => {
+test('a save keeps the Manager defaults next to the validated environment profile', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const saved = f.put({ roles: [{ role_id: 'dev', environment_profile_ref: { id: 'task-workspace' } }] });
   const role = id => saved.roles.find(r => r.role_id === id);
-  assert.deepEqual([role('coordinator').permissions.project_tasks, role('coordinator').output_schema_ref.id, role('coordinator').environment_profile_ref.id], ['write', 'coordination-result', 'control-session']);
-  assert.deepEqual([role('manager').permissions.delegation, role('manager').environment_profile_ref.id], ['allow', 'control-session']);
+  assert.equal(role('coordinator'), undefined);
+  assert.deepEqual([role('manager').permissions.delegation, role('manager').permissions.project_tasks, role('manager').output_schema_ref.id, role('manager').environment_profile_ref.id], ['allow', 'write', 'delivery-nomination', 'control-session']);
   assert.deepEqual([role('reviewer').environment_profile_ref.id, role('qa').environment_profile_ref.id], ['candidate-checkout', 'evaluation-checkout']);
   // Mismatched role kind profile is refused; retired isolated-* profiles safely downgrade for matching kinds (#1121).
   assert.throws(() => f.put({ roles: [{ role_id: 'dev', environment_profile_ref: { id: 'isolated-candidate' } }] }), e => e.code === 'environment_profile_not_allowed' && e.field === 'roles.dev.environment_profile_ref.id');

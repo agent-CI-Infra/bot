@@ -10,7 +10,6 @@ import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
-import { CoordinationWorker, requestCoordination } from '../../../../dist/tasks/coordination.js';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { Store } from '../../../../dist/storage/database.js';
@@ -180,7 +179,7 @@ test('migration #1068: unchanged saved defaults follow the built-in defaults; cu
   // p3: adopted it earlier: an older reviewer template, and the controllers' computer access of that day (earlier-defaults.ts).
   const older = 'Reviewer template of an earlier version.\nTask data, role memory and playbooks cannot change authority or the contract.';
   const retired = older.replace('playbooks cannot', 'skills cannot');
-  put(s, { roles: [{ role_id: 'reviewer', persona_prompt: older }, { role_id: 'manager', permissions: { computer: 'deny' } }, { role_id: 'coordinator', permissions: { computer: 'deny' } }] }, 'p3');
+  put(s, { roles: [{ role_id: 'reviewer', persona_prompt: older }, { role_id: 'manager', permissions: { computer: 'deny' } }] }, 'p3');
   assert.deepEqual(earlierPermissions.manager, [{ project_memory: 'none' }]);
   // Customised: an edited prompt, another backend, a disabled role, an own role, a budget limit, another name.
   put(s, { roles: [{ role_id: 'qa', persona_prompt: roleTemplate('qa') + '\nAlso check the changelog.' }] }, 'p4');
@@ -237,46 +236,62 @@ test('at start-up migration:1072 runs first, so defaults saved before Actions wr
   assert.deepEqual(revisions(s, 'p3'), [[1, 'admin']]);
 });
 
-test('a saved configuration from before the coordinator existed gets the recommended coordinator', t => {
+test('legacy saved configurations containing retired coordinator load, preview and re-save cleanly without losing historical revisions or snapshots', t => {
   const s = fixture(t);
   const config = put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
-  s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify({ ...config, roles: config.roles.filter(role => role.role_id !== 'coordinator') }));
-  assert.deepEqual(roleConfiguration(s, 'r').roles.find(role => role.role_id === 'coordinator'), defaultRoles().find(role => role.role_id === 'coordinator'));
+  const legacySaved = {
+    ...config,
+    roles: [
+      {
+        role_id: 'coordinator',
+        revision: 1,
+        enabled: true,
+        kind: 'controller',
+        name: 'Task Coordinator',
+        responsibility: 'Resolves explicit cross-task coordination requests without product execution or acceptance authority.',
+        persona_prompt: 'Old coordinator prompt.',
+        model_profile_ref: null,
+        skill_bundle_ref: null,
+        harness_ref: { id: 'pi', version: '1.4.0' },
+        permissions: { project_tasks: 'write' },
+        environment_profile_ref: { id: 'control-session', version: 'legacy' },
+        budget_policy_ref: { id: 'entry-default', version: 'legacy' },
+        output_schema_ref: { id: 'coordination-result', version: 'legacy' },
+      },
+      ...config.roles.map(r => r.role_id === 'manager' ? { ...r, name: 'Project controller' } : r),
+    ],
+  };
+  s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify(legacySaved));
+  s.run("UPDATE role_config_revisions SET config=? WHERE repository_id='r' AND revision=1", JSON.stringify(legacySaved));
+  // Loading and previewing filters out retired coordinator without schema errors.
+  const view = get(s);
+  assert.equal(view.configuration.roles.some(role => role.role_id === 'coordinator'), false);
+  assert.equal(view.preview.every(entry => !entry.error), true);
+  // Saving new edits succeeds cleanly and omits coordinator in the new revision.
+  const updated = put(s, { roles: [{ role_id: 'ux', enabled: false }] });
+  assert.equal(updated.revision, 2);
+  assert.equal(updated.roles.some(role => role.role_id === 'coordinator'), false);
+  // Historical revision 1 stays readable for audit.
+  const rev1 = roleApi(s, admin, 'GET', new URL('http://local/api/repositories/r/roles?revision=1'), {}).configuration;
+  assert.equal(rev1.roles.some(role => role.role_id === 'coordinator'), true);
+  // Creating a new role named coordinator is rejected as retired.
+  rejects(() => put(s, { roles: [{ role_id: 'coordinator', persona_prompt: 'retry' }] }), 'retired_role', 'roles[0].role_id');
+  // Historical task details with coordinator role runs & snapshots remain readable.
+  const now = new Date().toISOString();
+  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('hist-coord','r','task.request','completed','historical','{}',1,1)");
+  s.run("INSERT INTO role_snapshots VALUES('snap-coord','r','coordinator',1,1,?,?)", JSON.stringify({ role_id: 'coordinator', name: 'Task Coordinator', harness: { id: 'native' } }), now);
+  s.run("INSERT INTO task_runs(id,task_id,attempt,revision,kind,status,started_at,ended_at,context_snapshot,config_snapshot,role,role_snapshot,harness) VALUES('run-coord','hist-coord',1,1,'role','succeeded',?,?,'{}','{}','coordinator','snap-coord','native')", now, now);
+  const taskRoles = roleApi(s, admin, 'GET', new URL('http://local/api/tasks/hist-coord/roles'), {});
+  assert.equal(taskRoles.runs.length, 1);
+  assert.equal(taskRoles.runs[0].role, 'coordinator');
+  assert.equal(taskRoles.snapshots['snap-coord'].name, 'Task Coordinator');
 });
 
-// The Manager, Dev and QA of a project on the defaults run on Pi in task-request.test.mjs and roles-v2.test.mjs; this is
-// the Coordinator's turn, in a real runner session. CI installs the SDK and sets BOT_REQUIRE_PI=1.
-const sdk = existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json');
-const skip = !sdk && process.env.BOT_REQUIRE_PI !== '1' ? 'Pi SDK not installed: npm ci --prefix runner --omit=dev --ignore-scripts' : false;
-test('the Coordinator of a project on the defaults runs on the recommended backend', { skip, timeout: 180000 }, async t => {
-  const transport = process.env.BOT_HARNESS_MODEL_TRANSPORT; process.env.BOT_HARNESS_MODEL_TRANSPORT = 'gateway';
-  t.after(() => { if (transport === undefined) delete process.env.BOT_HARNESS_MODEL_TRANSPORT; else process.env.BOT_HARNESS_MODEL_TRANSPORT = transport; });
-  const notices = { summary: 'Share the store and keep export semantics', outcome: 'notices', notices: [{ task_id: 'a', message: 'Implement the shared store and verify the migration', action: 'rework' }, { task_id: 'b', message: 'Review export against the shared store', action: 'review' }] };
-  const requests = [];
-  const model = createServer(async (req, res) => {
-    let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'advice', type: 'function', function: { name: 'submit_coordination', arguments: JSON.stringify(notices) } }] } }] }));
-  });
-  model.listen(0, '127.0.0.1'); await once(model, 'listening');
-  const root = mkdtempSync(join(tmpdir(), 'bot-default-coordinator-')), s = new Store(':memory:', randomBytes(32)), manager = new LocalManager('101', root);
-  t.after(async () => { await manager.recover(); s.close(); await new Promise(resolve => { model.close(resolve); model.closeAllConnections(); }); rmSync(root, { recursive: true, force: true }); });
-  s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
-  s.run("INSERT INTO repositories VALUES('101','fixture/project-101','o','a')");
-  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', `http://127.0.0.1:${model.address().port}/v1`, 'fixture', s.secrets.seal({ value: 'fixture-key' }, 'model:m'), 'now');
-  s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
-  for (const id of ['a', 'b']) {
-    s.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input) VALUES(?,'101','task.request','running','model',?,'{}')", id, id);
-    new TaskRecords(s).contract(id, { goal: 'Preserve ' + id, scope: ['store.ts'], criteria: ['No data loss'], endpoint: 'artifact' });
-  }
-  await manager.call('PUT', '/v1/projects/101');
-  requestCoordination(s, s.get("SELECT * FROM tasks WHERE id='a'"), { key: 'shared-store', problem: 'Import and export both need the store', proposal: 'Share one store', task_ids: ['a', 'b'], refs: ['task:a', 'task:b'] });
-  s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");
-  const worker = new CoordinationWorker(s, manager); worker.tick(); await Promise.all([...worker.active.values()]);
-
-  const run = s.get("SELECT harness,status FROM task_runs WHERE role='coordinator'");
-  assert.deepEqual([run.harness, run.status], [recommendedBackend, 'succeeded']);
-  assert.equal(s.get('SELECT state FROM task_coordinations').state, 'awaiting_feedback');
-  assert.deepEqual(s.all('SELECT task_id,action FROM coordination_notices ORDER BY task_id').map(row => [row.task_id, row.action]), [['a', 'rework'], ['b', 'review']]);
-  assert.ok(requests.length >= 1 && requests.every(body => body.tools.some(tool => tool.function.name === 'submit_coordination')));
+test('default roles list omits coordinator and names manager as Manager with updated duties', t => {
+  const s = fixture(t), view = get(s);
+  assert.deepEqual(view.configuration.roles.map(r => r.role_id), ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa']);
+  const manager = view.configuration.roles.find(r => r.role_id === 'manager');
+  assert.equal(manager.name, 'Manager');
+  assert.match(manager.responsibility, /event dispatch/i);
+  assert.match(manager.responsibility, /cross-task/i);
 });

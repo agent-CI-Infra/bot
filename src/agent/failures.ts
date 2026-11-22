@@ -138,7 +138,7 @@ const codeActions: Record<string,string> = {
   candidate_writer_busy:'同一候选已有写者或只读检视运行。等待当前运行收集结束后继续，不同时修改被检视内容。',
   role_capacity:'这个角色已达到项目设定的并发上限，任务在队列里等一个运行结束；不消耗尝试次数，也不要手动重试。',
   role_nomination_stages_incomplete:'主控需先读取阶段计划并委派尚未完成的必需阶段；提名不能替代阶段证据或 QA。',
-  task_coordination_requested:'协调请求或显式任务依赖已持久化，框架会在结果可用后自动续接；不占用执行名额。',
+  task_coordination_requested:'显式任务依赖等待已持久化，框架会在依赖满足或阻塞后自动续接；不占用执行名额。',
   task_coordination_pending:'协调上下文已变化，读取通知并记录处理意见后重新提交给独立 QA；旧验收不会认证新上下文。',
   acp_not_configured:'ACP 外部后端已下线；请在项目「角色」页改用 Pi、Claude Code 或 Codex 并保存配置后重试。',
   acp_configuration_invalid:'ACP 外部后端已下线；请在项目「角色」页改用 Pi、Claude Code 或 Codex 并保存配置后重试。',

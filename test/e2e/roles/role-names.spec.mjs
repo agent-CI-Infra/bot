@@ -6,7 +6,7 @@ import { TaskEngine } from '../../../dist/agent/engine.js';
 import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
 
 const out = '.tmp/role-names-568';
-const storedNames = ['Project controller', 'Developer', 'Tester', 'Reviewer', 'UX reviewer', 'Independent QA', 'Task Coordinator'];
+const storedNames = ['Manager', 'Developer', 'Tester', 'Reviewer', 'UX reviewer', 'Independent QA'];
 
 async function login(page, url, password) {
   await page.goto(url);
@@ -19,8 +19,9 @@ async function checkOverview(page) {
   const board = page.getByTestId('project-role-board');
   await expect(board.locator('[data-role-row]')).toHaveCount(storedNames.length);
   for (const name of storedNames) await expect(board.getByText(name, { exact: true })).toBeVisible();
-  await expect(board.locator('[data-role-row="coordinator"]')).toContainText('空闲');
-  await expect(page.locator('.workspace-role-status')).toContainText('共启用 7 个项目角色');
+  await expect(board.locator('[data-role-row="coordinator"]')).toHaveCount(0);
+  await expect(board.locator('[data-role-row="manager"]')).toContainText('空闲');
+  await expect(page.locator('.workspace-role-status')).toContainText('共启用 6 个项目角色');
 }
 
 test('中文界面在总览、角色列表和表单保留名称原文，内置职责使用中文', async ({ page }) => {
@@ -37,14 +38,15 @@ test('中文界面在总览、角色列表和表单保留名称原文，内置�
     await openRoleAdvanced(page);
     const table = page.getByRole('table', { name: '角色解析结果', exact: true });
     for (const name of storedNames) await expect(table.getByRole('link', { name, exact: true })).toBeVisible();
-    for (const name of ['Dev', '开发', '项目管理者', '跨任务协调']) {
+    for (const name of ['Dev', '开发', '项目管理者', '跨任务协调', 'Task Coordinator', 'Project controller']) {
       await expect(table.getByRole('link', { name, exact: true })).toHaveCount(0);
     }
-    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
+    const roleIds = ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     for (const id of roleIds) {
       await expect(table.getByRole('link', { name: id, exact: true })).toHaveCount(0);
       await expect(table.getByText(id + ' 启用', { exact: true })).toHaveCount(0);
     }
+    await expect(table).toContainText('负责项目事件分派、任务内多角色编排与跨任务排期及依赖协调。');
     await expect(table).toContainText('在入口已有的权限范围内实现或调查任务。');
     await expect(table).not.toContainText('Implements or investigates');
     await page.screenshot({ path: `${out}/list-zh-1440.png`, fullPage: true });
@@ -88,12 +90,13 @@ test('英文界面在总览、角色列表和表单保留相同名称，内置�
     }
     const enText = await table.innerText();
     expect(enText).not.toContain('启用');
-    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
+    const roleIds = ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     for (const id of roleIds) {
       await expect(table.getByRole('link', { name: id, exact: true })).toHaveCount(0);
       await expect(table.getByText(id + ' Enabled', { exact: true })).toHaveCount(0);
       await expect(table.getByText(id + ' 启用', { exact: true })).toHaveCount(0);
     }
+    await expect(table).toContainText('Manages project event dispatch, coordinates multi-role task execution, and handles cross-task scheduling and dependencies.');
     await expect(table).toContainText("Implements or investigates the task within the entry point's existing authority.");
     await openRoleFromList(page, 'Developer');
     await expect(page.getByLabel('Display name', { exact: true })).toHaveValue('Developer');
@@ -137,7 +140,7 @@ test('已保存的历史简称、中文和自定义角色名原样显示，关�
     await expect(page.getByText(/是必需角色，其余角色都可以删除/)).toContainText(renamed);
     await page.goto(h.admin + '/#/projects/101/overview');
     const board = page.getByTestId('project-role-board');
-    await expect(page.locator('.workspace-role-status')).toContainText('共启用 7 个项目角色');
+    await expect(page.locator('.workspace-role-status')).toContainText('共启用 6 个项目角色');
     for (const name of [renamed, 'Dev', '开发']) await expect(board.getByText(name, { exact: true })).toBeVisible();
     await expect(board.locator('[data-role-row="test"]')).toHaveCount(0);
   } finally { await h.stop(); }

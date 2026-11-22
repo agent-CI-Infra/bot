@@ -17,7 +17,7 @@ For example, Windows device-path handling and SQLite JSON/JSONB support may be i
 
 ## Choose a runnable batch
 
-Identify necessary inputs, interface agreements and real shared-resource constraints. Start independent work concurrently. Work against an agreed interface can proceed before its producer is integrated when the executor can verify its own deliverable; record the integration requirement. A shared file or a different SHA is not by itself a reason to serialize development. Request Coordinator advice for an actual cross-task conflict.
+Identify necessary inputs, interface agreements and real shared-resource constraints. Start independent work concurrently. Work against an agreed interface can proceed before its producer is integrated when the executor can verify its own deliverable; record the integration requirement. A shared file or a different SHA is not by itself a reason to serialize development. Inspect same-project tasks with `list_project_tasks` / `read_project_task` and use `wait_for_tasks` only when there is a real delivery or merge dependency.
 
 You decide which work is ready. Record later goals and reasons for deferral in parent progress, or create them with execute=false. Do not build a complete fixed DAG before starting. Use existing task priority and FIFO; do not simulate a separate queue in prose.
 

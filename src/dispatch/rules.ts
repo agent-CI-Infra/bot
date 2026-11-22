@@ -106,7 +106,7 @@ export function checkRules(value: unknown, eventTypes: string[], roleIds: string
     if (!ruleActions.includes(rule.action)) fail(400, 'invalid_standing_rules', field + '.action');
     const creates = rule.action === 'create' || rule.action === 'continue_or_create';
     if (creates && Array.isArray(rule.writes) && rule.writes.includes('pull_request')) fail(400, 'standing_rule_development', field + '.writes');
-    if (creates ? (!string(rule.role, 32) || !roleIds.includes(rule.role) || ['qa', 'coordinator'].includes(rule.role)) : (rule.role !== undefined || rule.writes !== undefined))
+    if (creates ? (!string(rule.role, 32) || !roleIds.includes(rule.role) || rule.role === 'qa') : (rule.role !== undefined || rule.writes !== undefined))
       fail(400, 'invalid_standing_rules', field + '.role');
     let writes: string[] | undefined;
     if (creates && rule.writes !== undefined) {

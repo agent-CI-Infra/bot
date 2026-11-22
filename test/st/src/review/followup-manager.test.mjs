@@ -40,21 +40,14 @@ test('Manager infrastructure failure does not invalidate an independent pass or 
  const accepted=f.records.decide('parent',f.candidate.id,f.candidate.revision,verdict);const child=f.s.get('SELECT * FROM tasks WHERE id=?',accepted.followups[0]);assert.equal(child.status,'queued');assert.equal(child.priority,'P2');assert.ok(f.s.get("SELECT id FROM task_history WHERE type='followup_plan_deferred'"));
 });
 
-test('QA impact → Manager related-work plan → queued Coordinator → advice/ack → eligible FIFO task',async t=>{
- const {CoordinationWorker,resumeCoordinatedTasks,acknowledgeCoordination}=await import('../../../../dist/tasks/coordination.js');
- const f=await fixture(t,body=>{
-  if(body.tools.some(t=>t.function.name==='submit_coordination')){
-   const user=body.messages.find(m=>m.role==='user'&&m.content.includes('coordination_id'));const pack=JSON.parse(user.content);
-   return call('submit_coordination',{summary:'Existing writer keeps its candidate; new task checks only the independent docs discrepancy',outcome:'notices',notices:[{task_id:pack.request.task_ids[0],message:'Read existing evidence and handle only the distinct documentation claim, then obtain fresh QA.',action:'review'},{task_id:'existing',message:'Continue owned implementation; linked docs work is independent.',action:'review'}]});
-  }
-  return call('submit_followup_plan',{items:[{key:residual.key,priority:'P3',reason:'Distinct docs defect on a shared surface, core delivery is complete',evidence_refs:[residual.evidence],action:'related',task_id:'existing',needs:[]}]});
- });
+test('QA impact → Manager related-work plan queues follow-up directly with recorded relation without pausing for Coordinator',async t=>{
+ const f=await fixture(t,()=>call('submit_followup_plan',{items:[{key:residual.key,priority:'P3',reason:'Distinct docs defect on a shared surface, core delivery is complete',evidence_refs:[residual.evidence],action:'related',task_id:'existing',needs:[]}]}));
  f.s.run("UPDATE tasks SET status='running' WHERE id='existing'");await assessFollowups(f.s,f.task,f.candidate,verdict,f.workspace,async()=>{},new Redactor());
- const accepted=f.records.decide('parent',f.candidate.id,f.candidate.revision,verdict),child=accepted.followups[0];assert.equal(f.s.get('SELECT status FROM tasks WHERE id=?',child).status,'waiting_coordination');
- const worker=new CoordinationWorker(f.s);worker.tick();await Promise.all(worker.active.values());assert.equal(f.s.get('SELECT state FROM task_coordinations').state,'awaiting_feedback');
- resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get('SELECT status FROM tasks WHERE id=?',child).status,'queued');
- const notice=f.s.get('SELECT id FROM coordination_notices WHERE task_id=?',child);assert.deepEqual(acknowledgeCoordination(f.s,child,{notice_id:notice.id,disposition:'adopted',reason:'Adopt bounded documentation scope and reuse evidence only at its recorded version'}),{ok:true});
- assert.equal(f.records.get(child).acceptance,null);assert.equal(f.records.get(child).priority.level,'P3');await worker.close();
+ const accepted=f.records.decide('parent',f.candidate.id,f.candidate.revision,verdict),child=accepted.followups[0];
+ assert.equal(f.s.get('SELECT status FROM tasks WHERE id=?',child).status,'queued');
+ assert.equal(f.s.get('SELECT count(*) n FROM task_coordinations').n,0);
+ assert.equal(f.s.get("SELECT relationship FROM task_relations WHERE source_task_id=? AND target_task_id='existing'",child).relationship,'related');
+ assert.equal(f.records.get(child).acceptance,null);assert.equal(f.records.get(child).priority.level,'P3');
 });
 
 test('Pi Manager planning uses the same post-QA decision protocol through the control mailbox',async t=>{

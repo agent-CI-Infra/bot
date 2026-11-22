@@ -237,7 +237,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const allowedTools=snapshot.capability.tools;
   const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
   // grant_writes (#814) is a task-management tool of the project's controller only.
-  const managedTools=snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
+  const managedTools=snapshot.kind==='evaluator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
   const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   const cmdConfigured=configuredCommandTimeout(s,task,role),cmdBudget=cmdConfigured!==null?resolveCommandTimeout(s,task,role,cmdConfigured):null;
   const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;

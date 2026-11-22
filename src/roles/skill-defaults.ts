@@ -103,7 +103,7 @@ export function roleSkills(
   repositorySource?:{sha:string|null;files:Record<string,string>}|null,
 ):Bundle|null {
   const ids=defaultSkillIds(role,ciChange);
-  const autoEligible=role.kind!=='evaluator'&&role.id!=='coordinator'&&!configured;
+  const autoEligible=role.kind!=='evaluator'&&!configured;
   const autoFiles=autoEligible&&repositorySource
     ? extractRepositorySkillFiles(repositorySource.files).map(file=>({...file,path:'repository/'+file.path.slice('.agents/skills/'.length)}))
     : [];

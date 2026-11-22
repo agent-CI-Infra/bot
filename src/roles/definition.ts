@@ -48,9 +48,12 @@ const short = (value: unknown) => sha256(JSON.stringify(value)).slice(0, 16);
 const idPattern = /^[a-z][a-z0-9_-]{0,31}$/;
 // Validation errors name the configuration field, so the console and API can point at it.
 const invalid = (code: string, field: string): never => fail(400, code, field);
+const earlierManagerNames = new Set(['Project controller']);
+const earlierManagerDuties = new Set([
+  'Coordinates the project flow for one task: queries task facts, delegates bounded work, nominates a delivery for independent QA.',
+]);
 const builtinNames: Record<string, [string, string]> = {
-  coordinator:['Task Coordinator','Resolves explicit cross-task coordination requests without product execution or acceptance authority.'],
-  manager: ['Project controller', 'Coordinates the project flow for one task: queries task facts, delegates bounded work, nominates a delivery for independent QA.'],
+  manager: ['Manager', 'Manages project event dispatch, coordinates multi-role task execution, and handles cross-task scheduling and dependencies.'],
   dev: ['Developer', 'Implements or investigates the task within the entry point\'s existing authority.'],
   test: ['Tester', 'Independently tests the fixed candidate.'], reviewer: ['Reviewer', 'Independently inspects the fixed candidate for actionable defects.'],
   ux: ['UX reviewer', 'Inspects user interactions, visible state and accessibility of the candidate.'], qa: ['Independent QA', 'Decides whether the exact candidate meets the task contract, in a fresh context.']
@@ -84,7 +87,7 @@ export function defaultRoles(): RoleDefinitionV2[] {
       // The review and Actions entries run the dev role's own backend, as a saved recommended configuration always did.
       ...(id === 'dev' ? { entry_harness_source: 'role' as const } : {}),
       environment_profile_ref: catalogRef(environmentProfiles, allowedFor(kind).environment[0]!), budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'),
-      output_schema_ref: catalogRef(outputSchemas, id === 'coordinator' ? 'coordination-result' : allowedFor(kind).output[0]!) };
+      output_schema_ref: catalogRef(outputSchemas, allowedFor(kind).output[0]!) };
   });
 }
 /** A stored "follow the defaults" record: a revision and who set it, no roles. Reading it expands the current defaults. */
@@ -128,7 +131,9 @@ export function unmodifiedConfiguration(s: Store, repositoryId: string, stored: 
   if (current.length !== builtin.length) return false;
   return builtin.every(want => {
     const role = current.find(entry => entry.role_id === want.role_id);
-    if (!role || !role.enabled || role.name !== want.name || role.responsibility !== want.responsibility || role.model_profile_ref || role.skill_bundle_ref) return false;
+    const matchesName = role && (role.name === want.name || (want.role_id === 'manager' && earlierManagerNames.has(role.name)));
+    const matchesDuty = role && (role.responsibility === want.responsibility || (want.role_id === 'manager' && earlierManagerDuties.has(role.responsibility)));
+    if (!role || !role.enabled || !matchesName || !matchesDuty || role.model_profile_ref || role.skill_bundle_ref) return false;
     if (role.harness_ref?.id !== want.harness_ref.id || (role.harness_ref.model_source ?? 'gateway') !== 'gateway') return false;
     if (role.environment_profile_ref?.id !== want.environment_profile_ref.id || role.output_schema_ref?.id !== want.output_schema_ref.id) return false;
     if (role.budget_policy_ref?.id !== want.budget_policy_ref.id || Object.keys(role.budget_policy_ref).some(key => !['id', 'version'].includes(key))) return false;
@@ -281,9 +286,10 @@ export function retireIsolatedEnvironmentProfiles(s: Store) {
       if (stored?.schema !== 2 || !Array.isArray(stored.roles)) continue;
       if (!stored.roles.some((r: any) => retired.has(r?.environment_profile_ref?.id))) continue;
       const repositoryId = String(row.key).slice('roles:'.length), current = roleConfiguration(s, repositoryId, stored);
+      const storedById = new Map(stored.roles.map((role: any) => [role?.role_id, role]));
       const now = new Date().toISOString(), { updated_at, updated_by, ...config } = {
         ...current,
-        roles: current.roles.map((r: RoleDefinitionV2, idx: number) => retired.has(stored.roles[idx]?.environment_profile_ref?.id) ? { ...r, revision: r.revision + 1 } : r),
+        roles: current.roles.map((r: RoleDefinitionV2) => retired.has((storedById.get(r.role_id) as any)?.environment_profile_ref?.id) ? { ...r, revision: r.revision + 1 } : r),
         revision: current.revision + 1,
       };
       const saved = { ...config, updated_at: now, updated_by: 'migration:1121' };
@@ -381,29 +387,32 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
   const value = stored;
   if (followsDefault(value)) return defaultConfiguration(value);
   if (value.schema === 2) {
-    const roles = value.roles.map((role: any) => {
-      const { capability_policy_ref, ...definition } = role;
-      const kind: RoleKind = definition.kind ?? roleKind(String(definition.role_id ?? ''));
-      const budgetEntry = budgetPolicies.find(b => b.id === definition.budget_policy_ref?.id);
-      return { ...definition, kind, environment_profile_ref: migrateEnvironmentRef(definition.environment_profile_ref, kind), ...(budgetEntry ? { budget_policy_ref: { ...definition.budget_policy_ref, version: budgetEntry.version } } : {}), permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
-    });
-    // A configuration saved before the coordinator existed runs the recommended one unless coordinator was explicitly deleted.
-    if (!roles.some((role: RoleDefinitionV2) => role.role_id === 'coordinator') && !(Array.isArray(value.deleted_roles) && value.deleted_roles.includes('coordinator'))) {
-      roles.push(defaultRoles().find(role => role.role_id === 'coordinator')!);
-    }
+    // Filter out the retired Task Coordinator role (#1218) so legacy saved configs load and re-save cleanly while
+    // historical role_config_revisions and task snapshots stay intact for audit.
+    const roles = value.roles
+      .filter((role: any) => role?.role_id !== 'coordinator')
+      .map((role: any) => {
+        const { capability_policy_ref, ...definition } = role;
+        const kind: RoleKind = definition.kind ?? roleKind(String(definition.role_id ?? ''));
+        const budgetEntry = budgetPolicies.find(b => b.id === definition.budget_policy_ref?.id);
+        const outputEntry = outputSchemas.find(o => o.id === definition.output_schema_ref?.id);
+        const outputRef = outputEntry ? { id: outputEntry.id, version: outputEntry.version } : catalogRef(outputSchemas, allowedFor(kind).output[0]!);
+        return { ...definition, kind, environment_profile_ref: migrateEnvironmentRef(definition.environment_profile_ref, kind), ...(budgetEntry ? { budget_policy_ref: { ...definition.budget_policy_ref, version: budgetEntry.version } } : {}), output_schema_ref: outputRef, permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
+      });
     // Stored roles are fixed, even in a copy of the defaults (a task's frozen configuration, or one saved as read): only a
     // record without roles follows the defaults.
-    const { follows_default, required_stages: _retiredStages, ...fixed } = value;
-    return { ...fixed, roles, skills: value.skills.map((bundle: any) => ({ ...bundle, source: skillSourceDescriptor(bundle.source, bundle) })) };
+    const { follows_default, required_stages: _retiredStages, deleted_roles: rawDeletedRoles, ...fixed } = value;
+    const deletedRoles = Array.isArray(rawDeletedRoles) ? rawDeletedRoles.filter((id: unknown) => id !== 'coordinator') : undefined;
+    return { ...fixed, ...(deletedRoles?.length ? { deleted_roles: deletedRoles } : {}), roles, skills: value.skills.map((bundle: any) => ({ ...bundle, source: skillSourceDescriptor(bundle.source, bundle) })) };
   }
   // Legacy: built-in prompts with appended project instructions, the per-role driver map, the native manager.
-  const legacy = configuredRoles(value);
+  const legacy = configuredRoles(value).filter(r => r.id !== 'coordinator');
   return { schema: 2, revision: 0, enabled: !!value.enabled, legacy: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } }, skills: [],
     roles: legacy.map(r => { const kind = roleKind(r.id), [name, responsibility] = names(r.id);
       const custom = (value.roles ?? []).find((c: any) => c.id === r.id);
       return { role_id: r.id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: roleTemplate(r.id) + (custom?.prompt ? '\nProject instructions:\n' + custom.prompt : ''), model_profile_ref: null, skill_bundle_ref: null,
         harness_ref: harnessRef(r.harness), permissions: defaultPermissions(r.id, kind), environment_profile_ref: catalogRef(environmentProfiles, allowedFor(kind).environment[0]!),
-        budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'), output_schema_ref: catalogRef(outputSchemas,r.id==='coordinator'?'coordination-result':allowedFor(kind).output[0]!) }; }) };
+        budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'), output_schema_ref: catalogRef(outputSchemas, allowedFor(kind).output[0]!) }; }) };
 }
 export const entryEnabled = (config: RoleConfiguration, entry: Entry) => config.enabled && config.controller.entries[entry] === true;
 const managerEntries = (): Record<Entry, boolean> => ({ development: true, request: true, review: true, actions: true });
@@ -500,12 +509,18 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   });
   const roleInput = input.roles ?? [];
   if (!Array.isArray(roleInput) || roleInput.length > 32) invalid('invalid_role_definitions', 'roles');
-  const ids = roleInput.map((r: any, i: number) => { if (!r || typeof r !== 'object' || typeof r.role_id !== 'string' || !idPattern.test(r.role_id)) invalid('invalid_role_id', `roles[${i}].role_id`); return r.role_id; });
+  const ids = roleInput.map((r: any, i: number) => {
+    if (!r || typeof r !== 'object' || typeof r.role_id !== 'string' || !idPattern.test(r.role_id)) invalid('invalid_role_id', `roles[${i}].role_id`);
+    if (r.role_id === 'coordinator') invalid('retired_role', `roles[${i}].role_id`);
+    return r.role_id;
+  });
   if (new Set(ids).size !== ids.length) invalid('duplicate_role', 'roles');
   if (ids.filter((id: string) => !rolePool.some(r => r.id === id)).length > 16) invalid('too_many_custom_roles', 'roles');
   const allowedKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];
-  const deleted = input.deleted_roles ?? [];
-  if (!Array.isArray(deleted) || deleted.some(id => typeof id !== 'string' || !idPattern.test(id))) invalid('invalid_deleted_roles', 'deleted_roles');
+  const rawDeleted = input.deleted_roles ?? [];
+  if (!Array.isArray(rawDeleted) || rawDeleted.some(id => typeof id !== 'string' || !idPattern.test(id))) invalid('invalid_deleted_roles', 'deleted_roles');
+  // Retired coordinator is already omitted on read; ignore older clients echoing it in deleted_roles.
+  const deleted = rawDeleted.filter((id: string) => id !== 'coordinator');
   for (const id of deleted) {
     if (requiredRoles.includes(id)) invalid('role_required', `roles.${id}`);
     if (ids.includes(id)) invalid('role_delete_conflict', `roles.${id}`);
@@ -591,7 +606,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       harness_ref: { id: harness!.id, version: harness!.version, ...(modelSource === 'subscription' ? { model_source: 'subscription' as const } : {}) },
       permissions,
       environment_profile_ref: environmentRef,
-      budget_policy_ref: budget, output_schema_ref: pick('output_schema_ref', outputSchemas, allowed.output, (id==='coordinator'?'coordination-result':allowed.output[0]!), 'output_schema_not_allowed') };
+      budget_policy_ref: budget, output_schema_ref: pick('output_schema_ref', outputSchemas, allowed.output, allowed.output[0]!, 'output_schema_not_allowed') };
     // Echoing an old V2 id (as the console does on every save) is not a new backend choice.
     if (id === 'dev' && (current.legacy || !previous?.harness_ref || previous.entry_harness_source === 'role' || harness!.id !== previous.harness_ref.id))
       definition.entry_harness_source = 'role';
@@ -603,7 +618,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   if (typeof controllerInput !== 'object' || Array.isArray(controllerInput) || Object.keys(controllerInput).some(k => !['role', 'entries'].includes(k))) invalid('invalid_controller', 'controller');
   const controllerRole = controllerInput.role ?? 'manager';
   // Exactly one project controller: the controller-kind role.
-  if (controllerRole==='coordinator'||roles.find(r => r.role_id === controllerRole)?.kind !== 'controller') invalid('invalid_controller', 'controller.role');
+  if (roles.find(r => r.role_id === controllerRole)?.kind !== 'controller') invalid('invalid_controller', 'controller.role');
   const entryInput = controllerInput.entries ?? current.controller.entries;
   if (!entryInput || typeof entryInput !== 'object' || Object.keys(entryInput).some(k => !entries.includes(k as Entry)) || Object.values(entryInput).some(v => typeof v !== 'boolean')) invalid('invalid_controller_entries', 'controller.entries');
   // Accept retired booleans from older clients, but they no longer opt work out of Manager execution.

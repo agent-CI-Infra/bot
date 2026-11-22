@@ -17,7 +17,6 @@ import { roleWorkspaces, controllerWorkspace } from '../../../../dist/roles/work
 import { runTeam } from '../../../../dist/roles/team.js';
 import { roleExecutionModel, runRole } from '../../../../dist/roles/run.js';
 import { evaluateDelivery } from '../../../../dist/tasks/acceptance.js';
-import { requestCoordination, CoordinationWorker } from '../../../../dist/tasks/coordination.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
@@ -78,12 +77,12 @@ test('new roles default to Pi; general backends preserve role authority and cont
   assert.ok(claude.runtime_status && typeof claude.runtime_status.compatible_range === 'string');
   const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
-  for (const role of ['coordinator', 'manager']) assert.equal(f.put({ roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }).roles.find(r=>r.role_id===role).harness_ref.id,'claude_code');
+  assert.equal(f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'claude_code' } }] }).roles.find(r => r.role_id === 'manager').harness_ref.id, 'claude_code');
   // Codex App Server (#171 / #705) is a container worker backend like Claude Code.
   const codex = f.view().backends.find(b => b.id === 'codex');
   assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['controller', 'writer', 'observer', 'evaluator'], 'project', ['gateway', 'subscription'], null]);
   assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
-  for (const role of ['coordinator', 'manager']) assert.equal(f.put({ roles: [{ role_id: role, harness_ref: { id: 'codex' } }] }).roles.find(r=>r.role_id===role).harness_ref.id,'codex');
+  assert.equal(f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'manager').harness_ref.id, 'codex');
   for (const backend of ['acp', 'opencode']) {
     const view = f.view();
     assert.equal(view.backends.find(b => b.id === backend), undefined);
@@ -174,18 +173,6 @@ test('real Pi workers and fresh QA use controlled tools and a fixed candidate un
   assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='capability_denied' AND json_extract(data,'$.role')='manager' AND json_extract(data,'$.tool')='write_file'"));
   const qaSessions = f.s.all("SELECT data FROM task_history WHERE type='harness_started' AND json_extract(data,'$.role')='qa'").map(r => JSON.parse(r.data).workspace_id);
   assert.equal(new Set(qaSessions).size, 2);
-});
-
-test('a Coordinator configured with Pi gets its own real SDK session and restricted tools', { skip, timeout: 120000 }, async t => {
-  const f = await fixture(t, body => {
-    assert.deepEqual(body.tools.map(t => t.function.name).filter(name=>!['read','edit','write','bash','grep','find','ls'].includes(name)).sort(), ['read_project_task', 'read_tool_result', 'submit_coordination']);
-    return call('submit_coordination', { summary: 'Align the shared report', outcome: 'notices', notices: [{ task_id: 't', message: 'Recheck the shared report and obtain fresh QA', action: 'review' }] });
-  });
-  f.put({ roles: [{ role_id: 'coordinator', harness_ref: { id: 'pi' } }] });
-  const request = requestCoordination(f.s, f.task, { key: 'shared-report', problem: 'Two reports share a convention', proposal: 'Inspect current evidence', task_ids: ['other'], refs: ['task:t'] });
-  const worker = new CoordinationWorker(f.s, f.manager); worker.tick(); await Promise.all([...worker.active.values()]);
-  assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?', request.coordination_id).state, 'awaiting_feedback');
-  assert.deepEqual(f.s.all("SELECT harness,recovery_mode FROM task_runs WHERE role='coordinator'").map(r => [r.harness, r.recovery_mode]), [['pi', 'rebuilt_from_task_records']]);
 });
 
 test('startup migration retires ACP bindings across role settings, role_instances, and frozen task_execution_configs', async t => {
