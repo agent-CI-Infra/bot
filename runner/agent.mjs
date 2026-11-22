@@ -5,6 +5,7 @@ import {spawn} from 'node:child_process';
 import {environment,workspaceTag} from './command.mjs';
 import {local,runnerRoot} from './paths.mjs';
 import {volume} from './disk.mjs';
+import {acpLeaseFile} from './acp-lease.mjs';
 
 async function readRequestId(path){
   const fh=await open(path,'r').catch(()=>null);
@@ -397,6 +398,7 @@ export async function agentOperation(input,root){
         await unlink(dir+'/harness-state.json').catch(()=>{});
       }
       if(oldState)await terminateHarnessState(oldState,boot,root,input.workspace_id);
+      if(oldState?.harness==='container_acp'&&/^[a-f0-9]{48}$/.test(oldState.instance_id||''))await unlink(acpLeaseFile(dir,oldState.instance_id)).catch(()=>{});
       await Promise.all([
         unlink(dir+'/harness-stdout.bin').catch(()=>{}),
         unlink(dir+'/harness-stdin.jsonl').catch(()=>{}),
@@ -516,6 +518,12 @@ export async function agentOperation(input,root){
       return {...state,stdout_base64,next_offset,stdout_size,has_more,token_requests,tool_requests,model_requests};
     };
 
+    if (expectedInstanceId && input.lease_heartbeat === true) {
+      const state = await readFile(dir + '/harness-state.json', 'utf8').then(JSON.parse).catch(() => null);
+      if (state?.instance_id === expectedInstanceId && state.harness === 'container_acp' && state.state === 'running') {
+        await writeFile(acpLeaseFile(dir, expectedInstanceId), '', { mode: 0o600 });
+      }
+    }
     const deadline=Date.now()+waitMs;
     for(;;){
       const snapshot=await readOnce();

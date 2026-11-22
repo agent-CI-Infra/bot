@@ -20,6 +20,7 @@ const names: Record<string, string> = {
   process: 'Process',
   claude_code: 'Claude Code',
   codex: 'Codex',
+  container_acp: '容器内 ACP',
 };
 
 export interface ModelConnectivityStatus {

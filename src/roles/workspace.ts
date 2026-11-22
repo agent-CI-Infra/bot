@@ -4,6 +4,7 @@ import {AsyncLocalStorage} from 'node:async_hooks';
 import {Workspace} from '../agent/workspace.js';
 import {randomId} from '../core/security.js';
 import {traceEvent} from '../tasks/trace.js';
+import { roleHarness, runsInTaskCheckout } from './harness.js';
 import {stop} from '../agent/common.js';
 import type {Row} from '../storage/database.js';
 import type {RoleRunOptions} from './run.js';
@@ -59,13 +60,12 @@ async function piState(space:Workspace){try{const state=await space.call('pi:pro
 const report=(space:Workspace,instance:Row,expected:string,recovery:string)=>(runtime:any)=>traceEvent(space.store,space.task.id,'harness_started',{harness:'pi',package:runtime.package,version:runtime.version,expected_version:expected,node:runtime.node,instance_id:instance.id,role:instance.role,workspace_id:space.task.workspace_id,recovery},space.task.trace_run_id);
 const computerEgress=(environment:any)=>typeof environment?.computer?.egress==='boolean'?environment.computer.egress:environment?.computer?.network_policy==='internet egress';
 /**
- * A Pi backend session lives in a separate empty workspace; `claude_code` and `codex` run directly inside the active
- * task/candidate checkout (`<task_dir>/repo`) with in-container model relay and stdio MCP platform tools (#705).
+ * A Pi session lives in a separate empty workspace. Backends with native task tools start in the active checkout.
  */
 export function roleBackendWorkspace(workspaceOrGetter:Workspace|(()=>Workspace)):NonNullable<RoleRunOptions['prepare']>{
  return async(instance,resolved)=>{
   const workspace=typeof workspaceOrGetter==='function'?workspaceOrGetter():workspaceOrGetter;
-  if(['claude_code','codex'].includes(resolved.snapshot.harness.id)){
+  if(runsInTaskCheckout(roleHarness(resolved.snapshot.harness.id))){
    // The CLI works in the checkout with its own file tools, so the task's worktree is bound before it starts (#769).
    const ready=await workspace.ensure?.()??{};if(ready.error)stop('workspace_unavailable','waiting_environment',ready.message);
    let egress=false;

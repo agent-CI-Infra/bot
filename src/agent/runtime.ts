@@ -86,6 +86,8 @@ export interface AgentSpec<T> {
   runAccess?: { readonly token: string; check: (presented: unknown, capability?: string) => void };
   /** Fresh external session working directory when physical context must not be resumed. */
   harnessSessionKey?:string;
+  /** Original authorized input for backends that must rebuild during a later send(). */
+  harnessInitialPrompt?: string;
   /** Public harness events of the session (session_bound, message, tool, ...), mirrored into the RoleRun event stream. */
   onHarnessEvent?: (event: { type: string; [key: string]: unknown }) => void;
   resultSession?: ResultSession;

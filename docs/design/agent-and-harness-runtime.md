@@ -38,9 +38,28 @@
 | `process` | 独立 Node 子进程 | 隔离事件循环、JSON-line RPC 通信，不继承控制面环境变量与凭据。 |
 | `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持原生直连或显式回环模型中转（`runner/model-relay.mjs`）。 |
 | `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账。 |
+| `container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
 
-- **容器内短期 Git/`gh` 只读凭证**：`claude_code` 与 `codex` 不向环境注入长期 GitHub Token，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
+- **容器内短期 Git/`gh` 只读凭证**：`claude_code`、`codex` 和 `container_acp` 使用运行级身份，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
+
+### 容器内 ACP
+
+`container_acp` 声明工作区执行、`writer` / `observer` 角色类型，以及模型中转支持的 Chat Completions、Responses 和 Anthropic Messages 格式。配置中原有的 `acp` 标识继续按退役规则迁移。ACP 客户端由项目电脑里的 runner 启动，产品以 JSON-RPC 帧写 stdout，诊断写 stderr。客户端握手时仅声明平台实际提供的能力，文件访问和命令由产品在任务工作区执行。
+
+`session/new` 和 `session/load` 均接收工作区路径与本次运行的 MCP 配置。支持 `loadSession` 且会话可读时记录 `native_resume`。其余续跑从授权的任务记录重建并记录 `rebuilt_from_task_records`。平台立即响应许可请求并记录 `permission` 事件，产品预设可提供私有请求的即时答复。未注册的请求立即收到 JSON-RPC `-32601`。
+
+HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bearer 凭据，和 stdio 共享工具清单、权限检查与提交校验。产品预设用 `{relay}`、`{token}`、`{model}` 填入模型地址、运行令牌与已解析的模型。中转请求沿用平台模型用量账本。取消时 runner 先发 `session/cancel`，随后回收整组进程。看门狗在控制面停止续租后也会执行该流程。配套进程各有回环端口、探活路径和独立运行目录，整组随运行结束。
+
+#### 安装 Python 产品
+
+安装脚本校验源码目录摘要，用 uv 安装固定补丁版本的 Python，并按上游 `uv.lock` 或带哈希的 `requirements.txt` 安装依赖。控制面读取选定版本的清单，项目电脑从只读工具卷执行对应版本的解释器和入口。管理员操作见 [安装与维护容器内 ACP 产品](../features/deployment-and-operations.md#安装与维护容器内-acp-产品)。
+
+`preset.json` 包含 `python`、`source`、`sourceSha256`、`lock` 和 `launch`。`launch` 包含 `args`、`mcp`（`http` 或 `stdio`）、`access`、`untrustedCheckout`、`env`、`answers` 和 `sidecars`。在 `args` 与 `env` 中可使用 `{product}`、`{workspace}`、`{state}`、`{run}`、`{access}` 及模型变量。`{product}` 指向已校验的源码目录。`answers` 把私有 JSON-RPC 方法映射为即时返回值。每个配套进程声明 `name`、`args` 和 `healthPath`，用 `{port:名称}` 获取端口，自身的 `{state}`、`HOME` 和临时目录按运行隔离。
+
+`access: full` 要求当前角色具有文件写入和命令权限。使用 `access: native` 的预设须把 `{access}` 中的约束落实到产品的文件与命令配置。预设只有在能禁用不可信检出中的本地指令、钩子和 MCP 配置时才声明 `untrustedCheckout: true`。可信仓库指令由平台按现有规则提供。
+
+安装器核验解释器版本并写入来源和哈希后，原子切换选定记录。已开始的运行保持原版本绑定。产品的安装来源可能包含 PyPI 和 Python 构建产物下载站，由安装环境提供网络访问。
 
 ## 4. 虚拟电脑生命周期（`manager/`、`runner/`）
 

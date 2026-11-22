@@ -79,7 +79,8 @@ function roleModelPicker(role, state, redraw) {
   select.disabled = external || subscription; return select;
 }
 function roleBackendPicker(role, state, redraw) {
-  return roleSelect(role.role_id + ' Agent 后端', role.harness_ref.id, state.data.backends.map(backend => [
+  const candidates = state.data.backends.filter(backend => backend.kinds.includes(role.kind) || backend.id === role.harness_ref.id);
+  return roleSelect(role.role_id + ' Agent 后端', role.harness_ref.id, candidates.map(backend => [
     backend.id,
     backend.name + (backend.recommended ? '（推荐）' : '') + (backend.runtime_status && !backend.runtime_status.ready ? '（未就绪）' : '') + (backend.available ? '' : '（尚不可用）'),
     !backend.available || !backend.kinds.includes(role.kind),

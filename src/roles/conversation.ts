@@ -10,7 +10,7 @@ import { TaskCommands } from '../tasks/commands.js';
 import { assertTaskSource, taskManagementTools, type TaskCaller } from '../tasks/management.js';
 import { resolveRole, roleAuthority } from './definition.js';
 import { githubReadScopes, permitsTool } from './permissions.js';
-import { roleHarness } from './harness.js';
+import { roleHarness, runsInTaskCheckout } from './harness.js';
 import { budgetExceeded, runBudget, buildRunContext, conversationUsage } from './role-run.js';
 import { roleInstance } from './run.js';
 import { externalModelRecorder } from '../metrics/accounting.js';
@@ -114,9 +114,9 @@ export class RoleConversations {
             if(!open||controller.signal.aborted||held?.lease!==lease||held.lease_until<=Date.now()||this.store.get('SELECT state FROM role_conversation_turns WHERE id=?',id)?.state!=='running'||!this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1',source.caller.project_id)||roleAuthority(this.store,source.caller.project_id,snapshot,undefined,true))stop('run_token_revoked','cancelled');
             assertTaskSource(this.store,source.caller);source.guard();if(source.fence()!==fence)stop('run_token_revoked','cancelled');
           }},
-          ...(driver.externalModel||['claude_code','codex'].includes(driver.id)?{onExternalRequest:accounting.request,onHarnessEvent:accounting.event}:{}),
+          ...(driver.externalModel||runsInTaskCheckout(driver)?{onExternalRequest:accounting.request,onHarnessEvent:accounting.event}:{}),
           onExternalUsage:usage=>traceEvent(this.store,id,'external_model_usage',{...usage,cost:'unknown'})};
-        if(driver.externalModel||['claude_code','codex'].includes(driver.id))await driver.prepare?.(spec);
+        if(driver.externalModel||runsInTaskCheckout(driver))await driver.prepare?.(spec);
         spec.runContext=()=>({...buildRunContext(this.store,{task,scope:'conversation:'+source.id+':'+source.caller.role,run_id:invocation,lease_epoch:logicalInstance.sequence,instance:logicalInstance,role:source.caller.role!,snapshot,snapshot_id:resolved.id,candidate:null}),
           ...(spec.harnessBinding?{...(spec.harnessBinding.model_revision?{model_revision:spec.harnessBinding.model_revision}:{}),harness_revision:spec.harnessBinding.harness_revision}:{})});
         traceEvent(this.store,id,'conversation_run',{run_context:spec.runContext(),recovery:'rebuilt_from_authorized_conversation'});
@@ -139,7 +139,7 @@ export class RoleConversations {
           spec.containerOptions={...spec.containerOptions,manager:this.manager,egress};
           spec.pi={workspace:space,key:prefix+':'+space.task.workspace_id+':'+id,resume:false,runtime:{version:snapshot.harness.version,report:runtime=>traceEvent(this.store,id,'harness_started',{...runtime,recovery:'rebuilt_from_authorized_conversation'})}};
         }
-        if(driver.externalModel||['claude_code','codex'].includes(driver.id))await guard(true);
+        if(driver.externalModel||runsInTaskCheckout(driver))await guard(true);
         spec.adapter=driver.adapter(spec); const value=await runAgent(spec); await guard();return value;
       } finally { open=false;await space?.release(false); }
     };

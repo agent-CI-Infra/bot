@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFile, chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { maskedStream } from './command-output.mjs';
@@ -12,6 +12,7 @@ import { environment as baseEnv, workspaceTag } from './command.mjs';
 import { startModelRelay } from './model-relay.mjs';
 import { local, runnerRoot, tasksDirectory } from './paths.mjs';
 import { bashProfile, loginProfile } from './login-profile.mjs';
+import { ACP_LEASE_MS, acpLeaseFile, reapAcpDescendants } from './acp-lease.mjs';
 import { createTokenExchange } from './token-exchange.mjs';
 
 const ID48_RE = /^[a-f0-9]{48}$/;
@@ -204,7 +205,8 @@ try {
   await rename(agentDir + '/harness.json.tmp', agentDir + '/harness.json');
 
   const harness = rawConfig.harness;
-  if (harness !== 'claude_code' && harness !== 'codex') throw new Error('unsupported_container_harness');
+  const acp = harness === 'container_acp';
+  if (!acp && harness !== 'claude_code' && harness !== 'codex') throw new Error('unsupported_container_harness');
 
   const executable = mapToolsPath(rawConfig.executable);
   if (!executable || !executable.startsWith('/')) throw new Error('harness_executable_invalid');
@@ -235,6 +237,7 @@ try {
   }
 
   const gateway = rawConfig.model_transport === 'gateway';
+  if (acp && (!gateway || !instanceId)) throw new Error('acp_launch_invalid');
   if(gateway) relay = await startModelRelay({ agentDir, signal: runAbort.signal });
   const nativeModel = gateway ? undefined : rawConfig.native_model;
   if(nativeModel?.key)addSecret(nativeModel.key);
@@ -369,7 +372,7 @@ try {
       DISABLE_ERROR_REPORTING: '1',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     });
-  } else {
+  } else if (!acp) {
     const codexHome = local && typeof rawConfig.codex_home_override === 'string' && rawConfig.codex_home_override.startsWith('/')
       ? await ensureSafeDirectory(rawConfig.codex_home_override, dirname(rawConfig.codex_home_override))
       : await ensureSafeDirectory(`${cliStateRoot}/codex-home`, cliStateRoot);
@@ -397,6 +400,13 @@ try {
     });
   }
 
+  if (acp) {
+    spawnCmd = process.execPath;
+    spawnArgs = [`${runnerRoot}/acp-entry.mjs`, agentDir, executable];
+    childEnv.BOT_ACP_RELAY_URL = relay.url;
+    childEnv.BOT_ACP_INSTANCE_ID = instanceId;
+  }
+
   await writeFile(stdoutFile, '', { mode: 0o600 });
   await writeFile(stdinFile, '', { mode: 0o600 });
   await unlink(interruptFile).catch(() => {});
@@ -418,6 +428,16 @@ try {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
+  const exitResultPromise = new Promise(resolveExit => {
+    cliChild.once('error', err => resolveExit({ code: null, signal: null, error: String(err?.message || 'spawn_failed') }));
+    cliChild.once('close', (code, signal) => resolveExit({ code, signal, error: null }));
+  });
+  const exitFallback = acp ? new Promise(resolveExit => {
+    cliChild.once('exit', (code, signal) => {
+      setTimeout(() => resolveExit({ code, signal, error: null }), 100).unref();
+    });
+  }) : exitResultPromise;
+
   cliChild.stdout.on('data', chunk => outMask.data(chunk));
   cliChild.stderr.on('data', chunk => errMask.data(chunk));
   cliChild.stdin.on('error', () => {});
@@ -425,6 +445,7 @@ try {
   await writeState({
     state: 'running',
     cli_pid: cliChild.pid ?? null,
+    ...(acp ? { harness } : {}),
     model_transport: gateway ? 'gateway' : 'direct',
     relay_url: relay?.url ?? null,
     session_id: sessionId,
@@ -439,6 +460,10 @@ try {
   let interruptHandled = false;
   let killHandled = false;
   let pollingStdin = false;
+  let interruption = null;
+  const leaseStart = Date.now();
+  const leaseFile = acp ? acpLeaseFile(agentDir, instanceId) : null;
+  const leaseMs = local && Number.isSafeInteger(rawConfig.acp_local_lease_ms) ? Math.max(250, rawConfig.acp_local_lease_ms) : ACP_LEASE_MS;
 
   const pumpControlFiles = async () => {
     if (pollingStdin || !cliChild) return;
@@ -464,7 +489,9 @@ try {
       }
 
       if (!killHandled) {
-        const intr = await readFile(interruptFile, 'utf8').then(JSON.parse).catch(() => null);
+        const leaseExpired = acp && Date.now() - ((await stat(leaseFile).catch(() => null))?.mtimeMs ?? leaseStart) >= leaseMs;
+        const intr = leaseExpired ? { mode: 'graceful' } : await readFile(interruptFile, 'utf8').then(JSON.parse).catch(() => null);
+        if (leaseExpired) interruption = 'acp_lease_expired';
         if (intr && (!intr.instance_id || !instanceId || intr.instance_id === instanceId)) {
           if (intr.mode === 'kill') {
             interruptHandled = true;
@@ -496,10 +523,7 @@ try {
   pollTimer = setInterval(() => { void pumpControlFiles(); }, 20);
   pollTimer.unref();
 
-  const exitResult = await new Promise(resolveExit => {
-    cliChild.once('error', err => resolveExit({ code: null, signal: null, error: String(err?.message || 'spawn_failed') }));
-    cliChild.once('close', (code, signal) => resolveExit({ code, signal, error: null }));
-  });
+  const exitResult = await Promise.race([exitResultPromise, exitFallback]);
 
   outMask.end();
   errMask.end();
@@ -514,13 +538,19 @@ try {
         ? 'completed'
         : 'failed';
 
+  if (acp) await reapAcpDescendants(instanceId);
   await shutdown({
     state: finalState,
     exit_code: exitResult.code,
     signal: exitResult.signal,
-    error: exitResult.error,
+    error: interruption ?? exitResult.error,
     stderr_tail: stderrTail,
   });
+
+  if (acp) {
+    await unlink(leaseFile).catch(() => {});
+    try { process.kill(-process.pid, 'SIGKILL'); } catch {}
+  }
 
   // Reclaim any lingering descendants in our detached process group before exiting (#632).
   process.on('SIGTERM', () => {});

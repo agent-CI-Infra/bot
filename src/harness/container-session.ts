@@ -1,3 +1,4 @@
+import type { AcpProductManifest } from '../../runner/acp-products.mjs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -51,7 +52,9 @@ export interface ContainerHarnessLaunch {
   modelTransport?: ModelTransport;
   modelProvider?: string;
   claudeHomeOverride?: string;
-  cli: AgentToolCli;
+  cli: AgentToolCli | 'container_acp';
+  acpProduct?: AcpProductManifest;
+  acpLocalLeaseMs?: number;
   model: string;
   systemPrompt?: string;
   maxTurns?: number;
@@ -271,7 +274,12 @@ export async function withContainerHarnessSession<T, R>(
     executable = launch.executableOverride.executable;
     executableArgs = launch.executableOverride.args ?? [];
     nodeExecutable = launch.executableOverride.nodeExecutable;
-    cliVersion = launch.executableOverride.version ?? COMPATIBLE_CLI_RANGES[launch.cli].tested;
+    cliVersion = launch.executableOverride.version ?? (launch.cli === 'container_acp' ? '1' : COMPATIBLE_CLI_RANGES[launch.cli].tested);
+  } else if (launch.cli === 'container_acp') {
+    if (!launch.acpProduct) return stop('acp_product_not_installed', 'waiting_configuration');
+    const { id, version } = launch.acpProduct;
+    executable = `${DEFAULT_AGENT_TOOLS_ROOT}/acp/${id}/${version}/venv/bin/python`;
+    cliVersion = version;
   } else {
     const selected = selectCompatibleCliVersion(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, launch.cli);
     executable = selected.container_executable;
@@ -295,7 +303,8 @@ export async function withContainerHarnessSession<T, R>(
   const leaseEpoch = Number(runRow?.lease_epoch ?? spec.runContext?.()?.lease_epoch ?? 0);
   const runId = String(boundRunId ?? randomId());
 
-  const connectionMode = modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
+  const acp = launch.cli === 'container_acp';
+  const connectionMode = acp ? 'gateway' : modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
   const supported = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
   const nativeModel = connectionMode === 'direct' ? nativeModelConnection(launch.primaryModel, launch.fileProvider ?? spec.containerOptions?.fileProvider,supported) : undefined;
   if (nativeModel) {
@@ -340,6 +349,7 @@ export async function withContainerHarnessSession<T, R>(
   const harnessConfig = {
     instance_id: instanceId,
     harness: launch.cli,
+    ...(acp ? { acp_product: launch.acpProduct, acp_local_lease_ms: launch.acpLocalLeaseMs } : {}),
     model_transport: connectionMode,
     ...(nativeModel ? { native_model: nativeModel } : {}),
     ...(launch.modelProvider ? { model_provider: launch.modelProvider } : {}),
@@ -385,10 +395,16 @@ export async function withContainerHarnessSession<T, R>(
     if (configBytes.length === 0) break;
   }
 
-  const started = await transport.deliver({ type: 'workspace_harness_start', instance_id: instanceId });
-  if (!started?.started) {
-    const reason = started?.detail || started?.error || (started?.state ? `state:${String(started.state)}` : 'startup_failed');
-    stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
+  let started: any;
+  try {
+    started = await transport.deliver({ type: 'workspace_harness_start', instance_id: instanceId });
+    if (!started?.started) {
+      const reason = started?.detail || started?.error || (started?.state ? `state:${String(started.state)}` : 'startup_failed');
+      stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
+    }
+  } catch (error) {
+    await Promise.allSettled([transport.reap(instanceId, false), modelGateway?.close(), dispatcher.close(), readTokens?.revoke()]);
+    throw error;
   }
   const startedPid = typeof started?.pid === 'number' ? started.pid : null;
   const pollWaitMs = Number.isSafeInteger(launch.pollWaitMs) && (launch.pollWaitMs as number) >= 0
@@ -536,11 +552,25 @@ export async function withContainerHarnessSession<T, R>(
 
   const pollLoop = (async () => {
     let idlePolls = 0;
+    let lastHeartbeat = 0;
     try {
       while (!stopPolling) {
         if (backgroundError !== null) throw backgroundError;
         wakePending = false;
 
+        let renew = false;
+        if (acp && !signal.aborted && !cancelSignaled && Date.now() - lastHeartbeat >= 1000) {
+          try {
+            runAccess.check(runToken);
+            renew = true;
+            lastHeartbeat = Date.now();
+          } catch (error) {
+            cancelSignaled = true;
+            dispatcher.halt();
+            launch.manualCancel?.(error);
+            if (!launch.manualCancel) throw error;
+          }
+        }
         const polled = await transport.deliver({
           type: 'workspace_harness_poll',
           offset: stdoutOffset,
@@ -549,11 +579,12 @@ export async function withContainerHarnessSession<T, R>(
           known_tool_ids: collectKnownIds('tool:'),
           known_token_ids: collectKnownIds('token:'),
           known_model_ids: modelGateway?.knownIds() ?? [],
+          ...(renew ? { lease_heartbeat: true } : {}),
         });
         if (polled?.error === 'disk_full') {
           stop('disk_full', 'waiting_environment', '项目容器工作卷空间不足，容器内 Agent 已停止。');
         }
-        if (polled?.error) {
+        if (polled?.error && !(acp && polled.state === 'interrupted' && polled.error === 'acp_lease_expired')) {
           stop('execution_interrupted', 'waiting_environment', `轮询容器内 ${launch.cli} 失败：${spec.redactor.text(String(polled.detail || polled.error))}。`);
         }
         if (
