@@ -119,6 +119,31 @@ function syncReceiptProject(line) {
   if (project) line.append(' · ', managementReceiptLink('#/projects/' + id + '/basic', '打开项目'));
 }
 
+function managementReceiptInitiator(receipt) {
+  if (me && String(receipt.principal_id) === String(me.id)) {
+    const name = userDisplayName(me);
+    return name ? `你（${name}）` : '你';
+  }
+  return '其他成员';
+}
+
+function managementReceiptVersion(receipt) {
+  if (!receipt.before_revision) return null;
+  return receipt.before_revision === (receipt.after_revision ?? receipt.before_revision)
+    ? '这次操作没有改变配置版本'
+    : '配置版本已变化';
+}
+
+function managementReceiptChange(receipt) {
+  const operation = managementOperationLabels[receipt.operation] ?? receipt.operation;
+  if (receipt.operation === 'task.create') {
+    const request = typeof receipt.arguments?.request === 'string' ? receipt.arguments.request.replace(/\s+/g, ' ').trim() : '';
+    return '具体变更：创建任务' + (request ? ' · ' + clipText(request, 160) : '');
+  }
+  const target = receipt.target?.task_id ?? receipt.target?.workflow_id;
+  return '具体变更：' + operation + (target ? '（目标 ' + target + '）' : '');
+}
+
 function managementReceiptBody(receipt) {
   const operation = managementOperationLabels[receipt.operation] ?? receipt.operation, nodes = [];
   // The same state machine the transcript card uses: the page never restates a state the console can already name.
@@ -133,15 +158,14 @@ function managementReceiptBody(receipt) {
   projectLine.dataset.receiptProject = String(receipt.project_id);
   syncReceiptProject(projectLine);
   const initiator = element('span', ''); initiator.dataset.receiptInitiator = '';
-  initiator.textContent = me && String(receipt.principal_id) === String(me.id)
-    ? '你（当前登录用户） · ' + receipt.principal_id
-    : receipt.principal_id + '（不是当前登录用户；只有发起人可以执行或对账这条命令）';
-  const version = receipt.before_revision ? receipt.before_revision.slice(0, 12) + ' → ' + (receipt.after_revision ?? receipt.before_revision).slice(0, 12) : null;
+  const currentInitiator = me && String(receipt.principal_id) === String(me.id);
+  initiator.textContent = managementReceiptInitiator(receipt) + (currentInitiator ? '' : '（不是当前登录用户；只有发起人可以执行或对账这条命令）');
+  const version = managementReceiptVersion(receipt);
   const overview = card('这次操作');
   overview.append(facts([['操作', `${operation}（${receipt.operation}）`], ['项目', projectLine], ['发起人', initiator],
-    ['渠道', managementChannels[receipt.channel] ?? receipt.channel], ['版本', version],
+    ['渠道', managementChannels[receipt.channel] ?? receipt.channel], ['配置版本', version],
     ['提交时间', timestamp(receipt.created_at)], ['更新时间', timestamp(receipt.updated_at)],
-    ['参数指纹', receipt.parameter_hash ? receipt.parameter_hash.slice(0, 12) : null],
+    ['参数校验', receipt.parameter_hash ? '已记录提交参数指纹，用于核对同一幂等键对应的参数；完整值见原始回执' : null],
     // #355: a receipt names the conversation and the message it came from, so a reader can walk back to the request
     // that produced it instead of matching timestamps by eye. Older receipts without those columns say so.
     ['来源', receiptSourceLine(receipt)]]));
@@ -206,7 +230,6 @@ function managementReceiptBody(receipt) {
   } else if (shown === 'succeeded') {
     // A successful command says so in its own words instead of leaving an empty section beside the state badge.
     resultBox.append(element('p', '已执行，服务端没有记录错误。'));
-    if (receipt.after_revision) resultBox.append(facts([['执行后版本', receipt.after_revision.slice(0, 12)]]));
   }
   result.append(resultBox); nodes.push(result);
   // Everything that is a record of the command rather than its outcome: server notes, the links it produced and the

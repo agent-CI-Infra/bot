@@ -163,7 +163,17 @@ for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手�
     await shot(page, '06-workflow-confirm');
 
     await confirmCard.getByRole('button', { name: '确认执行', exact: true }).click();
-    await expect(chat.locator('.management-receipt').filter({ hasText: '操作 创建任务' })).toContainText('已执行');
+    const createdReceipt = chat.locator('.management-receipt').filter({ hasText: '操作 创建任务' });
+    await expect(createdReceipt).toContainText('已执行');
+    const createdCommand = f.h.store.get("SELECT * FROM management_commands WHERE operation='task.create' AND project_id='103'");
+    await expect(createdReceipt.locator('.management-receipt-meta')).toContainText('你');
+    await expect(createdReceipt.locator('.management-receipt-meta')).toContainText('fixture/project-103');
+    await expect(createdReceipt.locator('.management-receipt-meta')).not.toContainText(createdCommand.principal_id);
+    await expect(createdReceipt.locator('.management-receipt-change')).toContainText('创建任务');
+    await expect(createdReceipt.locator('.management-receipt-change')).toContainText('为 PR 增加 npm test 自动检查工作流');
+    await expect(createdReceipt.locator('.management-receipt-change')).not.toContainText('目标 103');
+    await expect(createdReceipt).toContainText('这次操作没有改变配置版本');
+    await expect(createdReceipt).not.toContainText(`版本 ${createdCommand.before_revision.slice(0, 12)} → ${createdCommand.after_revision.slice(0, 12)}`);
     expect(f.h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='103'").n).toBe(1);
     const createdTask = f.h.store.get("SELECT input FROM tasks WHERE repository_id='103'");
     expect(Boolean(JSON.parse(createdTask.input).workflow_changes?.confirmed_by)).toBe(true);

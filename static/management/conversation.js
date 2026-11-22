@@ -337,9 +337,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       const [caption, explanation] = managementCommandState(shown);
       box.dataset.state = value.state;
       summary.replaceChildren(element('strong', '操作 ' + (managementOperationLabels[value.operation] ?? value.operation)), element('span', ' · ' + caption, 'management-receipt-state'));
-      body.replaceChildren(element('p', explanation, 'management-receipt-note'), element('p', '发起人 ' + value.principal_id + ' · 项目 ' + value.project_id + ' · 更新于 ' + timestamp(value.updated_at), 'management-receipt-meta'), element('p', '具体变更：' + (managementOperationLabels[value.operation] ?? value.operation) + '（目标 ' + (value.target?.task_id ?? value.target?.workflow_id ?? value.project_id ?? '—') + '）', 'management-receipt-change'));
+      const project = scopeProject('project:' + value.project_id) || pendingRepositories.find(row => String(row.id) === String(value.project_id));
+      const projectName = project?.full_name || value.project_id;
+      body.replaceChildren(element('p', explanation, 'management-receipt-note'), element('p', '发起人 ' + managementReceiptInitiator(value) + ' · 项目 ' + projectName + ' · 更新于 ' + timestamp(value.updated_at), 'management-receipt-meta'), element('p', managementReceiptChange(value), 'management-receipt-change'));
       if (value.result?.notice) body.append(element('p', String(value.result.notice)));
-      if (value.before_revision) body.append(note('版本 ' + value.before_revision.slice(0, 12) + ' → ' + (value.after_revision ?? value.before_revision).slice(0, 12)));
+      const version = managementReceiptVersion(value);
+      if (version) body.append(note(version));
       if (value.arguments) { const args = element('details', ''); args.append(element('summary', '查看请求参数'), element('pre', JSON.stringify(value.arguments, null, 2))); body.append(args); }
       if (value.result?.diff) { const diff = element('details', ''); diff.append(element('summary', '查看配置差异'), element('pre', JSON.stringify(value.result.diff, null, 2))); body.append(diff); }
       if (value.result?.pr_url) body.append(link(value.result.pr_url, '查看配置 PR（待合入）'));

@@ -41,16 +41,20 @@ test('a receipt opens as its own page with the project, the change and the recor
     await expect(panel).toContainText('agent-test-zone/admin-fixture-101');
     await expect(panel).not.toContainText('项目 101');
     await expect(panel.getByRole('link', { name: '打开项目' })).toHaveAttribute('href', '#/projects/101/basic');
-    // The initiator of this console command is the person reading it; a receipt from someone else says so instead.
+    // The initiator of this console command is the person reading it; the opaque principal stays in the raw receipt.
     await expect(panel.locator('[data-receipt-initiator]')).toContainText('你');
+    await expect(panel.locator('[data-receipt-initiator]')).toContainText('administrator');
+    await expect(panel.locator('[data-receipt-initiator]')).not.toContainText(receipt.principal_id);
     // What the command named and what it wrote, structurally rather than as one JSON blob.
     await expect(panel.locator('[data-receipt-target]')).toContainText('101');
     await expect(panel.locator('[data-receipt-arguments]')).toContainText(prompt);
-    // The recorded diff is a before/after row per field, and the revision moved from the old to the new one.
+    // The recorded diff is a before/after row per field; the human summary says the configuration revision changed.
     const diff = panel.locator('[data-receipt-diff] tr', { hasText: 'prompt' });
     await expect(diff).toContainText(prompt);
-    await expect(panel).toContainText(receipt.before_revision.slice(0, 12));
-    await expect(panel).toContainText(receipt.after_revision.slice(0, 12));
+    await expect(panel).toContainText('配置版本已变化');
+    await expect(panel).not.toContainText(receipt.before_revision.slice(0, 12));
+    await expect(panel).not.toContainText(receipt.after_revision.slice(0, 12));
+    await expect(panel).not.toContainText(receipt.parameter_hash.slice(0, 12));
     // The idempotency key is what makes a repeat submission return this same receipt; the page shows it as evidence.
     await expect(panel).toContainText(receipt.idempotency_key);
     await expect(panel.getByRole('link', { name: '原始回执（JSON）', exact: true })).toHaveAttribute('href', '/api/management/commands/' + receipt.id);
@@ -66,6 +70,21 @@ test('a receipt opens as its own page with the project, the change and the recor
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally { projects.resolve(); await f.close(); }
+});
+
+test('a receipt from another member uses a neutral name instead of an opaque principal', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    const receipt = (await command(f.admin, 'manager.update', { project_id: '101' }, { prompt: 'Inspect the original records.' })).value;
+    const otherPrincipal = 'f'.repeat(48);
+    f.h.store.run('UPDATE management_commands SET principal_id=? WHERE id=?', otherPrincipal, receipt.id);
+    await login(page, f);
+    const panel = await open(page, f, receipt.id);
+    const initiator = panel.locator('[data-receipt-initiator]');
+    await expect(initiator).toContainText('其他成员');
+    await expect(initiator).not.toContainText(otherPrincipal);
+    await expect(initiator).toContainText('只有发起人可以执行或对账');
+  } finally { await f.close(); }
 });
 
 test('a failed command says why it did not run instead of showing the bare server code', async ({ page }) => {
