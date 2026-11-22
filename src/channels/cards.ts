@@ -291,8 +291,13 @@ export function sanitizeCardMarkdown(raw: string, origin = '', clean: (s: string
     const lower = tag.toLowerCase();
     if (lower === 'font' || lower === 'text_tag') {
       if (slash) return `</${lower}>`;
-      const color = /\bcolor\s*=\s*['"]([a-z0-9_-]{1,24})['"]/i.exec(attrs)?.[1];
-      return color ? `<${lower} color='${color}'>` : `<${lower}>`;
+      const rawColor = /\bcolor\s*=\s*['"]([a-z0-9_-]{1,24})['"]/i.exec(attrs)?.[1]?.toLowerCase();
+      if (lower === 'text_tag') {
+        const safe = rawColor && tagColors.has(rawColor) ? normalizeTagColor(rawColor) : 'neutral';
+        return `<text_tag color='${safe}'>`;
+      }
+      const safe = rawColor && (tagColors.has(rawColor) || rawColor === 'default') ? rawColor : '';
+      return safe ? `<font color='${safe}'>` : '<font>';
     }
     if (lower === 'br') return '\n';
     return full.replace(/</g, '&lt;').replace(/>/g, '&gt;');

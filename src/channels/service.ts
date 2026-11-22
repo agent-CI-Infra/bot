@@ -480,11 +480,28 @@ export class ChannelService {
   }
   private handleCardAction(c: Row, event: ChannelEvent): Json {
     if (!c.enabled) fail(403, 'channel_connector_inactive');
-    const previous = this.store.get('SELECT id FROM channel_inbox WHERE connector_id=? AND (event_id=? OR dedup_key=?)', c.id, event.event_id, 'card:' + event.event_id);
-    if (previous) return { toast: { type: 'info', content: '操作已处理' } };
     const action = event.card_action!;
     const cardRow = this.cards.get(action.card_id!, c.id);
     const toast = (type: 'info' | 'success' | 'warning' | 'error', content: string) => ({ toast: { type, content } });
+    const previous = this.store.get('SELECT id FROM channel_inbox WHERE connector_id=? AND (event_id=? OR dedup_key=?)', c.id, event.event_id, 'card:' + event.event_id);
+    if (previous) {
+      // Idempotent retry recovery: if Feishu retried a view/page/filter callback because the initial synchronous
+      // response timed out or dropped, re-return the currently persisted card state without advancing state again.
+      if (cardRow && !action.act!.startsWith('a:')) {
+        const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', cardRow.chat_id);
+        if (chat && chat.chat_id === event.chat_id && chat.app_id === event.app_id && chat.installation_tenant === event.installation_tenant
+          && (!cardRow.remote_message_id || cardRow.remote_message_id === event.message_id)) {
+          try {
+            this.guardInteractiveCard(cardRow, chat, { actor_id: event.actor_id, actor_tenant: event.actor_tenant });
+            const { spec, footer_note, console_url } = this.cards.openSpec(cardRow);
+            const { card: currentCard } = renderFeishuCard(spec, JSON.parse(cardRow.state), cardRow.id, { footerNote: footer_note, consoleUrl: console_url });
+            const safeCard = publicContent(currentCard, registeredRedactor(this.store)) as Json;
+            return { ...toast('info', '操作已处理'), card: { type: 'raw', data: safeCard } };
+          } catch { /* Fall back to plain toast if card/chat/fence is no longer valid. */ }
+        }
+      }
+      return toast('info', '操作已处理');
+    }
     const recordIgnored = () => {
       const id = randomId();
       this.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,'completed',?)",
