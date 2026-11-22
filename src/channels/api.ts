@@ -314,6 +314,56 @@ export class ChannelApi {
         return result;
       });
     }
+    if (match && !match[2] && method === 'DELETE') {
+      fields(input, ['expected_revision']);
+      const current = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
+      if (!current) return fail(404, 'channel_connector_not_found');
+      if (!canManageApplication(actor, current)) return applicationForbidden();
+      if (input.expected_revision !== current.revision) fail(409, 'channel_revision_conflict');
+      return store.transaction(() => {
+        const saved = store.get('SELECT * FROM channel_connectors WHERE id=?', current.id);
+        if (!saved) return fail(404, 'channel_connector_not_found');
+        if (!canManageApplication(actor, saved)) return applicationForbidden();
+        if (saved.revision !== input.expected_revision) return fail(409, 'channel_revision_conflict');
+        const now = Date.now(), hasTable = (name: string) => !!store.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", name);
+        const chatIds = store.all('SELECT id FROM channel_chats WHERE connector_id=?', saved.id).map(r => String(r.id));
+        for (const chatId of chatIds) {
+          const binding = store.get('SELECT id,principal_id FROM channel_service_bindings WHERE chat_id=?', chatId);
+          if (binding) {
+            store.run('UPDATE channel_service_bindings SET enabled=0,revision=revision+1,updated_at=? WHERE id=?', now, binding.id);
+            store.run('UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL', now, binding.principal_id);
+            store.run('UPDATE principals SET active=0,authorization_revision=authorization_revision+1 WHERE id=?', binding.principal_id);
+          }
+          for (const grant of store.all('SELECT id,principal_id FROM channel_employee_grants WHERE chat_id=?', chatId)) {
+            store.run('UPDATE channel_employee_grants SET enabled=0,revision=revision+1 WHERE id=?', grant.id);
+            store.run('UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL', now, grant.principal_id);
+            store.run('UPDATE principals SET active=0,authorization_revision=authorization_revision+1 WHERE id=?', grant.principal_id);
+          }
+          if (hasTable('channel_schedules'))
+            store.run("UPDATE channel_schedules SET state='paused',reason='connector_deleted',revision=revision+1,updated_at=? WHERE chat_id=? AND state='active'", now, chatId);
+          store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error='connector_deleted' WHERE chat_id=?", chatId);
+          store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chatId);
+          store.run("UPDATE channel_chats SET state='archived',context_revision=context_revision+1 WHERE id=?", chatId);
+        }
+        const connectorKey = saved.id + ':' + saved.app_id;
+        const affectedPrincipals = store.all("SELECT DISTINCT principal_id FROM external_identities WHERE provider='feishu' AND connector=? AND status='active'", connectorKey).map(r => String(r.principal_id));
+        store.run("UPDATE external_identities SET status='revoked' WHERE provider='feishu' AND connector=? AND status='active'", connectorKey);
+        for (const principalId of affectedPrincipals)
+          store.run('UPDATE principals SET authorization_revision=authorization_revision+1 WHERE id=?', principalId);
+        store.run('DELETE FROM channel_oauth_links WHERE challenge_hash IN (SELECT challenge_hash FROM channel_bind_requests WHERE connector_id=?)', saved.id);
+        store.run('DELETE FROM channel_bind_requests WHERE connector_id=?', saved.id);
+        store.run("UPDATE channel_inbox SET state='failed',error='channel_connector_deleted' WHERE connector_id=? AND state IN ('queued','submitted')", saved.id);
+        store.run("UPDATE channel_outbox SET state='failed',last_error='channel_connector_deleted' WHERE connector_id=? AND state IN ('queued','retry')", saved.id);
+        store.run("UPDATE channel_reactions SET state='done',last_error='channel_connector_deleted' WHERE source_event IN (SELECT id FROM channel_inbox WHERE connector_id=?) AND state IN ('pending','adding','removing')", saved.id);
+        this.service.members.forgetConnector(saved.id);
+        if (hasTable('notification_channel_limits'))
+          store.run('DELETE FROM notification_channel_limits WHERE connector_id=?', saved.id);
+        store.run('DELETE FROM channel_connectors WHERE id=? AND revision=?', saved.id, saved.revision);
+        store.run('DELETE FROM channel_credentials WHERE id=?', saved.credential_ref);
+        store.audit(actor.principal_id, 'channel.connector.deleted', saved.id, JSON.stringify({ app_id: saved.app_id, owner_tenant: saved.owner_tenant || null }));
+        return { deleted: true, connector_id: saved.id };
+      });
+    }
     if (!match) return fail(404, 'channel_endpoint_not_found');
     const c = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
     if (!c) return fail(404, 'channel_connector_not_found');

@@ -14,7 +14,7 @@ function channelNameRequest(route) {
 }
 const channelChatName = chat => chat.display_name || (chat.type === 'p2p' || chat.binding_id !== undefined ? '飞书姓名暂未获取' : '群名称暂未获取');
 const channelChatContext = chat => `机器人：${chat.app_name || '机器人名称暂未获取'}；所属企业：${chat.tenant_name || '企业名称暂未获取'}${chat.organization_name ? '；应用所属组织：' + chat.organization_name : ''}`;
-const channelNamePermissionHint = '读取飞书姓名所需的权限尚未生效。请该应用管理员在「全局设置 → 飞书连接」（组织应用在「设置 → 组织飞书应用」）导入完整权限 JSON，在飞书开通并发布后重试。';
+const channelNamePermissionHint = '读取飞书姓名所需的权限尚未生效。请该应用管理员在「全局设置 → 飞书连接」（组织应用在「个人设置 → 组织飞书应用」）导入完整权限 JSON，在飞书开通并发布后重试。';
 function channelProfileDetails(chat, changed = () => {}) {
   const box = element('div'), context = note(channelChatContext(chat)), status = note(''), request = renderVersion;
   status.setAttribute('role', 'status'); box.append(context);

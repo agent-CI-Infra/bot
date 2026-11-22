@@ -37,6 +37,8 @@ test('the binding page keeps its typed confirmation string when the permission c
 
 test('a sub-page nobody is typing on is still drawn again when the check ends', async () => {
   const page = load(); arrange(page, '#/identity/feishu-apps/new/1'); typed(page, '');
+  page.run(`(() => { const copy = document.createElement('textarea'); copy.readOnly = true; copy.value = '{"scopes":{}}';
+    const sel = document.createElement('select'); sel.value = 'enterprise'; $('identity-panel').append(copy, sel); })()`);
   const ended = await endCheck(page);
   assert.equal(ended.drawn, 1, 'an untouched sub-page follows the check as before');
   assert.equal(ended.picker, 2);
