@@ -19,15 +19,20 @@ export class FileTree {
     })));
   }
   row(ctx,id){if(!validNoteId(id))fail('invalid_note_id');const row=ctx.catalog.refs.get(id);if(!row)fail('note_not_found',404);return row;}
-  list({directory='',query='',includeDeleted=false,deletedOnly=false}={}){
+  list({directory='',query='',includeDeleted=false,deletedOnly=false,recursive=false}={}){
     notePath(directory,{root:true});if(typeof query!=='string'||query.length>200)fail('invalid_note_query');
     return this.run(ctx=>{
       if(!deletedOnly&&!ctx.directories.includes(directory))fail('directory_not_found',404);
-      const files=ctx.files.map(file=>publicFile(this.row(ctx,file.id),file)).filter(file=>(deletedOnly?file.deleted:includeDeleted||!file.deleted)&&(deletedOnly|| (query?file.path.toLowerCase().includes(query.toLowerCase()):file.directory===directory)));
+      const match=query.toLowerCase();
+      const files=ctx.files.map(file=>publicFile(this.row(ctx,file.id),file)).filter(file=>{
+        if(deletedOnly)return file.deleted;
+        if(file.deleted&&!includeDeleted)return false;
+        return match?file.path.toLowerCase().includes(match):recursive||file.directory===directory;
+      });
       // A file saved under a name the current contract refuses stays on disk and in the catalog, but it is reported
       // here instead of posing as a readable entry: the listing says what was left out rather than hiding it.
       const quarantined=ctx.catalog.quarantined.map(row=>({id:row.id,path:row.path,reason:'unsupported_name'}));
-      return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),quarantined,revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':query?'all_directories':'directory'};
+      return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),quarantined,revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':query||recursive?'all_directories':'directory'};
     });
   }
   createDirectory(path){

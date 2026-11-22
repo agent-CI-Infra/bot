@@ -339,7 +339,7 @@ export class Projects {
       try{
         if(directories&&method==='POST')return await tree.createDirectory(input.path);
         if(directories&&method==='DELETE')return await tree.deleteDirectory(input.path);
-        if(id===undefined&&method==='GET')return await tree.list({directory:query.directory??'',query:query.query??'',includeDeleted:query.include_deleted==='1',deletedOnly:query.deleted_only==='1'});
+        if(id===undefined&&method==='GET')return await tree.list({directory:query.directory??'',query:query.query??'',includeDeleted:query.include_deleted==='1',deletedOnly:query.deleted_only==='1',recursive:query.recursive==='1'});
         if(id===undefined&&method==='POST')return await tree.create(input.path,input.content,actor);
         if(method==='GET'&&action==='versions')return await tree.versions(id);
         if(method==='GET'&&!action)return await tree.read(id,query.revision===undefined?undefined:Number(query.revision));
