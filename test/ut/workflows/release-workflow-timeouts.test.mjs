@@ -12,7 +12,7 @@ import { parse } from 'yaml';
 const text = readFileSync('.github/workflows/release.yml', 'utf8'), workflow = parse(text);
 const deploy = workflow.jobs.deploy, step = deploy.steps.find(entry => entry.name === 'Deploy');
 const minutes = (name, job) => job?.['timeout-minutes'];
-const docs = readFileSync('docs/deployment.md', 'utf8');
+const docs = readFileSync('docs/features/deployment-and-operations.md', 'utf8');
 
 test('the release and deploy jobs of the release workflow stop at a declared time instead of the platform ceiling', () => {
   // release waits up to 30 minutes for the Images run of the tagged commit (seq 1 60, sleep 30) and then tags, so a
@@ -74,10 +74,10 @@ test('the deployment docs name the server timeout dependency, its bounds and its
   // #923: the remote script needs GNU coreutils' `timeout` on the target; a machine without it fails the first
   // deployment with 127, and a bound that fires has to be readable from the docs as 124 (or 137 when the grace period
   // is needed) rather than as a health-check failure.
-  assert.match(docs, /GNU coreutils[^]*?`timeout`/, 'docs/deployment.md names GNU coreutils timeout as a server prerequisite');
-  assert.match(docs, /15 分钟[^]*?35 分钟/, 'docs/deployment.md gives the pull and recreate bounds');
-  assert.match(docs, /124/, 'docs/deployment.md names the exit code of a bound that fires');
-  assert.match(docs, /137/, 'docs/deployment.md names the exit code of the kill grace period');
-  assert.match(docs, /85 分钟/, 'docs/deployment.md states the shortened health wait');
-  assert.ok(!docs.includes('90 分钟'), 'docs/deployment.md has no stale 90-minute health wait');
+  assert.match(docs, /GNU coreutils[^]*?`timeout`/, 'docs/features/deployment-and-operations.md names GNU coreutils timeout as a server prerequisite');
+  assert.match(docs, /15 分钟[^]*?35 分钟/, 'docs/features/deployment-and-operations.md gives the pull and recreate bounds');
+  assert.match(docs, /124/, 'docs/features/deployment-and-operations.md names the exit code of a bound that fires');
+  assert.match(docs, /137/, 'docs/features/deployment-and-operations.md names the exit code of the kill grace period');
+  assert.match(docs, /85 分钟/, 'docs/features/deployment-and-operations.md states the shortened health wait');
+  assert.ok(!docs.includes('90 分钟'), 'docs/features/deployment-and-operations.md has no stale 90-minute health wait');
 });

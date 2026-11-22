@@ -1,0 +1,129 @@
+# 部署、升级与运维
+
+本文面向部署和运维 launchpad 的管理员，涵盖 Docker Compose 上手部署、源码构建、版本发布与生产自动部署、常用环境变量、备份恢复、存储与 CLI 工具卷运维及故障排查。服务拓扑与隔离设计见 [系统总体架构与安全边界](../design/architecture.md)。
+
+## 1. 准备与快速启动
+
+### 前置条件
+
+- **Docker Engine** 与 **Docker Compose v2**（使用助手电脑 HOME 卷 subpath 挂载需要 Docker Engine API 1.45+）
+- 一个用于创建和安装 GitHub App 的 GitHub 组织或账号
+- 一个公网 HTTPS 域名（控制台、登录、回调与 Webhook 共用唯一入口），支持自建 HTTPS 反向代理或内置 Cloudflare Tunnel
+- 至少一个兼容 Chat Completions 的模型端点与 API Key
+
+### 启动已发布镜像（推荐）
+
+无需克隆仓库，直接下载 [`docker/compose.yaml`](../../docker/compose.yaml) 启动：
+
+```sh
+mkdir department-bot && cd department-bot
+curl -fsSLO https://raw.githubusercontent.com/agent-CI-Infra/bot/main/docker/compose.yaml
+docker compose up -d
+```
+
+启动后访问 `http://127.0.0.1:8791/`（远程服务器先执行 `ssh -L 8791:127.0.0.1:8791 <服务器>`）创建首位超级管理员，并按 [系统初始化](onboarding-and-access.md#2-系统初始化仅超级管理员) 完成七步配置。
+
+### 从源码构建
+
+如需验证未发布改动或无法拉取 GHCR 镜像，在仓库根目录叠加 [`docker/compose.build.yaml`](../../docker/compose.build.yaml)：
+
+```sh
+# 独立运行（以 docker/ 为 Compose 项目目录）
+docker compose -f docker/compose.yaml -f docker/compose.build.yaml up -d --build
+
+# 沿用仓库根目录为项目目录与 .env 基准
+BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml -f docker/compose.build.yaml up -d --build
+```
+
+四个核心镜像与对应服务：
+
+| 镜像 | 用途 | Compose 服务 |
+| --- | --- | --- |
+| `ghcr.io/agent-ci-infra/bot-control-plane` | 控制面、密钥初始化与入口网关 | `bot`、`key-init`、`webhook` |
+| `ghcr.io/agent-ci-infra/bot-computer-manager` | 管理动态项目电脑与助手电脑（唯一挂载 Docker socket） | `manager` |
+| `ghcr.io/agent-ci-infra/bot-project-computer` | 项目电脑与助手电脑批准基础镜像（预装工具链、Chromium 与 X11 虚拟桌面） | `project-image` |
+| `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选 Cloudflare Tunnel 连接器 | `tunnel` |
+
+## 2. 端口与常用环境变量
+
+控制面只暴露单一业务端口（容器 `8791`，默认仅绑定宿主机 `127.0.0.1:8791`）。在 `compose.yaml` 同目录 `.env` 中配置后重新 `docker compose up -d` 生效：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `BOT_IMAGE_TAG` | `latest` | 固定镜像标签，如 `v0.4.8` 或 `sha-<12 位提交>` |
+| `BOT_PORT` | `8791` | 业务端口的宿主机映射端口 |
+| `BOT_BIND_ADDRESS` | `127.0.0.1` | 宿主机绑定地址；反向代理在另一台机器时才改为 `0.0.0.0` 并配防火墙 |
+| `BOT_PUBLIC_ORIGIN` | 空 | 统一公网 HTTPS 入口（如 `https://bot.example.com`，不含路径）；同时作为合法写 Origin |
+| `BOT_COOKIE_SECURE` | `false` | 设为 `true` 强制 Secure Cookie（经 HTTPS 访问也会自动启用） |
+| `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 关闭项目电脑默认外网出口 |
+| `BOT_COMMAND_TIMEOUT_MAX_SECONDS` | `600` | 模型命令显式超时的统一上限（秒，1–2147363） |
+| `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中 `@` 触发检视的名字（逗号分隔，`off` 关闭） |
+| `BOT_OBSOLETE_FAILURE_DAYS` | `7` | 临时/平台类失败自动移出「待处理」的天数 |
+| `BOT_TRUSTED_PROXIES` | 空 | 密码登录限流信任的代理 IP/CIDR（逗号分隔；仅填受控代理，切勿填 `0.0.0.0/0`） |
+| `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许 Webhook 转发的内网主机名白名单（逗号分隔，不支持通配符） |
+| `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 控制面安装与项目电脑只读挂载 Agent CLI（Claude Code / Codex）的目录 |
+| `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
+| `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
+| `BOT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | 空 | 未在向导保存 GitHub 登录配置时的部署级 OAuth 默认值 |
+| `BOT_NOTES_RECLAIM_*` / `BOT_NOTES_ORPHAN_*` | 见源码默认 | 删除项目后孤儿笔记卷重试回收与 `/readyz` 告警阈值 |
+
+> 若从早期双端口（`8791` + `8792`）部署升级，将 `BOT_WEBHOOK_PORT` 改为 `BOT_PORT`、`BOT_ADMIN_ORIGIN` 改为 `BOT_PUBLIC_ORIGIN` 并删除 `BOT_ADMIN_PORT`，反向代理统一转发到 `8791`，并在 OAuth App 与仓库 GitHub App 同步更新回调地址。
+
+## 3. 日常升级、版本发布与服务器自动部署
+
+### 日常手动升级
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+> `docker compose down` 会保留数据卷；**切勿在日常升级或维护时执行 `docker compose down -v`**，否则会删除主密钥、数据库和账本。
+
+### 标签发版与自动化部署（`release.yml`）
+
+在 `main` 最新已构建镜像的提交上推送 `v*` 标签（如 `git tag v1.2.0 origin/main && git push origin v1.2.0`），[`.github/workflows/release.yml`](../../.github/workflows/release.yml) 会依次完成：
+
+1. 校验该提交位于 `main` 并等待对应 `sha-<12 位提交>` 镜像发布完成；
+2. 不重新构建，直接为四个镜像追加版本标签；
+3. 创建 GitHub Release（带预发布后缀如 `-rc.1` 自动标记为 Pre-release）；
+4. 若仓库 `production` Environment 配置了部署变量（`DEPLOY_HOST`、`DEPLOY_PORT`、`DEPLOY_USER`、`DEPLOY_PATH`、`DEPLOY_KNOWN_HOSTS`、`DEPLOY_SSH_KEY` 及可选跳板机 `DEPLOY_JUMP_*`），则经 SSH 自动发布：写入对应版本的 `compose.yaml` 与 `.env` 中的 `BOT_IMAGE_TAG`，清理中断残留的替换容器后拉取并重建服务。
+
+**服务器超时前提与容错边界**：
+
+- 目标服务器必须安装 **GNU coreutils 的 `timeout`**（需支持 `15m`/`35m` 等时长后缀，缺失会以退出码 `127` 失败）。
+- 远端命令限时：`docker compose pull` 最多 **15 分钟**，`docker compose up -d --force-recreate` 最多 **35 分钟**（覆盖 manager 最长 30 分钟启动宽限），随后等待 `bot` 健康检查最多 **85 分钟**（包含启动时数据库压缩耗时），全部计入 Deploy 步骤的 145 分钟预算内。
+- 超时后先发 `SIGTERM`，30 秒宽限期未退出再发 `SIGKILL`：正常超时退出码为 **`124`**，触发宽限期强杀退出码为 **`137`**。部署中断或失败排查后，在 Actions 中对该 Release 运行直接 **Re-run failed jobs** 即可幂等恢复。
+- 可通过 Actions → Release → Run workflow 手动运行只读 SSH 连通性预检（不发版、不改容器）。
+
+## 4. 数据卷、备份与存储维护
+
+### 关键数据卷
+
+| 卷名 | 内容与重要性 |
+| --- | --- |
+| `bot-data` | 控制面 `control.sqlite`、轨迹文件 `trajectories/`、共享 `blobs/`、Git 镜像缓存、公开看板快照、飞书加密附件 `channel-resources/` 与历史浏览器证据 |
+| `bot-keys` | AES-256-GCM 加密主密钥（**丢了主密钥将无法解密任何已存凭据**） |
+| `internal-keys` | 控制面与 manager 内部认证材料及部署 ID 种子 |
+| `manager-data` | `manager.sqlite`、manager 轨迹与项目笔记卷元数据 |
+| `assistant-homes` | 群聊与管理助手电脑的持久 HOME（可按需备份） |
+| `agent-tools` | 受信任的 Claude Code / Codex CLI 多版本二进制（可随时通过控制台重新安装） |
+| `tunnel-keys` | Cloudflare Tunnel token 文件 |
+
+### 备份与恢复要点
+
+- **停写一致备份**：备份前先停止 `bot` 和 `manager`，保持 `control.sqlite`、`trajectories/`、`channel-resources/`、`bot-keys`、`internal-keys` 与 `manager-data` 来自同一次停写。
+- **知识卷恢复（`note_move_uncertain`）**：若项目知识文件因异常移动进入 `note_move_uncertain` 只读保护，切勿手工删除 `.write-history` 里的 pending journal、改 file ID 或直接降级镜像。标准恢复步骤：① 停止该项目的任务派发、项目电脑与访问该卷的 manager 操作；② 对当前整个笔记卷（含 `.write-history`、历史索引与 blob）做只读备份；③ 选取移动前停写状态下生成的整卷备份，在同版 manager/runner 隔离环境中验证目录、正文与历史可读；④ 在停写状态下用验证过的完整备份替换原卷（备份后的新增改动对照第 ② 步通过正常保存接口补录）；⑤ 恢复同版服务并验证读正常后再开放写入。
+- **全局存储与按天数清理（「全局设置 → 存储」）**：超级管理员可查看整机/Launchpad/项目空间占比，配置轨迹文件、manager 重复正文（默认 2 天）、已完成/失败任务工作区（默认 1 天 / 7 天）和 Webhook 正文的保留天数，并按需触发「立即回收」；飞书群聊与私聊记录的保留天数及手工清理在「飞书会话」页（`#/conversations`）按会话配置（仅超管），存储页做汇总展示。
+- **Agent CLI 工具卷（「全局设置 → Agent CLI 工具卷」）**：仅超管可用，用于在线校验 SHA-256 安装或清理容器化 `claude_code` / `codex` 版本（运行中任务使用的版本自动受保护不可删除）。
+
+## 5. 故障排查速查
+
+- **任务失败或等待**：优先查看控制台任务详情页的「原因分类」与时间线（明确区分外部波动、GitHub 权限、模型配置、项目电脑、仓库内容与 Bot 自身故障）。
+- **GitHub 限流**：在「全局设置 → 机器人账号 → GitHub 请求额度」查看每个安装与 Token 账号的剩余配额与重置时间（限流等待不消耗重试次数）。
+- **服务日志与健康检查**：
+  ```sh
+  docker compose -p bot logs --since 1h bot       # 控制面：事件循环卡顿 [stall]、慢 SQL [slow-sql]、对账与任务异常
+  docker compose -p bot logs --since 1h manager   # 虚拟电脑：Docker 失败、恢复失败与资源异常
+  ```
+  控制面 `/healthz` 检查数据库健康，`/readyz` 额外核对 manager 连通性与孤儿笔记卷阈值。

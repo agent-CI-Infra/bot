@@ -60,7 +60,7 @@ test('a checkout without the runner dependencies names them and the install comm
   assert.ok(banner >= 0, `the runner must print its banner:\n${output}`);
   const beside = lines.slice(banner + 1, banner + 4).join('\n');
   assert.ok(beside.includes(missing), `the banner line must be followed by the missing-dependency notice:\n${output}`);
-  for (const needle of ['role-conversation', 'test/st/src/roles/role-conversation.test.mjs', 'integration-engine', 'test/st/src/tasks/integration-engine.test.mjs', install, 'docs/development.md:33'])
+  for (const needle of ['role-conversation', 'test/st/src/roles/role-conversation.test.mjs', 'integration-engine', 'test/st/src/tasks/integration-engine.test.mjs', install, 'CONTRIBUTING.md'])
     assert.ok(beside.includes(needle), `the notice must name ${needle}:\n${beside}`);
 });
 

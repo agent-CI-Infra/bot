@@ -1,6 +1,6 @@
 # 个人电脑兑换 GitHub Token：接口与 curl 示例
 
-这是与语言和客户端实现无关的接口协议。不要求 Node.js，也不要求下载 Bot 的脚本。下文用 OpenSSL 生成签名，用 curl 发送 HTTP 请求，用 jq 构造和读取 JSON；也可以用自己熟悉的语言实现相同协议。GitHub Actions OIDC 使用另一种身份，见[外部执行端说明](external-executors.md#github-actions-oidc)，不要套用个人电脑公钥流程。
+这是与语言和客户端实现无关的接口协议。不要求 Node.js，也不要求下载 Bot 的脚本。下文用 OpenSSL 生成签名，用 curl 发送 HTTP 请求，用 jq 构造和读取 JSON；也可以用自己熟悉的语言实现相同协议。GitHub Actions OIDC 使用另一种身份，见[外部执行端说明](features/external-executors.md#2-两种客户端认证方式)，不要套用个人电脑公钥流程。
 
 ## 接入前准备
 

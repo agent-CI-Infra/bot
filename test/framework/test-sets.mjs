@@ -1,7 +1,7 @@
 // Runs the unit tests as test sets: the files of one set run one after another in a node --test process of their own,
 // and different sets run at the same time. Each set gets its own TMPDIR and HOME inside one run directory under .tmp/,
 // and its processes may only connect to loopback (test/framework/test-network-guard.mjs). Rules for writing tests that fit
-// this: docs/development.md, section 测试集与并行.
+// this: CONTRIBUTING.md, section 检查与测试.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, cpus } from 'node:os';
@@ -50,7 +50,7 @@ console.log(`# ${sets.size} test sets, up to ${jobs} at a time, in ${run}`);
 const runnerDir = process.env.BOT_RUNNER_DIR || 'runner';
 if (!existsSync(join(runnerDir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json')))
   console.log(`# runner dependencies missing under ${runnerDir}/node_modules: role-conversation (test/st/src/roles/role-conversation.test.mjs) and integration-engine (test/st/src/tasks/integration-engine.test.mjs) fail for that reason\n`
-    + '#   install them with: npm ci --prefix runner --omit=dev --ignore-scripts   (docs/development.md:33)');
+    + '#   install them with: npm ci --prefix runner --omit=dev --ignore-scripts   (CONTRIBUTING.md)');
 
 async function runSet(set) {
   const root = join(run, set.name), network = join(root, 'network.log');

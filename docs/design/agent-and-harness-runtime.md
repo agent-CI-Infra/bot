@@ -1,0 +1,57 @@
+# Agent 运行时、RoleRun 协议、Harness 与虚拟电脑
+
+本文说明 launchpad 执行层的核心设计：共享 Agent 运行时、版本化 `bot.role-run/1` 协议、多后端 Harness 抽象，以及项目电脑与助手电脑的生命周期管理。
+
+## 1. 共享 Agent 运行时与工具契约（`src/agent/`）
+
+- **统一入口 `runAgent(spec)`**：所有模型循环共享同一执行入口与 `gateway.ts` 模型网关，统一处理：
+  - 模型选择快照与请求前实时授权/Key 核验（变更或撤权立即停机，不静默换模型）；
+  - 90 秒无 token 超时与暂时性故障自动重试（408/429/5xx/断流最多重试 5 次：1/3/9/27/60 秒）；
+  - 多模态请求上限（纯文本 2 MiB、含内联图片 20 MiB，自动缩放与拒图降级恢复，避免会话锁死）；
+  - 统一用量记账（`model_requests` 先落账后交付结果，记录当时单价快照与缓存命中 token，支持按 `repository_id` 或 `service_role_id` 归属）。
+- **统一工具集与结果预算**：
+  - **只读仓库探索（`RepositoryExplorer`）**：`github_read`、`github_search`、`read_job_log`、`download_artifact` 固定 GET 与当前仓库范围，返回前脱敏。
+  - **受控 GitHub 写入（`github_write`）**：类 REST 接口，按路由映射细粒度资源权限与能力上限，单次调用临时签发最小写权限安装令牌并在发出后立即撤销，支持按 scope+key 去重，**永远拒绝 `.github/workflows/`**。
+  - **超长结果分页**：超过预算或需折叠的工具输出统一脱敏写入 `tool-results` 卷（24 小时过期），仅向模型返回首尾预览与句柄，通过 `read_tool_result` 或容器内只读 `/results/<id>.utf8` 按需读取。
+  - **命令时限与后台进程**：`run_command` 支持 `timeout_seconds`（受 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 统一封顶）与 `keep_background: true`（自动将日志落盘到 `log_path` 并随任务结束回收进程组）。
+
+## 2. `bot.role-run/1` 协议与 `TaskToolGateway`（`src/roles/`）
+
+每次角色执行都是 `task_runs` 中的一次版本化 RoleRun，统一经历 `prepare → start → events / checkpoint / cancel → collect / recover`：
+
+- **不可变运行快照（`RunContext`）**：启动时按内容哈希固化角色定义、模型版本、Skill 文件与哈希、有效权限、环境、预算及不可变 `source_ref`/`candidate_ref`；写入前强制经 `assertSecretFree` 校验无密钥泄漏。
+- **单调租约（`lease_epoch`）与短时运行令牌（`rrt_…`）**：
+  - 每次绑定分配单调递增 `lease_epoch` 并签发 15 分钟续期运行令牌（仅存哈希，绑定租户/项目/任务/run/epoch/角色/能力）；新 run 接管或取消时旧令牌立即撤销，旧 epoch 迟到事件/提交全部拒绝。
+- **能力准入（`admitRun`）与累计预算**：
+  - 启动前对照驱动能力矩阵校验（`cancel`、`version_binding`、`output_validation`、`raw_evidence`、`fixed_candidate_read`、`fresh_context`），缺失即 `waiting_configuration`，不静默降级后端。
+  - `metered` 预算按角色实例跨重试/恢复持续累计（token、请求数、工具数、墙钟时间），耗尽立即中断并撤销令牌；连续长耗时运行满 60 分钟及之后每 20 分钟向 Manager 发送 `long_execution_report` 而非粗暴强杀。
+- **`TaskToolGateway`**：角色读取任务历史、项目知识与提交经验统一经网关鉴权（复核 `rrt_…`、epoch、发起人实时权限与角色策略），屏蔽跨任务/跨项目引用；支持同一任务多角色在共享工作区协作、按需为并发开发任务分配独立 `git worktree`。
+
+## 3. 多后端 Harness 抽象（`src/harness/`、`runner/`）
+
+`roleHarness(id).createSession(spec, services)` 屏蔽执行器差异，统一提供 `run / send / cancel / close` 与规范化恢复模式（`native_resume`、`checkpoint_transcript`、`rebuilt_from_task_records`、`fresh_evaluation`）：
+
+| 后端 | 运行位置 | 关键设计要点 |
+| --- | --- | --- |
+| `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
+| `native` | 控制面进程内 | 内置标准工具循环与 `ToolTranscript` 折叠，适合轻量控制面/服务角色会话。 |
+| `process` | 独立 Node 子进程 | 隔离事件循环、JSON-line RPC 通信，不继承控制面环境变量与凭据。 |
+| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持原生直连或显式回环模型中转（`runner/model-relay.mjs`）。 |
+| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账。 |
+
+- **容器内短期 Git/`gh` 只读凭证**：`claude_code` 与 `codex` 不向环境注入长期 GitHub Token，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
+- **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
+
+## 4. 虚拟电脑生命周期（`manager/`、`runner/`）
+
+### 项目电脑（`manager/projects.mjs`）
+
+- **每仓一台、并发复用**：同一仓库共享一台长期容器、工作卷与笔记卷，支持 `N`（1–32）个任务并发执行各自目录；启停、重置、重建与配置操作在项目锁内排队独占执行。
+- **代次（`generation`）与派生镜像**：重置电脑时停旧代容器、递增代次并创建新工作卷与新网络（旧代次封存不复用）；仓库定制的 Debian 软件包以批准基础镜像为底由固定 `apt` 流程构建缓存派生镜像。
+- **进程回收与崩溃恢复**：单命令结束后清理进程组，任务结束后按 `BOT_WORKSPACE_ID` 回收该任务全部进程（含 `keep_background` 服务）；最后一个任务结束时清扫残留进程，仅在清理失败或容器异常退出时触发独占重启。`manager` 重启时通过 journal 对账并恢复已登记电脑。
+
+### 助手电脑（`manager/assistant-computers.mjs`）
+
+- **按归属按需创建**：仅在回合需要执行命令或访问 `/tmp`/`/workspace` 时启动短时容器（纯读写 HOME 由控制面经 `/proc/self/fd` 边界核验直读直写）。
+- **生命周期与 HOME 代次**：运行中每 30 秒续期，回合结束回收进程后空闲默认 5 分钟销毁，单台最长存活 4 小时，达到并发上限淘汰最久空闲容器；归属的仓库范围收缩或更换绑定/角色时推进 HOME 代次并封存旧代次，超过软容量上限（默认 5 GB）自动降为只读提示清理。
+- **预装浏览器与 X11 虚拟桌面**：项目与助手基础镜像统一预装 Chromium（`/usr/local/bin/bot-chromium`）与虚拟桌面包装（`/usr/local/bin/bot-desktop`，封装 `Xvfb`、`openbox`、`xdotool`、`scrot`、`ffmpeg` 等），兼容只读根文件系统与非特权用户，控制面本身不安装浏览器。

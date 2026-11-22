@@ -442,7 +442,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       superAdmin(user);
       // The listing names what cannot be reclaimed yet, so an operator sees the volume, its repository and its age.
       const report = await notesReport(store, options);
-      // A manager that cannot be read keeps the durable intents and the report, as docs/api.md promises; the flag keeps
+      // A manager that cannot be read keeps the durable intents and the report, as docs/design/console-and-api.md promises; the flag keeps
       // an empty list distinguishable from an unreadable one.
       const listing = await listNotesOrphans(store, options.projects);
       respond(res, 200, { notes_volumes: listing.orphans, notes_volumes_unreadable: listing.unreadable,

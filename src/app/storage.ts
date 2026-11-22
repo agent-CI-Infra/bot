@@ -99,7 +99,7 @@ export class StorageReport {
           try { manager = await this.manager.call('GET', '/v1/storage') as Json; managerReadAt = new Date().toISOString(); }
           catch (error) {
             // Only the client's own code leaves the server: an unexpected error's message may carry a host, an address or
-            // text out of a manager response, and the API never returns those (docs/api.md).
+            // text out of a manager response, and the API never returns those (docs/design/console-and-api.md).
             managerError = error instanceof HttpError && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) ? error.code : 'manager_unavailable';
           }
         }

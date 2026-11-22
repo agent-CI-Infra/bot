@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 
-// #890: #/settings/accounts lists one row per account, and the #561 contract (docs/console-ui.md:145) ellipsizes the
+// #890: #/settings/accounts lists one row per account, and the #561 contract (docs/design/console-and-api.md) ellipsizes the
 // row heading so a long name never collides with the actions — but `settingsRow` only ever put the full text on the
 // subtitle. A long account name therefore showed its first characters with no way to read the rest short of opening the
 // detail page, which is exactly the row's job (choose or delete the right account). The fix keeps the single line and

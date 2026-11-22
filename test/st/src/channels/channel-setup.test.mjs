@@ -489,7 +489,7 @@ test('enterprise connections require the bot-inclusive tenant grant while preser
 });
 
 test('the documented Feishu scope table lists exactly the required scopes', () => {
-  const documented = [...readFileSync(new URL('../../../../docs/message-channels.md', import.meta.url), 'utf8').matchAll(/^\| `([a-z]+:[^`]+)` \|/gm)].map(m => m[1]);
+  const documented = [...readFileSync(new URL('../../../../docs/features/assistants-and-channels.md', import.meta.url), 'utf8').matchAll(/^\| `([a-z]+:[^`]+)` \|/gm)].map(m => m[1]);
   assert.deepEqual(documented, FEISHU_SCOPES.map(s => s.scope));
 });
 

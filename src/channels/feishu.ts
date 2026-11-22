@@ -16,7 +16,7 @@ export class ChannelHistoryError extends HttpError {
 }
 /**
  * The single list of tenant scopes a connection needs. The wizard's import JSON, the connection-settings JSON and the
- * automatic grant check are all generated from it; add a new scope here and to the table in docs/message-channels.md.
+ * automatic grant check are all generated from it; add a new scope here and to the table in docs/features/assistants-and-channels.md.
  */
 export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterprise_only?: true }[] = [
   { scope: 'im:message.p2p_msg:readonly', purpose: '接收私聊消息' },

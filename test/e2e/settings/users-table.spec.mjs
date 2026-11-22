@@ -5,7 +5,7 @@ import { harness, setup, testPassword } from '../../fixtures/helpers.mjs';
 
 // #547: one platform user per row, with the login methods and the GitHub binding the server reports. A phone keeps the
 // table readable: the wrapper scrolls on its own, the page does not, and every row's entries stay reachable.
-// Playwright results and screenshots live under .tmp/ (docs/development.md); nothing here writes into the tracked tree.
+// Playwright results and screenshots live under .tmp/ (CONTRIBUTING.md); nothing here writes into the tracked tree.
 const output = resolve('.tmp/users-table-547');
 const identity = (h, principal, login, status) => h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,
   connector,external_tenant,external_actor,display_name,status,verified_at) VALUES(?,?,'github','github.com','','',?,?,?,?)`,
