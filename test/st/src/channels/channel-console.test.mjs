@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../../../fixtures/channel-fixture.mjs';
+import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until, credentials } from '../../../fixtures/channel-fixture.mjs';
 import { testPassword } from '../../../fixtures/helpers.mjs';
 import { loadConsole } from '../../../fixtures/console-page.mjs';
 import { ledgerStorage } from '../../../../dist/channels/ledger.js';
@@ -339,4 +339,70 @@ test('the personal Feishu binding row reads a refused name once, not on every re
   assert.equal(nameLookups(page), 1, 'redrawing the page does not look the refused name up again');
   assert.equal(f.wire.state.profileRequests.length, 1, 'and the provider is not asked a second time');
 });
+
+test('conversations list filters by connector_id with authorization isolation and timeline exposes sync/retention capabilities (#1228)', async t => {
+  const f = await channelFixture(t), { admin, h, member, id } = f;
+  const second = await admin('/api/channels/connectors', 'POST', {
+    app_id: 'cli_second_console', application_type: 'enterprise', transport: 'http', enabled: true,
+    credentials, expected_revision: 0,
+  });
+  assert.equal(second.status, 201, JSON.stringify(second.value));
+  const secondId = second.value.connector_id;
+  h.store.run("UPDATE channel_connectors SET app_name='应用一',tenant_name='企业一' WHERE id=?", id);
+  h.store.run("UPDATE channel_connectors SET app_name='应用二',tenant_name='企业二' WHERE id=?", secondId);
+  const chat1Post = await post(h, id, envelope('chat in app 1', { message: { chat_id: 'oc_app1', chat_type: 'group' } }));
+  assert.equal(chat1Post.status, 200, JSON.stringify(chat1Post.value));
+  await finished(h, chat1Post.value.operation_id);
+  const chat2Post = await post(h, secondId, envelope('chat in app 2', { header: { app_id: 'cli_second_console' }, message: { chat_id: 'oc_app2', chat_type: 'group' } }));
+  assert.equal(chat2Post.status, 200, JSON.stringify(chat2Post.value));
+  await finished(h, chat2Post.value.operation_id);
+  const chat1 = h.store.get("SELECT * FROM channel_chats WHERE connector_id=? AND chat_id='oc_app1'", id);
+  const chat2 = h.store.get("SELECT * FROM channel_chats WHERE connector_id=? AND chat_id='oc_app2'", secondId);
+
+  const filtered1 = await admin('/api/channels/conversations?connector_id=' + id);
+  assert.equal(filtered1.status, 200);
+  assert.deepEqual(filtered1.value.conversations.map(c => c.id), [chat1.id]);
+  assert.equal(filtered1.value.conversations[0].connector_id, id);
+  assert.deepEqual(filtered1.value.connector, { id, app_name: '应用一', tenant_name: '企业一' });
+
+  const filtered2 = await admin('/api/channels/conversations?connector_id=' + secondId);
+  assert.deepEqual(filtered2.value.conversations.map(c => c.id), [chat2.id]);
+  assert.deepEqual(filtered2.value.connector, { id: secondId, app_name: '应用二', tenant_name: '企业二' });
+
+  // An ordinary member with no chats in connector 2 cannot discover its name via connector_id filtering.
+  const ordinary = await member('conv-filter-ordinary', { repository_ids: ['101'] });
+  const ordinaryFiltered = await ordinary.client('/api/channels/conversations?connector_id=' + secondId);
+  assert.equal(ordinaryFiltered.status, 200);
+  assert.deepEqual(ordinaryFiltered.value.conversations, []);
+  assert.equal(ordinaryFiltered.value.connector, null);
+
+  // Timeline exposes revision, connector_id, can_sync and can_manage_retention accurately per role.
+  const adminTimeline = await admin(`/api/channels/chats/${chat1.id}/timeline`);
+  assert.equal(adminTimeline.status, 200);
+  assert.equal(adminTimeline.value.chat.connector_id, id);
+  assert.equal(adminTimeline.value.chat.revision, chat1.revision);
+  assert.equal(adminTimeline.value.chat.can_sync, true);
+  assert.equal(adminTimeline.value.chat.can_manage_retention, true);
+
+  // Retention PUT/DELETE return the bumped revision for subsequent optimistic updates.
+  const retained = await admin(`/api/channels/chats/${chat1.id}/retention`, 'PUT', { days: 15, expected_revision: adminTimeline.value.chat.revision });
+  assert.equal(retained.status, 200);
+  assert.equal(retained.value.retention.days, 15);
+  assert.equal(retained.value.revision, chat1.revision + 1);
+
+  // Personal chat owner can view & sync their own active chat, but cannot manage retention.
+  bindFixture(h, id, ordinary.id, 'ou_ordinary_p2p');
+  const p2pPost = await post(h, id, envelope('hello', { sender: { sender_id: { open_id: 'ou_ordinary_p2p' } }, message: { chat_id: 'oc_ordinary_p2p', chat_type: 'p2p' } }));
+  await finished(h, p2pPost.value.operation_id);
+  const p2pChat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_ordinary_p2p'");
+  const ownerTimeline = await ordinary.client(`/api/channels/chats/${p2pChat.id}/timeline`);
+  assert.equal(ownerTimeline.status, 200);
+  assert.equal(ownerTimeline.value.chat.can_sync, true);
+  assert.equal(ownerTimeline.value.chat.can_manage_retention, false);
+
+  // Disabling the connector turns can_sync off on timeline.
+  h.store.run('UPDATE channel_connectors SET enabled=0 WHERE id=?', id);
+  assert.equal((await admin(`/api/channels/chats/${chat1.id}/timeline`)).value.chat.can_sync, false);
+});
+
 

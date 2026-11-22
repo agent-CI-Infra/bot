@@ -423,8 +423,8 @@ async function renderFeishuDetail(panel, data, c, request, { openGuide = false, 
   guideCard.append(guideDetails);
   panel.append(guideCard);
 
-  // Section 4: Health, delivery diagnostics & super-admin local history maintenance.
-  await channelDiagnostics(c, panel, data.platform);
+  // Section 4: Health and delivery diagnostics (local message search/resync/retention live in #/conversations).
+  await channelDiagnostics(c, panel);
 
   // Section 5: Delete connector.
   const dangerCard = settingsCard('删除应用连接');

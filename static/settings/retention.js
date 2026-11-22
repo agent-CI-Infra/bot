@@ -84,7 +84,7 @@ async function retentionCard(size, count, time, refresh) {
       ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
         + ((last.trajectories?.failed || last.deliveries?.failed || last.evidence?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.evidence?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
         + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
-      ['群聊记录', current.chats ? `${count(current.chats.configured)} / ${count(current.chats.chats)} 个群设置了保留天数${current.chats.configured ? `（${current.chats.min_days}–${current.chats.max_days} 天）` : ''}；在频道控制台按群设置` : '没有群聊']]);
+      ['群聊记录', current.chats ? `${count(current.chats.configured)} / ${count(current.chats.chats)} 个群设置了保留天数${current.chats.configured ? `（${current.chats.min_days}–${current.chats.max_days} 天）` : ''}；在「飞书会话」按会话设置` : '没有群聊']]);
   }
   history.append(cleanupFacts(view));
   settingsPanel.append(history);
