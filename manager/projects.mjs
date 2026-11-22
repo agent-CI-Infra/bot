@@ -340,6 +340,13 @@ export class Projects {
     const liveBuild = this.projectBuildJobs.get(repo)?.state;
     const buildInfo = liveBuild ? { ...liveBuild } : (build ? JSON.parse(build) : null);
     const globalDefaults = this.globalDefaults();
+    const wantsPrecompiled = spec.packages.length > 0 || !!normalizeScript(globalDefaults.setup_script) || !!normalizeScript(own.setup_script);
+    const imagePending = !!(buildInfo?.state === 'ready' && buildInfo?.image_id && resource?.image && resource.image !== buildInfo.image_id);
+    const toolchainPending = wantsPrecompiled && (
+      imagePending
+      || (!!this.approvedImageId && resource?.image === this.approvedImageId)
+      || (!resource?.image && ['queued', 'building', 'cancelling', 'failed', 'cancelled'].includes(String(buildInfo?.state || '')))
+    );
     // inherited: the resources that follow the default; resources_pending: the container still has other resources.
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
@@ -354,7 +361,8 @@ export class Projects {
       },
       inherited: resourceKeys.filter(key => own[key] === undefined),
       resources_pending: !!applied && applied !== JSON.stringify(resources(spec)),
-      image_pending: !!(buildInfo?.state === 'ready' && buildInfo?.image_id && resource?.image && resource.image !== buildInfo.image_id) } };
+      image_pending: imagePending,
+      toolchain_pending: toolchainPending } };
   }
   // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
   async defaultsView() {
@@ -853,6 +861,7 @@ export class Projects {
   async resolveImage(repo, spec, { forceRebuild = false, deferBuild = false } = {}) {
     const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
     if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
+    this.approvedImageId = approved.Id;
     const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
     const globalEnv = this.globalEnvironmentDefaults(), own = this.own(repo);
     const projectSpec = { packages: normalizePackages(own.packages || []), setup_script: own.setup_script || '', env: own.env || {} };

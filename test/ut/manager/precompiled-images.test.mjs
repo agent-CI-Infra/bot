@@ -605,6 +605,7 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
   assert.equal(duringBuild.state, 'ready', 'project container must come up ready immediately during recover()');
   assert.equal(duringBuild.computer.image, 'sha256:upgraded-base-v4');
   assert.ok(['queued', 'building'].includes(duringBuild.computer.build.state), duringBuild.computer.build.state);
+  assert.equal(duringBuild.computer.toolchain_pending, true, 'toolchain_pending must be true while running bare base during deferred build');
   assert.equal(duringBuild.computer.spec_revision, revBefore);
 
   // When the deferred recovery build completes, it MUST NOT stop the running container directly; instead it sets
@@ -618,14 +619,43 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
   assert.equal(afterBuild.computer.image, 'sha256:upgraded-base-v4', 'container not interrupted directly by deferred recovery build');
   assert.equal(f.docker.starts, startsBefore, 'no container restart before explicit idle refresh');
   assert.equal(afterBuild.computer.image_pending, true);
+  assert.equal(afterBuild.computer.toolchain_pending, true);
   assert.equal(afterBuild.computer.resources_pending, false);
   assert.equal(afterBuild.computer.spec_revision, revBefore, 'recovery rebuild must not bump spec_revision');
 
-  // Explicit idle refresh switches the container to the cached precompiled image and clears image_pending.
+  // Explicit idle refresh switches the container to the cached precompiled image and clears image_pending & toolchain_pending.
   f.docker.onBuild = null;
   await f.projects.operate('101', 'refresh', { operation_id: opId(), generation: 1 });
   const afterRefresh = f.projects.describe('101');
-  assert.equal(afterRefresh.computer.image, 'sha256:' + afterBuild.computer.build.tag.split(':')[1]);
+  const v4ImgId = 'sha256:' + afterBuild.computer.build.tag.split(':')[1];
+  assert.equal(afterRefresh.computer.image, v4ImgId);
   assert.equal(afterRefresh.computer.image_pending, false);
+  assert.equal(afterRefresh.computer.toolchain_pending, false);
   assert.equal(afterRefresh.computer.spec_revision, revBefore);
+
+  // Cache-hit deferBuild path refreshes precompiled_images.last_used_at via touchRow().
+  const imgKey = afterBuild.computer.build.image_key;
+  f.projects.db.prepare('UPDATE precompiled_images SET last_used_at=? WHERE image_key=?').run('2020-01-01T00:00:00.000Z', imgKey);
+  await f.projects.recover();
+  const touchedAt = f.projects.db.prepare('SELECT last_used_at FROM precompiled_images WHERE image_key=?').get(imgKey).last_used_at;
+  assert.notEqual(touchedAt, '2020-01-01T00:00:00.000Z', 'deferBuild cache hit must touch precompiled_images.last_used_at');
+
+  // previousMatchesBase === true reuse path: when previous image matches current approved base (same /opt/runner),
+  // a cache miss during recover() keeps running on that previous image while rebuilding in the background.
+  f.docker.images.set(v4ImgId, { Id: v4ImgId, Size: 3 * mib, Config: { Labels: { 'department.bot.base_image_id': 'sha256:upgraded-base-v4' } } });
+  f.projects.db.prepare("UPDATE projects SET spec=? WHERE repository_id='101'").run(JSON.stringify({ packages: ['jq', 'ripgrep'], setup_script: 'echo slow-sdk-2' }));
+  let releaseSameBase;
+  f.docker.onBuild = ({ tag }) => new Promise(resolve => {
+    releaseSameBase = () => {
+      f.docker.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 3 * mib });
+      resolve('rebuilt-same-base\n');
+    };
+  });
+  await f.projects.recover();
+  const sameBaseDuring = f.projects.describe('101').computer;
+  assert.equal(sameBaseDuring.image, v4ImgId, 'recover() reuses previous image when base_image_id matches approved');
+  assert.equal(sameBaseDuring.toolchain_pending, false, 'matching-base previous precompiled image keeps toolchain_pending false until switch');
+  releaseSameBase();
+  await f.projects.waitForBuild('101');
+  assert.equal(f.projects.describe('101').computer.image_pending, true);
 });

@@ -102,11 +102,11 @@ export class ProjectService {
   constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
   save(row: Row): void {
     if (!row) return;
-    this.store.run(`INSERT INTO project_environments(repository_id,generation,state,desired,error,started_at,revision) VALUES(?,?,?,?,?,?,?)
+    this.store.run(`INSERT INTO project_environments(repository_id,generation,state,desired,error,started_at,revision,toolchain_pending) VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(repository_id) DO UPDATE SET generation=excluded.generation,state=excluded.state,desired=excluded.desired,error=excluded.error,
-      started_at=excluded.started_at,revision=excluded.revision WHERE excluded.generation>project_environments.generation
+      started_at=excluded.started_at,revision=excluded.revision,toolchain_pending=excluded.toolchain_pending WHERE excluded.generation>project_environments.generation
       OR (excluded.generation=project_environments.generation AND excluded.revision>=project_environments.revision)`,
-    row.repository_id, row.generation, row.state, row.desired, row.error || null, row.started_at || null, row.revision || 0);
+    row.repository_id, row.generation, row.state, row.desired, row.error || null, row.started_at || null, row.revision || 0, (row as any).computer?.toolchain_pending ? 1 : 0);
   }
   async reconcile(): Promise<void> {
     if (this.syncing) return this.syncing;

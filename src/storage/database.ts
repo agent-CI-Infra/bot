@@ -161,6 +161,7 @@ export class Store {
       action TEXT NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT);
       PRAGMA user_version=2;`);
     if (!this.all('PRAGMA table_info(project_environments)').some(row => row.name === 'revision')) this.db.exec('ALTER TABLE project_environments ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    if (!this.all('PRAGMA table_info(project_environments)').some(row => row.name === 'toolchain_pending')) this.db.exec('ALTER TABLE project_environments ADD COLUMN toolchain_pending INTEGER NOT NULL DEFAULT 0');
     const extend = (table: string, columns: Record<string, string>) => {
       const names = this.all(`PRAGMA table_info(${table})`).map(row => row.name);
       for (const [name, type] of Object.entries(columns)) if (!names.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
