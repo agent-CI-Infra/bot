@@ -52,11 +52,11 @@
 
 ## 共用样式与组件
 
-`--color-*`、`--space-1..10`、`--radius-*`、`--font-size-*`、`--line-height-*`、`--control-min`、`--motion-*`、`--shadow-*` 和 `--focus-ring*` 为公共变量，只在 `static/shell.css` 的 `:root` 中声明。颜色值遵循近白背景、深色文字、蓝色操作，琥珀表示关注、红色表示实际失败、绿色表示成功。模块样式（含 `style.css`、`access.css`、`management.css`、`views.css`、`board.css`）引用这些变量，不写第二套正文色、辅助色或字号；看板的边框、阴影、状态圆点、圆角和文字也使用公共令牌，不保留独立的 teal 色值或硬编码字号。`--font-size-touch`（16px）是防止 iOS 聚焦输入时缩放的下限，不是字号阶梯中的一级。`--font-size-caption`（10px，输入框旁的小字说明）、`--font-size-title`（20px，回执页标题）和 `--font-size-hero`（28px，对话欢迎标题）补齐对话页原先没有对应档位的字号；图标字形的尺寸不属于字号阶梯。
+`--color-*`、`--space-1..10`、`--radius-*`、`--font-size-*`、`--line-height-*`、`--control-min`、`--motion-*`、`--shadow-*` 和 `--focus-ring*` 为公共变量，只在 `static/shell.css` 的 `:root` 中声明。颜色值遵循近白背景、深色文字、蓝色操作，琥珀表示关注、红色表示实际失败、绿色表示成功。模块样式（含 `style.css`、`access.css`、`management.css`、`views.css`、`workspace.css`）引用这些变量，不写第二套正文色、辅助色或字号。`--font-size-touch`（16px）是防止 iOS 聚焦输入时缩放的下限，不是字号阶梯中的一级。`--font-size-caption`（10px，输入框旁的小字说明）、`--font-size-title`（20px，回执页标题）和 `--font-size-hero`（28px，对话欢迎标题）补齐对话页原先没有对应档位的字号；图标字形的尺寸不属于字号阶梯。
 
 按钮的四种用法是 `.btn-primary`（每页默认最多一个启用的主操作）、`.btn-secondary`（与 `.quiet` 同外观）、`.btn-danger`（与 `.quiet.destructive` 同外观）和 `.btn-text`（工具栏文字操作；行内链接仍用 `.linkish`）。`.card` 与 `.side-card` 共用内边距、圆角、边框和阴影；列表容器 `.card.list-panel` 去掉内边距以便行贴边。
 
-`test/ut/static/console-tokens.test.mjs` 检查只有 `shell.css` 在 `:root` 声明自定义属性，每个 `var()` 都有声明、运行时写入或自身 fallback，`board.css` 不再写死十六进制颜色和 `font-size: Npx`，旧青绿硬编码色不再出现，以及中性徽章和看板空状态的对比度至少 4.5:1。对比度按 `shell.css` 里的声明现算，测试不再另抄一份色值。模块样式新增公共变量时，把声明写进 `shell.css`。
+`test/ut/static/console-tokens.test.mjs` 检查只有 `shell.css` 在 `:root` 声明自定义属性，每个 `var()` 都有声明、运行时写入或自身 fallback，旧青绿硬编码色不再出现，以及中性徽章的对比度至少 4.5:1。对比度按 `shell.css` 里的声明现算，测试不再另抄一份色值。模块样式新增公共变量时，把声明写进 `shell.css`。
 
 | 入口 | 用法 |
 | --- | --- |

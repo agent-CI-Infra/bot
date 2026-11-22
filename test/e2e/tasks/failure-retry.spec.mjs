@@ -10,9 +10,9 @@ test('GitHub 写入返回 500 后，过程写明原因和处理办法，点「�
   try{
     h.setBranch('ready');await h.run();h.due();await h.run();
     await page.goto(h.adminBase);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(h.password);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.goto(h.adminBase+'/#/reviews');
-    const card=page.locator('[data-card-key="101/issue/1"]');await expect(card).toContainText('检视 Issue 发布待确认');
-    await card.locator('.board-card-title').click();
+    await page.goto(h.adminBase+'/#/projects/101/overview/tasks');
+    const row=page.locator('.workbench-task-row').first();await expect(row).toContainText('发布待确认');
+    await row.locator('button').first().click();
     const timeline=page.locator('#timeline');
     await expect(timeline).toContainText('暂停或失败 · 外部服务或网络波动');
     await expect(timeline).toContainText('GitHub 请求 POST /repos/fixture/project-101/issues/1/comments 返回 HTTP 500，写入结果尚未确认：Server Error（GitHub 请求 ID：C5D4:3A2B:1）');

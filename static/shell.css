@@ -59,9 +59,7 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
    line-height above still applies to both, so a failed row keeps its box. */
 .console-ready .muted:not(.view-error) { color: var(--color-text-muted); }
 .console-ready :is(.card, .side-card) { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); }
-.console-ready .card.list-panel { padding: 0; }
-/* The board scrolls its columns sideways and opens toolbar menus past the panel edge, so it keeps board.css overflow. */
-.console-ready:not(.board-mode) .card.list-panel { overflow: hidden; }
+.console-ready .card.list-panel { padding: 0; overflow: hidden; }
 .console-ready .toolbar { padding: var(--space-6) var(--space-7); }
 .console-ready #paging { padding: var(--space-4) var(--space-7); }
 .console-ready .toolbar h1 { font-size: var(--font-size-5); letter-spacing: -.7px; }
@@ -110,7 +108,6 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
   body.console-ready .management-page .management-main:has(.management-command-preview, .management-feed > .console-state-error) { overflow-y: auto; overscroll-behavior: contain; }
   body.console-ready .management-page .management-main:has(.management-command-preview, .management-feed > .console-state-error) .management-feed-wrap { flex: 1 0 auto; min-height: min(320px,50dvh); }
   body.console-ready .management-page .management-main:has(.management-command-preview, .management-feed > .console-state-error) .management-feed { flex: none; width: 100%; overflow: visible; }
-  body.console-ready.board-mode .board-filter-controls { max-height: max(100px,calc(38dvh - var(--console-scope-height,0px))); }
   .console-ready dialog.console-scope-picker { inset: 0; width: 100%; height: 100dvh; max-height: 100dvh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); border: 0; border-radius: 0; }
   .console-scope-search-row input { font-size: 16px; }
 }
@@ -215,8 +212,6 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-attention-row p { margin: 5px 0; font-size: var(--font-size-label); }
 .console-attention-row .eyebrow { color: #826022; font-size: var(--font-size-1); }
 .console-inbox-paging { display: flex; justify-content: flex-end; gap: 12px; border: 0; }
-body.console-ready.board-mode main { width: calc(100% - var(--console-rail)); padding-bottom: 12px; }
-body.console-ready.board-mode .console-location { flex: none; margin-bottom: 8px; }
 body.console-ready .management-page { left: var(--console-rail); }
 @media (min-width:768px) and (max-width:1439px) {
   .console-groups { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-6); align-items: stretch; }
@@ -291,7 +286,6 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-attention-row > button { justify-self: start; }
   /* #481: a full-screen dialog reserves the bar's height instead of finishing underneath it while the bar is up. */
   .console-ready dialog { width: 100%; max-width: none; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; padding: 16px 16px calc(var(--console-mobile-height) + 16px); }
-  body.console-ready.board-mode main { width: 100%; padding: 8px 10px calc(var(--console-mobile-height) + 12px); }
   body.console-ready .management-page { left: 0; bottom: var(--console-mobile-height); }
 }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
@@ -300,8 +294,7 @@ body.console-ready .management-page { left: var(--console-rail); }
 .console-ready #identity .quiet { min-height: var(--control-min); }
 .console-ready #tabs button, .console-link { transition: background-color var(--motion-fast), color var(--motion-fast); }
 
-@media(max-width:767px) { body.console-ready.board-mode .console-location:has(#console-section-label[hidden]) { display: none; } }
-/* #481: the bar keeps its five destinations while a field has focus instead of hiding as it did before, and the page
+/* #481/#1222: the bar keeps its four destinations while a field has focus instead of hiding as it did before, and the page
    reserves the bar's height through scroll-padding-bottom, so typing never puts the field under it. */
 html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 @media(max-width:767px) { .console-ready #paging { padding-right:96px; } }
@@ -439,7 +432,7 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
 .console-ready .toolbar h1, .console-page-head h1, .console-group h2 {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%;
 }
-.console-link-title, .board-card-repo {
+.console-link-title {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%;
 }
 .console-ready .toolbar .muted, .console-ready #count, .console-ready .row-content > p,
@@ -482,7 +475,7 @@ body > header { position: sticky; top: 0; z-index: 40; }
   body.console-ready { display: grid; grid-template-columns: var(--console-rail) minmax(0, 1fr); align-content: start; }
   body.console-ready > header { grid-column: 2; }
   body.console-ready > header > .brand { display: none; }
-  body.console-ready main, body.console-ready.board-mode main { grid-column: 2; width: auto; margin: 0; }
+  body.console-ready main { grid-column: 2; width: auto; margin: 0; }
   #console-sidebar { top: 0; bottom: 0; overflow-y: auto; overscroll-behavior: contain; }
 }
 @media (max-width: 1100px) {

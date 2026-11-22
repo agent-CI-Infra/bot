@@ -170,3 +170,49 @@ test('board prs projects all 6 statuses, Bot PR source Issue link, CI checks, fi
   deleteProjectRecords(store, '101', { files: false });
   assert.equal(store.get("SELECT count(*) n FROM board_pr_tasks WHERE repository_id='101'").n, 0);
 });
+
+test('board prs reflects newer completed revision as pending re-review and selects CI checks from the newest head SHA (#1222)', async t => {
+  const { h, admin } = await fixture(t);
+  const store = h.store;
+
+  // #30: review finished with human_decision_required at 09:10, then revision task succeeded at 09:40 -> pending re-review
+  seedPr(store, '101', 30, 'Fix race after review feedback', { lastSeen: '2026-11-20T09:40:00.000Z' });
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,result,object_number,head_sha,created_at,updated_at)
+     VALUES('t-pr-30-rev','101','review.pr','succeeded','检视 PR #30',?,30,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-11-20T09:00:00.000Z','2026-11-20T09:10:00.000Z')`,
+    JSON.stringify({ conclusion: 'human_decision_required', recommendation: 'Needs changes.' }),
+  );
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,head_sha,created_at,updated_at)
+     VALUES('t-pr-30-dev','101','development.pr','succeeded','修订 PR #30',30,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','2026-11-20T09:20:00.000Z','2026-11-20T09:40:00.000Z')`,
+  );
+
+  // #31: older development.pr failed CI on head cccc..., newer review.pr succeeded on head dddd... with green CI -> reviewed, passed=1
+  seedPr(store, '101', 31, 'Adopt latest head checks on re-review', { lastSeen: '2026-11-20T10:30:00.000Z' });
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,head_sha,created_at,updated_at)
+     VALUES('t-pr-31-dev','101','development.pr','succeeded','修订 PR #31',31,'cccccccccccccccccccccccccccccccccccccccc','2026-11-20T10:00:00.000Z','2026-11-20T10:10:00.000Z')`,
+  );
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,result,object_number,head_sha,created_at,updated_at)
+     VALUES('t-pr-31-rev','101','review.pr','succeeded','检视 PR #31',?,31,'dddddddddddddddddddddddddddddddddddddddd','2026-11-20T10:20:00.000Z','2026-11-20T10:30:00.000Z')`,
+    JSON.stringify({ conclusion: 'ready_for_development', recommendation: 'Looks good on latest head.' }),
+  );
+  store.run(
+    `INSERT INTO commit_checks(repository_id,head_sha,check_key,name,status,conclusion,details_url,updated_at) VALUES
+      ('101','cccccccccccccccccccccccccccccccccccccccc','ci:unit','unit','completed','failure','https://github.com/org/repo/runs/10','2026-11-20T10:11:00.000Z'),
+      ('101','dddddddddddddddddddddddddddddddddddddddd','ci:unit','unit','completed','success','https://github.com/org/repo/runs/11','2026-11-20T10:31:00.000Z')`,
+  );
+
+  const list = await admin('/api/board/prs?repository_id=101');
+  assert.equal(list.status, 200);
+  const byNum = new Map(list.value.prs.map(p => [p.number, p]));
+
+  assert.equal(byNum.get(30).status, 'pending');
+  assert.match(byNum.get(30).reason, /等待重新检视/);
+
+  assert.equal(byNum.get(31).status, 'reviewed');
+  assert.equal(byNum.get(31).checks.failed, 0);
+  assert.equal(byNum.get(31).checks.passed, 1);
+  assert.match(byNum.get(31).reason, /Looks good on latest head/);
+});

@@ -41,8 +41,8 @@ test('timeline, snapshot stream, project tasks, sampling and sync use the same l
       return {full:timestamp(at),clock:timeline.textContent,title:timeline.title,dateTime:timeline.dateTime,
         snapshotClock:snapshotProgress.time.textContent,snapshotTitle:snapshotProgress.time.title,snapshotDateTime:snapshotProgress.time.dateTime,
         snapshotOutput:visible(snapshotProgress.output),tasks:visible(activityCards()[2]),sampling:visible(usageCard()),
-        sync:syncSummary([{account_name:'Fixture',synced_at:at}]),board:boardTime(at)};
-    })()`,['static/app.js','static/views.js','static/metrics.js','static/project.js','static/board.js']);
+        sync:syncSummary([{account_name:'Fixture',synced_at:at}])};
+    })()`,['static/app.js','static/views.js','static/metrics.js','static/project.js']);
     const clock=full.slice(11,19);
     assert.equal(result.full,full);assert.equal(result.clock,clock);assert.equal(result.title,full);
     assert.equal(result.snapshotClock,clock);assert.equal(result.snapshotTitle,full);
@@ -50,6 +50,6 @@ test('timeline, snapshot stream, project tasks, sampling and sync use the same l
     assert.ok(result.snapshotOutput.includes('['+clock+'] 已写入 100 个文件'));
     // Resource samples include the local date so an old sample cannot look like today's reading.
     assert.ok(result.tasks.includes(full));assert.ok(result.sampling.includes('采样 '+full));
-    assert.ok(result.sync.includes('同步于 '+clock));assert.ok(result.board.endsWith(full.slice(5,16)));
+    assert.ok(result.sync.includes('同步于 '+clock));
   });
 });
