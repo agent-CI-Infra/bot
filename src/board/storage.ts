@@ -99,11 +99,11 @@ export function boardStorage(store: Store): void {
       WHEN s.kind='task.request' AND json_valid(s.input) AND json_extract(s.input,'$.target.type')='issue' THEN
         CASE
           WHEN EXISTS(SELECT 1 FROM task_write_grants g WHERE g.task_id=s.id AND json_valid(g.writes) AND EXISTS(SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))
+            OR json_extract(s.input,'$.intent')='development'
             OR (json_valid(s.result) AND (typeof(json_extract(s.result,'$.pr_number'))='integer' OR json_extract(s.result,'$.delivery')='pull_request')) THEN 'development'
           WHEN EXISTS(SELECT 1 FROM task_write_grants g WHERE g.task_id=s.id AND json_valid(g.writes) AND EXISTS(SELECT 1 FROM json_each(g.writes) WHERE value='review'))
-            OR (json_valid(s.result) AND (json_type(s.result,'$.review_delivery')='object' OR typeof(json_extract(s.result,'$.conclusion'))='text'))
-            OR json_extract(s.input,'$.executor_role')='reviewer' THEN 'review'
-          WHEN json_extract(s.input,'$.executor_role')='dev' THEN 'development'
+            OR json_extract(s.input,'$.delivery')='review'
+            OR (json_valid(s.result) AND (json_type(s.result,'$.review_delivery')='object' OR typeof(json_extract(s.result,'$.conclusion'))='text')) THEN 'review'
           ELSE NULL
         END
       ELSE NULL END`;
@@ -213,8 +213,9 @@ export function boardStorage(store: Store): void {
       store.run("INSERT INTO settings VALUES('board_projection_v1','1')");
     });
   }
-  if (!store.get("SELECT 1 FROM settings WHERE key='board_issue_tasks_v1'")) {
+  if (!store.get("SELECT 1 FROM settings WHERE key='board_issue_tasks_v2'")) {
     store.transaction(() => {
+      store.db.exec('DELETE FROM board_issue_tasks');
       let after = 0;
       for (;;) {
         const rows = store.all('SELECT rowid FROM tasks WHERE rowid>? ORDER BY rowid LIMIT 250', after);
@@ -225,7 +226,8 @@ export function boardStorage(store: Store): void {
         store.db.exec(issueTaskProjection(`s.rowid>${after} AND s.rowid<=${end}`));
         after = end;
       }
-      store.run("INSERT INTO settings VALUES('board_issue_tasks_v1','1')");
+      store.run("INSERT OR REPLACE INTO settings VALUES('board_issue_tasks_v1','1')");
+      store.run("INSERT OR REPLACE INTO settings VALUES('board_issue_tasks_v2','1')");
     });
   }
 }

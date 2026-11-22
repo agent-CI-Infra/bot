@@ -489,4 +489,10 @@ button.role-task-chip:hover {
   .workbench-task-search { max-width: none; flex-basis: 100%; }
   .workbench-issue-controls { width: 100%; flex-wrap: wrap; }
   .console-ready button.issue-chain-toggle, button.issue-chain-toggle { min-height: var(--control-min); }
+  .console-ready button.issue-chain-link, button.issue-chain-link {
+    min-height: var(--control-min);
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 0;
+  }
 }

@@ -324,3 +324,43 @@ test('Issue post_review adds needs_human_label on needs_information/human_decisi
   assert.equal(f.state.labels.includes('bot-needs-human'), false);
   assert.match(f.state.comments[0].body, /\*\*自动开发状态\*\*：可开发/);
 });
+
+test('#1122 generic Issue task.request reconciles needs_human_label and newer development prevents stale older task from re-adding it (#1215)', async t => {
+  const f = await fixture(t);
+  const genericDev = (id, createdAt) => {
+    f.h.store.run(
+      `INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,created_at,updated_at) VALUES(?,'101','task.request','running','dev',?,5,?,?)`,
+      id, JSON.stringify({ target: { type: 'issue', number: 5 }, executor_role: 'dev', intent: 'development' }), createdAt, createdAt,
+    );
+    f.h.store.run('INSERT INTO task_write_grants VALUES(?,?,1,?)', id, JSON.stringify(['pull_request']), createdAt);
+    return f.h.store.get('SELECT * FROM tasks WHERE id=?', id);
+  };
+
+  // Issue starts with bot-needs-human from an earlier review; generic task.request removes it when starting
+  f.state.labels = ['bot-needs-human'];
+  const dev1 = genericDev('req-dev-1', '2026-11-20T10:00:00.000Z');
+  startProgress(f.h.store, dev1, { ...f.issue, labels: [{ name: 'bot-needs-human' }] });
+  await settleProgress(f.h.store, dev1.id, f.github);
+  assert.deepEqual(f.state.labels, ['bot-developing']);
+
+  // Generic development fails -> adds bot-needs-human and drops bot-developing
+  f.set(dev1.id, { status: 'failed', error_code: 'model_http_400' });
+  await settleProgress(f.h.store, dev1.id, f.github);
+  assert.deepEqual(f.state.labels, ['bot-needs-human']);
+
+  // A newer generic development starts on the same Issue -> removes bot-needs-human and adds bot-developing
+  const dev2 = genericDev('req-dev-2', '2026-11-20T10:10:00.000Z');
+  startProgress(f.h.store, dev2, { ...f.issue, labels: [] }); // even if issue.labels snapshot was stale, prior progress row had needs_human_on=1
+  await settleProgress(f.h.store, dev2.id, f.github);
+  assert.deepEqual(f.state.labels, ['bot-developing']);
+
+  // If the older failed development is settled again now, it MUST NOT re-add bot-needs-human or remove bot-developing
+  f.h.store.run('UPDATE issue_development_progress SET final=0,pending=1,needs_human_on=0 WHERE task_id=?', dev1.id);
+  await settleProgress(f.h.store, dev1.id, f.github);
+  assert.deepEqual(f.state.labels, ['bot-developing']);
+
+  // When the newer generic development opens a PR -> removes bot-developing, keeps bot-needs-human off, adds bot-developed
+  f.set(dev2.id, { status: 'pr_opened', result: JSON.stringify({ pr_number: 18, pr_url: 'https://github.invalid/fixture/project-101/pull/18', summary: 'Fixed.' }) });
+  await settleProgress(f.h.store, dev2.id, f.github);
+  assert.deepEqual(f.state.labels, ['bot-developed']);
+});

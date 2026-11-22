@@ -9,7 +9,7 @@ import {captureTaskConfiguration} from '../../dist/tasks/configuration.js';
 import { nativeRoles } from './native-roles.mjs';
 
 export async function emptyRepositoryFixture(t,options={}){
-  let branch='empty',generation=1,engine;const comments=[],operations=[],commit='a'.repeat(40),tree=options.files?treeSha(options.files):'b'.repeat(40);
+  let branch='empty',generation=1,engine;const comments=[],operations=[],repoLabels=new Map(),commit='a'.repeat(40),tree=options.files?treeSha(options.files):'b'.repeat(40);
   const server=createServer(async(req,res)=>{
     let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},path=new URL(req.url,'http://fixture').pathname;
     const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
@@ -28,6 +28,16 @@ export async function emptyRepositoryFixture(t,options={}){
       return send(comments);
     }
     if(path.endsWith('/issues/1/labels'))return send((body.labels||[]).map(name=>({name})));
+    if(path.includes('/issues/1/labels/')&&req.method==='DELETE')return send({},404);
+    if(path.endsWith('/labels')){
+      if(req.method==='POST'){const name=String(body.name||'');repoLabels.set(name.toLowerCase(),body);return send(body,201);}
+      return send([...repoLabels.values()]);
+    }
+    const labelMatch=/\/labels\/([^/]+)$/.exec(path);
+    if(labelMatch&&req.method==='GET'){
+      const found=repoLabels.get(decodeURIComponent(labelMatch[1]).toLowerCase());
+      return found?send(found,200):send({},404);
+    }
     return send({},404);
   });server.listen(0,'127.0.0.1');await once(server,'listening');
   const githubUrl='http://127.0.0.1:'+server.address().port;

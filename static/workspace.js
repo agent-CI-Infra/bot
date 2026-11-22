@@ -277,7 +277,11 @@ function renderIssueChainPanel(detail, repoId, issueNumber) {
   }
 
   const tasksBlock = element('div', '', 'issue-chain-block');
-  tasksBlock.append(element('h3', `关联任务（${(detail.tasks || []).length}）`, 'issue-chain-heading'));
+  const tasksTotal = Number(detail.tasks_total ?? (detail.tasks || []).length);
+  const tasksHeading = detail.tasks_truncated
+    ? `关联任务（显示 ${(detail.tasks || []).length} / 共 ${tasksTotal} 条）`
+    : `关联任务（${tasksTotal}）`;
+  tasksBlock.append(element('h3', tasksHeading, 'issue-chain-heading'));
   if (!detail.tasks?.length) {
     tasksBlock.append(element('p', '暂无关联任务记录。', 'muted issue-chain-text'));
   } else {
@@ -297,16 +301,24 @@ function renderIssueChainPanel(detail, repoId, issueNumber) {
       list.append(row);
     }
     tasksBlock.append(list);
+    if (detail.tasks_truncated) {
+      tasksBlock.append(element('p', `仅展示最近 ${detail.tasks.length} 条任务记录（共 ${tasksTotal} 条）。`, 'muted issue-chain-text'));
+    }
   }
   panel.append(tasksBlock);
 
   const dispatchBlock = element('div', '', 'issue-chain-block');
-  dispatchBlock.append(element('h3', `Manager 分派记录（${(detail.dispatch_events || []).length}）`, 'issue-chain-heading'));
-  if (!detail.dispatch_events?.length) {
+  const allEvents = detail.dispatch_events || [];
+  const eventsTotal = Number(detail.dispatch_events_total ?? allEvents.length);
+  const dispatchHeading = detail.dispatch_events_truncated
+    ? `Manager 分派记录（显示 ${allEvents.length} / 共 ${eventsTotal} 条）`
+    : `Manager 分派记录（${eventsTotal}）`;
+  dispatchBlock.append(element('h3', dispatchHeading, 'issue-chain-heading'));
+  if (!allEvents.length) {
     dispatchBlock.append(element('p', '暂无 Manager 分派决策记录。', 'muted issue-chain-text'));
   } else {
     const list = element('div', '', 'issue-chain-list');
-    for (const ev of detail.dispatch_events.slice(0, 8)) {
+    const renderEventItem = ev => {
       const row = element('div', '', 'issue-chain-item');
       const meta = element('div', '', 'issue-chain-meta');
       const [decLabel, decTone] = ev.state === 'filtered'
@@ -316,9 +328,22 @@ function renderIssueChainPanel(detail, repoId, issueNumber) {
       if (ev.decided_at || ev.created_at) meta.append(element('span', timestamp(ev.decided_at || ev.created_at) || '', 'muted issue-chain-time'));
       row.append(meta);
       if (ev.reason) row.append(element('p', ev.reason, 'muted issue-chain-text'));
-      list.append(row);
-    }
+      return row;
+    };
+    const initialCount = 8;
+    for (const ev of allEvents.slice(0, initialCount)) list.append(renderEventItem(ev));
     dispatchBlock.append(list);
+    if (allEvents.length > initialCount) {
+      const rest = allEvents.slice(initialCount);
+      const moreBtn = button(`展开其余 ${rest.length} 条分派记录`, () => {
+        for (const ev of rest) list.append(renderEventItem(ev));
+        moreBtn.remove();
+      }, 'btn-text linkish issue-chain-link');
+      dispatchBlock.append(moreBtn);
+    }
+    if (detail.dispatch_events_truncated) {
+      dispatchBlock.append(element('p', `仅展示最近 ${allEvents.length} 条分派记录（共 ${eventsTotal} 条）。`, 'muted issue-chain-text'));
+    }
   }
   panel.append(dispatchBlock);
   return panel;
