@@ -22,12 +22,21 @@ async function recall(f,receipt) {
 for(const personal of [false,true]) {
   for(const change of ['recall','edit'])test(`${personal?'private':'group'} ${change} of history refreshes an active answer without replacing the session`,async t=>{
     const f=await fixture(t,personal),waiting=gate(t),release=gate(t);let calls=0;
+    const reply='引用 old-source-unique 的早期回答';
+    let sourceId;
     f.modelState.respond=async(body,res)=>{
       calls++;
-      if(calls===1)return say(res,'引用 old-source-unique 的早期回答');
+      if(calls===1)return say(res,reply);
       if(calls===2){waiting.release();await release.wait;return say(res,'依赖旧正文的迟到回答');}
       const text=JSON.stringify(body);
-      assert.ok(!text.includes('old-source-unique'),text);
+      if(personal)assert.ok(!text.includes('old-source-unique'),text);
+      else {
+        const prompt=JSON.parse(body.messages[1].content);
+        const recent=prompt.context.recent_messages;
+        assert.ok(recent.some(message=>message.content===reply));
+        assert.equal(recent.find(message=>message.message_id===sourceId).content,change==='recall'?'[消息已撤回]':'new-source-unique');
+        assert.ok(!JSON.stringify(prompt.summary).includes('old-source-unique'));
+      }
       assert.ok(!text.includes('依赖旧正文的迟到回答'));
       assert.match(text,change==='recall'?/recalled/:/edited/);
       if(change==='edit')assert.match(text,/new-source-unique/);
@@ -35,6 +44,8 @@ for(const personal of [false,true]) {
     };
     const first=await f.send('old-source-unique');assert.equal((await done(f,first)).state,'completed');
     const original=inbox(f,first),event=f.service.turnMessages.event(original),chat=f.service.ledger.chat(event),fence=personal?null:f.service.serviceBindings.fence(chat.id);
+    sourceId=event.message_id;
+    if(!personal)await until(()=>f.h.store.get("SELECT 1 FROM channel_messages WHERE chat_id=? AND sender_type='app'",chat.id));
     f.h.store.run('INSERT INTO channel_chat_summaries VALUES(?,?,?,?,?,?,?)',chat.id,chat.context_revision,1,event.created_at,event.message_id,JSON.stringify({authorization_fence:fence}),f.h.store.secrets.seal({summary:'old-source-unique derived summary'},'channel-summary:'+chat.id));
     const next=await f.send('现在继续');await waiting.wait;
     if(change==='recall')await recall(f,first);
@@ -42,8 +53,14 @@ for(const personal of [false,true]) {
     release.release();assert.equal((await done(f,next)).state,'completed');
     assert.equal(calls,3);
     if(personal)assert.equal(inbox(f,next).conversation_id,original.conversation_id);
-    else assert.equal(f.service.serviceBindings.fence(chat.id),fence);
-    assert.equal(f.service.ledger.query(chat.id,{keyword:'old-source-unique'}).messages.length,0);
+    else {
+      assert.equal(f.service.serviceBindings.fence(chat.id),fence);
+      const timeline=await f.admin('/api/channels/chats/'+chat.id+'/timeline');
+      assert.equal(timeline.status,200);
+      assert.ok(timeline.value.messages.some(message=>message.content===reply));
+      assert.equal(timeline.value.messages.find(message=>message.message_id===sourceId).content,change==='recall'?'[消息已撤回]':'new-source-unique');
+    }
+    assert.equal(f.service.ledger.query(chat.id,{message_id:sourceId,keyword:'old-source-unique'}).messages.length,0);
     assert.equal(f.h.store.get('SELECT count(*) n FROM channel_chat_summaries WHERE chat_id=?',chat.id).n,0);
     assert.ok(!JSON.stringify(f.wire.sent).includes('依赖旧正文的迟到回答'));
   });

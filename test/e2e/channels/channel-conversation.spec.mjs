@@ -26,7 +26,22 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await expect(binding).toBeVisible();
     await binding.getByRole('link', { name: '查看聊天记录', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`#/conversations/${chat.id}$`));
-    await expect(page.getByLabel('消息与执行时间线')).toContainText('未 @ 的共同决定：先核对本地证据');
+    const timeline = page.getByLabel('消息与执行时间线');
+    const sentReply = timeline.getByRole('article', { name: '机器人消息', exact: true });
+    const reply = '本群可用 admin-fixture-101，已按本地记录回答。';
+    await expect(timeline).toContainText('未 @ 的共同决定：先核对本地证据');
+    await expect(sentReply).toContainText(reply);
+    const recall = await post(f.h, f.id, {
+      header: { ...quiet.header, event_id: 'recall-' + quiet.header.event_id, event_type: 'im.message.recalled_v1' },
+      event: { chat_id: chat.chat_id, message_id: quiet.event.message.message_id, recall_time: String(Date.now()) },
+    });
+    expect(recall.status).toBe(200);
+    await page.reload();
+    await expect(timeline.getByRole('article', { name: '成员消息', exact: true }).filter({ hasText: '消息已撤回' })).toBeVisible();
+    await expect(sentReply).toContainText(reply);
+    await sentReply.scrollIntoViewIfNeeded();
+    mkdirSync('.tmp/channel-conversation-312', { recursive: true });
+    await page.screenshot({ path: `.tmp/channel-conversation-312/group-history-${width}.png` });
     await page.getByText('本轮生成的回答', { exact: true }).click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('本群可用 admin-fixture-101，已按本地记录回答。');
     await expect(page.getByText(/当前群绑定：仓库问答助手/)).toBeVisible();

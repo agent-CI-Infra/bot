@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { channelFixture, inGroup, envelope, post, until, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
+import { channelFixture, inGroup, envelope, post, until, shareAssistantModel, scriptedModel } from '../../../fixtures/channel-fixture.mjs';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 import { HttpError } from '../../../../dist/core/security.js';
@@ -261,17 +261,88 @@ test('clearing the originating message prevents a later legacy task result from 
   assert.equal((await complete(f,await post(f.h,f.id,inGroup('Read the old discussion after cleanup','ou_alice')))).state,'completed');
 });
 
-test('derived replies and other scopes are absent from future model inputs after their source fence changes',async t=>{
-  const f=await fixture(t);f.modelState.respond=async(body,res)=>say(res,'Derived obsolete detail');
-  const input=inGroup('A mutable source','ou_bob');assert.equal((await complete(f,await post(f.h,f.id,input))).state,'completed');
-  await until(()=>f.h.store.get("SELECT count(*) n FROM channel_messages WHERE sender_type='app'").n>0);
-  assert.match(f.h.store.get('SELECT project_id FROM channel_message_scopes').project_id,/^binding:/);
-  const original=f.h.store.get('SELECT * FROM channel_messages WHERE message_id=?',input.event.message.message_id),payload=f.h.store.secrets.open(original.payload,'channel-message:'+f.chat.id+':'+original.message_id);
-  f.service.ledger.merge(f.chat,{...payload,updated_at:Date.now()+10,content:'Corrected source'},'live');
-  f.service.ledger.merge(f.chat,{...payload,message_id:'protected-other-project',sender_type:'app',content:'Unauthorized project secret',updated_at:Date.now()+20},'live');
-  f.h.store.run('INSERT INTO channel_message_scopes VALUES(?,?,?,NULL)',f.chat.id,'protected-other-project','201');
-  f.modelState.respond=async(body,res)=>{assert.ok(!JSON.stringify(body.messages).includes('Derived obsolete detail'));assert.ok(!JSON.stringify(body.messages).includes('Unauthorized project secret'));say(res,'A fresh local answer');};
-  assert.equal((await complete(f,await post(f.h,f.id,inGroup('Answer from current sources','ou_alice')))).state,'completed');
+test('history sync preserves a sent reply in the timeline and assistant history until the reply is recalled', async t => {
+  const f = await fixture(t), reply = 'Reply quoting A mutable source';
+  scriptedModel(f, [reply]);
+  const input = inGroup('A mutable source', 'ou_bob'), sourceId = input.event.message.message_id;
+  assert.equal((await complete(f, await post(f.h, f.id, input))).state, 'completed');
+  const delivered = await until(() => f.h.store.get("SELECT message_id FROM channel_messages WHERE chat_id=? AND sender_type='app'", f.chat.id));
+  const replyId = delivered.message_id;
+  assert.match(f.h.store.get('SELECT project_id FROM channel_message_scopes WHERE message_id=?', replyId).project_id, /^binding:/);
+
+  const source = f.h.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?', f.chat.id, sourceId);
+  const original = f.h.store.secrets.open(source.payload, 'channel-message:' + f.chat.id + ':' + sourceId);
+  f.wire.state.history = () => Response.json({ code: 0, data: { has_more: false, items: [{
+    message_id: sourceId, msg_type: 'text', create_time: String(source.created_at), update_time: String(source.updated_at + 1),
+    body: { content: JSON.stringify({ text: 'Corrected source' }) },
+    sender: { id: source.sender_id, tenant_key: source.sender_tenant, sender_type: 'user' },
+  }] } });
+  const api = '/api/channels/chats/' + f.chat.id;
+  assert.ok((await f.admin(api + '/sync', 'POST', { full: true })).status < 300);
+  await f.service.historySync.tick();
+  await until(() => f.h.store.get("SELECT 1 FROM channel_messages WHERE chat_id=? AND message_id=? AND source='history'", f.chat.id, sourceId));
+
+  const hiddenId = 'protected-other-project';
+  f.service.ledger.merge(f.chat, { ...original, message_id: hiddenId, sender_type: 'app', content: 'Unauthorized project secret' }, 'live');
+  f.h.store.run('INSERT INTO channel_message_scopes VALUES(?,?,?,NULL)', f.chat.id, hiddenId, '201');
+
+  const timeline = async () => {
+    const result = await f.admin(api + '/timeline');
+    assert.equal(result.status, 200);
+    return result.value.messages;
+  };
+  let messages = await timeline();
+  assert.equal(messages.find(message => message.message_id === sourceId).content, 'Corrected source');
+  assert.equal(messages.find(message => message.message_id === replyId).content, reply);
+  assert.equal((await f.admin(api + '/messages?keyword=' + encodeURIComponent(reply))).value.messages[0].message_id, replyId);
+
+  scriptedModel(f, [
+    (_results, prompt) => {
+      const recent = prompt.context.recent_messages;
+      assert.equal(recent.find(message => message.message_id === replyId).content, reply);
+      assert.equal(recent.find(message => message.message_id === sourceId).content, 'Corrected source');
+      assert.ok(!recent.some(message => message.message_id === hiddenId));
+      assert.deepEqual(prompt.source_updates.messages.map(message => [message.message_id, message.change, message.content]),
+        [[sourceId, 'edited', 'Corrected source']]);
+      return ['search_conversation_history', { keyword: 'A mutable source' }];
+    },
+    ([search]) => {
+      assert.deepEqual(search.messages.map(message => message.message_id), [replyId]);
+      return ['read_conversation_message', { message_id: replyId }];
+    },
+    ([, read]) => {
+      assert.equal(read.text, reply);
+      return ['read_conversation_message', { message_id: hiddenId }];
+    },
+    ([, , readHidden]) => {
+      assert.equal(readHidden.state, 'not_found_locally');
+      return 'The current source and sent reply are both available.';
+    },
+  ]);
+  assert.equal((await complete(f, await post(f.h, f.id, inGroup('Read the conversation again')))).state, 'completed');
+
+  const recalled = await post(f.h, f.id, {
+    header: { ...input.header, event_id: 'recall-' + replyId, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: f.chat.chat_id, message_id: replyId, recall_time: String(Date.now()) },
+  });
+  assert.equal(recalled.status, 200);
+  messages = await timeline();
+  const tombstone = messages.find(message => message.message_id === replyId);
+  assert.equal(tombstone.deleted, true);
+  assert.equal(tombstone.content, '[消息已撤回]');
+
+  scriptedModel(f, [
+    (_results, prompt) => {
+      assert.equal(prompt.context.recent_messages.find(message => message.message_id === replyId).content, '[消息已撤回]');
+      return ['read_conversation_message', { message_id: replyId }];
+    },
+    ([read]) => {
+      assert.equal(read.deleted, true);
+      assert.equal(read.text, '[消息已撤回]');
+      return 'The previous reply was recalled.';
+    },
+  ]);
+  assert.equal((await complete(f, await post(f.h, f.id, inGroup('Check the recalled reply')))).state, 'completed');
 });
 
 test('cleanup during an in-flight model erases derived content and cannot restore its response snapshots',async t=>{
