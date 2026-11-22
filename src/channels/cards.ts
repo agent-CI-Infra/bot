@@ -40,7 +40,7 @@ const chartTypes = new Set([
 
 const idPattern = /^[a-zA-Z0-9_-]{1,40}$/;
 const iconTokenPattern = /^[a-z0-9_]{1,64}$/;
-const pxPattern = /^\d{1,4}px$/;
+const pxPattern = /^\d{1,3}px$/;
 const spacingPxPattern = /^-?\d{1,3}px(?:\s+-?\d{1,3}px){0,3}$/;
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 

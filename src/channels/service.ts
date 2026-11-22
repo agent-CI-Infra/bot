@@ -820,19 +820,23 @@ export class ChannelService {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
     if (protection?.kind === 'card_update') {
+      const queuedRev = Number(String(row.idempotency_key ?? '').split(':').pop());
       const guard = () => {
         this.source(event); if (this.stopped) fail(409, 'channel_stopped');
         const cardRow = this.cards.get(String(protection.card_id), c.id);
         const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', String(protection.chat_id));
         if (!cardRow || !chat) return fail(409, 'channel_card_stale');
         this.guardInteractiveCard(cardRow, chat);
+        if (Number.isSafeInteger(queuedRev) && Number(cardRow.revision) > queuedRev) fail(409, 'channel_card_stale');
       };
       guard();
       const remote = await this.adapter(c, guard).update(delivery);
       if (!this.stopped) {
         const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', String(protection.chat_id));
         this.store.transaction(() => {
-          if (chat && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, remote)) {
+          const cardRow = this.cards.get(String(protection.card_id), c.id);
+          if (chat && (!Number.isSafeInteger(queuedRev) || Number(cardRow?.revision ?? 0) <= queuedRev)
+            && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, remote)) {
             this.ledger.merge(chat, { message_id: remote, sender_id: c.bot_open_id, sender_tenant: c.installation_tenant, sender_type: 'app',
               message_type: 'interactive', content: cardText(delivery.content), raw_content: JSON.stringify(delivery.content),
               created_at: Date.now(), updated_at: Date.now(), parent_id: '', root_id: '', thread_id: '', deleted: false }, 'live');
