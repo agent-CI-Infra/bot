@@ -106,7 +106,10 @@ test('the labels are project settings: an empty review, developing or needs-huma
   assert.equal((await patch({developing_label:'in progress',needs_human_label:'needs-maintainer'})).status,200);
   assert.deepEqual(projectLabels(h.store,'101'),{review_label:'',development_label:'team go',developing_label:'in progress',needs_human_label:'needs-maintainer'});
   assert.deepEqual(ownLabels(h.store,'101'),['team go','in progress','needs-maintainer']);
-  for(const values of [{development_label:''},{review_label:' padded'},{review_label:'x'.repeat(51)},{development_label:'tab\there'},{developing_label:'trailing '},{needs_human_label:' bad'}]){
+  for(const values of [
+    {development_label:''},{review_label:' padded'},{review_label:'x'.repeat(51)},{development_label:'tab\there'},{developing_label:'trailing '},{needs_human_label:' bad'},
+    {needs_human_label:'team go'},{needs_human_label:'IN PROGRESS'},{needs_human_label:'bot-developed'},{review_label:'same-label',needs_human_label:'same-label'},
+  ]){
     const refused=await patch(values);assert.equal(refused.status,400,JSON.stringify(values));assert.equal(refused.value.error,'invalid_label');
   }
   assert.equal((await patch({developing_label:'',needs_human_label:''})).status,200);assert.equal(developingLabel(h.store,'101'),'');

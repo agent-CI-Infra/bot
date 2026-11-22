@@ -215,3 +215,72 @@ test('board issues projects all 7 statuses across legacy tasks and #1122 task.re
   deleteProjectRecords(store, '101', { files: false });
   assert.equal(store.get("SELECT count(*) n FROM board_issue_tasks WHERE repository_id='101'").n, 0);
 });
+
+test('board issues ignores unrelated reviewer reply tasks, ignored comments, and treats user_cancel as skipped (#1215)', async t => {
+  const { h, admin } = await fixture(t);
+  const store = h.store;
+
+  // #11: real needs_information review + later routine reviewer reply (writes=['github'], no review grant or conclusion) -> stays needs_information
+  seedIssue(store, '101', 11, 'Needs repro steps', 'open', '2026-11-20T12:00:00.000Z');
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,input,result,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+    't-rev-11', '101', 'task.request', 'succeeded', '检视 Issue #11',
+    JSON.stringify({ target: { type: 'issue', number: 11 }, executor_role: 'reviewer', delivery: 'review' }),
+    JSON.stringify({ review_delivery: { conclusion: 'needs_information', recommendation: 'Need stack trace.' } }),
+    11, '2026-11-20T11:00:00.000Z', '2026-11-20T11:05:00.000Z',
+  );
+  store.run('INSERT INTO task_write_grants VALUES(?,?,1,?)', 't-rev-11', JSON.stringify(['review']), '2026-11-20T11:00:00.000Z');
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,input,result,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+    't-reply-11', '101', 'task.request', 'succeeded', '回复感谢评论',
+    JSON.stringify({ target: { type: 'issue', number: 11 }, executor_role: 'reviewer' }),
+    JSON.stringify({ summary: 'Thanks for the update.' }),
+    11, '2026-11-20T11:30:00.000Z', '2026-11-20T11:35:00.000Z',
+  );
+  store.run('INSERT INTO task_write_grants VALUES(?,?,1,?)', 't-reply-11', JSON.stringify(['github']), '2026-11-20T11:30:00.000Z');
+
+  // #12: ready_for_development review + pending review.published + later ignored thank-you comment -> stays pending (comment ignore never flips it)
+  seedIssue(store, '101', 12, 'Ready feature request', 'open', '2026-11-20T12:10:00.000Z');
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,result,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+    't-rev-12', '101', 'review.issue', 'succeeded', '检视 Issue #12',
+    JSON.stringify({ conclusion: 'ready_for_development', recommendation: 'Bounded feature.' }),
+    12, '2026-11-20T11:00:00.000Z', '2026-11-20T11:05:00.000Z',
+  );
+  store.run(
+    `INSERT INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,summary,facts,options,thread_key,state,decision,reason,created_at,decided_at)
+     VALUES('ev-rev-12','101','k-rev-12','review.published','review','issue',12,'Issue 检视已发布：#12','{}','[]','101:issue:12','pending',NULL,NULL,'2026-11-20T11:06:00.000Z',NULL)`,
+  );
+  store.run(
+    `INSERT INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,summary,facts,options,thread_key,state,decision,reason,created_at,decided_at)
+     VALUES('ev-cmt-12','101','k-cmt-12','issue.commented','webhook','issue',12,'Issue #12 新评论','{}','[]','101:issue:12','decided','ignore','普通感谢评论，无需处理','2026-11-20T12:00:00.000Z','2026-11-20T12:01:00.000Z')`,
+  );
+
+  // #13: user_cancel development -> skipped (not blocked / not needs_human)
+  seedIssue(store, '101', 13, 'Cancelled by human', 'open', '2026-11-20T12:20:00.000Z');
+  store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,summary,error_code,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+    't-dev-13', '101', 'development.issue', 'cancelled', '开发 Issue #13', 'user_cancel',
+    13, '2026-11-20T12:15:00.000Z', '2026-11-20T12:20:00.000Z',
+  );
+
+  const list = await admin('/api/board/issues?repository_id=101');
+  assert.equal(list.status, 200);
+  const byNum = new Map(list.value.issues.map(i => [i.number, i]));
+  assert.equal(byNum.get(11).status, 'needs_information');
+  assert.equal(byNum.get(11).review.task_id, 't-rev-11');
+  assert.equal(byNum.get(12).status, 'pending');
+  assert.match(byNum.get(12).reason, /等待 Manager 分派/);
+  assert.equal(byNum.get(13).status, 'skipped');
+  assert.match(byNum.get(13).reason, /人工取消/);
+  assert.equal(list.value.counts.blocked, 0);
+  assert.equal(list.value.counts.needs_human, 1);
+
+  // Detail exposes explicit total & truncation flags
+  const detail = await admin('/api/board/issues/101/12');
+  assert.equal(detail.status, 200);
+  assert.equal(detail.value.tasks_total, 1);
+  assert.equal(detail.value.tasks_truncated, false);
+  assert.equal(detail.value.dispatch_events_total, 2);
+  assert.equal(detail.value.dispatch_events_truncated, false);
+});

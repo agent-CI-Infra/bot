@@ -115,7 +115,15 @@ export function startProgress(store: Store, task: Row, issue: any) {
   const start = { ...(basis ? { basis } : {}), ...(manager?.reason ? { reason: excerpt(manager.reason, maxText, redactor) } : {}),
     ...(brief?.goal ? { goal: excerpt(brief.goal, maxText * 2, redactor) } : {}), ...(Array.isArray(brief?.criteria) ? { criteria: brief.criteria.slice(0, 12).map((c: unknown) => excerpt(c, maxItem, redactor)) } : {}) };
   const nhLabel = needsHumanLabel(store, task.repository_id) || null;
-  const nhOn = nhLabel && hasLabelName(issue?.labels, nhLabel) ? 1 : 0;
+  const priorNeedsHuman = nhLabel
+    ? !!store.get(
+        'SELECT 1 FROM issue_development_progress WHERE repository_id=? AND number=? AND needs_human_on=1 AND lower(coalesce(needs_human_label,\'\'))=lower(?) LIMIT 1',
+        task.repository_id,
+        Number(task.object_number),
+        nhLabel,
+      )
+    : false;
+  const nhOn = nhLabel && (hasLabelName(issue?.labels, nhLabel) || priorNeedsHuman) ? 1 : 0;
   store.run(`INSERT INTO issue_development_progress(task_id,repository_id,number,language,label,needs_human_label,needs_human_on,milestones,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(task_id) DO NOTHING`, id, task.repository_id, Number(task.object_number), reviewLanguage(setting, `${issue?.title ?? ''}\n${issue?.body ?? ''}`),
     developingLabel(store, task.repository_id) || null, nhLabel, nhOn, JSON.stringify({ start }), now, now);
@@ -218,20 +226,34 @@ const maxFailures = 12;
  * `github` may be a function that connects a client: it is called only when something has to be written.
  */
 export async function settleProgress(store: Store, taskId: string, github: GitHub | (() => Promise<GitHub>)): Promise<boolean> {
-  const previous = locks.get(taskId) ?? Promise.resolve();
+  const target = store.get('SELECT repository_id,number FROM issue_development_progress WHERE task_id=?', taskId);
+  const lockKey = target ? `issue:${target.repository_id}:${target.number}` : `task:${taskId}`;
+  const previous = locks.get(lockKey) ?? Promise.resolve();
   const work = previous.then(() => settle(store, taskId, github), () => settle(store, taskId, github));
-  locks.set(taskId, work); work.finally(() => { if (locks.get(taskId) === work) locks.delete(taskId); }).catch(() => {});
+  locks.set(lockKey, work); work.finally(() => { if (locks.get(lockKey) === work) locks.delete(lockKey); }).catch(() => {});
   return work;
 }
+function hasNewerIssueProgress(store: Store, row: Row): boolean {
+  return !!store.get(
+    `SELECT 1 FROM issue_development_progress
+     WHERE repository_id=? AND number=? AND task_id<>?
+       AND (created_at>? OR (created_at=? AND rowid>?))
+     LIMIT 1`,
+    row.repository_id, row.number, row.task_id, row.created_at, row.created_at, row.rowid,
+  );
+}
 async function settle(store: Store, taskId: string, client: GitHub | (() => Promise<GitHub>)): Promise<boolean> {
-  const row = store.get('SELECT * FROM issue_development_progress WHERE task_id=?', taskId), task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
+  const row = store.get('SELECT rowid,* FROM issue_development_progress WHERE task_id=?', taskId), task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
   if (!row || !task) return true;
   const now = state(task), number = Number(row.number);
+  const supersededByNewer = hasNewerIssueProgress(store, row);
   const wanted = !now.pr && !now.stopped ? developingIssueLabel(String(row.label ?? '')) : null;
-  const changeDeveloping = !!wanted !== !!row.label_on;
+  // An older development settling after a newer one started on the same Issue must not remove the newer task's
+  // developing label or re-add needs_human_label; the newer row owns the Issue's label state.
+  const changeDeveloping = !supersededByNewer && (!!wanted !== !!row.label_on);
   const nhDef = needsHumanIssueLabel(String(row.needs_human_label ?? ''));
   const wantNeedsHuman = !!nhDef && needsHumanWhenStopped(task, now);
-  const changeNeedsHuman = !!nhDef && wantNeedsHuman !== !!row.needs_human_on;
+  const changeNeedsHuman = !supersededByNewer && !!nhDef && wantNeedsHuman !== !!row.needs_human_on;
   const markDeveloped = !!now.pr && row.settled_status !== now.status;
   const update = (fields: Record<string, unknown>) => store.run(`UPDATE issue_development_progress SET ${Object.keys(fields).map(key => key + '=?').join(',')},updated_at=? WHERE task_id=?`,
     ...Object.values(fields) as any[], new Date().toISOString(), taskId);
@@ -251,6 +273,10 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
       if (wantNeedsHuman) await addIssueLabel(github, number, nhDef);
       else await github.request('DELETE', github.path(`/issues/${number}/labels/${encodeURIComponent(nhDef.name)}`), undefined, true);
       update({ needs_human_on: wantNeedsHuman ? 1 : 0 });
+      if (!wantNeedsHuman) {
+        store.run('UPDATE issue_development_progress SET needs_human_on=0 WHERE repository_id=? AND number=? AND task_id<>? AND needs_human_on=1',
+          row.repository_id, number, taskId);
+      }
     }
     // The PR label and the linked comment can succeed independently. Keep the row pending until both are on GitHub.
     let labelError: unknown;

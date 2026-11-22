@@ -38,7 +38,7 @@ const attentionStates = new Set([
   'waiting_publication', 'needs_replan', 'needs_help',
 ]);
 const doneStates = new Set(['succeeded', 'completed', 'pr_opened']);
-const autoStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired']);
+const autoStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel']);
 const ceilingNames: Record<Ceiling, string> = { read: '只读问答', comment: '可评论和打标签', develop: '可开发并开 PR' };
 const devStateNames: Record<string, string> = {
   queued: '排队中', running: '执行中', preparing: '准备环境', implementing: '修改代码',
@@ -70,7 +70,8 @@ function deriveIssueRow(
   review: Row | undefined,
   dev: Row | undefined,
   pr: PrInfo | null,
-  dispatch: Row | undefined,
+  reviewDispatch: Row | undefined,
+  intakeDispatch: Row | undefined,
   progress: { plan?: any; stopped?: any } | null,
   ceiling: Ceiling,
 ): Json {
@@ -107,6 +108,12 @@ function deriveIssueRow(
     || (devStatus === 'cancelled' && !autoStopCodes.has(String(dev.error_code ?? '')) && !effectivePr)
   );
 
+  const reviewCreatedAt = review ? String(review.created_at || '') : '';
+  const activeReviewDispatch = reviewDispatch && (!reviewCreatedAt || String(reviewDispatch.decided_at || reviewDispatch.created_at || '') >= reviewCreatedAt)
+    ? reviewDispatch
+    : undefined;
+  const governingDispatch = review ? activeReviewDispatch : intakeDispatch;
+
   if (dev && activeDevStates.has(devStatus)) {
     status = 'developing';
     const stageText = devStateNames[devStatus] || devStatus;
@@ -135,6 +142,11 @@ function deriveIssueRow(
       reason = cause?.label || `开发受阻（${devStatus}）`;
       nextStep = cause?.action || '打开开发任务查看原因并决定是否重试';
     }
+  } else if (dev && !reviewNewerThanDev && devStatus === 'cancelled' && autoStopCodes.has(String(dev.error_code ?? ''))) {
+    status = 'skipped';
+    reason = String(dev.error_code ?? '') === 'user_cancel'
+      ? '开发已由人工取消'
+      : '开发已自动停止（Issue 已关闭或被新任务替代）';
   } else if (review && doneStates.has(reviewStatus)) {
     const conclusion = review.conclusion ? String(review.conclusion) : '';
     const humanAction = review.human_action ? clip(review.human_action, 220) : '';
@@ -154,15 +166,12 @@ function deriveIssueRow(
       status = 'skipped';
       reason = `项目能力上限为「${ceilingNames[ceiling]}」，未开启自动开发`;
       nextStep = '如需自动开发，请在项目「监听与触发」将能力上限调至「可开发并开 PR」';
-    } else if (dispatch && String(dispatch.decision) === 'ignore') {
+    } else if (activeReviewDispatch && String(activeReviewDispatch.decision) === 'ignore') {
       status = 'skipped';
-      reason = clip(dispatch.reason, 220) || 'Manager 决定暂不开发';
-    } else if (dispatch && ['pending', 'dispatching'].includes(String(dispatch.state))) {
+      reason = clip(activeReviewDispatch.reason, 220) || 'Manager 决定暂不开发';
+    } else if (activeReviewDispatch && ['pending', 'dispatching'].includes(String(activeReviewDispatch.state))) {
       status = 'pending';
       reason = '检视结论为可开发，正在等待 Manager 分派';
-    } else if (dev && devStatus === 'cancelled' && autoStopCodes.has(String(dev.error_code ?? ''))) {
-      status = 'skipped';
-      reason = '开发已自动停止（Issue 已关闭或被新任务替代）';
     } else {
       status = 'skipped';
       reason = rec || '已完成检视，暂未启动自动开发';
@@ -175,15 +184,15 @@ function deriveIssueRow(
   } else if (review && activeReviewStates.has(reviewStatus)) {
     status = 'pending';
     reason = '正在检视 Issue';
-  } else if (dispatch && String(dispatch.state) === 'filtered') {
+  } else if (intakeDispatch && String(intakeDispatch.state) === 'filtered') {
     status = 'pending';
-    reason = clip(dispatch.reason, 220) || '事件被项目过滤，未启动检视';
-  } else if (dispatch && String(dispatch.decision) === 'ignore') {
+    reason = clip(intakeDispatch.reason, 220) || '事件被项目过滤，未启动检视';
+  } else if (intakeDispatch && String(intakeDispatch.decision) === 'ignore') {
     status = 'skipped';
-    reason = clip(dispatch.reason, 220) || 'Manager 已忽略，未启动处理';
+    reason = clip(intakeDispatch.reason, 220) || 'Manager 已忽略，未启动处理';
   }
 
-  const lastActivity = [obj.last_seen, reviewTime, devTime, dispatch?.decided_at || dispatch?.created_at]
+  const lastActivity = [obj.last_seen, reviewTime, devTime, governingDispatch?.decided_at || governingDispatch?.created_at]
     .filter((v): v is string => typeof v === 'string' && !!v)
     .sort()
     .at(-1) || String(obj.last_seen || '');
@@ -219,14 +228,14 @@ function deriveIssueRow(
           updated_at: String(dev.updated_at || dev.created_at),
         }
       : null,
-    dispatch: dispatch
+    dispatch: governingDispatch
       ? {
-          event_id: String(dispatch.id),
-          type: String(dispatch.type),
-          state: String(dispatch.state),
-          decision: dispatch.decision ? String(dispatch.decision) : null,
-          reason: dispatch.reason ? String(dispatch.reason) : null,
-          decided_at: dispatch.decided_at ? String(dispatch.decided_at) : String(dispatch.created_at),
+          event_id: String(governingDispatch.id),
+          type: String(governingDispatch.type),
+          state: String(governingDispatch.state),
+          decision: governingDispatch.decision ? String(governingDispatch.decision) : null,
+          reason: governingDispatch.reason ? String(governingDispatch.reason) : null,
+          decided_at: governingDispatch.decided_at ? String(governingDispatch.decided_at) : String(governingDispatch.created_at),
         }
       : null,
   };
@@ -238,9 +247,10 @@ function loadContextMaps(store: Store, repoIds: string[]) {
   const latestReview = new Map<string, Row>();
   const latestDev = new Map<string, Row>();
   const latestPr = new Map<string, PrInfo>();
-  const latestDispatch = new Map<string, Row>();
+  const latestReviewDispatch = new Map<string, Row>();
+  const latestIntakeDispatch = new Map<string, Row>();
   const progressByTask = new Map<string, { plan?: any; stopped?: any }>();
-  if (!uniqueRepos.length) return { ceilings, latestReview, latestDev, latestPr, latestDispatch, progressByTask };
+  if (!uniqueRepos.length) return { ceilings, latestReview, latestDev, latestPr, latestReviewDispatch, latestIntakeDispatch, progressByTask };
 
   const marks = uniqueRepos.map(() => '?').join(',');
   for (const row of store.all(`SELECT * FROM policies WHERE repository_id IN (${marks})`, ...uniqueRepos)) {
@@ -317,20 +327,24 @@ function loadContextMaps(store: Store, repoIds: string[]) {
 
   if (store.hasTable('dispatch_events')) {
     const dispatchRows = store.all(
-      `SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at
+      `SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at, bucket
        FROM (
          SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at,
+           CASE WHEN type='review.published' THEN 'review' ELSE 'intake' END AS bucket,
            row_number() OVER (
-             PARTITION BY repository_id, object_number
+             PARTITION BY repository_id, object_number, CASE WHEN type='review.published' THEN 'review' ELSE 'intake' END
              ORDER BY coalesce(nullif(decided_at,''), created_at) DESC, created_at DESC, rowid DESC
            ) AS rn
          FROM dispatch_events
          WHERE repository_id IN (${marks}) AND object_type='issue' AND object_number IS NOT NULL
+           AND type IN ('review.published','issue.opened','issue.reopened','issue.labeled')
        ) WHERE rn=1`,
       ...uniqueRepos,
     );
     for (const row of dispatchRows) {
-      latestDispatch.set(`${row.repository_id}:${row.object_number}`, row);
+      const key = `${row.repository_id}:${row.object_number}`;
+      if (row.bucket === 'review') latestReviewDispatch.set(key, row);
+      else latestIntakeDispatch.set(key, row);
     }
   }
 
@@ -343,7 +357,7 @@ function loadContextMaps(store: Store, repoIds: string[]) {
     }
   }
 
-  return { ceilings, latestReview, latestDev, latestPr, latestDispatch, progressByTask };
+  return { ceilings, latestReview, latestDev, latestPr, latestReviewDispatch, latestIntakeDispatch, progressByTask };
 }
 
 export function listBoardIssues(store: Store, user: Actor, url: URL): Json {
@@ -412,7 +426,8 @@ export function listBoardIssues(store: Store, user: Actor, url: URL): Json {
         maps.latestReview.get(key),
         dev,
         maps.latestPr.get(key) ?? null,
-        maps.latestDispatch.get(key),
+        maps.latestReviewDispatch.get(key),
+        maps.latestIntakeDispatch.get(key),
         dev ? (maps.progressByTask.get(String(dev.task_id)) ?? null) : null,
         maps.ceilings.get(String(obj.repository_id)) ?? 'comment',
       );
@@ -466,7 +481,8 @@ export function boardIssueDetail(store: Store, user: Actor, repoId: string, issu
       maps.latestReview.get(key),
       dev,
       maps.latestPr.get(key) ?? null,
-      maps.latestDispatch.get(key),
+      maps.latestReviewDispatch.get(key),
+      maps.latestIntakeDispatch.get(key),
       dev ? (maps.progressByTask.get(String(dev.task_id)) ?? null) : null,
       maps.ceilings.get(repoId) ?? 'comment',
     );
@@ -478,12 +494,14 @@ export function boardIssueDetail(store: Store, user: Actor, repoId: string, issu
       }
     }
 
+    const taskWhere = `repository_id=? AND object_number=?
+      AND (kind IN ('review.issue','development.issue','workflow.issue')
+        OR (kind='task.request' AND (NOT json_valid(input) OR json_extract(input,'$.target.type') IS NULL OR json_extract(input,'$.target.type')='issue')))`;
+    const tasksTotal = Number(store.get(`SELECT count(*) AS n FROM tasks WHERE ${taskWhere}`, repoId, issueNumber)?.n ?? 0);
     const tasks = store.all(
       `SELECT id, kind, status, summary, error_code, created_at, updated_at
        FROM tasks
-       WHERE repository_id=? AND object_number=?
-         AND (kind IN ('review.issue','development.issue','workflow.issue')
-           OR (kind='task.request' AND (NOT json_valid(input) OR json_extract(input,'$.target.type') IS NULL OR json_extract(input,'$.target.type')='issue')))
+       WHERE ${taskWhere}
        ORDER BY created_at DESC, rowid DESC
        LIMIT 20`,
       repoId, issueNumber,
@@ -500,6 +518,12 @@ export function boardIssueDetail(store: Store, user: Actor, repoId: string, issu
     }));
 
     const tKey = `${repoId}:issue:${issueNumber}`;
+    const dispatchEventsTotal = store.hasTable('dispatch_events')
+      ? Number(store.get(
+          `SELECT count(*) AS n FROM dispatch_events WHERE repository_id=? AND (thread_key=? OR (object_type='issue' AND object_number=?))`,
+          repoId, tKey, issueNumber,
+        )?.n ?? 0)
+      : 0;
     const dispatchEvents = store.hasTable('dispatch_events')
       ? store.all(
           `SELECT id, type, source, state, decision, reason, summary, created_at, decided_at
@@ -526,7 +550,11 @@ export function boardIssueDetail(store: Store, user: Actor, repoId: string, issu
     return {
       issue,
       tasks,
+      tasks_total: tasksTotal,
+      tasks_truncated: tasksTotal > tasks.length,
       dispatch_events: dispatchEvents,
+      dispatch_events_total: dispatchEventsTotal,
+      dispatch_events_truncated: dispatchEventsTotal > dispatchEvents.length,
       thread_summary: thread.summary,
     };
   });

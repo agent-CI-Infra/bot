@@ -1074,6 +1074,18 @@ export class TaskEngine {
       if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||last?.retry_cycle_started_at!==(cycle??undefined)||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
         log({type:'fault',state,code:failure.code,...(cycle!=null?{retry_cycle_started_at:cycle}:{}),...(detail?{detail,detail_sha:sha(detail)}:{})});
     }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);if(['completed','succeeded','pr_opened'].includes(current?.status))resolveExecutionRetries(this.store,id);
+      // Settle Issue progress (developing & needs_human labels + status comment) after catch writes the final/waiting status,
+      // covering both legacy development.issue and #1122 generic Issue development task.request (#1215).
+      if(current&&!['queued','running','preparing','implementing','validating','publishing'].includes(String(current.status))
+        &&this.store.get('SELECT 1 FROM issue_development_progress WHERE task_id=?',id)){
+        const progressRepo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id);
+        if(progressRepo){
+          await settleProgress(this.store,id,async()=>{
+            const gh=new GitHub(this.store,progressRepo,new Redactor(),async()=>{},this.githubUrl);
+            gh.purpose='task';await gh.connect(false,undefined,{issues:'write',metadata:'read'});return gh;
+          }).catch(()=>false);
+        }
+      }
       // A task that ended lets go of its worktree (#769); one that waits or retries keeps it until it prepares again.
       if(['completed','succeeded','pr_opened','failed','cancelled','superseded'].includes(current?.status))releaseWorktrees(this.store,id,'task_ended');endRun(this.store,attemptRun,['completed','succeeded','pr_opened'].includes(current?.status)?'succeeded':'stopped',current?.error_code);}
   }

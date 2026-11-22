@@ -414,6 +414,14 @@ export async function runRequest(
     await gh.connect(true, undefined, { issues: 'write' }, false);
     return gh;
   };
+  let progressStarted = false;
+  const beginIssueProgress = async (issueObj?: any) => {
+    if (progressStarted || !issueProgressActive()) return;
+    progressStarted = true;
+    if (task.object_number == null && Number.isSafeInteger(targetSpec?.number)) update({ object_number: Number(targetSpec!.number) });
+    startProgress(store, task, issueObj ?? input.object);
+    await settleProgress(store, String(task.id), connectProgressClient).catch(() => false);
+  };
 
   let prDiffFiles: any[] | undefined;
 
@@ -559,10 +567,7 @@ export async function runRequest(
         };
         input.object = issue;
         if (task.object_number == null) update({ object_number: Number(issue.number) });
-        if (issueProgressActive()) {
-          startProgress(store, task, issue);
-          await settleProgress(store, String(task.id), connectProgressClient).catch(() => false);
-        }
+        await beginIssueProgress(issue);
       } else if (targetSpec?.type === 'branch' && typeof targetSpec.ref === 'string') {
         const refName = targetSpec.ref.replace(/^refs\/heads\//, '');
         const branchRef = await github.ref(refName);
@@ -730,6 +735,7 @@ export async function runRequest(
     const contextFiles = { ...(parent ? JSON.parse(parent.input || '{}').context_files : {}), ...blobValue(store, input.context_files), ...targetContextFiles, ...inheritedContext, ...wakeupContextFile };
     const stagedContextFiles = { ...contextFiles, ...repoSkillContextFiles };
     if (Object.keys(stagedContextFiles).length) await workspace.context(stagedContextFiles);
+    await beginIssueProgress();
     if (controlled(store, task, entry) && !ownRole) await assessRetryReport(store, task, workspace, github, guard, redactor);
 
     const transferredConflictBases = new Set<string>();

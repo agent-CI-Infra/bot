@@ -166,6 +166,13 @@ export function validLabel(value: unknown, key: keyof Labels): string {
 export function saveLabels(store: Store, repositoryId: string, change: Partial<Labels>): Labels {
   const next = { ...projectLabels(store, repositoryId), ...Object.fromEntries(Object.entries(change).filter(([, v]) => v !== undefined)) } as Labels;
   for (const key of labelKeys) validLabel(next[key], key);
+  if (next.needs_human_label) {
+    const nh = next.needs_human_label.toLowerCase();
+    const others = [next.review_label, next.development_label, next.developing_label, 'bot-developed']
+      .filter(Boolean)
+      .map(name => name.toLowerCase());
+    if (others.includes(nh)) fail(400, 'invalid_label', 'needs_human_label');
+  }
   store.run(`INSERT INTO project_labels(repository_id,review_label,development_label,developing_label,needs_human_label) VALUES(?,?,?,?,?) ON CONFLICT(repository_id)
     DO UPDATE SET review_label=excluded.review_label,development_label=excluded.development_label,developing_label=excluded.developing_label,needs_human_label=excluded.needs_human_label`,
     repositoryId, next.review_label, next.development_label, next.developing_label, next.needs_human_label);
