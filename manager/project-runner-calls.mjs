@@ -1,7 +1,7 @@
 import { ManagerError } from './docker.mjs';
 
-const runnerTypes = ['command','read','write','workspace_init','workspace_source','workspace_tree','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_request','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_agent_result','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
+const runnerTypes = ['command','read','write','workspace_init','workspace_source','workspace_tree','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','workspace_import_commits','workspace_verify_merge','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_request','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_agent_result','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','conflict_base_sha','pr_head_sha','base_sha','head_sha','head_tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
 
 // The control plane's workspace cleanup: list the task directories or shared worktrees, remove a few of them per call
 // (runner/task-dirs.mjs).
@@ -26,6 +26,15 @@ export function validateCall(call) {
   if (call.source_workspace_id !== undefined && (!mayName.includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
   if (sourced.includes(call.type) && !/^[a-f0-9]{48}$/.test(call.source_workspace_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'workspace_integrate' && (![call.sha,call.tree_sha,call.base_tree].every(value => /^[a-f0-9]{40}$/.test(value || '')) || call.source_workspace_id === call.workspace_id)) throw new ManagerError('invalid_runner_request', 400);
+  for (const key of ['conflict_base_sha', 'pr_head_sha']) {
+    if (call[key] !== undefined && (call.type !== 'workspace_import_commits' || !/^[a-f0-9]{40}$/.test(call[key]))) throw new ManagerError('invalid_runner_request', 400);
+  }
+  if (call.type === 'workspace_import_commits' && !Array.isArray(call.commits)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'workspace_verify_merge') {
+    if (![call.base_sha, call.head_sha, call.head_tree_sha].every(value => /^[a-f0-9]{40}$/.test(value || ''))) throw new ManagerError('invalid_runner_request', 400);
+  } else if (call.base_sha !== undefined || call.head_sha !== undefined || call.head_tree_sha !== undefined) {
+    throw new ManagerError('invalid_runner_request', 400);
+  }
   // A shared worktree (#769) is named only by the calls that create or bind it, by its 48-hex id.
   const worktreeCalls = ['workspace_worktree_create', 'workspace_worktree_bind'];
   if (worktreeCalls.includes(call.type) !== (call.worktree_id !== undefined) || call.worktree_id !== undefined && !/^[a-f0-9]{48}$/.test(call.worktree_id)) throw new ManagerError('invalid_runner_request', 400);

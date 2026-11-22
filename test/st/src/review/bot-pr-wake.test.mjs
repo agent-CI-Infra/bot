@@ -978,37 +978,42 @@ test('continue_task merges mid-run conflict & check failure into running task, r
     if (workerTurn === 4) {
       const baseOnlyOut = String(body.messages.at(-1)?.content || '');
       assert.match(baseOnlyOut, /version = 2/, 'late conflict base commit was transferred into the running workspace');
-      // Write `calc.mjs` & `calc.test.mjs`, but omit `main-only.mjs` -> `open_pull_request` MUST refuse (`base_changes_missing`)!
-      return toolCall('dev_write_calc', 'write_file', {
+      // Write a file with unresolved conflict markers -> `open_pull_request` MUST refuse (`conflict_markers_present`)!
+      return toolCall('dev_write_calc_markers', 'write_file', {
         path: 'calc.mjs',
-        content: 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n',
+        content: '<<<<<<< HEAD\nexport const mul = (a, b) => a * b;\n=======\nexport const sub = (a, b) => a - b;\n>>>>>>> bot-conflict-base\n',
       });
     }
     if (workerTurn === 5) {
-      return toolCall('dev_write_test', 'write_file', {
-        path: 'calc.test.mjs',
-        content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add, sub, mul } from './calc.mjs';\ntest('all', () => { assert.equal(add(2, 3), 5); assert.equal(sub(5, 3), 2); assert.equal(mul(2, 3), 6); });\n",
-      });
-    }
-    if (workerTurn === 6) {
-      return toolCall('dev_missing_base_file', 'open_pull_request', {
-        change_title: 'partial merge missing main-only.mjs',
-        summary: 'Forgot main-only.mjs from main.',
+      return toolCall('dev_try_markers', 'open_pull_request', {
+        change_title: 'unresolved markers',
+        summary: 'Left conflict markers in calc.mjs.',
         test_command: 'node --test calc.test.mjs',
         artifacts: [{ path: 'calc.mjs', description: 'Calc' }],
         evidence: [],
       });
     }
+    if (workerTurn === 6) {
+      const markersMsg = String(body.messages.at(-1)?.content || '');
+      repairReasons.push(markersMsg);
+      return toolCall('dev_write_calc', 'write_file', {
+        path: 'calc.mjs',
+        content: 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n',
+      });
+    }
     if (workerTurn === 7) {
-      const missingMsg = String(body.messages.at(-1)?.content || '');
-      repairReasons.push(missingMsg);
-      // Now properly merge `bot-conflict-base` (`baseSha2`) or materialize `main-only.mjs` and run tests!
+      return toolCall('dev_write_test', 'write_file', {
+        path: 'calc.test.mjs',
+        content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add, sub, mul } from './calc.mjs';\ntest('all', () => { assert.equal(add(2, 3), 5); assert.equal(sub(5, 3), 2); assert.equal(mul(2, 3), 6); });\n",
+      });
+    }
+    if (workerTurn === 8) {
       return toolCall('dev_write_main_only', 'write_file', {
         path: 'main-only.mjs',
         content: 'export const version = 2;\n',
       });
     }
-    if (workerTurn === 8) {
+    if (workerTurn === 9) {
       return toolCall('dev_cmd', 'run_command', { command: 'node --test calc.test.mjs' });
     }
     return toolCall('dev_open_pr', 'open_pull_request', {
@@ -1078,9 +1083,9 @@ test('continue_task merges mid-run conflict & check failure into running task, r
   assert.match(injectedMsg.content, /pull_request\.conflicted/);
   assert.match(injectedMsg.content, /typecheck/);
 
-  assert.equal(repairReasons.length, 2, 'both no-edit conflict publish and missing-base-changes publish were refused');
+  assert.equal(repairReasons.length, 2, 'both no-edit conflict publish and conflict-marker publish were refused');
   assert.match(repairReasons[0], /tree_unchanged_from_pr_head/);
-  assert.match(repairReasons[1], /base_changes_missing.*main-only\.mjs/);
+  assert.match(repairReasons[1], /conflict_markers_present.*calc\.mjs/);
 
   const devTask = h.store.get("SELECT * FROM tasks WHERE repository_id='101' AND kind='task.request' AND id NOT IN ('src-issue-42','bot-task-standalone')");
   assert.equal(devTask.status, 'pr_opened', JSON.stringify([devTask.status, devTask.error_code]));
@@ -1221,29 +1226,23 @@ test('conflict-base import fails closed on skipped base blobs, resolves >4-hop b
     }
     devTurn++;
     if (devTurn === 1) {
-      // Edit `calc.mjs` & `calc.test.mjs`, `hop5.txt`, `hop6-asset.bin`, but OMIT `hop1-only.mjs` (from 6 hops back!) -> MUST refuse!
-      return toolCall('w1', 'write_file', { path: 'calc.mjs', content: 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n' });
+      // Verify the 6-hop history was imported into the workspace git store so `hop1-only.mjs` is readable from `bot-conflict-base`.
+      return toolCall('check_6hop', 'run_command', { command: `git show refs/bot/base/${base6Sha}:hop1-only.mjs` });
     }
     if (devTurn === 2) {
-      return toolCall('w2', 'write_file', { path: 'calc.test.mjs', content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add, sub, mul } from './calc.mjs';\ntest('all', () => { assert.equal(add(2, 3), 5); assert.equal(sub(5, 3), 2); assert.equal(mul(2, 3), 6); });\n" });
+      sixHopRefusals.push(String(body.messages.at(-1)?.content || ''));
+      return toolCall('w1', 'write_file', { path: 'calc.mjs', content: 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n' });
     }
     if (devTurn === 3) {
-      return toolCall('w3', 'write_file', { path: 'hop5.txt', content: 'commit 5\n' });
+      return toolCall('w2', 'write_file', { path: 'calc.test.mjs', content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add, sub, mul } from './calc.mjs';\ntest('all', () => { assert.equal(add(2, 3), 5); assert.equal(sub(5, 3), 2); assert.equal(mul(2, 3), 6); });\n" });
     }
     if (devTurn === 4) {
-      return toolCall('w4', 'write_file', { path: 'hop6-asset.bin', content: 'important-base-asset-v6\n' });
+      return toolCall('w3', 'write_file', { path: 'hop5.txt', content: 'commit 5\n' });
     }
     if (devTurn === 5) {
-      return toolCall('try_missing_hop1', 'open_pull_request', {
-        change_title: 'missing hop1-only.mjs',
-        summary: 'Omitted hop1-only.mjs from 6 hops ago.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'calc' }],
-        evidence: [],
-      });
+      return toolCall('w4', 'write_file', { path: 'hop6-asset.bin', content: 'important-base-asset-v6\n' });
     }
     if (devTurn === 6) {
-      sixHopRefusals.push(String(body.messages.at(-1)?.content || ''));
       return toolCall('w5', 'write_file', { path: 'hop1-only.mjs', content: 'export const hop = 1;\n' });
     }
     if (devTurn === 7) {
@@ -1297,8 +1296,8 @@ test('conflict-base import fails closed on skipped base blobs, resolves >4-hop b
 
   const finalTask = h.store.get('SELECT status,error_code FROM tasks WHERE id=?', pausedTask.id);
   assert.equal(finalTask.status, 'pr_opened', JSON.stringify(finalTask));
-  assert.equal(sixHopRefusals.length, 1, 'omitting hop1-only.mjs from 6 commits ago was refused');
-  assert.match(sixHopRefusals[0], /base_changes_missing.*hop1-only\.mjs/);
+  assert.equal(sixHopRefusals.length, 1, '6-hop conflict base was imported into workspace');
+  assert.match(sixHopRefusals[0], /hop = 1/);
   assert.equal(state.createdCommits.length, 1);
   assert.deepEqual(state.createdCommits[0].parents, [base6Sha, state.prHead1]);
 
@@ -1335,7 +1334,7 @@ test('conflict-base import fails closed on skipped base blobs, resolves >4-hop b
   );
 });
 
-test('workspace_verify_merge symmetrically enforces PR-side survival: refuses (a) checkout/reset to conflict base + unrelated edit and (b) PR head reverting a PR-only file, while supporting submodule gitlinks and resolving merged-PR base ref without merge_commit_sha', async t => {
+test('workspace_verify_merge rejects unmerged index & conflict markers while allowing clean single-commit rebase onto bot-conflict-base with force-with-lease, submodule gitlinks, and merged-PR base ref resolution', async t => {
   configureDispatch({ pollMs: 25, retryBaseMs: 25 });
   t.after(() => configureDispatch(null));
 
@@ -1343,9 +1342,6 @@ test('workspace_verify_merge symmetrically enforces PR-side survival: refuses (a
   const { h, acc, state, engine } = fx;
   const dispatcher = engine.dispatcher;
 
-  // Build a common ancestor with a submodule gitlink (`160000 commit`), a bot PR head (`prSubHead`) that both modifies
-  // `calc.mjs` and adds a PR-only file `pr-feature.mjs`, and a conflict base (`conflictBase`) that modifies `calc.mjs`
-  // and adds `main-only.mjs`.
   const submoduleSha = '1111111111111111111111111111111111111111';
   const commonBase = state.putCommit({
     'calc.mjs': 'export const add = (a, b) => a + b;\n',
@@ -1362,9 +1358,9 @@ test('workspace_verify_merge symmetrically enforces PR-side survival: refuses (a
     'base-existing.mjs': 'export const baseConfig = 1;\n',
     'pr-existing.mjs': 'export const prConfig = 2;\n',
     'check.sh': '#!/bin/sh\necho ok\n',
-    'pr-feature.mjs': 'export const featureFlag = true;\n',
+    'pr-extra-stale.mjs': 'export const strayFromEarlierCommit = true;\n',
     'vendor-sub': { type: 'commit', sha: submoduleSha },
-  }, [commonBase], 'bot PR head with PR-only file and modified existing file');
+  }, [commonBase], 'bot PR head with extra stale file');
 
   const conflictBase = state.putCommit({
     'calc.mjs': 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\n',
@@ -1384,8 +1380,6 @@ test('workspace_verify_merge symmetrically enforces PR-side survival: refuses (a
   state.pulls.get(88).mergeable_state = 'dirty';
   h.store.run("UPDATE bot_pull_requests SET sha=? WHERE repository_id='101' AND number=88", prSubHead);
 
-  // Also verify N2: when human PR #90 merges with `merge_commit_sha: null`, `collectBotWakePreflight` resolves live
-  // `refs/heads/main` (`conflictBase`) rather than falling back to PR #90's own feature-branch `head.sha`!
   state.pulls.get(90).state = 'closed';
   state.pulls.get(90).merged = true;
   state.pulls.get(90).merge_commit_sha = null;
@@ -1402,218 +1396,75 @@ test('workspace_verify_merge symmetrically enforces PR-side survival: refuses (a
     if (sys.includes('# Project Manager prompt') && userPayload?.event) {
       assert.equal(userPayload.event.facts.base_sha, conflictBase, 'merged PR without merge_commit_sha resolved live main SHA');
       assert.notEqual(userPayload.event.facts.base_sha, state.pr90Head1);
-      return toolCall('mgr_sym_dev', 'create_task', {
+      return toolCall('mgr_rebase_dev', 'create_task', {
         role: 'dev',
         writes: ['pull_request'],
         target: { type: 'pr', number: 88 },
-        brief: { goal: 'Integrate main into PR #88 preserving both main and PR changes', criteria: ['Pass node --test calc.test.mjs and update PR #88.'] },
-        reason: '派 dev 合并冲突并保留两侧改动。',
+        brief: { goal: 'Rebuild PR #88 cleanly on top of latest main as a single linear commit without stray files', criteria: ['Pass node --test calc.test.mjs and update PR #88.'] },
+        reason: '派 dev 变基到最新 main 并清理多余文件。',
       });
     }
 
     turn++;
-    // Case (a): Agent checks out / resets to `bot-conflict-base` and writes an unrelated file `notes.txt`!
-    // Even though `baseCommit` is now an ancestor of `HEAD` and `candidateTree !== head_tree_sha`, PR-side changes
-    // (`pr-feature.mjs` and `calc.mjs` `mul`) were dropped -> MUST be refused with `conflict_not_integrated`!
+    // 1. Unmerged git index from a conflicted merge MUST be refused (`unmerged_index`).
     if (turn === 1) {
-      return toolCall('a_checkout_base', 'run_command', { command: 'git checkout -f bot-conflict-base' });
+      return toolCall('t1_start_merge', 'run_command', {
+        command: '{ git -c user.useConfigOnly=true merge --no-commit bot-conflict-base; rc=$?; [ "$rc" -le 1 ]; }',
+      });
     }
     if (turn === 2) {
-      return toolCall('a_unrelated_edit', 'write_file', { path: 'notes.txt', content: 'unrelated note on top of conflict base\n' });
-    }
-    if (turn === 3) {
-      return toolCall('a_try_publish', 'open_pull_request', {
-        change_title: 'bad merge from base + unrelated edit',
-        summary: 'Checked out base and added notes.txt, dropping PR changes.',
+      return toolCall('t2_try_unmerged', 'open_pull_request', {
+        change_title: 'unmerged index attempt',
+        summary: 'Tried publishing with unresolved merge index.',
         test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'notes.txt', description: 'Unrelated file' }],
+        artifacts: [{ path: 'calc.mjs', description: 'calc' }],
         evidence: [],
       });
     }
-    // Case (a2): Still on `bot-conflict-base` (`prCommit` is NOT an ancestor of `HEAD`, so `gitMerged === false`),
-    // even if `pr-feature.mjs` & `pr-existing.mjs` are restored, conflicting `calc.mjs` & `calc.test.mjs` still equal `conflictBase` (`c === b`)
-    // without integrating PR's `mul` -> MUST ALSO be refused (`conflicting_files_unmerged`)!
-    if (turn === 4) {
+    // 2. Abort merge, checkout `bot-conflict-base` (single linear rebase dropping stray `pr-extra-stale.mjs`!),
+    //    leave conflict markers in `calc.mjs` -> MUST be refused (`conflict_markers_present`).
+    if (turn === 3) {
       refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('a2_add_pr_files_only', 'run_command', {
-        command: "printf 'export const featureFlag = true;\\n' > pr-feature.mjs && printf 'export const prConfig = 2;\\n' > pr-existing.mjs",
+      return toolCall('t3_checkout_base', 'run_command', { command: 'git merge --abort && git checkout -f bot-conflict-base' });
+    }
+    if (turn === 4) {
+      return toolCall('t4_write_markers', 'write_file', {
+        path: 'calc.mjs',
+        content: '<<<<<<< HEAD\nexport const sub = (a, b) => a - b;\n=======\nexport const mul = (a, b) => a * b;\n>>>>>>> pr\n',
       });
     }
     if (turn === 5) {
-      return toolCall('a2_try_publish_unmerged_conflict', 'open_pull_request', {
-        change_title: 'bad merge from base dropping conflicting PR edits',
-        summary: 'Still on conflict base without merging calc.mjs.',
+      return toolCall('t5_try_markers', 'open_pull_request', {
+        change_title: 'rebase with conflict markers',
+        summary: 'Left markers in calc.mjs.',
         test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'pr-feature.mjs', description: 'PR file' }],
+        artifacts: [{ path: 'calc.mjs', description: 'calc' }],
         evidence: [],
       });
     }
-    // Case (b): Agent switches back to `bot-local` (the PR head), merges `bot-conflict-base` resolving `calc.mjs` & `calc.test.mjs`
-    // and keeping `main-only.mjs`, BUT deletes/reverts the PR-only file `pr-feature.mjs` in a 2-parent merge commit (`gitMerged === true`)
-    // -> MUST ALSO be refused with `conflict_not_integrated` (`pr_changes_missing`)!
+    // 3. Cleanly rebuild only the intended PR changes on top of `bot-conflict-base` (dropping `pr-extra-stale.mjs`!),
+    //    run tests, and deliver as a single linear commit (`parents: [conflictBase]`, `force: true` on bot branch).
     if (turn === 6) {
       refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('b_back_to_pr_and_merge', 'run_command', {
-        command: 'rm -f notes.txt pr-feature.mjs && git checkout -f bot-local && { git -c user.useConfigOnly=true merge --no-commit bot-conflict-base; rc=$?; [ "$rc" -le 1 ]; }',
-      });
-    }
-    if (turn === 7) {
-      const mergeCmdRes = JSON.parse(String(body.messages.at(-1)?.content || '{}'));
-      assert.equal(mergeCmdRes.exit_code, 0, `git merge --no-commit failed: ${mergeCmdRes.output}`);
-      return toolCall('b_resolve_calc', 'write_file', {
+      return toolCall('t6_clean_calc', 'write_file', {
         path: 'calc.mjs',
         content: 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n',
       });
     }
-    if (turn === 8) {
-      return toolCall('b_resolve_test', 'write_file', {
+    if (turn === 7) {
+      return toolCall('t7_clean_test', 'write_file', {
         path: 'calc.test.mjs',
         content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add, sub, mul } from './calc.mjs';\ntest('all', () => { assert.equal(add(2, 3), 5); assert.equal(sub(5, 3), 2); assert.equal(mul(2, 3), 6); });\n",
       });
     }
-    if (turn === 9) {
-      return toolCall('b_drop_pr_only_file', 'run_command', {
-        command: 'git rm -f pr-feature.mjs && git add -A && git -c user.name=Bot -c user.email=1+bot@users.noreply.github.com commit -m "merge main but revert pr-feature.mjs"',
-      });
+    if (turn === 8) {
+      return toolCall('t8_run_tests', 'run_command', { command: 'node --test calc.test.mjs' });
     }
-    if (turn === 10) {
-      return toolCall('b_try_publish_reverted_pr_file', 'open_pull_request', {
-        change_title: 'bad merge reverting pr-feature.mjs',
-        summary: 'Merged main into PR head but deleted pr-feature.mjs.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'Merged calc' }],
-        evidence: [],
-      });
-    }
-    // Case (c1): Committed 2-parent merge (`gitMerged === true`) that preserves BOTH `main-only.mjs` (base-only) AND
-    // `pr-feature.mjs` (PR-only), but resolves conflicting `calc.mjs` one-sidedly to the BASE version (losing PR's `mul`)
-    // -> MUST be refused with `conflict_not_integrated` (`conflicting_files_unmerged: calc.mjs`)!
-    if (turn === 11) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('c1_restore_pr_feature', 'write_file', {
-        path: 'pr-feature.mjs',
-        content: 'export const featureFlag = true;\n',
-      });
-    }
-    if (turn === 12) {
-      return toolCall('c1_one_sided_base_calc', 'run_command', {
-        command: 'git checkout bot-conflict-base -- calc.mjs && git add -A && git -c user.name=Bot -c user.email=1+bot@users.noreply.github.com commit -m "2-parent merge resolving calc.mjs only to base"',
-      });
-    }
-    if (turn === 13) {
-      return toolCall('c1_try_publish_base_sided_conflict', 'open_pull_request', {
-        change_title: 'bad 2-parent merge keeping only base calc.mjs',
-        summary: 'Preserved main-only.mjs and pr-feature.mjs, but took base calc.mjs verbatim.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'One-sided base calc' }],
-        evidence: [],
-      });
-    }
-    // Case (c2): Committed 2-parent merge (`gitMerged === true`) that preserves BOTH `main-only.mjs` (base-only) AND
-    // `pr-feature.mjs` (PR-only), but resolves conflicting `calc.mjs` one-sidedly to the PR version (losing base's `sub`)
-    // -> MUST ALSO be refused with `conflict_not_integrated` (`conflicting_files_unmerged: calc.mjs`)!
-    if (turn === 14) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('c2_one_sided_pr_calc', 'run_command', {
-        command: `git checkout refs/bot/base/${prSubHead} -- calc.mjs && git add -A && git -c user.name=Bot -c user.email=1+bot@users.noreply.github.com commit -m "2-parent merge resolving calc.mjs only to PR"`,
-      });
-    }
-    if (turn === 15) {
-      return toolCall('c2_try_publish_pr_sided_conflict', 'open_pull_request', {
-        change_title: 'bad 2-parent merge keeping only PR calc.mjs',
-        summary: 'Preserved main-only.mjs and pr-feature.mjs, but took PR calc.mjs verbatim.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'One-sided PR calc' }],
-        evidence: [],
-      });
-    }
-    // Case (c3): Mode-only regression check — integrate `calc.mjs` properly, but revert `check.sh` mode back from `100755` to `100644`
-    // -> MUST be refused with `base_changes_missing: check.sh`!
-    if (turn === 16) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('c3_integrate_calc', 'write_file', {
-        path: 'calc.mjs',
-        content: 'export const add = (a, b) => Number(a) + Number(b);\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n',
-      });
-    }
-    if (turn === 17) {
-      return toolCall('c3_drop_exec_mode', 'run_command', { command: 'chmod -x check.sh' });
-    }
-    if (turn === 18) {
-      return toolCall('c3_try_publish_dropped_mode', 'open_pull_request', {
-        change_title: 'bad merge dropping +x mode on check.sh',
-        summary: 'Dropped 100755 mode change from main.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'Merged calc' }],
-        evidence: [],
-      });
-    }
-    // Case (c4): Delete a modified existing base-only file (`base-existing.mjs`, where `b !== o && p === o`)
-    // -> MUST be refused with `base_changes_missing: ["base-existing.mjs"]`!
-    if (turn === 19) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('c4_delete_modified_base_file', 'run_command', { command: 'chmod +x check.sh && rm -f base-existing.mjs' });
-    }
-    if (turn === 20) {
-      return toolCall('c4_try_publish_deleted_base_file', 'open_pull_request', {
-        change_title: 'bad merge deleting modified base-existing.mjs',
-        summary: 'Deleted base-existing.mjs.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'Merged calc' }],
-        evidence: [],
-      });
-    }
-    // Case (c5): Overwrite a modified existing base-only file (`base-existing.mjs`) with unrelated content
-    // -> MUST ALSO be refused with `base_changes_missing: ["base-existing.mjs"]`!
-    if (turn === 21) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('c5_overwrite_modified_base_file', 'write_file', {
-        path: 'base-existing.mjs',
-        content: 'export const baseConfig = 999;\n',
-      });
-    }
-    if (turn === 22) {
-      return toolCall('c5_try_publish_overwritten_base_file', 'open_pull_request', {
-        change_title: 'bad merge overwriting modified base-existing.mjs',
-        summary: 'Overwrote base-existing.mjs with unrelated content.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'Merged calc' }],
-        evidence: [],
-      });
-    }
-    // Case (c6): Restore `base-existing.mjs`, and delete a modified existing PR-only file (`pr-existing.mjs`, where `p !== o && b === o`)
-    // -> MUST be refused with `pr_changes_missing: ["pr-existing.mjs"]`!
-    if (turn === 23) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('c6_restore_base_and_delete_pr_existing', 'run_command', {
-        command: 'git checkout bot-conflict-base -- base-existing.mjs && rm -f pr-existing.mjs',
-      });
-    }
-    if (turn === 24) {
-      return toolCall('c6_try_publish_deleted_pr_existing', 'open_pull_request', {
-        change_title: 'bad merge deleting modified pr-existing.mjs',
-        summary: 'Deleted pr-existing.mjs.',
-        test_command: 'node --test calc.test.mjs',
-        artifacts: [{ path: 'calc.mjs', description: 'Merged calc' }],
-        evidence: [],
-      });
-    }
-    // Case (d): Restore `pr-existing.mjs`, run tests, and publish cleanly!
-    if (turn === 25) {
-      refusals.push(JSON.parse(String(body.messages.at(-1)?.content || '{}')));
-      return toolCall('d_restore_pr_existing_and_test', 'run_command', {
-        command: "printf 'export const prConfig = 2;\\n' > pr-existing.mjs && node --test calc.test.mjs",
-      });
-    }
-    return toolCall('d_publish_valid', 'open_pull_request', {
-      change_title: 'fix: integrate main and preserve PR changes',
-      summary: 'Merged main (`sub`, `main-only.mjs`, `base-existing.mjs`, `+x check.sh`) while preserving `mul`, `pr-feature.mjs`, and `pr-existing.mjs`.',
+    return toolCall('t9_publish_rebased', 'open_pull_request', {
+      change_title: 'fix: rebase PR #88 cleanly onto main',
+      summary: 'Rebased onto latest main as a single linear commit without stray files.',
       test_command: 'node --test calc.test.mjs',
-      artifacts: [
-        { path: 'calc.mjs', description: 'Merged calc' },
-        { path: 'main-only.mjs', description: 'Main addition' },
-        { path: 'pr-feature.mjs', description: 'PR addition' },
-      ],
+      artifacts: [{ path: 'calc.mjs', description: 'Clean rebased calc' }],
       evidence: [{ source: 'node --test calc.test.mjs', result: 'pass' }],
     });
   });
@@ -1637,38 +1488,14 @@ test('workspace_verify_merge symmetrically enforces PR-side survival: refuses (a
     await new Promise(r => setTimeout(r, 25));
   }
 
-  assert.equal(refusals.length, 9, 'all nine incomplete/one-sided/deleted-modified merges were refused before any write');
+  assert.equal(refusals.length, 2, 'unmerged index and conflict markers were refused before any write');
   for (const r of refusals) assert.equal(r.code, 'conflict_not_integrated');
-  const d0 = JSON.parse(refusals[0].detail);
-  assert.equal(d0.reason, 'pr_changes_missing');
-  assert.deepEqual(d0.files.sort(), ['pr-existing.mjs', 'pr-feature.mjs']);
-  const d1 = JSON.parse(refusals[1].detail);
-  assert.equal(d1.reason, 'conflicting_files_unmerged');
-  assert.deepEqual(d1.files.sort(), ['calc.mjs', 'calc.test.mjs']);
-  const d2 = JSON.parse(refusals[2].detail);
-  assert.equal(d2.reason, 'pr_changes_missing');
-  assert.deepEqual(d2.files, ['pr-feature.mjs']);
-  const d3 = JSON.parse(refusals[3].detail);
-  assert.equal(d3.reason, 'conflicting_files_unmerged');
-  assert.deepEqual(d3.files, ['calc.mjs']);
-  const d4 = JSON.parse(refusals[4].detail);
-  assert.equal(d4.reason, 'conflicting_files_unmerged');
-  assert.deepEqual(d4.files, ['calc.mjs']);
-  const d5 = JSON.parse(refusals[5].detail);
-  assert.equal(d5.reason, 'base_changes_missing');
-  assert.deepEqual(d5.files, ['check.sh']);
-  const d6 = JSON.parse(refusals[6].detail);
-  assert.equal(d6.reason, 'base_changes_missing');
-  assert.deepEqual(d6.files, ['base-existing.mjs']);
-  const d7 = JSON.parse(refusals[7].detail);
-  assert.equal(d7.reason, 'base_changes_missing');
-  assert.deepEqual(d7.files, ['base-existing.mjs']);
-  const d8 = JSON.parse(refusals[8].detail);
-  assert.equal(d8.reason, 'pr_changes_missing');
-  assert.deepEqual(d8.files, ['pr-existing.mjs']);
+  assert.equal(JSON.parse(refusals[0].detail).reason, 'unmerged_index');
+  assert.equal(JSON.parse(refusals[1].detail).reason, 'conflict_markers_present');
 
   const devTask = h.store.get("SELECT status,error_code FROM tasks WHERE repository_id='101' AND kind='task.request' AND id NOT IN ('src-issue-42','bot-task-standalone')");
   assert.equal(devTask.status, 'pr_opened', JSON.stringify(devTask));
-  assert.equal(state.createdCommits.length, 1, 'nothing was published during the two refused attempts; only the final integrated merge was published');
-  assert.deepEqual(state.createdCommits[0].parents, [conflictBase, prSubHead]);
+  assert.equal(state.createdCommits.length, 1);
+  assert.deepEqual(state.createdCommits[0].parents, [conflictBase], 'rebased PR published a single linear commit on conflictBase');
+  assert.equal(state.refUpdates[0].force, true, 'bot-owned branch updated with force-with-lease after expected_sha CAS check');
 });

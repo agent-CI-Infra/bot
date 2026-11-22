@@ -337,8 +337,8 @@ export async function runRequest(
   // single executing role of \`runRole\`) resolves its own role budget, so the shared AgentSpec keeps the neutral entry
   // defaults (64 turns, 180-second command default) and the dev budget never travels into other roles.
   const entryCommandDefault = roleRuns ? 180 : commandBudget().defaultSeconds;
-  const githubWrite = taskGithubWrite(store, task, redactor, guard, githubUrl);
-  const grantedWrite = grantedTaskWrite(store, task, redactor, guard, githubUrl);
+  const githubWrite = taskGithubWrite(store, task, redactor, guard, githubUrl, () => spaces.current);
+  const grantedWrite = grantedTaskWrite(store, task, redactor, guard, githubUrl, () => spaces.current);
   const readScopes = () => taskReadScopes(store, task).filter(scope => scope !== 'metadata');
   const canWriteCheckout = () => covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
   const readTokens = new ReadTokens(store, repo, redactor, guard, githubUrl, readScopes(), readScopes);
@@ -746,8 +746,12 @@ export async function runRequest(
       }
       return null;
     };
-    const ensureConflictBaseReady = async (): Promise<string | null> => {
-      const conflictSha = activeConflictBaseSha();
+    const ensureConflictBaseReady = async (forRebase = false): Promise<string | null> => {
+      const baseFallback =
+        forRebase && input.bot_pr && /^[a-f0-9]{40}$/i.test(String(input.base_ref_sha || input.bot_pr.base?.sha || ''))
+          ? String(input.base_ref_sha || input.bot_pr.base?.sha).toLowerCase()
+          : null;
+      const conflictSha = activeConflictBaseSha() || baseFallback;
       const prHeadSha = /^[a-f0-9]{40}$/i.test(String(input.bot_pr?.head?.sha || task.head_sha || ''))
         ? String(input.bot_pr?.head?.sha || task.head_sha).toLowerCase()
         : null;
@@ -858,6 +862,7 @@ export async function runRequest(
           change_title: { type: 'string' },
           labels: pullRequestLabelsSchema,
           media: pullRequestMediaSchema,
+          rebase: { type: 'boolean', description: 'Optional. When updating an existing bot pull request, set true to publish a single linear commit rebased onto the latest base branch (force-with-lease on the bot branch) instead of a merge commit on the previous PR head.' },
           test_command: { type: 'string' },
         };
         if (software() && !generic) {
@@ -938,7 +943,7 @@ export async function runRequest(
         const offered = (tools: any[]) => (roleRuns || !generic ? tools : tools.filter(t => offeredNow(t.function.name) !== false));
 
         const subscriptionCtx = taskEventSubscriptionContext(store, String(task.id));
-        let verifiedConflictMerge = null as { baseSha: string; gitMerged: boolean } | null;
+        let verifiedConflictMerge = null as { baseSha: string; gitMerged: boolean; rebased: boolean } | null;
         await ensureConflictBaseReady();
         const result = await executeAgent({
           store,
@@ -971,7 +976,7 @@ export async function runRequest(
                     base_branch: input.conflict_base_ref || input.base_branch,
                     base_sha: input.conflict_base_sha || input.base_ref_sha || input.bot_pr?.base?.sha || null,
                     pr_head_sha: input.bot_pr?.head?.sha || task.head_sha,
-                    instruction: `This bot pull request currently conflicts with ${input.conflict_base_ref || input.base_branch}. Integrate/merge commit ${input.conflict_base_sha || input.base_ref_sha || input.bot_pr?.base?.sha || input.base_branch} in this checkout, resolve conflicts preserving both changes, run project verification, and deliver via open_pull_request.`,
+                    instruction: `This bot pull request currently conflicts with ${input.conflict_base_ref || input.base_branch}. Merge or rebase onto commit ${input.conflict_base_sha || input.base_ref_sha || input.bot_pr?.base?.sha || input.base_branch} (branch bot-conflict-base) in this checkout, resolve conflicts, run project verification, and deliver via open_pull_request (pass rebase: true if you rebuilt a single linear commit on top of the base branch).`,
                   },
                 }
               : {}),
@@ -1038,16 +1043,20 @@ export async function runRequest(
                 if (!sourcePolicies(store, task).every(p => githubWriteAllowed(p, targetResource, 'reply'))) {
                   return stop('delivery_refused', 'retry_wait', JSON.stringify({ error: 'task_external_write_forbidden', tool: 'post_review', message: 'Source policy does not permit publishing reviews.' }));
                 }
+                const reviewMedia = validated.media_paths?.length
+                  ? await collectPullRequestMedia(spaces.current, validated.media_paths)
+                  : undefined;
+                const reviewDelivery = reviewMedia ? { ...validated, media: reviewMedia } : validated;
                 return redactor.clean({
-                  summary: validated.summary,
+                  summary: reviewDelivery.summary,
                   artifacts: [],
                   evidence: [],
                   unknowns: [],
                   delivery: 'review',
-                  review_delivery: validated,
-                  ...(validated.conclusion ? { conclusion: validated.conclusion } : {}),
-                  ...(validated.recommendation ? { recommendation: validated.recommendation } : {}),
-                  findings: validated.findings,
+                  review_delivery: reviewDelivery,
+                  ...(reviewDelivery.conclusion ? { conclusion: reviewDelivery.conclusion } : {}),
+                  ...(reviewDelivery.recommendation ? { recommendation: reviewDelivery.recommendation } : {}),
+                  findings: reviewDelivery.findings,
                 });
               }
               const pr = generic ? name === 'open_pull_request' : software();
@@ -1060,7 +1069,7 @@ export async function runRequest(
               const validated = validateReport(value, pr);
               const delivered = generic ? { ...validated, delivery: pr ? 'pull_request' : 'report' } : validated;
               if (!pr) return delivered;
-              const conflictSha = await ensureConflictBaseReady();
+              const conflictSha = await ensureConflictBaseReady(Boolean(validated.rebase));
               if (conflictSha && input.bot_pr) {
                 const prHeadSha = String(input.bot_pr.head?.sha || task.head_sha || '').toLowerCase();
                 const verified = await workspace.call(`verify-merge:${execution}:${randomId()}`, {
@@ -1083,11 +1092,15 @@ export async function runRequest(
                       files: verified?.files || [],
                       conflict_base_sha: conflictSha,
                       base_branch: baseRefName,
-                      message: `Cannot publish pull request #${input.bot_pr.number} as a 2-parent merge on ${baseRefName} (${conflictSha}) because the workspace tree does not integrate both ${conflictSha} and PR head ${prHeadSha} (${verified?.reason || 'unverified'}${verified?.files?.length ? ': ' + verified.files.join(', ') : ''}). Merge commit ${conflictSha} (or branch bot-conflict-base) on top of PR head ${prHeadSha}, resolve all conflicts preserving both base and PR changes, run tests, and call open_pull_request again — or deliver diagnosis via submit_report if blocked.`,
+                      message: `Cannot publish pull request #${input.bot_pr.number} onto ${baseRefName} (${conflictSha}) because the workspace still has unresolved conflict state (${verified?.reason || 'unverified'}${verified?.files?.length ? ': ' + verified.files.join(', ') : ''}). Merge or rebase onto commit ${conflictSha} (branch bot-conflict-base), remove conflict markers, run tests, and call open_pull_request again — or deliver diagnosis via submit_report if blocked.`,
                     }),
                   );
                 }
-                verifiedConflictMerge = { baseSha: conflictSha, gitMerged: Boolean(verified.git_merged) };
+                verifiedConflictMerge = {
+                  baseSha: conflictSha,
+                  gitMerged: Boolean(verified.git_merged),
+                  rebased: Boolean(verified.rebased || validated.rebase),
+                };
               }
               const labels = await checkPullRequestLabels(github, validated.labels, ownLabels(store, task.repository_id));
               if ('error' in labels) return stop('pull_request_labels_refused', 'retry_wait', labels.message + ' Refused: ' + JSON.stringify(labels.refused));
@@ -1209,6 +1222,7 @@ export async function runRequest(
           const candidateBaseSha = input.bot_pr && verifiedConflictMerge && verifiedConflictMerge.baseSha !== input.bot_pr.head?.sha
             ? verifiedConflictMerge.baseSha
             : task.head_sha;
+          const candidateRebase = Boolean(input.bot_pr && verifiedConflictMerge?.rebased && candidateBaseSha !== input.bot_pr.head?.sha);
           code = {
             ...snapshot,
             source_workspace_id: task.workspace_id,
@@ -1228,10 +1242,11 @@ export async function runRequest(
             owner_task_id: ownerTaskId,
             expected_sha: input.bot_pr?.head?.sha ?? null,
             pr_number: input.bot_pr?.number ?? null,
+            ...(candidateRebase ? { rebase: true } : {}),
             ...(input.integration ? { publication_key: input.integration.id, integration: input.integration } : {}),
             date: new Date(task.created_at).toISOString(),
             validation,
-            no_changes: snapshot.tree_sha === input.snapshot_tree && !verifiedConflictMerge?.gitMerged,
+            no_changes: snapshot.tree_sha === input.snapshot_tree && !verifiedConflictMerge?.gitMerged && !candidateRebase,
           };
           store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING', task.repository_id, branch, ownerTaskId);
           store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data', task.id, JSON.stringify(code));

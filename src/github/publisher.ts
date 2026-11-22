@@ -265,7 +265,8 @@ export class Publisher {
     }
     // Operation identity belongs to this exact candidate, not a task attempt or a previous QA revision.
     const expected=(candidate.skipped_files||[]).length?treeSha([...candidate.files,...candidate.skipped_files]):candidate.tree_sha;
-    const identity=sha(JSON.stringify({branch:candidate.branch,tree:expected,base:candidate.base_sha,previous:candidate.expected_sha??null,title:implementationText(candidate,this.task.object_number).title,date:candidate.date}));
+    const rebase=Boolean(candidate.rebase&&candidate.expected_sha&&candidate.base_sha&&candidate.base_sha!==candidate.expected_sha);
+    const identity=sha(JSON.stringify({branch:candidate.branch,tree:expected,base:candidate.base_sha,previous:candidate.expected_sha??null,...(rebase?{rebase:true}:{}),title:implementationText(candidate,this.task.object_number).title,date:candidate.date}));
     const key='branch:v2:'+identity;
     const observe=async()=>{const ref=await this.github.ref(candidate.branch);publicationFact(this.store,this.task,'branch_observed',{operation_key:key,branch:candidate.branch,expected_sha:candidate.expected_sha??null,target_sha:candidate.created_commit_sha??null,observed_sha:ref?.object?.sha??null});return ref;};
     // Legacy remote_sha can mean only "commit created". It is not evidence of a confirmed branch update.
@@ -308,7 +309,7 @@ export class Publisher {
     candidate.created_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
     const commit=candidate.created_commit_sha?{sha:candidate.created_commit_sha,tree:{sha:expected}}:await this.github.request('POST',this.github.path('/git/commits'),{message:this.published(implementationText(candidate,this.task.object_number).title),
-      tree:expected,parents:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author});
+      tree:expected,parents:rebase?[candidate.base_sha]:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author});
     if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
     candidate.created_commit_sha=commit.sha;save();
     publicationFact(this.store,this.task,'commit_created',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected,expected_sha:candidate.expected_sha??null});
@@ -317,7 +318,7 @@ export class Publisher {
     if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','needs_replan',`发布分支 ${candidate.branch} 前发现 head 已变化，当前提交=${current.object.sha}。`);
     if(!current&&candidate.expected_sha)stop('branch_disappeared','needs_replan',`待更新的分支 ${candidate.branch} 已不存在。`);
     const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
-    const request=candidate.expected_sha?{sha:commit.sha,force:false}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
+    const request=candidate.expected_sha?{sha:commit.sha,force:rebase}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
     const find=async()=>{const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;};
     // Pointing the bot's own branch at one commit is idempotent and GitHub reports the result exactly: a create that
     // already landed answers 422 with the ref in place, a fast-forward to the same commit is a no-op. So an unknown answer

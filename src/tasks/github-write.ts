@@ -1,6 +1,9 @@
 import type { Store, Row } from '../storage/database.js';
-import { stop, type Redactor } from '../agent/common.js';
+import { stop, TaskError, type Redactor } from '../agent/common.js';
+import type { Workspace } from '../agent/workspace.js';
 import { GitHub } from '../github/client.js';
+import { hostedMediaUrl } from '../github/hosted-pr-media.js';
+import { collectPullRequestMedia, commentMediaSchema, planMarkdownMedia, publishHostedMedia, type StoredMedia } from '../github/pull-request-media.js';
 import { githubWrite, type WriteResource, type WriteOperation } from '../github/write.js';
 import { githubWriteAllowed } from '../roles/permissions.js';
 import { taskActingRole, taskRolePolicies, sourcePolicies } from './management.js';
@@ -19,10 +22,11 @@ export function taskWriteAllowed(store: Store, task: Row, resource: WriteResourc
   return taskRolePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation));
 }
 
-export function taskGithubWrite(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, apiUrl?: string) {
+export function taskGithubWrite(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, apiUrl?: string, getWorkspace?: () => Workspace | undefined) {
   const scope = 'task:' + publicationScope(task);
   return (args: unknown) => {
     const repository = store.get('SELECT * FROM repositories WHERE id=?', task.repository_id)!;
+    const workspace = getWorkspace?.();
     return githubWrite(
       {
         store,
@@ -33,6 +37,7 @@ export function taskGithubWrite(store: Store, task: Row, redactor: Redactor, gua
         scope,
         actor: { kind: 'task', role: taskActingRole(store, task), task_id: String(task.id) },
         allowed: (resource, operation) => taskWriteAllowed(store, task, resource, operation),
+        ...(workspace ? { collectMedia: (paths: string[]) => collectPullRequestMedia(workspace, paths) } : {}),
       },
       args,
     );
@@ -109,6 +114,7 @@ export const postReviewTool = fn(
     },
     resolved_comments: { type: 'array', items: { type: 'integer', minimum: 1 } },
     labels: { type: 'array', items: { type: 'string' } },
+    media: commentMediaSchema,
     recommendation: { type: 'string' },
     conclusion: { type: 'string', enum: [...reviewConclusions] },
     key: { type: 'string', maxLength: 120 },
@@ -160,6 +166,8 @@ export interface NormalizedReviewDelivery {
   findings: any[];
   resolved_comments: number[];
   labels: string[];
+  media_paths?: string[];
+  media?: StoredMedia[];
   recommendation?: string;
   conclusion?: string;
 }
@@ -174,6 +182,7 @@ const allowedReviewKeys = new Set([
   'findings',
   'resolved_comments',
   'labels',
+  'media',
   'recommendation',
   'conclusion',
   'key',
@@ -299,6 +308,15 @@ export function validateReviewDelivery(
     ? args.resolved_comments.filter((n: unknown) => Number.isSafeInteger(n) && Number(n) >= 1).map(Number)
     : [];
   const labels = Array.isArray(args.labels) ? args.labels.filter((l: unknown) => typeof l === 'string' && l.trim()).map((l: string) => l.trim()) : [];
+  let mediaPaths: string[] = [];
+  const reviewTexts = [summaryRaw.trim(), ...rawFindings.map(f => String(f.body || ''))];
+  if (args.media !== undefined || reviewTexts.some(text => text.includes('workspace:'))) {
+    try { mediaPaths = planMarkdownMedia(reviewTexts, args.media).paths; }
+    catch (error) {
+      if (error instanceof TaskError) return { ok: false, error: { error: error.code, detail: error.detail } };
+      throw error;
+    }
+  }
 
   return {
     ok: true,
@@ -309,6 +327,7 @@ export function validateReviewDelivery(
       findings: rawFindings,
       resolved_comments: resolved,
       labels,
+      ...(mediaPaths.length ? { media_paths: mediaPaths } : {}),
       ...(typeof args.recommendation === 'string' && args.recommendation.trim() ? { recommendation: args.recommendation.trim() } : {}),
       ...(typeof args.conclusion === 'string' && args.conclusion.trim() ? { conclusion: args.conclusion.trim() } : {}),
     },
@@ -374,9 +393,30 @@ export async function publishReviewDelivery(
             ]),
           ]
         : [];
+    let renderedSummary = normalized.summary;
+    let renderedFindings = normalized.findings;
+    if (normalized.media?.length) {
+      let hosted;
+      try { hosted = publishHostedMedia(github, normalized.media); }
+      catch (error) {
+        if (error instanceof TaskError) return { error: error.code, detail: error.detail };
+        throw error;
+      }
+      const plan = planMarkdownMedia([normalized.summary, ...normalized.findings.map(f => String(f.body || ''))], normalized.media.map(file => file.source));
+      const bySource = new Map(normalized.media.map(file => [file.source, file.path]));
+      let missingUrl = false;
+      const rendered = plan.renderAll(source => {
+        const url = hostedMediaUrl(hosted, bySource.get(source) ?? '');
+        if (!url) { missingUrl = true; return ''; }
+        return url;
+      });
+      if (missingUrl) return { error: 'pull_request_media_unconfirmed', detail: 'The hosted media has no confirmed URL.' };
+      renderedSummary = rendered[0]!;
+      renderedFindings = normalized.findings.map((f, index) => ({ ...f, body: rendered[index + 1]! }));
+    }
     const reviewPayload = {
-      summary: normalized.summary,
-      findings: normalized.findings,
+      summary: renderedSummary,
+      findings: renderedFindings,
       resolved_comments: normalized.resolved_comments,
       reviewed_sha: reviewedSha,
       reviewed_heads: Array.isArray(taskInput.reviewed_heads) ? taskInput.reviewed_heads : [],
@@ -429,7 +469,7 @@ export async function publishReviewDelivery(
   }
 }
 
-export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, apiUrl?: string) {
+export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, apiUrl?: string, getWorkspace?: () => Workspace | undefined) {
   const scope = 'task:' + publicationScope(task);
   return async (name: string, args: any) => {
     const write = name === 'post_review' ? 'review' : name === 'rerun_failed_run' ? 'actions_rerun' : 'github';
@@ -447,6 +487,7 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
     }
 
     const repository = store.get('SELECT * FROM repositories WHERE id=?', task.repository_id)!;
+    const workspace = getWorkspace?.();
     if (name === 'github_write') {
       const context = {
         store,
@@ -459,6 +500,7 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
         allowed: (resource: string, operation?: 'create' | 'reply' | 'labels') =>
           effectiveWrites(store, task, sourcePolicies(store, task)).includes('github') &&
           sourcePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation)),
+        ...(workspace ? { collectMedia: (paths: string[]) => collectPullRequestMedia(workspace, paths) } : {}),
       };
       return githubWrite(context, args);
     }
@@ -532,6 +574,17 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
     if (!sourcePolicies(store, task).every(p => githubWriteAllowed(p, checked.value.target.type === 'pr' ? 'pull_requests' : 'issues', 'reply'))) {
       return { error: 'task_external_write_forbidden', detail: 'Source policy does not permit publishing reviews.' };
     }
-    return publishReviewDelivery(store, task, checked.value, redactor, guard, () => {}, apiUrl);
+    let delivery = checked.value;
+    if (delivery.media_paths?.length) {
+      if (!workspace) return { error: 'github_write_media_unavailable', detail: 'This post_review caller has no task workspace to read workspace media files.' };
+      try {
+        const media = await collectPullRequestMedia(workspace, delivery.media_paths);
+        delivery = { ...delivery, ...(media ? { media } : {}) };
+      } catch (error) {
+        if (error instanceof TaskError) return { error: error.code, detail: error.detail };
+        throw error;
+      }
+    }
+    return publishReviewDelivery(store, task, delivery, redactor, guard, () => {}, apiUrl);
   };
 }
