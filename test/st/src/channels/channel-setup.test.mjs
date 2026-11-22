@@ -492,3 +492,82 @@ test('the documented Feishu scope table lists exactly the required scopes', () =
   const documented = [...readFileSync(new URL('../../../../docs/message-channels.md', import.meta.url), 'utf8').matchAll(/^\| `([a-z]+:[^`]+)` \|/gm)].map(m => m[1]);
   assert.deepEqual(documented, FEISHU_SCOPES.map(s => s.scope));
 });
+
+
+test('deleting a Feishu connector checks management authority and revision, revokes active bindings/timers/credentials, keeps history readable, and allows reconnecting the same app (#1220)', async t => {
+  const f = await channelFixture(t), { admin, h, member, id, principal } = f;
+  // Create a group chat + binding + timer + queued inbox/outbox + personal binding + pending bind request under this connector.
+  const chat = await privateChat(f);
+  const groupPost = await post(h, id, envelope('hello group', { message: { chat_id: 'oc_del_group', chat_type: 'group' } }));
+  await finished(h, groupPost.value.operation_id);
+  const groupChat = h.store.get("SELECT * FROM channel_chats WHERE connector_id=? AND chat_id='oc_del_group'", id);
+  assert.ok(groupChat);
+  const bound = await admin('/api/channels/chats/' + groupChat.id + '/service-binding', 'PUT', {
+    service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0,
+  });
+  assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  const bindingRow = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', groupChat.id);
+  const timer = await admin('/api/channels/chats/' + groupChat.id + '/schedules', 'POST', {
+    name: '删除前巡检', prompt: '汇报仓库进展', timezone: 'Asia/Shanghai', cron: '0 9 * * *', enabled: true,
+  });
+  assert.equal(timer.status, 201, JSON.stringify(timer.value));
+  const issued = await admin('/api/channels/bindings/issue', 'POST', { connector_id: id });
+  assert.equal(issued.status, 201);
+  // Seed a queued inbox/outbox item to confirm deletion terminates in-flight items.
+  f.service.close();
+  h.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES('del_in_1',?,'evt_del_1','dedup_del_1',?,'queued',?)",
+    id, h.store.secrets.seal({}, 'channel-event:del_in_1'), Date.now());
+  h.store.run("INSERT INTO channel_outbox(id,connector_id,idempotency_key,payload,state,next_attempt,created_at) VALUES('del_out_1',?,'key_del_1',?,'queued',?,?)",
+    id, h.store.secrets.seal({}, 'channel-outbox:del_out_1'), Date.now() + 60_000, Date.now());
+
+  const connectorRow = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  const orgAdmin = await member('del-org-admin', { organization_ids: ['10'] });
+  const ordinary = await member('del-ordinary', {});
+  // Non-platform admins cannot delete a platform-wide connector.
+  assert.equal((await orgAdmin.client('/api/channels/connectors/' + id, 'DELETE', { expected_revision: connectorRow.revision })).value.error, 'channel_application_forbidden');
+  assert.equal((await ordinary.client('/api/channels/connectors/' + id, 'DELETE', { expected_revision: connectorRow.revision })).value.error, 'channel_application_forbidden');
+  // Stale revision is refused with 409.
+  assert.equal((await admin('/api/channels/connectors/' + id, 'DELETE', { expected_revision: connectorRow.revision + 1 })).value.error, 'channel_revision_conflict');
+  assert.equal((await admin('/api/channels/connectors/' + id, 'DELETE', { expected_revision: connectorRow.revision, extra: 1 })).value.error, 'unknown_field');
+
+  const principalRevBefore = h.store.get('SELECT authorization_revision FROM principals WHERE id=?', principal).authorization_revision;
+  const deleted = await admin('/api/channels/connectors/' + id, 'DELETE', { expected_revision: connectorRow.revision });
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.value));
+  assert.deepEqual(deleted.value, { deleted: true, connector_id: id });
+  assert.equal(h.store.get('SELECT * FROM channel_connectors WHERE id=?', id), undefined);
+  assert.equal(h.store.get('SELECT * FROM channel_credentials WHERE id=?', connectorRow.credential_ref), undefined);
+  assert.equal((await admin('/api/channels/connectors/' + id, 'DELETE', { expected_revision: connectorRow.revision })).value.error, 'channel_connector_not_found');
+
+  // Linked group binding disabled, service principal deactivated & grants revoked, schedule paused, personal identity revoked, bind requests cleared.
+  assert.equal(h.store.get('SELECT enabled FROM channel_service_bindings WHERE id=?', bindingRow.id).enabled, 0);
+  assert.equal(h.store.get('SELECT active FROM principals WHERE id=?', bindingRow.principal_id).active, 0);
+  assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants WHERE principal_id=? AND revoked_at IS NULL', bindingRow.principal_id).n, 0);
+  const pausedSchedule = h.store.get('SELECT state,reason FROM channel_schedules WHERE id=?', timer.value.schedule.id);
+  assert.deepEqual({ ...pausedSchedule }, { state: 'paused', reason: 'connector_deleted' });
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu' AND connector=? AND status='active'", id + ':' + connectorRow.app_id).n, 0);
+  assert.ok(h.store.get('SELECT authorization_revision FROM principals WHERE id=?', principal).authorization_revision > principalRevBefore);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_bind_requests WHERE connector_id=?', id).n, 0);
+  assert.equal(h.store.get("SELECT state,error FROM channel_inbox WHERE id='del_in_1'").error, 'channel_connector_deleted');
+  assert.equal(h.store.get("SELECT state,last_error FROM channel_outbox WHERE id='del_out_1'").last_error, 'channel_connector_deleted');
+  assert.equal(h.store.get('SELECT state FROM channel_chats WHERE id=?', groupChat.id).state, 'archived');
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='channel.connector.deleted' AND resource_id=?", id));
+  // Historical local messages remain readable by platform admin after deletion.
+  assert.equal((await admin('/api/channels/chats/' + chat.id + '/messages')).status, 200);
+  // The (app_id, installation_tenant) slot is freed so the same app can be connected again.
+  const recreated = await admin('/api/channels/connectors', 'POST', {
+    app_id: connectorRow.app_id, application_type: 'enterprise', transport: 'websocket', enabled: true,
+    credentials: { app_secret: credentials.app_secret }, expected_revision: 0,
+  });
+  assert.equal(recreated.status, 201, JSON.stringify(recreated.value));
+
+  // Organization app deletion: creator and org admin may delete; foreign org admin cannot.
+  const repoAdmin = await member('del-repo-admin', { repository_ids: ['101'] });
+  const foreignAdmin = await member('del-foreign-admin', { repository_ids: ['201'] });
+  const orgApp = await repoAdmin.client('/api/channels/connectors', 'POST', {
+    app_id: 'cli_org_delete', application_type: 'enterprise', transport: 'websocket', enabled: true,
+    owner_tenant: 'github.com:10', credentials: { app_secret: credentials.app_secret }, expected_revision: 0,
+  });
+  assert.equal(orgApp.status, 201);
+  assert.equal((await foreignAdmin.client('/api/channels/connectors/' + orgApp.value.connector_id, 'DELETE', { expected_revision: 1 })).value.error, 'channel_application_forbidden');
+  assert.equal((await orgAdmin.client('/api/channels/connectors/' + orgApp.value.connector_id, 'DELETE', { expected_revision: 1 })).status, 200);
+});

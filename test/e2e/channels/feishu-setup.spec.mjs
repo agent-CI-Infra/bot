@@ -21,6 +21,10 @@ for (const width of [1440, 390]) test(`name lookup reports the missing directory
     f.wire.state.scopes = FEISHU_SCOPES.filter(s => s.scope !== 'contact:contact.base:readonly').map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
+    // List page stays clean without auto-probing; opening the app's detail page checks its scopes.
+    const row = page.getByRole('group', { name: 'cli_fixture', exact: true });
+    await expect(row).toContainText('已启用');
+    await row.getByRole('link', { name: '管理', exact: true }).click();
     const grants = page.getByLabel('飞书权限检查');
     await expect(grants).toContainText('contact:contact.base:readonly');
     await expect(grants).toContainText('缺少 1 项');
@@ -31,14 +35,14 @@ for (const width of [1440, 390]) test(`name lookup reports the missing directory
     await page.goto(f.h.admin + '/#/identity/feishu');
     const binding = page.getByLabel('我的飞书账号', { exact: true });
     await expect(binding).toContainText('导入完整权限 JSON');
-    await expect(binding).toContainText('设置 → 组织飞书应用');
+    await expect(binding).toContainText('个人设置 → 组织飞书应用');
     await expect(binding).not.toContainText('fixture-only');
     await page.goto(f.h.admin + '/#/identity/feishu/conversations');
     const conversation = page.getByLabel('可查看的飞书会话').locator('article').first();
     await conversation.getByText('会话信息', { exact: true }).click();
     await conversation.getByRole('button', { name: '刷新飞书姓名', exact: true }).click();
     await expect(conversation).toContainText('读取飞书姓名所需的权限尚未生效');
-    await expect(conversation).toContainText('设置 → 组织飞书应用');
+    await expect(conversation).toContainText('个人设置 → 组织飞书应用');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: `${output}/name-permission-${width}.png`, fullPage: true });
     f.wire.state.profileCode = 0; f.wire.state.profileStatus = 200;
@@ -57,8 +61,8 @@ test('missing reaction permission gives an administrator an actionable hint on d
     await finished(h, receipt.value.operation_id);
     await until(() => h.store.get('SELECT state FROM channel_reactions WHERE source_event=?', receipt.value.operation_id)?.state === 'failed');
     await page.goto(h.admin + '/#/settings/feishu'); await login(page, h, password);
-    await expect(page.getByRole('group', { name: 'cli_fixture', exact: true }).getByLabel('飞书权限检查')).toContainText('im:message.reactions:write_only');
-    await page.getByRole('link', { name: '连接诊断与收发记录' }).click();
+    await page.getByRole('group', { name: 'cli_fixture', exact: true }).getByRole('link', { name: '管理', exact: true }).click();
+    await expect(page.getByLabel('飞书权限检查')).toContainText('im:message.reactions:write_only');
     await expect(page.getByText('处理中表情暂不可用：', { exact: false })).toContainText('im:message.reactions:write_only');
     await expect(page.getByText('处理中表情暂不可用：', { exact: false })).toContainText('普通消息回复不受影响');
     mkdirSync(output, { recursive: true });
@@ -69,50 +73,55 @@ test('missing reaction permission gives an administrator an actionable hint on d
     }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
-test('global administrator connects an app through the wizard, resumes it and sees credential and revision failures', async ({ page }) => {
+test('global administrator connects an app through the 3-step wizard, manages it in-place, toggles and deletes it (#1220)', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), h = await harness(null, undefined, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
   const f = { h, ...await setup(h), close: () => h.stop() };
   const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  mkdirSync('.tmp/issue-1220', { recursive: true });
   try {
-    await page.setViewportSize({ width: 1440, height: 1100 }); await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
+    await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
     await expect(page.getByRole('heading', { name: '飞书应用连接', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: '管理服务角色', exact: true })).toBeVisible();
     await page.getByRole('link', { name: '新增飞书应用连接' }).click();
     await expect(page.getByRole('navigation', { name: '飞书连接步骤' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: '飞书连接步骤' }).getByRole('button')).toHaveCount(3);
+    // Step 1 combines owner, type, transport, full scope JSON and credentials.
+    await expect(page.getByLabel('应用所属', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('应用所属', { exact: true }).locator('option')).toHaveText(['全平台共用（所有用户可见）']);
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
     const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:resource', 'im:message.reactions:write_only', 'cardkit:card:write',
       'im:message.group_msg', 'im:message:readonly', 'im:chat:read', 'im:chat.members:bot_access', 'im:chat.members:read', 'contact:contact.base:readonly', 'contact:user.base:readonly']);
     expect(scopes.scopes.user).toEqual([]);
-    await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');
+    await page.getByLabel('事件接收方式', { exact: true }).selectOption('http');
+    // Non-secret wizard choices survive a browser reload.
+    await page.reload();
+    await expect(page.getByRole('combobox', { name: '应用类型', exact: true })).toHaveValue('enterprise');
+    await expect(page.getByLabel('事件接收方式', { exact: true })).toHaveValue('http');
     const enterpriseScopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(enterpriseScopes.scopes.tenant).toEqual(FEISHU_SCOPES.map(s => s.scope));
     expect(enterpriseScopes.scopes.tenant).toContain('im:message.group_msg.include_bot:read');
-    expect(scopes.scopes.tenant).not.toContain('im:message.group_msg.include_bot:read');
     expect(enterpriseScopes.scopes.user).toEqual([]);
-    await expect(page.getByText('企业自建应用需先开通', { exact: false })).toContainText('再进入下一步保存连接');
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedFeishuScopes = value; } } }));
     await page.getByRole('button', { name: '复制完整权限 JSON', exact: true }).click();
     expect(JSON.parse(await page.evaluate(() => window.copiedFeishuScopes))).toEqual(enterpriseScopes);
-    await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
+    await page.screenshot({ path: '.tmp/issue-1220/wizard-step1-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/issue-1220/wizard-step1-390.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     expect(f.h.store.get('SELECT count(*) n FROM tenants').n).toBe(0);
-    await expect(page.getByRole('heading', { name: '应用凭据', exact: true })).toBeVisible();
     await expect(page.getByLabel('项目所属组织')).toHaveCount(0);
-    // Without any organization yet, a super administrator's app is platform-wide.
-    await expect(page.getByLabel('应用所属', { exact: true })).toHaveValue('');
-    await expect(page.getByLabel('应用所属', { exact: true }).locator('option')).toHaveText(['全平台共用（所有用户可见）']);
-    await expect(page.getByText('应用连接不授予用户项目权限', { exact: false })).toContainText('不限制操作者所属飞书企业');
     await page.getByLabel('App ID', { exact: true }).fill('cli_wizard'); await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
     wire.state.authCode = 10003; await page.getByRole('button', { name: '检查凭据并读取机器人' }).click();
     await expect(page.getByRole('alert')).toContainText('无法通过鉴权');
     wire.state.authCode = 0; await page.getByRole('button', { name: '检查凭据并读取机器人' }).click();
     await expect(page.getByLabel('机器人 open_id', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('alert')).toContainText('凭据已验证');
-    await expect(page.getByText('应用安装企业由系统在保存时自动获取', { exact: false })).toBeVisible();
-    await expect(page.getByLabel('应用安装租户 tenant_key')).toHaveCount(0);
-    await expect(page.locator('input[name="actor_tenants"]')).toHaveCount(0);
+    await expect(page.getByLabel('应用安装租户 tenant_key')).toBeHidden();
     await page.getByLabel('Verification Token', { exact: true }).fill(credentials.verification_token);
     await page.getByLabel('Encrypt Key', { exact: true }).fill(credentials.encrypt_key);
     wire.state.authCode = 10003;
@@ -123,81 +132,113 @@ test('global administrator connects an app through the wizard, resumes it and se
     wire.state.tenantCode = 1184001;
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByRole('alert')).toContainText('tenant:tenant:readonly');
-    await expect(page.getByRole('alert')).toContainText('发布并通过必要审核后重新保存');
     expect(f.h.store.get('SELECT count(*) n FROM channel_connectors').n).toBe(0);
     expect(f.h.store.get('SELECT count(*) n FROM channel_credentials').n).toBe(0);
     wire.state.tenantCode = 0;
     await page.getByRole('button', { name: '保存连接并继续' }).click();
+    await expect(page).toHaveURL(/#\/settings\/feishu\/[a-f0-9]{48}\/setup\/1$/);
     await expect(page.getByLabel('HTTP 回调地址')).toHaveValue(/https:\/\/console.example.test\/hooks\/feishu\/[a-f0-9]{48}/);
     const steps = page.getByRole('list', { name: '事件与回调配置步骤' }).getByRole('listitem');
     await expect(steps).toHaveCount(3);
     await expect(steps.nth(0).getByLabel('HTTP 回调地址')).toBeVisible();
     await expect(steps.nth(0)).toContainText('将事件发送至开发者服务器');
-    await expect(steps.nth(0)).toContainText('保存并通过地址验证');
-    await expect(steps.nth(1)).toContainText('将回调发送至开发者服务器');
-    await expect(steps.nth(1)).toContainText('第 1 步的同一个 HTTP 回调地址');
-    await expect(steps.nth(1)).toContainText('单独保存并通过地址验证');
     await expect(steps.nth(1)).toContainText('card.action.trigger，推荐');
-    await expect(steps.nth(2).getByRole('button', { name: '事件与卡片回调已保存，前往发布' })).toBeVisible();
     const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'"); expect(c.enabled).toBe(1); expect(c.transport).toBe('http'); expect(c.bot_open_id).toBe('ou_automatic_save'); expect(c.installation_tenant).toBe('install-tenant');
-    await page.screenshot({ path: output + '/events-desktop.png', fullPage: true });
-    await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click(); await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
+    await page.getByRole('button', { name: '检查已发布的机器人与权限', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: '凭据已验证' })).toContainText('尚未验证事件投递');
-    expect(f.h.store.get('SELECT last_received_at FROM channel_connectors WHERE id=?', c.id).last_received_at).toBe(null);
-    await page.getByRole('button', { name: '进入绑定与试用' }).click();
-    await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
-    await expect(page.getByText('尚未收到', { exact: true })).toBeVisible();
-    await expect(page.getByText('绑定后直接在私聊发送', { exact: false })).toContainText('确认收到助手回复后才完成接入');
+    await page.screenshot({ path: '.tmp/issue-1220/wizard-step2-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/issue-1220/wizard-step2-390.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByRole('button', { name: '完成配置，进入绑定与试用' }).click();
+    await expect(page).toHaveURL(new RegExp(c.id + '/setup/2$'));
+    await expect(page.getByText('绑定后直接在私聊发送', { exact: false })).toContainText('确认收到助手回复后即完成接入');
     await expect(page.getByText('/project', { exact: false })).toHaveCount(0);
-    await page.getByRole('link', { name: '前往飞书绑定' }).click();
-    await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
-    await expect(page.getByRole('button', { name: '消息渠道', exact: true })).toHaveCount(0);
-    await page.goto(f.h.admin + '/#/settings/feishu/' + c.id + '/1');
+    await page.getByRole('link', { name: '进入应用管理页', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp('/#/settings/feishu/' + c.id + '$'));
+    // Management detail page edits credentials in-place without forcing a step jump.
+    await expect(page.getByRole('heading', { name: '连接配置与凭据', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '连接健康与收发记录', exact: true })).toBeVisible();
     await expect(page.getByLabel('App Secret（留空保留）')).toHaveValue('');
     await expect(page.getByLabel('Verification Token（留空保留）')).toHaveValue('');
     await page.getByLabel('App Secret（留空保留）').fill('rotated-fixture-secret');
-    await page.getByRole('button', { name: '保存连接并继续' }).click(); await expect(page).toHaveURL(new RegExp(c.id + '/2$'));
+    await page.getByRole('button', { name: '保存配置', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('连接配置已保存');
+    await expect(page).toHaveURL(new RegExp('/#/settings/feishu/' + c.id + '$'));
     const updated = f.h.store.get('SELECT * FROM channel_connectors WHERE id=?', c.id), sealed = f.h.store.get('SELECT sealed FROM channel_credentials WHERE id=?', updated.credential_ref);
     expect(f.h.store.secrets.open(sealed.sealed, 'channel-credential:' + updated.credential_ref)).toEqual({ ...credentials, app_secret: 'rotated-fixture-secret' });
-    await page.goto(f.h.admin + '/#/settings/feishu/' + c.id + '/1'); await expect(page.getByLabel('App Secret（留空保留）')).toBeVisible();
+    // Stale revision conflict is reported in-place.
     await f.admin('/api/channels/connectors/' + c.id, 'PATCH', { expected_revision: updated.revision, enabled: false });
-    await page.getByRole('button', { name: '保存连接并继续' }).click();
+    await page.getByRole('button', { name: '保存配置', exact: true }).click();
     await expect(page.getByRole('alert')).toContainText('连接已被其他操作更新');
+    // List page shows enabled/disabled + live activity badges, supports one-click toggle and confirmed deletion.
+    await page.getByRole('link', { name: '返回连接列表', exact: true }).click();
+    const listRow = page.getByRole('group', { name: 'cli_wizard', exact: true });
+    await expect(listRow).toContainText('已停用');
+    await expect(listRow).toContainText('未运行');
+    await listRow.getByRole('button', { name: '启用', exact: true }).click();
+    await expect(listRow).toContainText('已启用');
+    await expect(listRow).toContainText('HTTP 回调待收事件');
+    // Add a second disabled websocket connector to show varied statuses in list screenshots.
+    await connector(f.admin, { app_id: 'cli_ws_list', transport: 'websocket', enabled: true });
+    f.h.store.run("UPDATE channel_connectors SET connection_state='connected',app_name='研发值班助手',tenant_name='示例企业' WHERE app_id='cli_ws_list'");
+    await page.reload();
+    await expect(page.getByRole('group', { name: 'cli_ws_list', exact: true })).toContainText('已连接');
+    await page.screenshot({ path: '.tmp/issue-1220/list-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/credentials-mobile.png', fullPage: true }); expect(errors).toEqual([]);
+    await page.screenshot({ path: '.tmp/issue-1220/list-390.png' });
+    // Delete cli_wizard from the list via the confirm dialog.
+    await page.getByRole('group', { name: 'cli_wizard', exact: true }).getByRole('button', { name: '删除', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('删除飞书应用连接');
+    await dialog.getByRole('button', { name: '确认删除', exact: true }).click();
+    await expect(page.getByRole('group', { name: 'cli_wizard', exact: true })).toHaveCount(0);
+    expect(f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'")).toBeUndefined();
+    expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
-test('connection list refreshes current app names even when bot metadata is stale, with permission diagnostics on desktop and mobile', async ({ page }) => {
+test('app management detail refreshes current app names even when bot metadata is stale, with permission diagnostics on desktop and mobile', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
-  mkdirSync(output, { recursive: true });
+  mkdirSync(output, { recursive: true }); mkdirSync('.tmp/issue-1220', { recursive: true });
   try {
     const id = await connector(f.admin);
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
-    const row = page.getByRole('group', { name: 'cli_fixture', exact: true });
-    await expect(row.getByText('Fixture bot', { exact: true })).toBeVisible();
+    // List page does not auto-probe connectors on load; opening the detail page runs the check.
+    const authBefore = wire.state.authRequests.length;
+    const listRow = page.getByRole('group', { name: 'cli_fixture', exact: true });
+    await expect(listRow.getByText('应用名称待获取', { exact: true })).toBeVisible();
+    await expect(listRow).toContainText('已启用');
+    expect(wire.state.authRequests.length).toBe(authBefore);
+    await listRow.getByRole('link', { name: '管理', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp('/#/settings/feishu/' + id + '$'));
+    const status = page.getByRole('status').first();
+    await expect(status).toHaveText('应用与企业信息已检查。');
+    await expect(page.getByRole('heading', { name: 'Fixture bot', exact: true })).toBeVisible();
     wire.state.currentAppName = '研发协作助手'; wire.state.tenantName = '示例研发企业';
-    await row.getByRole('button', { name: '刷新应用信息' }).click();
-    await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
-    await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
-    await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
-    await expect(row.getByText('App ID：cli_fixture', { exact: true })).toBeVisible();
-    const grants = row.locator('.feishu-scope-check');
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
+    await expect(status).toHaveText('应用与企业信息已检查。');
+    await expect(page.getByRole('heading', { name: '研发协作助手', exact: true })).toBeVisible();
+    await expect(page.getByText('示例研发企业', { exact: true })).toBeVisible();
+    await expect(page.getByText('App ID：cli_fixture', { exact: true })).toBeVisible();
+    const grants = page.locator('.feishu-scope-check');
     await expect(grants).toContainText(`所需的 ${FEISHU_SCOPES.length} 项均已开通`);
     expect(f.h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id).revision).toBe(1);
     const requests = wire.state.authRequests.length;
     await page.reload();
-    await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
-    await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
+    await expect(page.getByText('示例研发企业', { exact: true })).toBeVisible();
+    await expect(status).toHaveText('应用与企业信息已检查。');
     expect(wire.state.authRequests.length).toBeGreaterThan(requests);
-    await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.screenshot({ path: output + '/connections-desktop.png', fullPage: true });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-status-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/issue-1220/detail-status-390.png' });
     // A partly configured app lists what is missing, links Feishu's request page for exactly those scopes and offers the full import JSON.
     wire.state.scopes = FEISHU_SCOPES.filter(s => !['im:resource', 'im:message.group_msg', 'im:message.group_msg.include_bot:read', 'im:chat.members:read'].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
-    await row.getByRole('button', { name: '刷新应用信息与权限' }).click();
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
     await expect(grants).toContainText('缺少 4 项');
     await expect(grants.getByRole('listitem')).toHaveText([/^im:resource · 获取与上传消息中的图片和文件/, /^im:message\.group_msg · /, /^im:message\.group_msg\.include_bot:read · 接收群内用户及其他机器人消息/, /^im:chat\.members:read · 核验群成员/]);
     const request = new URL(await grants.getByRole('link', { name: '在飞书开通缺少的权限' }).getAttribute('href'));
@@ -205,35 +246,31 @@ test('connection list refreshes current app names even when bot metadata is stal
     expect(request.searchParams.get('q')).toBe('im:resource,im:message.group_msg,im:message.group_msg.include_bot:read,im:chat.members:read');
     expect(JSON.parse(await grants.getByLabel('完整权限 JSON').inputValue()).scopes.tenant).toEqual(FEISHU_SCOPES.map(s => s.scope));
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/connections-mobile-missing-scopes.png', fullPage: true });
-    await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.screenshot({ path: output + '/connections-desktop-missing-scopes.png', fullPage: true });
     wire.state.scopeCode = 99991663;
-    await row.getByRole('button', { name: '刷新应用信息与权限' }).click();
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
     await expect(grants).toContainText('暂时无法自动检查飞书权限');
-    await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
+    await expect(status).toHaveText('应用与企业信息已检查。');
     wire.state.scopeCode = 0; wire.state.scopes = null;
     wire.state.applicationCode = 99991672;
-    await row.getByRole('button', { name: '刷新应用信息' }).click();
-    await expect(row.getByRole('status')).toContainText('admin:app.info:readonly');
-    await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
+    await expect(status).toContainText('admin:app.info:readonly');
+    await expect(page.getByRole('heading', { name: '研发协作助手', exact: true })).toBeVisible();
     wire.state.applicationCode = 0; wire.state.tenantCode = 1184001;
-    await row.getByRole('button', { name: '刷新应用信息' }).click();
-    await expect(row.getByRole('status')).toContainText('tenant:tenant:readonly');
-    await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
+    await expect(status).toContainText('tenant:tenant:readonly');
+    await expect(page.getByText('示例研发企业', { exact: true })).toBeVisible();
     wire.state.tenantCode = 0; wire.state.authCode = 10003;
-    await row.getByRole('button', { name: '刷新应用信息' }).click();
-    await expect(row.getByRole('status')).toContainText('无法通过鉴权');
-    await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
+    await expect(status).toContainText('无法通过鉴权');
+    await expect(page.getByRole('heading', { name: '研发协作助手', exact: true })).toBeVisible();
     expect(await page.locator('body').innerText()).not.toContain(credentials.app_secret);
     wire.state.authCode = 0; wire.state.currentAppName = null; wire.state.appName = '<img src=x onerror=alert(1)> 研发协作助手';
     wire.state.tenantName = '跨团队持续交付与基础设施研发企业'.repeat(8);
-    await row.getByRole('button', { name: '刷新应用信息' }).click();
-    await expect(row.getByText(wire.state.appName, { exact: true })).toBeVisible();
-    await expect(row.locator('img')).toHaveCount(0);
+    await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
+    await expect(page.getByRole('heading', { name: wire.state.appName, exact: true })).toBeVisible();
+    await expect(page.locator('#settings-panel img')).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/connections-mobile-long-names.png', fullPage: true });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
@@ -243,7 +280,6 @@ test('store apps save without manual bot identity and synchronize it after recei
   try {
     await page.goto(h.admin + '/#/settings/feishu/new/0'); await login(page, h, f.password);
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
-    await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
     await expect(page.getByLabel('机器人 open_id')).toHaveCount(0);
     await page.getByLabel('App ID', { exact: true }).fill('cli_store_wizard');
     await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
@@ -252,19 +288,18 @@ test('store apps save without manual bot identity and synchronize it after recei
     await page.getByLabel('Verification Token', { exact: true }).fill(credentials.verification_token);
     await page.getByLabel('Encrypt Key', { exact: true }).fill(credentials.encrypt_key);
     await page.getByRole('button', { name: '保存连接并继续' }).click();
-    await expect(page.getByRole('heading', { name: '事件与回调', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '订阅事件与发布', exact: true })).toBeVisible();
     const events = page.getByRole('list', { name: '事件与回调配置步骤' }).getByRole('listitem').nth(0);
     await expect(events.getByRole('link', { name: '配置公网 HTTPS 地址' })).toBeVisible();
     await expect(events).toContainText('app_ticket');
     const c = h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_store_wizard'"); expect(c.bot_open_id).toBe('');
-    await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click();
-    await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
+    await page.getByRole('button', { name: '检查已发布的机器人与权限', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: '尚未收到有效的商店应用票据' })).toBeVisible();
     const ticket = { ts: String(Date.now() / 1000), uuid: 'wizard-ticket', token: credentials.verification_token, type: 'event_callback',
       event: { type: 'app_ticket', app_id: 'cli_store_wizard', app_ticket: 'fixture-store-ticket' } };
     expect((await post(h, c.id, ticket, { encrypted: true })).value.state).toBe('completed');
     for (let i = 0; i < 2; i++) {
-      await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
+      await page.getByRole('button', { name: '检查已发布的机器人与权限', exact: true }).click();
       await expect(page.getByRole('status').filter({ hasText: '机器人身份已自动同步' })).toBeVisible();
     }
     const updated = h.store.get('SELECT * FROM channel_connectors WHERE id=?', c.id);
@@ -272,15 +307,17 @@ test('store apps save without manual bot identity and synchronize it after recei
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
 
-test('enterprise long connections require callback configuration as well as message events', async ({ page }) => {
+test('enterprise long connections show collapsible event/callback guide and delete controls on the detail page (#1220)', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
-  mkdirSync(output, { recursive: true });
+  mkdirSync('.tmp/issue-1220', { recursive: true });
   try {
     const id = await connector(f.admin, { transport: 'websocket' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    // Legacy /<id>/2 opens the detail page with the Feishu configuration guide expanded.
     await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/2'); await login(page, f.h, f.password);
     const steps = page.getByRole('list', { name: '事件与回调配置步骤' }).getByRole('listitem');
     await expect(steps).toHaveCount(3);
-    await expect(steps.nth(0)).toContainText('等待上方传输状态显示已连接');
+    await expect(steps.nth(0)).toContainText('等待上方活跃状态显示「已连接」');
     await expect(steps.nth(0)).toContainText('使用长连接接收事件');
     await expect(steps.nth(0)).toContainText('im.message.receive_v1');
     await expect(steps.nth(0)).toContainText('im.chat.member.user.deleted_v1');
@@ -288,23 +325,30 @@ test('enterprise long connections require callback configuration as well as mess
     await expect(steps.nth(1)).toContainText('使用长连接接收回调');
     await expect(steps.nth(1)).toContainText('card.action.trigger，推荐');
     await expect(steps.nth(1)).toContainText('card.action.trigger_v1），旧版不支持长连接');
-    await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.screenshot({ path: output + '/events-websocket-desktop.png', fullPage: true });
+    const guide = page.locator('.feishu-guide-details');
+    const scopes = JSON.parse(await guide.getByLabel('完整权限 JSON').inputValue());
+    expect(scopes.scopes.tenant).toContain('cardkit:card:write');
+    await guide.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-guide-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/events-websocket-mobile.png', fullPage: true });
+    await guide.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
+    await page.screenshot({ path: '.tmp/issue-1220/detail-guide-390.png' });
     const current = f.h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id);
     await f.admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: current.revision, enabled: false });
     await page.reload();
-    await expect(steps.nth(0).getByRole('link', { name: '前往启用连接' })).toHaveAttribute('href', '#/settings/feishu/' + id + '/1');
-    await page.getByRole('button', { name: '1. 创建应用', exact: true }).click();
-    const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
-    expect(scopes.scopes.tenant).toContain('cardkit:card:write');
-    await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('已有应用也需补齐并发布新版本');
+    await expect(steps.nth(0).getByRole('button', { name: '立即启用连接' })).toBeVisible();
+    // Delete from detail page danger zone redirects back to the list.
+    await page.getByRole('button', { name: '删除此飞书应用连接', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('删除飞书应用连接');
+    await dialog.getByRole('button', { name: '确认删除', exact: true }).click();
+    await expect(page).toHaveURL(/#\/settings\/feishu$/);
+    expect(f.h.store.get('SELECT * FROM channel_connectors WHERE id=?', id)).toBeUndefined();
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
-test('the trial step sends group scope to the group assistant binding instead of a per-project group form', async ({ page }) => {
+test('the detail and completion step send group scope to the group assistant binding instead of a per-project group form', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
   try {
     const id = await connector(f.admin);
@@ -312,6 +356,7 @@ test('the trial step sends group scope to the group assistant binding instead of
     await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
     await expect(page.getByRole('button', { name: '批准或更新群范围' })).toHaveCount(0);
     await expect(page.getByLabel('群 chat_id')).toHaveCount(0);
+    await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/setup/2');
     await expect(page.getByText('在「个人设置 → 飞书绑定」点击「创建群绑定」', { exact: false })).toBeVisible();
     expect((await f.admin('/api/channels/connectors/' + id + '/groups')).status).toBe(404);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
@@ -386,18 +431,25 @@ test('a repository admin connects an app for their organization from the identit
     await expect(page.getByLabel('应用类型', { exact: true }).locator('option[value="saas"]')).toHaveJSProperty('disabled', true);
     await expect(page.getByLabel('事件接收方式', { exact: true }).locator('option[value="http"]')).toHaveJSProperty('disabled', true);
     await expect(page.getByText('组织的应用只能是企业自建应用', { exact: false })).toBeVisible();
-    await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
     await expect(page.getByLabel('应用所属', { exact: true }).locator('option')).toHaveText(['组织 agent-test-zone']);
     await page.getByLabel('App ID', { exact: true }).fill('cli_org_wizard'); await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
-    await page.screenshot({ path: output + '/organization-app-credentials-desktop.png', fullPage: true });
     await page.getByRole('button', { name: '保存连接并继续' }).click();
-    await expect(page).toHaveURL(/#\/identity\/feishu-apps\/[a-f0-9]{48}\/2$/);
+    await expect(page).toHaveURL(/#\/identity\/feishu-apps\/[a-f0-9]{48}\/setup\/1$/);
     const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_org_wizard'");
     expect([c.owner_tenant, c.created_by, c.transport, c.application_type]).toEqual(['github.com:10', maintainer.id, 'websocket', 'enterprise']);
     await page.getByRole('link', { name: '返回连接列表' }).click();
     const row = page.getByRole('group', { name: 'cli_org_wizard' });
-    await expect(row.getByText('组织 agent-test-zone 的应用 · 创建人 org-app-maintainer · 启用 · 企业自建长连接', { exact: true })).toBeVisible();
-    await page.goto(f.h.admin + '/#/identity/feishu-apps/' + c.id + '/1');
+    await expect(row).toContainText('组织 agent-test-zone 的应用 · 创建人 org-app-maintainer');
+    await expect(row).toContainText('已启用');
+    mkdirSync('.tmp/issue-1220', { recursive: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.screenshot({ path: '.tmp/issue-1220/org-admin-list-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/issue-1220/org-admin-list-390.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await row.getByRole('link', { name: '管理', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp('/#/identity/feishu-apps/' + c.id + '$'));
     await expect(page.getByLabel('App ID', { exact: true })).toHaveAttribute('readonly', '');
     await expect(page.getByLabel('应用所属', { exact: true })).toHaveCount(0);
     await page.goto(f.h.admin + '/#/identity/feishu');

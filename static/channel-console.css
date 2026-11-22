@@ -46,7 +46,18 @@
 .feishu-row-info > p:empty { display: none; }
 .feishu-row-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; overflow-wrap: anywhere; }
 .feishu-binding-badge:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border-radius: var(--radius-3); background: var(--color-brand-weak); color: var(--color-brand); font-size: var(--font-size-1); font-weight: 600; }
-.feishu-binding-badge-muted { background: var(--color-surface-alt); color: var(--color-text-muted); border: 1px solid var(--color-border); }
+.feishu-binding-badge.feishu-binding-badge-muted:not([hidden]) { background: var(--color-status-neutral-bg); color: var(--color-status-neutral); border: 1px solid var(--color-border); }
+.feishu-binding-badge.feishu-binding-badge-success:not([hidden]) { background: var(--color-success-bg); color: var(--color-success); }
+.feishu-binding-badge.feishu-binding-badge-warning:not([hidden]) { background: var(--color-warning-bg); color: var(--color-warning); border: 1px solid var(--color-warning-border); }
+.feishu-binding-badge.feishu-binding-badge-danger:not([hidden]) { background: var(--color-danger-bg); color: var(--color-danger); border: 1px solid var(--color-danger-weak); }
+.feishu-binding-badge.feishu-binding-badge-info:not([hidden]) { background: var(--color-info-bg); color: var(--color-info); border: 1px solid var(--color-info-border); }
+.feishu-detail-head:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+.feishu-detail-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
+.feishu-detail-title :is(h2,h3) { margin: 0; }
+.feishu-guide-details { border: 1px solid var(--color-border); border-radius: var(--radius-3); padding: var(--space-3) var(--space-4); background: var(--color-surface-alt); }
+.feishu-guide-details > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min); display: flex; align-items: center; }
+.feishu-guide-body { display: grid; gap: var(--space-3); margin-top: var(--space-3); min-width: 0; }
+.feishu-danger-zone { border-color: var(--color-danger-weak); background: var(--color-danger-soft); }
 .feishu-row-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
 .feishu-row-drawer:not([hidden]) { display: grid; gap: var(--space-3); width: 100%; min-width: 0; padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .feishu-repo-picker:not([hidden]) { display: grid; gap: var(--space-3); min-width: 0; }
