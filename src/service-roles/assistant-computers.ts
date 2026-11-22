@@ -31,8 +31,8 @@ export const assistantComputerTools = [
   fn('read_file', 'Read a UTF-8 file of your computer (at most 1 MiB is returned).', { path }, ['path']),
   fn('write_file', 'Write a UTF-8 file on your computer, replacing it. Temporary files belong in /tmp; write to HOME (~/...) only data worth keeping for later turns.', { path, content: { type: 'string' } }, ['path', 'content']),
   fn('delete_file', 'Delete a file or a directory (with its contents) on your computer, in HOME or a temporary area. Use it to clean up HOME, for example when it is over its size limit.', { path }, ['path']),
-  fn('run_command', `Run a non-interactive /bin/sh command on your computer: working directory /workspace, HOME persistent, /tmp temporary. Chromium ($BOT_BROWSER_EXECUTABLE / bot-chromium) and X11 virtual desktop tools (bot-desktop, xvfb-run, Xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg) are preinstalled for CLI, CDP and desktop-level browser or GUI tasks. Times out after timeout_seconds (default 120, at most ${commandSecondsLimit}; a smaller configured maximum lowers that default).`,
-    { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: commandSecondsLimit, description: `Optional timeout in seconds; the configured maximum is ${commandSecondsLimit}.` } }, ['command']),
+  fn('run_command', `Run a non-interactive /bin/sh command on your computer: working directory /workspace, HOME persistent, /tmp temporary. Chromium ($BOT_BROWSER_EXECUTABLE / bot-chromium) and X11 virtual desktop tools (bot-desktop, xvfb-run, Xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg) are preinstalled for CLI, CDP and desktop-level browser or GUI tasks. Set keep_background=true to keep long-lived processes (such as bot-desktop start or a Chromium CDP server) alive across commands in this turn; all processes end when the turn finishes. Times out after timeout_seconds (default 120, at most ${commandSecondsLimit}; a smaller configured maximum lowers that default).`,
+    { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: commandSecondsLimit, description: `Optional timeout in seconds; the configured maximum is ${commandSecondsLimit}.` }, keep_background: { type: 'boolean', description: 'Keep background processes (such as bot-desktop start or Chromium CDP) alive across commands in this turn; they end when the turn finishes.' } }, ['command']),
 ];
 export const assistantComputerNames = assistantComputerTools.map(t => t.function.name);
 /** delete_file needs no permission item of its own: whoever may write files may delete them. */
@@ -472,9 +472,10 @@ export class AssistantComputer {
   }
   private async operate(name: string, args: Json): Promise<Json> {
     if (name === 'run_command') {
-      fields(args, ['command', 'timeout_seconds']);
+      fields(args, ['command', 'timeout_seconds', 'keep_background']);
+      if (args.keep_background !== undefined && typeof args.keep_background !== 'boolean') fail(400, 'invalid_field', 'keep_background');
       const command = text(args.command, 16000), seconds = assistantCommandTimeout(args.timeout_seconds);
-      return { ...(await this.run({ type: 'command', command, timeout_ms: seconds * 1000 }, seconds * 1000)), ...this.notice() };
+      return { ...(await this.run({ type: 'command', command, timeout_ms: seconds * 1000, ...(args.keep_background === true ? { keep_background: true } : {}) }, seconds * 1000)), ...this.notice() };
     }
     fields(args, name === 'write_file' ? ['path', 'content'] : ['path']);
     const where = locate(args.path);

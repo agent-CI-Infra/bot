@@ -143,7 +143,10 @@ test('a default read-only group and a legacy computer=deny binding both use the 
   // Even an existing stored binding with legacy computer=deny still has computer access.
   f.h.store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=?',
     JSON.stringify({ ...JSON.parse(row.permissions), computer: 'deny', browser: 'deny' }), row.id);
-  script(f, { [chat.id]: [['run_command', { command: 'printf ok-readonly' }]] });
+  script(f, { [chat.id]: [['run_command', { command: 'printf ok-readonly' }], ['run_command', { command: 'printf bg-ok', keep_background: true }]] });
   const seen = await ask(f, 'oc_group_readonly', '跑个只读统计脚本');
   assert.equal(seen[0].output, 'ok-readonly');
+  assert.equal(seen[1].output, 'bg-ok');
+  assert.equal(seen[1].running, true);
+  assert.equal(f.assistant.commands.at(-1).keep_background, true);
 });

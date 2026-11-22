@@ -40,9 +40,9 @@ export async function assistantManager(t) {
     if (['reap', 'journal_clear'].includes(input.type)) return { ok: true, result: {} };
     try {
       if (input.type === 'command') {
-        const { home } = place(name, '/home/assistant'); commands.push({ container: name, command: input.command });
+        const { home } = place(name, '/home/assistant'); commands.push({ container: name, command: input.command, keep_background: input.keep_background === true });
         const run = spawnSync('/bin/sh', ['-c', input.command], { cwd: join(containers, name, 'workspace'), env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8', timeout: input.timeout_ms });
-        return { ok: true, result: { exit_code: run.status, output: (run.stdout || '') + (run.stderr || ''), timed_out: false, truncated: false } };
+        return { ok: true, result: { exit_code: run.status, output: (run.stdout || '') + (run.stderr || ''), timed_out: false, truncated: false, ...(input.keep_background === true ? { running: true } : {}) } };
       }
       const target = place(name, input.path);
       if (input.type === 'assistant_read') {

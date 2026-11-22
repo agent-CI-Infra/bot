@@ -46,6 +46,18 @@ test('#1214 助手电脑全局设置：默认开放外网，可切换并持久�
     await expect(resources).toBeVisible();
     await expect(egress).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+    // On a short mobile viewport, scrolling the save button into view keeps it clear of any fixed bottom bar.
+    await page.setViewportSize({ width: 390, height: 640 });
+    const saveButton = resources.getByRole('button', { name: '保存', exact: true });
+    await saveButton.scrollIntoViewIfNeeded();
+    const box = await saveButton.boundingBox();
+    expect(box).not.toBeNull();
+    const hitSave = await saveButton.evaluate((el, point) => {
+      const top = document.elementFromPoint(point.x, point.y);
+      return !!top && (top === el || el.contains(top));
+    }, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+    expect(hitSave).toBe(true);
     expect(errors).toEqual([]);
   } finally {
     await h.stop();

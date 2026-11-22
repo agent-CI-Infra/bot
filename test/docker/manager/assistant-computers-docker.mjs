@@ -7,6 +7,7 @@ import { computerResultOwner } from '../../../runner/result-owner.mjs';
 //   BOT_TEST_BASE_IMAGE=department-bot-project-computer:<tag> npm run test:assistant:docker
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { mkdirSync, writeFileSync, cpSync, readdirSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -46,14 +47,18 @@ try {
   const [A, B] = [hex(16), hex(16)];resultOwners.add(A);resultOwners.add(B);
   homes(`set -e; for o in ${A} ${B}; do mkdir -p -m 750 /assistant-homes/$o; mkdir -m 700 /assistant-homes/$o/home-1; done; stat -c '%U %a %n' /assistant-homes /assistant-homes/${A}/home-1`);
   homes(`mkdir -p /tool-results/${computerResultOwner('assistant',A)} /tool-results/${computerResultOwner('assistant',B)}; printf '{\"issues\":[452,459],\"tail\":\"中😀\"}' > /tool-results/${computerResultOwner('assistant',A)}/sample.utf8; printf other > /tool-results/${computerResultOwner('assistant',B)}/other.utf8; chmod 444 /tool-results/*/*.utf8`);
-  const run = async (owner, turn, command, timeout_ms = 30_000) => {
-    const r = await computers.execute(owner, { turn, operation_id: hex(24), request: { type: 'command', command, timeout_ms } });
+  const run = async (owner, turn, command, timeout_ms = 30_000, extra = {}) => {
+    const r = await computers.execute(owner, { turn, operation_id: hex(24), request: { type: 'command', command, timeout_ms, ...extra } });
     assert.equal(r.ok, true, JSON.stringify(r)); return r.result;
   };
   const acquire = (owner, turn, extra = {}) => computers.acquire(owner, { turn, fence, home_generation: 1, home_mode: 'rw', ...extra });
 
-  // 2. Two owners side by side: each sees only its own HOME, /tmp, processes and no network.
+  // 2. Two owners side by side: each sees only its own HOME, /tmp and processes; default egress uses an ICC-disabled
+  //    bridge network isolated from sibling assistant containers and host loopback ports.
   assert.equal((await acquire(A, 'ta')).state, 'ready'); assert.equal((await acquire(B, 'tb')).state, 'ready');
+  const netInfo = JSON.parse(sh('docker', ['network', 'inspect', computers.networkName()]))[0];
+  assert.equal(netInfo.Internal, false);
+  assert.equal(netInfo.Options?.['com.docker.network.bridge.enable_icc'], 'false');
   const resultView=await run(A,'ta',"cat /results/sample.utf8; test ! -e /results/other.utf8; for action in 'printf changed > /results/sample.utf8' 'rm /results/sample.utf8' 'touch /results/new'; do if sh -c \"$action\"; then exit 90; fi; done; cat /results/sample.utf8");
   assert.equal(resultView.exit_code,0,resultView.output);assert.equal((resultView.output.match(/中😀/g)||[]).length,2);
   const hidden=await run(B,'tb','test ! -e /results/sample.utf8 && cat /results/other.utf8');assert.equal(hidden.exit_code,0);assert.match(hidden.output,/other/);
@@ -62,13 +67,54 @@ try {
   passed('results are UTF-8 readable, owner-isolated, read-only and disappear when the control plane expires them');
   await run(A, 'ta', 'echo a-secret > ~/a-home.txt && echo a-tmp > /tmp/a-tmp.txt && (sleep 600 &) && ln -s /assistant-homes/' + B + '/home-1/b-home.txt ~/link-to-b && ln -s ../../../etc/passwd ~/dots');
   await run(B, 'tb', 'echo b-secret > ~/b-home.txt && echo b-tmp > /tmp/b-tmp.txt && (B_SECRET=b-env sleep 600 &)');
-  const view = await run(A, 'ta', `id -u; echo $HOME; ls -A ~; ls -A /tmp; cat ~/link-to-b 2>&1; ls /home; grep -rl b-secret /home /tmp /workspace /opt /etc 2>/dev/null | head -5; cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c B_SECRET; ls /sys/class/net; grep ' /home/assistant ' /proc/self/mountinfo | wc -l; node -e "require('net').connect(80,'1.1.1.1').on('error',e=>console.log('net',e.code))"`);
+  const view = await run(A, 'ta', `id -u; echo $HOME; ls -A ~; ls -A /tmp; cat ~/link-to-b 2>&1; ls /home; grep -rl b-secret /home /tmp /workspace /opt /etc 2>/dev/null | head -5; cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c B_SECRET; ls /sys/class/net | sort | tr '\\n' ','; echo; grep ' /home/assistant ' /proc/self/mountinfo | wc -l`);
   assert.match(view.output, /^10001\n\/home\/assistant\n/);
   assert.ok(view.output.includes('a-home.txt') && !view.output.includes('b-home.txt') && !view.output.includes('b-tmp.txt'), view.output);
   assert.match(view.output, /No such file or directory/);
   assert.ok(!/b-secret|b-env/.test(view.output), view.output);
-  assert.match(view.output, /\n0\nlo\n1\nnet E(NETUNREACH|NOTFOUND|AI_AGAIN|CONNREFUSED)/);
-  passed('owners are isolated: HOME, /tmp, symlinks to another HOME, processes, environment and network', view.output.trim().split('\n'));
+  assert.match(view.output, /\n0\neth0,lo,\n1\n/);
+  // Verify ICC isolation (A cannot reach a TCP listener in B) and host loopback isolation (A cannot reach a 127.0.0.1 host port).
+  const bServer = await run(B, 'tb', `node -e "require('net').createServer(s=>s.end('from-b')).listen(18999,'0.0.0.0',()=>console.log('listening'))"`, 15_000, { keep_background: true });
+  assert.equal(bServer.running, true, JSON.stringify(bServer));
+  const bIp = JSON.parse(sh('docker', ['inspect', computers.name(B)]))[0].NetworkSettings.Networks[computers.networkName()].IPAddress;
+  const gatewayIp = netInfo.IPAM?.Config?.[0]?.Gateway || '';
+  assert.ok(bIp, 'container B should have an IP on the assistant egress network');
+  const hostLoopback = createServer(socket => socket.end('host-loopback'));
+  await new Promise(resolve => hostLoopback.listen(0, '127.0.0.1', resolve));
+  const hostPort = hostLoopback.address().port;
+  try {
+    const netCheck = await run(A, 'ta', `node -e "
+      const net = require('net');
+      const probe = (host, port) => new Promise(resolve => {
+        const s = net.connect({ host, port });
+        const t = setTimeout(() => { s.destroy(); resolve('TIMEOUT'); }, 1500);
+        s.on('connect', () => { clearTimeout(t); s.destroy(); resolve('CONNECTED'); });
+        s.on('error', e => { clearTimeout(t); resolve(e.code || 'ERR'); });
+      });
+      Promise.all([probe('${bIp}', 18999), probe('127.0.0.1', ${hostPort})${gatewayIp ? `, probe('${gatewayIp}', ${hostPort})` : ''}]).then(r => console.log(JSON.stringify(r)));
+    "`, 15_000);
+    const probes = JSON.parse(netCheck.output.trim());
+    assert.ok(probes.every(p => p !== 'CONNECTED'), `ICC and host loopback must stay unreachable: ${JSON.stringify(probes)}`);
+  } finally {
+    await new Promise(resolve => hostLoopback.close(resolve));
+  }
+  passed('owners are isolated: HOME, /tmp, symlinks to another HOME, processes, environment, ICC and host loopback', { bIp, gatewayIp });
+
+  // 2b. Preinstalled Chromium + X11 virtual desktop work across run_command calls with keep_background: true.
+  const desktop = await run(A, 'ta', 'bot-desktop start --display :99 --size 1280x720x24', 15_000, { keep_background: true });
+  assert.equal(desktop.running, true, JSON.stringify(desktop));
+  const browser = await run(A, 'ta', `DISPLAY=:99 bot-chromium --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-profile --window-size=1024,700 'data:text/html,<title>AssistantDesktop</title><h1>OK</h1>'`, 15_000, { keep_background: true });
+  assert.equal(browser.running, true, JSON.stringify(browser));
+  const desktopVerify = await run(A, 'ta', `set -e
+    DISPLAY=:99 xdpyinfo >/dev/null
+    i=0; until curl -fsS http://127.0.0.1:9222/json/version > /tmp/cdp.json; do i=$((i+1)); [ "$i" -lt 30 ] || exit 1; sleep 0.2; done
+    grep -q '"Browser":"Chrome/' /tmp/cdp.json || grep -q '"Browser": "Chrome/' /tmp/cdp.json
+    DISPLAY=:99 scrot -o /tmp/desktop.png
+    identify /tmp/desktop.png
+    rm -f /tmp/cdp.json /tmp/desktop.png`, 20_000);
+  assert.equal(desktopVerify.exit_code, 0, desktopVerify.output);
+  assert.match(desktopVerify.output, /1280x720/);
+  passed('preinstalled Chromium CDP and X11 virtual desktop persist across commands with keep_background: true', desktopVerify.output.trim());
   const limits = await run(A, 'ta', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; df -k /tmp /workspace | tail -2 | awk \'{print $2}\'; touch /x 2>&1; cat /proc/self/status | grep -E "^(CapEff|NoNewPrivs)"');
   assert.match(limits.output, /^2147483648\n0\n512\n100000 100000\n524288\n524288\n.*Read-only file system\nCapEff:\t0000000000000000\nNoNewPrivs:\t1/s);
   passed('limits are in force: 2 GiB memory without swap, 512 pids, 1 CPU, 512 MiB tmpfs, read-only root, no capabilities', limits.output.trim().split('\n'));
@@ -78,7 +124,7 @@ try {
   const imageTools = await run(A, 'ta', `python3 -c "from PIL import Image; im=Image.new('RGB',(320,240),(12,34,56)); im.save('/tmp/im.png'); im.resize((80,60)).save('/tmp/im.jpg',quality=80)" && identify /tmp/im.png /tmp/im.jpg && convert /tmp/im.png -resize 40x30 /workspace/im-small.png && identify /workspace/im-small.png && rm -f /tmp/im.png /tmp/im.jpg /workspace/im-small.png`);
   assert.equal(imageTools.exit_code, 0, imageTools.output);
   assert.match(imageTools.output, /320x240[\s\S]*80x60[\s\S]*40x30/);
-  passed('offline image tools (Pillow and ImageMagick) run under the read-only no-network sandbox');
+  passed('image tools (Pillow and ImageMagick) run under the read-only sandbox');
   // File operations stay below /workspace and /tmp, never follow a symlink and never reach HOME or the runner journal.
   const file = request => computers.execute(A, { turn: 'ta', operation_id: hex(24), request });
   const data = Buffer.from('chunked\0binary'), part = Math.ceil(data.length / 2);
@@ -96,15 +142,15 @@ try {
   assert.equal((await file({ type: 'assistant_delete', path: '/tmp/in' })).result.directory, true);
   passed('file operations are confined to HOME, /workspace and /tmp and follow no symlink');
 
-  // 3. The turn ends: its processes end, /tmp stays for the next turn within the idle time.
+  // 3. The turn ends: its processes (including background desktop and Chromium) end, /tmp stays for the next turn within the idle time.
   await computers.release(A, { turn: 'ta' });
   const name = computers.name(A), idle = sh('docker', ['top', name, '-eo', 'pid,args']);
-  assert.ok(!idle.includes('sleep 600'), idle);
+  assert.ok(!idle.includes('sleep 600') && !idle.includes('Xvfb') && !idle.includes('openbox') && !idle.includes('chromium'), idle);
   const reused = await acquire(A, 'ta2');
   assert.equal(reused.reused, true);
   // Only this command's own record (and its live output) is in the journal.
   assert.match((await run(A, 'ta2', 'cat /tmp/a-tmp.txt ~/a-home.txt; ls /workspace/.runner-journal | wc -l')).output, /^a-tmp\na-secret\n[12]\n$/);
-  passed('release ends the turn\'s processes and clears the journal; the next turn reuses the container and its /tmp');
+  passed('release ends the turn\'s processes (including background desktop/Chromium) and clears the journal; the next turn reuses the container and its /tmp');
 
   // 4. A changed fence: a new container; HOME persists, /tmp does not. Read-only HOME refuses writes.
   await computers.release(A, { turn: 'ta2' });
@@ -128,7 +174,15 @@ try {
   assert.equal(resized.output, '1073741824\n0\n256\n50000 100000\n131072\n262144\nkept\n');
   passed('new resources replace the idle computer at the next turn: 1 GiB without swap, 256 pids, 0.5 CPU, 128/256 MiB tmpfs, HOME kept', resized.output.trim().split('\n'));
   await computers.release(A, { turn: 'ta5' });
-  await computers.setSettings({ cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 });
+  // 6b. Turning egress off replaces the idle container with NetworkMode: none.
+  await computers.setSettings({ cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: false });
+  assert.equal((await acquire(A, 'ta6', { fence: other, home_generation: 2 })).reused, false);
+  const offline = await run(A, 'ta6', `ls /sys/class/net; node -e "require('net').connect(80,'1.1.1.1').on('error',e=>console.log('net',e.code))"`);
+  assert.match(offline.output, /^lo\nnet E(NETUNREACH|NOTFOUND|AI_AGAIN|CONNREFUSED)/);
+  assert.equal(computers.facts(await computers.inspect(A)).network_policy, 'none');
+  passed('disabling egress replaces the idle container with NetworkMode: none (lo only, outbound blocked)', offline.output.trim().split('\n'));
+  await computers.release(A, { turn: 'ta6' });
+  await computers.setSettings({ egress: true });
 
   // 7. Idle timeout and fence removal take the container away with its processes.
   computers.leases.get(A).used -= 10 * 60_000; await computers.check(); await Promise.all([...computers.removing.values()]);
