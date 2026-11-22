@@ -233,6 +233,7 @@ async function renderChannelConsole(request) {
     if (!retentionBefore.value) { retentionStatus.textContent = '请先选择要清理的时间点。'; return; }
     const beforeMs = new Date(retentionBefore.value).getTime();
     if (!Number.isFinite(beforeMs)) { retentionStatus.textContent = '请选择有效的时间点。'; return; }
+    let cleanResult = null;
     const confirmed = await askConfirm({
       title: '清理本地消息记录',
       body: ['清理会删除此时间之前的本地消息原文、附件文件及派生摘要，并保留覆盖边界。此操作不可撤销。'],
@@ -240,12 +241,13 @@ async function renderChannelConsole(request) {
       danger: true,
       run: async () => {
         const res = await api(`/api/channels/chats/${selected}/retention`, 'DELETE', { before: beforeMs, expected_revision: currentChatRevision });
+        cleanResult = res;
         if (res.revision !== undefined) currentChatRevision = res.revision;
-        return res;
       },
     });
     if (confirmed && alive()) {
-      retentionStatus.textContent = `已清理 ${timestamp(beforeMs)} 之前的本地记录。保留策略：${confirmed.retention?.days === null ? '保留至管理员显式清理' : confirmed.retention?.days + ' 天'}。`;
+      const days = cleanResult?.retention?.days;
+      retentionStatus.textContent = `已清理 ${timestamp(beforeMs)} 之前的本地记录。保留策略：${days == null ? '保留至管理员显式清理' : days + ' 天'}。`;
       await update();
       if (searchController) await searchController.refresh();
     }
