@@ -140,12 +140,58 @@ test('buildFeishuCard blocks unsafe URLs, forged img_key, raw callbacks, nested 
     },
   }, 'card_size_exceeded');
 
-  const md = sanitizeCardMarkdown('![secret](img_v2_abc) [bad](javascript:x) [ok](https://example.com) <img src="x"> <font color="red">hi</font>');
+  const md = sanitizeCardMarkdown('![secret](img_v2_abc) ![titled](img_v2_def "t") [bad](javascript:x) [ok](https://example.com) <img src="x"> <at id=all></at> <font color="red">hi</font>');
   assert.ok(!md.includes('img_v2_abc'));
+  assert.ok(!md.includes('img_v2_def'));
   assert.ok(!md.includes('javascript:'));
+  assert.ok(!md.includes('<at '));
   assert.match(md, /\[ok\]\(https:\/\/example\.com\/\)/);
   assert.match(md, /&lt;img/);
+  assert.match(md, /&lt;at id=all&gt;/);
   assert.match(md, /<font color='red'>hi<\/font>/);
+
+  // paginated_list title, empty_text, item title, badges and footerNote must never leak forged img_key or raw <at> tags
+  const forged = buildFeishuCard({
+    card: {
+      elements: [{
+        tag: 'paginated_list',
+        id: 'l',
+        display: 'items',
+        title: '![forged](img_v2_secret_key) <at id=all></at>',
+        empty_text: '![empty](img_v2_empty) <at id=all></at>',
+        items: [{
+          title: '![item](img_v2_other) <at id=all></at>',
+          content: 'OK',
+          badges: [
+            { text: '<at id=all></at>', color: 'blue' },
+            { text: '![b](img_v2_badge)', color: 'red' },
+          ],
+        }],
+      }],
+    },
+  });
+  const renderedForged = renderFeishuCard(forged.spec, forged.state, 'b'.repeat(48), {
+    footerNote: '定时任务「<at id=all></at> ![x](img_v2_footer)」',
+  });
+  const serializedForged = JSON.stringify(renderedForged.card);
+  assert.ok(!serializedForged.includes('img_v2_'), serializedForged);
+  assert.ok(!serializedForged.includes('<at '), serializedForged);
+
+  const emptyList = buildFeishuCard({
+    card: {
+      elements: [{
+        tag: 'paginated_list',
+        id: 'e',
+        display: 'items',
+        empty_text: '![empty](img_v2_empty) <at id=all></at>',
+        items: [],
+      }],
+    },
+  });
+  const renderedEmpty = renderFeishuCard(emptyList.spec, emptyList.state, 'c'.repeat(48));
+  const serializedEmpty = JSON.stringify(renderedEmpty.card);
+  assert.ok(!serializedEmpty.includes('img_v2_'), serializedEmpty);
+  assert.ok(!serializedEmpty.includes('<at '), serializedEmpty);
 });
 
 test('interactive card engine supports views, paginated_list filtering/paging, followup actions and redaction', () => {
