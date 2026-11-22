@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import {
   channelFixture, envelope, post, until, finished, inGroup, boundGroup, privateChat, scriptedModel, cardEvent, repositoryAssistant,
 } from '../../../fixtures/channel-fixture.mjs';
+import { channelCardPath, sweepOrphanChannelCards } from '../../../../dist/channels/cards.js';
+import { RetentionCleanup } from '../../../../dist/storage/retention.js';
 
 function interactiveClick(cardId, act, { message = 'remote-1', actor = 'ou_alice', chat = 'oc_group', option } = {}) {
   const e = envelope();
@@ -176,6 +180,9 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   assert.equal(initial.msg_type, 'interactive');
   const cardRow = f.h.store.get('SELECT * FROM channel_interactive_cards WHERE chat_id=?', group.id);
   assert.ok(cardRow && cardRow.remote_message_id === 'remote-1');
+  // Hybrid tiered storage: SQLite row holds only 'file' marker while sealed spec lives under channel-cards/
+  assert.equal(cardRow.spec, 'file');
+  assert.ok(existsSync(channelCardPath(f.h.store, cardRow.id)));
 
   // 1) Page next -> returns toast AND updated Card JSON 2.0 synchronously (no async PATCH wait)
   const pageEvent = interactiveClick(cardRow.id, 'p:rows:next', { message: 'remote-1', chat: 'oc_group_interactive' });
@@ -245,6 +252,108 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   // 6) Legacy card tokens still resolve to channel_card_stale
   const legacy = await post(f.h, f.id, cardEvent('legacy-token', 'remote-legacy', 'ou_alice', 'oc_group_interactive'));
   assert.equal((await finished(f.h, legacy.value.operation_id)).error, 'channel_card_stale');
+});
+
+test('interactive card hybrid file storage supports legacy SQLite fallback, missing-file resilience, prune and orphan sweep', async t => {
+  const f = await channelFixture(t);
+  const chat = await privateChat(f, 'ou_alice', f.principal, 'oc_private_storage');
+  const now = Date.now();
+  const baseSpec = {
+    config: { width_mode: 'fill', update_multi: true, enable_forward: true },
+    header: { title: { tag: 'plain_text', content: '分层存储卡' } },
+    elements: [],
+    views: [
+      { id: 'v1', label: '视图一', elements: [{ tag: 'markdown', content: '第一页' }] },
+      { id: 'v2', label: '视图二', elements: [{ tag: 'markdown', content: '第二页' }] },
+    ],
+    default_view: 'v1',
+    view_switcher: 'buttons',
+    actions: [],
+    interactive: true,
+  };
+  const fence = f.service.personalCardFence(chat, f.principal);
+
+  // 1) Create file-backed card -> spec stored under channel-cards/, SQLite holds 'file'
+  const live = f.service.cards.create({
+    connector_id: f.id, chat_id: chat.id, chat_type: 'p2p',
+    owner_kind: 'personal', owner_id: f.principal, fence,
+    spec: baseSpec, state: { view: 'v1', lists: {} }, now,
+  });
+  f.service.cards.attachMessage(live.id, 'om_live');
+  const livePath = channelCardPath(f.h.store, live.id);
+  assert.equal(f.h.store.get('SELECT spec FROM channel_interactive_cards WHERE id=?', live.id).spec, 'file');
+  assert.ok(existsSync(livePath));
+
+  // 2) Legacy pre-upgrade row (inline sealed SQLite spec, no file on disk) still works seamlessly
+  const legacyId = '11'.repeat(24);
+  f.h.store.run(
+    `INSERT INTO channel_interactive_cards(id,connector_id,chat_id,chat_type,remote_message_id,owner_kind,owner_id,fence,spec,state,revision,expires_at,created_at,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?)`,
+    legacyId, f.id, chat.id, 'p2p', 'om_legacy', 'personal', f.principal, fence,
+    f.h.store.secrets.seal({ spec: baseSpec }, 'channel-interactive-card:' + legacyId),
+    JSON.stringify({ view: 'v1', lists: {} }), now + 86_400_000, now, now,
+  );
+  assert.ok(!existsSync(channelCardPath(f.h.store, legacyId)));
+  const legacyClick = await post(f.h, f.id, interactiveClick(legacyId, 'v:v2', { message: 'om_legacy', actor: 'ou_alice', chat: 'oc_private_storage' }));
+  assert.equal(legacyClick.status, 200);
+  assert.equal(legacyClick.value.card.type, 'raw');
+  assert.match(JSON.stringify(legacyClick.value.card.data), /第二页/);
+
+  // 3) Missing .enc file fails closed with a clean warning toast (never 500)
+  const broken = f.service.cards.create({
+    connector_id: f.id, chat_id: chat.id, chat_type: 'p2p',
+    owner_kind: 'personal', owner_id: f.principal, fence,
+    spec: baseSpec, state: { view: 'v1', lists: {} }, now,
+  });
+  f.service.cards.attachMessage(broken.id, 'om_broken');
+  rmSync(channelCardPath(f.h.store, broken.id), { force: true });
+  const brokenClick = await post(f.h, f.id, interactiveClick(broken.id, 'v:v2', { message: 'om_broken', actor: 'ou_alice', chat: 'oc_private_storage' }));
+  assert.equal(brokenClick.status, 200);
+  assert.equal(brokenClick.value.toast.type, 'warning');
+  assert.equal(brokenClick.value.card, undefined);
+
+  // 4) Prune deletes expired rows AND their .enc files while keeping live cards intact
+  const expired = f.service.cards.create({
+    connector_id: f.id, chat_id: chat.id, chat_type: 'p2p',
+    owner_kind: 'personal', owner_id: f.principal, fence,
+    spec: baseSpec, state: { view: 'v1', lists: {} }, now: now - 30 * 86_400_000,
+  });
+  const expiredPath = channelCardPath(f.h.store, expired.id);
+  assert.ok(existsSync(expiredPath));
+  const pruned = f.service.cards.prune(now);
+  assert.equal(pruned.count, 1);
+  assert.equal(pruned.files, 1);
+  assert.ok(pruned.bytes > 0);
+  assert.ok(!existsSync(expiredPath));
+  assert.ok(!f.h.store.get('SELECT 1 FROM channel_interactive_cards WHERE id=?', expired.id));
+  assert.ok(existsSync(livePath), 'live card file preserved by prune');
+
+  // 5) Orphan sweep & RetentionCleanup remove old unreferenced .enc/.tmp files and preserve live + fresh files
+  const orphanId = 'deadbeef'.repeat(6), orphanPath = channelCardPath(f.h.store, orphanId);
+  const freshOrphanId = 'cafebabe'.repeat(6), freshOrphanPath = channelCardPath(f.h.store, freshOrphanId);
+  const staleTmp = orphanPath + '.abcdef012345.tmp';
+  mkdirSync(dirname(orphanPath), { recursive: true, mode: 0o700 });
+  mkdirSync(dirname(freshOrphanPath), { recursive: true, mode: 0o700 });
+  writeFileSync(orphanPath, Buffer.from('stale-card-orphan'));
+  writeFileSync(staleTmp, Buffer.from('stale-card-tmp'));
+  writeFileSync(freshOrphanPath, Buffer.from('fresh-card-orphan'));
+  const oldDate = new Date(now - 2 * 3600_000);
+  utimesSync(orphanPath, oldDate, oldDate);
+  utimesSync(staleTmp, oldDate, oldDate);
+  const swept = sweepOrphanChannelCards(f.h.store, now, 3600_000);
+  assert.equal(swept.count, 2);
+  assert.equal(swept.failed, 0);
+  assert.ok(!existsSync(orphanPath));
+  assert.ok(!existsSync(staleTmp));
+  assert.ok(existsSync(freshOrphanPath), 'fresh file within grace window preserved');
+  assert.ok(existsSync(livePath), 'live referenced file preserved');
+
+  utimesSync(freshOrphanPath, oldDate, oldDate);
+  const retention = new RetentionCleanup(f.h.store, undefined, { now: () => now });
+  const pass = await retention.run();
+  assert.equal(pass.channel_cards.count, 1);
+  assert.ok(!existsSync(freshOrphanPath));
+  assert.ok(existsSync(livePath));
 });
 
 test('private chat supports rich interactive cards with owner isolation, Web console omits card tool, and schedules send cards directly', async t => {

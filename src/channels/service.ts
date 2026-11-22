@@ -525,7 +525,14 @@ export class ChannelService {
       if (code === 'channel_card_actor_forbidden') return toast('error', '无权操作他人的私聊卡片');
       return toast('error', '权限或会话状态已变化，旧卡片已失效');
     }
-    const { spec, footer_note, console_url } = this.cards.openSpec(cardRow);
+    let opened: { spec: any; footer_note?: string; console_url?: string };
+    try {
+      opened = this.cards.openSpec(cardRow);
+    } catch {
+      recordIgnored();
+      return toast('warning', '卡片数据已失效，无法更新');
+    }
+    const { spec, footer_note, console_url } = opened;
     const currentState = JSON.parse(cardRow.state);
     const outcome = applyInteractiveCardAction(spec, currentState, cardRow.id, action.act!, action.option);
     if (outcome.kind === 'invalid') { recordIgnored(); return toast('warning', outcome.toast); }

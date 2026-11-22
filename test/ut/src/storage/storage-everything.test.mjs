@@ -143,16 +143,20 @@ test('the view lists each computer, the data filesystem, what can be reclaimed a
   assert.equal(view.host.known.docker_containers, GiB);
   // #968: only the volume bytes outside the rows above, and the assistant HOME named on its own.
   assert.equal(view.host.known.docker_volumes, 7 * GiB); assert.equal(view.host.known.assistant_homes, 3 * GiB);
-  assert.equal(view.host.known.git_cache, 0); assert.equal(view.host.known.channel_resources, 0); assert.equal(view.host.used_bytes, 600 * GiB);
-  // Sealed Feishu attachments under channel-resources/ are accounted in host.known and overview.amounts.other.
+  assert.equal(view.host.known.git_cache, 0); assert.equal(view.host.known.channel_resources, 0); assert.equal(view.host.known.channel_cards, 0); assert.equal(view.host.used_bytes, 600 * GiB);
+  // Sealed Feishu attachments under channel-resources/ and card specs under channel-cards/ are accounted in host.known and overview.amounts.other.
   const sampleResourceDir = join(store.channelResourcesDir, 'ab');
   mkdirSync(sampleResourceDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(sampleResourceDir, 'ab'.repeat(24) + '.enc'), randomBytes(8192));
+  const sampleCardDir = join(store.channelCardsDir, 'cd');
+  mkdirSync(sampleCardDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(sampleCardDir, 'cd'.repeat(24) + '.enc'), randomBytes(4096));
   report.directories.at = 0;
   await report.refresh();
   const afterResources = report.view(admin);
   assert.ok(afterResources.host.known.channel_resources >= 8192, 'channel-resources directory bytes are measured');
-  assert.ok(afterResources.overview.amounts.other >= afterResources.host.known.channel_resources, 'overview.other includes channel-resources');
+  assert.ok(afterResources.host.known.channel_cards >= 4096, 'channel-cards directory bytes are measured');
+  assert.ok(afterResources.overview.amounts.other >= afterResources.host.known.channel_resources + afterResources.host.known.channel_cards, 'overview.other includes channel-resources and channel-cards');
   assert.equal(view.host.other_bytes, null); assert.equal(view.overview.machine, null); assert.deepEqual(view.host.unmeasured, []);
   const reclaim = Object.fromEntries(view.reclaimable.map(item => [item.key, item]));
   assert.equal(reclaim.manager_free_pages.bytes, 8 * GiB); assert.deepEqual([reclaim.expiring_workspaces.bytes, reclaim.expiring_workspaces.count], [40 * GiB, 1]);
