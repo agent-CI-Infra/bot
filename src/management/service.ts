@@ -1,12 +1,12 @@
 import { configuredRedactor } from '../core/redaction.js';
-import type { Manager } from '../projects/service.js';
+import { authorizeComputerSpec, type Manager } from '../projects/service.js';
+import { superAdmin, type Actor } from '../app/auth.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
-import type { Actor } from '../app/auth.js';
 import { projectLabels, rulesUpdateRemoved, type RuleService } from '../rules/service.js';
 import { managerPrompt } from '../dispatch/settings.js';
 import { applyManagerChange, managerView } from '../dispatch/api.js';
@@ -35,6 +35,9 @@ export interface ManagementExtension {
 const normalized = (v:any):any => v===undefined?null:Array.isArray(v)?v.map(normalized):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,normalized(v[k])])):v;
 const canonical = (v:any):string => JSON.stringify(normalized(v));
 export const parameterHash = (v: unknown): string => digest(canonical(v));
+const platformComputerOperations = new Set(['computer.update_defaults', 'computer.cancel_build']);
+const environmentOperations = new Set(['environment.configure', 'environment.cancel_build', 'environment.lifecycle']);
+const asyncComputerOperations = new Set([...platformComputerOperations, ...environmentOperations]);
 const now=()=>new Date().toISOString();
 export class ManagementService {
   readonly extensions = new Map<string,ManagementExtension>();
@@ -120,12 +123,19 @@ export class ManagementService {
     if(!row)return fail(404,'repository_not_found');return row;
   }
   revision(target:ManagementCommand['target']): string {
+    if(target.project_id==='platform'){
+      const audit=this.store.get("SELECT max(id) AS id FROM audit WHERE action='settings.updated' AND resource_id LIKE 'computer.defaults%'");
+      const cmd=this.store.get("SELECT max(created_at) AS t,count(*) AS n FROM management_commands WHERE project_id='platform' AND state='succeeded'");
+      return parameterHash({scope:'platform',audit,cmd});
+    }
     if(target.task_id!){
       const t=this.store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',target.task_id!,target.project_id);
       if(!t)fail(404,'task_not_found');
       return parameterHash({task:t,record:this.store.get('SELECT * FROM task_records WHERE task_id=?',target.task_id!),instructions:this.store.get("SELECT max(id) AS id FROM task_history WHERE task_id=? AND type='supplemental_instruction'",target.task_id!)});
     }
     return parameterHash({policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',target.project_id),
+      environment:this.store.hasTable('project_environments')?this.store.get('SELECT generation,state,desired,revision FROM project_environments WHERE repository_id=?',target.project_id):null,
+      console_spec:this.store.hasTable('computer_console_specs')?this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',target.project_id):null,
       schedules:this.store.all('SELECT id,revision FROM schedules WHERE project_id=? ORDER BY id',target.project_id),
       subscriptions:this.store.all('SELECT id,revision FROM notification_subscriptions WHERE project_id=? ORDER BY id',target.project_id),
       manager:managerPrompt(this.store,target.project_id).revision,labels:projectLabels(this.store,target.project_id),
@@ -139,6 +149,7 @@ export class ManagementService {
     return this.store.get('SELECT * FROM management_policies WHERE tenant_id=?',tenant??actor.tenant_id);
   }
   private fence(actor:ActorContext,project:string):string{
+    if(project==='platform')return parameterHash({scope:'platform',principal:actor.principal_id,auth:actor.authorization_revision});
     const p=this.store.get('SELECT account_id,owner_id FROM repositories WHERE id=?',project)!;
     return parameterHash({project:p,account:this.store.get('SELECT type,app_id,credentials FROM accounts WHERE id=?',p.account_id),
       installations:this.store.all('SELECT g.ref,g.revision,g.status,g.scope_pending,r.present FROM github_installations g JOIN installation_repositories r ON r.installation_ref=g.ref WHERE g.account_id=? AND r.repository_id=? ORDER BY g.ref',p.account_id,project),policy:this.policy(actor,project)});
@@ -146,11 +157,23 @@ export class ManagementService {
   check(actor:ActorContext,command:Pick<ManagementCommand,'operation'|'target'|'arguments'>): void {
     const {operation,target}=command,capability=commands[operation]?.capability??(operation==='configuration.pr'?'config.write':undefined);
     if(!capability)fail(400,'invalid_management_arguments');
+    if(platformComputerOperations.has(operation)){
+      if(target.project_id!=='platform'||target.task_id)fail(400,'invalid_management_target');
+      if(actor.project_id||confinedTenant(actor))fail(403,'forbidden');
+      superAdmin(this.user(actor));
+      if(!this.computer)fail(503,'manager_not_configured');
+      return;
+    }
     const project=this.scope(actor,target.project_id,capability);
     if(target.task_id&&!this.store.get('SELECT 1 FROM tasks WHERE id=? AND repository_id=?',target.task_id!,target.project_id))fail(404,'task_not_found');
     if(operation.startsWith('task.')&&operation!=='task.create'&&!target.task_id!)fail(400,'task_target_required');
     if(!operation.startsWith('task.')&&target.task_id)fail(400,'invalid_management_target');
     if(operation==='task.create'&&target.task_id!)fail(400,'invalid_management_target');
+    if(environmentOperations.has(operation)){
+      if(!this.computer)fail(503,'manager_not_configured');
+      if(operation==='environment.configure')authorizeComputerSpec(this.user(actor),command.arguments);
+      return;
+    }
     // Stop/cancel remains available while disabled. Project defaults only persist configuration;
     // their switches take effect after an explicit enable. Execution commands still require an active project.
     if(!['task.pause','task.cancel','schedule.pause','schedule.delete','subscription.pause','subscription.delete'].includes(operation)){
@@ -238,6 +261,26 @@ export class ManagementService {
       const rows=this.store.all(`SELECT repository_id,currency,count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,sum(cost) cost,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE repository_id IN (${marks}) GROUP BY repository_id,currency ORDER BY repository_id,currency LIMIT ? OFFSET ?`,...ids,limit+1,offset),more=rows.length>limit;rows.splice(limit);
       return {usage:rows,next_offset:more?offset+limit:null};
     }
+    if(operation==='get_computer_defaults'){
+      if(!this.computer)fail(503,'manager_not_configured');
+      const view=await this.computer!.call('GET','/v1/defaults');
+      const isSuper=this.user(actor).role==='super_admin'&&!actor.project_id&&!confinedTenant(actor);
+      if(isSuper)return traceClean({...view,revision:this.revision({project_id:'platform'})});
+      return traceClean({defaults:view?.defaults??null,environment:view?.environment??null,toolchain:view?.toolchain??null,global_image:view?.global_image??null,
+        build:view?.build?{state:view.build.state,tag:view.build.tag??null,finished_at:view.build.finished_at??null}:null,read_only:true});
+    }
+    if(operation==='get_environment'){
+      if(!target.project_id)fail(400,'project_target_required');
+      if(!this.computer)fail(503,'manager_not_configured');
+      const live=await this.computer!.call('GET','/v1/projects/'+target.project_id).catch(()=>null);
+      return traceClean({project_id:target.project_id,revision:this.revision({project_id:target.project_id}),environment:live,url:'#/projects/'+target.project_id+'/machine'});
+    }
+    if(operation==='list_precompiled_images'){
+      if(actor.project_id||confinedTenant(actor))fail(403,'forbidden');
+      superAdmin(this.user(actor));
+      if(!this.computer)fail(503,'manager_not_configured');
+      return traceClean(await this.computer!.call('GET','/v1/precompiled-images'));
+    }
     if(operation==='list_audit'){
       const rows=this.store.all(`SELECT * FROM management_commands WHERE project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,...ids,limit+1,offset),more=rows.length>limit;rows.splice(limit);
       return {audit:rows.map(r=>this.receipt(r)),next_offset:more?offset+limit:null};
@@ -250,7 +293,7 @@ export class ManagementService {
   }
   read(actor:ActorContext,id:string):Json {
     const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id);if(!row)fail(404,'management_command_not_found');
-    this.scope(actor,row!.project_id);return this.receipt(row!);
+    if(row!.project_id==='platform'){superAdmin(this.user(actor));}else this.scope(actor,row!.project_id);return this.receipt(row!);
   }
   async submit(actor:ActorContext,input:Json):Promise<Json>{
     // The rule files' console layer is gone (#935): an old client learns what replaces it instead of a schema error.
@@ -259,7 +302,7 @@ export class ManagementService {
     if(input?.operation==='configuration.pr')throw Object.assign(new HttpError(410,'configuration_pr_removed'),{detail:configurationPrRemoved});
     validate(commandSchema,input);const submitted=input as unknown as ManagementCommand,entry=commands[submitted.operation]!;
     validate(entry.arguments,submitted.arguments);
-    this.scope(actor,submitted.target.project_id,entry.capability);
+    if(!platformComputerOperations.has(submitted.operation))this.scope(actor,submitted.target.project_id,entry.capability);
     const hash=parameterHash(submitted);
     const command={...submitted, arguments:configuredRedactor(this.store).clean(submitted.arguments)};
     const previous=this.store.get('SELECT * FROM management_commands WHERE principal_id=? AND idempotency_key=?',actor.principal_id,command.idempotency_key);
@@ -269,8 +312,9 @@ export class ManagementService {
       if(current!==command.expected_revision)fail(409,'management_revision_conflict');
       // Authorized commands execute directly: what an actor may do is configured in the console, with no approval step.
       const id=randomId(),time=now();
+      const tenantId=command.target.project_id==='platform'?'':this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id;
       this.store.run(`INSERT INTO management_commands(id,principal_id,tenant_id,project_id,channel,operation,target,arguments,expected_revision,idempotency_key,parameter_hash,authorization_revision,execution_fence,source_conversation,source_message,state,before_revision,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(command.arguments),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,'pending',current,time,time);
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,tenantId,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(command.arguments),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,'pending',current,time,time);
       return this.store.get('SELECT * FROM management_commands WHERE id=?',id)!;
     });
     return this.execute(actor,row.id,command);
@@ -302,6 +346,11 @@ export class ManagementService {
           this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
           const result=await extension.execute(actor,command,id);this.sourceGuard?.(row);this.check(actor,command);this.finish(id,'succeeded',result);
         }
+      }else if(asyncComputerOperations.has(command.operation)){
+        if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
+        this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
+        const result=await this.executeComputerCommand(actor,command);
+        this.finish(id,'succeeded',result);
       }else this.store.transaction(()=>{
         this.check(actor,command);
         if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
@@ -340,6 +389,44 @@ export class ManagementService {
       this.finish(id,row?.state==='executing'?'unknown':'failed',{error:error instanceof HttpError||error instanceof TaskError?error.code:'management_tool_failed',http_status:error instanceof HttpError?error.status:503,...(error instanceof HttpError&&error.field?{field:error.field}:{}),...(error instanceof HttpError&&error.detail?{detail:error.detail}:{}),...(row?.state==='executing'?{reconcile_required:true}:{})});
     }
     return this.receipt(this.store.get('SELECT * FROM management_commands WHERE id=?',id)!);
+  }
+  private async executeComputerCommand(actor:ActorContext,command:ManagementCommand):Promise<Json>{
+    const user=this.user(actor),{operation,target,arguments:args}=command,manager=this.computer!;
+    if(operation==='computer.update_defaults'){
+      const updated=await manager.call('PUT','/v1/defaults',args);
+      this.store.audit(user.id,'settings.updated','computer.defaults');
+      this.reconcileProjects?.();
+      return {computer_defaults:updated,configuration_url:'#/settings/work-computers'};
+    }
+    if(operation==='computer.cancel_build'){
+      const cancelled=await manager.call('POST','/v1/defaults/build/cancel',{});
+      this.store.audit(user.id,'settings.updated','computer.defaults.build_cancel');
+      return {...cancelled,configuration_url:'#/settings/work-computers'};
+    }
+    const repoId=target.project_id;
+    if(operation==='environment.cancel_build'){
+      const cancelled=await manager.call('POST',`/v1/projects/${repoId}/build/cancel`,{});
+      this.store.audit(user.id,'environment.build_cancelled',repoId,repoId);
+      return {...cancelled,configuration_url:`#/projects/${repoId}/machine`};
+    }
+    const live=await manager.call('GET','/v1/projects/'+repoId) ?? await manager.call('PUT','/v1/projects/'+repoId);
+    const opId=randomId();
+    if(operation==='environment.configure'){
+      const result=await manager.call('POST',`/v1/projects/${repoId}/configure`,{operation_id:opId,generation:live.generation,request:args});
+      this.store.audit(user.id,'environment.configure',opId,repoId);
+      return {environment:result,configuration_url:`#/projects/${repoId}/machine`};
+    }
+    if(operation==='environment.lifecycle'){
+      const action=String(args.action);
+      const result=await manager.call('POST',`/v1/projects/${repoId}/${action}`,{operation_id:opId,generation:live.generation},action==='stop'?90000:35*60000);
+      this.store.transaction(()=>{
+        this.store.audit(user.id,'environment.'+action,opId,repoId);
+        if(action==='start'||action==='reset')this.store.run('UPDATE policies SET enabled=1 WHERE repository_id=?',repoId);
+        else if(action==='stop')this.store.run('UPDATE policies SET enabled=0 WHERE repository_id=?',repoId);
+      });
+      return {environment:result,configuration_url:`#/projects/${repoId}/machine`};
+    }
+    return fail(409,operation.replaceAll('.','_')+'_not_registered');
   }
   private finish(id:string,state:string,result:Json):void{
     const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id)!;

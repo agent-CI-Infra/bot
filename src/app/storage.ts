@@ -155,6 +155,21 @@ export class StorageReport {
   }
 
   async api(user: Actor, method: string, path: string, input: Json = {}): Promise<Json | undefined> {
+    if (path === '/api/storage/precompiled-images') {
+      superAdmin(user);
+      if (method !== 'GET') return fail(405, 'method_not_allowed');
+      if (!this.manager) return { images: [], queue_length: 0, active_build: null };
+      return this.manager.call('GET', '/v1/precompiled-images');
+    }
+    if (path === '/api/storage/precompiled-images/prune') {
+      superAdmin(user);
+      if (method !== 'POST') return fail(405, 'method_not_allowed');
+      if (!this.manager) fail(503, 'manager_not_configured');
+      const result = await this.manager!.call('POST', '/v1/precompiled-images/prune', {});
+      this.store.audit(user.id, 'storage.precompiled_images_pruned', 'precompiled_images');
+      const list = await this.manager!.call('GET', '/v1/precompiled-images').catch(() => null);
+      return { ...result, ...(list ?? {}) };
+    }
     if (path === '/api/storage/reclaim') {
       superAdmin(user);
       if (method === 'POST') return this.reclaim.start(user.id);
@@ -229,7 +244,7 @@ export class StorageReport {
       .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes, stale: where === 'manager' && managerError !== null }));
     return { refreshed_at: snapshot?.refreshed_at ?? null, manager_read_at: managerReadAt, manager_error: managerError, projects: list, alerts, overview: storageOverview(list.filter(p => registered.has(p.repository_id)) as {repository_id: string | null; name: string}[], this.footprint, manager?.footprint, manager?.workspace_projects, this.machine && Date.now() - Date.parse(this.machine.measured_at) <= 15 * 60_000 ? this.machine : null), ...summary(list, control, manager, snapshot?.cleanup ?? {}),
       totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null, docker: manager.docker ?? null,
-        compaction: manager.compaction ?? null, vacuum: manager.vacuum ?? null } : null } };
+        compaction: manager.compaction ?? null, vacuum: manager.vacuum ?? null, precompiled_images: manager.precompiled_images ?? null } : null } };
   }
 }
 

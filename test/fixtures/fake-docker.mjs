@@ -4,8 +4,8 @@ import { ManagerError } from '../../manager/docker.mjs';
 // as "METHOD path", so a test can tell which resources were removed.
 export class FakeDocker {
   containers = new Map(); volumes = new Map(); networks = new Map(); starts = 0; failNetwork = false;
-  images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; runs = [];
-  calls = [];
+  images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; buildCalls = []; runs = [];
+  calls = []; onBuild = null;
   // The raw GET /system/df payload (#671): the same answer the manager parses in readDockerUsage(), not a shape of its own.
   // A request carrying `type` gets only the lists it asked for, as Docker answers it (#680); one without gets all of them.
   df = { LayersSize: 0, Images: [], Containers: [], Volumes: [], BuildCache: [] };
@@ -31,7 +31,11 @@ export class FakeDocker {
         Images: types.includes('image') ? df.Images ?? [] : [], Containers: types.includes('container') ? df.Containers ?? [] : [],
         BuildCache: types.includes('build-cache') ? df.BuildCache ?? [] : [], Volumes: types.includes('volume') ? df.Volumes ?? [] : [] };
     }
-    if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
+    if (path.startsWith('/images/')) {
+      const target = decodeURIComponent(path.split('/')[2].split('?')[0]);
+      if (method === 'DELETE') { this.images.delete(target); return {}; }
+      return this.images.get(target) || null;
+    }
     const [kind, named] = path.slice(1).split('?')[0].split('/'), name = named ? decodeURIComponent(named.split('?')[0]) : undefined;
     if (kind === 'volumes' && !named) {
       // Docker's volume listing with label filters, as the manager reads it to find notes volumes.
@@ -71,7 +75,17 @@ export class FakeDocker {
     }
     throw new Error('Unexpected fake Docker call');
   }
-  async build(tag, dockerfile) { this.builds.push(dockerfile); if (dockerfile.includes('broken-package')) throw Object.assign(new ManagerError('image_build_failed'), { output: 'E: Unable to locate package' });
-    this.images.set(tag, { Id: 'sha256:' + tag.split(':')[1] }); return 'built'; }
+  async build(tag, dockerfile, labels, options) {
+    this.builds.push(dockerfile);
+    this.buildCalls.push({ tag, dockerfile, labels, options });
+    if (options?.signal?.aborted) throw Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true, output: '' });
+    if (this.onBuild) return await this.onBuild({ tag, dockerfile, labels, options, docker: this });
+    if (dockerfile.includes('broken-package') || String(options?.files?.['setup.sh'] || '').includes('broken-setup')) {
+      throw Object.assign(new ManagerError('image_build_failed', 409), { output: 'E: Unable to locate package' });
+    }
+    options?.onOutput?.('Step 1/2 : building\n', 'Step 1/2 : building\n');
+    this.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 1024 * 1024 });
+    return 'built';
+  }
   async runner(container, input, wait) { this.runs.push({ ...input, wait }); return { ok: true, result: { ready: true, exit_code: 0, output: 'setup output' } }; }
 }

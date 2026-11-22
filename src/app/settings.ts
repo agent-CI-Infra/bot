@@ -28,9 +28,16 @@ export function runningVersion(imageTag: string | undefined): Json {
 // assistant_computers (#457): the manager keeps the container settings, the control plane the HOME settings; null when the
 // deployment has no assistant computers.
 export async function settingsApi(store: Store, user: Actor, method: string, path: string, input: Json, imageTag?: string, manager?: Manager, assistants?: AssistantComputerService): Promise<Json | undefined> {
-  if (path !== '/api/settings' && path !== '/api/version') return undefined;
+  if (path !== '/api/settings' && path !== '/api/version' && path !== '/api/settings/computer-defaults/build/cancel') return undefined;
   superAdmin(user);
   if (path === '/api/version') return method === 'GET' ? runningVersion(imageTag) : undefined;
+  if (path === '/api/settings/computer-defaults/build/cancel') {
+    if (method !== 'POST') return fail(405, 'method_not_allowed');
+    if (!manager) fail(503, 'manager_not_configured');
+    const result = await manager!.call('POST', '/v1/defaults/build/cancel', {});
+    store.audit(user.id, 'settings.updated', 'computer.defaults.build_cancel');
+    return { ...result, computer_defaults: await manager!.call('GET', '/v1/defaults').catch(() => null) };
+  }
   const view = async (computer?: Json) => ({ settings: { task_concurrency: defaultConcurrency(store), task_concurrency_bounds: [...concurrencyBounds],
     computer_defaults: computer ?? await manager?.call('GET', '/v1/defaults').catch(() => null) ?? null,
     assistant_computers: await assistants?.settingsView().catch(() => null) ?? null }, version: runningVersion(imageTag) });

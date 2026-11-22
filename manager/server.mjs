@@ -47,6 +47,10 @@ export function createManagerServer({ projects, token, assistants = null }) {
       // The window of the manager's copies of runner-call bodies, set from the control plane's storage settings (#671).
       else if (req.method === 'PUT' && path === '/v1/storage/retention') result = projects.setRetention(await json(req));
       else if (req.method === 'PUT' && path === '/v1/defaults') result = await projects.setDefaults(await json(req));
+      else if (req.method === 'POST' && path === '/v1/defaults/build/cancel') result = projects.cancelGlobalBuild();
+      else if (req.method === 'GET' && path === '/v1/precompiled-images') result = await projects.listPrecompiledImages(assistants?.activeImages());
+      else if (req.method === 'POST' && path === '/v1/precompiled-images/prune') result = await projects.prunePrecompiledImages(assistants?.activeImages(), { force: true });
+      else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/build\/cancel$/.test(path)) result = projects.cancelBuild(path.split('/')[3]);
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
       else if (/^\/v1\/projects\/[1-9]\d{0,19}\/file-tree(?:\/[^/]+)?(?:\/(?:versions|restore|move))?$/.test(path)) {
         const parts=path.split('/');let id;

@@ -10,6 +10,14 @@ import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { rememberConsoleComputer } from '../rules/service.js';
 
+// Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
+export const superAdminComputerFields = new Set(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress']);
+export const projectAdminComputerFields = new Set(['packages', 'setup_script', 'env', 'rebuild', 'rerun_setup']);
+
+export function authorizeComputerSpec(user: Actor, spec: Json): void {
+  const keys = Object.keys(spec);
+  if (keys.some(key => superAdminComputerFields.has(key) || !projectAdminComputerFields.has(key))) superAdmin(user);
+}
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
 export class ManagerClient implements Manager {
@@ -245,11 +253,15 @@ export class ProjectService {
       this.store.transaction(() => {
         this.save(result); this.store.run("UPDATE environment_operations SET state='completed',result=? WHERE id=?", JSON.stringify(result), op.id);
         if(op.action==='configure'){
-          const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
-          const{rerun_setup:_rerun,...values}=JSON.parse(op.input).request;
-          // A null resource follows the default again, so it leaves the console layer.
-          const spec={...base,...values};for(const key of Object.keys(spec))if(spec[key]===null)delete spec[key];
-          this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec',op.repository_id,JSON.stringify(spec));
+          const buildState = String((result as any)?.computer?.build?.state || '');
+          // Only commit the console spec layer when the change applied synchronously; async builds commit once ready.
+          if (!['queued', 'building', 'cancelling'].includes(buildState)) {
+            const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
+            const{rerun_setup:_rerun,rebuild:_rebuild,...values}=JSON.parse(op.input).request;
+            // A null resource follows the default again, so it leaves the console layer.
+            const spec={...base,...values};for(const key of Object.keys(spec))if(spec[key]===null)delete spec[key];
+            this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec',op.repository_id,JSON.stringify(spec));
+          }
         }
       }); return result;
     } catch (error) {
@@ -315,6 +327,16 @@ export class ProjectService {
         FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id
         WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args).map(row => ({ ...row, running_tasks: JSON.parse(row.running_tasks) })) };
     }
+    const cancelBuild = /^\/api\/environments\/([^/]+)\/build\/cancel$/.exec(url.pathname);
+    if (cancelBuild) {
+      if (method !== 'POST') return fail(405, 'method_not_allowed');
+      const id = cancelBuild[1]!; repository(this.store, user, id);
+      if (this.removing.has(id)) fail(409, 'repository_deleting');
+      const result = await this.manager.call('POST', `/v1/projects/${id}/build/cancel`, {});
+      if (result?.environment) this.save(result.environment);
+      this.store.audit(user.id, 'environment.build_cancelled', id, id);
+      return result;
+    }
     const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete|configure|stats))?$/.exec(url.pathname);
     if (!match) return fail(404, 'not_found');
     const id = match[1]!; repository(this.store, user, id);
@@ -325,9 +347,11 @@ export class ProjectService {
     fields(input, ['operation_id','generation','confirm','spec']);
     if (!/^[a-f0-9]{48}$/.test(String(input.operation_id || '')) || !Number.isSafeInteger(input.generation)) fail(400, 'invalid_operation');
     if (match[2] === 'delete') { superAdmin(user); if (input.confirm !== true) fail(400, 'confirmation_required'); }
-    // The computer spec (CPU, memory, processes, /tmp, internet) is a deployment resource: super administrators only.
-    // The manager enforces the bounds; the control plane only forwards the requested values.
-    if (match[2] === 'configure') { superAdmin(user); if (!input.spec || typeof input.spec !== 'object' || Array.isArray(input.spec)) fail(400, 'invalid_spec'); }
+    // Resource limits and network egress remain super-admin-only; project admins may configure software overlays.
+    if (match[2] === 'configure') {
+      if (!input.spec || typeof input.spec !== 'object' || Array.isArray(input.spec)) fail(400, 'invalid_spec');
+      authorizeComputerSpec(user, input.spec as Json);
+    }
     else if (input.spec !== undefined) fail(400, 'invalid_operation');
     const previous = this.store.get('SELECT * FROM environment_operations WHERE id=?', String(input.operation_id));
     const payload = JSON.stringify({ operation_id: input.operation_id, generation: input.generation, ...(match[2] === 'configure' ? { request: input.spec } : {}) });

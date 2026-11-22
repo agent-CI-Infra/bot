@@ -6,8 +6,9 @@ import { CommandOutput, maskedStream, outputLimit, backgroundOutputNotice } from
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
 import { watchVolume } from './disk.mjs';
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
-// persistent HOME of an assistant computer.
+// persistent HOME of an assistant computer. Precompiled tools installed at build time live under /opt/preinstalled.
 const userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
+const preinstalledBins = ['/opt/preinstalled/bin', '/opt/preinstalled/home/.local/bin', '/opt/preinstalled/npm-global/bin', '/opt/preinstalled/python/bin', '/opt/preinstalled/cargo/bin', '/opt/preinstalled/go/bin'].join(':');
 // Repository variables configured by an administrator; the manager lists their names in BOT_PROJECT_ENV_KEYS.
 const projectEnvironment = Object.fromEntries(String(process.env.BOT_PROJECT_ENV_KEYS || '').split(',').filter(Boolean)
   .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
@@ -16,7 +17,7 @@ const caches = assistant ? { XDG_CACHE_HOME:'/tmp/.cache', PIP_CACHE_DIR:'/tmp/.
 export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, ...caches,
   ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
   ...(/^[a-f0-9]{48}$/.test(process.env.BOT_OPERATION_ID || '') ? { BOT_OPERATION_ID: process.env.BOT_OPERATION_ID } : {}),
-  PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
+  PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:${preinstalledBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 // timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.

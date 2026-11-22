@@ -16,6 +16,7 @@ import { DiskGuard } from './disk.mjs';
 import { IncrementalVacuum } from './compaction.mjs';
 import { isCleanupCall, validateCall } from './project-runner-calls.mjs';
 import { sanitizeAgentPollTrajectory } from '../runner/image-budget.mjs';
+import { PrecompiledImageBuilder, reservedEnv, normalizePackages, normalizeScript } from './precompiled-images.mjs';
 
 export { validateCall };
 
@@ -39,21 +40,26 @@ export function validResource(key, value, limits = bounds) {
   const [min, max] = limits[key];
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (key === 'cpus' ? Math.round(value * 100) === value * 100 : Number.isInteger(value));
 }
-// Debian package names only (no options, files or URLs); environment names that the computer or runner own are refused.
+// Debian package names only (no options, files or URLs); environment names that the computer or runner own (or that can
+// dynamically inject code into the runner) are refused.
 export const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]{1,99}(?::[a-z0-9-]{1,20})?$/;
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/, reservedEnv = new Set(['PATH', 'HOME', 'TMPDIR', 'USER', 'SHELL', 'PWD', 'HOSTNAME', 'NPM_CONFIG_PREFIX']);
-export function validateSpec(input) {
-  const keys = ['egress', 'packages', 'env', 'setup_script', 'rerun_setup', ...Object.keys(bounds)];
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !keys.includes(k))) throw new ManagerError('invalid_spec', 400);
-  // null clears the project's own value, so the resource follows the default again.
-  for (const key of resourceKeys) if (input[key] != null && !validResource(key, input[key])) throw new ManagerError('invalid_spec', 400);
-  for (const key of ['egress', 'rerun_setup']) if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new ManagerError('invalid_spec', 400);
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+export { reservedEnv };
+function validateSoftwareFields(input) {
   if (input.packages !== undefined && (!Array.isArray(input.packages) || input.packages.length > 100 || new Set(input.packages).size !== input.packages.length
     || input.packages.some(name => typeof name !== 'string' || !PACKAGE_NAME.test(name)))) throw new ManagerError('invalid_packages', 400);
   if (input.env !== undefined && (!input.env || typeof input.env !== 'object' || Array.isArray(input.env) || Object.keys(input.env).length > 64
     || Object.entries(input.env).some(([name, value]) => !ENV_NAME.test(name) || reservedEnv.has(name) || /^(BOT_|GIT_)/.test(name)
       || typeof value !== 'string' || value.length > 4096 || value.includes('\0')))) throw new ManagerError('invalid_env', 400);
   if (input.setup_script !== undefined && (typeof input.setup_script !== 'string' || input.setup_script.length > 16384 || input.setup_script.includes('\0'))) throw new ManagerError('invalid_setup_script', 400);
+}
+export function validateSpec(input) {
+  const keys = ['egress', 'packages', 'env', 'setup_script', 'rerun_setup', 'rebuild', ...Object.keys(bounds)];
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !keys.includes(k))) throw new ManagerError('invalid_spec', 400);
+  // null clears the project's own value, so the resource follows the default again.
+  for (const key of resourceKeys) if (input[key] != null && !validResource(key, input[key])) throw new ManagerError('invalid_spec', 400);
+  for (const key of ['egress', 'rerun_setup', 'rebuild']) if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new ManagerError('invalid_spec', 400);
+  validateSoftwareFields(input);
   return input;
 }
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -97,9 +103,11 @@ export class Projects {
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
-    this.scanning = null; this.dockerUsageAt = 0;
+    this.scanning = null; this.dockerUsageAt = 0; this.lastPruneAt = 0;
+    this.globalBuildJob = null; this.projectBuildJobs = new Map();
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
+    this.images = new PrecompiledImageBuilder({ docker, db: this.db, deployment, logFailure });
     this.databasePath = database;
     this.notesRoot = dirname(database) + '/project-notes';
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};
@@ -157,36 +165,205 @@ export class Projects {
   own(repo) { const saved = this.get(repo)?.spec, { max_command_minutes: _removed, ...spec } = saved ? JSON.parse(saved) : {}; return spec; }
   // The resource defaults now in force: the built-in values with the ones saved in the global settings.
   resourceDefaults() { const saved = this.db.prepare("SELECT value FROM settings WHERE key='resource_defaults'").get(); return { ...builtin, ...(saved ? JSON.parse(saved.value) : {}) }; }
-  spec(repo) { return { ...defaults, ...this.resourceDefaults(), egress: this.egress, ...this.own(repo) }; }
+  // The unified global environment defaults shared by project computers and assistant computers.
+  globalEnvironmentDefaults() {
+    const saved = this.db.prepare("SELECT value FROM settings WHERE key='computer_defaults_env'").get();
+    const parsed = saved ? JSON.parse(saved.value) : {};
+    return {
+      egress: typeof parsed.egress === 'boolean' ? parsed.egress : this.egress,
+      packages: normalizePackages(parsed.packages || []),
+      setup_script: typeof parsed.setup_script === 'string' ? parsed.setup_script : '',
+      env: parsed.env && typeof parsed.env === 'object' ? parsed.env : {},
+    };
+  }
+  globalDefaults() { return { ...this.resourceDefaults(), ...this.globalEnvironmentDefaults() }; }
+  currentGlobalImage() {
+    const saved = this.db.prepare("SELECT value FROM settings WHERE key='global_precompiled_image'").get();
+    return saved ? JSON.parse(saved.value) : null;
+  }
+  setCurrentGlobalImage(value) {
+    if (!value) this.db.prepare("DELETE FROM settings WHERE key='global_precompiled_image'").run();
+    else this.db.prepare("INSERT INTO settings VALUES('global_precompiled_image',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(value));
+  }
+  globalBuildView() {
+    if (this.globalBuildJob?.state) return { ...this.globalBuildJob.state };
+    const saved = this.db.prepare("SELECT value FROM settings WHERE key='global_build'").get();
+    return saved ? JSON.parse(saved.value) : null;
+  }
+  saveGlobalBuild(value) {
+    if (!value) this.db.prepare("DELETE FROM settings WHERE key='global_build'").run();
+    else this.db.prepare("INSERT INTO settings VALUES('global_build',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(value));
+  }
+  // Effective global environment for assistant computers: shares global defaults, precompiled image and env.
+  assistantGlobalEnvironment() {
+    const res = this.resourceDefaults(), envDefaults = this.globalEnvironmentDefaults(), globalImg = this.currentGlobalImage();
+    return {
+      image: globalImg?.id || this.image,
+      tag: globalImg?.tag || null,
+      env: envDefaults.env,
+      defaults: { ...res, egress: envDefaults.egress },
+    };
+  }
+  // Effective project computer spec: project overlay stacked on top of unified global defaults.
+  spec(repo) {
+    const res = this.resourceDefaults(), globalEnv = this.globalEnvironmentDefaults(), own = this.own(repo);
+    return {
+      ...defaults,
+      ...res,
+      egress: own.egress ?? globalEnv.egress,
+      ...own,
+      packages: normalizePackages([...globalEnv.packages, ...(own.packages || [])]),
+      env: { ...globalEnv.env, ...(own.env || {}) },
+      setup_script: own.setup_script || '',
+    };
+  }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
     const { spec: _saved, build, setup, applied, ...state } = project, spec = this.spec(repo), own = this.own(repo);
+    const liveBuild = this.projectBuildJobs.get(repo)?.state;
+    const buildInfo = liveBuild ? { ...liveBuild } : (build ? JSON.parse(build) : null);
+    const globalDefaults = this.globalDefaults();
     // inherited: the resources that follow the default; resources_pending: the container still has other resources.
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
-      ...spec, build: build ? JSON.parse(build) : null, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
-      defaults: this.resourceDefaults(), inherited: resourceKeys.filter(key => own[key] === undefined),
+      ...spec, build: buildInfo, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
+      defaults: this.resourceDefaults(), global_defaults: globalDefaults,
+      own: {
+        ...Object.fromEntries(resourceKeys.filter(k => own[k] !== undefined).map(k => [k, own[k]])),
+        ...(own.egress !== undefined ? { egress: own.egress } : {}),
+        packages: normalizePackages(own.packages || []),
+        setup_script: own.setup_script || '',
+        env: own.env || {},
+      },
+      inherited: resourceKeys.filter(key => own[key] === undefined),
       resources_pending: !!applied && applied !== JSON.stringify(resources(spec)) } };
   }
-  // The resource defaults with their bounds, and for reference the host's CPUs and memory and what the running computers
-  // are given (computers share the host, so their totals may exceed it).
+  // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
   async defaultsView() {
     const info = await this.docker.request('GET', '/info').catch(() => null);
+    const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`).catch(() => null);
     const running = this.list().filter(p => ['ready', 'busy'].includes(p.state)).map(p => this.spec(p.repository_id));
-    return { defaults: this.resourceDefaults(), builtin, bounds, host: info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null,
-      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + s.memory_mb, 0) } };
+    return {
+      defaults: this.resourceDefaults(),
+      builtin,
+      bounds,
+      host: info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null,
+      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + s.memory_mb, 0) },
+      environment: this.globalEnvironmentDefaults(),
+      environment_builtin: { egress: this.egress, packages: [], setup_script: '', env: {} },
+      build: this.globalBuildView(),
+      global_image: this.currentGlobalImage(),
+      toolchain: approved?.Config?.Labels?.['department.bot.toolchain'] || null,
+    };
   }
   // New computers use the new defaults at once; a running one that follows them shows resources_pending until the control
-  // plane sends refresh while no task uses it.
+  // plane sends refresh while no task uses it. Global packages/setup_script trigger an automatic precompiled image build.
   async setDefaults(input) {
-    if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.entries(input).some(([key, value]) => !resourceKeys.includes(key) || !validResource(key, value))) throw new ManagerError('invalid_defaults', 400);
+    const allowed = [...resourceKeys, 'egress', 'packages', 'setup_script', 'env', 'rebuild'];
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length
+      || Object.keys(input).some(key => !allowed.includes(key))) throw new ManagerError('invalid_defaults', 400);
+    for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key])) throw new ManagerError('invalid_defaults', 400);
+    for (const key of ['egress', 'rebuild']) if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new ManagerError('invalid_defaults', 400);
+    validateSoftwareFields(input);
     // Docker refuses to create a container that is given more CPUs than the host has.
     const info = await this.docker.request('GET', '/info').catch(() => null);
     if (info?.NCPU && input.cpus > info.NCPU) throw new ManagerError('cpus_exceed_host', 400);
-    this.db.prepare("INSERT INTO settings VALUES('resource_defaults',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ ...this.resourceDefaults(), ...input }));
+
+    const resUpdates = Object.fromEntries(resourceKeys.filter(k => input[k] !== undefined).map(k => [k, input[k]]));
+    if (Object.keys(resUpdates).length) {
+      this.db.prepare("INSERT INTO settings VALUES('resource_defaults',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(JSON.stringify({ ...this.resourceDefaults(), ...resUpdates }));
+    }
+    const envKeys = ['egress', 'packages', 'setup_script', 'env'];
+    const envUpdates = Object.fromEntries(envKeys.filter(k => input[k] !== undefined).map(k => [k, k === 'packages' ? normalizePackages(input[k]) : input[k]]));
+    if (Object.keys(envUpdates).length) {
+      this.db.prepare("INSERT INTO settings VALUES('computer_defaults_env',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(JSON.stringify({ ...this.globalEnvironmentDefaults(), ...envUpdates }));
+    }
+    const touchesBuild = input.packages !== undefined || input.setup_script !== undefined || input.env !== undefined || input.rebuild === true
+      || (input.egress !== undefined && (this.globalEnvironmentDefaults().packages.length > 0 || !!normalizeScript(this.globalEnvironmentDefaults().setup_script)));
+    if (touchesBuild) {
+      await this.triggerGlobalBuild({ forceRebuild: input.rebuild === true });
+    }
     return this.defaultsView();
+  }
+  async triggerGlobalBuild({ forceRebuild = false } = {}) {
+    const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`).catch(() => null);
+    if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
+    const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
+    const envDefaults = this.globalEnvironmentDefaults();
+    if (this.globalBuildJob) {
+      this.globalBuildJob.superseded = true;
+      this.globalBuildJob.handle.cancel();
+      this.globalBuildJob = null;
+    }
+    if (!envDefaults.packages.length && !normalizeScript(envDefaults.setup_script)) {
+      this.setCurrentGlobalImage(null);
+      this.saveGlobalBuild({ state: 'none', toolchain, packages: [], can_cancel: false, finished_at: new Date().toISOString() });
+      return;
+    }
+    if (!forceRebuild) {
+      const cached = await this.images.checkLayeredCache({ approvedImage: approved, globalSpec: envDefaults });
+      if (cached.cached && cached.image) {
+        const finished_at = new Date().toISOString();
+        this.setCurrentGlobalImage({ id: cached.image.Id, tag: cached.tag, image_key: cached.image_key, finished_at });
+        this.saveGlobalBuild({ state: 'ready', tag: cached.tag, image_key: cached.image_key, phase: 'global', toolchain, packages: envDefaults.packages, can_cancel: false, finished_at });
+        return;
+      }
+    }
+    const job = { handle: null, state: null, superseded: false, promise: null };
+    const handle = this.images.startLayered({
+      approvedImage: approved,
+      globalSpec: envDefaults,
+      projectSpec: null,
+      resources: this.resourceDefaults(),
+      egress: envDefaults.egress,
+      forceRebuildGlobal: forceRebuild,
+      onProgress: snapshot => {
+        if (job.superseded) return;
+        job.state = { ...snapshot, toolchain, packages: envDefaults.packages };
+        this.saveGlobalBuild(job.state);
+      },
+    });
+    job.handle = handle;
+    this.globalBuildJob = job;
+    job.promise = handle.promise.then(result => {
+      if (job.superseded) return result;
+      const finished_at = new Date().toISOString();
+      this.setCurrentGlobalImage({ id: result.image.Id, tag: result.tag, image_key: result.image_key, finished_at });
+      const finalState = {
+        build_id: handle.build_id, image_key: result.image_key, tag: result.tag, phase: 'global',
+        state: 'ready', queue_position: null, toolchain, packages: envDefaults.packages,
+        output: result.output ? result.output.slice(-16000) : null, can_cancel: false, finished_at,
+      };
+      this.saveGlobalBuild(finalState);
+      if (this.globalBuildJob === job) this.globalBuildJob = null;
+      return result;
+    }, error => {
+      if (job.superseded) return null;
+      const finished_at = new Date().toISOString();
+      const cancelled = !!error?.cancelled;
+      const finalState = {
+        build_id: handle.build_id, image_key: job.state?.image_key ?? null, tag: job.state?.tag ?? null, phase: 'global',
+        state: cancelled ? 'cancelled' : 'failed', queue_position: null, toolchain, packages: envDefaults.packages,
+        output: (error?.output || job.state?.output || null)?.slice(-16000) ?? null, can_cancel: false, finished_at,
+      };
+      this.saveGlobalBuild(finalState);
+      if (this.globalBuildJob === job) this.globalBuildJob = null;
+      return null;
+    });
+  }
+  cancelGlobalBuild() {
+    const job = this.globalBuildJob;
+    if (!job) return { cancelled: false, build: this.globalBuildView() };
+    const cancelled = job.handle.cancel();
+    return { cancelled, build: this.globalBuildView() };
+  }
+  async waitForGlobalBuild() {
+    if (this.globalBuildJob?.promise) await this.globalBuildJob.promise;
+    return this.globalBuildView();
   }
   // Up to `parallel` runner calls (shared) use a computer at once; lifecycle actions (exclusive) run alone. Waiters are
   // admitted in arrival order, so a stop, reset or configure is not starved by a stream of runner calls.
@@ -463,7 +640,6 @@ export class Projects {
     // Readiness is a protocol and journal check, not a Docker running flag.
     const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
     if (!health.ok || !health.result.ready) throw new ManagerError('runner_not_ready');
-    await this.setup(repo, generation, spec, forceSetup);
     container = await this.inspect(repo, generation, 'container');
     this.update(repo, 'ready', 'ready', null, container.State.StartedAt);
     this.prune(repo, true);
@@ -536,41 +712,169 @@ export class Projects {
   }
   async readContainers() { return readDockerContainers(this.docker); }
   async readVolumes() { return readDockerVolumes(this.docker); }
-  // The approved image, or one derived from it with the project's system packages. Built once per package set and base image,
-  // and only by the manager: apt runs as root at build time, nothing inside the computer needs root.
-  async resolveImage(repo, spec) {
+  // The approved image, or a two-level precompiled image (global defaults + project overlay). Built via the serial
+  // PrecompiledImageBuilder: apt runs via validated package names only, and setup_script ALWAYS runs as UID 10001.
+  async resolveImage(repo, spec, { forceRebuild = false } = {}) {
     const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
     if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
-    const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null, packages = [...spec.packages].sort();
-    if (!packages.length) { this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({ state: 'none', toolchain }), repo); return approved; }
-    const tag = `department-bot-project-custom:${digest(approved.Id + '\n' + packages.join(' ')).slice(0, 16)}`;
-    let image = await this.docker.request('GET', `/images/${encodeURIComponent(tag)}/json`), output = null;
-    const record = value => this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({ tag, packages, toolchain, ...value }), repo);
-    if (!image) {
-      record({ state: 'building', started_at: new Date().toISOString() });
-      const dockerfile = `FROM ${approved.Id}\nUSER 0\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- ${packages.join(' ')} \\\n && rm -rf /var/lib/apt/lists/*\nUSER 10001:10001\n`;
-      try { output = await this.docker.build(tag, dockerfile, { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'project-image' }); }
-      catch (error) { record({ state: 'failed', output: error.output || null, finished_at: new Date().toISOString() }); throw error; }
-      image = await this.docker.request('GET', `/images/${encodeURIComponent(tag)}/json`);
-      if (!image?.Id) throw new ManagerError('image_build_failed', 409);
+    const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
+    const globalEnv = this.globalEnvironmentDefaults(), own = this.own(repo);
+    const projectSpec = { packages: normalizePackages(own.packages || []), setup_script: own.setup_script || '', env: own.env || {} };
+    const effectivePackages = normalizePackages([...globalEnv.packages, ...projectSpec.packages]);
+    const hasSetup = !!(normalizeScript(globalEnv.setup_script) || normalizeScript(projectSpec.setup_script));
+    if (!effectivePackages.length && !hasSetup) {
+      this.db.prepare('UPDATE projects SET build=?, setup=NULL WHERE repository_id=?').run(JSON.stringify({ state: 'none', toolchain, packages: [], can_cancel: false }), repo);
+      return approved;
     }
-    record({ state: 'ready', output: output ? output.slice(-4000) : JSON.parse(this.get(repo).build || '{}').output || null, finished_at: new Date().toISOString() });
-    return image;
+    const record = value => this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({ toolchain, packages: effectivePackages, ...value }), repo);
+    const handle = this.images.startLayered({
+      approvedImage: approved,
+      globalSpec: globalEnv,
+      projectSpec,
+      resources: { cpus: spec.cpus, memory_mb: spec.memory_mb },
+      egress: spec.egress,
+      forceRebuild,
+      onProgress: snapshot => record(snapshot),
+    });
+    try {
+      const result = await handle.promise;
+      const finished_at = new Date().toISOString();
+      if (result.globalImage?.Id && result.globalImage.Id !== approved.Id && (globalEnv.packages.length || normalizeScript(globalEnv.setup_script))) {
+        const cachedGlobal = await this.images.findCachedLayer({ fromImageId: approved.Id, packages: globalEnv.packages, setupScript: globalEnv.setup_script, env: globalEnv.env });
+        if (cachedGlobal.tag) this.setCurrentGlobalImage({ id: result.globalImage.Id, tag: cachedGlobal.tag, image_key: cachedGlobal.imageKey, finished_at });
+      }
+      const existingOutput = JSON.parse(this.get(repo)?.build || '{}').output || null;
+      record({
+        build_id: handle.build_id, image_key: result.image_key, tag: result.tag, phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
+        state: 'ready', queue_position: null, output: result.output ? result.output.slice(-16000) : existingOutput, can_cancel: false, finished_at,
+      });
+      this.recordPrecompiledSetup(repo, this.get(repo)?.generation || 1, globalEnv.setup_script, projectSpec.setup_script, 'succeeded', finished_at, result.output);
+      return result.image;
+    } catch (error) {
+      const finished_at = new Date().toISOString();
+      const cancelled = !!error?.cancelled;
+      record({
+        build_id: handle.build_id, state: cancelled ? 'cancelled' : 'failed', queue_position: null,
+        output: (error?.output || null)?.slice(-16000) ?? null, can_cancel: false, finished_at,
+      });
+      if (hasSetup) this.recordPrecompiledSetup(repo, this.get(repo)?.generation || 1, globalEnv.setup_script, projectSpec.setup_script, cancelled ? 'cancelled' : 'failed', finished_at, error?.output || null);
+      throw error;
+    }
   }
-  // Runs the project's setup script as the project user when the script or the generation changed (or on request).
-  // Its results live in the work volume (HOME), so later containers of the same generation do not repeat it.
-  async setup(repo, generation, spec, force) {
-    const previous = JSON.parse(this.get(repo).setup || 'null'), hash = digest(spec.setup_script);
-    if (!spec.setup_script.trim()) { if (previous) this.db.prepare('UPDATE projects SET setup=NULL WHERE repository_id=?').run(repo); return; }
-    if (!force && previous?.generation === generation && previous.hash === hash) return;
-    const name = this.names(repo, generation).container, started = new Date().toISOString();
-    this.db.prepare('UPDATE projects SET setup=? WHERE repository_id=?').run(JSON.stringify({ generation, hash, state: 'running', started_at: started }), repo);
-    // The script runs until it ends; stop, reset or delete interrupts it.
-    const run = await this.docker.runner(name, { operation_id: randomId(), type: 'command', command: spec.setup_script, timeout_ms: null }, 0).catch(() => null);
-    const result = run?.ok ? run.result : { exit_code: null, output: '', error: run?.error || 'runner_failed' };
-    await this.docker.runner(name, { operation_id: randomId(), type: 'reap' }).catch(() => null);
-    this.db.prepare('UPDATE projects SET setup=? WHERE repository_id=?').run(JSON.stringify({ generation, hash, state: result.exit_code === 0 ? 'succeeded' : 'failed',
-      exit_code: result.exit_code, timed_out: !!result.timed_out, error: result.error || null, output: String(result.output || '').slice(-8000), started_at: started, finished_at: new Date().toISOString() }), repo);
+  recordPrecompiledSetup(repo, generation, globalScript, projectScript, state, finishedAt, output = null) {
+    const combined = [normalizeScript(globalScript), normalizeScript(projectScript)].filter(Boolean).join('\n---\n');
+    if (!combined) {
+      this.db.prepare('UPDATE projects SET setup=NULL WHERE repository_id=?').run(repo);
+      return;
+    }
+    this.db.prepare('UPDATE projects SET setup=? WHERE repository_id=?').run(JSON.stringify({
+      mode: 'precompiled', generation, hash: digest(combined), state,
+      exit_code: state === 'succeeded' ? 0 : null, timed_out: false,
+      error: state === 'cancelled' ? 'image_build_cancelled' : state === 'failed' ? 'image_build_failed' : null,
+      output: output ? String(output).slice(-8000) : null, finished_at: finishedAt,
+    }), repo);
+  }
+  startProjectBuild(repo, { approvedImage, toolchain, globalSpec, nextOwn, nextSpec, forceRebuild }) {
+    const existing = this.projectBuildJobs.get(repo);
+    if (existing) {
+      existing.superseded = true;
+      existing.handle.cancel();
+      this.projectBuildJobs.delete(repo);
+    }
+    const projectSpec = { packages: normalizePackages(nextOwn.packages || []), setup_script: nextOwn.setup_script || '', env: nextOwn.env || {} };
+    const effectivePackages = normalizePackages([...globalSpec.packages, ...projectSpec.packages]);
+    const hasSetup = !!(normalizeScript(globalSpec.setup_script) || normalizeScript(projectSpec.setup_script));
+    const job = { handle: null, state: null, superseded: false, promise: null, applyPromise: null };
+    const recordBuild = value => {
+      this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify(value), repo);
+    };
+    const handle = this.images.startLayered({
+      approvedImage,
+      globalSpec,
+      projectSpec,
+      resources: { cpus: nextSpec.cpus, memory_mb: nextSpec.memory_mb },
+      egress: nextSpec.egress,
+      forceRebuild,
+      onProgress: snapshot => {
+        if (job.superseded) return;
+        job.state = { ...snapshot, toolchain, packages: effectivePackages };
+        recordBuild(job.state);
+      },
+    });
+    job.handle = handle;
+    if (!job.state) {
+      job.state = {
+        build_id: handle.build_id, image_key: null, tag: null, phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
+        state: 'queued', queue_position: null, started_at: null, updated_at: new Date().toISOString(), finished_at: null,
+        output: null, can_cancel: true, toolchain, packages: effectivePackages,
+      };
+      recordBuild(job.state);
+    }
+    this.projectBuildJobs.set(repo, job);
+    job.promise = handle.promise.then(async result => {
+      if (job.superseded) return result;
+      const finished_at = new Date().toISOString();
+      if (result.globalImage?.Id && result.globalImage.Id !== approvedImage.Id && (globalSpec.packages.length || normalizeScript(globalSpec.setup_script))) {
+        const cachedGlobal = await this.images.findCachedLayer({ fromImageId: approvedImage.Id, packages: globalSpec.packages, setupScript: globalSpec.setup_script, env: globalSpec.env });
+        if (cachedGlobal.tag) this.setCurrentGlobalImage({ id: result.globalImage.Id, tag: cachedGlobal.tag, image_key: cachedGlobal.imageKey, finished_at });
+      }
+      const finalBuild = {
+        build_id: handle.build_id, image_key: result.image_key, tag: result.tag,
+        phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
+        state: 'ready', queue_position: null, toolchain, packages: effectivePackages,
+        output: result.output ? result.output.slice(-16000) : (job.state?.output || null),
+        can_cancel: false, started_at: job.state?.started_at || finished_at, updated_at: finished_at, finished_at,
+      };
+      job.state = finalBuild;
+      recordBuild(finalBuild);
+      const apply = this.lock(repo, async () => {
+        if (job.superseded) return;
+        const current = this.get(repo);
+        if (!current || current.state === 'deleted') return;
+        this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(nextOwn), repo);
+        this.recordPrecompiledSetup(repo, current.generation, globalSpec.setup_script, projectSpec.setup_script, 'succeeded', finished_at, result.output);
+        if (current.desired === 'ready' && current.state !== 'reset_failed') {
+          this.background.delete(repo);
+          await this.stopGeneration(repo, current.generation);
+          await this.provision(repo);
+        }
+      }).catch(error => logFailure(`project ${repo} apply after precompiled build failed`, error));
+      job.applyPromise = apply;
+      await apply;
+      if (this.projectBuildJobs.get(repo) === job) this.projectBuildJobs.delete(repo);
+      return result;
+    }, error => {
+      if (job.superseded) return null;
+      const finished_at = new Date().toISOString();
+      const cancelled = !!error?.cancelled;
+      const finalBuild = {
+        build_id: handle.build_id, image_key: job.state?.image_key ?? null, tag: job.state?.tag ?? null,
+        phase: job.state?.phase ?? 'project', state: cancelled ? 'cancelled' : 'failed', queue_position: null,
+        toolchain, packages: effectivePackages,
+        output: (error?.output || job.state?.output || null)?.slice(-16000) ?? null,
+        can_cancel: false, started_at: job.state?.started_at || null, updated_at: finished_at, finished_at,
+      };
+      job.state = finalBuild;
+      recordBuild(finalBuild);
+      if (hasSetup) this.recordPrecompiledSetup(repo, this.get(repo)?.generation || 1, globalSpec.setup_script, projectSpec.setup_script, cancelled ? 'cancelled' : 'failed', finished_at, finalBuild.output);
+      if (this.projectBuildJobs.get(repo) === job) this.projectBuildJobs.delete(repo);
+      return null;
+    });
+    return job;
+  }
+  cancelBuild(repo) {
+    this.validate(repo);
+    if (!this.get(repo)) throw new ManagerError('project_not_registered', 404);
+    const job = this.projectBuildJobs.get(repo);
+    if (!job) return { cancelled: false, environment: this.describe(repo) };
+    const cancelled = job.handle.cancel();
+    return { cancelled, environment: this.describe(repo) };
+  }
+  async waitForBuild(repo) {
+    const job = this.projectBuildJobs.get(repo);
+    if (job?.promise) await job.promise;
+    if (job?.applyPromise) await job.applyPromise;
+    return this.describe(repo);
   }
   // Live resource use; read-only and outside the project lock. Workspace size is sampled at most once a minute.
   async stats(repo) {
@@ -702,16 +1006,46 @@ export class Projects {
       try {
         let result;
         if (action === 'configure') {
-          // Saved under the project lock, so a running command finishes first; a stopped computer applies it on the next start.
           // Only the project's own values are saved; a null resource is removed, so it follows the default again.
-          const { rerun_setup: rerun, ...requested } = input.request, previous = this.get(repo).spec, own = { ...this.own(repo), ...requested };
+          const { rerun_setup: rerun, rebuild, ...requested } = input.request;
+          const own = { ...this.own(repo), ...requested };
           for (const key of resourceKeys) if (own[key] === null) delete own[key];
-          this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(own), repo);
-          // Build a new package image before touching the running computer; a failed build leaves it as it was.
-          try { await this.resolveImage(repo, this.spec(repo)); }
-          catch (error) { this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(previous, repo); throw Object.assign(error, { untouched: true }); }
-          if (project.desired === 'ready' && project.state !== 'reset_failed') {
-            this.background.delete(repo); await this.stopGeneration(repo, project.generation); await this.provision(repo, { forceSetup: rerun === true });
+          if (own.packages !== undefined) own.packages = normalizePackages(own.packages);
+          const forceRebuild = rebuild === true || rerun === true;
+          const globalEnv = this.globalEnvironmentDefaults(), globalRes = this.resourceDefaults();
+          const nextSpec = {
+            ...defaults,
+            ...globalRes,
+            egress: own.egress ?? globalEnv.egress,
+            ...own,
+            packages: normalizePackages([...globalEnv.packages, ...(own.packages || [])]),
+            env: { ...globalEnv.env, ...(own.env || {}) },
+            setup_script: own.setup_script || '',
+          };
+          const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
+          if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
+          const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
+          const projectOverlay = { packages: normalizePackages(own.packages || []), setup_script: own.setup_script || '', env: own.env || {} };
+          const cache = await this.images.checkLayeredCache({ approvedImage: approved, globalSpec: globalEnv, projectSpec: projectOverlay });
+          const needsBuild = forceRebuild ? (nextSpec.packages.length > 0 || !!normalizeScript(globalEnv.setup_script) || !!normalizeScript(projectOverlay.setup_script)) : !cache.cached;
+          if (!needsBuild) {
+            const pendingJob = this.projectBuildJobs.get(repo);
+            if (pendingJob) { pendingJob.superseded = true; pendingJob.handle.cancel(); this.projectBuildJobs.delete(repo); }
+            this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(own), repo);
+            if (project.desired === 'ready' && project.state !== 'reset_failed') {
+              this.background.delete(repo); await this.stopGeneration(repo, project.generation); await this.provision(repo);
+            } else {
+              const finished_at = new Date().toISOString();
+              this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({
+                state: cache.tag ? 'ready' : 'none', tag: cache.tag, image_key: cache.image_key, toolchain,
+                packages: nextSpec.packages, can_cancel: false, finished_at,
+              }), repo);
+              this.recordPrecompiledSetup(repo, project.generation, globalEnv.setup_script, projectOverlay.setup_script, 'succeeded', finished_at, null);
+            }
+          } else {
+            // Asynchronous build outside the project lock: running container and tasks stay uninterrupted while
+            // live progress streams and callers may cancel at any time.
+            this.startProjectBuild(repo, { approvedImage: approved, toolchain, globalSpec: globalEnv, nextOwn: own, nextSpec, forceRebuild });
           }
           result = this.describe(repo);
         } else if (action === 'refresh') {
@@ -852,10 +1186,35 @@ export class Projects {
       } catch (error) { logFailure(`project ${row.repository_id} recovery on start failed`, error); this.update(row.repository_id, row.state === 'resetting' ? 'reset_failed' : 'failed', 'stopped', 'recovery_failed'); }
     });
   }
+  protectedImageRefs(assistantImages = []) {
+    const protectedImageIds = new Set(), protectedTags = new Set();
+    const globalImg = this.currentGlobalImage();
+    if (globalImg?.id) protectedImageIds.add(globalImg.id);
+    if (globalImg?.tag) protectedTags.add(globalImg.tag);
+    for (const row of this.db.prepare("SELECT r.image FROM resources r JOIN projects p ON p.repository_id=r.repository_id AND p.generation=r.generation WHERE p.state<>'deleted'").all()) {
+      if (row.image) protectedImageIds.add(row.image);
+    }
+    for (const ref of assistantImages || []) {
+      if (!ref) continue;
+      if (String(ref).startsWith('sha256:')) protectedImageIds.add(ref);
+      else protectedTags.add(ref);
+    }
+    return { protectedImageIds, protectedTags };
+  }
+  listPrecompiledImages(assistantImages = []) {
+    return this.images.listImages(this.protectedImageRefs(assistantImages));
+  }
+  prunePrecompiledImages(assistantImages = [], options = {}) {
+    return this.images.prune({ ...this.protectedImageRefs(assistantImages), ...options });
+  }
   // Liveness check of idle computers only: one with runner calls in flight is skipped rather than queued behind them.
-  async check() {
+  async check(assistantImages = []) {
     for (const row of this.list()) if (['ready', 'busy'].includes(row.state)) this.prune(row.repository_id);
     this.scanStorage(); void this.readDockerUsage(); void this.refreshFootprint();
+    if (Date.now() - this.lastPruneAt >= 30 * 60_000) {
+      this.lastPruneAt = Date.now();
+      void this.prunePrecompiledImages(assistantImages, { force: false }).catch(error => logFailure('precompiled image GC failed', error));
+    }
     await Promise.all(this.list().filter(p => p.state === 'ready' && !this.gates.has(p.repository_id)).map(row => this.lock(row.repository_id, async () => {
       const current = this.get(row.repository_id); if (current.state !== 'ready') return;
       try {
@@ -884,8 +1243,15 @@ export class Projects {
     const computers = this.db.prepare('SELECT s.repository_id,s.generation,s.scanned_at,s.result FROM computer_storage s JOIN projects p ON p.repository_id=s.repository_id AND p.generation=s.generation WHERE p.state<>\'deleted\'').all().map(row => ({ ...row, result: JSON.parse(row.result) }));
     const docker = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='docker_usage'").get()?.value ?? 'null');
     const compaction = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='compaction'").get()?.value ?? 'null');
+    const precompiledRows = this.db.prepare('SELECT image_key,state,size_bytes FROM precompiled_images').all();
+    const precompiled = {
+      count: precompiledRows.filter(r => r.state === 'ready').length,
+      total_bytes: precompiledRows.filter(r => r.state === 'ready').reduce((sum, r) => sum + (Number(r.size_bytes) || 0), 0),
+      queue_length: this.images.queue.length,
+      active_build: this.images.active ? { image_key: this.images.active.imageKey, tag: this.images.active.tag, kind: this.images.active.kind, started_at: this.images.active.startedAt } : null,
+    };
     return { footprint: this.footprint ?? null, workspace_projects: this.db.prepare("SELECT DISTINCT r.repository_id FROM resources r JOIN projects p ON p.repository_id=r.repository_id AND p.generation=r.generation WHERE p.state<>'deleted'").all().map(row => row.repository_id), usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal, auto_vacuum: value('auto_vacuum') },
-      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker, compaction, vacuum: this.vacuum.state() };
+      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker, compaction, vacuum: this.vacuum.state(), precompiled_images: precompiled };
   }
   /** Saves the expiry window in days (1–365); the next expiry pass uses it. */
   setRetention(input) {
@@ -895,6 +1261,7 @@ export class Projects {
     return this.expiry.state();
   }
   async shutdown() {
+    await this.images.shutdown();
     await this.migration.stop(); await this.expiry.stop(); await this.vacuum.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
     this.trajectories.closeAll(); await this.trajectories.settle(); this.db.close();
   }

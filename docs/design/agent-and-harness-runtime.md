@@ -61,16 +61,27 @@ HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bea
 
 安装器核验解释器版本并写入来源和哈希后，原子切换选定记录。已开始的运行保持原版本绑定。产品的安装来源可能包含 PyPI 和 Python 构建产物下载站，由安装环境提供网络访问。
 
-## 4. 虚拟电脑生命周期（`manager/`、`runner/`）
+## 4. 虚拟电脑生命周期与自动预编译镜像引擎（`manager/`、`runner/`）
+
+### 统一环境与两级预编译镜像（`manager/precompiled-images.mjs`）
+
+- **一套全局默认环境 + 项目增量叠加**：全局 `computer_defaults`（默认资源、外网开关、全局 `packages`、全局 `setup_script` 与全局 `env`）同时驱动管理助手电脑、群助手电脑与项目电脑；项目级软件配置自动叠加在全局默认之上。
+- **两级内容寻址镜像缓存**：Level 1 构建全局基座镜像（`department-bot-computer-precompiled:<global_key>`，由管理助手、群助手与无增量项目直接复用），Level 2 以全局基座为 `FROM` 仅叠加项目增量包与增量脚本；重置项目或新起助手容器直接命中缓存镜像，零重复安装。`precompiled_images` 台账跟踪状态与占用，GC 自动保护全局当前镜像、活跃项目镜像、存活助手容器镜像及其父层。
+- **串行构建队列与可控性**：全局构建并发固定为 `1`（FIFO 排队 + 同 `image_key` single-flight 订阅去重）；构建不设超时（`timeout = 0`），内存（禁 swap）与 CPU 上限与目标项目（或全局默认）一致；构建在项目独占锁外异步执行，流式刷新输出日志，并支持超管与项目管理员随时通过 `AbortSignal` 取消（不影响正在运行的容器）。
+- **四项构建期硬防护**：
+  1. `setup_script` 构建期一律禁止 `root`，固定以 `USER 10001:10001` 安装到基础镜像预置的 `/opt/preinstalled`（自动纳入 `PATH`，运行期容器保持 `ReadonlyRootfs: true`）；系统 deb 包仅走正则校验的 `packages` 白名单模板；
+  2. `setup_script` 与构建期环境变量均作为独立 tar 上下文文件（`setup.sh`、`env.sh`）注入，绝不字符串拼接进 Dockerfile；
+  3. 构建期网络绑定专用 `enable_icc=false` 外网 bridge（与 `control` 网隔离），目标禁用 `egress` 时同步切换为 `networkmode=none`；
+  4. 扩展 `reservedEnv` 黑名单，禁止 `LD_PRELOAD`、`LD_LIBRARY_PATH`、`NODE_OPTIONS`、`PYTHONSTARTUP`、`PYTHONPATH`、`BASH_ENV`、`UV_TOOL_BIN_DIR` 等动态注入变量，且绝不传入任何凭据。
 
 ### 项目电脑（`manager/projects.mjs`）
 
-- **每仓一台、并发复用**：同一仓库共享一台长期容器、工作卷与笔记卷，支持 `N`（1–32）个任务并发执行各自目录；启停、重置、重建与配置操作在项目锁内排队独占执行。
-- **代次（`generation`）与派生镜像**：重置电脑时停旧代容器、递增代次并创建新工作卷与新网络（旧代次封存不复用）；仓库定制的 Debian 软件包以批准基础镜像为底由固定 `apt` 流程构建缓存派生镜像。
+- **每仓一台、并发复用**：同一仓库共享一台长期容器、工作卷与笔记卷，支持 `N`（1–32）个任务并发执行各自目录；启停、重置、重建与配置操作在项目锁内排队独占执行（镜像预编译在锁外异步执行，构建完成后再原子切换容器）。
+- **代次（`generation`）与权限分层**：重置电脑时停旧代容器、递增代次并创建新工作卷与新网络（旧代次封存不复用）；项目管理员可配置本项目增量 `packages`、`setup_script`、`env` 并手动停止构建，CPU/内存/进程数/`/tmp` 与 `egress` 保持仅超级管理员可写。
 - **进程回收与崩溃恢复**：单命令结束后清理进程组，任务结束后按 `BOT_WORKSPACE_ID` 回收该任务全部进程（含 `keep_background` 服务）；最后一个任务结束时清扫残留进程，仅在清理失败或容器异常退出时触发独占重启。`manager` 重启时通过 journal 对账并恢复已登记电脑。
 
 ### 助手电脑（`manager/assistant-computers.mjs`）
 
-- **按归属按需创建**：仅在回合需要执行命令或访问 `/tmp`/`/workspace` 时启动短时容器（纯读写 HOME 由控制面经 `/proc/self/fd` 边界核验直读直写）。
+- **按归属按需创建与全局镜像对齐**：仅在回合需要执行命令或访问 `/tmp`/`/workspace` 时启动短时容器（纯读写 HOME 由控制面经 `/proc/self/fd` 边界核验直读直写）；容器默认直接继承全局默认环境与全局预编译镜像（及全局 `env`），全球默认更新后空闲容器在下一回合平滑切换。
 - **生命周期与 HOME 代次**：运行中每 30 秒续期，回合结束回收进程后空闲默认 5 分钟销毁，单台最长存活 4 小时，达到并发上限淘汰最久空闲容器；归属的仓库范围收缩或更换绑定/角色时推进 HOME 代次并封存旧代次，超过软容量上限（默认 5 GB）自动降为只读提示清理。
 - **预装浏览器与 X11 虚拟桌面**：项目与助手基础镜像统一预装 Chromium（`/usr/local/bin/bot-chromium`）与虚拟桌面包装（`/usr/local/bin/bot-desktop`，封装 `Xvfb`、`openbox`、`xdotool`、`scrot`、`ffmpeg` 等），兼容只读根文件系统与非特权用户，控制面本身不安装浏览器。
