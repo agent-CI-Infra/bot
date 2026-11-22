@@ -387,7 +387,7 @@ test('F1 & F2: async/sync console spec sync preserves unapplied rule_imports.com
   assert.deepEqual(JSON.parse(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer), { packages: ['tree'], env: { C: '3' } });
 });
 
-test('claimQueuedTask respects toolchain_pending (during and after failed deferred build) and pending environment_operations, and reconcile refreshes image_pending only once idle', { timeout: 60_000 }, async t => {
+test('claimQueuedTask gates on toolchain_pending during deferred build/switch, clears to toolchain_missing on failure/cancel to avoid starvation, and respects pending environment_operations', { timeout: 60_000 }, async t => {
   const f = managerFixture(t);
   const h = await harness(t, f.manager);
   const { admin } = await setup(h);
@@ -399,26 +399,50 @@ test('claimQueuedTask respects toolchain_pending (during and after failed deferr
   await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { packages: ['jq'], setup_script: 'echo ok' } });
   await f.projects.waitForBuild('101');
   let failDeferred;
-  f.docker.onBuild = () => new Promise((_resolve, reject) => {
+  f.docker.onBuild = ({ options }) => new Promise((_resolve, reject) => {
     failDeferred = () => reject(Object.assign(new ManagerError('image_build_failed', 502), { output: 'apt failed\n' }));
+    options?.signal?.addEventListener('abort', () => reject(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true })), { once: true });
   });
   f.docker.images.set('approved', { Id: 'sha256:upgraded-base-claim-gate', Size: 10 * mib });
   await f.projects.recover();
 
-  // 0a. During the deferred recovery build window (bare base running, build in progress), toolchain_pending=1 blocks claims.
+  // 0a. Real startup order: even if project_environments started with stale toolchain_pending=0, initial reconcile()
+  // before engine start syncs toolchain_pending=1 so claimQueuedTask refuses claims during the deferred build window.
+  h.store.run("UPDATE project_environments SET toolchain_pending=0 WHERE repository_id='101'");
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-queued','101','review.pr','queued','q','{}',2,0)");
   await h.projects.reconcile();
+  assert.equal(f.projects.describe('101').computer.build.deferred, true);
   assert.equal(f.projects.describe('101').computer.toolchain_pending, true);
-  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'task must NOT be claimed while deferred recovery build is running on bare base');
+  assert.equal(f.projects.describe('101').computer.toolchain_missing, false);
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'task must NOT be claimed while deferred recovery build is running');
 
-  // 0b. If the deferred recovery build FAILS, toolchain_pending stays true (even though image_pending is false) so tasks still wait.
+  // 0b. Terminal failure of deferred build: clears toolchain_pending (0), exposes display-only toolchain_missing=true,
+  // and allows tasks to be claimed again so the project is never permanently starved!
   failDeferred();
   await f.projects.waitForBuild('101');
   await h.projects.reconcile();
-  assert.equal(f.projects.describe('101').computer.build.state, 'failed');
-  assert.equal(f.projects.describe('101').computer.image_pending, false);
-  assert.equal(f.projects.describe('101').computer.toolchain_pending, true);
-  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'task must NOT be claimed on bare base after a failed deferred recovery build');
+  const afterFail = f.projects.describe('101').computer;
+  assert.equal(afterFail.build.state, 'failed');
+  assert.equal(afterFail.build.deferred, true);
+  assert.equal(afterFail.image_pending, false);
+  assert.equal(afterFail.toolchain_pending, false);
+  assert.equal(afterFail.toolchain_missing, true);
+  const claimedDegraded = claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now());
+  assert.equal(claimedDegraded?.id, 't-queued', 'failed deferred build must release claim gate to avoid permanent starvation');
+  // Return t-queued back to queued for the cancel & success assertions below.
+  h.store.run("DELETE FROM task_claims WHERE task_id='t-queued'");
+  h.store.run("UPDATE tasks SET status='queued', claim_token=NULL WHERE id='t-queued'");
+
+  // 0c. Admin cancellation of deferred build also clears toolchain_pending and sets toolchain_missing=true.
+  await f.projects.recover();
+  await new Promise(r => setImmediate(r));
+  f.projects.cancelBuild('101');
+  await f.projects.waitForBuild('101');
+  await h.projects.reconcile();
+  const afterCancel = f.projects.describe('101').computer;
+  assert.equal(afterCancel.build.state, 'cancelled');
+  assert.equal(afterCancel.toolchain_pending, false);
+  assert.equal(afterCancel.toolchain_missing, true);
 
   // Now allow the recovery rebuild to succeed (simulating manager restart / retry), producing image_pending=true.
   f.docker.onBuild = null;
@@ -427,6 +451,7 @@ test('claimQueuedTask respects toolchain_pending (during and after failed deferr
   const pendingState = f.projects.describe('101').computer;
   assert.equal(pendingState.image_pending, true);
   assert.equal(pendingState.toolchain_pending, true);
+  assert.equal(pendingState.toolchain_missing, false);
   assert.equal(pendingState.image, 'sha256:upgraded-base-claim-gate');
 
   // 1. While a task holds a claim on 101, reconcile() MUST NOT refresh/interrupt the container.
@@ -449,6 +474,7 @@ test('claimQueuedTask respects toolchain_pending (during and after failed deferr
   const switched = f.projects.describe('101').computer;
   assert.equal(switched.image_pending, false);
   assert.equal(switched.toolchain_pending, false);
+  assert.equal(switched.toolchain_missing, false);
   assert.equal(switched.image, 'sha256:' + switched.build.tag.split(':')[1]);
 
   // 4. After refresh completes and toolchain_pending clears, claimQueuedTask claims t-queued normally.
