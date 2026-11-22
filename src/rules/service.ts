@@ -72,20 +72,54 @@ export function saveConsoleComputer(store: Store, id: string, spec: Record<strin
   store.run('INSERT INTO computer_console_specs(repository_id,spec,spec_revision) VALUES(?,?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec,spec_revision=excluded.spec_revision',
     id, JSON.stringify(spec), nextRev);
 }
+function clearSatisfiedImportedComputer(store: Store, id: string, liveOwn: Record<string, unknown>, explicitKeys?: Set<string>): void {
+  if (!store.hasTable('rule_imports')) return;
+  const imported = importedComputer(store, id) ?? {};
+  const entries = Object.entries(imported);
+  if (!entries.length) return;
+  const remaining: Record<string, unknown> = {};
+  for (const [key, value] of entries) {
+    const matched = JSON.stringify(canonicalComputerValue(key, liveOwn[key])) === JSON.stringify(canonicalComputerValue(key, value));
+    if (!matched && !explicitKeys?.has(key)) remaining[key] = value;
+  }
+  store.run('UPDATE rule_imports SET computer=? WHERE repository_id=?', Object.keys(remaining).length ? JSON.stringify(remaining) : null, id);
+}
 /**
  * Reconciles computer_console_specs when an asynchronous configure (from console or management assistant) finishes on
- * the manager and advances `live.spec_revision`. Does nothing while a build is still in flight or for legacy managers
- * that do not report `own`/`spec_revision`.
+ * the manager and advances `live.spec_revision`. Merges only the manager's configured keys into the existing console
+ * spec so unapplied `.bot/computer.yaml` imports or pending console fields are never silently dropped, and clears
+ * `rule_imports.computer` only for keys that are now present in the manager.
  */
 export function syncConsoleComputer(store: Store, id: string, live: any): void {
   if (!live || typeof live !== 'object' || !live.own || typeof live.spec_revision !== 'number') return;
   if (['queued', 'building', 'cancelling'].includes(String(live.build?.state || ''))) return;
   ensureConsoleSpecTable(store);
-  const row = store.get('SELECT spec_revision FROM computer_console_specs WHERE repository_id=?', id);
+  const row = store.get('SELECT spec, spec_revision FROM computer_console_specs WHERE repository_id=?', id);
   const savedRev = Number(row?.spec_revision ?? 0);
   if (live.spec_revision > savedRev) {
-    saveConsoleComputer(store, id, ownComputer(live), live.spec_revision);
-    if (store.hasTable('rule_imports')) store.run('UPDATE rule_imports SET computer=NULL WHERE repository_id=?', id);
+    const liveOwn = ownComputer(live);
+    const imported = importedComputer(store, id) ?? {};
+    const base: Record<string, unknown> = row ? JSON.parse(row.spec) : { ...liveOwn, ...imported };
+    const configuredKeys = Array.isArray(live.configured_keys)
+      ? (live.configured_keys as unknown[]).filter((k): k is string => typeof k === 'string' && computerKeys.includes(k as any))
+      : null;
+    if (configuredKeys && configuredKeys.length) {
+      for (const key of configuredKeys) {
+        if (liveOwn[key] === undefined) delete base[key];
+        else base[key] = liveOwn[key];
+      }
+      saveConsoleComputer(store, id, base, live.spec_revision);
+      clearSatisfiedImportedComputer(store, id, liveOwn, new Set(configuredKeys));
+    } else {
+      const merged: Record<string, unknown> = { ...base, ...liveOwn };
+      for (const [key, value] of Object.entries(imported)) {
+        if (JSON.stringify(canonicalComputerValue(key, liveOwn[key])) !== JSON.stringify(canonicalComputerValue(key, value))) {
+          merged[key] = value;
+        }
+      }
+      saveConsoleComputer(store, id, merged, live.spec_revision);
+      clearSatisfiedImportedComputer(store, id, liveOwn);
+    }
   }
 }
 // The project's console computer spec: the saved one, else the computer as the manager has it, with the .bot/computer.yaml
@@ -100,8 +134,11 @@ export function rememberConsoleComputer(store: Store, id: string, live: any): vo
   ensureConsoleSpecTable(store);
   store.transaction(() => {
     if (store.get('SELECT 1 FROM computer_console_specs WHERE repository_id=?', id)) return;
+    const spec = consoleComputer(store, id, live);
+    // consoleComputer() may have already inserted the row via syncConsoleComputer() when live.spec_revision > 0;
+    // either way, `computer_console_specs` now durably owns the merged imported fields so `rule_imports.computer` can clear.
     const rev = typeof live?.spec_revision === 'number' ? live.spec_revision : 0;
-    store.run('INSERT INTO computer_console_specs(repository_id,spec,spec_revision) VALUES(?,?,?)', id, JSON.stringify(consoleComputer(store, id, live)), rev);
+    store.run('INSERT INTO computer_console_specs(repository_id,spec,spec_revision) VALUES(?,?,?) ON CONFLICT(repository_id) DO NOTHING', id, JSON.stringify(spec), rev);
     if (store.hasTable('rule_imports')) store.run('UPDATE rule_imports SET computer=NULL WHERE repository_id=?', id);
   });
 }

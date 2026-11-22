@@ -32,13 +32,14 @@ export function normalizeEnv(env) {
   return out;
 }
 
-export function computeImageKey({ baseImageId, packages = [], setupScript = '', env = {} }) {
+export function computeImageKey({ baseImageId, packages = [], setupScript = '', env = {}, egress = true }) {
   const payload = JSON.stringify({
     v: PRECOMPILED_SCHEMA_VERSION,
     base_image_id: String(baseImageId || ''),
     packages: normalizePackages(packages),
     setup_script: normalizeScript(setupScript),
     env: normalizeEnv(env),
+    egress: egress !== false,
   });
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
@@ -218,12 +219,12 @@ export class PrecompiledImageBuilder {
   /**
    * Inspects whether a layer image already exists locally in Docker.
    */
-  async findCachedLayer({ fromImageId, packages = [], setupScript = '', env = {} }) {
+  async findCachedLayer({ fromImageId, packages = [], setupScript = '', env = {}, egress = true }) {
     const sortedPackages = normalizePackages(packages);
     const normalizedScript = normalizeScript(setupScript);
     if (!sortedPackages.length && !normalizedScript) return { noop: true, imageKey: null, tag: null, image: null };
     const buildEnv = normalizedScript ? normalizeEnv(env) : {};
-    const imageKey = computeImageKey({ baseImageId: fromImageId, packages: sortedPackages, setupScript: normalizedScript, env: buildEnv });
+    const imageKey = computeImageKey({ baseImageId: fromImageId, packages: sortedPackages, setupScript: normalizedScript, env: buildEnv, egress });
     const tag = `${PRECOMPILED_REPO}:${imageKey}`;
     const image = await this.docker.request('GET', `/images/${encodeURIComponent(tag)}/json`);
     return { noop: false, imageKey, tag, image: image?.Id ? image : null };
@@ -259,10 +260,11 @@ export class PrecompiledImageBuilder {
       };
     }
 
+    const egressFlag = egress !== false;
     const buildEnv = normalizedScript ? normalizeEnv(env) : {};
-    const imageKey = computeImageKey({ baseImageId: fromImageId, packages: sortedPackages, setupScript: normalizedScript, env: buildEnv });
+    const imageKey = computeImageKey({ baseImageId: fromImageId, packages: sortedPackages, setupScript: normalizedScript, env: buildEnv, egress: egressFlag });
     const tag = `${PRECOMPILED_REPO}:${imageKey}`;
-    const spec = { packages: sortedPackages, has_setup_script: !!normalizedScript, env_keys: Object.keys(buildEnv) };
+    const spec = { packages: sortedPackages, has_setup_script: !!normalizedScript, env_keys: Object.keys(buildEnv), egress: egressFlag };
 
     if (!forceRebuild) {
       const existing = await this.docker.request('GET', `/images/${encodeURIComponent(tag)}/json`);
@@ -287,10 +289,9 @@ export class PrecompiledImageBuilder {
     const promise = new Promise((resolve, reject) => { resolveSub = resolve; rejectSub = reject; });
     const subscriber = { id: subId, resolve: resolveSub, reject: rejectSub, onProgress, cancelled: false };
 
-    // Share an in-flight job ONLY when egress policy matches AND (if already building) the running job's resource
-    // ceiling is at least as high as this caller's ceiling; queued jobs widen their ceiling before starting.
-    const egressFlag = egress !== false;
-    const jobKey = `${imageKey}:${egressFlag ? 'egress' : 'none'}`;
+    // Share an in-flight job ONLY when imageKey (which includes egress policy) matches AND (if already building)
+    // the running job's resource ceiling is at least as high as this caller's ceiling; queued jobs widen before starting.
+    const jobKey = imageKey;
     const existingJob = !forceRebuild ? this.jobsByKey.get(jobKey) : null;
     const canShare = !!existingJob && (
       existingJob.state === 'queued'
@@ -512,7 +513,8 @@ export class PrecompiledImageBuilder {
   /**
    * Computes whether a two-level (global + optional project overlay) image is already cached locally.
    */
-  async checkLayeredCache({ approvedImage, globalSpec, projectSpec = null }) {
+  async checkLayeredCache({ approvedImage, globalSpec, projectSpec = null, egress = true }) {
+    const egressFlag = egress !== false;
     const globalPkgs = normalizePackages(globalSpec?.packages);
     const globalScript = normalizeScript(globalSpec?.setup_script);
     const globalEnv = globalSpec?.env || {};
@@ -522,7 +524,7 @@ export class PrecompiledImageBuilder {
     let level1Tag = null;
 
     if (globalPkgs.length || globalScript) {
-      const found = await this.findCachedLayer({ fromImageId: approvedImage.Id, packages: globalPkgs, setupScript: globalScript, env: globalEnv });
+      const found = await this.findCachedLayer({ fromImageId: approvedImage.Id, packages: globalPkgs, setupScript: globalScript, env: globalEnv, egress: egressFlag });
       level1Key = found.imageKey;
       level1Tag = found.tag;
       if (!found.image) return { cached: false, image: null, globalImage: null, image_key: level1Key, tag: level1Tag };
@@ -540,7 +542,7 @@ export class PrecompiledImageBuilder {
       return { cached: true, image: level1Image, globalImage: level1Image, image_key: level1Key, tag: level1Tag };
     }
     const effectiveEnv = { ...globalEnv, ...(projectSpec.env || {}) };
-    const found2 = await this.findCachedLayer({ fromImageId: level1Image.Id, packages: deltaPkgs, setupScript: projectScript, env: effectiveEnv });
+    const found2 = await this.findCachedLayer({ fromImageId: level1Image.Id, packages: deltaPkgs, setupScript: projectScript, env: effectiveEnv, egress: egressFlag });
     if (!found2.image) return { cached: false, image: null, globalImage: level1Image, image_key: found2.imageKey, tag: found2.tag };
     return { cached: true, image: found2.image, globalImage: level1Image, image_key: found2.imageKey, tag: found2.tag };
   }

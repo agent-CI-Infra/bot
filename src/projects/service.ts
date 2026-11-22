@@ -9,7 +9,7 @@ import { fail, fields, randomId, HttpError, type Json } from '../core/security.j
 import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
-import { ownComputer, rememberConsoleComputer, saveConsoleComputer, syncConsoleComputer } from '../rules/service.js';
+import { consoleComputer, ownComputer, rememberConsoleComputer, saveConsoleComputer, syncConsoleComputer } from '../rules/service.js';
 
 // Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
 export const superAdminComputerFields = new Set(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress']);
@@ -32,19 +32,25 @@ export function authorizeComputerSpec(user: Actor, spec: Json): void {
   if (keys.some(key => superAdminComputerFields.has(key) || !projectAdminComputerFields.has(key))) superAdmin(user);
 }
 
-/** Strips raw global setup_script text and global env values for non-super actors while keeping baseline labels/keys. */
+/** Strips raw global setup_script text and global env values (both in global_defaults and merged top-level env) for non-super actors. */
 export function sanitizeComputerForActor(user: Actor, computer: any): any {
   if (!computer || typeof computer !== 'object' || user.role === 'super_admin') return computer;
+  const ownEnv = computer.own && typeof computer.own.env === 'object' && computer.own.env !== null
+    ? { ...computer.own.env }
+    : {};
   const gd = computer.global_defaults;
-  if (!gd || typeof gd !== 'object') return computer;
-  const { setup_script: globalScript, env: globalEnv, ...restGlobal } = gd;
-  return {
-    ...computer,
-    global_defaults: {
+  const sanitizedGlobal = gd && typeof gd === 'object' ? (() => {
+    const { setup_script: globalScript, env: globalEnv, ...restGlobal } = gd;
+    return {
       ...restGlobal,
       has_setup_script: typeof globalScript === 'string' && globalScript.trim().length > 0,
       env_keys: globalEnv && typeof globalEnv === 'object' ? Object.keys(globalEnv).sort() : [],
-    },
+    };
+  })() : gd;
+  return {
+    ...computer,
+    ...(computer.own ? { env: ownEnv } : {}),
+    ...(gd !== undefined ? { global_defaults: sanitizedGlobal } : {}),
   };
 }
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
@@ -287,15 +293,14 @@ export class ProjectService {
           const buildState = String(computer?.build?.state || '');
           // Only commit the console spec layer when the change applied synchronously; async builds sync via spec_revision once ready.
           if (!['queued', 'building', 'cancelling'].includes(buildState)) {
-            if (computer?.own) {
-              saveConsoleComputer(this.store, op.repository_id, ownComputer(computer), Number(computer.spec_revision || 0));
-            } else {
-              const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
-              const{rerun_setup:_rerun,rebuild:_rebuild,...values}=JSON.parse(op.input).request;
-              // A null resource follows the default again, so it leaves the console layer.
-              const spec={...base,...values};for(const key of Object.keys(spec))if(spec[key]===null)delete spec[key];
-              saveConsoleComputer(this.store, op.repository_id, spec);
-            }
+            const base = consoleComputer(this.store, op.repository_id, computer);
+            const { rerun_setup: _rerun, rebuild: _rebuild, ...values } = JSON.parse(op.input).request;
+            // Merge requested keys into the existing console layer (preserving any unapplied imported fields);
+            // a null resource follows the default again, so it leaves the console layer.
+            const spec: Record<string, unknown> = { ...base, ...values };
+            for (const key of Object.keys(spec)) if (spec[key] === null) delete spec[key];
+            const rev = typeof computer?.spec_revision === 'number' ? Number(computer.spec_revision) : undefined;
+            saveConsoleComputer(this.store, op.repository_id, spec, rev);
           }
         }
       }); return result;

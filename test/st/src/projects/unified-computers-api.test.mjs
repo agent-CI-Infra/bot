@@ -10,7 +10,7 @@ import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 import { fail } from '../../../../dist/core/security.js';
 import { harness, setup, account, repository, testPassword } from '../../../fixtures/helpers.mjs';
 import { ManagementService } from '../../../../dist/management/service.js';
-import { RuleService, computerRequest } from '../../../../dist/rules/service.js';
+import { RuleService, computerRequest, consoleComputer, rememberConsoleComputer } from '../../../../dist/rules/service.js';
 import { TaskCommands } from '../../../../dist/tasks/commands.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 
@@ -211,12 +211,13 @@ test('management assistant queries and commands enforce tiered permissions for g
   assert.equal(resetReceipt.state, 'succeeded');
   assert.equal(resetReceipt.result.environment.generation, 2);
 
-  // Minor #3: non-super actor receives sanitized global_defaults (no raw global setup_script or env values).
+  // Minor #3 & F6: non-super actor receives sanitized global_defaults AND project-own-only top-level computer.env.
   const memberEnv = envAfter.environment.computer;
   assert.equal(memberEnv.global_defaults.has_setup_script, true);
   assert.deepEqual(memberEnv.global_defaults.env_keys, ['GLOBAL_FLAG']);
   assert.equal(memberEnv.global_defaults.setup_script, undefined);
   assert.equal(memberEnv.global_defaults.env, undefined);
+  assert.equal(memberEnv.env.GLOBAL_FLAG, undefined, 'merged global env values must not leak in top-level computer.env for non-super actors');
 });
 
 test('read-only project reader without config.write cannot configure or cancel builds, and console computer spec stays decoupled from merged globals across async builds', async t => {
@@ -249,6 +250,11 @@ test('read-only project reader without config.write cannot configure or cancel b
   assert.deepEqual(gd.env_keys, ['GLOBAL_TOKEN_HINT']);
   assert.equal(gd.setup_script, undefined);
   assert.equal(gd.env, undefined);
+  assert.equal(readerDetail.value.environment.computer.env.GLOBAL_TOKEN_HINT, undefined);
+  // Super admin still sees full merged computer.env and global_defaults.
+  const superDetail = await admin('/api/environments/101');
+  assert.equal(superDetail.value.environment.computer.env.GLOBAL_TOKEN_HINT, 'val-123');
+  assert.equal(superDetail.value.environment.computer.global_defaults.env.GLOBAL_TOKEN_HINT, 'val-123');
 
   // Read-only user is forbidden from BOTH configure and build/cancel (Blocking #8).
   assert.equal((await reader('/api/environments/101/configure', 'POST', { operation_id: id(), generation: 1, spec: { packages: ['ripgrep'] } })).status, 403);
@@ -297,4 +303,57 @@ test('read-only project reader without config.write cannot configure or cancel b
   assert.equal(syncedConsole.setup_script, 'echo async-proj');
   assert.deepEqual(syncedConsole.env, { PROJ_KEY: 'v1' });
   assert.equal(computerRequest(syncedConsole, liveReady), null, 'completed async build must not be reverted on next reconcile');
+});
+
+test('F1 & F2: async/sync console spec sync preserves unapplied rule_imports.computer and rememberConsoleComputer never crashes on spec_revision > 0', async t => {
+  const f = managerFixture(t);
+  const h = await harness(t, f.manager);
+  const { admin } = await setup(h);
+  const a = await account(admin);
+  await repository(admin, a.id, '101');
+  await h.projects.reconcile();
+
+  // Simulate an upgraded project with unapplied .bot/computer.yaml imports and NO computer_console_specs row yet.
+  h.store.run('DELETE FROM computer_console_specs WHERE repository_id=?', '101');
+  h.store.run("INSERT OR REPLACE INTO rule_imports(repository_id,sha,pending,computer,report,imported_at) VALUES(?,?,0,?,?,?)",
+    '101', 'a'.repeat(40), JSON.stringify({ memory_mb: 8192, packages: ['jq'] }), JSON.stringify({ files: ['.bot/computer.yaml'] }), new Date().toISOString());
+
+  // Manager applies an unrelated configure (cpus: 3) -> spec_revision advances to 1 without applying memory_mb/packages.
+  await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { cpus: 3 } });
+  const liveRev1 = f.projects.describe('101').computer;
+  assert.equal(liveRev1.spec_revision, 1);
+
+  // F1: syncConsoleComputer (via consoleComputer) preserves unapplied imported fields AND keeps them in rule_imports.computer
+  // until the manager actually has them.
+  const specAfterRev1 = consoleComputer(h.store, '101', liveRev1);
+  assert.equal(specAfterRev1.cpus, 3);
+  assert.equal(specAfterRev1.memory_mb, 8192);
+  assert.deepEqual(specAfterRev1.packages, ['jq']);
+  const remainingImports = JSON.parse(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer);
+  assert.deepEqual(remainingImports, { memory_mb: 8192, packages: ['jq'] });
+
+  // F2: rememberConsoleComputer with NO existing row and spec_revision > 0 must NOT throw a unique-constraint error,
+  // and must preserve the imported fields in computer_console_specs.
+  h.store.run('DELETE FROM computer_console_specs WHERE repository_id=?', '101');
+  assert.doesNotThrow(() => rememberConsoleComputer(h.store, '101', liveRev1));
+  const remembered = JSON.parse(h.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?', '101').spec);
+  assert.equal(remembered.memory_mb, 8192);
+  assert.deepEqual(remembered.packages, ['jq']);
+
+  // An async configure of setup_script also preserves unapplied memory_mb/packages in computer_console_specs.
+  await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { setup_script: 'echo extra' } });
+  await f.projects.waitForBuild('101');
+  const liveRev2 = f.projects.describe('101').computer;
+  const specAfterRev2 = consoleComputer(h.store, '101', liveRev2);
+  assert.equal(specAfterRev2.memory_mb, 8192);
+  assert.deepEqual(specAfterRev2.packages, ['jq']);
+  assert.equal(specAfterRev2.setup_script, 'echo extra');
+
+  // Once the imported fields ARE applied to the manager, syncConsoleComputer clears any matching rule_imports.computer too.
+  h.store.run("UPDATE rule_imports SET computer=? WHERE repository_id=?", JSON.stringify({ memory_mb: 8192, packages: ['jq'] }), '101');
+  await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 8192, packages: ['jq'] } });
+  await f.projects.waitForBuild('101');
+  const liveRev3 = f.projects.describe('101').computer;
+  consoleComputer(h.store, '101', liveRev3);
+  assert.equal(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer, null);
 });
