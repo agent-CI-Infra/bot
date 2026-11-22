@@ -341,11 +341,19 @@ export class Projects {
     const buildInfo = liveBuild ? { ...liveBuild } : (build ? JSON.parse(build) : null);
     const globalDefaults = this.globalDefaults();
     const wantsPrecompiled = spec.packages.length > 0 || !!normalizeScript(globalDefaults.setup_script) || !!normalizeScript(own.setup_script);
+    const isDeferredBuild = buildInfo?.deferred === true;
+    const buildInFlight = ['queued', 'building', 'cancelling'].includes(String(buildInfo?.state || ''));
     const imagePending = !!(buildInfo?.state === 'ready' && buildInfo?.image_id && resource?.image && resource.image !== buildInfo.image_id);
+    // Gate task claims while a deferred recovery build is queued/building (on either bare base or matching-base
+    // previous image) or waiting for idle image_pending switch. On terminal failure/cancel, clear toolchain_pending
+    // and expose display-only toolchain_missing so the project is never permanently starved.
     const toolchainPending = wantsPrecompiled && (
       imagePending
+      || (isDeferredBuild && buildInFlight)
+    );
+    const toolchainMissing = wantsPrecompiled && !toolchainPending && (
+      (isDeferredBuild && ['failed', 'cancelled'].includes(String(buildInfo?.state || '')))
       || (!!this.approvedImageId && resource?.image === this.approvedImageId)
-      || (!resource?.image && ['queued', 'building', 'cancelling', 'failed', 'cancelled'].includes(String(buildInfo?.state || '')))
     );
     // inherited: the resources that follow the default; resources_pending: the container still has other resources.
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
@@ -362,7 +370,8 @@ export class Projects {
       inherited: resourceKeys.filter(key => own[key] === undefined),
       resources_pending: !!applied && applied !== JSON.stringify(resources(spec)),
       image_pending: imagePending,
-      toolchain_pending: toolchainPending } };
+      toolchain_pending: toolchainPending,
+      toolchain_missing: toolchainMissing } };
   }
   // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
   async defaultsView() {
@@ -949,6 +958,8 @@ export class Projects {
     }), repo);
   }
   startProjectBuild(repo, { approvedImage, toolchain, globalSpec, nextOwn, nextSpec, requestedKeys = [], forceRebuild, commitSpec = true }) {
+    const deferred = !commitSpec;
+    const deferredMark = deferred ? { deferred: true } : {};
     const existing = this.projectBuildJobs.get(repo);
     if (existing) {
       existing.superseded = true;
@@ -971,7 +982,7 @@ export class Projects {
       forceRebuild,
       onProgress: snapshot => {
         if (job.superseded) return;
-        job.state = { ...snapshot, toolchain, packages: effectivePackages };
+        job.state = { ...snapshot, ...deferredMark, toolchain, packages: effectivePackages };
         recordBuild(job.state);
       },
     });
@@ -980,7 +991,7 @@ export class Projects {
       job.state = {
         build_id: handle.build_id, image_key: null, tag: null, phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
         state: 'queued', queue_position: null, started_at: null, updated_at: new Date().toISOString(), finished_at: null,
-        output: null, can_cancel: true, toolchain, packages: effectivePackages,
+        output: null, can_cancel: true, ...deferredMark, toolchain, packages: effectivePackages,
       };
       recordBuild(job.state);
     }
@@ -995,7 +1006,7 @@ export class Projects {
       const finalBuild = {
         build_id: handle.build_id, image_key: result.image_key, image_id: result.image.Id, tag: result.tag,
         phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
-        state: 'ready', queue_position: null, toolchain, packages: effectivePackages,
+        state: 'ready', queue_position: null, ...deferredMark, toolchain, packages: effectivePackages,
         output: result.output ? result.output.slice(-16000) : (job.state?.output || null),
         can_cancel: false, started_at: job.state?.started_at || finished_at, updated_at: finished_at, finished_at,
       };
@@ -1030,7 +1041,7 @@ export class Projects {
       const finalBuild = {
         build_id: handle.build_id, image_key: job.state?.image_key ?? null, tag: job.state?.tag ?? null,
         phase: job.state?.phase ?? 'project', state: cancelled ? 'cancelled' : 'failed', queue_position: null,
-        toolchain, packages: effectivePackages,
+        ...deferredMark, toolchain, packages: effectivePackages,
         output: (error?.output || job.state?.output || null)?.slice(-16000) ?? null,
         can_cancel: false, started_at: job.state?.started_at || null, updated_at: finished_at, finished_at,
       };

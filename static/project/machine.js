@@ -123,7 +123,8 @@ function machineSection(globalSettings = false) {
     note('工作卷、笔记和代次保留。项目任务并发在另一组单独保存，不会重建电脑。'));
   if (pc.resources_pending) impact.append(note('全局默认已变化，电脑等待空闲后重建。电脑报告的资源是配置目标，不能据此确认运行中容器已使用新上限。'));
   if (pc.image_pending) impact.append(note('新的预编译镜像已就绪，电脑将在当前运行任务全部空闲后自动平滑切换，不会中断正在执行的任务。'));
-  else if (pc.toolchain_pending) impact.append(note('预编译工具链尚未就绪（当前容器运行在基础镜像），新任务将暂缓认领直到镜像构建并切换完成。'));
+  if (pc.toolchain_pending) impact.append(note('预编译工具链正在构建或等待切换，新任务将暂缓认领直到新镜像切换到位。'));
+  if (pc.toolchain_missing) impact.append(note('预编译构建失败或已停止，当前电脑缺少项目预装软件包/初始化脚本（降级运行中），任务可继续认领；请修复配置后保存或重新预编译。'));
   const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
   const nodes = [
     note(unread?'暂时读不到已保存的机器配置，目前显示电脑报告的值。':'表单显示本项目叠加配置，电脑是否已应用需结合上方状态核对。机器配置只在这里修改，仓库里的 .bot/computer.yaml 不再读取。'),
@@ -236,7 +237,7 @@ function machineStatus() {
   const record=element('details','','fold');record.append(element('summary','查看电脑记录与技术信息'),facts([['状态记录',state(env.state)],['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
     ['资源', pc.resources_pending ? '全局默认资源已改，等没有任务运行时按新值重建' : null],
-    ['预编译镜像切换', pc.image_pending ? '新预编译镜像已就绪，等没有任务运行时自动切换' : pc.toolchain_pending ? '预编译工具链构建/恢复中，暂缓认领新任务' : null],
+    ['预编译镜像切换', pc.image_pending ? '新预编译镜像已就绪，等没有任务运行时自动切换（新任务暂缓认领）' : pc.toolchain_pending ? '预编译工具链构建/恢复中，暂缓认领新任务' : pc.toolchain_missing ? '预编译构建失败或已停止，当前缺少项目增量工具链（降级可认领任务）' : null],
     ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', environmentFault(env.error)]]));machine.append(record);
   if(pc.image)machine.append(collapsible('完整运行镜像',pc.image));
   environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error).forEach((control,index)=>{control.id='computer-action-'+index;if(!available)control.disabled=true;lifecycle.append(control);}); machine.append(lifecycle);

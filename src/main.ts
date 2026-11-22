@@ -57,12 +57,14 @@ const manager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8
 const projects = new ProjectService(store, manager);
 // Repository mirrors live next to the database on the control plane's own volume.
 const gitCache = new GitCache(process.env.BOT_GIT_CACHE_DIR || resolve(dirname(databasePath), 'git-cache'));
-const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCache);engine.start();
+const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCache);
 // Tasks in 待处理 that nobody needs to act on any more leave it in small batches (#713).
 engine.obsolete.start();
 engine.botPrWake.start();
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
-void projects.reconcile();
+// Complete the first environment reconcile (syncing toolchain_pending / manager state) before starting the task engine
+// so a restarted control plane cannot claim queued tasks against a stale toolchain_pending=0 row.
+void projects.reconcile().catch(error => console.error('[projects] initial reconciliation failed:', error)).finally(() => engine.start());
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
 // A count read from the environment, or the default when unset; a value that is not a positive integer stops startup
 // instead of turning into NaN, which would make a threshold that never fires (#771).
