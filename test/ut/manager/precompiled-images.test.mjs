@@ -59,7 +59,7 @@ test('security hardening: non-root setup_script, tar injection immunity, resourc
   assert.ok(!call.dockerfile.includes('chmod +w /opt/runner'), 'setup_script must not be interpolated into Dockerfile');
   assert.ok(!call.dockerfile.includes("a'b"), 'env values must not be interpolated into Dockerfile');
   assert.match(call.dockerfile, /USER 10001:10001\nCOPY --chown=10001:10001 env\.sh \/tmp\/bot-setup-env\.sh\nCOPY --chown=10001:10001 setup\.sh \/tmp\/bot-setup\.sh/);
-  assert.match(call.dockerfile, /RUN HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global UV_TOOL_DIR=\/opt\/preinstalled\/uv-tools UV_TOOL_BIN_DIR=\/opt\/preinstalled\/bin PYTHONUSERBASE=\/opt\/preinstalled\/python CARGO_HOME=\/opt\/preinstalled\/cargo GOPATH=\/opt\/preinstalled\/go \/bin\/sh -eu -c '\. \/tmp\/bot-setup-env\.sh && \/bin\/sh -eu \/tmp\/bot-setup\.sh'/);
+  assert.match(call.dockerfile, /RUN mkdir -p \/workspace\/home && HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global UV_TOOL_DIR=\/opt\/preinstalled\/uv-tools UV_TOOL_BIN_DIR=\/opt\/preinstalled\/bin PYTHONUSERBASE=\/opt\/preinstalled\/python CARGO_HOME=\/opt\/preinstalled\/cargo GOPATH=\/opt\/preinstalled\/go \/bin\/sh -eu -c '\. \/tmp\/bot-setup-env\.sh && \/bin\/sh -eu \/tmp\/bot-setup\.sh'/);
   assert.equal(call.options.files['setup.sh'], hostileScript + '\n');
   assert.equal(call.options.files['env.sh'], shellEnvScript(hostileEnv));
 
@@ -304,8 +304,9 @@ test('project-computer.Dockerfile keeps runtime install prefixes unset in ENV wh
   }
   assert.match(dockerfile, /PREINSTALLED_DIR=\/opt\/preinstalled/);
   assert.match(dockerfile, /PATH=\/opt\/preinstalled\/bin:/);
+  assert.match(dockerfile, /mkdir -p \/workspace \/workspace\/home /);
   const layer = generateLayerDockerfile({ fromImageId: 'sha256:base', hasSetupScript: true });
-  assert.match(layer, /RUN HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global/);
+  assert.match(layer, /RUN mkdir -p \/workspace\/home && HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global/);
 });
 
 test('single-flight build sharing isolates egress policy and resource ceilings, reusing cache only if earlier build succeeds', async t => {
@@ -561,4 +562,43 @@ test('F3 & F4: failed/cancelled global build does not retry in a 5s check loop, 
   await f.assistants.release(owner, { turn: 't-f7' });
   await f.projects.reconcilingGlobal;
   await f.projects.waitForGlobalBuild();
+});
+
+test('recover() stays non-blocking on uncached precompiled images after a base image upgrade and switches container once background build completes', async t => {
+  const f = fixture(t);
+  await f.projects.register('101');
+  await f.projects.operate('101', 'configure', {
+    operation_id: opId(), generation: 1,
+    request: { packages: ['jq'], setup_script: 'echo slow-sdk' },
+  });
+  await f.projects.waitForBuild('101');
+  const revBefore = f.projects.describe('101').computer.spec_revision;
+
+  // Simulate upgrading the approved base image to a new digest so 101's precompiled image is no longer cached,
+  // and hold the Docker build in flight while calling recover().
+  let releaseBuild;
+  f.docker.onBuild = ({ tag }) => new Promise(resolve => {
+    releaseBuild = () => {
+      f.docker.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 3 * mib });
+      resolve('rebuilt\n');
+    };
+  });
+  f.docker.images.set('approved', { Id: 'sha256:upgraded-base-v4', Size: 10 * mib });
+
+  // recover() MUST finish immediately without waiting for the slow Docker build, leaving 101 ready on the new base!
+  await f.projects.recover();
+  const duringBuild = f.projects.describe('101');
+  assert.equal(duringBuild.state, 'ready', 'project container must come up ready immediately during recover()');
+  assert.equal(duringBuild.computer.image, 'sha256:upgraded-base-v4');
+  assert.ok(['queued', 'building'].includes(duringBuild.computer.build.state), duringBuild.computer.build.state);
+  assert.equal(duringBuild.computer.spec_revision, revBefore);
+
+  // Once the background build completes, 101 switches atomically to the new precompiled image without bumping spec_revision.
+  releaseBuild();
+  await f.projects.waitForBuild('101');
+  const afterBuild = f.projects.describe('101');
+  assert.equal(afterBuild.state, 'ready');
+  assert.equal(afterBuild.computer.build.state, 'ready');
+  assert.equal(afterBuild.computer.image, 'sha256:' + afterBuild.computer.build.tag.split(':')[1]);
+  assert.equal(afterBuild.computer.spec_revision, revBefore, 'recovery rebuild must not bump spec_revision');
 });

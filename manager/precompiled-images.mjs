@@ -68,11 +68,12 @@ export function generateLayerDockerfile({ fromImageId, packages = [], hasSetupSc
   }
   if (hasSetupScript) {
     // Set build-time install prefixes ONLY for this RUN so runtime agent installs still target writable HOME.
+    // Ensure /workspace/home exists so legacy setup scripts referencing /workspace/home do not fail on upgrade.
     lines.push(
       'USER 10001:10001',
       'COPY --chown=10001:10001 env.sh /tmp/bot-setup-env.sh',
       'COPY --chown=10001:10001 setup.sh /tmp/bot-setup.sh',
-      "RUN HOME=/opt/preinstalled/home PREINSTALLED_DIR=/opt/preinstalled NPM_CONFIG_PREFIX=/opt/preinstalled/npm-global UV_TOOL_DIR=/opt/preinstalled/uv-tools UV_TOOL_BIN_DIR=/opt/preinstalled/bin PYTHONUSERBASE=/opt/preinstalled/python CARGO_HOME=/opt/preinstalled/cargo GOPATH=/opt/preinstalled/go /bin/sh -eu -c '. /tmp/bot-setup-env.sh && /bin/sh -eu /tmp/bot-setup.sh' && rm -f /tmp/bot-setup.sh /tmp/bot-setup-env.sh",
+      "RUN mkdir -p /workspace/home && HOME=/opt/preinstalled/home PREINSTALLED_DIR=/opt/preinstalled NPM_CONFIG_PREFIX=/opt/preinstalled/npm-global UV_TOOL_DIR=/opt/preinstalled/uv-tools UV_TOOL_BIN_DIR=/opt/preinstalled/bin PYTHONUSERBASE=/opt/preinstalled/python CARGO_HOME=/opt/preinstalled/cargo GOPATH=/opt/preinstalled/go /bin/sh -eu -c '. /tmp/bot-setup-env.sh && /bin/sh -eu /tmp/bot-setup.sh' && rm -f /tmp/bot-setup.sh /tmp/bot-setup-env.sh",
     );
   }
   lines.push(
