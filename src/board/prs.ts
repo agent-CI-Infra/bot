@@ -91,6 +91,8 @@ function derivePrRow(
   const reviewStatus = review ? String(review.status) : '';
   const reviewTime = review ? String(review.updated_at || review.created_at || '') : '';
   const devTime = dev ? String(dev.updated_at || dev.created_at || '') : '';
+  const devNewerThanReview = !!dev && (!review || devTime > reviewTime);
+  const reviewNewerThanDev = !!review && (!dev || reviewTime > devTime);
   const reviewCreatedAt = review ? String(review.created_at || '') : '';
   const activeReviewDispatch = reviewDispatch && (!reviewCreatedAt || String(reviewDispatch.decided_at || reviewDispatch.created_at || '') >= reviewCreatedAt)
     ? reviewDispatch
@@ -118,26 +120,35 @@ function derivePrRow(
   } else if (review && activeReviewStates.has(reviewStatus)) {
     status = 'reviewing';
     reason = '正在检视 PR 改动与测试证据';
-  } else if (devBlocked && dev) {
+  } else if (devBlocked && dev && !reviewNewerThanDev) {
     status = 'needs_attention';
     const cause = explainFailure(dev.error_code, devStatus);
     reason = cause?.label || `PR 跟进修改受阻（${devStatus}）`;
     nextStep = cause?.action || '打开跟进任务查看原因并决定是否重试';
-  } else if (reviewBlocked && review) {
+  } else if (reviewBlocked && review && !(dev && doneStates.has(devStatus) && devNewerThanReview)) {
     status = 'needs_attention';
     const cause = explainFailure(review.error_code, reviewStatus);
     reason = cause?.label || `PR 检视受阻（${reviewStatus}）`;
     nextStep = cause?.action || '打开检视任务查看原因并处理';
+  } else if (!isClosed && !isDraft && checks && checks.failed > 0) {
+    status = 'needs_attention';
+    reason = `必需检查存在 ${checks.failed} 项失败（共 ${checks.total} 项）`;
+    nextStep = botPr ? '查看失败日志，可由维护者处理或指示 bot 继续修复' : '查看 GitHub Actions 失败检查并推送修复提交';
+  } else if (dev && doneStates.has(devStatus) && devNewerThanReview) {
+    if (isDraft) {
+      status = 'draft';
+      reason = '草稿 PR，已完成跟进修改，转为 Ready for review 后将重新检视';
+    } else {
+      status = 'pending';
+      const ciLabel = checkSummaryLabel(checks);
+      reason = ciLabel ? `已完成跟进修改，等待重新检视（${ciLabel}）` : '已完成跟进修改，等待重新检视';
+    }
   } else if (reviewNeedsHuman && review) {
     status = 'needs_attention';
     const humanAction = review.human_action ? clip(review.human_action, 220) : '';
     const rec = review.recommendation ? clip(review.recommendation, 220) : '';
     reason = humanAction || rec || 'PR 检视指出需要人工决定或补充说明';
     nextStep = '在 PR 中确认方案或处理检视意见';
-  } else if (!isClosed && !isDraft && checks && checks.failed > 0) {
-    status = 'needs_attention';
-    reason = `必需检查存在 ${checks.failed} 项失败（共 ${checks.total} 项）`;
-    nextStep = botPr ? '查看失败日志，可由维护者处理或指示 bot 继续修复' : '查看 GitHub Actions 失败检查并推送修复提交';
   } else if (review && doneStates.has(reviewStatus)) {
     status = 'reviewed';
     const rec = review.recommendation ? clip(review.recommendation, 200) : '';
@@ -149,10 +160,6 @@ function derivePrRow(
   } else if (isDraft) {
     status = 'draft';
     reason = '草稿 PR，bot 默认不触发自动检视';
-  } else if (dev && doneStates.has(devStatus)) {
-    status = 'reviewed';
-    const ciLabel = checkSummaryLabel(checks);
-    reason = ciLabel ? `已完成跟进修改（${ciLabel}）` : '已完成跟进修改';
   } else if (dev && devStatus === 'cancelled' && autoStopCodes.has(String(dev.error_code ?? ''))) {
     status = 'pending';
     reason = String(dev.error_code ?? '') === 'user_cancel' ? '跟进任务已由人工取消' : '跟进任务已自动停止';
@@ -283,11 +290,20 @@ function loadPrContextMaps(store: Store, repoIds: string[]) {
     }
   }
 
-  // Fallback head SHA from latest PR review/dev task when not a bot PR
-  for (const [key, row] of [...latestDev.entries(), ...latestReview.entries()]) {
+  // Fallback head SHA from the newest PR review/dev task (by updated_at, review wins ties) when not a bot PR
+  const taskKeys = new Set([...latestDev.keys(), ...latestReview.keys()]);
+  for (const key of taskKeys) {
     if (shaByPr.has(key)) continue;
-    if (row.head_sha && typeof row.head_sha === 'string') {
-      shaByPr.set(key, { repoId: String(row.repository_id), sha: row.head_sha });
+    const rev = latestReview.get(key);
+    const dev = latestDev.get(key);
+    const revSha = rev && typeof rev.head_sha === 'string' && rev.head_sha ? rev.head_sha : null;
+    const devSha = dev && typeof dev.head_sha === 'string' && dev.head_sha ? dev.head_sha : null;
+    if (!revSha && !devSha) continue;
+    const revTime = rev ? String(rev.updated_at || rev.created_at || '') : '';
+    const devTime = dev ? String(dev.updated_at || dev.created_at || '') : '';
+    const chosen = revSha && devSha ? (revTime >= devTime ? rev : dev) : (revSha ? rev : dev);
+    if (chosen && typeof chosen.head_sha === 'string' && chosen.head_sha) {
+      shaByPr.set(key, { repoId: String(chosen.repository_id), sha: chosen.head_sha });
     }
   }
 

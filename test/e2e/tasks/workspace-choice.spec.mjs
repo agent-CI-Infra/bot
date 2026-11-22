@@ -14,11 +14,10 @@ test('任务时间线写明用了哪个工作区、谁选的',async({page})=>{
       detail:'执行 agent 选用 worktree 777777777777（写，提交 aaaaaaa），先还原，原有改动（2 个文件）已保存到 ../context/saved-changes-777777777777-aaaaaaaaaaaa.patch。'});
     log('system-choice',1,{type:'workspace_chosen',decided_by:'system',choice:'create',worktree_id:'8'.repeat(48),mode:'read',head:'a'.repeat(40),detail:'系统新建 worktree 888888888888（读，提交 aaaaaaa）。'});
     await page.goto(h.adminBase);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(h.password);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.goto(h.adminBase+'/#/reviews');await expect(page.locator('[data-card-key="101/issue/1"]')).toBeVisible();
-    await page.evaluate(()=>openTask('chose-own'));
+    await page.goto(h.adminBase+'/#/tasks/chose-own');
     const own=page.locator('#timeline li').filter({hasText:'选用 worktree'});
     await expect(own).toContainText('工作区');await expect(own).toContainText('自选');await expect(own).toContainText('原有改动（2 个文件）已保存到 ../context/saved-changes-');
-    await page.evaluate(()=>openTask('system-choice'));
+    await page.goto(h.adminBase+'/#/tasks/system-choice');
     const system=page.locator('#timeline li').filter({hasText:'系统新建 worktree'});
     await expect(system).toContainText('工作区');await expect(system).toContainText('系统选择');
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);

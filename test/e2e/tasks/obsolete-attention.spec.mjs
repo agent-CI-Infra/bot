@@ -12,8 +12,7 @@ test('自动移出待处理的任务写明原因，详情里仍可点「重试�
     // The newer review of the same Issue starts and takes the older wait out of 待处理.
     await h.run();
     await page.goto(h.adminBase);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(h.password);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.goto(h.adminBase+'/#/reviews');await expect(page.locator('[data-card-key="101/issue/1"]')).toBeVisible();
-    await page.evaluate(()=>openTask('older-401'));
+    await page.goto(h.adminBase+'/#/tasks/older-401');
     const timeline=page.locator('#timeline'),obsolete=timeline.locator('.step-obsolete');
     // The original failure stays next to the dismissal, which names the state and code it left.
     await expect(timeline).toContainText('Bad credentials');

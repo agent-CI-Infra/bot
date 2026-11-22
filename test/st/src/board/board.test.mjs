@@ -26,6 +26,8 @@ test('retired legacy Kanban board endpoints answer 410 board_retired while Issue
 
   assert.equal((await admin('/api/board/issues?repository_id=101')).status, 200);
   assert.equal((await admin('/api/board/prs?repository_id=101')).status, 200);
+  assert.equal((await fetch(h.admin + '/board.js')).status, 404);
+  assert.equal((await fetch(h.admin + '/board.css')).status, 404);
 });
 
 test('verified webhooks project draft, closed and comment objects into board_objects without starting tasks', async t => {
