@@ -2,7 +2,7 @@
 // route reset the title to the generic chrome name, so a tab or a history entry never said which page it belonged to.
 // The title names the page the address belongs to, and a real address change moves the focus to that page's heading once.
 const pageTitleKeys = {
-  projects: 'nav.projects', board: 'nav.board', costs: 'nav.costs', management: 'nav.management',
+  projects: 'nav.projects', costs: 'nav.costs', management: 'nav.management',
   settings: 'nav.settings', inbox: 'nav.inbox', conversations: 'nav.conversations', 'new-task': 'nav.new_task',
   more: 'nav.more', external: 'nav.external', design: 'page.design', identity: 'identity.title', preferences: 'nav.preferences'
 };

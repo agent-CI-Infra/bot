@@ -915,7 +915,7 @@ export class ChannelService {
       this.employees.assertGrant(grant);protection={...protection,kind:'employee',grant_id:grant.id,grant_revision:grant.revision};
     }
     let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
-    return this.queue(source,card(`任务 ${task.id}\n状态：${task.status}\n${summary||task.summary}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),key,task.source_message,protection);
+    return this.queue(source,card(`任务 ${task.id}\n状态：${task.status}\n${summary||task.summary}${task.error_code?'\n原因：'+task.error_code:''}`,`${this.options.origin??''}/#/tasks/${encodeURIComponent(task.id)}`),key,task.source_message,protection);
   }
   /** A task a group delegated reports back to that group, only while the binding may still see its repository. */
   private serviceTaskResult(link:Row):string|undefined{
@@ -940,7 +940,7 @@ export class ChannelService {
     const name=this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??task.repository_id;
     const state=({completed:'已完成',succeeded:'已完成',pr_opened:'已提交 PR',cancelled:'已取消',failed:'失败'} as Record<string,string>)[task.status]??task.status;
     let summary='',pr='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');pr=String(result?.pr_url??'');}catch{}
-    return card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${pr&&pr!==summary?'\nPR：'+pr:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board');
+    return card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${pr&&pr!==summary?'\nPR：'+pr:''}${task.error_code?'\n原因：'+task.error_code:''}`,`${this.options.origin??''}/#/tasks/${encodeURIComponent(task.id)}`);
   }
   /**
    * A task the management assistant created in a private chat (#844) is linked to that chat and the message that asked for it,

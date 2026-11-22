@@ -1,6 +1,6 @@
 // Project work pages live in the scope navigation; settings share one secondary category list.
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['board', '任务看板'], ['inbox', '待处理'], ['costs', '用量与成本'], ['new-task', '新建任务'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['triggers', '监听与触发'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '定时任务与通知'], ['external', '外部执行'], ['members', '成员']];
+const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['inbox', '待处理'], ['costs', '用量与成本'], ['new-task', '新建任务'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['triggers', '监听与触发'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '定时任务与通知'], ['external', '外部执行'], ['members', '成员']];
 // Settings categories are shared by the secondary nav and the phone page picker.
 const projectSettingsSections = [
   ['basic', '基本设置', '项目概况、分支与启停'],
@@ -14,7 +14,7 @@ const projectSettingsSections = [
 ];
 // One source for the scope sidebar, phone page picker and the current-project group in More.
 function projectWorkSections() {
-  return [['overview', t('nav.project_overview')], ['board', t('nav.board')], ['inbox', t('nav.inbox')], ['management', t('nav.management')],
+  return [['overview', t('nav.project_overview')], ['inbox', t('nav.inbox')], ['management', t('nav.management')],
     ['release', t('nav.project_release')], ['knowledge', t('nav.project_knowledge')], ['activity', t('nav.project_activity')],
     ...(me.role === 'super_admin' ? [['costs', t('nav.costs')]] : [])];
 }

@@ -25,7 +25,6 @@ async function renderProject(route) {
       if (current?.id === route.id) current.rolesDraft = null;
       // A newly forbidden project must not retain the work page it displayed before its grant was revoked.
       $('console-page').replaceChildren(); $('costs-panel').replaceChildren();
-      if (typeof resetBoard === 'function') resetBoard();
       if (typeof taskCreationDrafts !== 'undefined') taskCreationDrafts.delete(route.id);
       if (typeof leaveManagementPage === 'function') leaveManagementPage();
     }

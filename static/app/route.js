@@ -45,7 +45,7 @@ function addressTab(hash) {
   const project = projectRoute(hash);
   if (project) return projectConsoleRoute(project) ? project.section : 'projects';
   if (hash === '#/projects') return 'projects';
-  if (['#/reviews', '#/developments'].includes(hash)) return 'board';
+  if (/^#\/(?:board|reviews|developments)(?:\/.*)?$/.test(hash.split('?')[0])) return 'projects';
   if (onboardingAddress.test(hash)) return 'settings';
   if (hash === '#external') return 'external';
   // #224-A: the component/state sample page. It has an address of its own so a deep link works, and no #tabs entry:
@@ -75,6 +75,11 @@ async function route() {
   if (oldInbox) history.replaceState(null, '', `#/projects/${oldInbox[1]}/inbox${oldInbox[2] ? '/' + oldInbox[2] : ''}`);
   const oldMenu = /^#\/projects\/([1-9]\d*)\/menu$/.exec(location.hash);
   if (oldMenu) history.replaceState(null, '', `#/projects/${oldMenu[1]}/overview`);
+  // #1222: the legacy console Kanban board is retired; single-project board redirects to Project Overview Tasks,
+  // and global board / reviews / developments addresses redirect to the Projects list.
+  const oldProjectBoard = /^#\/projects\/([1-9]\d*)\/board(?:\/.*)?$/.exec(location.hash.split('?')[0]);
+  if (oldProjectBoard) history.replaceState(null, '', `#/projects/${oldProjectBoard[1]}/overview/tasks`);
+  if (/^#\/(?:board|reviews|developments)(?:\/.*)?$/.test(location.hash.split('?')[0])) history.replaceState(null, '', '#/projects');
   const oldCreation = /^#\/new-task\/([1-9]\d*)$/.exec(location.hash);
   if (oldCreation) history.replaceState(null, '', `#/projects/${oldCreation[1]}/new-task`);
   const legacy = legacyOnboardingAddress.exec(location.hash);
@@ -124,8 +129,6 @@ async function route() {
   // #553: a list read that this navigation abandoned must not leave its loading state behind the hidden list.
   if (list.hidden) $('rows').querySelector(':scope > .console-state-loading')?.remove();
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
-  // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
-  document.body.classList.toggle('board-mode', tab === 'board');
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', (!target || projectConsoleRoute(target)) && el.dataset.tab === activeNavTab ? 'page' : 'false'));
   // A second address can arrive while the first one is still loading (a hash change during a list read): the newer

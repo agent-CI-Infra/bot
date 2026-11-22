@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 import { rmSync, mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
-test('每个页面都有地址，旧任务地址进入看板类别；全局设置按类别打开', async ({ page, browser }) => {
+test('每个页面都有地址，旧看板与任务地址原地重定向；全局设置按类别打开', async ({ page, browser }) => {
   const h = await harness(), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
@@ -16,15 +16,20 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Accounts, users, review and development no longer have top-level tabs.
     for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导', '消息渠道']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => ({ click: () => consoleNavigate(page, name) }), current = () => page.locator('#tabs [aria-current=page]');
-    for (const [name, address] of [['任务看板', '#/board'], ['用量与成本', '#/costs'], ['外部执行端', '#/external'], ['管理助手', '#/management'], ['项目', '#/projects']]) {
+    for (const [name, address] of [['用量与成本', '#/costs'], ['外部执行端', '#/external'], ['管理助手', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
       await page.reload(); await expect(current()).toHaveText(name === '外部执行端' ? '个人设置' : name);
       if (name === '外部执行端') await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('外部执行端');
     }
-    for (const [address, category] of [['#/reviews', 'review'], ['#/developments', 'development']]) {
-      await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('任务看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue(category);
-      await expect(page).toHaveURL(/#\/board$/); await page.reload(); await expect(current()).toHaveText('任务看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('');
+    // #1222: legacy board/review/development routes redirect cleanly to projects or project overview tasks.
+    for (const address of ['#/board', '#/reviews', '#/developments']) {
+      await page.goto(h.admin + '/' + address);
+      await expect(page).toHaveURL(/#\/projects$/);
+      await expect(current()).toHaveText('项目');
     }
+    await page.goto(h.admin + '/#/projects/101/board');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview\/tasks$/);
+    await expect(current()).toHaveText('项目总览');
     // #966: the old delivery-list address is unknown. It shows the existing not-found page and does not read deliveries.
     const eventsRequests = [];
     const noteEvents = request => { if (request.url().includes('/api/events')) eventsRequests.push(request.url()); };
@@ -65,11 +70,6 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await expect(page.locator('#settings-panel')).toContainText('administrator');
     await expect(page.locator('#console-page [data-page-not-found="console"]')).toHaveCount(0);
     await expect(page.locator('#message')).not.toContainText('URI malformed');
-    // A changed task is picked up by the board's quiet refresh without leaving the selected category.
-    await page.goto(h.admin + '/#/reviews'); await expect(page.locator('.board-card')).toHaveCount(4);
-    h.store.run("UPDATE tasks SET status='succeeded',phase='done' WHERE id='t1'");
-    await page.evaluate(() => boardPoll()); await expect(page.locator('[data-card-key="101/issue/1"]')).toContainText('检视 Issue 已完成');
-    await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('review');
     // A project administrator has no global settings; its address falls back to the projects page.
     const memberPassword = testPassword(); await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: ['101'] });
     const context = await browser.newContext(), member = await context.newPage(); await member.goto(h.admin + '/#/settings/users');

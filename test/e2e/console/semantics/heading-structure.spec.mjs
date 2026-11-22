@@ -87,16 +87,13 @@ for (const [width, height] of viewports) {
       await expect(page.locator('#page-title')).toHaveText('项目');
       const problems = [], checked = [], detail = [];
 
-      // The board hides the shared toolbar (and its h1) in CSS, so its own visible heading has to start the page.
-      await page.goto(h.admin + '/#/board');
-      await expect(page.locator('#board-columns')).toBeVisible();
-      await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-      const board = await outlineProblems(page, '#/board');
-      problems.push(...board.problems);
-      checked.push('#/board');
-      if (!board.headings.length || board.headings[0].level !== 1 || board.headings[0].text !== '任务看板') {
-        problems.push('#/board: the first visible heading is not an h1 named 任务看板');
-      }
+      // Project overview PR Progress keeps one visible h1 (the project name in the header) and an unbroken heading order.
+      await page.goto(h.admin + '/#/projects/101/overview/prs');
+      await expect(page.locator('.workspace-overview')).toBeVisible();
+      await expect(page.locator('.workbench-pr-section')).toBeVisible();
+      const prs = await outlineProblems(page, '#/projects/101/overview/prs');
+      problems.push(...prs.problems);
+      checked.push('#/projects/101/overview/prs');
 
       // The categories come from the registry the settings shell itself uses, so a new section is covered by adding it
       // to static/settings/nav.js and nothing else. The checked list below is what the count at the end asserts on:

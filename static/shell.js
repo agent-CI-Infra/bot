@@ -148,7 +148,7 @@ function consoleGroups() {
 // Real links expose their scope before activation. Reconcile in place so async page reads do not discard keyboard focus.
 function syncConsoleNavigation(repo) {
   const project = projectRoute(), id = repo ? String(repo.id) : null, isSuper = me.role === 'super_admin';
-  const entries = id ? projectWorkSections() : [['projects', t('nav.projects')], ['board', t('nav.board')], ['inbox', t('nav.inbox')], ['management', t('nav.management')], ...(isSuper ? [['costs', t('nav.costs')]] : [])];
+  const entries = id ? projectWorkSections() : [['projects', t('nav.projects')], ['inbox', t('nav.inbox')], ['management', t('nav.management')], ...(isSuper ? [['costs', t('nav.costs')]] : [])];
   const active = tab === 'task' ? null : project ? (projectSettingsSections.some(([key]) => key === project.section) ? 'basic' : project.section) : ['identity', 'preferences', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   const primary = document.querySelector('.console-primary-nav'), settings = document.querySelector('.console-settings-nav');
   const rows = [...entries.map(([key, caption]) => ({ key, caption, href: consolePageAddress(key, id) })),
@@ -190,7 +190,6 @@ function syncConsoleShell() {
     if (typeof resetTaskCreation === 'function') resetTaskCreation();
     if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles();
     if (typeof resetScheduleViews === 'function') resetScheduleViews();
-    if (typeof resetBoard === 'function') resetBoard();
     if (typeof resetPersonalApps === 'function') resetPersonalApps();
     consoleOwner = me?.id || null; consolePositions.clear(); consoleRouteKey = null;
     syncConsoleScope();
@@ -302,9 +301,9 @@ function syncConsoleShell() {
 // reports it as the current destination instead of naming a page underneath it.
 function syncConsoleMobileCurrent() {
   const chat = typeof managementChatState === 'function' ? managementChatState() : null;
-  const chosen = chat?.open ? 'assistant' : ['projects', 'board', 'inbox'].includes(tab) ? tab : ['design', 'not-found'].includes(tab) ? '' : 'more';
+  const chosen = chat?.open ? 'assistant' : ['projects', 'inbox'].includes(tab) ? tab : ['design', 'not-found'].includes(tab) ? '' : 'more';
   for (const a of $('console-mobile-nav').querySelectorAll('a')) {
-    if (['projects', 'board', 'inbox'].includes(a.dataset.page)) a.href = consolePageAddress(a.dataset.page);
+    if (['projects', 'inbox'].includes(a.dataset.page)) a.href = consolePageAddress(a.dataset.page);
     if (a.dataset.page === chosen) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
 }
@@ -371,7 +370,10 @@ async function renderConsoleInbox(request) {
     if (!rows.length) {
       body.append(consoleState('当前范围没有待处理任务', '这表示未发现上述等待或失败事项，不代表服务、CI 或其他任务已经全部成功。'));
       const next = element('div', '', 'console-inbox-next');
-      next.append(consoleLink(consolePageAddress('board', id || null), '查看任务看板'), consoleLink(consolePageAddress('new-task', id || null), '新建任务'));
+      next.append(
+        consoleLink(id ? `#/projects/${id}/overview/tasks` : '#/projects', id ? '查看项目总览' : '查看项目列表'),
+        consoleLink(consolePageAddress('new-task', id || null), '新建任务'),
+      );
       body.append(next);
     } else {
       body.append(element('p', `本页 ${rows.length} 项 · 按最近状态变更时间从早到晚排列`, 'muted'));
@@ -550,7 +552,7 @@ function initConsoleShell() {
   // and its accessible name — is exactly its destination, and the badge stays decorative.
   const mobile = element('nav', '', 'console-mobile-nav'); mobile.id = 'console-mobile-nav'; mobile.hidden = true; mobile.setAttribute('aria-label', t('nav.mobile')); mobile.setAttribute('data-i18n', 'nav.mobile'); mobile.setAttribute('data-i18n-attr', 'aria-label');
   for (const [key, href, captionKey, iconName] of [
-    ['projects', '#/projects', 'nav.projects', 'home'], ['board', '#/board', 'nav.tasks_short', 'board'], ['inbox', '#/inbox', 'nav.inbox', 'inbox'],
+    ['projects', '#/projects', 'nav.projects', 'home'], ['inbox', '#/inbox', 'nav.inbox', 'inbox'],
     ['assistant', '#/management', 'nav.assistant', 'chat'], ['more', '#/more', 'nav.more_short', 'more']]) {
     const caption = t(captionKey);
     const a = consoleLink(href, caption);

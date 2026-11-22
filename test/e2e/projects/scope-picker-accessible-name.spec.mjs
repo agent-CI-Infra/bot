@@ -25,9 +25,9 @@ const nameMismatch = selector => page => page.evaluate((selector) => {
 }, selector);
 
 const triggers = { 390: '#console-mobile-project', 1440: '#console-project' };
-const routes = ['#/settings/storage', '#/board'];
+const routes = ['#/settings/storage', '#/projects'];
 
-test('#1060 项目切换器的可访问名包含可见文字：1440/390 的 storage 与 board 上 label-content-name-mismatch 为 0', async ({ page }) => {
+test('#1060 项目切换器的可访问名包含可见文字：1440/390 的 storage 与 projects 上 label-content-name-mismatch 为 0', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -36,7 +36,7 @@ test('#1060 项目切换器的可访问名包含可见文字：1440/390 的 stor
     const owner = await account(admin);
     for (const id of ['101', '202', '303']) await repository(admin, owner.id, id);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(h.admin + '/#/board');
+    await page.goto(h.admin + '/#/projects');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -55,9 +55,9 @@ test('#1060 项目切换器的可访问名包含可见文字：1440/390 的 stor
     }
     expect(readings.map(({ width, route, present, label, violations }) => ({ width, route, present, label, violations }))).toEqual([
       { width: '390', route: '#/settings/storage', present: true, label: '', violations: 0 },
-      { width: '390', route: '#/board', present: true, label: '', violations: 0 },
+      { width: '390', route: '#/projects', present: true, label: '', violations: 0 },
       { width: '1440', route: '#/settings/storage', present: true, label: '', violations: 0 },
-      { width: '1440', route: '#/board', present: true, label: '', violations: 0 },
+      { width: '1440', route: '#/projects', present: true, label: '', violations: 0 },
     ]);
 
     for (const [width, selector] of Object.entries(triggers)) {

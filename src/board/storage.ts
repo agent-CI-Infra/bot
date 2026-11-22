@@ -33,6 +33,22 @@ export function boardStorage(store: Store): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS board_issue_tasks_repo_num ON board_issue_tasks(repository_id,object_number,role_kind,updated_at DESC,created_at DESC);
+    CREATE TABLE IF NOT EXISTS board_pr_tasks(
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      object_number INTEGER NOT NULL CHECK(object_number>0),
+      role_kind TEXT NOT NULL CHECK(role_kind IN ('review','development')),
+      status TEXT NOT NULL,
+      error_code TEXT,
+      conclusion TEXT,
+      recommendation TEXT,
+      human_action TEXT,
+      head_sha TEXT,
+      no_changes INTEGER NOT NULL DEFAULT 0,
+      summary TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS board_pr_tasks_repo_num ON board_pr_tasks(repository_id,object_number,role_kind,updated_at DESC,created_at DESC);
     CREATE INDEX IF NOT EXISTS board_task_object ON tasks(repository_id,object_number,kind,created_at DESC);
     CREATE INDEX IF NOT EXISTS board_task_latest ON tasks(repository_id,object_number,kind,coalesce(nullif(updated_at,''),created_at) DESC,created_at DESC);
     -- Everything the board needs from a task (see latestTasks in api.ts), so card lists never read a tasks row.
@@ -138,6 +154,48 @@ export function boardStorage(store: Store): void {
       status=excluded.status,error_code=excluded.error_code,conclusion=excluded.conclusion,
       recommendation=excluded.recommendation,human_action=excluded.human_action,pr_number=excluded.pr_number,
       pr_url=excluded.pr_url,no_changes=excluded.no_changes,summary=excluded.summary,updated_at=excluded.updated_at;`;
+  const prRoleExpr = `CASE
+      WHEN s.kind='development.pr' THEN 'development'
+      WHEN s.kind='review.pr' THEN 'review'
+      WHEN s.kind='task.request' AND json_valid(s.input) AND json_extract(s.input,'$.target.type')='pr' THEN
+        CASE
+          WHEN EXISTS(SELECT 1 FROM task_write_grants g WHERE g.task_id=s.id AND json_valid(g.writes) AND EXISTS(SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))
+            OR json_extract(s.input,'$.intent')='development'
+            OR (json_valid(s.result) AND json_extract(s.result,'$.delivery')='pull_request') THEN 'development'
+          WHEN EXISTS(SELECT 1 FROM task_write_grants g WHERE g.task_id=s.id AND json_valid(g.writes) AND EXISTS(SELECT 1 FROM json_each(g.writes) WHERE value='review'))
+            OR json_extract(s.input,'$.delivery')='review'
+            OR (json_valid(s.result) AND (json_type(s.result,'$.review_delivery')='object' OR typeof(json_extract(s.result,'$.conclusion'))='text')) THEN 'review'
+          ELSE NULL
+        END
+      ELSE NULL END`;
+  const prTaskProjection = (where: string) => `INSERT INTO board_pr_tasks(
+      task_id,repository_id,object_number,role_kind,status,error_code,conclusion,recommendation,human_action,head_sha,no_changes,summary,created_at,updated_at)
+    SELECT s.id,s.repository_id,s.object_number,(${prRoleExpr}),s.status,s.error_code,
+      CASE WHEN json_valid(s.result) AND typeof(coalesce(json_extract(s.result,'$.conclusion'),json_extract(s.result,'$.review_delivery.conclusion')))='text'
+        THEN substr(coalesce(json_extract(s.result,'$.conclusion'),json_extract(s.result,'$.review_delivery.conclusion')),1,64) END,
+      CASE WHEN json_valid(s.result) AND typeof(coalesce(json_extract(s.result,'$.recommendation'),json_extract(s.result,'$.review_delivery.recommendation')))='text'
+        THEN substr(coalesce(json_extract(s.result,'$.recommendation'),json_extract(s.result,'$.review_delivery.recommendation')),1,500) END,
+      CASE WHEN json_valid(s.result) THEN substr((
+        SELECT coalesce(nullif(trim(json_extract(f.value,'$.human_action')),''),trim(json_extract(f.value,'$.body')))
+        FROM json_each(CASE
+          WHEN json_type(s.result,'$.findings')='array' THEN json_extract(s.result,'$.findings')
+          WHEN json_type(s.result,'$.review_delivery.findings')='array' THEN json_extract(s.result,'$.review_delivery.findings')
+          ELSE '[]' END) f
+        WHERE json_type(f.value)='object' AND json_extract(f.value,'$.requires_human_decision')=1
+        LIMIT 1),1,500) END,
+      CASE WHEN typeof(s.head_sha)='text' AND length(trim(s.head_sha))>0 THEN substr(trim(s.head_sha),1,64) END,
+      CASE WHEN json_valid(s.result) AND json_extract(s.result,'$.status')='no_changes' THEN 1 ELSE 0 END,
+      CASE WHEN typeof(s.summary)='text' THEN substr(s.summary,1,300) END,
+      s.created_at,coalesce(nullif(s.updated_at,''),s.created_at)
+    FROM tasks s
+    WHERE ${where} AND s.repository_id IS NOT NULL
+      AND typeof(s.object_number)='integer' AND s.object_number BETWEEN 1 AND 9007199254740991
+      AND (${prRoleExpr}) IS NOT NULL
+    ON CONFLICT(task_id) DO UPDATE SET
+      repository_id=excluded.repository_id,object_number=excluded.object_number,role_kind=excluded.role_kind,
+      status=excluded.status,error_code=excluded.error_code,conclusion=excluded.conclusion,
+      recommendation=excluded.recommendation,human_action=excluded.human_action,head_sha=excluded.head_sha,
+      no_changes=excluded.no_changes,summary=excluded.summary,updated_at=excluded.updated_at;`;
   // Triggers also cover executor updates, retries and cancellations without changing execution policy.
   // On tasks, status/lease/phase updates only advance last_seen; input and result JSON are parsed only when those columns change.
   for (const operation of ['INSERT','UPDATE'] as const) {
@@ -148,7 +206,7 @@ export function boardStorage(store: Store): void {
   store.transaction(()=>store.db.exec(`
     DROP TRIGGER IF EXISTS board_tasks_insert;
     CREATE TRIGGER board_tasks_insert AFTER INSERT ON tasks BEGIN
-      ${projection('tasks', 's', 's.rowid=NEW.rowid')} ${published('s.rowid=NEW.rowid')} ${issueTaskProjection('s.rowid=NEW.rowid')} END;
+      ${projection('tasks', 's', 's.rowid=NEW.rowid')} ${published('s.rowid=NEW.rowid')} ${issueTaskProjection('s.rowid=NEW.rowid')} ${prTaskProjection('s.rowid=NEW.rowid')} END;
     DROP TRIGGER IF EXISTS board_tasks_update;
     DROP TRIGGER IF EXISTS board_tasks_update_input;
     DROP TRIGGER IF EXISTS board_tasks_update_seen;
@@ -181,18 +239,21 @@ export function boardStorage(store: Store): void {
     BEGIN
       ${published('s.rowid=NEW.rowid')}
     END;
-    CREATE TRIGGER board_issue_tasks_update AFTER UPDATE OF repository_id, kind, status, error_code, object_number, input, result, summary, updated_at, created_at ON tasks
+    CREATE TRIGGER board_issue_tasks_update AFTER UPDATE OF repository_id, kind, status, error_code, object_number, head_sha, input, result, summary, updated_at, created_at ON tasks
     WHEN NEW.repository_id IS NOT OLD.repository_id OR NEW.kind IS NOT OLD.kind OR NEW.status IS NOT OLD.status
-      OR NEW.error_code IS NOT OLD.error_code OR NEW.object_number IS NOT OLD.object_number OR NEW.input IS NOT OLD.input
-      OR NEW.result IS NOT OLD.result OR NEW.summary IS NOT OLD.summary OR NEW.updated_at IS NOT OLD.updated_at
+      OR NEW.error_code IS NOT OLD.error_code OR NEW.object_number IS NOT OLD.object_number OR NEW.head_sha IS NOT OLD.head_sha
+      OR NEW.input IS NOT OLD.input OR NEW.result IS NOT OLD.result OR NEW.summary IS NOT OLD.summary OR NEW.updated_at IS NOT OLD.updated_at
     BEGIN
       ${issueTaskProjection('s.rowid=NEW.rowid')}
+      ${prTaskProjection('s.rowid=NEW.rowid')}
     END;
     CREATE TRIGGER board_issue_tasks_grants_insert AFTER INSERT ON task_write_grants BEGIN
       ${issueTaskProjection('s.id=NEW.task_id')}
+      ${prTaskProjection('s.id=NEW.task_id')}
     END;
     CREATE TRIGGER board_issue_tasks_grants_update AFTER UPDATE OF writes ON task_write_grants WHEN NEW.writes IS NOT OLD.writes BEGIN
       ${issueTaskProjection('s.id=NEW.task_id')}
+      ${prTaskProjection('s.id=NEW.task_id')}
     END;
   `));
   if (!store.get("SELECT 1 FROM settings WHERE key='board_projection_v1'")) {
@@ -228,6 +289,21 @@ export function boardStorage(store: Store): void {
       }
       store.run("INSERT OR REPLACE INTO settings VALUES('board_issue_tasks_v1','1')");
       store.run("INSERT OR REPLACE INTO settings VALUES('board_issue_tasks_v2','1')");
+    });
+  }
+  if (!store.get("SELECT 1 FROM settings WHERE key='board_pr_tasks_v1'")) {
+    store.transaction(() => {
+      store.db.exec('DELETE FROM board_pr_tasks');
+      let after = 0;
+      for (;;) {
+        const rows = store.all('SELECT rowid FROM tasks WHERE rowid>? ORDER BY rowid LIMIT 250', after);
+        if (!rows.length) break;
+        const end = Number(rows.at(-1)!.rowid);
+        store.db.exec(projection('tasks', 's', `s.rowid>${after} AND s.rowid<=${end}`));
+        store.db.exec(prTaskProjection(`s.rowid>${after} AND s.rowid<=${end}`));
+        after = end;
+      }
+      store.run("INSERT OR REPLACE INTO settings VALUES('board_pr_tasks_v1','1')");
     });
   }
 }

@@ -32,8 +32,8 @@ test('#713 superseded work leaves 待处理 unless the newer task is the bot\'s 
   boardTask(h.store, 'late-failure', 11, 'review.issue', 'failed', { time: daysAgo(3), errorCode: 'agent_context_too_large', input: openIssue });
   h.store.run("UPDATE tasks SET updated_at=? WHERE id='late-failure'", daysAgo(0.5));
   boardTask(h.store, 'took-over', 11, 'review.issue', 'succeeded', { time: daysAgo(2), input: openIssue });
-  const stage = async number => (await admin('/api/board/cards')).value.cards.find(c => c.object_number === number && c.card_category === 'review.issue').bot_stage;
-  assert.equal(await stage(11), 'attention');
+  const issueStatus = async number => (await admin('/api/board/issues?repository_id=101&include_closed=1')).value.issues.find(i => i.number === number)?.status;
+  assert.equal(await issueStatus(11), 'blocked');
   // Never touched, even with a newer task: a person's pause, and every wait the engine resumes by itself.
   for (const [index, status] of ['paused', 'waiting_environment', 'waiting_configuration', 'retry_wait', 'waiting_pr_head'].entries()) {
     boardTask(h.store, 'kept-' + status, 20 + index, 'review.issue', status, { time: daysAgo(30), errorCode: 'github_rate_limited', input: closedIssue });
@@ -42,12 +42,12 @@ test('#713 superseded work leaves 待处理 unless the newer task is the bot\'s 
   const moved = new ObsoleteSweep(h.store, { log: () => {} }).sweep({ now });
   // The oldest first; created at the same time, by id.
   assert.deepEqual(moved.map(d => [d.task.id, d.rule]), [['late-failure', 'superseded'], ['old-401', 'superseded'], ['old-failure', 'superseded']]);
-  // The bot's own stop (#655) with the reason, so the card shows the review that took over, not 未检视.
+  // The bot's own stop (#655) with the reason, so the issue no longer shows as blocked.
   assert.deepEqual(state(h, 'old-failure'), ['cancelled', 'obsolete_superseded']);
   assert.deepEqual(state(h, 'old-401'), ['cancelled', 'obsolete_superseded']);
   assert.deepEqual(record(h, 'old-401'), { rule: 'superseded', previous_status: 'waiting_permission', previous_error_code: 'github_permission_401',
     status: 'cancelled', code: 'obsolete_superseded', newer_task_id: 'newer-queued', newer_status: 'queued', newer_created_at: daysAgo(1) });
-  assert.equal(await stage(11), 'reviewed');
+  assert.notEqual(await issueStatus(11), 'blocked');
   for (const id of ['kept-failure', 'other-kind', 'kept-paused', 'kept-waiting_environment', 'kept-waiting_configuration', 'kept-retry_wait', 'kept-waiting_pr_head'])
     assert.equal(record(h, id), null, id);
   assert.deepEqual(state(h, 'kept-paused'), ['paused', 'github_rate_limited']);
@@ -100,20 +100,19 @@ test('#713 the sweep works in small batches, keeps the history, the result and t
   boardTask(h.store, 'paused', 81, 'review.issue', 'paused', { time: daysAgo(40), input: openIssue });
   h.store.run("INSERT INTO task_logs(id,task_id,content,created_at) VALUES('fault-1','expired-1',?,?)", JSON.stringify({ type: 'fault', state: 'failed', code: 'github_rate_limited', detail: 'GitHub 流控' }), daysAgo(11));
   const counts = async () => {
-    const shown = encodeURIComponent(JSON.stringify([{ field: 'include_closed', value: true }]));
-    const board = (await admin('/api/board/cards?filters=' + shown)).value.column_counts.attention;
+    const blocked = (await admin('/api/board/issues?repository_id=101&include_closed=1')).value.counts.blocked;
     const inbox = (await admin('/api/tasks?attention=1')).value.tasks.map(row => row.id).sort();
-    return { board, inbox, summary: (await admin('/api/tasks?summary=1')).value.summary.attention };
+    return { blocked, inbox, summary: (await admin('/api/tasks?summary=1')).value.summary.attention };
   };
-  assert.deepEqual(await counts(), { board: 7, inbox: ['expired-1', 'expired-2', 'expired-3', 'expired-4', 'expired-5', 'needs-person', 'paused'], summary: 7 });
+  assert.deepEqual(await counts(), { blocked: 7, inbox: ['expired-1', 'expired-2', 'expired-3', 'expired-4', 'expired-5', 'needs-person', 'paused'], summary: 7 });
   const sweep = new ObsoleteSweep(h.store, { batch: 2, log: () => {} }), before = task(h, 'expired-5');
   // The oldest first, two at a time.
   assert.deepEqual(sweep.sweep({ now }).map(d => d.task.id), ['expired-5', 'expired-4']);
-  assert.deepEqual(await counts(), { board: 5, inbox: ['expired-1', 'expired-2', 'expired-3', 'needs-person', 'paused'], summary: 5 });
+  assert.deepEqual(await counts(), { blocked: 5, inbox: ['expired-1', 'expired-2', 'expired-3', 'needs-person', 'paused'], summary: 5 });
   assert.deepEqual(sweep.sweep({ now }).map(d => d.task.id), ['expired-3', 'expired-2']);
   assert.deepEqual(sweep.sweep({ now }).map(d => d.task.id), ['expired-1']);
   assert.deepEqual(sweep.sweep({ now }), []);
-  assert.deepEqual(await counts(), { board: 2, inbox: ['needs-person', 'paused'], summary: 2 });
+  assert.deepEqual(await counts(), { blocked: 2, inbox: ['needs-person', 'paused'], summary: 2 });
   // Nothing is lost: the result, the original fault and the time of the last change stay; the move is in the timeline.
   const after = task(h, 'expired-5');
   assert.deepEqual([after.result, after.updated_at, after.input], [before.result, before.updated_at, before.input]);

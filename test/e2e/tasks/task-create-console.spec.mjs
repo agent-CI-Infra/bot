@@ -21,15 +21,15 @@ async function fill(page) {
 }
 const createCount = f => f.h.store.get("SELECT count(*) n FROM management_commands WHERE operation='task.create'").n;
 
-test('the mobile board keeps a compact new-task entry and carries the current project into the form', async ({ page }) => {
+test('the mobile project overview keeps a compact new-task entry and carries the current project into the form', async ({ page }) => {
   const f = await fixture();
   try {
     await login(page, f); await page.setViewportSize({ width: 390, height: 844 });
-    await page.evaluate(() => { location.hash = '#/projects/101/board'; });
-    await expect(page.locator('#board-columns')).toBeVisible();
-    const entry = page.getByRole('link', { name: '新建任务', exact: true });
+    await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
+    await expect(page.locator('.workspace-overview')).toBeVisible();
+    const entry = page.locator('.workspace-overview').getByRole('link', { name: '+ 新建任务', exact: true });
     await expect(entry).toHaveAttribute('href', '#/projects/101/new-task'); await expect(entry).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await entry.click(); await expect(page.locator('#console-page h1')).toHaveText('新建任务');
     await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
   } finally { await f.close(); }

@@ -28,16 +28,16 @@ async function fixture() {
 
 const destinations = page => page.locator('#console-mobile-nav a');
 
-test('390px 底栏是五个稳定目的地，各自至少 44px 并标明当前路由', async ({ page }) => {
+test('390px 底栏是四个稳定目的地，各自至少 44px 并标明当前路由', async ({ page }) => {
   const { h, password } = await fixture();
   try {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page, h, password);
     const bar = page.locator('#console-mobile-nav');
     await expect(bar).toBeVisible();
-    await expect(destinations(page)).toHaveCount(5);
+    await expect(destinations(page)).toHaveCount(4);
     expect(await destinations(page).evaluateAll(links => links.map(link => [link.dataset.page, link.innerText.trim()])))
-      .toEqual([['projects', '项目'], ['board', '任务'], ['inbox', '待处理'], ['assistant', '助手'], ['more', '更多']]);
+      .toEqual([['projects', '项目'], ['inbox', '待处理'], ['assistant', '助手'], ['more', '更多']]);
     // 44px is the touch target, not the label: the anchor itself has to be big enough to hit.
     for (const link of await destinations(page).all()) {
       const box = await link.boundingBox();
@@ -45,7 +45,7 @@ test('390px 底栏是五个稳定目的地，各自至少 44px 并标明当前�
       expect(box.width).toBeGreaterThanOrEqual(44);
     }
     // Each destination reports the route it stands on, and only that one.
-    for (const [page_, hash] of [['projects', '#/projects'], ['board', '#/board'], ['inbox', '#/inbox'], ['more', '#/more']]) {
+    for (const [page_, hash] of [['projects', '#/projects'], ['inbox', '#/inbox'], ['more', '#/more']]) {
       await page.goto(h.admin + '/' + hash);
       await expect(page.locator(`#console-mobile-nav a[data-page="${page_}"]`)).toHaveAttribute('aria-current', 'page');
       expect(await destinations(page).evaluateAll(links => links.filter(link => link.getAttribute('aria-current') === 'page').length)).toBe(1);
@@ -59,10 +59,10 @@ test('767px 是真实断点：767 仍是移动底栏，768 回到桌面侧栏', 
     await page.setViewportSize({ width: 767, height: 900 });
     await login(page, h, password);
     await expect(page.locator('#console-mobile-nav')).toBeVisible();
-    await expect(destinations(page)).toHaveCount(5);
+    await expect(destinations(page)).toHaveCount(4);
     await expect(page.locator('#console-sidebar')).toBeHidden();
     await page.setViewportSize({ width: 768, height: 900 });
-    await page.goto(h.admin + '/#/board');
+    await page.goto(h.admin + '/#/inbox');
     await expect(page.locator('#console-mobile-nav')).toBeHidden();
     await expect(page.locator('#console-sidebar')).toBeVisible();
   } finally { await h.stop(); }
@@ -72,7 +72,7 @@ test('移动端从底栏「助手」进入普通页面，桌面只从侧栏进�
   const f = await managementFixture();
   try {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(f.h.admin + '/#/board');
+    await page.goto(f.h.admin + '/#/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -84,11 +84,11 @@ test('移动端从底栏「助手」进入普通页面，桌面只从侧栏进�
     await expect(window_).toBeVisible(); await expect(page).toHaveURL(/#\/management$/);
     await expect(page.getByRole('button', { name: '会话记录', exact: true })).toBeVisible();
     await expect(assistant).toHaveAttribute('aria-current', 'page');
-    await page.locator('#console-mobile-nav a[data-page="board"]').click();
-    await expect(window_).toBeHidden(); await expect(page).toHaveURL(/#\/board$/);
+    await page.locator('#console-mobile-nav a[data-page="inbox"]').click();
+    await expect(window_).toBeHidden(); await expect(page).toHaveURL(/#\/inbox$/);
     await assistant.click(); await expect(window_).toBeVisible();
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(f.h.admin + '/#/board');
+    await page.goto(f.h.admin + '/#/inbox');
     await expect(page.locator('#console-mobile-nav')).toBeHidden();
     await expect(page.locator('#console-sidebar')).toBeVisible(); await expect(page.locator('#management-launcher')).toHaveCount(0);
   } finally { await f.close(); }
@@ -98,7 +98,7 @@ test('助手的作用域与会话在底栏入口处保留，不因页面切换�
   const f = await managementFixture();
   try {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(f.h.admin + '/#/board');
+    await page.goto(f.h.admin + '/#/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -115,7 +115,7 @@ test('助手的作用域与会话在底栏入口处保留，不因页面切换�
     const id = await current.getAttribute('data-conversation-id');
     const listed = (await (await page.request.get(f.h.admin + '/api/management/conversations')).json()).conversations;
     expect(listed.find(item => item.id === id)?.scope).toBe('project:101');
-    await page.locator('#console-mobile-nav a[data-page="board"]').click();
+    await page.locator('#console-mobile-nav a[data-page="inbox"]').click();
     await expect(page.locator('.management-window')).toBeHidden();
     await assistant.click();
     await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(current).toHaveAttribute('data-conversation-id', id);
@@ -132,7 +132,7 @@ test('进行中与未读状态在离开助手页后镜像到底栏「助手」',
   };
   try {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(f.h.admin + '/#/board');
+    await page.goto(f.h.admin + '/#/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -141,7 +141,7 @@ test('进行中与未读状态在离开助手页后镜像到底栏「助手」',
     await page.getByLabel('管理消息', { exact: true }).fill('看一下进展');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(page.locator('.management-turn-state')).toHaveAttribute('data-state', 'running');
-    await page.locator('#console-mobile-nav a[data-page="board"]').click();
+    await page.locator('#console-mobile-nav a[data-page="inbox"]').click();
     await expect(page.locator('.management-window')).toBeHidden();
     await expect(assistant).toHaveAttribute('data-active', '1');
     await expect(assistant.locator('.console-nav-badge')).toBeVisible();
@@ -315,7 +315,7 @@ test('换一次会话后底栏「助手」不保留上一位用户的进行中�
   };
   try {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(f.h.admin + '/#/board');
+    await page.goto(f.h.admin + '/#/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -324,7 +324,7 @@ test('换一次会话后底栏「助手」不保留上一位用户的进行中�
     await page.getByLabel('管理消息', { exact: true }).fill('看一下进展');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(page.locator('.management-turn-state')).toHaveAttribute('data-state', 'running');
-    await page.locator('#console-mobile-nav a[data-page="board"]').click();
+    await page.locator('#console-mobile-nav a[data-page="inbox"]').click();
     await expect(assistant).toHaveAttribute('data-active', '1');
     // Leave the reply unread, then change session from the account menu: the next owner starts idle and read.
     release();

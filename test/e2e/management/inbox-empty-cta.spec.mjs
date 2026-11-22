@@ -10,7 +10,7 @@ async function login(page, url, password) {
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
 
-test('待处理为空时给出查看看板和新建任务的下一步（#690）', async ({ page }) => {
+test('待处理为空时给出项目列表/项目总览和新建任务的下一步（#690、#1222）', async ({ page }) => {
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
@@ -21,7 +21,7 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
     const empty = page.locator('.console-inbox [data-testid=console-state-empty]');
     await expect(empty.getByRole('heading', { name: '当前范围没有待处理任务', exact: true })).toBeVisible();
     const next = page.locator('.console-inbox-next');
-    await expect(next.getByRole('link', { name: '查看任务看板', exact: true })).toHaveAttribute('href', '#/board');
+    await expect(next.getByRole('link', { name: '查看项目列表', exact: true })).toHaveAttribute('href', '#/projects');
     await expect(next.getByRole('link', { name: '新建任务', exact: true })).toHaveAttribute('href', '#/new-task');
     for (const [width, height, name] of [[390, 844, 'empty-390'], [1440, 900, 'empty-1440']]) {
       await page.setViewportSize({ width, height });
@@ -34,7 +34,7 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
         });
         return { links, cardCentre: card.left + card.width / 2 };
       });
-      expect(layout.links.map(link => link.text)).toEqual(['查看任务看板', '新建任务']);
+      expect(layout.links.map(link => link.text)).toEqual(['查看项目列表', '新建任务']);
       // One centred row, lined up under the centred empty-state heading.
       expect(Math.abs(layout.links[0].top - layout.links[1].top)).toBeLessThan(1);
       const rowCentre = (layout.links[0].left + layout.links[1].right) / 2;
@@ -44,7 +44,7 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
     // Shorter 390 screens (390x667) put the row behind the bottom bar on the first screen; the page still scrolls far enough
     // that each link clears the bar and takes the click, so it is never a dead end.
     await page.setViewportSize({ width: 390, height: 667 });
-    for (const name of ['查看任务看板', '新建任务']) {
+    for (const name of ['查看项目列表', '新建任务']) {
       const hit = await next.getByRole('link', { name, exact: true }).evaluate(a => {
         a.scrollIntoView({ block: 'center' });
         const box = a.getBoundingClientRect(), bar = document.querySelector('#console-mobile-nav').getBoundingClientRect().top;
@@ -57,6 +57,7 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
     await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/inbox$/);
     await expect(empty.getByRole('heading', { name: '当前范围没有待处理任务', exact: true })).toBeVisible();
+    await expect(page.locator('.console-inbox-next').getByRole('link', { name: '查看项目总览', exact: true })).toHaveAttribute('href', '#/projects/101/overview/tasks');
     const newTask = page.locator('.console-inbox-next').getByRole('link', { name: '新建任务', exact: true });
     await expect(newTask).toHaveAttribute('href', '#/projects/101/new-task');
     await page.screenshot({ path: '.tmp/inbox-empty-690/empty-101-1440.png' });

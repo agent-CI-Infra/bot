@@ -2,13 +2,14 @@
 
 项目列表的「项目总览」、侧栏项目选择器、项目分类和手机的「当前页面」均可进入 `#/projects/<id>/overview`。原 `basic`、`activity` 和其他项目设置地址保持独立；工作台不混放角色或策略编辑表单，复用独立任务详情页 `#/tasks/<id>`、待处理中心、角色配置及项目设置，不提供绕过授权的快捷写入。
 
-## 角色视图、任务视图与 Issue 进展
+## 角色视图、任务视图、Issue 进展与 PR 进展
 
-全局顶栏集中展示项目标题、启停标记、GitHub 入口及权限和事件缺口。内容区第一行并列「角色视图」（默认，`#/projects/<id>/overview`）、「任务视图」（`#/projects/<id>/overview/tasks`）与「Issue 进展」（`#/projects/<id>/overview/issues`，#1215）切换、实时活跃角色数、与筛选胶囊同口径的 `queued` 排队中任务数（存在 `#283` 等角色槽位任务时另标明等槽位数）、项目并发槽位、「刷新总览」，以及按 `can_write_tasks`（`tasks.write`）门控的「+ 新建任务」入口；视图选择与其控制的内容和操作保持在同一行，窄屏按现有规则换行。底部保留环境记录状态与角色并发配置、待处理中心、项目电脑状态快捷链接。
+全局顶栏集中展示项目标题、启停标记、GitHub 入口及权限和事件缺口。内容区第一行并列「角色视图」（默认，`#/projects/<id>/overview`）、「任务视图」（`#/projects/<id>/overview/tasks`）、「Issue 进展」（`#/projects/<id>/overview/issues`，#1215）与「PR 进展」（`#/projects/<id>/overview/prs`，#1222）切换、实时活跃角色数、与筛选胶囊同口径的 `queued` 排队中任务数（存在 `#283` 等角色槽位任务时另标明等槽位数）、项目并发槽位、「刷新总览」，以及按 `can_write_tasks`（`tasks.write`）门控的「+ 新建任务」入口；视图选择与其控制的内容和操作保持在同一行，窄屏按现有规则换行。底部保留环境记录状态与角色并发配置、待处理中心、项目电脑状态快捷链接。
 
 - **角色视图**：读取 `GET /api/repositories/<id>/role-board`，按启用角色列出职责分类、执行后端与已解析模型名、配置容量上限、正在执行任务芯片（主控已委派子角色活跃执行时标记 `delegated_active`，避免重复计入活跃占用）及可唯一归属的排队队列（含默认主控编排入口、`release.observe` / `release.notes` 单执行器归属及 `#283` `role_capacity` 槽位等待；多候选阶段策略在调度前保持 `unsupported: ['role_queue']` 并明确说明）。
 - **任务视图**：读取 `GET /api/tasks?repository_id=<id>&summary=1&flow=1&group=<group>&q=<query>&limit=10&offset=0`，单行呈现任务简介、优先级、关联 `Issue #N` / `PR #N` / `GitHub Actions` 检查简标、状态徽章与内联横向**角色流转框图**（已完成 `✓`、并行观察角色上下并列框、退回/暂停警示、当前运行中脉冲节点、排队 `…` 与虚线门禁 `QA 验收`），支持按简介、任务 ID 或 `#编号` 搜索。
 - **Issue 进展**：读取 `GET /api/board/issues?repository_id=<id>&status=<status>&include_closed=<0|1>&q=<query>&limit=20&offset=0` 与单对象链路 `GET /api/board/issues/<id>/<number>`，将历史 `review.issue` / `development.issue` 与 `#1122` 通用 `task.request` 聚合回 Issue，归入 7 个互斥状态（已开 PR、开发中、需补充信息、需人工决定、开发受阻、无需 / 暂不开发、待检视），顶部按状态计数筛选并直出关联 PR 或不可开发原因；点击「查看链路」展开该 Issue 的检视结论、关联任务与 Manager 分派决策记录。
+- **PR 进展**：读取 `GET /api/board/prs?repository_id=<id>&status=<status>&bot_only=<0|1>&include_closed=<0|1>&q=<query>&limit=20&offset=0` 与单对象链路 `GET /api/board/prs/<id>/<number>`，将历史 `review.pr` / `development.pr` 与 `#1122` 通用 `task.request` 聚合回 PR，归入 6 个互斥状态（需人工处理、跟进修改中、检视中、已检视、草稿、待检视），标明 Bot PR、来源 Issue 与 CI 检查状态，支持按状态、`仅 Bot PR`、`含已关闭` 与编号/标题筛选，点击「查看链路」展开检视结论、关联任务与 Manager 分派记录。
 
 ## 任务范围与数据来源
 

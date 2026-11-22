@@ -65,12 +65,15 @@ function computeTaskReturnLabel() {
   if (proj) {
     const repo = (typeof repositories !== 'undefined' ? repositories : []).find(r => String(r.id) === String(proj.id));
     const name = repo?.full_name ? repo.full_name.split('/').pop() : `项目 ${proj.id}`;
-    const isTaskList = proj.section === 'overview' && /^(tasks|active|queued|attention|all|completed)(?:[./]|$)/.test(proj.item || '');
-    return `返回 ${name} ${isTaskList ? '任务视图' : proj.section === 'overview' ? '角色视图' : '项目页'}`;
+    const item = proj.item || '';
+    const isTaskList = proj.section === 'overview' && /^(tasks|active|queued|attention|all|completed)(?:[./]|$)/.test(item);
+    const isIssues = proj.section === 'overview' && /^issues(?:[./]|$)/.test(item);
+    const isPrs = proj.section === 'overview' && /^prs(?:[./]|$)/.test(item);
+    const viewName = isTaskList ? '任务视图' : isIssues ? 'Issue 进展' : isPrs ? 'PR 进展' : proj.section === 'overview' ? '角色视图' : '项目页';
+    return `返回 ${name} ${viewName}`;
   }
   if (typeof tab !== 'undefined') {
     if (tab === 'inbox') return '返回待处理列表';
-    if (tab === 'board') return '返回任务看板';
     if (tab === 'conversations') return '返回飞书会话';
     if (tab === 'costs') return '返回用量与成本';
   }

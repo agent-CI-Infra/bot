@@ -35,11 +35,11 @@ test('a project receipt retains the navigation scope and both back links reopen 
 test('revoking a retained project clears neutral navigation and memory while its explicit address still explains denial',async({page})=>{
  const {h,admin,password}=await fixture(),memberPassword=testPassword();const member=(await admin('/api/users','POST',{username:'revoked-scope',password:memberPassword,repository_ids:['101','202']})).value.user;
  try{
-  await login(page,h,memberPassword,'#/projects/101/board','revoked-scope');await expect(page.locator('#board-columns')).toBeVisible();
-  await admin('/api/project-admin-assignments','PUT',{user_id:member.id,repository_ids:['202']});await page.reload();await expect(page.locator('[data-project-unavailable=forbidden]')).toBeVisible();await expect(page).toHaveURL(/#\/projects\/101\/board$/);
+  await login(page,h,memberPassword,'#/projects/101/inbox','revoked-scope');await expect(page.locator('.console-inbox')).toBeVisible();
+  await admin('/api/project-admin-assignments','PUT',{user_id:member.id,repository_ids:['202']});await page.reload();await expect(page.locator('[data-project-unavailable=forbidden]')).toBeVisible();await expect(page).toHaveURL(/#\/projects\/101\/inbox$/);
   await page.goto(h.admin+'/#/identity');await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','');
-  await expect(page.locator('#console-inbox-link')).toHaveAttribute('href','#/inbox');await expect(page.locator('#tabs').getByRole('link',{name:'任务看板',exact:true})).toHaveAttribute('href','#/board');
-  expect(await page.evaluate(id=>localStorage.getItem('console-last-scope:'+id),member.id)).toBe('all');await page.locator('#tabs').getByRole('link',{name:'任务看板',exact:true}).click();await expect(page.locator('#board-columns')).toBeVisible();await expect(page).toHaveURL(/#\/board$/);
+  await expect(page.locator('#console-inbox-link')).toHaveAttribute('href','#/inbox');await expect(page.locator('#tabs').getByRole('link',{name:'项目',exact:true})).toHaveAttribute('href','#/projects');
+  expect(await page.evaluate(id=>localStorage.getItem('console-last-scope:'+id),member.id)).toBe('all');await page.locator('#console-inbox-link').click();await expect(page.locator('.console-inbox')).toBeVisible();await expect(page).toHaveURL(/#\/inbox$/);
  }finally{await h.stop();}
 });
 
@@ -72,7 +72,7 @@ for(const member of [false,true]) test(`neutral-page refresh preserves the last 
  const {h,admin,password}=await fixture();const user=member?'memory-member':'administrator',secret=member?testPassword():password;
  try{
   if(member)await admin('/api/users','POST',{username:user,password:secret,repository_ids:['101']});
-  await login(page,h,secret,'#/projects/101/board',user);await expect(page.locator('#board-columns')).toBeVisible();await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','101');
+  await login(page,h,secret,'#/projects/101/overview',user);await expect(page.locator('.workspace-overview')).toBeVisible();await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','101');
   const key=await page.evaluate(()=> 'console-last-scope:'+me.id);expect(await page.evaluate(k=>localStorage.getItem(k),key)).toBe('101');
   await page.goto(h.admin+'/#/identity');await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();await page.reload();await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();expect(await page.evaluate(k=>localStorage.getItem(k),key)).toBe('101');
   await page.locator('#logout').click();await expect(page.locator('#access')).toBeVisible();await login(page,h,secret,'',user);await expect(page).toHaveURL(/#\/projects\/101\/overview$/);await expect(page.locator('.workspace-overview')).toBeVisible();

@@ -18,8 +18,8 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
       await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
       const state = page.locator('#console-page [data-page-not-found="console"]'), fits = () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
       // A fresh load of an unknown address, and a hash change to one from a working page.
-      for (const from of [null, '#/board']) {
-        if (from) { await page.evaluate(hash => { location.hash = hash; }, from); await expect(page.locator('#console-context')).toHaveText('任务看板'); }
+      for (const from of [null, '#/inbox']) {
+        if (from) { await page.evaluate(hash => { location.hash = hash; }, from); await expect(page.locator('#console-context')).toHaveText('待处理'); }
         const lists = []; page.on('request', r => { if (/\/api\/repositories\?/.test(r.url())) lists.push(r.url()); });
         if (from) await page.evaluate(() => { location.hash = '#/nonexistent'; });
         await expect(state.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible({ timeout: 1000 });

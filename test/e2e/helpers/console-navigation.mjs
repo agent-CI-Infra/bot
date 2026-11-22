@@ -4,7 +4,7 @@
 const addresses = {
   '全局设置': '#/settings/work-computers', '外部执行端': '#/external',
   '身份与权限': '#/identity', '飞书绑定': '#/identity/feishu', '设置': '#/preferences',
-  '飞书会话': '#/conversations', '任务看板': '#/board', '用量与成本': '#/costs', '管理助手': '#/management', '项目': '#/projects'
+  '飞书会话': '#/conversations', '用量与成本': '#/costs', '管理助手': '#/management', '项目': '#/projects'
 };
 
 export async function consoleNavigate(page, name) {

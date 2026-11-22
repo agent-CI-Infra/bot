@@ -27,15 +27,15 @@ test('shared desktop rail and mobile navigation expose real destinations across 
       } else await expect(page.locator('#console-sidebar')).toBeHidden();
       if(width<768){
         await expect(page.locator('#console-mobile-nav')).toBeVisible();
-        await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目','任务','待处理','助手','更多']);
-        await expect(page.locator('#console-mobile-nav a svg.console-icon')).toHaveCount(5);
+        await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目','待处理','助手','更多']);
+        await expect(page.locator('#console-mobile-nav a svg.console-icon')).toHaveCount(4);
         const boxes=await page.locator('#console-mobile-nav a').evaluateAll(nodes=>nodes.map(n=>({width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height})));
         expect(boxes.every(b=>b.width>=44&&b.height>=44)).toBe(true);
       }
       await page.screenshot({path:`${out}/more-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
-    for(const name of ['项目总览','管理助手','任务看板','用量与成本','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('link',{name,exact:true})).toBeVisible();
+    for(const name of ['项目总览','管理助手','待处理','用量与成本','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('link',{name,exact:true})).toBeVisible();
     await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
     // Settings categories stay separate from the scope work navigation.
     const projectNav = page.getByRole('navigation', { name: '项目设置类别' });

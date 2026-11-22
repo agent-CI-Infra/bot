@@ -30,12 +30,11 @@ async function render(quiet = false) {
     if (summary) summary.textContent = active ? t('projects.list.filters_active') : t('projects.list.filters');
     if (active) filtersFold.open = true;
   } $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
+  $('rows').hidden=['external','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
   // Only lists that render into #rows show its loading state; console pages draw their own and must not keep a stale one.
   $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren(...($('rows').hidden||consoleTabs.includes(tab)?[]:[consoleState(t('projects.list.loading_title'),t('projects.list.loading_text'),{tone:'loading'})]));listSignature='';$('count').textContent=t('projects.list.loading');$('rows').setAttribute('aria-busy','true');}
-  if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(isIdentity){try{await renderIdentity();}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='settings'){try{await renderSettings(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}

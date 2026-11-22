@@ -26,7 +26,6 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     const sidebar = page.locator('#console-sidebar');
     await expect(sidebar.getByRole('link', { name: '项目', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('link', { name: '管理助手', exact: true }).locator('svg.console-icon')).toBeVisible();
-    await expect(sidebar.getByRole('link', { name: '任务看板', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('link', { name: '用量与成本', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('button', { name: '仓库事件', exact: true })).toHaveCount(0);
     await expect(sidebar.getByRole('link', { name: '待处理', exact: true }).locator('svg.console-icon')).toBeVisible();
@@ -40,7 +39,7 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     // Switching the language re-translates every [data-i18n] node; the sidebar entries must keep their icons both ways.
     const sidebarEntries = sidebar.locator('#tabs [data-console-nav]');
     const entryCount = await sidebarEntries.count();
-    expect(entryCount).toBe(7);
+    expect(entryCount).toBe(6);
     await page.getByRole('button', { name: 'English', exact: true }).click();
     await expect(sidebar.getByRole('link', { name: 'Projects', exact: true })).toBeVisible();
     await expect(sidebar.getByRole('button', { name: 'Repository events', exact: true })).toHaveCount(0);
@@ -61,9 +60,9 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     const mobile = page.locator('#console-mobile-nav');
     await expect(mobile).toBeVisible();
-    // #481: five phone destinations, each with one decorative SVG.
-    await expect(mobile.locator('svg.console-icon')).toHaveCount(5);
-    for (const name of ['项目', '任务', '待处理', '助手', '更多']) {
+    // #1222: four phone destinations, each with one decorative SVG.
+    await expect(mobile.locator('svg.console-icon')).toHaveCount(4);
+    for (const name of ['项目', '待处理', '助手', '更多']) {
       const item = mobile.getByRole('link', { name, exact: true });
       await expect(item).toBeVisible();
       await expect(item.locator('svg.console-icon')).toBeVisible();
