@@ -135,7 +135,7 @@ test('a manager that cannot list notes volumes leaves the maintenance listing at
   const { HttpError } = await import('../../../../dist/core/security.js');
   const real = h.projects.notesVolumes.bind(h.projects);
   t.after(() => { h.projects.notesVolumes = real; });
-  // docs/api.md promises the audit intents and the report when the manager cannot be read; the listing must not turn
+  // docs/design/console-and-api.md promises the audit intents and the report when the manager cannot be read; the listing must not turn
   // that into a 503 of its own.
   for (const failure of [
     () => { throw new HttpError(503, 'docker_operation_failed'); },

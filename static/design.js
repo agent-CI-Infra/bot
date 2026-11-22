@@ -2,7 +2,7 @@
 //
 // It is a real console page — served by the same control plane, drawing with the same stylesheets and the same shared
 // renderers — reachable at #/design and deliberately absent from #tabs and from every product page's links. It is the
-// reviewed evidence surface for the shared console tokens (declared only in static/shell.css, see docs/console-ui.md) and for the states the console must cover, not
+// reviewed evidence surface for the shared console tokens (declared only in static/shell.css, see docs/design/console-and-api.md) and for the states the console must cover, not
 // a feature users navigate to; static/app.js registers the address and keeps it to super administrators.
 //
 // The samples use the components that already exist: buttons and form controls from static/style.css, status badges from
@@ -155,7 +155,7 @@ function renderDesignPage() {
   dialogCard.append(element('h3', '确认框'), element('p', '危险确认说明影响对象与不可逆性；Esc 关闭并把焦点还给触发按钮。'), dialogButton);
 
   host.append(
-    designSection('design-tokens', '设计 token', '值只在 static/shell.css 声明（见 docs/console-ui.md）；本页不声明任何 token，样例只用它们着色。', tokensGrid),
+    designSection('design-tokens', '设计 token', '值只在 static/shell.css 声明（见 docs/design/console-and-api.md）；本页不声明任何 token，样例只用它们着色。', tokensGrid),
     designSection('design-buttons', '按钮与操作', '', buttons),
     designSection('design-form', '表单控件', '', form),
     designSection('design-rows', '表格、卡片与状态', '', designRows(), card),

@@ -1,53 +1,66 @@
 # launchpad
 
-launchpad 是一个 GitHub App，负责检视 Issue 和 PR。仓库启用后，新开的 Issue 会收到一次检视评论；PR 在打开、标为可检视（Ready for review）以及 head 更新（推送新提交）时检视，草稿 PR 不检视；管理员可以按仓库关掉其中某种触发。bot 只发评论，不批准、不请求变更，也不合并。管理员为仓库打开开发后，bot 才会按 Issue 改代码并开 PR。许可证为 Apache-2.0。
+launchpad 是一个开源的多账号 GitHub 自动化与 AI 协作平台（Apache-2.0），面向代码仓库提供 Issue/PR 自动检视、按需与自主开发交付、CI 失败排查、手动发版本、控制台与飞书助手协作、定时任务及公开看板托管。
 
-## 安装到你的仓库
+## 核心能力速览
 
-App 已经创建好了，不需要自己再建。安装地址只用这一个：
+- **Issue 与 PR 检视**：仓库启用后自动检视新开 Issue、开放/更新的 PR 以及讨论与 `@` 提及；每个对象只维护一条原位更新的总结评论，行内意见固定使用 `COMMENT`，不擅自批准或修改他人分支。
+- **可控的自动开发与 PR 跟进**：项目能力上限设为「可开发并开 PR」（`develop`）后，项目 Manager 按明确依据（开发标签、维护者评论或项目规则）在独立虚拟电脑内改代码、跑测试、经独立 QA 后推送 `bot/*` 分支并开 PR；后续持续跟进仓库成员评论、检查失败与合并冲突。
+- **多角色与多后端执行**：通过单对象持久 Manager 与项目角色池编排协作，按角色支持 `Pi`（默认推荐）、`Native`、`Process` 及容器内 `Claude Code`、`Codex` 执行器，并统一受 RoleRun 协议、能力上限与自动合并策略约束。
+- **控制台与飞书助手**：提供统一的 Web 管理控制台、控制台与飞书私聊管理助手、支持三维独立权限的飞书群聊助手，以及项目定时任务、会话定时任务与事件通知订阅。
+- **手动发版本与公开看板**：支持版本预检、打标签、跟踪 Release 工作流、生成发行说明草稿与人工发布；单端口托管公共 Dashboard（`/dashboard/`）与单仓看板（`/boards/<owner>/<repo>/`）。
+- **外部执行端**：支持个人电脑（公钥签名）和 GitHub Actions（OIDC）兑换单仓受限 Bot 令牌，并接收签名 Webhook 转发或轮询事件。
 
-<https://github.com/apps/agent-ci-infra-bot/installations/select_target>
+## 快速开始
 
-1. 打开上面的地址，选择仓库所在的组织或个人账号，再选要安装的仓库。
-2. 安装之后，找这套 bot 的管理员审核并启用该仓库。
-3. 启用后就可以开始使用。启用前收到的 Issue 和 PR 事件不会补跑。
+### 将 bot 安装到你的仓库
 
-## 自动改代码
+1. 打开安装页选择组织/个人账号及目标仓库：<https://github.com/apps/agent-ci-infra-bot/installations/select_target>
+2. 登录控制台，在项目列表点击「开始接入」由管理助手只读分析仓库并确认启动与配置（未受信任组织提交启动申请由超级管理员同意）。
+3. 完整上手步骤见 [登录、系统初始化与仓库接入](docs/features/onboarding-and-access.md)。
 
-项目能力上限是开关：低于「可开发并开 PR」（`develop`）时 bot 不开发，新项目默认是「可评论和打标签」。能力上限为 `develop` 时，问题清晰的 Issue 默认由 bot 自己判断并开 PR：最近一次检视结论为「可开发」、问题已确认、推荐方案范围明确、没有留给人决定的问题、没有人被指派时，项目 Manager 按内置提示词里的这条规则开始开发，不需要开发标签。有人（不是 App）加开发标签（默认 `bot-develop`）、triage 以上权限的维护者在评论里提出要求，仍然是开发的依据，但不是默认前提；外人的评论不算。仓库 README 或 CONTRIBUTING 里只要求「必须由人加开发标签」的句子不否决这条默认，这样的说明应该改掉；仓库自己的 skill、测试方式和已有标签的用法仍然遵守。bot 不自行合并 PR，人明确要求时除外。不能开发时 bot 在 Issue 上回复缺什么。完整条件见[自动开发什么时候开始](docs/rules.md#自动开发什么时候开始)。bot 开出的 PR 上，仓库成员评论要求修改时，bot 判断后照做（只是提问就回答）；其他检视机器人提出合理意见时，最多据此修改一次，见[bot 开的 PR 怎样跟进修改](docs/rules.md#bot-开的-pr-怎样跟进修改)。
+### 自行部署
 
-## 在角色配置里调整行为
+无需克隆仓库，使用 Docker Compose 即可启动：
 
-bot 在一个仓库里的检视、标签、开发规则和虚拟电脑配置都在控制台的项目配置里调整（Manager 提示词、项目设置和机器配置），仓库里只读取 `.agents/skills/` 下的 skill；早期版本使用的 `.bot/` 文件已在升级时导入，不再读取。见[在角色配置里调整行为](docs/rules.md)。
+```sh
+mkdir department-bot && cd department-bot
+curl -fsSLO https://raw.githubusercontent.com/agent-CI-Infra/bot/main/docker/compose.yaml
+docker compose up -d
+```
 
-## 手动发版本
+启动后访问 `http://127.0.0.1:8791/` 创建首位超级管理员并完成七步系统初始化。详细步骤与运维说明见 [部署、升级与运维](docs/features/deployment-and-operations.md)。
 
-超级管理员或对应项目的管理员可在项目页的「发版本」填写 `v1.2.3`、`v1.2.3-beta.1` 等版本，检查并确认完整提交 SHA。仓库需要有发布用的 CI（`.github/ci-gates.json` 和运行它的 `ci.yml`），并有版本标签触发的 `.github/workflows/release.yml`。控制面使用 GitHub App 安装令牌创建注释标签，跟踪该标签的 Release 工作流；全部 job 成功后准备 GitHub Release 草稿，由人编辑并点击「正式发布」。预发布版本正式发布后仍保留预发布标记。仓库工作流自行发布的 Release 会显示为外部已发布。
+## 文档导航
 
-发行说明只使用本次提交历史范围内的提交和已合并 PR。仓库存在 `.agents/skills/release-notes/SKILL.md` 时，控制面固定读取本次 SHA 的文件，并使用项目配置的模型按该规则组织真实来源；否则使用内置来源清单。整理发行说明和运行分析都先交给项目 Manager 分派，Manager 不安排整理时同样使用内置来源清单。可选的运行分析可以主动申请本仓库的 Actions 只读令牌，按需读取本次 run／attempt 的 job 日志；令牌只保留在工具执行端，日志先脱敏再交给模型，分析结束后撤销令牌。页面保留读取的日志行段和来源链接，分析不参与发布状态判定。失败不会自动重跑，同名标签不会被移动或删除。
+本仓库文档在 `docs/` 下按 **功能** 与 **设计** 两个维度组织（详见 [文档总入口](docs/README.md)）：
 
-相对上一枚可达的合法版本标签，没有新增提交时，页面说明跳过，服务端拒绝确认，不创建发布记录、标签或 Release；还没有这样的版本标签时，现有历史可作为首次发布。填写的版本按 SemVer 不高于上一枚可达版本标签时（例如已有 `v1.2.0` 却填 `v1.1.0`，或已有 `v1.2.3` 却填 `v1.2.3-rc.1`），页面提示可填写的更高版本，服务端同样拒绝确认。已有发布记录仍可查看和按原规则恢复，同名标签始终不会移动或删除。
-
-发版本的写入只看 GitHub App 安装权限：控制台授权（超级管理员或该项目的管理员）决定谁能操作，不另外核对操作者本人在 GitHub 仓库上的权限。
-
-CI 改动以 bot PR 交付：项目管理员在「新建任务」写明要改的 CI、确认允许修改 `.github/workflows/`，bot 在项目电脑里按仓库自己的情况改 workflow、测试并开 PR，人检视合并后才生效。没有这样确认的任务和 `github_write` 都改不了 `.github/workflows/`，见[接入说明](docs/onboarding-guide.md#32-ci-改动走-bot-pr)。
-
-## 部署和管理
-
-部署、项目管理和升级都在[部署这套 bot 和管理员面板](docs/admin.md)；仓库管理员接入一个新仓库直接在控制台或飞书私聊的管理助手完成：点击仓库行的「开始接入」打开管理助手并填入提示词，助手只读分析仓库、提问并给出建议，确认后启动并落盘配置，见[接入指南](docs/onboarding-guide.md)。项目的能力上限、事件来源和自动处理范围在「监听与触发」页统一配置，单对象持久 Manager 提示词和角色在「角色」页配置：通过过滤的事件由对象 Manager 直接响应、指派角色执行通用任务或续接已有任务，模型按项目默认模型与角色覆写两层配置，见[统一任务调度与对象 Manager](docs/workflows.md)。
-
-角色池可按角色选择 Pi（默认推荐）、Native、Process，或容器内 Claude Code、Codex（app-server）执行器；后两者在项目容器内执行原生终端、文件编辑与平台 MCP 工具，经容器内模型中转调用平台模型，会话与任务记录持续关联，交付仍经独立 QA；启用方式与边界见 [Harness Runtime](docs/harness-runtime.md)。每次角色运行经版本化的 RoleRun 协议准入、留痕和恢复：租约 epoch、短时运行令牌、受控任务工具网关、跨恢复累计的预算，见 [RoleRun 协议](docs/role-run.md)。
-
-## 仓库快照与运行日志
-
-控制面为每个仓库保留一份 Git 镜像，任务开始前只拉取这次要用的提交，已缓存的提交不再访问 GitHub。每个任务从镜像把固定提交的文件拷进自己的工作目录，之后镜像的更新不影响已拷出的副本。镜像不可用时回到 GitHub API 逐文件准备；GitHub 的递归 tree 被截断时，按目录非递归列举文件。子模块和不支持的 Git mode 条目不下载，子模块仓库不克隆。GitHub 因文件过大而拒绝返回的 blob 会跳过。跳过项的路径和原因记入日志，数量记入覆盖说明；发布时保留这些上游条目。大文件保存在工作区中，由工具读取。哈希不一致、路径越界或工作区被替换时，任务会停止并显示原因。
-
-在「检视」「开发」页点开任务，可查看运行记录和准备日志。失败或暂停的任务详情显示故障说明、原因类别（外部服务或网络波动、GitHub 权限或配置、GitHub 拒绝请求、模型、项目电脑、仓库内容、任务条件变化、GitHub 写入结果未知、Bot 自身问题）和下一步怎么做，准备日志记录固定提交、文件来自 Git 缓存还是 GitHub API、已接收文件数和字节数、跳过路径及原因。
-
-## 同时运行多个任务
-
-每个仓库一台虚拟电脑，默认一次运行一个任务。超级管理员在「全局设置」设置默认并发数（1–32），项目可以在「机器配置」里单独设置，留空跟随全局默认；超出的任务继续排队。同时运行的任务各用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限。「全局设置」还显示当前运行的镜像标签。
+- **功能地图与使用指南（`docs/features/`）**：见 [`docs/features/README.md`](docs/features/README.md)
+  - [登录、系统初始化与仓库接入](docs/features/onboarding-and-access.md)
+  - [GitHub 自动化：检视、开发、Actions 与 CI 改动](docs/features/github-automation.md)
+  - [角色配置、规则、能力上限与自动合并](docs/features/roles-and-rules.md)
+  - [控制台、项目总览、知识库、发版本与公开看板](docs/features/console-and-workspace.md)
+  - [管理助手、飞书应用机器人与群聊助手](docs/features/assistants-and-channels.md)
+  - [定时任务与事件通知订阅](docs/features/schedules-and-notifications.md)
+  - [模型连接与用量成本](docs/features/models-and-costs.md)
+  - [外部执行端](docs/features/external-executors.md)
+  - [部署、升级与运维](docs/features/deployment-and-operations.md)
+- **架构与核心设计（`docs/design/`）**：见 [`docs/design/README.md`](docs/design/README.md)
+  - [系统总体架构与安全边界](docs/design/architecture.md)
+  - [身份登录、安装档案与统一授权](docs/design/identity-and-installations.md)
+  - [事件分派、通用任务引擎与交付验收](docs/design/dispatch-and-tasks.md)
+  - [Agent 运行时、RoleRun 协议、Harness 与虚拟电脑](docs/design/agent-and-harness-runtime.md)
+  - [统一管理服务、服务角色与飞书渠道架构](docs/design/assistants-and-channels.md)
+  - [持久化调度与事件通知引擎](docs/design/schedules-and-events.md)
+  - [存储架构、轨迹文件、工作区与项目知识引擎](docs/design/storage-and-knowledge.md)
+  - [控制台前端架构与管理 API 总览](docs/design/console-and-api.md)
+  - [外部执行端凭据代理与公开看板托管](docs/design/external-and-public-board.md)
+- **研发与协作**：
+  - [贡献与开发验证指南（`CONTRIBUTING.md`）](CONTRIBUTING.md)
+  - [AI 编码助手指引（`AGENTS.md`）](AGENTS.md)
+  - [内置默认提示词（`docs/prompts/`）](docs/prompts/README.md)
+  - [外部执行端令牌兑换协议（`docs/external-token-api.md`）](docs/external-token-api.md)
 
 ## 反馈
 
-用起来有问题或有建议，欢迎到本仓库提 issue：<https://github.com/agent-CI-Infra/bot/issues>
+使用过程中遇到问题或有功能建议，欢迎在本仓库提交 Issue：<https://github.com/agent-CI-Infra/bot/issues>

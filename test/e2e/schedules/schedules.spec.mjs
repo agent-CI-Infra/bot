@@ -314,7 +314,7 @@ test('schedule preview matches the server after a timezone change, is reachable 
     const ui = (await page.getByLabel('计划预览').innerText()).split('\n').filter(line => line.includes('Europe/Berlin') && !line.startsWith('时区：') && !line.startsWith('时间窗口'));
     const expected = [];
     // Independent oracle: the test builds the reading itself instead of asking the page for it, so a broken helper
-    // cannot agree with itself. The shape is the one docs/console-ui.md asks for: YYYY-MM-DD HH:mm:ss, 24-hour.
+    // cannot agree with itself. The shape is the one docs/design/console-and-api.md asks for: YYYY-MM-DD HH:mm:ss, 24-hour.
     const clockAt = (ts, zone) => {
       const parts = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ts));
       const part = type => parts.find(item => item.type === type).value;

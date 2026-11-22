@@ -111,7 +111,7 @@ test('long execution progress scrolls independently and previews command and fil
     const history = await settled(f.admin, conversation, run.id);
     const terminal = history.events.filter(event => event.type === 'reply' || event.type === 'done');
     f.h.store.run("DELETE FROM management_events WHERE message_id=? AND type IN ('reply','done')", run.id);
-    const command = 'git status --short\ngit diff -- docs/onboarding/README.md docs/development.md';
+    const command = 'git status --short\ngit diff -- docs/features/README.md CONTRIBUTING.md';
     const tools = [
       { name: 'run_command', arguments: { command } },
       ...Array.from({ length: 12 }, (_, i) => ({ name: 'read_file', arguments: { path: 'docs/onboarding/section-' + (i + 1) + '.md' } })),
@@ -129,7 +129,7 @@ test('long execution progress scrolls independently and previews command and fil
     await expect(progress.locator('.management-step')).toHaveCount(tools.length + 1);
     const commandStep = progress.locator('.management-step').nth(1);
     await expect(commandStep.locator('summary').first()).toContainText('在助手电脑运行命令');
-    await expect(commandStep.locator('.management-step-preview')).toHaveText('git status --short git diff -- docs/onboarding/README.md docs/development.md');
+    await expect(commandStep.locator('.management-step-preview')).toHaveText('git status --short git diff -- docs/features/README.md CONTRIBUTING.md');
     await expect(progress.locator('.management-step-preview').nth(2)).toHaveText('docs/onboarding/section-1.md');
     expect(await steps.evaluate(node => node.scrollHeight > node.clientHeight && node.clientHeight <= 260)).toBe(true);
     await steps.hover();

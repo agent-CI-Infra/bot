@@ -7,7 +7,7 @@ import { diskFull } from './disk.mjs';
 // The manager's trajectory files: the input and result of every runner call it records, appended to JSONL files under
 // its data volume, one per project and task workspace (lifecycle calls without one share the project's file). The
 // ledger (operations) keeps the call's state and a ref "<file>:<offset>:<length>:<sha256 of the line>" per body. The
-// format and rules are those of the control plane's src/storage/trajectories.ts (docs/trajectories.md): a line is
+// format and rules are those of the control plane's src/storage/trajectories.ts (docs/design/storage-and-knowledge.md): a line is
 // {"seq","at","type","id","prev","data"} with prev the sha256 of the line before it; trajectory_files gets one insert
 // when a file is opened and one update when it is closed; appending never writes SQLite; the line is written (and, for
 // a result a repeated call replays, synced) before the row that points to it is committed.

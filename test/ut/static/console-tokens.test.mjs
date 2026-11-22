@@ -1,4 +1,4 @@
-// #224-A / #262: one declaration site for the console theme. docs/console-ui.md says modules
+// #224-A / #262: one declaration site for the console theme. docs/design/console-and-api.md says modules
 // reference the shared variables and do not copy a second theme. shell.css is the only :root
 // that declares custom properties, and every var() a sheet reads resolves to a declaration,
 // a runtime write, or its own fallback. Contrast checks read the declared colours from shell.css.
