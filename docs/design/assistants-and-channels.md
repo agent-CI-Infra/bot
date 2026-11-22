@@ -34,6 +34,7 @@ flowchart LR
   Outbox --> Feishu
 ```
 
+- **入站消息解析**：`FeishuAdapter` 负责回调验签、解密和历史拉取。`feishu-message-format.ts` 解析正文和提及，供实时消息与历史记录共用。
 - **连接归属与传输安全**：
   - 支持全平台应用与组织专属应用（`owner_tenant` 不可变）；非超级管理员仅允许配置「企业自建 + SDK 长连接」（防 HTTP Verification Token / Encrypt Key 持有者伪造用户消息）。
   - 组织专属应用经 `confineActor` 强制隔离：群范围只能选本组织仓库，经其绑定的私聊身份仅在本组织内有效。
