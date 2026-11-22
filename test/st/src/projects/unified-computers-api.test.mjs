@@ -387,7 +387,7 @@ test('F1 & F2: async/sync console spec sync preserves unapplied rule_imports.com
   assert.deepEqual(JSON.parse(h.store.get('SELECT computer FROM rule_imports WHERE repository_id=?', '101').computer), { packages: ['tree'], env: { C: '3' } });
 });
 
-test('claimQueuedTask respects pending environment_operations and reconcile refreshes image_pending only once idle', { timeout: 60_000 }, async t => {
+test('claimQueuedTask respects toolchain_pending (during and after failed deferred build) and pending environment_operations, and reconcile refreshes image_pending only once idle', { timeout: 60_000 }, async t => {
   const f = managerFixture(t);
   const h = await harness(t, f.manager);
   const { admin } = await setup(h);
@@ -395,14 +395,38 @@ test('claimQueuedTask respects pending environment_operations and reconcile refr
   await repository(admin, a.id, '101');
   for (let i = 0; i < 2; i++) await h.projects.reconcile();
 
-  // Configure a precompiled image on 101, then simulate base image upgrade + recover() so image_pending becomes true.
+  // Configure a precompiled image on 101, then simulate base image upgrade + recover() with a held/failing deferred build.
   await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { packages: ['jq'], setup_script: 'echo ok' } });
   await f.projects.waitForBuild('101');
+  let failDeferred;
+  f.docker.onBuild = () => new Promise((_resolve, reject) => {
+    failDeferred = () => reject(Object.assign(new ManagerError('image_build_failed', 502), { output: 'apt failed\n' }));
+  });
   f.docker.images.set('approved', { Id: 'sha256:upgraded-base-claim-gate', Size: 10 * mib });
+  await f.projects.recover();
+
+  // 0a. During the deferred recovery build window (bare base running, build in progress), toolchain_pending=1 blocks claims.
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-queued','101','review.pr','queued','q','{}',2,0)");
+  await h.projects.reconcile();
+  assert.equal(f.projects.describe('101').computer.toolchain_pending, true);
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'task must NOT be claimed while deferred recovery build is running on bare base');
+
+  // 0b. If the deferred recovery build FAILS, toolchain_pending stays true (even though image_pending is false) so tasks still wait.
+  failDeferred();
+  await f.projects.waitForBuild('101');
+  await h.projects.reconcile();
+  assert.equal(f.projects.describe('101').computer.build.state, 'failed');
+  assert.equal(f.projects.describe('101').computer.image_pending, false);
+  assert.equal(f.projects.describe('101').computer.toolchain_pending, true);
+  assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'task must NOT be claimed on bare base after a failed deferred recovery build');
+
+  // Now allow the recovery rebuild to succeed (simulating manager restart / retry), producing image_pending=true.
+  f.docker.onBuild = null;
   await f.projects.recover();
   await f.projects.waitForBuild('101');
   const pendingState = f.projects.describe('101').computer;
   assert.equal(pendingState.image_pending, true);
+  assert.equal(pendingState.toolchain_pending, true);
   assert.equal(pendingState.image, 'sha256:upgraded-base-claim-gate');
 
   // 1. While a task holds a claim on 101, reconcile() MUST NOT refresh/interrupt the container.
@@ -412,21 +436,22 @@ test('claimQueuedTask respects pending environment_operations and reconcile refr
   assert.equal(f.projects.describe('101').computer.image, 'sha256:upgraded-base-claim-gate', 'reconcile must not interrupt a claimed task');
   assert.equal(f.projects.describe('101').computer.image_pending, true);
 
-  // 2. While a pending environment_operations row exists, claimQueuedTask MUST refuse to claim new tasks on that repo.
+  // 2. While a pending environment_operations row exists (even if toolchain_pending is 0), claimQueuedTask MUST refuse to claim.
   h.store.run("DELETE FROM task_claims WHERE task_id='t-running'");
   h.store.run("UPDATE tasks SET status='succeeded' WHERE id='t-running'");
-  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,next_run_at) VALUES('t-queued','101','review.pr','queued','q','{}',2,0)");
+  h.store.run("UPDATE project_environments SET toolchain_pending=0 WHERE repository_id='101'");
   h.store.run("INSERT INTO environment_operations VALUES('op-pending','101','refresh','{}','pending',NULL)");
   assert.equal(claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now()), undefined, 'claimQueuedTask must not claim while refresh is pending');
   h.store.run("DELETE FROM environment_operations WHERE id='op-pending'");
 
-  // 3. Once idle (no task_claims), reconcile() issues refresh, switches container to the new precompiled image, and clears image_pending.
+  // 3. Once idle (no task_claims), reconcile() issues refresh, switches container to the new precompiled image, and clears image_pending & toolchain_pending.
   await h.projects.reconcile();
   const switched = f.projects.describe('101').computer;
   assert.equal(switched.image_pending, false);
+  assert.equal(switched.toolchain_pending, false);
   assert.equal(switched.image, 'sha256:' + switched.build.tag.split(':')[1]);
 
-  // 4. After refresh completes, claimQueuedTask claims t-queued normally.
+  // 4. After refresh completes and toolchain_pending clears, claimQueuedTask claims t-queued normally.
   const claimed = claimQueuedTask(h.store, '101', "kind='review.pr'", 1, Date.now());
   assert.equal(claimed?.id, 't-queued');
 });

@@ -78,7 +78,7 @@ HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bea
 
 - **每仓一台、并发复用**：同一仓库共享一台长期容器、工作卷与笔记卷，支持 `N`（1–32）个任务并发执行各自目录；启停、重置、重建与配置操作在项目锁内排队独占执行（镜像预编译在锁外异步执行，构建完成后再原子切换容器）。
 - **代次（`generation`）与权限分层**：重置电脑时停旧代容器、递增代次并创建新工作卷与新网络（旧代次封存不复用）；项目管理员可配置本项目增量 `packages`、`setup_script`、`env` 并手动停止构建，CPU/内存/进程数/`/tmp` 与 `egress` 保持仅超级管理员可写。
-- **进程回收与崩溃恢复**：单命令结束后清理进程组，任务结束后按 `BOT_WORKSPACE_ID` 回收该任务全部进程（含 `keep_background` 服务）；最后一个任务结束时清扫残留进程，仅在清理失败或容器异常退出时触发独占重启。`manager` 重启时通过 journal 对账并恢复已登记电脑；若基础镜像升级导致预编译镜像未命中缓存，容器先以匹配当前基础镜像的镜像（确保 runner 协议版本一致）快速就绪，后台串行队列以 `commitSpec: false` 异步预编译新镜像；完成后仅置 `image_pending: true` 而非直接停容器，由控制面在对账事务中结合 `claimQueuedTask` 的 `environment_operations` 排他门禁于空闲时发起 `refresh` 平滑切换（若延后构建失败或被停止，在下次重启或管理员保存/重建时重新触发）。
+- **进程回收与崩溃恢复**：单命令结束后清理进程组，任务结束后按 `BOT_WORKSPACE_ID` 回收该任务全部进程（含 `keep_background` 服务）；最后一个任务结束时清扫残留进程，仅在清理失败或容器异常退出时触发独占重启。`manager` 重启时通过 journal 对账并恢复已登记电脑；若基础镜像升级导致预编译镜像未命中缓存，容器先以匹配当前基础镜像的镜像（确保 runner 协议版本一致）快速就绪，后台串行队列以 `commitSpec: false` 异步预编译新镜像；在容器仍停留在基础镜像或等待切换期间，`describe()` 上报 `toolchain_pending: true` 并持久化到 `project_environments.toolchain_pending`，`claimQueuedTask` 在写事务内暂缓认领该仓库任务（覆盖构建窗口、待切换窗口以及构建失败/取消停留态）；构建完成后置 `image_pending: true` 而非直接停容器，由控制面结合 `environment_operations` 排他门禁于空闲时发起 `refresh` 平滑切换并清除 `toolchain_pending`（若延后构建失败或被停止，在下次重启或管理员保存/重建时重新触发）。
 
 ### 助手电脑（`manager/assistant-computers.mjs`）
 
