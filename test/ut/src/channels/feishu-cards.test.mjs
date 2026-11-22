@@ -140,7 +140,7 @@ test('buildFeishuCard blocks unsafe URLs, forged img_key, raw callbacks, nested 
     },
   }, 'card_size_exceeded');
 
-  const md = sanitizeCardMarkdown('![secret](img_v2_abc) ![titled](img_v2_def "t") [bad](javascript:x) [ok](https://example.com) <img src="x"> <at id=all></at> <font color="red">hi</font>');
+  const md = sanitizeCardMarkdown('![secret](img_v2_abc) ![titled](img_v2_def "t") [bad](javascript:x) [ok](https://example.com) <img src="x"> <at id=all></at> <font color="red">hi</font> <font color="bogus">plain</font> <text_tag color="grey">g</text_tag> <text_tag color="bogus">b</text_tag>');
   assert.ok(!md.includes('img_v2_abc'));
   assert.ok(!md.includes('img_v2_def'));
   assert.ok(!md.includes('javascript:'));
@@ -149,6 +149,9 @@ test('buildFeishuCard blocks unsafe URLs, forged img_key, raw callbacks, nested 
   assert.match(md, /&lt;img/);
   assert.match(md, /&lt;at id=all&gt;/);
   assert.match(md, /<font color='red'>hi<\/font>/);
+  assert.match(md, /<font>plain<\/font>/);
+  assert.match(md, /<text_tag color='neutral'>g<\/text_tag>/);
+  assert.match(md, /<text_tag color='neutral'>b<\/text_tag>/);
 
   // paginated_list title, empty_text, item title, badges and footerNote must never leak forged img_key or raw <at> tags
   const forged = buildFeishuCard({

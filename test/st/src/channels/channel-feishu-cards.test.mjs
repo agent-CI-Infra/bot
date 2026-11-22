@@ -178,7 +178,8 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   assert.ok(cardRow && cardRow.remote_message_id === 'remote-1');
 
   // 1) Page next -> returns toast AND updated Card JSON 2.0 synchronously (no async PATCH wait)
-  const pageRes = await post(f.h, f.id, interactiveClick(cardRow.id, 'p:rows:next', { message: 'remote-1', chat: 'oc_group_interactive' }));
+  const pageEvent = interactiveClick(cardRow.id, 'p:rows:next', { message: 'remote-1', chat: 'oc_group_interactive' });
+  const pageRes = await post(f.h, f.id, pageEvent);
   assert.equal(pageRes.status, 200);
   assert.equal(pageRes.value.toast.type, 'info');
   assert.match(pageRes.value.toast.content, /第 2 页/);
@@ -188,6 +189,15 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   assert.equal(f.wire.sent.filter(s => s.method === 'PATCH').length, 0);
   const ledgerAfterPage = f.service.ledger.query(group.id, { message_id: 'remote-1' }).messages[0];
   assert.match(ledgerAfterPage.content, /Item 3/);
+
+  // 1b) Duplicate retry of the same event_id (e.g. lost HTTP/WS response) returns the current card idempotently without advancing state again
+  const revBeforeRetry = f.h.store.get('SELECT revision FROM channel_interactive_cards WHERE id=?', cardRow.id).revision;
+  const retryRes = await post(f.h, f.id, pageEvent);
+  assert.equal(retryRes.status, 200);
+  assert.equal(retryRes.value.toast.content, '操作已处理');
+  assert.equal(retryRes.value.card.type, 'raw');
+  assert.equal(retryRes.value.card.data.body.elements.find(e => e.tag === 'table').rows[0].name, 'Item 3');
+  assert.equal(f.h.store.get('SELECT revision FROM channel_interactive_cards WHERE id=?', cardRow.id).revision, revBeforeRetry);
 
   // 2) Filter via select_static option -> synchronous card response shows only kind=A rows
   const filterRes = await post(f.h, f.id, interactiveClick(cardRow.id, 'f:rows:kind', { message: 'remote-1', chat: 'oc_group_interactive', option: 'A' }));
@@ -227,6 +237,10 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   assert.equal(blocked.value.toast.type, 'error');
   assert.match(blocked.value.toast.content, /失效/);
   assert.equal(blocked.value.card, undefined);
+  // Retrying an earlier event_id after fence revocation must NOT leak card content
+  const retryAfterDisable = await post(f.h, f.id, pageEvent);
+  assert.equal(retryAfterDisable.value.toast.content, '操作已处理');
+  assert.equal(retryAfterDisable.value.card, undefined);
 
   // 6) Legacy card tokens still resolve to channel_card_stale
   const legacy = await post(f.h, f.id, cardEvent('legacy-token', 'remote-legacy', 'ou_alice', 'oc_group_interactive'));
