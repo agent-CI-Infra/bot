@@ -25,7 +25,7 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     await expect(repository.getByLabel('当前会话记录',{exact:true})).toHaveCount(0);
     const backend = assistant.getByRole('combobox',{name:'Agent 后端',exact:true});
     await expect(backend).toHaveValue('native');
-    await expect(backend.locator('option[value=container_acp]')).toHaveCount(0);
+    await expect(backend.locator('option[value=container_acp], option[value=icode]')).toHaveCount(0);
     const captureBackend=async state=>{for(const width of [1440,390]){await page.setViewportSize({width,height:900});await expect(assistant.getByRole('combobox',{name:'Agent 后端',exact:true})).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/service-roles/backend-'+state+'-'+width+'.png',fullPage:true});}await page.setViewportSize({width:1440,height:1000});};
     await captureBackend('before-save');
     await assistant.getByRole('combobox',{name:'Agent 后端',exact:true}).selectOption('pi');

@@ -1,6 +1,6 @@
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
-import { readAcpProduct, type AcpProductManifest } from '../../runner/acp-products.mjs';
+import { icodeProductId, readAcpProduct, type AcpProductManifest } from '../../runner/acp-products.mjs';
 import { TaskError, stop } from '../agent/common.js';
 import type { RuntimeModel } from '../agent/model.js';
 import type { AgentSpec } from '../agent/runtime.js';
@@ -21,21 +21,22 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-export async function prepareAcp<T>(spec: AgentSpec<T>): Promise<AcpProductManifest> {
+export async function prepareAcp<T>(spec: AgentSpec<T>, backend = containerAcpId): Promise<AcpProductManifest> {
+  const id = backend === icodeProductId ? icodeProductId : process.env.BOT_ACP_PRODUCT ?? containerAcpId;
   let product: AcpProductManifest;
   try {
-    product = readAcpProduct(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, process.env.BOT_ACP_PRODUCT ?? containerAcpId);
+    product = readAcpProduct(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, id);
   } catch (error) {
     return stop('acp_product_not_installed', 'waiting_configuration', `无法读取容器 ACP 产品版本（${(error as NodeJS.ErrnoException).code ?? (error as Error).message}）。`);
   }
   spec.harnessPreparation = product;
-  spec.harnessBinding = { harness_revision: `${containerAcpId}:${product.id}@${product.version}:${contentHash(product)}`, cli_version: product.version };
+  spec.harnessBinding = { harness_revision: `${backend}:${product.id}@${product.version}:${contentHash(product)}`, cli_version: product.version };
   return product;
 }
 
-export function acpHarness<T>(spec: AgentSpec<T>): NonNullable<AgentSpec<T>['adapter']> {
+export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): NonNullable<AgentSpec<T>['adapter']> {
   return async () => {
-    const product = spec.harnessPreparation as AcpProductManifest | undefined ?? await prepareAcp(spec);
+    const product = spec.harnessPreparation as AcpProductManifest | undefined ?? await prepareAcp(spec, backend);
     const access = spec.harnessAccess;
     if (access && product.launch.access === 'full' && (!access.commands || (access.fileTools ?? access.workspace) !== 'write')) {
       return stop('harness_permission_mismatch', 'waiting_configuration', '此 ACP 产品要求运行命令和写入文件的权限。');
@@ -46,7 +47,7 @@ export function acpHarness<T>(spec: AgentSpec<T>): NonNullable<AgentSpec<T>['ada
     const model = (spec.model ?? executionModel(spec.store, spec.task)) as RuntimeModel;
     const revision = spec.harnessBinding?.harness_revision ?? contentHash(product);
     const binding = spec.harnessState?.value;
-    const resumeId = binding?.harness === containerAcpId && binding.revision === revision && typeof binding.sessionId === 'string' &&
+    const resumeId = binding?.harness === backend && binding.revision === revision && typeof binding.sessionId === 'string' &&
       spec.roleRun?.recovery_mode !== 'rebuilt_from_task_records' ? binding.sessionId : undefined;
     const rebuilding = Boolean(resumeId || binding?.sessionId || spec.runContext?.()?.resume_from_run_id || spec.roleRun?.recovery_mode === 'rebuilt_from_task_records');
     const signal = spec.executionSignal ?? new AbortController().signal;
@@ -95,7 +96,7 @@ export function acpHarness<T>(spec: AgentSpec<T>): NonNullable<AgentSpec<T>['ada
     };
     try {
       return await withContainerHarnessSession(spec, {
-        cli: containerAcpId, acpProduct: product, primaryModel: model, model: model.model,
+        cli: containerAcpId, backendId: backend, acpProduct: product, primaryModel: model, model: model.model,
         resume: rebuilding, sessionId: resumeId, sessionKey: spec.harnessSessionKey ?? spec.roleRun?.instance_id,
         manualCancel: cancel,
       }, signal, onData, async session => {
@@ -106,8 +107,8 @@ export function acpHarness<T>(spec: AgentSpec<T>): NonNullable<AgentSpec<T>['ada
         });
         const bound = await Promise.race([ready.promise, fault.promise, exited]);
         if (cancelReason) { await cancelling; throw cancelReason; }
-        spec.harnessState?.save({ harness: containerAcpId, sessionId: bound.session_id, revision });
-        emit({ type: 'session_bound', session_id: bound.session_id, recoveryMode: bound.recoveryMode, version: session.cliVersion, workspace_id: session.workspaceId });
+        spec.harnessState?.save({ harness: backend, sessionId: bound.session_id, revision });
+        emit({ type: 'session_bound', session_id: bound.session_id, recoveryMode: bound.recoveryMode, version: session.cliVersion, model: model.model, workspace_id: session.workspaceId });
         const submission = spec.finish ? '\nUse the offered bot MCP submission tool to submit the result before ending the turn.' : '';
         const trustedRules = access?.trustedCheckout === false && access.trustedAgentsMd ? `\n\nTrusted repository instructions:\n${access.trustedAgentsMd}` : '';
         const recovery = bound.recoveryMode === 'rebuilt_from_task_records' ? '\nRebuild context from the supplied task records. Check confirmed results before repeating work.' : '';
@@ -117,6 +118,11 @@ export function acpHarness<T>(spec: AgentSpec<T>): NonNullable<AgentSpec<T>['ada
         await Promise.race([session.writeStdin(JSON.stringify({ text: input }) + '\n'), fault.promise, exited]);
         const stopReason = await Promise.race([turn.promise, fault.promise, exited]);
         if (cancelReason) { await cancelling; throw cancelReason; }
+        await session.closeStdin();
+        const exit = await Promise.race([session.waitExit().catch(() => null), delay(2500, null, { ref: false })]);
+        if (cancelReason) { await cancelling; throw cancelReason; }
+        // A session cancelled by the runner watchdog can report a cancelled turn before its lease outcome arrives.
+        if (exit?.error === 'acp_lease_expired') stop('acp_lease_expired', 'retry_wait');
         if (stopReason === 'cancelled') stop('harness_cancelled', 'cancelled');
         await spec.guard();
         emit({ type: 'turn', stop_reason: stopReason, session_id: bound.session_id });

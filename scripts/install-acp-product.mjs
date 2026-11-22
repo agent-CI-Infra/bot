@@ -1,15 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { acpProductId, acpVersion, readAcpProduct, validateAcpLaunch } from '../runner/acp-products.mjs';
+import { acpProductExecutable, acpProductId, acpVersion, icodeProductId, icodeReleases, readAcpProduct, validateAcpLaunch } from '../runner/acp-products.mjs';
 
 const [action, ...args] = process.argv.slice(2);
 const { values: options } = parseArgs({ args, options: {
   root: { type: 'string', default: '/opt/agent-tools' },
   product: { type: 'string' }, version: { type: 'string' }, source: { type: 'string' },
-  preset: { type: 'string' }, 'python-executable': { type: 'string' }, offline: { type: 'boolean' },
+  archive: { type: 'string' }, preset: { type: 'string' }, 'python-executable': { type: 'string' }, offline: { type: 'boolean' },
 } });
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 if (action === 'hash-source' && options.source) {
@@ -55,6 +55,8 @@ function stageSource(source, target) {
 }
 
 function install() {
+  if (options.archive) return installICode();
+  if (options.product === icodeProductId) throw new Error('icode_offline_archive_required');
   const preset = JSON.parse(readFileSync(options.preset, 'utf8'));
   const launch = validateAcpLaunch(preset.launch);
   if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(preset.python ?? '') ||
@@ -98,6 +100,39 @@ function install() {
     throw error;
   }
   useVersion();
+}
+
+function installICode() {
+  const release = icodeReleases.get(options.version);
+  const expected = release?.sha256[process.arch];
+  if (options.product !== icodeProductId || !expected || process.platform !== 'linux') {
+    throw new Error('icode_release_unsupported');
+  }
+  const archive = readFileSync(options.archive);
+  if (hash(archive) !== expected) throw new Error('icode_archive_hash_mismatch');
+  mkdirSync(versionDir, { mode: 0o755 });
+  try {
+    const executable = join(versionDir, acpProductExecutable(icodeProductId));
+    mkdirSync(join(versionDir, 'bin'), { mode: 0o755 });
+    // Only extract the pinned release's single executable, without applying archive paths or permissions.
+    const output = openSync(executable, 'wx', 0o755);
+    try {
+      execFileSync('tar', ['-xOzf', '-', 'icode'], { input: archive, stdio: ['pipe', output, 'inherit'] });
+    } finally {
+      closeSync(output);
+    }
+    const manifest = {
+      schema: 'bot.acp-product/1', id: icodeProductId, version: options.version, distribution: 'linux-offline',
+      source: 'https://github.com/openJiuwen-ai/iCode/commit/' + release.commit, sourceSha256: expected,
+      launch: { args: ['acp', '--approval', 'bypass', '--ask-user-timeout', '5', '--agent', 'Launchpad'],
+        mcp: 'http', access: 'native', untrustedCheckout: true, env: {}, answers: {}, sidecars: [] },
+    };
+    writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644, flag: 'wx' });
+    useVersion();
+  } catch (error) {
+    rmSync(versionDir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 try {

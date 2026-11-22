@@ -55,7 +55,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       const picker = page.getByTestId('role-form').getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
-      const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp'] : [];
+      const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp', 'icode'] : [];
       expect(optionValues).toEqual(['pi', 'claude_code', 'codex', ...acp, 'native', 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
       for (const backend of ['pi', 'native', 'process']) expect(await optionDisabled(backend)).toBe(false);

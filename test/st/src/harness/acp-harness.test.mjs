@@ -184,17 +184,21 @@ test('ACP installer verifies inputs and switches the selected version after a su
 test('ACP role kinds are declared in project configuration and refused for service roles', () => {
   const store = new Store(':memory:', randomBytes(32));
   try {
-    const backend = agentBackends().find(item => item.id === id);
-    for (const role of ['dev', 'test', 'reviewer', 'ux', 'custom']) assert.ok(backend.kinds.includes(roleKind(role)));
-    for (const role of ['manager', 'coordinator', 'qa']) assert.ok(!backend.kinds.includes(roleKind(role)));
-    assert.equal(backend.runtime_status.source, 'declaration');
-    assert.deepEqual(backend.supported_model_sources, ['gateway']);
+    const backends = agentBackends();
     const actor = { id: 'admin', role: 'super_admin' };
-    assert.throws(() => serviceRolesApi(store, actor, 'POST', '/api/service-roles', { name: 'fixture', harness: id }), /unknown_role_harness/);
-    assert.throws(() => roleHarness('acp'), /unknown_role_harness/);
-    for (const role of ['manager', 'coordinator', 'qa']) {
-      assert.throws(() => resolveRole(store, '1', role, 'development.issue', { harness: id }), error => error.code === 'harness_role_unsupported');
+    for (const backend of [id, 'icode']) {
+      const metadata = backends.find(item => item.id === backend);
+      for (const role of ['dev', 'test', 'reviewer', 'ux', 'custom']) assert.ok(metadata.kinds.includes(roleKind(role)));
+      for (const role of ['manager', 'coordinator', 'qa']) {
+        assert.ok(!metadata.kinds.includes(roleKind(role)));
+        assert.throws(() => resolveRole(store, '1', role, 'development.issue', { harness: backend }), error => error.code === 'harness_role_unsupported');
+      }
+      assert.deepEqual(metadata.supported_model_sources, ['gateway']);
+      assert.throws(() => serviceRolesApi(store, actor, 'POST', '/api/service-roles', { name: 'fixture', harness: backend }), /unknown_role_harness/);
     }
+    assert.equal(backends.find(item => item.id === id).runtime_status.source, 'declaration');
+    assert.equal(backends.find(item => item.id === 'icode').runtime_status.source, 'tool_volume');
+    assert.throws(() => roleHarness('acp'), /unknown_role_harness/);
   } finally { store.close(); }
 });
 
@@ -206,7 +210,7 @@ test('ACP negotiates, streams, answers requests, validates HTTP MCP submissions,
   assert.deepEqual(await session.run(), { summary: 'verified fact' });
   const binding = f.events.find(event => event.type === 'session_bound');
   assert.equal(binding.recoveryMode, 'new_session');
-  assert.deepEqual(f.events.find(event => event.type === 'configuration').capabilities, { loadSession: true });
+  assert.deepEqual(f.events.find(event => event.type === 'configuration').capabilities, { loadSession: true, sessionCapabilities: { close: {} } });
   assert.deepEqual(f.events.filter(event => event.type === 'message').map(event => event.text), ['检查', '完成']);
   assert.deepEqual(f.events.filter(event => event.type === 'tool').map(event => event.status), ['pending', 'completed']);
   assert.deepEqual(f.events.find(event => event.type === 'permission'), { type: 'permission', allowed: true, tool_call_id: 'T', outcome: 'selected', optionId: 'allow' });
@@ -218,6 +222,7 @@ test('ACP negotiates, streams, answers requests, validates HTTP MCP submissions,
   const [usage] = f.store.all('SELECT input_tokens, output_tokens FROM model_requests');
   assert.deepEqual({ ...usage }, { input_tokens: 19, output_tokens: 7 });
   assert.equal(JSON.stringify(f.events).includes(f.runToken), false);
+  assert.equal(json(join(f.runs()[0], 'close.json')), true);
   await noProcesses(f.runs()[0]);
 
   await session.send('continue');
@@ -237,11 +242,11 @@ test('ACP negotiates, streams, answers requests, validates HTTP MCP submissions,
   await assert.rejects(session.send('bad stdout'), error => error.code === 'acp_invalid_frame');
 });
 
-for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires']) {
+for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires', 'force kill']) {
   test(`ACP ${mode} stops the agent, its background child, and the sidecar`, async t => {
     const f = await fixture(t);
     const controller = new AbortController();
-    if (mode === 'lease expires') {
+    if (mode === 'lease expires' || mode === 'force kill') {
       const product = readAcpProduct(f.tools, id);
       let renew = true;
       const deliver = f.spec.roleWorkspace.deliver;
@@ -251,12 +256,14 @@ for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires']) {
           await waitFor(() => f.runs().some(run => existsSync(join(run, 'session.json'))));
           await session.writeStdin(JSON.stringify({ text: 'hold' }) + '\n');
           await waitFor(() => f.runs().some(run => existsSync(join(run, 'prompt.json'))));
-          renew = false;
+          if (mode === 'force kill') await session.interrupt('kill');
+          else renew = false;
           return session.waitExit();
         });
       // The poll observer stays alive after control-plane heartbeats stop.
       const result = await ran;
-      assert.equal(result.error, 'acp_lease_expired');
+      if (mode === 'lease expires') assert.equal(result.error, 'acp_lease_expired');
+      else assert.equal(result.state, 'interrupted');
     } else {
       const session = roleHarness(id).createSession({ ...f.spec, cancelSignal: controller.signal }, {});
       t.after(() => session.close());
@@ -270,7 +277,7 @@ for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires']) {
       await assert.rejects(task, error => error instanceof TaskError && error.code === ({ cancel: 'harness_cancelled', close: 'harness_cancelled', timeout: 'role_budget_exhausted', revoked: 'run_token_revoked' })[mode]);
     }
     const [run] = f.runs();
-    assert.equal(json(join(run, 'cancel.json')), true);
+    if (mode !== 'force kill') assert.equal(json(join(run, 'cancel.json')), true);
     await noProcesses(run);
   });
 }

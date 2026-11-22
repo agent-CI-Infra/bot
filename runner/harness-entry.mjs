@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFile, chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { maskedStream } from './command-output.mjs';
@@ -12,7 +12,8 @@ import { environment as baseEnv, workspaceTag } from './command.mjs';
 import { startModelRelay } from './model-relay.mjs';
 import { local, runnerRoot, tasksDirectory } from './paths.mjs';
 import { bashProfile, loginProfile } from './login-profile.mjs';
-import { ACP_LEASE_MS, acpLeaseFile, reapAcpDescendants } from './acp-lease.mjs';
+import { ACP_LEASE_MS, acpLeaseFile, acpRunHome, reapAcpDescendants } from './acp-lease.mjs';
+import { icodeProductId } from './acp-products.mjs';
 import { createTokenExchange } from './token-exchange.mjs';
 
 const ID48_RE = /^[a-f0-9]{48}$/;
@@ -126,6 +127,7 @@ const bootLine = await readFile('/proc/1/stat', 'utf8').catch(() => '');
 const boot = bootLine ? bootLine.slice(bootLine.lastIndexOf(')') + 2).split(' ')[19] : 'local';
 
 let instanceId = null;
+let icode = false;
 let hasWrittenRunning = false;
 
 let currentState = {
@@ -206,6 +208,8 @@ try {
 
   const harness = rawConfig.harness;
   const acp = harness === 'container_acp';
+  icode = acp && rawConfig.acp_product?.id === icodeProductId;
+  if (icode && (local || !instanceId)) throw new Error('icode_requires_project_computer');
   if (!acp && harness !== 'claude_code' && harness !== 'codex') throw new Error('unsupported_container_harness');
 
   const executable = mapToolsPath(rawConfig.executable);
@@ -217,8 +221,10 @@ try {
   const tasksBase = await ensureSafeDirectory(tasksDirectory, dirname(tasksDirectory));
   const stateWorkspaceDir = await ensureSafeDirectory(`${tasksBase}/${stateWorkspaceId}`, tasksBase);
   const cliStateRoot = await ensureSafeDirectory(`${stateWorkspaceDir}/cli-state/${sessionKey}`, stateWorkspaceDir);
-  const homeDir = await ensureSafeDirectory(`${cliStateRoot}/home`, cliStateRoot);
-  const tmpDir = await ensureSafeDirectory(`${agentDir}/tmp`, agentDir);
+  const homeDir = icode ? await ensureSafeDirectory(acpRunHome(agentDir, instanceId), agentDir)
+    : await ensureSafeDirectory(`${cliStateRoot}/home`, cliStateRoot);
+  const tmpDir = icode ? await ensureSafeDirectory(join(homeDir, 'tmp'), homeDir)
+    : await ensureSafeDirectory(`${agentDir}/tmp`, agentDir);
   const wrapperBinDir = await ensureSafeDirectory(`${agentDir}/bin`, agentDir);
 
   await writeFile(
@@ -405,6 +411,7 @@ try {
     spawnArgs = [`${runnerRoot}/acp-entry.mjs`, agentDir, executable];
     childEnv.BOT_ACP_RELAY_URL = relay.url;
     childEnv.BOT_ACP_INSTANCE_ID = instanceId;
+    if (icode) childEnv.CHRYS_SESSION_ROOT_DIR = await ensureSafeDirectory(join(cliStateRoot, 'icode'), cliStateRoot);
   }
 
   await writeFile(stdoutFile, '', { mode: 0o600 });
@@ -445,7 +452,7 @@ try {
   await writeState({
     state: 'running',
     cli_pid: cliChild.pid ?? null,
-    ...(acp ? { harness } : {}),
+    ...(acp ? { harness, ...(icode ? { acp_product_id: icodeProductId } : {}) } : {}),
     model_transport: gateway ? 'gateway' : 'direct',
     relay_url: relay?.url ?? null,
     session_id: sessionId,
@@ -539,6 +546,7 @@ try {
         : 'failed';
 
   if (acp) await reapAcpDescendants(instanceId);
+  if (icode) await rm(acpRunHome(agentDir, instanceId), { recursive: true, force: true }).catch(() => {});
   await shutdown({
     state: finalState,
     exit_code: exitResult.code,
@@ -557,6 +565,10 @@ try {
   try { process.kill(-process.pid, 'SIGTERM'); } catch {}
   process.exit(0);
 } catch (err) {
+  if (icode && !local && instanceId) {
+    await reapAcpDescendants(instanceId);
+    await rm(acpRunHome(agentDir, instanceId), { recursive: true, force: true }).catch(() => {});
+  }
   await shutdown({
     state: 'failed',
     error: String(err?.message || 'harness_entry_failed').slice(0, 1000),
