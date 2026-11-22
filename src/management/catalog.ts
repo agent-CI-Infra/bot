@@ -4,7 +4,22 @@ import { planSchema, subscriptionSchema, schedulingCommands } from '../schedules
 
 export { str, obj } from './catalog-base.js';
 const bool = { type: 'boolean' }, integer = { type: 'integer', minimum: 0 };
+const num = { type: 'number', minimum: 0 };
 const strings = { type: 'array', items: str, maxItems: 100 };
+const envMap = { type: 'object', additionalProperties: true };
+const nullableNum = { anyOf: [num, { type: 'null' }] };
+const nullableInt = { anyOf: [integer, { type: 'null' }] };
+const computerArgs = obj({
+  cpus: nullableNum,
+  memory_mb: nullableInt,
+  pids: nullableInt,
+  tmp_mb: nullableInt,
+  egress: bool,
+  packages: strings,
+  setup_script: { type: 'string', maxLength: 16384 },
+  env: envMap,
+  rebuild: bool,
+});
 export const contractSchema = obj({ goal: str, scope: strings, criteria: { ...strings, minItems: 1 }, endpoint: str }, ['goal', 'scope', 'criteria', 'endpoint']);
 export const taskTargetSchema = obj({ type: { type: 'string', enum: ['issue', 'pr', 'branch', 'commit'] }, number: { type: 'integer', minimum: 1 }, ref: { ...str, maxLength: 256 } }, ['type']);
 export const targetSchema = obj({ project_id: str, task_id: str }, ['project_id']);
@@ -22,10 +37,15 @@ export const commands: Record<string, { capability: string; arguments: Json; des
   'task.instructions': { capability: 'tasks.write', arguments: obj({ instruction: str }, ['instruction']), description: '追加当前任务补充指令，供后续步骤读取，不改目标或旧 run 快照。' },
   'task.contract': { capability: 'tasks.write', arguments: obj({ contract: contractSchema }, ['contract']), description: '显式修改目标、范围或验收条件并增加 contract revision，使旧候选与验收失效。' },
   'knowledge.revise': { capability: 'knowledge.write', arguments: obj({ id: str, revision: integer, body: str, reason:str, catalog:{type:'object'}, action:{type:'string',enum:['accept','reject','archive','conflict','revoke','restore','merge']}, evidence:strings, supersedes:strings, run_id:str }, ['id','revision']), description: '按精确 revision 修订知识目录或正文，或附证据复核候选；文档晋升通过项目知识页核验合入。' },
+  'computer.update_defaults': { capability: 'config.write', arguments: computerArgs, description: '更新全局虚拟电脑默认环境（默认资源、外网开关、预装软件包、非特权初始化脚本、环境变量），仅超级管理员可用（target.project_id 固定填 "platform"）；修改软件包或脚本后自动排队预编译并缓存镜像，供管理助手、群助手与所有项目电脑共用。' },
+  'computer.cancel_build': { capability: 'config.write', arguments: obj({}), description: '手动停止正在排队或构建中的全局默认预编译镜像任务，仅超级管理员可用（target.project_id 固定填 "platform"）；不影响运行中的容器。' },
+  'environment.configure': { capability: 'config.write', arguments: computerArgs, description: '配置单个项目的虚拟电脑叠加环境：项目管理员可配置增量 packages、setup_script（非特权安装到 /opt/preinstalled）、env 与 rebuild，自动在全局基座之上预编译并缓存镜像；CPU/内存/进程数/tmp/egress 仅超级管理员可修改。' },
+  'environment.cancel_build': { capability: 'config.write', arguments: obj({}), description: '手动停止当前项目正在排队或构建中的预编译镜像任务；项目管理员与超级管理员可用，不影响正在运行的项目电脑。' },
+  'environment.lifecycle': { capability: 'config.write', arguments: obj({ action: { type: 'string', enum: ['start', 'stop', 'reset'] } }, ['action']), description: '启停或重置项目电脑（start / stop / reset）；reset 时直接复用已缓存的预编译镜像，不重复运行初始化脚本。' },
   ...schedulingCommands,
 };
 export const schedulingQueries = ['list_schedules','list_subscriptions','list_occurrences','list_notification_deliveries','list_schedule_audit','list_schedule_destinations','preview_schedule','preview_subscription','list_schedule_migrations'];
-export const queries = ['list_projects','list_tasks','get_task','get_effective_config','get_usage','list_audit','get_capabilities','search_knowledge','read_knowledge','knowledge_versions', ...schedulingQueries] as const;
+export const queries = ['list_projects','list_tasks','get_task','get_effective_config','get_usage','list_audit','get_capabilities','search_knowledge','read_knowledge','knowledge_versions','get_computer_defaults','get_environment','list_precompiled_images', ...schedulingQueries] as const;
 export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, id:str, revision:{type:'integer',minimum:1}, baseline:str, plan: planSchema, subscription: subscriptionSchema, schedule_id: str }) }, ['operation','target','arguments']);
 export const commandSchema = obj({ operation: { type:'string',enum:Object.keys(commands) }, target: targetSchema, arguments: { type:'object' }, expected_revision: str,
   idempotency_key: { ...str,maxLength:240 }, source_conversation: { ...str,maxLength:240 }, source_message: { ...str,maxLength:240 } }, ['operation','target','arguments','expected_revision','idempotency_key','source_conversation','source_message']);
@@ -48,6 +68,7 @@ export function validate(schema: Json, value: any): void {
     }
     case 'string': if(typeof value!=='string'||value.includes('\0')||value.length<Number(schema.minLength??0)||value.length>Number(schema.maxLength??Number.MAX_SAFE_INTEGER))fail(400,'invalid_management_arguments');break;
     case 'integer': if(!Number.isSafeInteger(value)||value<Number(schema.minimum??0)||value>Number(schema.maximum??Number.MAX_SAFE_INTEGER))fail(400,'invalid_management_arguments');break;
+    case 'number': if(typeof value!=='number'||!Number.isFinite(value)||value<Number(schema.minimum??-Infinity)||value>Number(schema.maximum??Infinity))fail(400,'invalid_management_arguments');break;
     case 'boolean': if(typeof value!=='boolean')fail(400,'invalid_management_arguments');break;
     case 'null': if(value!==null)fail(400,'invalid_management_arguments');break;
     case 'array': if(!Array.isArray(value)||value.length<Number(schema.minItems??0)||value.length>Number(schema.maxItems??100))fail(400,'invalid_management_arguments');else for(const item of value)validate(schema.items as Json,item);break;

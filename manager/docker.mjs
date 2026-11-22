@@ -44,23 +44,84 @@ export class Docker {
       if (timeout) req.setTimeout(timeout, () => req.destroy(new Error('docker_timeout'))); req.on('error', reject); req.end(bytes);
     });
   }
-  // Builds an image from a generated Dockerfile (a one-file tar context). Only the manager writes the Dockerfile.
-  build(tag, dockerfile, labels, timeout = 30 * 60000) {
-    const context = tar('Dockerfile', Buffer.from(dockerfile)), query = new URLSearchParams({ t: tag, labels: JSON.stringify(labels), rm: '1', forcerm: '1' });
+  // Builds an image from a generated Dockerfile and optional extra context files (tar archive).
+  // Only the manager writes the Dockerfile; setup scripts are injected as separate tar entries rather than interpolated.
+  // Supports resource caps (memory/memswap/cpuquota), isolated networkmode, streaming output callbacks, no timeout (0),
+  // and AbortSignal cancellation.
+  build(tag, dockerfile, labels, optionsOrTimeout = 0) {
+    const opts = typeof optionsOrTimeout === 'number' ? { timeout: optionsOrTimeout } : (optionsOrTimeout || {});
+    const timeout = opts.timeout ?? 0, outputLimit = opts.outputLimit ?? 32768;
+    const entries = [{ name: 'Dockerfile', data: Buffer.from(dockerfile) }];
+    for (const [name, content] of Object.entries(opts.files || {})) {
+      entries.push({ name, data: Buffer.isBuffer(content) ? content : Buffer.from(String(content)) });
+    }
+    const context = tarFiles(entries);
+    const params = { t: tag, labels: JSON.stringify(labels || {}), rm: '1', forcerm: '1' };
+    if (opts.memory) { params.memory = String(opts.memory); params.memswap = String(opts.memswap ?? opts.memory); }
+    if (opts.cpuquota) { params.cpuquota = String(opts.cpuquota); params.cpuperiod = String(opts.cpuperiod ?? 100000); }
+    if (opts.networkmode) params.networkmode = String(opts.networkmode);
+    const query = new URLSearchParams(params);
     return new Promise((resolve, reject) => {
+      let output = '', remainder = '', failure = null, settled = false;
+      const finish = (err, value) => {
+        if (settled) return; settled = true;
+        if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
+        if (err) reject(err); else resolve(value);
+      };
+      const append = text => {
+        if (!text) return;
+        output = (output + text).slice(-outputLimit);
+        try { opts.onOutput?.(text, output); } catch {}
+      };
+      const processLine = line => {
+        if (!line.trim()) return;
+        let entry; try { entry = JSON.parse(line); } catch { return; }
+        const chunk = entry.stream || (entry.status ? entry.status + '\n' : '');
+        if (chunk) append(chunk);
+        if (entry.error) failure = entry.error;
+      };
+      if (opts.signal?.aborted) {
+        finish(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true, output: '' }));
+        return;
+      }
       const req = http.request({ socketPath: this.socketPath, path: '/v1.47/build?' + query, method: 'POST',
         headers: { 'Content-Type': 'application/x-tar', 'Content-Length': context.length } }, res => {
-        let text = '';
-        res.on('data', b => { text += b; if (text.length > 4 * 1024 * 1024) text = text.slice(-1024 * 1024); });
-        res.on('end', () => {
-          const lines = text.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return {}; } });
-          const output = lines.map(l => l.stream || (l.status ? l.status + '\n' : '')).join('').slice(-8000), failure = lines.find(l => l.error);
-          if (res.statusCode >= 300 || failure) reject(Object.assign(new ManagerError('image_build_failed', 409), { output: `${output}${failure?.error || ''}`.slice(-8000) }));
-          else resolve(output);
+        res.on('data', b => {
+          remainder += b.toString('utf8');
+          let index;
+          while ((index = remainder.indexOf('\n')) !== -1) {
+            processLine(remainder.slice(0, index));
+            remainder = remainder.slice(index + 1);
+          }
         });
-        res.on('error', reject);
+        res.on('end', () => {
+          if (remainder) processLine(remainder);
+          if (opts.signal?.aborted) {
+            finish(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true, output }));
+            return;
+          }
+          if (res.statusCode >= 300 || failure) {
+            finish(Object.assign(new ManagerError('image_build_failed', 409), { output: `${output}${failure || ''}`.slice(-outputLimit) }));
+          } else {
+            finish(null, output);
+          }
+        });
+        res.on('error', err => {
+          if (opts.signal?.aborted) finish(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true, output }));
+          else finish(err);
+        });
       });
-      req.setTimeout(timeout, () => req.destroy(new Error('docker_timeout'))); req.on('error', reject); req.end(context);
+      const onAbort = () => {
+        req.destroy();
+        finish(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true, output }));
+      };
+      if (opts.signal) opts.signal.addEventListener('abort', onAbort, { once: true });
+      if (timeout > 0) req.setTimeout(timeout, () => req.destroy(new Error('docker_timeout')));
+      req.on('error', err => {
+        if (opts.signal?.aborted) finish(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true, output }));
+        else finish(err);
+      });
+      req.end(context);
     });
   }
   async stats(container) {
@@ -93,13 +154,20 @@ export class Docker {
   }
 }
 
-// Minimal ustar archive with one regular file, enough for a Docker build context.
-function tar(name, data) {
-  const header = Buffer.alloc(512), field = (value, offset, length) => header.write(value, offset, length, 'ascii');
-  field(name, 0, 100); field('0000644\0', 100, 8); field('0000000\0', 108, 8); field('0000000\0', 116, 8);
-  field(data.length.toString(8).padStart(11, '0') + '\0', 124, 12); field(Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0', 136, 12);
-  field('        ', 148, 8); field('0', 156, 1); field('ustar\0', 257, 6); field('00', 263, 2);
-  let checksum = 0; for (const byte of header) checksum += byte;
-  field(checksum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
-  return Buffer.concat([header, data, Buffer.alloc((512 - data.length % 512) % 512), Buffer.alloc(1024)]);
+// Minimal ustar archive builder supporting one or more regular files for a Docker build context.
+export function tarFiles(entries) {
+  const parts = [];
+  const nowOctal = Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0';
+  for (const { name, data, mode = '0000644' } of entries) {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const header = Buffer.alloc(512), field = (value, offset, length) => header.write(value, offset, length, 'ascii');
+    field(name, 0, 100); field(mode + '\0', 100, 8); field('0000000\0', 108, 8); field('0000000\0', 116, 8);
+    field(buf.length.toString(8).padStart(11, '0') + '\0', 124, 12); field(nowOctal, 136, 12);
+    field('        ', 148, 8); field('0', 156, 1); field('ustar\0', 257, 6); field('00', 263, 2);
+    let checksum = 0; for (const byte of header) checksum += byte;
+    field(checksum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
+    parts.push(header, buf, Buffer.alloc((512 - buf.length % 512) % 512));
+  }
+  parts.push(Buffer.alloc(1024));
+  return Buffer.concat(parts);
 }

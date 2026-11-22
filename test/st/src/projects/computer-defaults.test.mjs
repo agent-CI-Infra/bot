@@ -38,7 +38,7 @@ test('computers follow the resource defaults unless their project sets its own v
   let view = await f.projects.defaultsView();
   assert.deepEqual(view.defaults, { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 }); assert.deepEqual(view.builtin, view.defaults);
   assert.deepEqual(view.host, { cpus: 8, memory_mb: 32768 }); assert.deepEqual(view.allocated, { computers: 1, cpus: 2, memory_mb: 4096 });
-  for (const input of [{}, { cpus: 0.1 }, { memory_mb: 100 }, { pids: 1.5 }, { tmp_mb: '64' }, { egress: false }, { cpus: null }, []])
+  for (const input of [{}, { cpus: 0.1 }, { memory_mb: 100 }, { pids: 1.5 }, { tmp_mb: '64' }, { egress: 'no' }, { cpus: null }, []])
     await assert.rejects(f.projects.setDefaults(input), /invalid_defaults/);
   // Docker cannot give a container more CPUs than the host has.
   await assert.rejects(f.projects.setDefaults({ cpus: 12 }), /cpus_exceed_host/);

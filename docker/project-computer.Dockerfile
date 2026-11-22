@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /opt/bot && mv /tmp/image-packages /opt/bot/image-packages \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 project && useradd --uid 10001 --gid project --no-create-home project \
-    && mkdir -p /workspace /opt/agent-tools && chown project:project /workspace /opt/agent-tools && chmod 700 /workspace && chmod 755 /opt/agent-tools
+    && mkdir -p /workspace /opt/agent-tools /opt/preinstalled/bin /opt/preinstalled/home/.local/bin /opt/preinstalled/npm-global /opt/preinstalled/uv-tools /opt/preinstalled/python /opt/preinstalled/cargo /opt/preinstalled/go /opt/preinstalled/cache \
+    && chown -R project:project /workspace /opt/agent-tools /opt/preinstalled && chmod 700 /workspace && chmod 755 /opt/agent-tools /opt/preinstalled
 COPY runner/package.json runner/package-lock.json /opt/runner/
 RUN cd /opt/runner && npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY runner /opt/runner
@@ -23,8 +24,17 @@ COPY LICENSE NOTICE /opt/licenses/
 COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
 COPY docker/bot-desktop.sh /usr/local/bin/bot-desktop
 RUN chmod 755 /usr/local/bin/bot-chromium /usr/local/bin/bot-desktop && chmod -R a-w /opt/runner /opt/bot
-# Preinstalled browser and X11 virtual desktop tools for project and assistant computers (#1214).
-ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium
+# Preinstalled browser and X11 virtual desktop tools for project and assistant computers (#1214),
+# plus the writable non-root /opt/preinstalled prefix for precompiled setup scripts.
+ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium \
+    PREINSTALLED_DIR=/opt/preinstalled \
+    NPM_CONFIG_PREFIX=/opt/preinstalled/npm-global \
+    UV_TOOL_DIR=/opt/preinstalled/uv-tools \
+    UV_TOOL_BIN_DIR=/opt/preinstalled/bin \
+    PYTHONUSERBASE=/opt/preinstalled/python \
+    CARGO_HOME=/opt/preinstalled/cargo \
+    GOPATH=/opt/preinstalled/go \
+    PATH=/opt/preinstalled/bin:/opt/preinstalled/home/.local/bin:/opt/preinstalled/npm-global/bin:/opt/preinstalled/python/bin:/opt/preinstalled/cargo/bin:/opt/preinstalled/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium, xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg"
 USER 10001:10001
 WORKDIR /workspace

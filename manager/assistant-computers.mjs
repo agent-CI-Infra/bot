@@ -59,16 +59,32 @@ export function validateAssistantSettings(input, hostCpus = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount }) {
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount, globalEnvironment = null }) {
     this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.resultMount=resultMount;
+    this.globalEnvironment = globalEnvironment;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
   }
+  effectiveGlobal() {
+    const g = this.globalEnvironment?.();
+    return {
+      image: g?.image || this.image,
+      tag: g?.tag || null,
+      env: g?.env && typeof g.env === 'object' ? g.env : {},
+      defaults: g?.defaults || null,
+    };
+  }
+  activeImages() {
+    return [...new Set([...this.leases.values()].map(l => l.image).filter(Boolean))];
+  }
   // Only the current keys: a value an earlier version saved (the container runtime) is dropped, and the next save forgets it.
+  // When wired to unified global defaults, resource and egress keys fall back to the shared global computer defaults.
   settings() {
     const saved = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(), values = saved ? JSON.parse(saved.value) : {};
-    return Object.fromEntries(Object.entries(assistantDefaults).map(([key, value]) => [key, values[key] ?? value]));
+    const shared = this.effectiveGlobal().defaults;
+    const base = shared ? { ...assistantDefaults, ...shared } : assistantDefaults;
+    return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, values[key] ?? value]));
   }
   // The host's CPUs and memory, for the console to offer only sizes the host has; null when Docker cannot be read.
   async host() { const info = await this.docker.request('GET', '/info').catch(() => null); return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null; }
@@ -181,7 +197,8 @@ export class AssistantComputers {
     const { turn, fence, home_generation: generation, home_mode: mode } = input;
     if (!turnPattern.test(turn || '') || !/^[a-f0-9]{16,128}$/.test(fence || '') || !Number.isSafeInteger(generation) || generation < 1 || !['rw', 'ro'].includes(mode)) throw new ManagerError('invalid_assistant_request', 400);
     return this.lock(owner, async () => {
-      const now = Date.now(), settings = this.settings();
+      const now = Date.now(), settings = this.settings(), globalEnv = this.effectiveGlobal();
+      const targetImage = globalEnv.image, env = globalEnv.env, envSignature = JSON.stringify(Object.entries(env).sort());
       let lease = this.leases.get(owner);
       if (lease?.state === 'busy' && lease.turn !== turn) {
         // Another turn of the same owner (a private chat and a console conversation of one person) holds it: wait for it,
@@ -193,8 +210,9 @@ export class AssistantComputers {
         // The turn already holding it (a retried request) keeps it through new resources and past its lifetime: both apply
         // between turns. A changed fence, HOME generation or mode never keeps it.
         const held = lease.state === 'busy' && lease.turn === turn;
-        const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && lease.image === this.image && (!input.harness || lease.harness)
-          && (held || (lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
+        const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && (!input.harness || lease.harness)
+          && (held || (lease.image === targetImage && (lease.envSignature ?? '[]') === envSignature
+            && lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
           const reused = lease.state === 'idle';
@@ -215,7 +233,7 @@ export class AssistantComputers {
         }
         this.waiting = this.waiting.filter(t => t.owner !== owner);
       }
-      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: resourcesOf(settings), egress: settings.egress, image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
+      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: resourcesOf(settings), egress: settings.egress, image: targetImage, env, envSignature, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
       this.leases.set(owner, lease);
       try {
         await this.create(lease);
@@ -243,8 +261,11 @@ export class AssistantComputers {
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
     const networkMode = lease.egress ? await this.ensureNetwork() : 'none';
     const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
+    const extraEnv = lease.env && Object.keys(lease.env).length
+      ? [...Object.entries(lease.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(lease.env).join(',')}`]
+      : [];
     const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
-      Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant'], Labels: this.labels(owner),
+      Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant', ...extraEnv], Labels: this.labels(owner),
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: networkMode,
         Mounts: [...results, { Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[])],

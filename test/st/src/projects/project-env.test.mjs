@@ -152,24 +152,25 @@ test('a computer created with a noexec /tmp or with swap is replaced at the next
 test('packages build a derived image once, variables reach the container, and the setup script runs when it changes', async t => {
   const f = fixture(t); await f.projects.register('101');
   const name = f.projects.names('101', 1).container, configure = request => f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request });
-  for (const request of [{ packages: ['ok', '-rf'] }, { packages: ['a'.repeat(120)] }, { env: { PATH: '/tmp' } }, { env: { BOT_TOKEN: 'x' } }, { env: { GOOD: 1 } },
+  for (const request of [{ packages: ['ok', '-rf'] }, { packages: ['a'.repeat(120)] }, { env: { PATH: '/tmp' } }, { env: { BOT_TOKEN: 'x' } }, { env: { NODE_OPTIONS: '--x' } }, { env: { GOOD: 1 } },
     { setup_script: 'x'.repeat(20000) }, { max_command_minutes: 500 }, { rerun_setup: 'yes' }])
     await assert.rejects(configure(request), /invalid_(spec|packages|env|setup_script)/);
-  await assert.rejects(configure({ packages: ['broken-package'] }), /image_build_failed/);
+  await configure({ packages: ['broken-package'] });
+  await f.projects.waitForBuild('101');
   assert.equal(f.projects.spec('101').packages.length, 0); assert.equal(f.projects.get('101').state, 'ready');
   assert.equal(f.projects.describe('101').computer.build.state, 'failed');
-  const result = await configure({ packages: ['ffmpeg', 'libpq-dev'], env: { PIP_INDEX_URL: 'https://mirror.invalid/simple' }, setup_script: 'echo setup' });
+  await configure({ packages: ['ffmpeg', 'libpq-dev'], env: { PIP_INDEX_URL: 'https://mirror.invalid/simple' }, setup_script: 'echo setup' });
+  const result = await f.projects.waitForBuild('101');
   assert.equal(f.docker.builds.length, 2); assert.match(f.docker.builds[1], /apt-get install -y --no-install-recommends -- ffmpeg libpq-dev/);
+  assert.equal(f.docker.buildCalls[1].options.files['setup.sh'], 'echo setup\n');
   const container = f.docker.containers.get(name);
   assert.match(container.Image, /^sha256:[0-9a-f]{16}$/); assert.ok(container.Config.Env.includes('PIP_INDEX_URL=https://mirror.invalid/simple'));
   assert.ok(container.Config.Env.includes('BOT_PROJECT_ENV_KEYS=PIP_INDEX_URL'));
   assert.deepEqual([result.computer.build.state, result.computer.build.toolchain, result.computer.setup.state, result.computer.setup.exit_code], ['ready', 'fixture toolchain', 'succeeded', 0]);
-  const setupRuns = () => f.docker.runs.filter(r => r.type === 'command' && r.command === 'echo setup').length;
-  assert.equal(setupRuns(), 1);
-  // The setup script has no time limit: no runner timer and no Docker wait limit.
-  assert.deepEqual(['timeout_ms', 'wait'].map(k => f.docker.runs.find(r => r.command === 'echo setup')[k]), [null, 0]);
-  await configure({ cpus: 3 }); assert.equal(setupRuns(), 1); assert.equal(f.docker.builds.length, 2);
-  await configure({ rerun_setup: true }); assert.equal(setupRuns(), 2); assert.equal(f.projects.spec('101').rerun_setup, undefined);
+  // setup_script is precompiled into the image (never re-run via runner at container start).
+  assert.equal(f.docker.runs.filter(r => r.type === 'command' && r.command === 'echo setup').length, 0);
+  await configure({ cpus: 3 }); assert.equal(f.docker.builds.length, 2);
+  await configure({ rerun_setup: true }); await f.projects.waitForBuild('101'); assert.equal(f.docker.builds.length, 3); assert.equal(f.projects.spec('101').rerun_setup, undefined);
   // Commands are not capped by the project: a caller's own timeout is kept, and none means the command runs until it ends.
   await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'command', command: 'sleep 1', timeout_ms: 3600000 } });
   assert.deepEqual(['timeout_ms', 'wait'].map(k => f.docker.runs.find(r => r.command === 'sleep 1')[k]), [3600000, 3600000 + 60000]);

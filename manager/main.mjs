@@ -16,9 +16,10 @@ const projects = new Projects({ database, docker: new Docker(),
   deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project-computer:local',
   results: process.env.BOT_TOOL_RESULTS_DIR || null, egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
 projects.db.prepare("INSERT INTO settings VALUES('compaction',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(compaction));
-// Assistant computers use the approved base image (no project's packages) unless BOT_ASSISTANT_IMAGE names another one.
+// Assistant computers share the unified global computer defaults and precompiled image unless BOT_ASSISTANT_IMAGE overrides it.
 const assistants = new AssistantComputers({ docker: projects.docker, db: projects.db, deployment: projects.deployment,
-  resultMount:owner=>projects.resultMount(computerResultOwner('assistant',owner)), agentTools:()=>projects.agentToolsVolume(), image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' });
+  resultMount:owner=>projects.resultMount(computerResultOwner('assistant',owner)), agentTools:()=>projects.agentToolsVolume(), image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes',
+  globalEnvironment: process.env.BOT_ASSISTANT_IMAGE ? null : () => projects.assistantGlobalEnvironment() });
 const { server, recovered } = createManagerServer({ projects, token, assistants });
 server.listen(8793, '0.0.0.0');
 let timer, assistantTimer, stopping = false, checking = false, checkingAssistants = false;
@@ -30,6 +31,6 @@ await recovered;
 // Background work once the manager is ready: close trajectory files a stopped process left open, then move the bodies of
 // ledger rows written before #436 into files, slice by slice, and remove the files no call replays any more (#671).
 if (!stopping) void projects.trajectories.seal().catch(error => console.error('[manager] sealing trajectory files failed:', error)).then(() => { if (!stopping) { projects.migration.start(); projects.expiry.start(); projects.vacuum.start(); } });
-if (!stopping) timer = setInterval(async () => { if (checking) return; checking = true; try { await projects.check(); } finally { checking = false; } }, 5000);
+if (!stopping) timer = setInterval(async () => { if (checking) return; checking = true; try { await projects.check(assistants.activeImages()); } finally { checking = false; } }, 5000);
 // Assistant computers keep their own timer: their idle timeouts never wait behind a slow project check.
 if (!stopping) assistantTimer = setInterval(async () => { if (checkingAssistants) return; checkingAssistants = true; try { await assistants.check(); } catch (error) { console.error('[manager] assistant computer check failed:', error); } finally { checkingAssistants = false; } }, 5000);
