@@ -2,6 +2,8 @@
 
 The control plane manages all interactive callbacks with opaque server-issued tokens and re-checks chat and authorization fences on every click. Never write raw `callback` behaviors on buttons.
 
+> **Shared-card note (Feishu Card JSON 2.0)**: Card JSON 2.0 enforces `update_multi: true`, meaning `views` and `paginated_list` updates apply to **all viewers** in a group chat. In group chats, prefer client-side `collapsible_panel` and native `table` pagination (`page_size: 5..10`) whenever the data fits under 28 KB and does not require dropdown filtering; use `views` and `paginated_list` for private chats, larger multi-section payloads, or interactive filtering.
+
 ## 1. Switchable Views (`views`)
 
 Use `views` (2–10 named views) whenever information naturally splits into sections or perspectives (for example overview vs details, per-category tabs, or table vs chart). Shared `elements` appear above the switcher; each view gets its own 28 KB / 190-element budget.

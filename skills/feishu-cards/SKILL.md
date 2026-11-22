@@ -20,13 +20,14 @@ description: Decide when to reply in Feishu with a general-purpose Card JSON 2.0
 ## Core Design Principles
 
 1. **General-purpose composition**: Pick only the components that serve the content. A concise two-section card beats a cluttered dashboard.
-2. **Use `width_mode: "fill"` for wide layouts**: Cards with `table`, `chart`, `column_set`, `views` or `paginated_list` automatically default to `"fill"`; keep `"default"` or `"compact"` for narrow summaries.
-3. **Respect Feishu Card JSON 2.0 hard limits**:
+2. **Prefer client-side interaction in group chats**: Feishu Card JSON 2.0 only supports shared cards (`update_multi: true`), so clicking server-managed `views` or `paginated_list` switches the card for **everyone** in a group chat. When group-chat content fits under 28 KB and does not need dropdown filters, prefer pure client-side components — `collapsible_panel` (local expand/collapse), native `table` with `page_size: 5..10` (local client pagination for up to 100 rows), and `chart` — which update locally with zero latency and never disrupt other readers. Use `views` and `paginated_list` for private chats, datasets that exceed the 28 KB single-view budget, or when interactive dropdown filtering or shared view switching is genuinely useful.
+3. **Use `width_mode: "fill"` for wide layouts**: Cards with `table`, `chart`, `column_set`, `views` or `paginated_list` automatically default to `"fill"`; keep `"default"` or `"compact"` for narrow summaries.
+4. **Respect Feishu Card JSON 2.0 hard limits**:
    - Serialized card payload must stay under **28 KB** (Feishu enforces 30 KB) and **190 elements** (Feishu enforces 200).
    - `table` and `paginated_list` MUST sit at the **root** of `elements` (or top level of a `view.elements`), never nested inside `column_set`, `collapsible_panel`, or `interactive_container`.
    - At most **5 `table`** and **5 `chart`** components per rendered view; container nesting depth at most **5**.
    - Interactive cards remain updatable for **14 days** (Feishu platform limit).
-4. **Security & truthfulness**:
+5. **Security & truthfulness**:
    - Only `http(s)` or console relative links are allowed; never invent `img_key` or raw callback payloads.
    - Never fabricate metrics, counts, or statuses to fill out a visual template.
    - Always finish your turn with a concise plain-text summary (used as fallback if Feishu rejects the card and recorded in conversation history).
