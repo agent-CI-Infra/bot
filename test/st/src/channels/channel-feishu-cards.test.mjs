@@ -177,30 +177,33 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   const cardRow = f.h.store.get('SELECT * FROM channel_interactive_cards WHERE chat_id=?', group.id);
   assert.ok(cardRow && cardRow.remote_message_id === 'remote-1');
 
-  // 1) Page next -> returns toast & queues PATCH update
+  // 1) Page next -> returns toast AND updated Card JSON 2.0 synchronously (no async PATCH wait)
   const pageRes = await post(f.h, f.id, interactiveClick(cardRow.id, 'p:rows:next', { message: 'remote-1', chat: 'oc_group_interactive' }));
   assert.equal(pageRes.status, 200);
   assert.equal(pageRes.value.toast.type, 'info');
   assert.match(pageRes.value.toast.content, /第 2 页/);
-  await until(() => f.wire.sent.some(s => s.method === 'PATCH'));
-  const patch1 = f.wire.sent.find(s => s.method === 'PATCH');
-  assert.equal(patch1.content.body.elements.find(e => e.tag === 'table').rows[0].name, 'Item 3');
+  assert.equal(pageRes.value.card.type, 'raw');
+  assert.equal(pageRes.value.card.data.schema, '2.0');
+  assert.equal(pageRes.value.card.data.body.elements.find(e => e.tag === 'table').rows[0].name, 'Item 3');
+  assert.equal(f.wire.sent.filter(s => s.method === 'PATCH').length, 0);
+  const ledgerAfterPage = f.service.ledger.query(group.id, { message_id: 'remote-1' }).messages[0];
+  assert.match(ledgerAfterPage.content, /Item 3/);
 
-  // 2) Filter via select_static option -> PATCH shows only kind=A rows
+  // 2) Filter via select_static option -> synchronous card response shows only kind=A rows
   const filterRes = await post(f.h, f.id, interactiveClick(cardRow.id, 'f:rows:kind', { message: 'remote-1', chat: 'oc_group_interactive', option: 'A' }));
   assert.equal(filterRes.value.toast.content, '类型：A');
-  await until(() => f.wire.sent.filter(s => s.method === 'PATCH').length >= 2);
-  const patch2 = f.wire.sent.filter(s => s.method === 'PATCH')[1];
-  assert.deepEqual(patch2.content.body.elements.find(e => e.tag === 'table').rows.map(r => r.name), ['Item 1', 'Item 3']);
+  assert.equal(filterRes.value.card.type, 'raw');
+  assert.deepEqual(filterRes.value.card.data.body.elements.find(e => e.tag === 'table').rows.map(r => r.name), ['Item 1', 'Item 3']);
 
-  // 3) Switch view to trend via WebSocket long-connection path -> PATCH renders VChart
+  // 3) Switch view to trend via WebSocket long-connection path -> synchronous card response renders VChart
   f.h.store.run("UPDATE channel_connectors SET transport='websocket' WHERE id=?", f.id);
   const switchRes = f.service.receiveLongConnection(f.id, interactiveClick(cardRow.id, 'v:trend', { message: 'remote-1', chat: 'oc_group_interactive' }));
   f.h.store.run("UPDATE channel_connectors SET transport='http' WHERE id=?", f.id);
   assert.equal(switchRes.toast.content, '已切换至「趋势图」');
-  await until(() => f.wire.sent.filter(s => s.method === 'PATCH').length >= 3);
-  const patch3 = f.wire.sent.filter(s => s.method === 'PATCH')[2];
-  assert.ok(patch3.content.body.elements.some(e => e.tag === 'chart'));
+  assert.equal(switchRes.card.type, 'raw');
+  assert.equal(switchRes.card.data.schema, '2.0');
+  assert.ok(switchRes.card.data.body.elements.some(e => e.tag === 'chart'));
+  assert.equal(f.wire.sent.filter(s => s.method === 'PATCH').length, 0);
 
   // 4) Follow-up action -> runs standard turn attributed to clicking user (ou_bob) and sends reply
   let seenFollowup = '';
@@ -210,6 +213,7 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   const followRes = await post(f.h, f.id, interactiveClick(cardRow.id, 'a:refresh', { message: 'remote-1', actor: 'ou_bob', chat: 'oc_group_interactive' }));
   assert.equal(followRes.value.toast.type, 'success');
   assert.match(followRes.value.toast.content, /刷新数据/);
+  assert.equal(followRes.value.card, undefined);
   await until(() => f.wire.sent.some(s => s.msg_type === 'post' && JSON.stringify(s.content).includes('已按你的点击重新查询完成')));
   assert.equal(seenFollowup, '[卡片操作：刷新数据] 请重新查询并刷新最新结果');
 
@@ -219,11 +223,10 @@ test('interactive card handles view switch, paginated_list filter/page, followup
     service_role_id: binding.service_role_id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: false, expected_revision: binding.revision,
   });
   assert.equal(disable.status, 200);
-  const patchCountBefore = f.wire.sent.filter(s => s.method === 'PATCH').length;
   const blocked = await post(f.h, f.id, interactiveClick(cardRow.id, 'v:items', { message: 'remote-1', chat: 'oc_group_interactive' }));
   assert.equal(blocked.value.toast.type, 'error');
   assert.match(blocked.value.toast.content, /失效/);
-  assert.equal(f.wire.sent.filter(s => s.method === 'PATCH').length, patchCountBefore);
+  assert.equal(blocked.value.card, undefined);
 
   // 6) Legacy card tokens still resolve to channel_card_stale
   const legacy = await post(f.h, f.id, cardEvent('legacy-token', 'remote-legacy', 'ou_alice', 'oc_group_interactive'));
@@ -290,14 +293,17 @@ test('private chat supports rich interactive cards with owner isolation, Web con
   assert.equal(stranger.value.toast.type, 'error');
   assert.match(stranger.value.toast.content, /无权/);
 
-  // Owner (ou_alice) can switch views on their private card
+  // Owner (ou_alice) can switch views on their private card synchronously
   const ownerClick = await post(f.h, f.id, interactiveClick(p2pCard.id, 'v:b', { message: 'remote-1', actor: 'ou_alice', chat: 'oc_private_cards' }));
   assert.equal(ownerClick.value.toast.type, 'info');
-  await until(() => f.wire.sent.some(s => s.method === 'PATCH'));
+  assert.equal(ownerClick.value.card.type, 'raw');
+  assert.equal(ownerClick.value.card.data.schema, '2.0');
+  assert.match(JSON.stringify(ownerClick.value.card.data), /内容B/);
 
   // Expired card (> 14 days) is rejected cleanly
   f.h.store.run('UPDATE channel_interactive_cards SET expires_at=? WHERE id=?', Date.now() - 1000, p2pCard.id);
   const expired = await post(f.h, f.id, interactiveClick(p2pCard.id, 'v:a', { message: 'remote-1', actor: 'ou_alice', chat: 'oc_private_cards' }));
+  assert.equal(expired.value.card, undefined);
   assert.equal(expired.value.toast.type, 'warning');
   assert.match(expired.value.toast.content, /14 天/);
 

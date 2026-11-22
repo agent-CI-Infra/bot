@@ -40,9 +40,46 @@ const chartTypes = new Set([
 
 const idPattern = /^[a-zA-Z0-9_-]{1,40}$/;
 const iconTokenPattern = /^[a-z0-9_]{1,64}$/;
-const pxPattern = /^\d{1,3}px$/;
+const pxPattern = /^\d{1,4}px$/;
 const spacingPxPattern = /^-?\d{1,3}px(?:\s+-?\d{1,3}px){0,3}$/;
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Feishu text_tag and table options use "neutral" rather than "grey" for gray pills. */
+function normalizeTagColor(color: string): string {
+  return color === 'grey' ? 'neutral' : color;
+}
+
+/** Feishu table column width accepts "auto", [1%, 100%], or [80px, 600px]. */
+function normalizeTableColumnWidth(value: unknown, path?: string): string {
+  const w = String(value).trim();
+  if (w === 'auto') return 'auto';
+  const px = /^(\d{1,4})px$/.exec(w);
+  if (px) return `${Math.min(600, Math.max(80, Number(px[1])))}px`;
+  const pct = /^(\d{1,3})%$/.exec(w);
+  if (pct) return `${Math.min(100, Math.max(1, Number(pct[1])))}%`;
+  if (path) cardFail('card_invalid', `${path} must be "auto", pixel width ("80px"-"600px"), or percentage ("1%"-"100%").`);
+  return 'auto';
+}
+
+/** Feishu table row_height accepts "low", "middle", "high", "auto", or [32px, 124px]. */
+function normalizeTableRowHeight(value: unknown, path?: string): string {
+  const rh = String(value).trim();
+  if (rh === 'medium') return 'middle';
+  if (['low', 'middle', 'high', 'auto'].includes(rh)) return rh;
+  const px = /^(\d{1,4})px$/.exec(rh);
+  if (px) return `${Math.min(124, Math.max(32, Number(px[1])))}px`;
+  if (path) cardFail('card_invalid', `${path} must be "low", "middle", "high", "auto", or pixel height ("32px"-"124px").`);
+  return 'low';
+}
+
+/** Feishu table header_style only supports background_style ("none" | "grey") and text_size ("normal" | "heading"). */
+function normalizeTableHeaderBackground(value: string): 'none' | 'grey' {
+  return value === 'none' || value === 'default' ? 'none' : 'grey';
+}
+
+function normalizeTableHeaderTextSize(value: string): 'normal' | 'heading' {
+  return value === 'heading' || value.startsWith('heading-') || ['large', 'x_large', 'xx_large'].includes(value) ? 'heading' : 'normal';
+}
 
 export const feishuCardInstructions = ` Your default Feishu reply is native Markdown (post), which remains best for ordinary Q&A, short answers, code explanations and prose. When structured layout, tables, charts, collapsible sections, multi-view tabs, paginated/filterable lists, or follow-up action buttons genuinely make a reply clearer or easier to browse, you may call ${feishuCardToolName} on demand for any topic. Never force every reply into a card, and never tie cards to one fixed use case. Read feishu-cards/SKILL.md via read_skill when you want component syntax, VChart rules or interactive layout patterns. Calling ${feishuCardToolName} validates and stages the card for your final reply (calling it again replaces the staged card; { clear: true } reverts to Markdown; ending a turn silently discards it). After staging a card, finish with a brief plain-text summary as a fallback.`;
 
@@ -358,7 +395,7 @@ function sanitizeHeader(value: unknown, clean: (s: string) => string): Json {
       const t = asObject(tag, `card.header.text_tag_list[${i}]`);
       const color = t.color === undefined ? 'neutral' : String(t.color);
       if (!tagColors.has(color)) cardFail('card_invalid', `card.header.text_tag_list[${i}].color is invalid.`);
-      return { tag: 'text_tag', text: plainTextNode(t.text, clean, 40, `card.header.text_tag_list[${i}].text`), color };
+      return { tag: 'text_tag', text: plainTextNode(t.text, clean, 40, `card.header.text_tag_list[${i}].text`), color: normalizeTagColor(color) };
     });
   }
   return out;
@@ -380,9 +417,7 @@ function sanitizeTableColumns(value: unknown, clean: (s: string) => string, path
       data_type: dataType,
     };
     if (c.width !== undefined) {
-      const w = String(c.width);
-      if (w !== 'auto' && !pxPattern.test(w)) cardFail('card_invalid', `${path}[${i}].width must be "auto" or pixel width (e.g. "120px").`);
-      out.width = w;
+      out.width = normalizeTableColumnWidth(c.width, `${path}[${i}].width`);
     }
     if (c.horizontal_align !== undefined) {
       if (!alignValues.has(String(c.horizontal_align))) cardFail('card_invalid', `${path}[${i}].horizontal_align is invalid.`);
@@ -411,7 +446,11 @@ function sanitizeTableColumns(value: unknown, clean: (s: string) => string, path
 }
 
 function sanitizeTableCell(value: unknown, dataType: string, origin: string, clean: (s: string) => string, path: string): unknown {
-  if (value === null || value === undefined) return '';
+  if (value === null || value === undefined) {
+    if (dataType === 'options') return [];
+    if (dataType === 'number' || dataType === 'date') return undefined;
+    return '';
+  }
   if (dataType === 'options') {
     const list = Array.isArray(value) ? value : [value];
     if (list.length > 8) cardFail('card_invalid', `${path} allows at most 8 option tags.`);
@@ -420,7 +459,7 @@ function sanitizeTableCell(value: unknown, dataType: string, origin: string, cle
       const o = asObject(item, `${path}[${idx}]`);
       const color = o.color === undefined ? 'neutral' : String(o.color);
       if (!tagColors.has(color)) cardFail('card_invalid', `${path}[${idx}].color is invalid.`);
-      return { text: cleanText(o.text, clean, 40, `${path}[${idx}].text`), color };
+      return { text: cleanText(o.text, clean, 40, `${path}[${idx}].text`), color: normalizeTagColor(color) };
     });
   }
   if (dataType === 'number') {
@@ -451,11 +490,11 @@ function sanitizeTableHeaderStyle(value: unknown, path: string): Json {
   }
   if (h.text_size !== undefined) {
     if (!textSizes.has(String(h.text_size))) cardFail('card_invalid', `${path}.text_size is invalid.`);
-    out.text_size = String(h.text_size);
+    out.text_size = normalizeTableHeaderTextSize(String(h.text_size));
   }
   if (h.background_style !== undefined) {
     if (!bgStyles.has(String(h.background_style))) cardFail('card_invalid', `${path}.background_style is invalid.`);
-    out.background_style = String(h.background_style);
+    out.background_style = normalizeTableHeaderBackground(String(h.background_style));
   }
   if (h.text_color !== undefined) {
     if (!['default', 'grey'].includes(String(h.text_color))) cardFail('card_invalid', `${path}.text_color must be "default" or "grey".`);
@@ -479,16 +518,15 @@ function sanitizeTableElement(el: Json, origin: string, clean: (s: string) => st
     const outRow: Json = {};
     for (const col of columns) {
       const name = String(col.name);
-      if (rowObj[name] !== undefined) outRow[name] = sanitizeTableCell(rowObj[name], String(col.data_type), origin, clean, `${path}.rows[${ri}].${name}`);
+      if (rowObj[name] !== undefined) {
+        const cell = sanitizeTableCell(rowObj[name], String(col.data_type), origin, clean, `${path}.rows[${ri}].${name}`);
+        if (cell !== undefined) outRow[name] = cell;
+      }
     }
     return outRow;
   });
   const out: Json = { tag: 'table', page_size: pageSize, columns, rows };
-  if (el.row_height !== undefined) {
-    const rh = String(el.row_height);
-    if (!['low', 'medium', 'auto'].includes(rh) && !pxPattern.test(rh)) cardFail('card_invalid', `${path}.row_height must be "low", "medium", "auto", or px.`);
-    out.row_height = rh;
-  }
+  if (el.row_height !== undefined) out.row_height = normalizeTableRowHeight(el.row_height, `${path}.row_height`);
   if (el.freeze_first_column !== undefined) out.freeze_first_column = !!el.freeze_first_column;
   if (el.header_style !== undefined) out.header_style = sanitizeTableHeaderStyle(el.header_style, `${path}.header_style`);
   if (el.margin !== undefined) out.margin = sanitizeMargin(el.margin, `${path}.margin`);
@@ -603,7 +641,10 @@ function sanitizePaginatedList(el: Json, origin: string, clean: (s: string) => s
       const row: Json = {};
       for (const col of columns!) {
         const name = String(col.name);
-        if (itemObj[name] !== undefined) row[name] = sanitizeTableCell(itemObj[name], String(col.data_type), origin, clean, `${path}.items[${idx}].${name}`);
+        if (itemObj[name] !== undefined) {
+          const cell = sanitizeTableCell(itemObj[name], String(col.data_type), origin, clean, `${path}.items[${idx}].${name}`);
+          if (cell !== undefined) row[name] = cell;
+        }
       }
       for (const f of filterDefs) {
         const v = itemObj[f.field];
@@ -627,7 +668,7 @@ function sanitizePaginatedList(el: Json, origin: string, clean: (s: string) => s
       const bo = asObject(b, `${path}.items[${idx}].badges[${bi}]`);
       const color = bo.color === undefined ? 'neutral' : String(bo.color);
       if (!tagColors.has(color)) cardFail('card_invalid', `${path}.items[${idx}].badges[${bi}].color is invalid.`);
-      return { text: sanitizeCardInlineFragment(cleanText(bo.text, clean, 24, `${path}.items[${idx}].badges[${bi}].text`), origin), color };
+      return { text: sanitizeCardInlineFragment(cleanText(bo.text, clean, 24, `${path}.items[${idx}].badges[${bi}].text`), origin), color: normalizeTagColor(color) };
     }) : cardFail('card_invalid', `${path}.items[${idx}].badges must be an array.`);
     const fieldsObj = itemObj.fields && typeof itemObj.fields === 'object' && !Array.isArray(itemObj.fields) ? itemObj.fields as Json : itemObj;
     for (const f of filterDefs) {
@@ -647,11 +688,7 @@ function sanitizePaginatedList(el: Json, origin: string, clean: (s: string) => s
   const out: SanitizedPaginatedList = { tag: 'paginated_list', id, ...(title ? { title } : {}), display, page_size: pageSize, empty_text: emptyText, filters, items };
   if (columns) out.columns = columns;
   if (el.freeze_first_column !== undefined) out.freeze_first_column = !!el.freeze_first_column;
-  if (el.row_height !== undefined) {
-    const rh = String(el.row_height);
-    if (!['low', 'medium', 'auto'].includes(rh) && !pxPattern.test(rh)) cardFail('card_invalid', `${path}.row_height is invalid.`);
-    out.row_height = rh;
-  }
+  if (el.row_height !== undefined) out.row_height = normalizeTableRowHeight(el.row_height, `${path}.row_height`);
   if (el.header_style !== undefined) out.header_style = sanitizeTableHeaderStyle(el.header_style, `${path}.header_style`);
   return out;
 }
@@ -984,6 +1021,56 @@ export function initialCardState(spec: SanitizedCardSpec): InteractiveCardState 
   return { view: spec.default_view, lists };
 }
 
+/** Defensively normalize table elements at render time so previously stored specs also satisfy Feishu Card 2.0 constraints. */
+function normalizeTableForRender(table: Json): Json {
+  const rawColumns = Array.isArray(table.columns) ? table.columns as Json[] : [];
+  const columns = rawColumns.map(col => {
+    const next: Json = { ...col };
+    if (next.width !== undefined) next.width = normalizeTableColumnWidth(next.width);
+    return next;
+  });
+  const colTypes = new Map(columns.map(col => [String(col.name), String(col.data_type ?? 'text')]));
+  const rawRows = Array.isArray(table.rows) ? table.rows as Json[] : [];
+  const rows = rawRows.map(row => {
+    const nextRow: Json = {};
+    for (const [k, v] of Object.entries(row)) {
+      const dt = colTypes.get(k);
+      if (dt === 'options') {
+        if (Array.isArray(v)) {
+          nextRow[k] = v.map(item => (item && typeof item === 'object' ? { ...item as Json, color: normalizeTagColor(String((item as Json).color ?? 'neutral')) } : item));
+        } else {
+          nextRow[k] = [];
+        }
+      } else if (dt === 'number' || dt === 'date') {
+        if (typeof v === 'number' && Number.isFinite(v)) nextRow[k] = v;
+      } else if (v !== undefined && v !== null) {
+        nextRow[k] = v;
+      }
+    }
+    return nextRow;
+  });
+  const next: Json = { ...table, columns, rows };
+  if (next.row_height !== undefined) next.row_height = normalizeTableRowHeight(next.row_height);
+  if (next.header_style && typeof next.header_style === 'object' && !Array.isArray(next.header_style)) {
+    const hs: Json = { ...(next.header_style as Json) };
+    if (hs.background_style !== undefined) hs.background_style = normalizeTableHeaderBackground(String(hs.background_style));
+    if (hs.text_size !== undefined) hs.text_size = normalizeTableHeaderTextSize(String(hs.text_size));
+    next.header_style = hs;
+  }
+  return next;
+}
+
+function normalizeHeaderForRender(header: Json): Json {
+  if (!Array.isArray(header.text_tag_list)) return header;
+  return {
+    ...header,
+    text_tag_list: (header.text_tag_list as Json[]).map(t => ({
+      ...t,
+      color: normalizeTagColor(String(t.color ?? 'neutral')),
+    })),
+  };
+}
+
 function renderPaginatedListBlock(
   list: SanitizedPaginatedList,
   listState: { page: number; filters: Record<string, string> },
@@ -1022,6 +1109,8 @@ function renderPaginatedListBlock(
         weight: 1,
         elements: [{
           tag: 'select_static',
+          type: 'default',
+          width: 'fill',
           placeholder: { tag: 'plain_text', content: `${f.label}：全部` },
           initial_option: current,
           options: [
@@ -1049,13 +1138,13 @@ function renderPaginatedListBlock(
         }],
       });
     }
-    out.push({ tag: 'column_set', flex_mode: 'flow', horizontal_spacing: 'small', columns: filterColumns });
+    out.push({ tag: 'column_set', flex_mode: 'none', horizontal_spacing: 'small', columns: filterColumns });
   }
 
   if (!slice.length) {
     out.push({ tag: 'markdown', content: sanitizeCardMarkdown(list.empty_text), text_size: 'notation' });
   } else if (list.display === 'table' && list.columns) {
-    out.push({
+    out.push(normalizeTableForRender({
       tag: 'table',
       page_size: list.page_size,
       row_height: list.row_height ?? 'low',
@@ -1063,10 +1152,10 @@ function renderPaginatedListBlock(
       ...(list.header_style ? { header_style: list.header_style } : {}),
       columns: list.columns,
       rows: slice.map(entry => entry.row as Json),
-    });
+    }));
   } else {
     for (const entry of slice) {
-      const badges = Array.isArray(entry.badges) ? (entry.badges as { text: string; color: string }[]).map(b => `<text_tag color='${b.color}'>${sanitizeCardInlineFragment(b.text)}</text_tag>`).join(' ') : '';
+      const badges = Array.isArray(entry.badges) ? (entry.badges as { text: string; color: string }[]).map(b => `<text_tag color='${normalizeTagColor(b.color)}'>${sanitizeCardInlineFragment(b.text)}</text_tag>`).join(' ') : '';
       const head = [entry.title ? `**${sanitizeCardInlineFragment(String(entry.title))}**` : '', badges].filter(Boolean).join(' ');
       const body = [head, String(entry.content ?? '')].filter(Boolean).join('\n');
       if (entry.url) {
@@ -1135,6 +1224,8 @@ export function renderFeishuCard(
         const list = el as unknown as SanitizedPaginatedList;
         const listState = state.lists[list.id] ?? { page: 0, filters: {} };
         bodyElements.push(...renderPaginatedListBlock(list, listState, cardId, actions));
+      } else if (el.tag === 'table') {
+        bodyElements.push(normalizeTableForRender(el));
       } else {
         bodyElements.push(el);
       }
@@ -1151,6 +1242,8 @@ export function renderFeishuCard(
         actions[act] = { kind: 'view_select', target: 'views', label: '视图', options: spec.views.map(v => v.id) };
         bodyElements.push({
           tag: 'select_static',
+          type: 'default',
+          width: 'fill',
           placeholder: { tag: 'plain_text', content: '切换视图' },
           initial_option: activeView.id,
           options: spec.views.map(v => ({ text: { tag: 'plain_text', content: v.label }, value: v.id })),
@@ -1229,7 +1322,7 @@ export function renderFeishuCard(
       width_mode: spec.config.width_mode,
       enable_forward: spec.config.enable_forward,
     },
-    ...(spec.header ? { header: spec.header } : {}),
+    ...(spec.header ? { header: normalizeHeaderForRender(spec.header) } : {}),
     body: { elements: bodyElements },
   };
   return { card, actions, summary: cardText(card) };

@@ -1,4 +1,4 @@
-import { configuredRedactor, registeredRedactor, publicText } from '../core/redaction.js';
+import { configuredRedactor, publicContent, publicText, registeredRedactor } from '../core/redaction.js';
 import { TaskRecords } from '../tasks/service.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
@@ -514,23 +514,28 @@ export class ChannelService {
     if (outcome.kind === 'invalid') { recordIgnored(); return toast('warning', outcome.toast); }
     if (outcome.kind === 'update') {
       const { card: nextCard } = renderFeishuCard(spec, outcome.nextState, cardRow.id, { footerNote: footer_note, consoleUrl: console_url });
-      let queued = false;
+      const safeCard = publicContent(nextCard, registeredRedactor(this.store)) as Json;
+      let updated = false;
       this.store.transaction(() => {
         const nextRev = this.cards.saveState(cardRow.id, Number(cardRow.revision), outcome.nextState);
         if (!nextRev) return;
-        const inboxId = randomId();
+        const now = Date.now(), inboxId = randomId();
         this.store.run("INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,chat_ref,created_at) VALUES(?,?,?,?,?,'completed',?,?)",
-          inboxId, c.id, event.event_id, 'card:' + event.event_id, this.store.secrets.seal(event, 'channel-event:' + inboxId), chat.id, Date.now());
-        this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', Date.now(), c.id);
-        this.queue(
-          { ...this.chatEvent(chat), actor_id: event.actor_id, actor_tenant: event.actor_tenant, message_id: event.message_id },
-          nextCard, `card-update:${cardRow.id}:${nextRev}`, inboxId,
-          { kind: 'card_update', card_id: cardRow.id, chat_id: chat.id, owner_kind: cardRow.owner_kind, owner_id: cardRow.owner_id, fence: cardRow.fence },
-          false, false, event.message_id, [], false, { rich_card: true, card_id: cardRow.id },
-        );
-        queued = true;
+          inboxId, c.id, event.event_id, 'card:' + event.event_id, this.store.secrets.seal(event, 'channel-event:' + inboxId), chat.id, now);
+        this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', now, c.id);
+        // Keep the local message ledger synchronized immediately alongside the synchronous callback card response.
+        if (event.message_id && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, event.message_id)) {
+          this.ledger.merge(chat, { message_id: event.message_id, sender_id: c.bot_open_id, sender_tenant: c.installation_tenant, sender_type: 'app',
+            message_type: 'interactive', content: cardText(safeCard), raw_content: JSON.stringify(safeCard),
+            created_at: now, updated_at: now, parent_id: '', root_id: '', thread_id: '', deleted: false }, 'live');
+        }
+        updated = true;
       });
-      return queued ? toast('info', outcome.toast) : toast('info', '卡片正在更新，请稍候');
+      // Return the updated Card JSON 2.0 directly in the card.action.trigger callback response for instant rendering
+      // instead of waiting on outbox polling, tenant token exchange and an extra PATCH round-trip.
+      return updated
+        ? { toast: { type: 'info', content: outcome.toast }, card: { type: 'raw', data: safeCard } }
+        : toast('info', '卡片正在更新，请稍候');
     }
     // Follow-up action: enter the standard inbound message pipeline attributed to the clicking user.
     const now = Date.now();
@@ -554,6 +559,7 @@ export class ChannelService {
       this.ledger.accept(synthetic);
       this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', now, c.id);
     });
+    void this.tick();
     return toast('success', `已发起：${outcome.label}`);
   }
   /**

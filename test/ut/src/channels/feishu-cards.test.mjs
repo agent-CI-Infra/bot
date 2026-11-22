@@ -285,3 +285,108 @@ test('interactive card engine supports views, paginated_list filtering/paging, f
   assert.equal(turn.execute({ clear: true }).cleared, true);
   assert.equal(turn.staged, null);
 });
+
+test('table and paginated_list normalize widths, row_height, header_style, tag colors and null cells at build and render time', () => {
+  const built = buildFeishuCard({
+    card: {
+      header: {
+        title: 'Normalized Table Card',
+        text_tag_list: [{ text: 'Closed', color: 'grey' }],
+      },
+      elements: [
+        {
+          tag: 'table',
+          row_height: 'medium',
+          header_style: { background_style: 'grey-100', text_size: 'small', text_color: 'grey', bold: true },
+          columns: [
+            { name: 'id', display_name: '#', data_type: 'text', width: '50px' },
+            { name: 'title', display_name: 'Title', data_type: 'lark_md', width: '900px' },
+            { name: 'pct', display_name: 'Share', data_type: 'number', width: '25%' },
+            { name: 'state', display_name: 'State', data_type: 'options', width: 'auto' },
+            { name: 'when', display_name: 'Date', data_type: 'date' },
+          ],
+          rows: [
+            { id: '#1', title: 'Item 1', pct: null, state: [{ text: 'closed', color: 'grey' }], when: null },
+            { id: '#2', title: 'Item 2', pct: 42, state: null, when: '2026-11-22T00:00:00Z' },
+          ],
+        },
+        {
+          tag: 'paginated_list',
+          id: 'issues',
+          display: 'table',
+          page_size: 2,
+          row_height: '20px',
+          filters: [{ field: 'state', label: '状态' }],
+          columns: [
+            { name: 'id', display_name: '#', data_type: 'text', width: '48px' },
+            { name: 'state', display_name: '状态', data_type: 'options', width: '64px' },
+          ],
+          items: [
+            { id: '#1', state: [{ text: 'closed', color: 'grey' }] },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.equal(built.rendered.header.text_tag_list[0].color, 'neutral');
+  const table = built.rendered.body.elements.find(e => e.tag === 'table');
+  assert.equal(table.row_height, 'middle');
+  assert.equal(table.header_style.background_style, 'grey');
+  assert.equal(table.header_style.text_size, 'normal');
+  assert.deepEqual(table.columns.map(c => c.width), ['80px', '600px', '25%', 'auto', undefined]);
+  assert.equal(table.rows[0].state[0].color, 'neutral');
+  assert.equal('pct' in table.rows[0], false);
+  assert.equal('when' in table.rows[0], false);
+  assert.deepEqual(table.rows[1].state, []);
+
+  // Filter bar column_set uses flex_mode: 'none' and select_static with width: 'fill'
+  const filterBar = built.rendered.body.elements.find(e => e.tag === 'column_set');
+  assert.equal(filterBar.flex_mode, 'none');
+  assert.equal(filterBar.columns[0].elements[0].tag, 'select_static');
+  assert.equal(filterBar.columns[0].elements[0].width, 'fill');
+
+  // Paginated list table also clamps narrow widths and row_height
+  const listTable = built.rendered.body.elements.filter(e => e.tag === 'table')[1];
+  assert.equal(listTable.row_height, '32px');
+  assert.deepEqual(listTable.columns.map(c => c.width), ['80px', '80px']);
+
+  // Defensive render-time normalization heals legacy stored specs already persisted in SQLite
+  const legacySpec = {
+    config: { width_mode: 'fill', update_multi: true, enable_forward: true },
+    header: { title: { tag: 'plain_text', content: 'Legacy' }, text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: 'Old' }, color: 'grey' }] },
+    elements: [],
+    views: [
+      {
+        id: 'table_view',
+        label: '数据表',
+        elements: [{
+          tag: 'table',
+          page_size: 5,
+          row_height: 'medium',
+          header_style: { background_style: 'grey-100', text_size: 'heading-2' },
+          columns: [
+            { name: 'num', display_name: '#', data_type: 'text', width: '56px' },
+            { name: 'status', display_name: '状态', data_type: 'options', width: '72px' },
+          ],
+          rows: [
+            { num: '#23', status: [{ text: 'closed', color: 'grey' }] },
+          ],
+        }],
+      },
+      { id: 'other', label: '其他', elements: [{ tag: 'markdown', content: 'ok' }] },
+    ],
+    default_view: 'table_view',
+    view_switcher: 'buttons',
+    actions: [],
+    interactive: true,
+  };
+  const healed = renderFeishuCard(legacySpec, { view: 'table_view', lists: {} }, 'd'.repeat(48));
+  assert.equal(healed.card.header.text_tag_list[0].color, 'neutral');
+  const healedTable = healed.card.body.elements.find(e => e.tag === 'table');
+  assert.equal(healedTable.row_height, 'middle');
+  assert.equal(healedTable.header_style.background_style, 'grey');
+  assert.equal(healedTable.header_style.text_size, 'heading');
+  assert.deepEqual(healedTable.columns.map(c => c.width), ['80px', '80px']);
+  assert.equal(healedTable.rows[0].status[0].color, 'neutral');
+});
