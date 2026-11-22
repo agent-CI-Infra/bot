@@ -10,7 +10,7 @@ import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 import { fail } from '../../../../dist/core/security.js';
 import { harness, setup, account, repository, testPassword } from '../../../fixtures/helpers.mjs';
 import { ManagementService } from '../../../../dist/management/service.js';
-import { RuleService } from '../../../../dist/rules/service.js';
+import { RuleService, computerRequest } from '../../../../dist/rules/service.js';
 import { TaskCommands } from '../../../../dist/tasks/commands.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 
@@ -210,4 +210,91 @@ test('management assistant queries and commands enforce tiered permissions for g
   });
   assert.equal(resetReceipt.state, 'succeeded');
   assert.equal(resetReceipt.result.environment.generation, 2);
+
+  // Minor #3: non-super actor receives sanitized global_defaults (no raw global setup_script or env values).
+  const memberEnv = envAfter.environment.computer;
+  assert.equal(memberEnv.global_defaults.has_setup_script, true);
+  assert.deepEqual(memberEnv.global_defaults.env_keys, ['GLOBAL_FLAG']);
+  assert.equal(memberEnv.global_defaults.setup_script, undefined);
+  assert.equal(memberEnv.global_defaults.env, undefined);
+});
+
+test('read-only project reader without config.write cannot configure or cancel builds, and console computer spec stays decoupled from merged globals across async builds', async t => {
+  const f = managerFixture(t);
+  const h = await harness(t, f.manager);
+  const { admin } = await setup(h);
+  const a = await account(admin);
+  await repository(admin, a.id, '101');
+  await h.projects.reconcile();
+
+  // Create a project user whose scoped grant only has read capabilities (no config.write).
+  const readerPw = testPassword();
+  await admin('/api/users', 'POST', { username: 'proj-reader', password: readerPw, role: 'project_admin', repository_ids: ['101'] });
+  const readerPrincipal = h.store.get("SELECT p.id FROM principals p JOIN users u ON u.id=p.user_id WHERE u.username='proj-reader'").id;
+  h.store.run("UPDATE scoped_grants SET capabilities=? WHERE principal_id=?", JSON.stringify(['tasks.read', 'config.read']), readerPrincipal);
+  const reader = h.client();
+  await reader('/api/auth/login', 'POST', { username: 'proj-reader', password: readerPw });
+
+  // Configure global defaults with secret-like env & setup_script and verify sanitization for non-super actors.
+  await admin('/api/settings', 'PATCH', {
+    computer_defaults: { packages: ['jq'], setup_script: 'echo internal-global-script', env: { GLOBAL_TOKEN_HINT: 'val-123' } },
+  });
+  await f.projects.waitForGlobalBuild();
+
+  const readerDetail = await reader('/api/environments/101');
+  assert.equal(readerDetail.status, 200);
+  assert.equal(readerDetail.value.can_configure, false);
+  const gd = readerDetail.value.environment.computer.global_defaults;
+  assert.equal(gd.has_setup_script, true);
+  assert.deepEqual(gd.env_keys, ['GLOBAL_TOKEN_HINT']);
+  assert.equal(gd.setup_script, undefined);
+  assert.equal(gd.env, undefined);
+
+  // Read-only user is forbidden from BOTH configure and build/cancel (Blocking #8).
+  assert.equal((await reader('/api/environments/101/configure', 'POST', { operation_id: id(), generation: 1, spec: { packages: ['ripgrep'] } })).status, 403);
+  assert.equal((await reader('/api/environments/101/build/cancel', 'POST', {})).status, 403);
+
+  // Blocking #3: consoleComputer() must NOT capture merged global packages/setup_script/env into project's own console spec,
+  // and computerRequest(effective, live) must return null (no spurious reconfigure/restart).
+  const rules = new RuleService(h.store, f.manager);
+  const liveAfterGlobal = f.projects.describe('101').computer;
+  const savedAfterGlobal = rules.consoleComputer('101', liveAfterGlobal);
+  assert.deepEqual(savedAfterGlobal.packages, []);
+  assert.equal(savedAfterGlobal.setup_script, '');
+  assert.deepEqual(savedAfterGlobal.env, {});
+  assert.equal(computerRequest(savedAfterGlobal, liveAfterGlobal), null);
+
+  // Blocking #4: async configure via Console API commits to computer_console_specs once the build finishes
+  // (spec_revision advances), so a later consoleComputer() + computerRequest() does NOT revert the project's spec.
+  let releaseBuild;
+  f.docker.onBuild = ({ tag }) => new Promise(resolve => {
+    releaseBuild = () => {
+      f.docker.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 4 * mib });
+      resolve('ok\n');
+    };
+  });
+  const asyncCfg = await admin('/api/environments/101/configure', 'POST', {
+    operation_id: id(), generation: 1,
+    spec: { packages: ['ripgrep'], setup_script: 'echo async-proj', env: { PROJ_KEY: 'v1' } },
+  });
+  assert.ok([200, 201].includes(asyncCfg.status));
+  await new Promise(r => setImmediate(r));
+  // While building, computerRequest must suppress drift reconciliation.
+  const liveBuilding = f.projects.describe('101').computer;
+  assert.equal(liveBuilding.build.state, 'building');
+  assert.equal(computerRequest(rules.consoleComputer('101', liveBuilding), liveBuilding), null);
+
+  releaseBuild();
+  await f.projects.waitForBuild('101');
+  const liveReady = f.projects.describe('101').computer;
+  assert.equal(liveReady.build.state, 'ready');
+  assert.ok(liveReady.spec_revision > 0);
+  // Detail read syncs computer_console_specs from the higher spec_revision.
+  const adminDetail = await admin('/api/environments/101');
+  assert.equal(adminDetail.status, 200);
+  const syncedConsole = rules.consoleComputer('101', liveReady);
+  assert.deepEqual(syncedConsole.packages, ['ripgrep']);
+  assert.equal(syncedConsole.setup_script, 'echo async-proj');
+  assert.deepEqual(syncedConsole.env, { PROJ_KEY: 'v1' });
+  assert.equal(computerRequest(syncedConsole, liveReady), null, 'completed async build must not be reverted on next reconcile');
 });

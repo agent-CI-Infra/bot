@@ -58,34 +58,43 @@ const settingsCards = {
       const precompiled = await api('/api/storage/precompiled-images').catch(() => null);
       if (precompiled) {
         const cacheCard = settingsCard('预编译镜像缓存', 'h2');
-        const list = Array.isArray(precompiled.images) ? precompiled.images : [];
-        const totalBytes = list.reduce((sum, item) => sum + (Number(item.size_bytes) || 0), 0);
-        const unreferenced = list.filter(item => !item.protected);
-        cacheCard.append(facts([
-          ['已缓存镜像', `${count(list.length)} 个（总计 ${size(totalBytes)}）`],
-          ['当前构建队列', precompiled.active_build ? `构建中（${precompiled.active_build.kind === 'global' ? '全局' : '项目'}），排队 ${count(precompiled.queue_length)} 个` : `空闲（排队 ${count(precompiled.queue_length)} 个）`],
-          ['可清理的无引用镜像', `${count(unreferenced.length)} 个`],
-        ]));
-        if (list.length) {
-          const tbl = costTable(['镜像标签', '层级', '状态', '大小', '保护状态', '最近使用']);
-          for (const item of list) {
-            row(tbl, [item.tag, item.kind === 'global' ? '全局基座' : '项目增量', item.state, item.size_bytes != null ? size(item.size_bytes) : '—',
-              item.protected ? '使用中（受保护）' : '无引用', time(item.last_used_at)]);
-          }
-          cacheCard.append(tbl.wrap);
-        } else {
-          cacheCard.append(note('尚无预编译镜像缓存。配置全局或项目软件包/初始化脚本后会自动预编译并缓存在此。'));
-        }
+        const cacheBody = element('div', '');
         const pruneStatus = note(''); pruneStatus.setAttribute('role', 'status');
-        const pruneBtn = button('清理无引用预编译镜像', async event => {
-          const btn = event.currentTarget; btn.disabled = true;
-          try {
-            const res = await api('/api/storage/precompiled-images/prune', 'POST', {});
-            announceSave(pruneStatus, `已清理 ${count(res.removed?.length ?? 0)} 个无引用预编译镜像，保留 ${count(res.kept ?? 0)} 个受保护镜像。`, false);
-          } catch (err) { btn.disabled = false; announceSave(pruneStatus, readErrorText(err), true); }
-        });
-        pruneBtn.disabled = unreferenced.length === 0;
-        cacheCard.append(pruneBtn, pruneStatus);
+        const renderCache = state => {
+          const list = Array.isArray(state?.images) ? state.images : [];
+          const totalBytes = list.reduce((sum, item) => sum + (Number(item.size_bytes) || 0), 0);
+          const unreferenced = list.filter(item => !item.protected);
+          const nodes = [facts([
+            ['已缓存镜像', `${count(list.length)} 个（总计 ${size(totalBytes)}）`],
+            ['当前构建队列', state?.active_build ? `构建中（${state.active_build.kind === 'global' ? '全局' : '项目'}），排队 ${count(state.queue_length)} 个` : `空闲（排队 ${count(state?.queue_length ?? 0)} 个）`],
+            ['可清理的无引用镜像', `${count(unreferenced.length)} 个`],
+          ])];
+          if (list.length) {
+            const tbl = costTable(['镜像标签', '层级', '状态', '大小', '保护状态', '最近使用']);
+            for (const item of list) {
+              row(tbl, [item.tag, item.kind === 'global' ? '全局基座' : '项目增量', item.state, item.size_bytes != null ? size(item.size_bytes) : '—',
+                item.protected ? '使用中（受保护）' : '无引用', time(item.last_used_at)]);
+            }
+            nodes.push(tbl.wrap);
+          } else {
+            nodes.push(note('尚无预编译镜像缓存。配置全局或项目软件包/初始化脚本后会自动预编译并缓存在此。'));
+          }
+          const pruneBtn = button('清理无引用预编译镜像', async event => {
+            const btn = event.currentTarget; btn.disabled = true;
+            try {
+              const res = await api('/api/storage/precompiled-images/prune', 'POST', {});
+              const fresh = await api('/api/storage/precompiled-images').catch(() => null);
+              if (fresh) renderCache(fresh);
+              else btn.disabled = false;
+              announceSave(pruneStatus, `已清理 ${count(res.removed?.length ?? 0)} 个无引用预编译镜像，保留 ${count(res.kept ?? 0)} 个受保护镜像。`, false);
+            } catch (err) { btn.disabled = false; announceSave(pruneStatus, readErrorText(err), true); }
+          });
+          pruneBtn.disabled = unreferenced.length === 0;
+          nodes.push(pruneBtn);
+          cacheBody.replaceChildren(...nodes);
+        };
+        renderCache(precompiled);
+        cacheCard.append(cacheBody, pruneStatus);
         cards.push(cacheCard);
       }
     }

@@ -73,6 +73,7 @@ export class AssistantComputers {
       tag: g?.tag || null,
       env: g?.env && typeof g.env === 'object' ? g.env : {},
       defaults: g?.defaults || null,
+      onStaleImage: g?.onStaleImage ?? null,
     };
   }
   activeImages() {
@@ -198,7 +199,18 @@ export class AssistantComputers {
     if (!turnPattern.test(turn || '') || !/^[a-f0-9]{16,128}$/.test(fence || '') || !Number.isSafeInteger(generation) || generation < 1 || !['rw', 'ro'].includes(mode)) throw new ManagerError('invalid_assistant_request', 400);
     return this.lock(owner, async () => {
       const now = Date.now(), settings = this.settings(), globalEnv = this.effectiveGlobal();
-      const targetImage = globalEnv.image, env = globalEnv.env, envSignature = JSON.stringify(Object.entries(env).sort());
+      let targetImage = globalEnv.image;
+      // If the global precompiled image was pruned or belongs to a superseded base, fall back to the approved base image
+      // and ask the manager to reconcile/rebuild in the background rather than failing container creation.
+      if (targetImage !== this.image) {
+        const checkRef = globalEnv.tag || targetImage;
+        const present = await this.docker.request('GET', `/images/${encodeURIComponent(checkRef)}/json`).catch(() => null);
+        if (!present?.Id) {
+          targetImage = this.image;
+          globalEnv.onStaleImage?.();
+        }
+      }
+      const env = globalEnv.env, envSignature = JSON.stringify(Object.entries(env).sort());
       let lease = this.leases.get(owner);
       if (lease?.state === 'busy' && lease.turn !== turn) {
         // Another turn of the same owner (a private chat and a console conversation of one person) holds it: wait for it,

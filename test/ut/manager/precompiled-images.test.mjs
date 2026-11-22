@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -59,7 +59,7 @@ test('security hardening: non-root setup_script, tar injection immunity, resourc
   assert.ok(!call.dockerfile.includes('chmod +w /opt/runner'), 'setup_script must not be interpolated into Dockerfile');
   assert.ok(!call.dockerfile.includes("a'b"), 'env values must not be interpolated into Dockerfile');
   assert.match(call.dockerfile, /USER 10001:10001\nCOPY --chown=10001:10001 env\.sh \/tmp\/bot-setup-env\.sh\nCOPY --chown=10001:10001 setup\.sh \/tmp\/bot-setup\.sh/);
-  assert.match(call.dockerfile, /RUN HOME=\/opt\/preinstalled\/home \/bin\/sh -eu -c '\. \/tmp\/bot-setup-env\.sh && \/bin\/sh -eu \/tmp\/bot-setup\.sh'/);
+  assert.match(call.dockerfile, /RUN HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global UV_TOOL_DIR=\/opt\/preinstalled\/uv-tools UV_TOOL_BIN_DIR=\/opt\/preinstalled\/bin PYTHONUSERBASE=\/opt\/preinstalled\/python CARGO_HOME=\/opt\/preinstalled\/cargo GOPATH=\/opt\/preinstalled\/go \/bin\/sh -eu -c '\. \/tmp\/bot-setup-env\.sh && \/bin\/sh -eu \/tmp\/bot-setup\.sh'/);
   assert.equal(call.options.files['setup.sh'], hostileScript + '\n');
   assert.equal(call.options.files['env.sh'], shellEnvScript(hostileEnv));
 
@@ -295,4 +295,162 @@ test('manager HTTP server exposes precompiled image list, prune, and build cance
 
   const pruned = await client.call('POST', '/v1/precompiled-images/prune', {});
   assert.equal(pruned.removed.length, 0);
+});
+
+test('project-computer.Dockerfile keeps runtime install prefixes unset in ENV while build RUN scopes them to /opt/preinstalled', () => {
+  const dockerfile = readFileSync(new URL('../../../docker/project-computer.Dockerfile', import.meta.url), 'utf8');
+  for (const name of ['NPM_CONFIG_PREFIX=', 'UV_TOOL_DIR=', 'UV_TOOL_BIN_DIR=', 'PYTHONUSERBASE=', 'CARGO_HOME=', 'GOPATH=']) {
+    assert.ok(!dockerfile.includes(name), `runtime ENV must not set ${name}`);
+  }
+  assert.match(dockerfile, /PREINSTALLED_DIR=\/opt\/preinstalled/);
+  assert.match(dockerfile, /PATH=\/opt\/preinstalled\/bin:/);
+  const layer = generateLayerDockerfile({ fromImageId: 'sha256:base', hasSetupScript: true });
+  assert.match(layer, /RUN HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global/);
+});
+
+test('single-flight build sharing isolates egress policy and resource ceilings, reusing cache only if earlier build succeeds', async t => {
+  const f = fixture(t);
+  await f.projects.register('101');
+  await f.projects.register('202');
+  await f.projects.register('303');
+  await f.projects.operate('101', 'configure', { operation_id: opId(), generation: 1, request: { cpus: 1, memory_mb: 1024, egress: true } });
+  await f.projects.operate('202', 'configure', { operation_id: opId(), generation: 1, request: { cpus: 4, memory_mb: 4096, egress: true } });
+  await f.projects.operate('303', 'configure', { operation_id: opId(), generation: 1, request: { cpus: 4, memory_mb: 4096, egress: false } });
+
+  const gates = [];
+  f.docker.onBuild = ({ tag, options }) => new Promise((resolve, reject) => {
+    gates.push({
+      tag, options,
+      fail: () => reject(Object.assign(new ManagerError('image_build_failed', 502), { output: 'oom\n' })),
+      succeed: () => {
+        f.docker.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 2 * mib });
+        resolve('ok\n');
+      },
+    });
+  });
+
+  // 101 starts building with cpus=1/1024MB, egress=true.
+  await f.projects.operate('101', 'configure', { operation_id: opId(), generation: 1, request: { setup_script: 'echo heavy-sdk' } });
+  await new Promise(r => setImmediate(r));
+  // 202 has identical script & egress=true, but HIGHER resources (4 CPU/4096MB): must NOT share 101's lower-ceiling building job!
+  await f.projects.operate('202', 'configure', { operation_id: opId(), generation: 1, request: { setup_script: 'echo heavy-sdk' } });
+  // 303 has egress=false: must NOT share egress=true job either!
+  await f.projects.operate('303', 'configure', { operation_id: opId(), generation: 1, request: { setup_script: 'echo heavy-sdk' } });
+  await new Promise(r => setImmediate(r));
+
+  assert.equal(f.projects.describe('101').computer.build.state, 'building');
+  assert.equal(f.projects.describe('202').computer.build.state, 'queued');
+  assert.equal(f.projects.describe('303').computer.build.state, 'queued');
+
+  // If 101 fails under its low ceiling (OOM), 202 still runs its own build with its 4 CPU/4096MB ceiling!
+  gates[0].fail();
+  await f.projects.waitForBuild('101');
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.projects.describe('101').computer.build.state, 'failed');
+  assert.equal(f.projects.describe('202').computer.build.state, 'building');
+  assert.equal(gates[1].options.cpuquota, 400000);
+  assert.equal(gates[1].options.memory, 4096 * mib);
+  assert.equal(gates[1].options.networkmode, 'dbot-fixture-build-egress');
+
+  gates[1].succeed();
+  await f.projects.waitForBuild('202');
+  await new Promise(r => setImmediate(r));
+  // 303 had egress=false so even though tag matched, its build job checks local cache or runs with networkmode=none.
+  await f.projects.waitForBuild('303');
+  assert.equal(f.projects.describe('202').computer.build.state, 'ready');
+  assert.equal(f.projects.describe('303').computer.build.state, 'ready');
+});
+
+test('recovery reconciles interrupted builds, base image upgrades invalidate stale global precompiled image, and corrupt rows / queued parents stay safe', async t => {
+  const f = fixture(t);
+  await f.projects.register('101');
+  const owner = hex(16);
+  mkdirSync(join(f.homes, owner, 'home-1'), { recursive: true });
+
+  // Build a global precompiled image on approved base image.
+  await f.projects.setDefaults({ packages: ['jq'], setup_script: 'echo global-base' });
+  await f.projects.waitForGlobalBuild();
+  const globalImg = f.projects.currentGlobalImage();
+  assert.ok(globalImg?.id);
+
+  // Start a project build and hold it mid-flight, then inspect prune protection for its parent (globalImg) while queued.
+  await f.projects.register('202');
+  const gates = [];
+  f.docker.onBuild = ({ tag, options }) => new Promise((resolve, reject) => {
+    gates.push({
+      tag, options,
+      succeed: () => {
+        f.docker.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 2 * mib });
+        resolve('done\n');
+      },
+    });
+    options?.signal?.addEventListener('abort', () => reject(Object.assign(new ManagerError('image_build_cancelled', 409), { cancelled: true })), { once: true });
+  });
+  await f.projects.operate('101', 'configure', { operation_id: opId(), generation: 1, request: { setup_script: 'echo p101' } });
+  await f.projects.operate('202', 'configure', { operation_id: opId(), generation: 1, request: { setup_script: 'echo p202' } });
+  await new Promise(r => setImmediate(r));
+
+  // Even if global_precompiled_image were cleared, 202's queued build still protects its parentImageId (globalImg) from prune.
+  f.projects.db.prepare("DELETE FROM settings WHERE key='global_precompiled_image'").run();
+  // Corrupt one spec_json row in precompiled_images: listPrecompiledImages must not throw.
+  f.projects.db.prepare(
+    "INSERT INTO precompiled_images(image_key, tag, kind, parent_image_id, base_image_id, spec_json, state, last_used_at, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+  ).run('corruptkey123456', 'department-bot-computer-precompiled:corruptkey123456', 'project', null, 'sha256:fixture', '{not-json', 'failed', new Date().toISOString(), new Date().toISOString());
+
+  const listed = await f.projects.listPrecompiledImages();
+  assert.equal(listed.images.find(i => i.tag === globalImg.tag).protected, true, 'parent of queued build must stay protected');
+  assert.deepEqual(listed.images.find(i => i.image_key === 'corruptkey123456').spec, {});
+
+  // Cancel both builds and restore global image record.
+  f.projects.cancelBuild('101');
+  f.projects.cancelBuild('202');
+  await f.projects.waitForBuild('101');
+  await f.projects.waitForBuild('202');
+  f.docker.onBuild = null;
+
+  // Simulate an unclean manager crash while builds were queued/building in SQLite.
+  f.projects.db.prepare("UPDATE precompiled_images SET state='building' WHERE image_key=?").run(globalImg.image_key);
+  f.projects.db.prepare("INSERT OR REPLACE INTO settings(key, value) VALUES('global_build', ?)").run(JSON.stringify({ state: 'building', can_cancel: true }));
+  f.projects.db.prepare("UPDATE projects SET build=? WHERE repository_id='101'").run(JSON.stringify({ state: 'queued', can_cancel: true }));
+  f.projects.db.prepare("INSERT OR REPLACE INTO settings(key, value) VALUES('global_precompiled_image', ?)").run(JSON.stringify(globalImg));
+
+  // Recover with same base image first: interrupted builds are marked failed with build_interrupted and can_cancel=false.
+  await f.projects.recover();
+  assert.equal(f.projects.describe('101').computer.build.state, 'failed');
+  assert.equal(f.projects.describe('101').computer.build.error, 'build_interrupted');
+  assert.equal(f.projects.describe('101').computer.build.can_cancel, false);
+  const globalAfterRecover = await f.projects.defaultsView();
+  assert.equal(globalAfterRecover.build.state, 'failed');
+  assert.equal(globalAfterRecover.build.error, 'build_interrupted');
+
+  // Now simulate upgrading the approved base image to a new digest, hold the auto-rebuild, and run reconcileGlobalImage():
+  let releaseUpgradeBuild;
+  f.docker.onBuild = ({ tag }) => new Promise(resolve => {
+    releaseUpgradeBuild = () => {
+      f.docker.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 4 * mib });
+      resolve('rebuilt\n');
+    };
+  });
+  f.docker.images.set('approved', { Id: 'sha256:upgraded-base-v2', Size: 10 * mib });
+  await f.projects.reconcileGlobalImage();
+
+  // Base image changed -> stale global_precompiled_image was invalidated immediately so assistant uses approved base while rebuilding!
+  assert.equal(f.projects.currentGlobalImage(), null);
+  const asstTurn = await f.assistants.acquire(owner, { turn: 't-upgraded', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(asstTurn.computer.image, 'approved');
+  await f.assistants.release(owner, { turn: 't-upgraded' });
+
+  // Finish the automatic global rebuild on top of upgraded-base-v2.
+  releaseUpgradeBuild();
+  await f.projects.waitForGlobalBuild();
+  const rebuilt = f.projects.currentGlobalImage();
+  assert.ok(rebuilt?.id);
+  assert.equal(rebuilt.base_image_id, 'sha256:upgraded-base-v2');
+
+  // Verify AssistantComputers.acquire falls back to approved base image if the precompiled image is deleted from Docker.
+  f.docker.onBuild = null;
+  f.docker.images.delete(rebuilt.id);
+  f.docker.images.delete(rebuilt.tag);
+  const fallbackTurn = await f.assistants.acquire(owner, { turn: 't-fallback', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(fallbackTurn.computer.image, 'approved');
 });

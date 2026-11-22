@@ -66,11 +66,12 @@ export function generateLayerDockerfile({ fromImageId, packages = [], hasSetupSc
     );
   }
   if (hasSetupScript) {
+    // Set build-time install prefixes ONLY for this RUN so runtime agent installs still target writable HOME.
     lines.push(
       'USER 10001:10001',
       'COPY --chown=10001:10001 env.sh /tmp/bot-setup-env.sh',
       'COPY --chown=10001:10001 setup.sh /tmp/bot-setup.sh',
-      "RUN HOME=/opt/preinstalled/home /bin/sh -eu -c '. /tmp/bot-setup-env.sh && /bin/sh -eu /tmp/bot-setup.sh' && rm -f /tmp/bot-setup.sh /tmp/bot-setup-env.sh",
+      "RUN HOME=/opt/preinstalled/home PREINSTALLED_DIR=/opt/preinstalled NPM_CONFIG_PREFIX=/opt/preinstalled/npm-global UV_TOOL_DIR=/opt/preinstalled/uv-tools UV_TOOL_BIN_DIR=/opt/preinstalled/bin PYTHONUSERBASE=/opt/preinstalled/python CARGO_HOME=/opt/preinstalled/cargo GOPATH=/opt/preinstalled/go /bin/sh -eu -c '. /tmp/bot-setup-env.sh && /bin/sh -eu /tmp/bot-setup.sh' && rm -f /tmp/bot-setup.sh /tmp/bot-setup-env.sh",
     );
   }
   lines.push(
@@ -286,11 +287,21 @@ export class PrecompiledImageBuilder {
     const promise = new Promise((resolve, reject) => { resolveSub = resolve; rejectSub = reject; });
     const subscriber = { id: subId, resolve: resolveSub, reject: rejectSub, onProgress, cancelled: false };
 
-    let job = !forceRebuild ? this.jobsByKey.get(imageKey) : null;
-    if (job && ['queued', 'building'].includes(job.state)) {
+    // Share an in-flight job ONLY when egress policy matches AND (if already building) the running job's resource
+    // ceiling is at least as high as this caller's ceiling; queued jobs widen their ceiling before starting.
+    const egressFlag = egress !== false;
+    const jobKey = `${imageKey}:${egressFlag ? 'egress' : 'none'}`;
+    const existingJob = !forceRebuild ? this.jobsByKey.get(jobKey) : null;
+    const canShare = !!existingJob && (
+      existingJob.state === 'queued'
+      || (existingJob.state === 'building'
+        && existingJob.resources.cpus >= resources.cpus
+        && existingJob.resources.memory_mb >= resources.memory_mb)
+    );
+    let job = canShare ? existingJob : null;
+    if (job) {
       job.subscribers.add(subscriber);
       if (job.state === 'queued') {
-        // Widen build resources if another subscriber waiting for the same layer has a higher ceiling.
         job.resources = {
           cpus: Math.max(job.resources.cpus, resources.cpus),
           memory_mb: Math.max(job.resources.memory_mb, resources.memory_mb),
@@ -299,6 +310,7 @@ export class PrecompiledImageBuilder {
       try { onProgress?.(this.snapshotJob(job, subId)); } catch {}
     } else {
       job = {
+        jobKey,
         imageKey,
         tag,
         kind,
@@ -310,7 +322,8 @@ export class PrecompiledImageBuilder {
         env: buildEnv,
         spec,
         resources: { cpus: resources.cpus, memory_mb: resources.memory_mb },
-        egress: egress !== false,
+        egress: egressFlag,
+        forceRebuild: !!forceRebuild,
         state: 'queued',
         output: '',
         startedAt: null,
@@ -320,7 +333,7 @@ export class PrecompiledImageBuilder {
         abortController: new AbortController(),
         subscribers: new Set([subscriber]),
       };
-      this.jobsByKey.set(imageKey, job);
+      this.jobsByKey.set(jobKey, job);
       this.queue.push(job);
       this.upsertRow({ imageKey, tag, kind, parentImageId, baseImageId, spec, state: 'queued', output: '' });
       try { onProgress?.(this.snapshotJob(job, subId)); } catch {}
@@ -351,7 +364,7 @@ export class PrecompiledImageBuilder {
       if (job.state === 'queued') {
         const index = this.queue.indexOf(job);
         if (index !== -1) this.queue.splice(index, 1);
-        if (this.jobsByKey.get(job.imageKey) === job) this.jobsByKey.delete(job.imageKey);
+        if (this.jobsByKey.get(job.jobKey) === job) this.jobsByKey.delete(job.jobKey);
         job.state = 'cancelled';
         job.finishedAt = nowIso();
         job.updatedAt = job.finishedAt;
@@ -376,7 +389,7 @@ export class PrecompiledImageBuilder {
     this.notifyQueuePositions();
     void this.runJob(job).finally(() => {
       if (this.active === job) this.active = null;
-      if (this.jobsByKey.get(job.imageKey) === job) this.jobsByKey.delete(job.imageKey);
+      if (this.jobsByKey.get(job.jobKey) === job) this.jobsByKey.delete(job.jobKey);
       this.drain();
     });
   }
@@ -396,6 +409,26 @@ export class PrecompiledImageBuilder {
     job.state = 'building';
     job.startedAt = nowIso();
     job.updatedAt = job.startedAt;
+
+    // Re-check local cache once at the front of the queue: if an earlier job with a lower ceiling just built this
+    // identical content-addressed tag, reuse it without rebuilding.
+    if (!job.forceRebuild) {
+      const existing = await this.docker.request('GET', `/images/${encodeURIComponent(job.tag)}/json`).catch(() => null);
+      if (existing?.Id) {
+        const finished = nowIso();
+        job.state = 'ready';
+        job.finishedAt = finished;
+        job.updatedAt = finished;
+        this.touchRow(job.imageKey, existing.Size ?? null);
+        this.notifySubscribers(job);
+        for (const sub of [...job.subscribers]) {
+          if (!sub.cancelled) sub.resolve({ image: existing, image_key: job.imageKey, tag: job.tag, cached: true, output: null });
+        }
+        job.subscribers.clear();
+        return;
+      }
+    }
+
     this.upsertRow({
       imageKey: job.imageKey, tag: job.tag, kind: job.kind, parentImageId: job.parentImageId,
       baseImageId: job.baseImageId, spec: job.spec, state: 'building', output: '',
@@ -601,6 +634,20 @@ export class PrecompiledImageBuilder {
     return { build_id: buildId, promise, cancel };
   }
 
+  reconcileInterrupted() {
+    const activeKeys = new Set([...this.jobsByKey.values()].map(job => job.imageKey));
+    const stale = this.db.prepare("SELECT image_key, output FROM precompiled_images WHERE state IN ('queued','building','cancelling')").all();
+    const now = nowIso();
+    let count = 0;
+    for (const row of stale) {
+      if (activeKeys.has(row.image_key)) continue;
+      const nextOutput = `${row.output ? row.output + '\n' : ''}[interrupted by manager restart]`.slice(-OUTPUT_LIMIT);
+      this.db.prepare("UPDATE precompiled_images SET state='failed', output=?, finished_at=?, last_used_at=? WHERE image_key=?").run(nextOutput, now, now, row.image_key);
+      count++;
+    }
+    return count;
+  }
+
   async listImages({ protectedImageIds = new Set(), protectedTags = new Set() } = {}) {
     const rows = this.db.prepare('SELECT * FROM precompiled_images ORDER BY last_used_at DESC').all();
     const tagToId = new Map();
@@ -615,17 +662,24 @@ export class PrecompiledImageBuilder {
       const id = tagToId.get(row.tag);
       if (id) idToKey.set(id, row.image_key);
     }
-    const protectedKeys = new Set(this.jobsByKey.keys());
+    const protectedKeys = new Set();
     const markKey = key => {
       if (!key || protectedKeys.has(key)) return;
       protectedKeys.add(key);
       const row = rows.find(r => r.image_key === key);
       if (row?.parent_image_id && idToKey.has(row.parent_image_id)) markKey(idToKey.get(row.parent_image_id));
     };
+    // Walk active and queued jobs AND their parent layers so manual prune never removes the parent of a queued build.
+    for (const job of this.jobsByKey.values()) {
+      markKey(job.imageKey);
+      if (job.parentImageId && idToKey.has(job.parentImageId)) markKey(idToKey.get(job.parentImageId));
+      if (job.fromImageId && idToKey.has(job.fromImageId)) markKey(idToKey.get(job.fromImageId));
+    }
     for (const row of rows) {
       const id = tagToId.get(row.tag);
       if (protectedTags.has(row.tag) || (id && protectedImageIds.has(id))) markKey(row.image_key);
     }
+    const safeSpec = raw => { try { return JSON.parse(raw || '{}'); } catch { return {}; } };
 
     return {
       queue_length: this.queue.length,
@@ -636,7 +690,7 @@ export class PrecompiledImageBuilder {
         kind: row.kind,
         parent_image_id: row.parent_image_id,
         base_image_id: row.base_image_id,
-        spec: JSON.parse(row.spec_json || '{}'),
+        spec: safeSpec(row.spec_json),
         state: row.state,
         size_bytes: row.size_bytes ?? null,
         present: tagToId.has(row.tag),

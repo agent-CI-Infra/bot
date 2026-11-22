@@ -1,5 +1,5 @@
 import { configuredRedactor } from '../core/redaction.js';
-import { authorizeComputerSpec, type Manager } from '../projects/service.js';
+import { authorizeComputerSpec, sanitizeComputerForActor, type Manager } from '../projects/service.js';
 import { superAdmin, type Actor } from '../app/auth.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
@@ -7,7 +7,7 @@ import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
-import { projectLabels, rulesUpdateRemoved, type RuleService } from '../rules/service.js';
+import { projectLabels, rulesUpdateRemoved, syncConsoleComputer, type RuleService } from '../rules/service.js';
 import { managerPrompt } from '../dispatch/settings.js';
 import { applyManagerChange, managerView } from '../dispatch/api.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -266,14 +266,20 @@ export class ManagementService {
       const view=await this.computer!.call('GET','/v1/defaults');
       const isSuper=this.user(actor).role==='super_admin'&&!actor.project_id&&!confinedTenant(actor);
       if(isSuper)return traceClean({...view,revision:this.revision({project_id:'platform'})});
-      return traceClean({defaults:view?.defaults??null,environment:view?.environment??null,toolchain:view?.toolchain??null,global_image:view?.global_image??null,
+      const envView=view?.environment&&typeof view.environment==='object'?view.environment:{};
+      return traceClean({defaults:view?.defaults??null,
+        environment:{egress:envView.egress,packages:envView.packages??[],has_setup_script:typeof envView.setup_script==='string'&&envView.setup_script.trim().length>0,env_keys:envView.env&&typeof envView.env==='object'?Object.keys(envView.env).sort():[]},
+        toolchain:view?.toolchain??null,global_image:view?.global_image??null,
         build:view?.build?{state:view.build.state,tag:view.build.tag??null,finished_at:view.build.finished_at??null}:null,read_only:true});
     }
     if(operation==='get_environment'){
       if(!target.project_id)fail(400,'project_target_required');
       if(!this.computer)fail(503,'manager_not_configured');
       const live=await this.computer!.call('GET','/v1/projects/'+target.project_id).catch(()=>null);
-      return traceClean({project_id:target.project_id,revision:this.revision({project_id:target.project_id}),environment:live,url:'#/projects/'+target.project_id+'/machine'});
+      if(live?.computer)syncConsoleComputer(this.store,target.project_id,live.computer);
+      const user=this.user(actor);
+      const safeLive=live?.computer?{...live,computer:sanitizeComputerForActor(user,live.computer)}:live;
+      return traceClean({project_id:target.project_id,revision:this.revision({project_id:target.project_id}),environment:safeLive,url:'#/projects/'+target.project_id+'/machine'});
     }
     if(operation==='list_precompiled_images'){
       if(actor.project_id||confinedTenant(actor))fail(403,'forbidden');
@@ -413,8 +419,10 @@ export class ManagementService {
     const opId=randomId();
     if(operation==='environment.configure'){
       const result=await manager.call('POST',`/v1/projects/${repoId}/configure`,{operation_id:opId,generation:live.generation,request:args});
+      if(result?.computer)syncConsoleComputer(this.store,repoId,result.computer);
       this.store.audit(user.id,'environment.configure',opId,repoId);
-      return {environment:result,configuration_url:`#/projects/${repoId}/machine`};
+      const safeResult=result?.computer?{...result,computer:sanitizeComputerForActor(user,result.computer)}:result;
+      return {environment:safeResult,configuration_url:`#/projects/${repoId}/machine`};
     }
     if(operation==='environment.lifecycle'){
       const action=String(args.action);
