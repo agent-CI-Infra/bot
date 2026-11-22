@@ -50,30 +50,82 @@ export const ruleErrors = new Set(['invalid_skill_file', 'invalid_rule_content',
 export const computerKeys = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress', 'packages', 'env', 'setup_script'];
 // The resource values that were fixed before a super administrator could change the defaults.
 const builtinResources: Record<string, number> = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
-// The console layer taken from a computer the manager describes: its fields without the resources that follow the default.
+// The console layer taken from a computer the manager describes: strictly the project's own overlay (never merged global
+// defaults). Falls back to top-level fields for older managers/mocks that do not report `live.own`.
 export function ownComputer(live: any): Record<string, unknown> {
+  if (live?.own && typeof live.own === 'object') {
+    const own = live.own as Record<string, unknown>;
+    return Object.fromEntries(computerKeys.filter(key => own[key] !== undefined).map(key => [key, own[key]]));
+  }
   return Object.fromEntries(computerKeys.filter(key => live?.[key] !== undefined && !live.inherited?.includes(key)).map(key => [key, live[key]]));
+}
+function ensureConsoleSpecTable(store: Store): void {
+  store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL,spec_revision INTEGER NOT NULL DEFAULT 0)');
+  const cols = store.all('PRAGMA table_info(computer_console_specs)') as { name: string }[];
+  if (!cols.some(col => col.name === 'spec_revision')) store.db.exec('ALTER TABLE computer_console_specs ADD COLUMN spec_revision INTEGER NOT NULL DEFAULT 0');
+}
+/** Commits a project's own console spec layer together with the manager's monotonic spec_revision. */
+export function saveConsoleComputer(store: Store, id: string, spec: Record<string, unknown>, specRevision?: number): void {
+  ensureConsoleSpecTable(store);
+  const currentRev = Number(store.get('SELECT spec_revision FROM computer_console_specs WHERE repository_id=?', id)?.spec_revision ?? 0);
+  const nextRev = typeof specRevision === 'number' && Number.isFinite(specRevision) ? Math.max(currentRev, specRevision) : currentRev;
+  store.run('INSERT INTO computer_console_specs(repository_id,spec,spec_revision) VALUES(?,?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec,spec_revision=excluded.spec_revision',
+    id, JSON.stringify(spec), nextRev);
+}
+/**
+ * Reconciles computer_console_specs when an asynchronous configure (from console or management assistant) finishes on
+ * the manager and advances `live.spec_revision`. Does nothing while a build is still in flight or for legacy managers
+ * that do not report `own`/`spec_revision`.
+ */
+export function syncConsoleComputer(store: Store, id: string, live: any): void {
+  if (!live || typeof live !== 'object' || !live.own || typeof live.spec_revision !== 'number') return;
+  if (['queued', 'building', 'cancelling'].includes(String(live.build?.state || ''))) return;
+  ensureConsoleSpecTable(store);
+  const row = store.get('SELECT spec_revision FROM computer_console_specs WHERE repository_id=?', id);
+  const savedRev = Number(row?.spec_revision ?? 0);
+  if (live.spec_revision > savedRev) {
+    saveConsoleComputer(store, id, ownComputer(live), live.spec_revision);
+    if (store.hasTable('rule_imports')) store.run('UPDATE rule_imports SET computer=NULL WHERE repository_id=?', id);
+  }
 }
 // The project's console computer spec: the saved one, else the computer as the manager has it, with the .bot/computer.yaml
 // fields the upgrade imported for a project without a saved spec (#935) on top until that spec is first saved.
 export function consoleComputer(store: Store, id: string, live: any): Record<string, unknown> {
-  const row = store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?', id);
+  syncConsoleComputer(store, id, live);
+  const row = store.hasTable('computer_console_specs') ? store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?', id) : undefined;
   return row ? JSON.parse(row.spec) : { ...ownComputer(live), ...importedComputer(store, id) };
 }
 // Saves the console spec the first time a task or the machine page changes the computer; the imported fields join it.
 export function rememberConsoleComputer(store: Store, id: string, live: any): void {
+  ensureConsoleSpecTable(store);
   store.transaction(() => {
     if (store.get('SELECT 1 FROM computer_console_specs WHERE repository_id=?', id)) return;
-    store.run('INSERT INTO computer_console_specs VALUES(?,?)', id, JSON.stringify(consoleComputer(store, id, live)));
+    const rev = typeof live?.spec_revision === 'number' ? live.spec_revision : 0;
+    store.run('INSERT INTO computer_console_specs(repository_id,spec,spec_revision) VALUES(?,?,?)', id, JSON.stringify(consoleComputer(store, id, live)), rev);
     if (store.hasTable('rule_imports')) store.run('UPDATE rule_imports SET computer=NULL WHERE repository_id=?', id);
   });
 }
+function canonicalComputerValue(key: string, value: unknown): unknown {
+  if (key === 'packages') return [...new Set(Array.isArray(value) ? value : [])].sort();
+  if (key === 'setup_script') return typeof value === 'string' ? value : '';
+  if (key === 'env') {
+    const obj = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return Object.fromEntries(Object.keys(obj).sort().map(k => [k, obj[k]]));
+  }
+  return value;
+}
 // What applying the rules sends to the manager: the effective computer, plus null for every resource the computer still
 // sets as its own although the console no longer does, so that resource follows the global default again. Empty when
-// the computer already matches.
+// the computer already matches (comparing against the project's own overlay `live.own`, never merged global defaults).
 export function computerRequest(effective: Record<string, unknown>, live: any): Record<string, unknown> | null {
+  // Never interrupt or revert an asynchronous precompiled image build that is currently queued or running.
+  if (['queued', 'building', 'cancelling'].includes(String(live?.build?.state || ''))) return null;
+  const baseline = live?.own && typeof live.own === 'object' ? live.own : live;
   const dropped = Array.isArray(live?.inherited) ? Object.keys(builtinResources).filter(key => effective[key] === undefined && live[key] !== undefined && !live.inherited.includes(key)) : [];
-  const changed = dropped.length || Object.entries(effective).some(([key, value]) => JSON.stringify(live?.[key]) !== JSON.stringify(value));
+  const changed = dropped.length || Object.entries(effective).some(([key, value]) => {
+    if (key === 'egress' && live?.own && baseline?.egress === undefined && value === live?.egress) return false;
+    return JSON.stringify(canonicalComputerValue(key, baseline?.[key])) !== JSON.stringify(canonicalComputerValue(key, value));
+  });
   return changed ? { ...effective, ...Object.fromEntries(dropped.map(key => [key, null])) } : null;
 }
 // The project's skills as the agent finds them: a name, what the skill is for (its front matter description, or its first

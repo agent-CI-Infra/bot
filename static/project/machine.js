@@ -1,5 +1,6 @@
 function machineSection(globalSettings = false) {
-  const { environment } = current, pc = environment?.environment.computer, isSuper = me.role === 'super_admin', editable = !!pc;
+  const { environment } = current, pc = environment?.environment.computer, isSuper = me.role === 'super_admin';
+  const canConfigure = isSuper || environment?.can_configure === true, editable = canConfigure && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
   if (!pc) return [status, ...(globalSettings ? [] : [concurrencyPage()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
   // The saved spec is the project's own layer (#935: no repository file adds to it); without it the form cannot tell
@@ -97,10 +98,11 @@ function machineSection(globalSettings = false) {
   resourceGrid.append(configField('CPU（核）', cpusControl, 'cpus'), configField('内存（MB）', memoryControl, 'memory_mb'),
     configField('进程数上限', pidsControl, 'pids'), configField('/tmp 大小（MB）', tmpControl, 'tmp_mb'));
   const globalPkgList = globalDefaults.packages?.length ? globalDefaults.packages.join(' ') : '无';
-  const globalEnvKeys = Object.keys(globalDefaults.env || {});
+  const globalEnvKeys = Array.isArray(globalDefaults.env_keys) ? globalDefaults.env_keys : Object.keys(globalDefaults.env || {});
+  const hasGlobalSetup = globalDefaults.has_setup_script ?? !!globalDefaults.setup_script?.trim();
   const globalBaseline = facts([
     ['全局预装软件包（自动继承）', globalPkgList],
-    ['全局初始化脚本（自动继承）', globalDefaults.setup_script?.trim() ? '已配置（本项目脚本将叠加在其之后执行）' : '无'],
+    ['全局初始化脚本（自动继承）', hasGlobalSetup ? '已配置（本项目脚本将叠加在其之后执行）' : '无'],
     ['全局环境变量（自动继承）', globalEnvKeys.length ? globalEnvKeys.join('、') : '无'],
   ]);
   const egressControl = checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）');
@@ -117,7 +119,7 @@ function machineSection(globalSettings = false) {
       configField('环境变量', textarea('env', envText(shown.env), { rows: 3, spellcheck: false, placeholder: '每行 名称=值。对仓库代码可见，不要填写密钥' }), 'env')));
   const impact = element('aside', '', 'machine-config-impact'), draft = element('p', '', 'machine-config-draft'); draft.setAttribute('role', 'status');
   impact.append(element('h4', '保存影响'), draft,
-    note(isSuper ? '保存后若需要预编译镜像，构建将在后台串行队列（并发=1，无超时）自动执行，上方卡片实时显示构建日志且可随时手动停止；构建完成前当前运行中的虚拟电脑不受影响。' : '项目管理员可配置本项目增量软件包、初始化脚本与环境变量，并实时查看构建进展或手动停止构建；资源上限与网络开关由超级管理员维护。'),
+    note(!canConfigure ? '只有项目管理员或超级管理员可修改机器配置。' : isSuper ? '保存后若需要预编译镜像，构建将在后台串行队列（并发=1，无超时）自动执行，上方卡片实时显示构建日志且可随时手动停止；构建完成前当前运行中的虚拟电脑不受影响。' : '项目管理员可配置本项目增量软件包、初始化脚本与环境变量，并实时查看构建进展或手动停止构建；资源上限与网络开关由超级管理员维护。'),
     note('工作卷、笔记和代次保留。项目任务并发在另一组单独保存，不会重建电脑。'));
   if (pc.resources_pending) impact.append(note('全局默认已变化，电脑等待空闲后重建。电脑报告的资源是配置目标，不能据此确认运行中容器已使用新上限。'));
   const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
@@ -238,7 +240,8 @@ function machineStatus() {
   const work=card('运行与排队记录'), count=value=>Array.isArray(value)?value.length:'未知';
   work.append(facts([['运行任务记录',count(environment.running_tasks)],['排队任务记录',count(environment.queued_tasks)]]),
     consoleLink(`#/projects/${current.id}/activity`,'查看运行与排队任务','与本页使用同一项目电脑记录'),note('任务记录与电脑连接分别读取；配置页的项目任务并发与角色容量是不同限制。'));
-  return [machine, usageCard(), work, preparationCard(pc, available && !!env.computer)];
+  const canConfigure = me.role === 'super_admin' || environment?.can_configure === true;
+  return [machine, usageCard(), work, preparationCard(pc, available && !!env.computer, canConfigure)];
 }
 let usage = null;
 function usageCard() {
@@ -253,7 +256,7 @@ function usageCard() {
   return section;
 }
 // Package image build and precompiled setup script progress: live status, streaming output, and manual cancel.
-function preparationCard(pc, known = true) {
+function preparationCard(pc, known = true, canConfigure = false) {
   const section = card('软件安装与初始化'), build = pc.build, setup = pc.setup;
   const phaseName = build?.phase === 'global' ? '全局基座层' : build?.phase === 'project' ? '项目增量层' : null;
   const buildState = {
@@ -272,7 +275,7 @@ function preparationCard(pc, known = true) {
     cancelled: ['初始化构建已取消', 'warning'],
   }[setup.state] || [setup.state, ''];
   const head = element('div', '', 'actions'); head.append(badge(...buildState), badge(...setupState));
-  if (build?.can_cancel || ['queued', 'building'].includes(build?.state)) {
+  if (canConfigure && (build?.can_cancel || ['queued', 'building'].includes(build?.state))) {
     const cancelBtn = button('停止构建', async event => {
       if (!await askConfirm({ title: '停止当前镜像构建？', body: ['正在排队或构建中的镜像任务会立即中止；当前正在运行的虚拟电脑和已有工作卷不受影响。'], action: '停止构建', danger: true })) return;
       const btn = event.currentTarget; btn.disabled = true;

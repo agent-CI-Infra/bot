@@ -4,19 +4,48 @@ import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { request as httpsRequest } from 'node:https';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
+import { authorize } from '../identity/authorization.js';
 import { fail, fields, randomId, HttpError, type Json } from '../core/security.js';
 import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
-import { rememberConsoleComputer } from '../rules/service.js';
+import { ownComputer, rememberConsoleComputer, saveConsoleComputer, syncConsoleComputer } from '../rules/service.js';
 
 // Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
 export const superAdminComputerFields = new Set(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress']);
 export const projectAdminComputerFields = new Set(['packages', 'setup_script', 'env', 'rebuild', 'rerun_setup']);
 
+export function canConfigureProject(user: Actor, projectId: string): boolean {
+  if (user.role === 'super_admin') return true;
+  if (!user.context) return false;
+  try { authorize(user.context, 'config.write', { project_id: projectId }); return true; } catch { return false; }
+}
+
+export function requireProjectConfigWrite(user: Actor, projectId: string): void {
+  if (user.role === 'super_admin') return;
+  if (!user.context) return fail(403, 'forbidden');
+  authorize(user.context, 'config.write', { project_id: projectId });
+}
+
 export function authorizeComputerSpec(user: Actor, spec: Json): void {
   const keys = Object.keys(spec);
   if (keys.some(key => superAdminComputerFields.has(key) || !projectAdminComputerFields.has(key))) superAdmin(user);
+}
+
+/** Strips raw global setup_script text and global env values for non-super actors while keeping baseline labels/keys. */
+export function sanitizeComputerForActor(user: Actor, computer: any): any {
+  if (!computer || typeof computer !== 'object' || user.role === 'super_admin') return computer;
+  const gd = computer.global_defaults;
+  if (!gd || typeof gd !== 'object') return computer;
+  const { setup_script: globalScript, env: globalEnv, ...restGlobal } = gd;
+  return {
+    ...computer,
+    global_defaults: {
+      ...restGlobal,
+      has_setup_script: typeof globalScript === 'string' && globalScript.trim().length > 0,
+      env_keys: globalEnv && typeof globalEnv === 'object' ? Object.keys(globalEnv).sort() : [],
+    },
+  };
 }
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -133,6 +162,7 @@ export class ProjectService {
       if (!state && repo.enabled) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);
       if (!state || this.removing.has(repo.id)) return;
       this.save(state);
+      syncConsoleComputer(this.store, repo.id, (state as any)?.computer);
       // The manager admits as many runner calls at once as tasks may run, never fewer than hold a claim right now.
       const parallel = Math.max(repositoryConcurrency(this.store, repo.id), Number(this.store.get('SELECT count(*) AS n FROM task_claims WHERE repository_id=?', repo.id)!.n));
       if (Number.isSafeInteger(state.parallel) && state.parallel !== parallel) await this.manager.call('PUT', `/v1/projects/${repo.id}/parallel`, { tasks: parallel }).catch(() => {});
@@ -253,14 +283,19 @@ export class ProjectService {
       this.store.transaction(() => {
         this.save(result); this.store.run("UPDATE environment_operations SET state='completed',result=? WHERE id=?", JSON.stringify(result), op.id);
         if(op.action==='configure'){
-          const buildState = String((result as any)?.computer?.build?.state || '');
-          // Only commit the console spec layer when the change applied synchronously; async builds commit once ready.
+          const computer = (result as any)?.computer;
+          const buildState = String(computer?.build?.state || '');
+          // Only commit the console spec layer when the change applied synchronously; async builds sync via spec_revision once ready.
           if (!['queued', 'building', 'cancelling'].includes(buildState)) {
-            const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
-            const{rerun_setup:_rerun,rebuild:_rebuild,...values}=JSON.parse(op.input).request;
-            // A null resource follows the default again, so it leaves the console layer.
-            const spec={...base,...values};for(const key of Object.keys(spec))if(spec[key]===null)delete spec[key];
-            this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec',op.repository_id,JSON.stringify(spec));
+            if (computer?.own) {
+              saveConsoleComputer(this.store, op.repository_id, ownComputer(computer), Number(computer.spec_revision || 0));
+            } else {
+              const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
+              const{rerun_setup:_rerun,rebuild:_rebuild,...values}=JSON.parse(op.input).request;
+              // A null resource follows the default again, so it leaves the console layer.
+              const spec={...base,...values};for(const key of Object.keys(spec))if(spec[key]===null)delete spec[key];
+              saveConsoleComputer(this.store, op.repository_id, spec);
+            }
           }
         }
       }); return result;
@@ -275,7 +310,7 @@ export class ProjectService {
     }
   }
   // One project computer: its fixed spec, current queue and recent execution history.
-  async detail(id: string): Promise<Json> {
+  async detail(id: string, user?: Actor): Promise<Json> {
     const saved = this.store.get(`SELECT r.full_name,p.enabled,e.* FROM repositories r JOIN policies p ON p.repository_id=r.id
       LEFT JOIN project_environments e ON e.repository_id=r.id WHERE r.id=?`, id)!;
     let observed = 'available';
@@ -285,6 +320,7 @@ export class ProjectService {
       return null;
     });
     if (!live && observed === 'available') observed = 'absent';
+    if (live?.computer) syncConsoleComputer(this.store, id, live.computer);
     const tasks = this.store.all(`SELECT id,kind,status,phase,object_number,generation,error_code,updated_at FROM tasks WHERE repository_id=?
       ORDER BY created_at DESC,id DESC LIMIT 20`, id);
     const commands: Json[] = [];
@@ -301,8 +337,10 @@ export class ProjectService {
         exit_code: command.exit_code ?? null, timed_out: !!command.timed_out, error: command.error ?? null });
       if (commands.length >= 30) break;
     }
+    const computer = live?.computer ? (user ? sanitizeComputerForActor(user, live.computer) : live.computer) : null;
     return { observation: { status: observed, checked_at: new Date().toISOString(), state: live?.state ?? null },
-      environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
+      can_configure: user ? canConfigureProject(user, id) : undefined,
+      environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer,
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
       running_tasks: this.store.all(`SELECT t.id,t.kind,t.status,t.phase,t.object_number,c.claimed_at FROM task_claims c JOIN tasks t ON t.id=c.task_id
         WHERE c.repository_id=? ORDER BY c.claimed_at,t.id`, id),
@@ -331,24 +369,26 @@ export class ProjectService {
     if (cancelBuild) {
       if (method !== 'POST') return fail(405, 'method_not_allowed');
       const id = cancelBuild[1]!; repository(this.store, user, id);
+      requireProjectConfigWrite(user, id);
       if (this.removing.has(id)) fail(409, 'repository_deleting');
       const result = await this.manager.call('POST', `/v1/projects/${id}/build/cancel`, {});
       if (result?.environment) this.save(result.environment);
       this.store.audit(user.id, 'environment.build_cancelled', id, id);
-      return result;
+      return result?.environment?.computer ? { ...result, environment: { ...result.environment, computer: sanitizeComputerForActor(user, result.environment.computer) } } : result;
     }
     const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete|configure|stats))?$/.exec(url.pathname);
     if (!match) return fail(404, 'not_found');
     const id = match[1]!; repository(this.store, user, id);
-    if (!match[2] && method === 'GET') return this.detail(id);
+    if (!match[2] && method === 'GET') return this.detail(id, user);
     if (this.removing.has(id) && method !== 'GET') fail(409, 'repository_deleting');
     if (match[2] === 'stats' && method === 'GET') return { stats: await this.manager.call('GET', `/v1/projects/${id}/stats`) };
     if (method !== 'POST' || !match[2]) return fail(404, 'not_found');
     fields(input, ['operation_id','generation','confirm','spec']);
     if (!/^[a-f0-9]{48}$/.test(String(input.operation_id || '')) || !Number.isSafeInteger(input.generation)) fail(400, 'invalid_operation');
     if (match[2] === 'delete') { superAdmin(user); if (input.confirm !== true) fail(400, 'confirmation_required'); }
-    // Resource limits and network egress remain super-admin-only; project admins may configure software overlays.
+    // Resource limits and network egress remain super-admin-only; project admins (config.write) may configure software overlays.
     if (match[2] === 'configure') {
+      requireProjectConfigWrite(user, id);
       if (!input.spec || typeof input.spec !== 'object' || Array.isArray(input.spec)) fail(400, 'invalid_spec');
       authorizeComputerSpec(user, input.spec as Json);
     }

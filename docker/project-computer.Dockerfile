@@ -25,15 +25,10 @@ COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
 COPY docker/bot-desktop.sh /usr/local/bin/bot-desktop
 RUN chmod 755 /usr/local/bin/bot-chromium /usr/local/bin/bot-desktop && chmod -R a-w /opt/runner /opt/bot
 # Preinstalled browser and X11 virtual desktop tools for project and assistant computers (#1214),
-# plus the writable non-root /opt/preinstalled prefix for precompiled setup scripts.
+# plus the read-only-at-runtime /opt/preinstalled PATH entries (install prefix env vars are set only during build RUN
+# so runtime pip/uv/cargo/go installs continue writing to the container's writable HOME).
 ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium \
     PREINSTALLED_DIR=/opt/preinstalled \
-    NPM_CONFIG_PREFIX=/opt/preinstalled/npm-global \
-    UV_TOOL_DIR=/opt/preinstalled/uv-tools \
-    UV_TOOL_BIN_DIR=/opt/preinstalled/bin \
-    PYTHONUSERBASE=/opt/preinstalled/python \
-    CARGO_HOME=/opt/preinstalled/cargo \
-    GOPATH=/opt/preinstalled/go \
     PATH=/opt/preinstalled/bin:/opt/preinstalled/home/.local/bin:/opt/preinstalled/npm-global/bin:/opt/preinstalled/python/bin:/opt/preinstalled/cargo/bin:/opt/preinstalled/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium, xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg"
 USER 10001:10001

@@ -159,7 +159,12 @@ try {
   // Software and initialization: a package image, a variable and a setup script; everything runs as the project user.
   const software = await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{packages:['tree'],env:{GREETING:'hello'},
     setup_script:'mkdir -p "$HOME/.local/bin" && ln -sf /bin/echo "$HOME/.local/bin/greet"'}});
-  assert.deepEqual([software.environment.computer.build.state,software.environment.computer.setup.exit_code],['ready',0]);
+  assert.ok(['queued','building','ready'].includes(software.environment.computer.build.state),software.environment.computer.build.state);
+  const built = await wait(async () => {
+    const pc = (await api('/api/environments/101')).environment.computer;
+    return ['ready','failed','cancelled'].includes(pc.build?.state) ? pc : null;
+  }, 'precompiled image build');
+  assert.deepEqual([built.build.state,built.setup.mode,built.setup.exit_code],['ready','precompiled',0]);
   const tools = await run('101','tree --version >/dev/null && echo "$GREETING" && greet from-setup');
   assert.equal(tools.result.output,'hello\nfrom-setup\n',tools.result.output);
   const stats = (await api('/api/environments/101/stats')).stats;
