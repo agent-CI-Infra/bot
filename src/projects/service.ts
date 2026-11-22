@@ -192,9 +192,10 @@ export class ProjectService {
         // An answered start also clears the notes-retry slot: the residue it owed is gone, or the manager no longer refuses it.
         this.notesRetries.delete(repo.id);
         if (result?.state) state = result;
-      } else if (repo.enabled && state.state === 'ready' && state.computer?.resources_pending) {
-        // The resource defaults changed: a computer that follows them is rebuilt once no task runs on it. The engine claims no
-        // task on it while the refresh is pending; checking for claims and recording it in one step leaves no gap between.
+      } else if (repo.enabled && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending)) {
+        // Resource defaults changed or a deferred recovery precompiled image finished building: rebuild once no task
+        // runs on the computer. claimQueuedTask excludes repositories with a pending environment_operations row, so
+        // checking claims and recording `refresh` in one transaction leaves no race window.
         const input = { operation_id: randomId(), generation: state.generation };
         const queued = this.store.transaction(() => {
           if (this.store.get("SELECT 1 FROM task_claims WHERE repository_id=? UNION ALL SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", repo.id, repo.id)) return false;

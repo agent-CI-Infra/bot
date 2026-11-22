@@ -307,6 +307,8 @@ test('project-computer.Dockerfile keeps runtime install prefixes unset in ENV wh
   assert.match(dockerfile, /mkdir -p \/workspace \/workspace\/home /);
   const layer = generateLayerDockerfile({ fromImageId: 'sha256:base', hasSetupScript: true });
   assert.match(layer, /RUN mkdir -p \/workspace\/home && HOME=\/opt\/preinstalled\/home PREINSTALLED_DIR=\/opt\/preinstalled NPM_CONFIG_PREFIX=\/opt\/preinstalled\/npm-global/);
+  assert.match(layer, /\[warn\] setup_script wrote to \/workspace\/home during build/);
+  assert.match(layer, /rm -rf \/workspace\/home\/\*/);
 });
 
 test('single-flight build sharing isolates egress policy and resource ceilings, reusing cache only if earlier build succeeds', async t => {
@@ -564,7 +566,7 @@ test('F3 & F4: failed/cancelled global build does not retry in a 5s check loop, 
   await f.projects.waitForGlobalBuild();
 });
 
-test('recover() stays non-blocking on uncached precompiled images after a base image upgrade and switches container once background build completes', async t => {
+test('recover() stays non-blocking on uncached precompiled images after a base image upgrade, flags image_pending without interrupting tasks, and switches on refresh', { timeout: 60_000 }, async t => {
   const f = fixture(t);
   await f.projects.register('101');
   await f.projects.operate('101', 'configure', {
@@ -575,8 +577,7 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
   const prevBuilt = f.projects.describe('101').computer;
   const revBefore = prevBuilt.spec_revision;
   const prevImageId = prevBuilt.image;
-  // Ensure FakeDocker can inspect the previous precompiled image by ID (as real Docker does).
-  f.docker.images.set(prevImageId, { Id: prevImageId, Size: 3 * mib });
+  f.docker.images.set(prevImageId, { Id: prevImageId, Size: 3 * mib, Config: { Labels: { 'department.bot.base_image_id': 'sha256:fixture' } } });
 
   // Simulate upgrading the approved base image to a new digest so 101's precompiled image is no longer cached,
   // and hold the Docker build in flight while calling recover().
@@ -589,22 +590,42 @@ test('recover() stays non-blocking on uncached precompiled images after a base i
   });
   f.docker.images.set('approved', { Id: 'sha256:upgraded-base-v4', Size: 10 * mib });
 
-  // recover() MUST finish immediately without waiting for the slow Docker build, preserving the previous precompiled
-  // image while rebuilding in the background so existing tools remain available!
-  await f.projects.recover();
+  // recover() MUST finish immediately without waiting for the slow Docker build, starting on the new approved base
+  // (never reusing an old-base image whose /opt/runner may mismatch the upgraded manager).
+  let recoverTimer;
+  try {
+    await Promise.race([
+      f.projects.recover(),
+      new Promise((_, reject) => { recoverTimer = setTimeout(() => reject(new Error('recover() blocked on uncached build')), 10_000); }),
+    ]);
+  } finally {
+    clearTimeout(recoverTimer);
+  }
   const duringBuild = f.projects.describe('101');
   assert.equal(duringBuild.state, 'ready', 'project container must come up ready immediately during recover()');
-  assert.equal(duringBuild.computer.image, prevImageId, 'recover() preserves previous precompiled image during background rebuild when still present in Docker');
+  assert.equal(duringBuild.computer.image, 'sha256:upgraded-base-v4');
   assert.ok(['queued', 'building'].includes(duringBuild.computer.build.state), duringBuild.computer.build.state);
   assert.equal(duringBuild.computer.spec_revision, revBefore);
 
-  // Once the background build completes, 101 switches atomically to the new precompiled image without bumping spec_revision.
+  // When the deferred recovery build completes, it MUST NOT stop the running container directly; instead it sets
+  // image_pending=true (keeping resources_pending=false) so the control plane refreshes cleanly when idle.
+  const startsBefore = f.docker.starts;
   releaseBuild();
   await f.projects.waitForBuild('101');
   const afterBuild = f.projects.describe('101');
   assert.equal(afterBuild.state, 'ready');
   assert.equal(afterBuild.computer.build.state, 'ready');
-  assert.equal(afterBuild.computer.image, 'sha256:' + afterBuild.computer.build.tag.split(':')[1]);
-  assert.notEqual(afterBuild.computer.image, prevImageId);
+  assert.equal(afterBuild.computer.image, 'sha256:upgraded-base-v4', 'container not interrupted directly by deferred recovery build');
+  assert.equal(f.docker.starts, startsBefore, 'no container restart before explicit idle refresh');
+  assert.equal(afterBuild.computer.image_pending, true);
+  assert.equal(afterBuild.computer.resources_pending, false);
   assert.equal(afterBuild.computer.spec_revision, revBefore, 'recovery rebuild must not bump spec_revision');
+
+  // Explicit idle refresh switches the container to the cached precompiled image and clears image_pending.
+  f.docker.onBuild = null;
+  await f.projects.operate('101', 'refresh', { operation_id: opId(), generation: 1 });
+  const afterRefresh = f.projects.describe('101');
+  assert.equal(afterRefresh.computer.image, 'sha256:' + afterBuild.computer.build.tag.split(':')[1]);
+  assert.equal(afterRefresh.computer.image_pending, false);
+  assert.equal(afterRefresh.computer.spec_revision, revBefore);
 });

@@ -353,8 +353,8 @@ export class Projects {
         env: own.env || {},
       },
       inherited: resourceKeys.filter(key => own[key] === undefined),
-      resources_pending: (!!applied && applied !== JSON.stringify(resources(spec)))
-        || (buildInfo?.state === 'ready' && !!buildInfo?.image_id && !!resource?.image && resource.image !== buildInfo.image_id) } };
+      resources_pending: !!applied && applied !== JSON.stringify(resources(spec)),
+      image_pending: !!(buildInfo?.state === 'ready' && buildInfo?.image_id && resource?.image && resource.image !== buildInfo.image_id) } };
   }
   // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
   async defaultsView() {
@@ -867,27 +867,30 @@ export class Projects {
       const cached = await this.images.checkLayeredCache({ approvedImage: approved, globalSpec: globalEnv, projectSpec, egress: spec.egress });
       if (cached.cached && cached.image) {
         const finished_at = new Date().toISOString();
+        if (cached.image_key) this.images.touchRow(cached.image_key, cached.image.Size ?? null);
         const existingOutput = JSON.parse(this.get(repo)?.build || '{}').output || null;
         record({
-          image_key: cached.image_key, tag: cached.tag, phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
+          image_key: cached.image_key, image_id: cached.image.Id, tag: cached.tag, phase: projectSpec.packages.length || normalizeScript(projectSpec.setup_script) ? 'project' : 'global',
           state: 'ready', queue_position: null, output: existingOutput, can_cancel: false, finished_at,
         });
         this.recordPrecompiledSetup(repo, this.get(repo)?.generation || 1, globalEnv.setup_script, projectSpec.setup_script, 'succeeded', finished_at, existingOutput);
         return cached.image;
       }
-      // On startup recovery, do not block manager readiness on multi-minute image builds: prefer the generation's
-      // previous image if it is still present in Docker (preserving existing tools during the rebuild window),
-      // falling back to the approved base image only when absent, and enqueue the precompiled build asynchronously.
+      // On startup recovery, do not block manager readiness on multi-minute image builds: start on a matching-base
+      // previous image if one exists (ensuring runner/manager protocol compatibility), else the approved base image,
+      // and enqueue the precompiled build asynchronously. Switching onto the newly built image happens strictly when
+      // idle via `image_pending` + the control plane's claim-gated `refresh`.
       const generation = this.get(repo)?.generation;
       const previousRef = generation ? this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation)?.image : null;
       const previousImage = previousRef && previousRef !== approved.Id
         ? await this.docker.request('GET', `/images/${encodeURIComponent(previousRef)}/json`).catch(() => null)
         : null;
+      const previousMatchesBase = !!previousImage?.Id && previousImage.Config?.Labels?.['department.bot.base_image_id'] === approved.Id;
       this.startProjectBuild(repo, {
         approvedImage: approved, toolchain, globalSpec: globalEnv, nextOwn: own, nextSpec: spec,
         requestedKeys: [], forceRebuild: false, commitSpec: false,
       });
-      return previousImage?.Id ? previousImage : approved;
+      return previousMatchesBase ? previousImage : approved;
     }
     const handle = this.images.startLayered({
       approvedImage: approved,
@@ -998,9 +1001,9 @@ export class Projects {
             .run(JSON.stringify(nextOwn), JSON.stringify(requestedKeys), repo);
         }
         this.recordPrecompiledSetup(repo, current.generation, globalSpec.setup_script, projectSpec.setup_script, 'succeeded', finished_at, result.output);
-        // For deferred recovery builds, avoid disrupting active task background services; describe() flags
-        // resources_pending so the control plane refreshes the container once all task claims drain.
-        if (!commitSpec && this.kept(repo).size > 0) return;
+        // Deferred recovery builds (!commitSpec) never interrupt running tasks by stopping the container directly:
+        // describe() reports image_pending=true so the control plane switches cleanly via claim-gated idle refresh.
+        if (!commitSpec) return;
         if (current.desired === 'ready' && current.state !== 'reset_failed') {
           this.background.delete(repo);
           await this.stopGeneration(repo, current.generation);

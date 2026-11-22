@@ -122,6 +122,7 @@ function machineSection(globalSettings = false) {
     note(!canConfigure ? '只有项目管理员或超级管理员可修改机器配置。' : isSuper ? '保存后若需要预编译镜像，构建将在后台串行队列（并发=1，无超时）自动执行，上方卡片实时显示构建日志且可随时手动停止；构建完成前当前运行中的虚拟电脑不受影响。' : '项目管理员可配置本项目增量软件包、初始化脚本与环境变量，并实时查看构建进展或手动停止构建；资源上限与网络开关由超级管理员维护。'),
     note('工作卷、笔记和代次保留。项目任务并发在另一组单独保存，不会重建电脑。'));
   if (pc.resources_pending) impact.append(note('全局默认已变化，电脑等待空闲后重建。电脑报告的资源是配置目标，不能据此确认运行中容器已使用新上限。'));
+  if (pc.image_pending) impact.append(note('新的预编译镜像已就绪，电脑将在当前运行任务全部空闲后自动平滑切换，不会中断正在执行的任务。'));
   const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
   const nodes = [
     note(unread?'暂时读不到已保存的机器配置，目前显示电脑报告的值。':'表单显示本项目叠加配置，电脑是否已应用需结合上方状态核对。机器配置只在这里修改，仓库里的 .bot/computer.yaml 不再读取。'),
@@ -234,6 +235,7 @@ function machineStatus() {
   const record=element('details','','fold');record.append(element('summary','查看电脑记录与技术信息'),facts([['状态记录',state(env.state)],['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
     ['资源', pc.resources_pending ? '全局默认资源已改，等没有任务运行时按新值重建' : null],
+    ['预编译镜像切换', pc.image_pending ? '新预编译镜像已就绪，等没有任务运行时自动切换' : null],
     ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', environmentFault(env.error)]]));machine.append(record);
   if(pc.image)machine.append(collapsible('完整运行镜像',pc.image));
   environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error).forEach((control,index)=>{control.id='computer-action-'+index;if(!available)control.disabled=true;lifecycle.append(control);}); machine.append(lifecycle);
