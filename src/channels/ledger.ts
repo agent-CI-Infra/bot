@@ -279,12 +279,6 @@ export class ChannelLedger {
             ...(content.length > 3000 ? { notice: 'Read the current full message with read_message_text.' } : {}), change: row.deleted ? 'recalled' : 'edited' };
         }) };
   }
-  /** Earlier bot text can quote any changed source. Keep stored replies, but omit such derived text from future inputs. */
-  private contextView(row: Row): Json {
-    if (row.sender_type !== 'user' && this.store.get('SELECT 1 FROM channel_source_updates WHERE chat_id=? AND observed_at>=? LIMIT 1', row.chat_id, row.observed_at))
-      return { ...this.view(row), content: '[先前回复可能引用已变更消息；请查阅当前原文。]' };
-    return this.view(row);
-  }
   private visibility(projects?:string[],fence?:string):{sql:string;args:string[]} {
     if(projects===undefined&&fence===undefined)return {sql:'',args:[]};
     const denied=projects===undefined?'0':projects.length?'s.project_id NOT IN ('+projects.map(()=>'?').join(',')+')':'1';
@@ -319,7 +313,7 @@ export class ChannelLedger {
       if (!batch.length) { exhausted = true; break; }
       for (const row of batch) {
         scanTime = row.created_at; scanId = row.message_id;
-        const message=this.contextView(row),content=String(message.content);
+        const message=this.view(row),content=String(message.content);
         if (query.keyword && (row.sensitive || row.deleted || !content.toLocaleLowerCase().includes(query.keyword.toLocaleLowerCase()))) continue;
         messages.push(message);
         if (messages.length > limit) break;
@@ -335,7 +329,7 @@ export class ChannelLedger {
   /** Bounded prompt windows and compaction use the same sealed local records as searches. */
   recent(id: string, limit = 40, projects?:string[],fence?:string,excludePending=false): Json[] {
     const visible=this.visibility(projects,fence);
-    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql}${excludePending?this.pendingFilter():''} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.contextView(row));
+    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql}${excludePending?this.pendingFilter():''} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.view(row));
   }
   private pendingFilter():string {
     return ` AND NOT EXISTS(SELECT 1 FROM channel_inbox i WHERE i.chat_ref=channel_messages.chat_id AND i.dedup_key='message:'||channel_messages.message_id AND i.state IN ('queued','merged'))`;
@@ -346,6 +340,6 @@ export class ChannelLedger {
       AND (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 100`, id,
       ...visible.args,
       Number(boundary.created_at), Number(boundary.created_at), String(boundary.message_id), Number(after?.created_at??-1),Number(after?.created_at??-1),String(after?.message_id??''))
-      .map(row => this.contextView(row));
+      .map(row => this.view(row));
   }
 }
