@@ -170,9 +170,14 @@ try {
   // 6. New resources apply from the owner's next turn: the idle computer is replaced with the new limits, HOME kept.
   await computers.setSettings({ cpus: 0.5, memory_mb: 1024, pids: 256, tmp_mb: 128, workspace_mb: 256 });
   assert.equal((await acquire(A, 'ta5', { fence: other, home_generation: 2 })).reused, false);
-  const resized = await run(A, 'ta5', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; echo "$BOT_TMP_LIMIT_MB"; echo "$BOT_WORKSPACE_LIMIT_MB"; cat ~/kept.txt');
-  assert.equal(resized.output, '1073741824\n0\n256\n50000 100000\n128\n256\nkept\n');
-  passed('new resources replace the idle computer at the next turn: 1 GiB without swap, 256 pids, 0.5 CPU, 128/256 MiB ephemeral volume limits, HOME kept', resized.output.trim().split('\n'));
+  const resized = await run(A, 'ta5', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; echo "$BOT_TMP_LIMIT_MB"; echo "$BOT_WORKSPACE_LIMIT_MB"; stat -f -c %T /workspace; stat -f -c %T /tmp; df -Pk /workspace | awk "NR==2 {print \\$4}"; cat ~/kept.txt');
+  const resizedLines = resized.output.trim().split('\n');
+  assert.deepEqual(resizedLines.slice(0, 6), ['1073741824', '0', '256', '50000 100000', '128', '256']);
+  assert.notEqual(resizedLines[6], 'tmpfs', '/workspace must be a disk-backed volume, not tmpfs');
+  assert.notEqual(resizedLines[7], 'tmpfs', '/tmp must be a disk-backed volume, not tmpfs');
+  assert.ok(Number(resizedLines[8]) > 0, 'disk-backed /workspace must report positive available space');
+  assert.equal(resizedLines[9], 'kept');
+  passed('new resources replace the idle computer at the next turn: 1 GiB without swap, 256 pids, 0.5 CPU, disk-backed /workspace & /tmp volumes with 128/256 MiB soft limits, HOME kept', resizedLines);
   await computers.release(A, { turn: 'ta5' });
   // 6b. Turning egress off replaces the idle container with NetworkMode: none.
   await computers.setSettings({ cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: false });

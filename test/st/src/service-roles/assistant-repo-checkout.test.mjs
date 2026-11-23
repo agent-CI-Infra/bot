@@ -443,8 +443,8 @@ test('global and assistant computer resource defaults are 16 GB RAM and 20 GB ep
   assert.equal(assistantDefaults.tmp_mb, 20480);
   assert.equal(assistantDefaults.workspace_mb, 20480);
 
-  // Global defaults and inherited assistant settings both report 16 GB RAM and 20 GB workspace/tmp.
-  assert.deepEqual(projects.resourceDefaults(), { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 20480 });
+  // Global defaults have 16 GB RAM and RAM-safe 4 GB tmpfs; assistant settings inherit 16 GB RAM and keep 20 GB disk-backed /workspace & /tmp.
+  assert.deepEqual(projects.resourceDefaults(), { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 4096 });
   const effective = assistants.settings();
   assert.equal(effective.memory_mb, 16384);
   assert.equal(effective.tmp_mb, 20480);
@@ -549,5 +549,140 @@ test('runner assistant_archive_stage and assistant_archive_extract unpack safely
     assistantFile({ type: 'assistant_archive_stage', stage_id: 'bad-id', base64: '', offset: 0 }, opts),
     /invalid_stage_id/,
   );
+
+  // 7. assistant_write enforces soft limit and volume.full safety floor.
+  await assert.rejects(
+    assistantFile({ type: 'assistant_write', path: join(workspaceRoot, 'oversize.txt'), base64: Buffer.alloc(1024, 0x61).toString('base64'), offset: 0 }, {
+      workspaceRoot, tmpRoot, homeRoot, env: { BOT_WORKSPACE_LIMIT_MB: '0.0005' },
+    }),
+    /ENOSPC/,
+  );
+  await assert.rejects(
+    assistantFile({ type: 'assistant_write', path: join(workspaceRoot, 'full.txt'), base64: Buffer.from('x').toString('base64'), offset: 0 }, {
+      workspaceRoot, tmpRoot, homeRoot, volume: () => ({ free_bytes: 0, total_bytes: 100 * 1024 ** 3, full: true, low: true }),
+    }),
+    /ENOSPC/,
+  );
   assert.ok(gzipSync(Buffer.alloc(0)).length > 0);
+});
+
+test('assistant computers enforce small-host memory clamping, aggregate admission, DiskGuard refusal, archive timeout, and legacy default migration (#1279)', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'assistant-guards-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const homes = join(dir, 'homes');
+  mkdirSync(homes, { recursive: true });
+  const docker = new FakeDocker();
+  docker.homesMount = homes;
+  // Simulate an 8 GiB host with 4 CPUs.
+  docker.info = { NCPU: 4, MemTotal: 8192 * 1024 * 1024 };
+
+  const projects = new Projects({ database: join(dir, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
+  t.after(() => projects.db.close());
+  // Seed legacy saved assistant settings before constructing AssistantComputers to verify one-time migration.
+  projects.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+  projects.db.prepare("INSERT INTO settings VALUES('assistant_computers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    .run(JSON.stringify({ idle_minutes: 15, memory_mb: 2048, tmp_mb: 512, workspace_mb: 512, cpus: 2 }));
+
+  let diskLow = false;
+  const fakeDisk = { check: () => ({ free_bytes: diskLow ? 100 : 200 * 1024 ** 3, total_bytes: 500 * 1024 ** 3, reserve_bytes: 25 * 1024 ** 3, low: diskLow }) };
+  const assistants = new AssistantComputers({
+    docker,
+    db: projects.db,
+    deployment: 'fixture',
+    image: 'approved',
+    homes,
+    disk: fakeDisk,
+    globalEnvironment: () => projects.assistantGlobalEnvironment(),
+  });
+
+  // 1. One-time legacy default migration drops old 2048/512/512 defaults while preserving custom idle_minutes=15 & cpus=2.
+  const raw = assistants.settings();
+  assert.equal(raw.idle_minutes, 15);
+  assert.equal(raw.cpus, 2);
+  assert.equal(raw.memory_mb, 16384);
+  assert.equal(raw.tmp_mb, 20480);
+  assert.equal(raw.workspace_mb, 20480);
+
+  // 2. Small host (8 GiB) clamps effective memory_mb to 6144 MiB and rejects explicit saves > host memory.
+  const view = await assistants.settingsView();
+  assert.equal(view.settings.memory_mb, 6144);
+  assert.deepEqual(view.host_clamped, { memory_mb: 6144 });
+  await assert.rejects(assistants.setSettings({ memory_mb: 16384 }), /memory_exceeds_host/);
+
+  // 3. Container receives clamped 6144 MiB; aggregate busy memory admission allows up to 2x host RAM (12 <= 16 GiB) and queues the 3rd (18 > 16 GiB).
+  const ownerA = 'a'.repeat(32), ownerB = 'b'.repeat(32), ownerC = 'c'.repeat(32);
+  mkdirSync(join(homes, ownerA, 'home-1'), { recursive: true });
+  mkdirSync(join(homes, ownerB, 'home-1'), { recursive: true });
+  mkdirSync(join(homes, ownerC, 'home-1'), { recursive: true });
+  const resA = await assistants.acquire(ownerA, { turn: 't-a', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(resA.state, 'ready');
+  assert.equal(docker.containers.get(assistants.name(ownerA)).HostConfig.Memory, 6144 * 1024 * 1024);
+
+  const resB = await assistants.acquire(ownerB, { turn: 't-b', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(resB.state, 'ready');
+  const queuedC = await assistants.acquire(ownerC, { turn: 't-c', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.deepEqual(queuedC, { state: 'queued', reason: 'capacity', position: 1 });
+  await assistants.release(ownerB, { turn: 't-b' });
+  await assistants.remove(ownerB);
+
+  // 4. Archive extraction passes 180s timeout to docker.runner (matching control-plane timeout).
+  await assistants.execute(ownerA, {
+    turn: 't-a',
+    operation_id: 'e'.repeat(48),
+    request: { type: 'assistant_archive_extract', stage_id: 'c'.repeat(48), destination: '/workspace/repo', overwrite: true },
+  });
+  const extractCall = docker.runs.findLast(r => r.type === 'assistant_archive_extract');
+  assert.equal(extractCall?.wait, 180_000);
+
+  // 5. DiskGuard low-space admission refuses write/command calls while keeping read/delete available.
+  diskLow = true;
+  await assert.rejects(
+    assistants.execute(ownerA, { turn: 't-a', operation_id: 'd'.repeat(48), request: { type: 'assistant_write', path: '/workspace/x', base64: 'YQ==', offset: 0 } }),
+    err => err.message === 'disk_full' && err.status === 507,
+  );
+  await assert.rejects(
+    assistants.execute(ownerA, { turn: 't-a', operation_id: 'f'.repeat(48), request: { type: 'command', command: 'echo hi' } }),
+    err => err.message === 'disk_full' && err.status === 507,
+  );
+  const delOk = await assistants.execute(ownerA, { turn: 't-a', operation_id: '1'.repeat(48), request: { type: 'assistant_delete', path: '/workspace/x' } });
+  assert.equal(delOk.ok, true, 'delete stays allowed under disk pressure so space can be reclaimed');
+
+  // Releasing ownerA makes it idle; when ownerB acquires under disk pressure, idle ownerA is evicted first, then fails closed if disk stays low.
+  await assistants.release(ownerA, { turn: 't-a' });
+  await assert.rejects(
+    assistants.acquire(ownerB, { turn: 't-b', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' }),
+    err => err.message === 'disk_full' && err.status === 507,
+  );
+  assert.equal(assistants.leases.has(ownerA), false, 'idle container evicted under disk pressure to reclaim scratch volumes');
+});
+
+test('GitCache.archive streams with a hard byte cap and deletes the temp archive on overflow (#1279)', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'git-cache-cap-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const src = join(dir, 'repo'), cacheRoot = join(dir, 'cache');
+  mkdirSync(src, { recursive: true });
+  execFileSync('git', ['init', '-b', 'main'], { cwd: src });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: src });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: src });
+  // Incompressible random bytes so the compressed tar.gz reliably exceeds 32 KiB.
+  const { randomBytes } = await import('node:crypto');
+  writeFileSync(join(src, 'random.bin'), randomBytes(128 * 1024));
+  execFileSync('git', ['add', '.'], { cwd: src });
+  execFileSync('git', ['commit', '-m', 'big random blob'], { cwd: src });
+  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: src, encoding: 'utf8' }).trim();
+
+  const mirrorDir = join(cacheRoot, '777.git');
+  mkdirSync(cacheRoot, { recursive: true });
+  execFileSync('git', ['clone', '--bare', src, mirrorDir]);
+  const cache = new GitCache(cacheRoot);
+
+  // With a 32 KiB cap, streaming archive stops early, throws archive_too_large, and leaves no archive-*.tar.gz file behind.
+  await assert.rejects(cache.archive('777', sha, 32 * 1024), err => err?.code === 'archive_too_large');
+  const { readdirSync } = await import('node:fs');
+  assert.deepEqual(readdirSync(cacheRoot).filter(f => f.startsWith('archive-')), []);
+
+  // With a generous cap, archive succeeds and returns exact size.
+  const ok = await cache.archive('777', sha, 1024 * 1024);
+  t.after(() => rmSync(ok.file, { force: true }));
+  assert.ok(ok.size > 32 * 1024 && ok.size < 1024 * 1024);
 });

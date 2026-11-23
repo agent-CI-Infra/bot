@@ -250,12 +250,26 @@ export async function executeCheckoutRepository(options: CheckoutRepositoryOptio
       if (mirror.has(commitSha)) {
         const listing = await mirror.listing(commitSha);
         if (listing) {
-          skippedFiles = listing.tree.filter(entry => entry.type !== 'blob').length;
-          const archived = await options.gitCache.archive(String(repository.id), commitSha);
+          const blobEntries = listing.tree.filter(entry => entry.type === 'blob');
+          skippedFiles = listing.tree.length - blobEntries.length;
+          if (blobEntries.length > 200_000) {
+            return { error: 'archive_too_many_files', detail: `Repository has ${blobEntries.length} files, exceeding the 200000 file checkout limit.` };
+          }
+          const totalUncompressedBytes = blobEntries.reduce((sum, entry) => sum + (Number(entry.size) || 0), 0);
+          const maxUncompressedBytes = 4 * 1024 * 1024 * 1024;
+          if (totalUncompressedBytes > maxUncompressedBytes) {
+            return { error: 'archive_too_large', detail: `Repository tree (${totalUncompressedBytes} bytes uncompressed) exceeds the ${Math.floor(maxUncompressedBytes / (1024 * 1024 * 1024))} GiB checkout limit.` };
+          }
+          let archived: { file: string; size: number };
           try {
-            if (archived.size > MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES) {
-              return { error: 'archive_too_large', detail: `Repository archive (${archived.size} bytes) exceeds the ${Math.floor(MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES / (1024 * 1024))} MiB limit.` };
+            archived = await options.gitCache.archive(String(repository.id), commitSha, MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES);
+          } catch (error: any) {
+            if (error?.code === 'archive_too_large') {
+              return { error: 'archive_too_large', detail: `Repository archive exceeds the ${Math.floor(MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES / (1024 * 1024))} MiB compressed limit.` };
             }
+            throw error;
+          }
+          try {
             source = 'git_cache';
             extractResult = await computer.extractArchive(archived, destination, { overwrite });
           } finally {

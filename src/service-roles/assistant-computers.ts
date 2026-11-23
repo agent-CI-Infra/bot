@@ -426,6 +426,7 @@ export class AssistantComputer {
       await this.options.check();
       const result = await this.service.manager!.call('PUT', '/v1/assistant-computers/' + home.id,
         { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode,...(runtime?{harness:true}:{}) }, 120_000).catch(error => {
+        if (error instanceof HttpError && error.code === 'disk_full') throw new Refusal({ error: 'assistant_computer_disk_full', detail: '宿主机数据盘剩余空间低于安全预留，已拒绝创建助手电脑以保护控制面与持久化数据。' });
         // No fallback to a project computer or the host: the turn learns that the computer is unavailable.
         if (error instanceof HttpError && ['manager_unavailable', 'docker_operation_failed', 'assistant_computer_create_failed', 'runner_not_ready', 'assistant_homes_unavailable', 'assistant_home_missing', 'not_found'].includes(error.code)) fail(503, 'assistant_computer_unavailable');
         // Removed while it was being created: the turn is not in `active` until this call returns, so the first reconcile
@@ -463,6 +464,9 @@ export class AssistantComputer {
     try {
       result = await this.service.manager!.call('POST', `/v1/assistant-computers/${owner}/execute`, { turn: this.options.turn, operation_id: operation, request }, timeoutMs + 60_000);
     } catch (error) {
+      if (error instanceof HttpError && error.code === 'disk_full') {
+        throw new Refusal({ error: 'assistant_computer_disk_full', detail: '宿主机数据盘剩余空间低于安全预留，已拒绝写入或执行以保护宿主机与控制面。' });
+      }
       // The computer went away under the turn (idle sweep after a manager restart, a removal): it is taken again once.
       if (retry && error instanceof HttpError && ['assistant_computer_released', 'assistant_computer_not_acquired'].includes(error.code)) {
         await this.options.check(); this.drop(); return this.run(request, timeoutMs, false);
@@ -473,7 +477,8 @@ export class AssistantComputer {
     if (!result?.ok) {
       // A failed file operation or runner call is an observation for the model, never the end of the turn.
       const detail = String(result?.detail ?? '');
-      throw new Refusal({ error: /destination_exists/.test(detail) ? 'destination_exists'
+      throw new Refusal({ error: result?.error === 'disk_full' ? 'assistant_computer_disk_full'
+        : /destination_exists/.test(detail) ? 'destination_exists'
         : /unsafe_archive_symlink/.test(detail) ? 'unsafe_archive_symlink'
         : /unsafe_archive_path/.test(detail) ? 'unsafe_archive_path'
         : /unsafe_archive_entry_type/.test(detail) ? 'unsafe_archive_entry_type'

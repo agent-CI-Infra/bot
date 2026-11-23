@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname, sep } from 'node:path';
+import { fullBytes, volume as readVolume } from './disk.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -52,6 +53,27 @@ function configuredLimitBytes(root, workspaceRoot, env = process.env) {
   const raw = root === workspaceRoot ? env.BOT_WORKSPACE_LIMIT_MB : env.BOT_TMP_LIMIT_MB;
   const mb = Number(raw);
   return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : null;
+}
+
+async function directoryBytes(rootDir, excludePath = null) {
+  let total = 0;
+  const realRoot = await realpath(rootDir).catch(() => rootDir);
+  const realExclude = excludePath ? await realpath(excludePath).catch(() => resolve(excludePath)) : null;
+  const stack = [realRoot];
+  while (stack.length) {
+    const current = stack.pop();
+    const entries = await readdir(current, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (isReservedSegment(entry.name)) continue;
+      const fullPath = resolve(current, entry.name);
+      if (realExclude && fullPath === realExclude) continue;
+      const info = await lstat(fullPath).catch(() => null);
+      if (!info) continue;
+      if (info.isDirectory()) stack.push(fullPath);
+      else if (info.isFile()) total += info.size;
+    }
+  }
+  return total;
 }
 
 async function inspectTarArchive(archivePath) {
@@ -126,7 +148,19 @@ export async function assistantFile(input, options = {}) {
   if (input.type === 'assistant_write') {
     if (typeof input.base64 !== 'string' || input.base64.length > 56000 || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_content');
     const data = Buffer.from(input.base64, 'base64');
-    const handle = await open((await target(input.path, true, { workspaceRoot, allowedRoots: allRoots })).path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | (input.offset === 0 ? constants.O_TRUNC : 0), 0o644);
+    const located = await target(input.path, true, { workspaceRoot, allowedRoots: allRoots });
+    const volumeState = (options.volume || readVolume)(located.root);
+    if (volumeState?.full) throw new Error('ENOSPC: volume free space is below the safety reserve');
+    if (allowedCheckoutRoots.includes(located.root)) {
+      const limitBytes = configuredLimitBytes(located.root, workspaceRoot, env);
+      if (limitBytes !== null) {
+        const existingBytes = await directoryBytes(located.root, input.offset === 0 ? located.path : null);
+        if (existingBytes + input.offset + data.length > limitBytes) {
+          throw new Error(`ENOSPC: write exceeds configured ${located.root} soft limit (${limitBytes} bytes)`);
+        }
+      }
+    }
+    const handle = await open(located.path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | (input.offset === 0 ? constants.O_TRUNC : 0), 0o644);
     try {
       const info = await handle.stat();
       if (!info.isFile()) throw new Error('regular_file_required');
@@ -146,6 +180,8 @@ export async function assistantFile(input, options = {}) {
     if (typeof input.base64 !== 'string' || input.base64.length > 65536 || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_content');
     const data = Buffer.from(input.base64, 'base64');
     if (input.offset + data.length > MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES) throw new Error('archive_too_large');
+    const tmpVolume = (options.volume || readVolume)(tmpRoot);
+    if (tmpVolume?.full) throw new Error('ENOSPC: /tmp volume free space is below the safety reserve');
     const stagePath = archiveStagePath(input.stage_id, tmpRoot);
     const handle = await open(stagePath, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | (input.offset === 0 ? constants.O_TRUNC : 0), 0o600);
     try {
@@ -168,9 +204,16 @@ export async function assistantFile(input, options = {}) {
       const existing = await lstat(dest).catch(() => null);
       if (existing && !overwrite) throw new Error('destination_exists');
       const { files, bytes } = await inspectTarArchive(stagePath);
+      const volumeState = (options.volume || readVolume)(root);
+      if (volumeState && (volumeState.full || bytes > Math.max(0, volumeState.free_bytes - fullBytes(volumeState.total_bytes)))) {
+        throw new Error(`ENOSPC: archive size (${bytes} bytes) exceeds available disk space below safety reserve`);
+      }
       const limitBytes = configuredLimitBytes(root, workspaceRoot, env);
-      if (limitBytes !== null && bytes > limitBytes) {
-        throw new Error(`ENOSPC: archive size (${bytes} bytes) exceeds configured ${root} limit (${limitBytes} bytes)`);
+      if (limitBytes !== null) {
+        const existingBytes = await directoryBytes(root, overwrite ? dest : null);
+        if (existingBytes + bytes > limitBytes) {
+          throw new Error(`ENOSPC: archive size (${bytes} bytes, plus ${existingBytes} bytes already in ${root}) exceeds configured ${root} soft limit (${limitBytes} bytes)`);
+        }
       }
       stageDir = resolve(dirname(dest), `.bot-unpack-${input.stage_id}`);
       await rm(stageDir, { recursive: true, force: true }).catch(() => {});

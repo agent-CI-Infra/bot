@@ -29,12 +29,13 @@ export const describeVolume = state => state ? `${Math.floor(state.free_bytes / 
 
 // The runner's journaled calls (runner/runner.mjs). A call that would write is refused while the volume is full, before
 // it runs or is journaled, and one that failed for want of space, or while the volume is full, answers disk_full instead
-// of runner_operation_failed. Calls that only read, or keep a small cache of what they read, are left as they are;
-// answers to a running agent are small and never refused, so an agent about to finish still can. An assistant
-// computer's volumes are its own business (manager/assistant-computers.mjs).
+// of runner_operation_failed. Calls that only read, delete, reap, or keep a small cache are left as they are so cleanup
+// and agents about to finish still succeed. Assistant computers share the host Docker data disk via ephemeral volumes
+// (#1279), so their write/command calls are guarded by the same free-space floor.
 const reads = new Set(['read', 'workspace_read', 'workspace_source', 'workspace_integration_check', 'workspace_blob', 'workspace_export',
-  'git_have', 'git_export', 'workspace_agent_poll', 'workspace_agent_live', 'workspace_agent_runtime', 'workspace_harness_poll']);
-const guarded = type => !assistant && !reads.has(type);
+  'git_have', 'git_export', 'workspace_agent_poll', 'workspace_agent_live', 'workspace_agent_runtime', 'workspace_harness_poll',
+  'assistant_read', 'assistant_delete', 'reap', 'journal_clear', 'health', 'tail']);
+const guarded = type => !reads.has(type);
 const answer = (input, reason, state) => ({ ok: false, error: 'disk_full', detail: `${input.type}${input.path ? ' ' + input.path : ''}: ${String(reason).slice(0, 2000)}; the work volume has ${describeVolume(state)}` });
 // A Pi session starts with workspace_agent_start or continue, or with the last configuration piece that carries start
 // (#1277): those are refused, so no session starts on a full volume; the other configuration pieces are not.

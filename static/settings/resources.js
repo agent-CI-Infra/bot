@@ -6,11 +6,11 @@ const commonSizes = { cpus: [0.5, 1, 2, 4, 6, 8, 12, 16], memory_mb: [512, 1024,
 commonSizes.workspace_mb = commonSizes.tmp_mb;
 const megabytes = value => value >= 1024 ? `${Number((value / 1024).toFixed(1))} GB` : `${value} MB`;
 const resourceFields = [['cpus', 'CPU', value => `${value} 核`], ['memory_mb', '内存', megabytes], ['pids', '进程数上限', value => `${value} 个`], ['tmp_mb', '/tmp 大小', megabytes]];
-const assistantResourceFields = [...resourceFields, ['workspace_mb', '工作目录大小', megabytes]];
+const assistantResourceFields = [['cpus', 'CPU', value => `${value} 核`], ['memory_mb', '内存', megabytes], ['pids', '进程数上限', value => `${value} 个`], ['tmp_mb', '/tmp 大小（软限额）', megabytes], ['workspace_mb', '工作目录大小（软限额）', megabytes]];
 // The selects of `fields` set to `values`; `marked` is the value labelled `mark` (the built-in default). changes() lists
 // the fields whose choice differs from `values`.
-function resourceSelects(fields, { values, bounds, host, marked, mark }) {
-  const grid = element('div', '', 'field-grid'), controls = {}, hostLimit = { cpus: host?.cpus, memory_mb: host?.memory_mb };
+function resourceSelects(fields, { values, bounds, host, marked, mark, tmpBoundByHostMemory = false }) {
+  const grid = element('div', '', 'field-grid'), controls = {}, hostLimit = { cpus: host?.cpus, memory_mb: host?.memory_mb, ...(tmpBoundByHostMemory ? { tmp_mb: host?.memory_mb } : {}) };
   for (const [key, caption, label] of fields) {
     const select = controls[key] = document.createElement('select'); select.name = key;
     const sizes = [...new Set([...commonSizes[key].filter(size => size >= bounds[key][0] && size <= bounds[key][1] && !(hostLimit[key] && size > hostLimit[key])), values[key]])].sort((a, b) => a - b);
@@ -24,8 +24,8 @@ let globalBuildTimer = null;
 function resourceDefaultsBody(view, redraw) {
   clearTimeout(globalBuildTimer);
   if (!view.computer) return [note('暂时读不到 manager，无法显示虚拟电脑默认环境，稍后再试。')];
-  const { defaults, builtin, bounds, host, allocated, environment = {}, build, global_image: globalImage, toolchain } = view.computer;
-  const { grid, changes: changed } = resourceSelects(resourceFields, { values: defaults, bounds, host, marked: builtin, mark: '（内置默认）' });
+  const { defaults, configured_defaults: configuredDefaults, host_clamped: hostClamped, builtin, bounds, host, allocated, environment = {}, build, global_image: globalImage, toolchain } = view.computer;
+  const { grid, changes: changed } = resourceSelects(resourceFields, { values: defaults, bounds, host, marked: builtin, mark: '（内置默认）', tmpBoundByHostMemory: true });
   const egressEnabled = environment.egress !== false;
   const egressWrap = checkbox('egress', egressEnabled, '默认允许访问外网（项目与助手电脑默认继承）');
   const egressInput = egressWrap.querySelector('input');
@@ -41,7 +41,8 @@ function resourceDefaultsBody(view, redraw) {
       ['运行中的项目电脑', `${allocated.computers} 台，共分配 ${allocated.cpus} CPU · ${megabytes(allocated.memory_mb)} 内存`],
       ['当前全局预编译镜像', globalImage?.tag ? `${globalImage.tag}（${timestamp(globalImage.finished_at) || '已就绪'}）` : '基础镜像（无全局增量）'],
     ]),
-    note('管理助手电脑、群助手电脑与所有项目电脑共用此全局默认环境（默认资源、外网开关、预装软件包、非特权初始化脚本与环境变量）；各项目可在自己的「机器配置」页叠加项目专属包与脚本。' + (toolchain ? ` 基础镜像已包含：${toolchain}。` : '')),
+    note('管理助手电脑、群助手电脑与所有项目电脑共用此全局默认环境（默认 CPU/内存/进程数、外网开关、预装软件包、非特权初始化脚本与环境变量）；各项目可在自己的「机器配置」页叠加项目专属包与脚本。项目电脑的 /workspace 为持久化磁盘卷，/tmp 为内存型 tmpfs（默认 4 GB，计入并受限于容器内存上限，防止 OOM）；助手电脑的 /workspace 与 /tmp 则是独立的临时磁盘卷（默认 20 GB 软限额）。' + (toolchain ? ` 基础镜像已包含：${toolchain}。` : '')),
+    ...(hostClamped ? [note(`当前主机总内存为 ${megabytes(host.memory_mb)}，低于已配置/内置默认内存（${megabytes(configuredDefaults?.memory_mb ?? builtin.memory_mb)}），实际生效上限已自动收紧至 ${megabytes(defaults.memory_mb)} 以保护宿主机与控制面。`)] : []),
   ];
 
   if (build && build.state && build.state !== 'none') {

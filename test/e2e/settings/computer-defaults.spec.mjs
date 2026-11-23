@@ -43,7 +43,7 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     await cpu.selectOption('4'); await defaults.locator('select[name=memory_mb]').selectOption('8192');
     await defaults.getByRole('button', { name: '保存', exact: true }).click();
     await expect(defaults).toContainText('已保存：新建的虚拟电脑立即使用，已有的在空闲时重建');
-    expect(projects.resourceDefaults()).toEqual({ cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 20480 });
+    expect(projects.resourceDefaults()).toEqual({ cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 4096 });
     // Saving reconciles at once; no task runs on 101, so it is rebuilt with the new defaults.
     await expect.poll(() => [host().NanoCpus, host().Memory]).toEqual([4e9, 8192 * mib]);
     expect(projects.describe('101').computer.resources_pending).toBe(false);

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { ManagerError } from './docker.mjs';
-import { logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
+import { clampMemoryToHost, logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
 
 /**
  * Assistant computers (#457): one short-lived container per conversation owner (a group, or a person's private chats and
@@ -60,21 +60,24 @@ function validateCall(call, harness = false) {
   if (['assistant_archive_stage', 'assistant_archive_extract'].includes(call.type) && !idPattern.test(call.stage_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'assistant_archive_extract' && (typeof call.destination !== 'string' || !call.destination || call.destination.length > 4096 || call.destination.includes('\0') || (call.overwrite !== undefined && typeof call.overwrite !== 'boolean'))) throw new ManagerError('invalid_runner_request', 400);
 }
-export function validateAssistantSettings(input, hostCpus = null) {
+export function validateAssistantSettings(input, host = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.keys(input).some(k => !Object.hasOwn(assistantDefaults, k))) throw new ManagerError('invalid_assistant_settings', 400);
   for (const [key, [min, max]] of Object.entries(timerBounds)) if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || input[key] < min || input[key] > max)) throw new ManagerError('invalid_assistant_settings', 400);
   for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key], sizeBounds)) throw new ManagerError('invalid_assistant_settings', 400);
   if (input.egress !== undefined && typeof input.egress !== 'boolean') throw new ManagerError('invalid_assistant_settings', 400);
-  // Docker refuses to create a container that is given more CPUs than the host has.
-  if (hostCpus && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
+  // Docker refuses to create a container that is given more CPUs or memory than the host has.
+  const hostCpus = typeof host === 'number' ? host : host?.cpus ?? null;
+  const hostMemoryMb = typeof host === 'object' && host ? host.memory_mb ?? null : null;
+  if (hostCpus && input.cpus !== undefined && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
+  if (hostMemoryMb && input.memory_mb !== undefined && input.memory_mb > hostMemoryMb) throw new ManagerError('memory_exceeds_host', 400);
   return input;
 }
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount, globalEnvironment = null }) {
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount, globalEnvironment = null, disk = null }) {
     this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.resultMount=resultMount;
-    this.globalEnvironment = globalEnvironment;
+    this.globalEnvironment = globalEnvironment; this.disk = disk;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
@@ -131,7 +134,12 @@ export class AssistantComputers {
   async host() { const info = await this.docker.request('GET', '/info').catch(() => null); return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null; }
   async settingsView() {
     // homes: whether this manager has the HOME volume, without which no computer can be created (#1254).
-    return { settings: this.settings(), defaults: assistantDefaults, bounds, host: await this.host(), homes: await this.volume().then(() => true, () => false),
+    const host = await this.host();
+    const configured = this.settings();
+    const effectiveMemoryMb = clampMemoryToHost(configured.memory_mb, host?.memory_mb);
+    const effective = { ...configured, memory_mb: effectiveMemoryMb };
+    const hostClamped = effectiveMemoryMb !== configured.memory_mb ? { memory_mb: effectiveMemoryMb } : null;
+    return { settings: effective, configured_settings: configured, host_clamped: hostClamped, defaults: assistantDefaults, bounds, host, homes: await this.volume().then(() => true, () => false),
       usage: { computers: this.leases.size, busy: [...this.leases.values()].filter(l => l.state === 'busy').length, waiting: this.waiting.length } };
   }
   /**
@@ -139,7 +147,8 @@ export class AssistantComputers {
    * created from now on; an idle container with other resources is replaced when its owner's next turn takes it.
    */
   async setSettings(input) {
-    validateAssistantSettings(input, input?.cpus !== undefined ? (await this.host())?.cpus : null);
+    const host = input && (input.cpus !== undefined || input.memory_mb !== undefined) ? await this.host() : null;
+    validateAssistantSettings(input, host);
     // Only the values someone set, of the current keys: the others keep following their defaults, and a key an earlier
     // version saved is forgotten.
     const row = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(), saved = row ? JSON.parse(row.value) : {};
@@ -269,6 +278,8 @@ export class AssistantComputers {
     if (!turnPattern.test(turn || '') || !/^[a-f0-9]{16,128}$/.test(fence || '') || !Number.isSafeInteger(generation) || generation < 1 || !['rw', 'ro'].includes(mode)) throw new ManagerError('invalid_assistant_request', 400);
     return this.lock(owner, async () => {
       const now = Date.now(), settings = this.settings(), globalEnv = this.effectiveGlobal();
+      const host = await this.host();
+      const effectiveResources = { ...resourcesOf(settings), memory_mb: clampMemoryToHost(settings.memory_mb, host?.memory_mb) };
       let targetImage = globalEnv.image;
       // Validate BOTH the live approved base image digest AND the stored image ID (not only the tag):
       // if the approved base image changed before the next 5s reconcile timer or the stored ID was pruned,
@@ -307,7 +318,7 @@ export class AssistantComputers {
         const held = lease.state === 'busy' && lease.turn === turn;
         const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && (!input.harness || lease.harness)
           && (held || (lease.image === targetImage && (lease.envSignature ?? '[]') === envSignature
-            && lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
+            && lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(effectiveResources) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
           const reused = lease.state === 'idle';
@@ -317,7 +328,17 @@ export class AssistantComputers {
         // A changed fence, HOME generation or mode, other resources or image, or a container past its lifetime: replaced,
         // keeping the owner's slot.
         this.discard(lease, 'replaced');
-      } else {
+      }
+      // Disk free-space admission (#1279): ephemeral /workspace and /tmp volumes share the host Docker data disk with
+      // manager.sqlite and the control plane. Reclaim idle scratch volumes first, then fail closed if still below reserve.
+      if (this.disk?.check()?.low) {
+        const idles = [...this.leases.values()].filter(l => l.state === 'idle' && l.owner !== owner);
+        if (idles.length) {
+          await Promise.all(idles.map(idle => this.discard(idle, 'disk_pressure')));
+        }
+        if (this.disk.check(true)?.low) throw new ManagerError('disk_full', 507);
+      }
+      if (!lease) {
         // A new container needs a free slot and its turn in the queue; an idle container used longest ago gives way.
         const position = this.waiting.length || this.leases.size >= settings.max_containers ? this.ticket(owner, turn) : 0;
         if (position > 1) return { state: 'queued', reason: 'capacity', position };
@@ -326,9 +347,20 @@ export class AssistantComputers {
           if (!idle) return { state: 'queued', reason: 'capacity', position: Math.max(position, 1) };
           this.discard(idle, 'capacity');
         }
-        this.waiting = this.waiting.filter(t => t.owner !== owner);
       }
-      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: resourcesOf(settings), egress: settings.egress, image: targetImage, env, envSignature, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
+      // Aggregate memory admission on known hosts (#1279): cgroup Memory is a burst ceiling rather than reserved RAM,
+      // so allow up to 2x host RAM across concurrently busy assistant computers (preventing max_containers=20 from
+      // OOM-killing the manager/control plane while keeping normal multi-user concurrency on 16-32 GiB hosts).
+      if (host?.memory_mb) {
+        const busyLeases = [...this.leases.values()].filter(l => l.owner !== owner && (l.state === 'busy' || l.state === 'creating'));
+        const busyMemoryMb = busyLeases.reduce((sum, l) => sum + (l.resources?.memory_mb || 0), 0);
+        if (busyLeases.length > 0 && busyMemoryMb + effectiveResources.memory_mb > host.memory_mb * 2) {
+          const position = this.ticket(owner, turn);
+          return { state: 'queued', reason: 'capacity', position };
+        }
+      }
+      this.waiting = this.waiting.filter(t => t.owner !== owner);
+      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: effectiveResources, egress: settings.egress, image: targetImage, env, envSignature, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
       this.leases.set(owner, lease);
       try {
         await this.create(lease);
@@ -406,10 +438,15 @@ export class AssistantComputers {
     if (!input || Object.keys(input).some(k => !['turn', 'operation_id', 'request'].includes(k)) || !turnPattern.test(input.turn || '') || !idPattern.test(input.operation_id || '')) throw new ManagerError('invalid_operation', 400);
     const lease = this.held(owner, input.turn);
     validateCall(input.request, lease.harness);
+    const writing = ['command', 'assistant_write', 'assistant_archive_stage', 'assistant_archive_extract'].includes(input.request.type);
+    if (writing && this.disk?.check()?.low) throw new ManagerError('disk_full', 507);
     const command = input.request.type === 'command';
+    const timeoutMs = command
+      ? (input.request.timeout_ms ?? 10_000) + 30_000
+      : input.request.type === 'assistant_archive_extract' ? 180_000 : 90_000;
     lease.inflight++; lease.renewed = Date.now();
     try {
-      return await this.docker.runner(this.name(owner), { ...input.request, operation_id: input.operation_id }, command ? (input.request.timeout_ms ?? 10_000) + 30_000 : 90_000);
+      return await this.docker.runner(this.name(owner), { ...input.request, operation_id: input.operation_id }, timeoutMs);
     } catch (error) {
       if (lease.removed) throw new ManagerError('assistant_computer_released', 410);
       throw error;
