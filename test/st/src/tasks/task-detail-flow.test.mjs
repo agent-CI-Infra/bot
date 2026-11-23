@@ -11,6 +11,7 @@ import { RetentionCleanup } from '../../../../dist/storage/retention.js';
 import { deleteProjectRecords } from '../../../../dist/projects/removal.js';
 import { appEvents } from '../../../../dist/github/client.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
+import { resumeParentTasks } from '../../../../dist/tasks/children.js';
 
 test('parallel role runs stamp exact run_id and role on task_logs without cross-contamination', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin);
@@ -300,4 +301,81 @@ test('live task check sync reports full/partial failures without cooldown, omits
   h.store.transaction(() => deleteProjectRecords(h.store, '101'));
   assert.equal(h.store.get("SELECT COUNT(*) AS n FROM commit_checks WHERE repository_id='101'").n, 0);
   assert.equal(h.store.get("SELECT COUNT(*) AS n FROM commit_checks WHERE repository_id='202'").n, 1);
+});
+
+test('#1285: parent detail aggregates blocked children and derives recovery from each child failure cause', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  const at = '2026-11-16T08:00:00Z';
+  const insert = (id, status, error, summary) => h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,phase,error_code,created_at,updated_at) VALUES(?, '101','task.request',?,?, 'model',?,?,?)",
+    id, status, summary, error, at, at);
+  const parent = (parentId, children) => {
+    insert(parentId, 'waiting_coordination', 'task_children_pending', 'Parent blocked by children');
+    for (const [id, status, error] of children) {
+      insert(id, status, error, 'Child ' + id);
+      h.store.run('INSERT INTO task_children VALUES(?,?,?)', parentId, id, at);
+    }
+  };
+  parent('p-blocked', [['c-env', 'waiting_environment', 'fixture_tool_scope_denied'], ['c-config', 'waiting_configuration', 'model_not_configured']]);
+
+  const detail = await admin('/api/tasks/p-blocked');
+  assert.equal(detail.status, 200);
+  const task = detail.value.task, block = task.structured.children.blocked;
+  assert.equal(task.status, 'waiting_coordination');
+  assert.equal(task.error_code, 'task_children_pending');
+  assert.equal(task.structured.progress.waiting_reason, 'task_children_pending');
+  // Environment and model configuration disagree: no guessed settings page, and the progress sentence stays generic.
+  assert.equal(block.cause, null);
+  assert.equal(block.mixed, true);
+  assert.equal(block.destination, null);
+  assert.equal(block.label, '子任务分别等待不同原因');
+  assert.equal(task.error_cause.cause, 'task_changed');
+  assert.equal(task.error_cause.label, '子任务分别等待不同原因');
+  assert.equal(task.error_cause.action, '');
+  assert.equal('blocked_children' in task.error_cause, false);
+  assert.deepEqual(task.structured.progress.blocked_children, block);
+  const byId = Object.fromEntries(block.children.map(child => [child.id, child]));
+  assert.deepEqual([byId['c-env'].status, byId['c-env'].error_code, byId['c-config'].status, byId['c-config'].error_code],
+    ['waiting_environment', 'fixture_tool_scope_denied', 'waiting_configuration', 'model_not_configured']);
+  assert.match(byId['c-env'].recovery, /环境/);
+  assert.match(byId['c-config'].recovery, /模型配置/);
+
+  // Agreeing configuration causes point at their own settings page; model and repository keep their real causes.
+  parent('p-roles', [['c-role', 'waiting_configuration', 'role_configuration_changed'], ['c-harness', 'waiting_configuration', 'unknown_role_harness']]);
+  parent('p-model', [['c-model', 'waiting_configuration', 'model_not_configured']]);
+  parent('p-repo', [['c-repo', 'waiting_configuration', 'repository_has_no_commit']]);
+  parent('p-bot', [['c-bot', 'waiting_environment', 'repository_tree_invalid']]);
+  const roles = (await admin('/api/tasks/p-roles')).value.task;
+  assert.deepEqual([roles.structured.children.blocked.cause, roles.structured.children.blocked.destination, roles.error_cause.label, roles.error_cause.action],
+    ['role_configuration', { section: 'roles', caption: '打开角色配置' }, '子任务等待配置', '']);
+  const model = (await admin('/api/tasks/p-model')).value.task;
+  assert.deepEqual([model.structured.children.blocked.cause, model.structured.children.blocked.destination, model.error_cause.label],
+    ['model', { section: 'model', caption: '打开项目模型配置' }, '子任务等待模型配置']);
+  const repositoryWait = (await admin('/api/tasks/p-repo')).value.task;
+  assert.deepEqual([repositoryWait.structured.children.blocked.cause, repositoryWait.structured.children.blocked.destination, repositoryWait.error_cause.label],
+    ['repository', null, '子任务等待仓库内容或规则修正']);
+  // A bot-attributed wait names the bot cause in the child recovery instead of the environment wording.
+  const botWait = (await admin('/api/tasks/p-bot')).value.task;
+  assert.deepEqual([botWait.structured.children.blocked.cause, botWait.structured.children.blocked.destination, botWait.error_cause.label],
+    ['bot', null, '子任务等待处理']);
+  assert.match(botWait.structured.children.blocked.children[0].recovery, /bot 自身/);
+  assert.doesNotMatch(botWait.structured.children.blocked.children[0].recovery, /环境或外部条件恢复/);
+
+  // Another polling round keeps the same aggregate and sends no child-return notification.
+  const returns = () => h.store.get("SELECT COUNT(*) AS n FROM task_child_events WHERE parent_id='p-blocked'").n;
+  const before = returns();
+  h.store.run("UPDATE tasks SET phase='waiting',updated_at=? WHERE id IN ('c-env','c-config')", '2026-11-16T08:05:00Z');
+  const again = (await admin('/api/tasks/p-blocked')).value.task;
+  assert.deepEqual(again.structured.children.blocked, block);
+  assert.equal(returns(), before);
+  resumeParentTasks(h.store, () => false);
+  assert.equal(h.store.get("SELECT status FROM tasks WHERE id='p-blocked'").status, 'waiting_coordination');
+
+  // A sibling that can still return restores the ordinary wait-first contract and its generic explanation.
+  h.store.run("UPDATE tasks SET status='running',error_code=NULL WHERE id='c-env'");
+  const mixed = (await admin('/api/tasks/p-blocked')).value.task;
+  assert.equal(mixed.structured.children.blocked, null);
+  assert.equal(mixed.structured.progress.blocked_children, null);
+  assert.equal(mixed.error_cause.cause, 'task_changed');
 });

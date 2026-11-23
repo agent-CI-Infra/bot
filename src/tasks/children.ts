@@ -1,7 +1,70 @@
 import type {Store,Row} from '../storage/database.js';
+import {explainFailure,type FailureCause} from '../agent/failures.js';
 import {traceEvent} from './trace.js';
 
 const returned=['completed','succeeded','pr_opened','failed','cancelled','superseded','needs_help','needs_replan','paused'];
+// A child in one of these states has stopped before returning: its own retry/configuration wait is the reason the parent
+// cannot make progress, not a result the parent may consume.
+const blockedWaits=new Set(['waiting_environment','waiting_configuration']);
+const recovery:Record<string,string>={'waiting_environment':'环境或外部条件恢复后子任务会自动继续。','waiting_configuration':'按子任务说明修正配置后子任务会自动继续。'};
+// The aggregate names the settings page each child's own cause points at; a cause without one stays neutral so the callout
+// only offers the child entries instead of guessing a page.
+const destinations:Partial<Record<FailureCause,{section:string;caption:string}>>={
+ environment:{section:'machine',caption:'检查项目电脑'},
+ role_configuration:{section:'roles',caption:'打开角色配置'},
+ model:{section:'model',caption:'打开项目模型配置'},
+};
+const labels:Partial<Record<FailureCause,string>>={
+ environment:'子任务等待项目电脑或运行环境',
+ role_configuration:'子任务等待配置',
+ model:'子任务等待模型配置',
+ repository:'子任务等待仓库内容或规则修正',
+ bot:'子任务等待处理',
+};
+const actions:Partial<Record<FailureCause,string>>={
+ environment:'检查项目电脑或运行环境，并打开子任务查看各自的阻塞原因；条件恢复后子任务会自动继续。',
+ role_configuration:'按子任务说明修正项目、角色或集成配置；条件满足后子任务会自动继续。',
+ model:'按子任务说明修正项目模型配置；条件满足后子任务会自动继续。',
+ repository:'按子任务说明修正仓库内容或规则；条件满足后子任务会自动继续。',
+};
+const neutralLabel='子任务分别等待不同原因';
+const neutralAction='请打开子任务查看各自的阻塞原因；条件恢复后子任务会自动继续。';
+const recoveryByCause:Partial<Record<FailureCause,string>>={
+ environment:'环境或外部条件恢复后子任务会自动继续。',
+ role_configuration:'按子任务说明修正项目、角色或集成配置后子任务会自动继续。',
+ model:'按子任务说明修正模型配置后子任务会自动继续。',
+ repository:'按子任务说明修正仓库内容或规则后子任务会自动继续。',
+ github_access:'按子任务说明修正 GitHub 权限或安装配置后子任务会自动继续。',
+ bot:'这是 bot 自身的问题，与环境和配置无关；自动重试后子任务会继续，反复出现请反馈给 bot 维护者。',
+};
+function waitCause(status:string,code:string|null):{cause:FailureCause|null;recovery:string}{
+ const explained=code?explainFailure(code,status):null;
+ const cause=explained?.cause as FailureCause|null ?? null;
+ return {cause,recovery:(cause&&recoveryByCause[cause])||recovery[status]||'等待外部条件恢复后子任务会自动继续。'};
+}
+/** The parent's own explanation when every unreturned child is waiting on an outside condition. */
+export function childBlockSummary(children:any[]){
+ const pending=children.filter(t=>!returned.includes(t.status));
+ if(!pending.length||pending.some(t=>!blockedWaits.has(t.status)))return null;
+ const statuses=[...new Set(pending.map(t=>t.status))];
+ const error_codes=[...new Set(pending.map(t=>t.reason??t.error_code).filter((code:unknown):code is string=>typeof code==='string'&&!!code))];
+ const rows=pending.map(t=>{
+  const code=typeof t.reason==='string'?t.reason:typeof t.error_code==='string'?t.error_code:null;
+  const {cause,recovery:childRecovery}=waitCause(t.status,code);
+  return {id:t.id,status:t.status,error_code:code,summary:t.summary??null,next_action:t.progress?.next_action??null,cause,recovery:childRecovery,
+   child:{id:t.id,status:t.status,error_code:code,summary:t.summary??null,next_action:t.progress?.next_action??null,recovery:childRecovery}};
+ });
+ const causes=[...new Set(rows.map(row=>row.cause))];
+ // Every child points at the same setting; otherwise the aggregate stays neutral and only lists the children.
+ const cause=causes.length===1?causes[0]:null;
+ return {
+  count:pending.length,statuses,error_codes,cause,destination:(cause&&destinations[cause])||null,
+  mixed:causes.length>1,
+  label:(cause&&labels[cause])||neutralLabel,
+  action:(cause&&actions[cause])||neutralAction,
+  children:rows.map(row=>row.child),
+ };
+}
 export function childTaskStorage(s:Store){
  s.db.exec(`CREATE TABLE IF NOT EXISTS task_children(parent_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
  child_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,created_at TEXT NOT NULL);
@@ -37,7 +100,8 @@ export function childTaskContext(s:Store,parent:string,after?:number){
  const events=s.all('SELECT * FROM task_child_events WHERE parent_id=? AND id>? ORDER BY id LIMIT 100',parent,cursor);
  const last=events.at(-1)?.id??cursor;
  const parentRow=s.get('SELECT t.id,r.contract,r.revision FROM task_children c JOIN tasks t ON t.id=c.parent_id JOIN task_records r ON r.task_id=t.id WHERE c.child_id=?',parent);
- return {parent_id:parentRow?.id??null,parent:parentRow?{id:parentRow.id,revision:parentRow.revision,contract:JSON.parse(parentRow.contract),query_tool:'read_managed_task'}:null,children,events,after_event_id:last,
+ return {parent_id:parentRow?.id??null,parent:parentRow?{id:parentRow.id,revision:parentRow.revision,contract:JSON.parse(parentRow.contract),query_tool:'read_managed_task'}:null,children,
+  blocked:childBlockSummary(children),events,after_event_id:last,
   more:!!s.get('SELECT id FROM task_child_events WHERE parent_id=? AND id>?',parent,last)};
 }
 export function waitForChildren(s:Store,task:Row,args:any){

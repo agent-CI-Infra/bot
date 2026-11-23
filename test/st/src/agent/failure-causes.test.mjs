@@ -64,6 +64,21 @@ test('causes separate outages, GitHub settings, GitHub refusals, the model, the 
   assert.equal(otherCap.cause, 'role_configuration');
 });
 
+test('#1285: an unknown waiting_environment code keeps environment semantics and its own code',()=>{
+  for(const code of ['fixture_tool_scope_denied','some_integration_wait']){
+    assert.equal(failureCause(code,'waiting_environment'),'environment',code);
+    const explained=explainFailure(code,'waiting_environment');
+    assert.deepEqual([explained.cause,explained.label,explained.automatic,explained.attempt_retry],['environment','未归类的等待原因',true,false]);
+    assert.match(explained.action,new RegExp(code));
+    assert.doesNotMatch(explained.action,/与外部服务和权限无关/);
+  }
+  // Known environment waits and unknown failed-stop attribution keep their previous behaviour.
+  const interrupted=explainFailure('execution_interrupted','waiting_environment');
+  assert.deepEqual([interrupted.cause,interrupted.label],['environment','项目电脑或运行环境']);
+  assert.equal(failureCause('a_code_from_an_older_version','failed'),'bot');
+  assert.match(explainFailure('a_code_from_an_older_version','failed').action,/与外部服务和权限无关/);
+});
+
 test('network failures say whether it was a timeout, DNS, a reset, TLS or a refused connection',async t=>{
   const failed=(code,extra={})=>Object.assign(new TypeError('fetch failed'),{cause:Object.assign(new Error('socket'),{code,...extra})});
   assert.equal(networkReason(Object.assign(new Error('aborted'),{name:'TimeoutError'}),30000),'30 秒内没有响应');

@@ -22,6 +22,66 @@ test('authorized explicit children are durable, idempotent, and distinct from or
 for(const status of ['completed','failed','cancelled','superseded','needs_help'])test(`any ${status} child wakes the parent while its sibling continues`,t=>{const f=fixture(t);for(const id of ['a','b']){f.add(id);attachChild(f.s,'parent',id);f.s.run("UPDATE tasks SET status='running' WHERE id=?",id);}assert.equal(f.park().waiting,true);f.s.run('UPDATE tasks SET status=? WHERE id=?',status,'a');f.reopen();resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'queued');assert.equal(f.s.get("SELECT status FROM tasks WHERE id='b'").status,'running');const ctx=childTaskContext(f.s,'parent');assert.equal(ctx.events.length,1);assert.equal(new TaskRecords(f.s).get('parent').children.events.length,1);assert.equal(f.park(ctx.after_event_id).waiting,true);resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'waiting_coordination');});
 test('early results, concurrent returns, active Manager and cancelled parent do not lose or replay wakes',t=>{const f=fixture(t);for(const id of ['a','b']){f.add(id);attachChild(f.s,'parent',id);}f.s.run("UPDATE tasks SET status='completed' WHERE id='a'");assert.equal(f.park().waiting,false);const first=childTaskContext(f.s,'parent').after_event_id;assert.equal(f.park(first).waiting,true);f.s.run("UPDATE tasks SET status='needs_help' WHERE id='b'");resumeParentTasks(f.s,()=>true);assert.equal(f.parent().status,'waiting_coordination');resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'queued');const last=childTaskContext(f.s,'parent').after_event_id;assert.equal(f.park(last).waiting,false);assert.match(f.park(last).instruction,/No child/);f.s.run("UPDATE tasks SET status='cancelled' WHERE id='parent'");resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'cancelled');});
 test('internal retries do not wake; cursors cannot acknowledge another parent or unobserved future',t=>{const f=fixture(t);f.add('a');attachChild(f.s,'parent','a');assert.equal(f.park().waiting,true);for(const status of ['running','retry_wait','queued','running'])f.s.run('UPDATE tasks SET status=? WHERE id=?',status,'a');resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'waiting_coordination');assert.equal(childTaskContext(f.s,'parent').events.length,0);assert.equal(f.park(10000).error,'invalid_child_cursor');});
+test('all unreturned children waiting on the environment or configuration aggregate once without waking the parent',t=>{
+ const f=fixture(t);for(const id of ['env','config']){f.add(id);attachChild(f.s,'parent',id);}
+ f.s.run("UPDATE tasks SET status='waiting_environment',error_code='fixture_tool_scope_denied' WHERE id='env'");
+ f.s.run("UPDATE tasks SET status='waiting_configuration',error_code='model_not_configured' WHERE id='config'");
+ assert.equal(f.park().waiting,true);
+ const first=new TaskRecords(f.s).get('parent'), block=first.progress.blocked_children;
+ assert.equal(block.count,2);assert.deepEqual(block.statuses,['waiting_environment','waiting_configuration']);
+ assert.deepEqual(block.error_codes,['fixture_tool_scope_denied','model_not_configured']);
+ // The environment wait and the model configuration wait disagree, so the aggregate guesses no settings page.
+ assert.equal(block.cause,null);assert.equal(block.destination,null);assert.equal(block.mixed,true);
+ assert.equal(block.label,'子任务分别等待不同原因');
+ const byId=Object.fromEntries(block.children.map(c=>[c.id,c]));
+ assert.deepEqual([byId.env.status,byId.env.error_code,byId.config.status,byId.config.error_code],
+  ['waiting_environment','fixture_tool_scope_denied','waiting_configuration','model_not_configured']);
+ assert.match(byId.config.recovery,/配置/);assert.match(byId.env.recovery,/环境/);
+ assert.equal(first.children.blocked.count,2);
+ // Repeating the wait only records the wait trace: no child return event and no parent notification/wake.
+ const before=f.s.get("SELECT count(*) n FROM task_child_events WHERE parent_id='parent'").n;
+ assert.equal(f.park().waiting,true);assert.equal(f.park().waiting,true);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_child_events WHERE parent_id='parent'").n,before);
+ resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'waiting_coordination');
+ assert.deepEqual(new TaskRecords(f.s).get('parent').progress.blocked_children,block);
+ // Any sibling that can still return keeps the ordinary wait-first contract and no aggregate block.
+ f.s.run("UPDATE tasks SET status='running',error_code=NULL WHERE id='env'");
+ const mixed=new TaskRecords(f.s).get('parent');assert.equal(mixed.progress.blocked_children,null);assert.equal(mixed.children.blocked,null);
+ assert.equal(f.park().waiting,true);assert.equal(f.parent().status,'waiting_coordination');
+});
+
+test('the aggregate cause and destination come from each child failure cause, not from its waiting status',t=>{
+ const block=(children)=>{
+  const f=fixture(t);for(const [id,status,error] of children){f.add(id);attachChild(f.s,'parent',id);f.s.run('UPDATE tasks SET status=?,error_code=? WHERE id=?',status,error,id);}
+  assert.equal(f.park().waiting,true);
+  return new TaskRecords(f.s).get('parent').progress.blocked_children;
+ };
+ // Model, role and repository causes are classified by explainFailure, so only the matching settings page is offered.
+ const model=block([['model','waiting_configuration','model_not_configured']]);
+ assert.deepEqual([model.cause,model.destination,model.mixed,model.label],
+  ['model',{section:'model',caption:'打开项目模型配置'},false,'子任务等待模型配置']);
+ const roles=block([['role','waiting_configuration','role_configuration_changed'],['harness','waiting_configuration','unknown_role_harness']]);
+ assert.deepEqual([roles.cause,roles.destination,roles.mixed],['role_configuration',{section:'roles',caption:'打开角色配置'},false]);
+ for(const code of ['repository_has_no_commit','unsafe_skill_file']){
+  const repository=block([['repo','waiting_configuration',code]]);
+  assert.deepEqual([repository.cause,repository.destination,repository.mixed,repository.label],
+   ['repository',null,false,'子任务等待仓库内容或规则修正'],code);
+  assert.match(repository.children[0].recovery,/仓库内容或规则/);
+ }
+ // Bot-attributed waits stay bot-attributed even in a configuration/environment wait and offer no settings page.
+ for(const [status,code] of [['waiting_configuration','pi_environment_required'],['waiting_environment','repository_tree_invalid']]){
+  const bot=block([['bot',status,code]]);
+  assert.deepEqual([bot.cause,bot.destination,bot.mixed,bot.label],['bot',null,false,'子任务等待处理'],code);
+  // The child recovery names the bot cause instead of the waiting state's environment/configuration wording.
+  assert.match(bot.children[0].recovery,/bot 自身/);
+  assert.doesNotMatch(bot.children[0].recovery,/环境或外部条件恢复/);
+  assert.doesNotMatch(bot.children[0].recovery,/修正配置/);
+ }
+ // Disagreement (including a model child next to a repository child) falls back to the neutral child entry.
+ const mixed=block([['model','waiting_configuration','model_not_configured'],['repo','waiting_configuration','repository_has_no_commit']]);
+ assert.deepEqual([mixed.cause,mixed.destination,mixed.mixed,mixed.label,mixed.action],
+  [null,null,true,'子任务分别等待不同原因','请打开子任务查看各自的阻塞原因；条件恢复后子任务会自动继续。']);
+});
 
 test('dependency decisions remain with parent: failure does not start successors, ready work keeps FIFO',t=>{
  const f=fixture(t),cmd=new TaskCommands(f.s),caller=roleTaskCaller(f.s,'r','manager',{source_task_id:'parent',guard(){}});
