@@ -64,7 +64,8 @@ async function fixture(t) {
   const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
   const bind = (input = {}, chatId = chat.id) => f.admin('/api/channels/chats/' + chatId + '/service-binding', 'PUT', {
     model_id: f.assistantModel.id,
-    scope: { kind: 'repositories', repositories: ['101', '102'] }, participation: 'mentions', enabled: true, expected_revision: 0, ...input });
+    // Native, as the in-process fixture model needs (#1255; test/fixtures/native-roles.mjs).
+    scope: { kind: 'repositories', repositories: ['101', '102'] }, participation: 'mentions', harness: 'native', enabled: true, expected_revision: 0, ...input });
   /** Change what the group may do (#849, #1249): a level name, or individual items as the advanced editor sends them. */
   const setLevel = async (value, chatId = chat.id) => {
     const current = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === chatId);
@@ -318,7 +319,7 @@ test('two groups on the same role keep separate scopes; a grantor losing a repos
   const second = groupMessage('Second group discussion', 'ou_alice', 'oc_group_2'); second.event.message.mentions = []; await post(h, f.id, second);
   const chat2 = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group_2'");
   const actor = maintainer(f, 'maintainer', ['101', '102'], 'ou_maintainer');
-  await f.service.serviceBindings.configure(actor, f.chat.id, { model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 });
+  await f.service.serviceBindings.configure(actor, f.chat.id, { model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101', '102'] }, harness: 'native', enabled: true, expected_revision: 0 });
   assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['201'] } }, chat2.id)).status, 200);
   let target;
   f.modelState.respond = async (body, res) => { const seen = observations(body); return !seen.length ? call(res, 'list_projects', {}) : seen.length === 1 ? call(res, 'github_read', { repository: target, path: '/pulls' }) : say(res, 'done ' + target); };
@@ -359,6 +360,9 @@ test('legacy group employees migrate once to a repository assistant binding; the
   assert.equal(binding.service_role_id, 'group-assistant'); assert.equal(binding.scope, 'repositories'); assert.equal(binding.participation, 'questions');
   assert.equal(binding.model_id, f.assistantModel.id); assert.ok(binding.prompt.length > 0);
   assert.equal(binding.migrated_from, 'channel_employee'); assert.equal(binding.configured_by, f.principal); assert.equal(binding.owner_id, f.principal);
+  // A migrated group starts on the default backend (#1255); this one answers through the in-process fixture model.
+  assert.equal(binding.harness, 'pi');
+  h.store.run("UPDATE channel_service_bindings SET harness='native' WHERE id=?", binding.id);
   assert.deepEqual(h.store.all('SELECT project_id,grantor_id FROM scoped_grants WHERE principal_id=?', binding.principal_id).map(g => [g.project_id, g.grantor_id]), [['101', f.principal]]);
   assert.equal(h.store.get('SELECT enabled FROM channel_employee_grants WHERE id=?', legacy.id).enabled, 1);
   assertManagedExecution(h.store, h.store.get('SELECT * FROM tasks WHERE id=?', created.id));
@@ -750,8 +754,8 @@ test('a project administrator binds one group at read and another at dispatch; e
   // A project administrator of 101 only, no super administrator involved.
   const admin = maintainer(f, 'project-admin', ['101'], 'ou_project_admin');
   const scope = { kind: 'repositories', repositories: ['101'] };
-  const a = await bindings.configure(admin, f.chat.id, { model_id: f.assistantModel.id, scope, level: 'read', enabled: true, expected_revision: 0 });
-  const b = await bindings.configure(admin, chatB.id, { model_id: f.assistantModel.id, scope, level: 'dispatch', enabled: true, expected_revision: 0 });
+  const a = await bindings.configure(admin, f.chat.id, { model_id: f.assistantModel.id, scope, level: 'read', harness: 'native', enabled: true, expected_revision: 0 });
+  const b = await bindings.configure(admin, chatB.id, { model_id: f.assistantModel.id, scope, level: 'dispatch', harness: 'native', enabled: true, expected_revision: 0 });
   assert.deepEqual([a.level, b.level, a.owner, b.owner], ['read', 'dispatch', 'project-admin', 'project-admin']);
   assert.equal(b.permissions.github_contents, 'read', 'dispatch never includes Contents write');
   const grants = chat => JSON.parse(h.store.get("SELECT g.capabilities FROM scoped_grants g JOIN channel_service_bindings b ON b.principal_id=g.principal_id WHERE b.chat_id=?", chat).capabilities);
@@ -961,13 +965,13 @@ test('a project administrator configures a group directly with a project model o
   assert.deepEqual(roles(f, pa.user, 'GET', '/api/service-roles').value.service_roles, []);
   assert.equal(roles(f, pa.user, 'POST', '/api/service-roles', { project_id: '101', name: 'x' }).value.error, 'super_admin_required');
   // Single-repo group with project 101's own model and custom prompt: succeeds and bills project 101.
-  const bound = await bindings.configure(pa.context, f.chat.id, { model_id: own.id, prompt: '先给结论。', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 });
+  const bound = await bindings.configure(pa.context, f.chat.id, { model_id: own.id, prompt: '先给结论。', scope: { kind: 'repositories', repositories: ['101'] }, harness: 'native', enabled: true, expected_revision: 0 });
   assert.deepEqual([bound.state, bound.model_id, bound.model.project_id, bound.prompt], ['active', own.id, '101', '先给结论。']);
   // Project 101's own model cannot cover a 2-repo group; refusal names project 102.
   await assert.rejects(bindings.configure(pa.context, chatB.id, { model_id: own.id, prompt: '跨仓问答。', scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 }),
     error => error.code === 'channel_service_model_unavailable' && JSON.stringify(error.detail) === JSON.stringify({ projects: [repo(102)] }));
   // With a shared model covering both repos, the project admin configures a multi-repo group with a custom prompt without needing a super admin!
-  const multi = await bindings.configure(pa.context, chatB.id, { model_id: f.assistantModel.id, prompt: '先汇总双仓差异。', scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 });
+  const multi = await bindings.configure(pa.context, chatB.id, { model_id: f.assistantModel.id, prompt: '先汇总双仓差异。', scope: { kind: 'repositories', repositories: ['101', '102'] }, harness: 'native', enabled: true, expected_revision: 0 });
   assert.deepEqual([multi.state, multi.model_id, multi.prompt], ['active', f.assistantModel.id, '先汇总双仓差异。']);
   // Organization scope refuses a project-owned model.
   const tenant = h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;

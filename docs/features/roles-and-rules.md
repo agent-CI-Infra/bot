@@ -42,7 +42,7 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
 
 在「项目设置 → 角色」配置项目协作角色（默认角色池为 `Manager`、`Developer`、`Tester`、`Reviewer`、`UX reviewer` 与 `Independent QA`；原独立 `Task Coordinator` 已退役，项目事件分派、任务内多角色编排与跨任务排期/依赖等待统一由 `Manager` 承担）：
 
-- **跟随默认与自定义**：未修改过的项目自动跟随当前版本的推荐配置（默认推荐 `Pi` 后端）；一旦保存自定义修改即转为项目独立版本，随时可点击「恢复默认」回到跟随内置默认（历史版本保留可查）。升级前保存过 `coordinator` 的旧项目配置读取与重存时会自动平滑过滤，历史修订与任务详情快照保持只读可读。
+- **跟随默认与自定义**：未修改过的项目自动跟随当前版本的推荐配置（默认推荐 `Pi` 后端）；升级时，自定义配置里选了 `native` 的角色（包括旧格式配置里写明或未写后端的角色）一次性改为 `pi`，迁移数量写进控制面启动日志；角色覆写的模型要求 `text_json` 输出、Pi 无法使用的角色保持 `native`。`native` 仍可手动选择；一旦保存自定义修改即转为项目独立版本，随时可点击「恢复默认」回到跟随内置默认（历史版本保留可查）。升级前保存过 `coordinator` 的旧项目配置读取与重存时会自动平滑过滤，历史修订与任务详情快照保持只读可读。
 - **单页表单编辑**：支持按角色配置名称、启停状态、职责说明、完整可编辑提示词、Agent 后端（`pi`、`native`、`process`、`claude_code`、`codex`、`icode`、`workswarm`、`container_acp`）、角色覆写模型（Claude Code 与 Codex 还支持切换模型来源为「项目电脑内自行配置（不注入模型配置）」，在「项目设置 → 机器配置」只写维护 `/workspace/home` 下的配置文件）、技能包、预算（轮次、输出 token、命令超时、累计用量上限）与逐项权限。Manager 与 QA 为必需角色，不可停用或删除。
 - **WorkSwarm**：Dev、Test、Reviewer、UX 和自定义角色可选，使用项目电脑内的 WorkSwarm、AgentServer 与 Gateway。控制面启动自动安装或由超管在「全局设置 → Agent CLI 工具卷」按 Agent 安装/升级/删除，角色后端列表实时显示版本、安装状态和未就绪原因。模型和任务工具走平台中转，后续会话从任务记录重建。平台不给 WorkSwarm 配置飞书等内置渠道。Gateway 自带调度器在该版本仍会启动，初始任务列表为空，创建接口可用且新建任务默认启用。见 [Agent CLI 工具卷与 WorkSwarm](deployment-and-operations.md#workswarm)。
 - **iCode**：Dev、Test、Reviewer、UX 和自定义角色可选，在项目电脑中使用平台模型与用量统计。控制面启动自动安装或由超管在「全局设置 → Agent CLI 工具卷」按 Agent 安装/升级/删除，角色后端列表显示实际选用版本、就绪状态和未就绪原因。Manager、QA 及服务角色的选项中没有 iCode。见 [Agent CLI 工具卷与 iCode](deployment-and-operations.md#icode)。

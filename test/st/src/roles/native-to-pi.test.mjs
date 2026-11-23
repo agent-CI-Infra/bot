@@ -1,0 +1,119 @@
+// #1255: Pi is the default backend of the management assistant, group assistants and project roles. A database from before
+// it moves what it saved as Native to Pi once at start-up; every other backend stays.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { Store } from '../../../../dist/storage/database.js';
+import { roleApi } from '../../../../dist/roles/api.js';
+import { roleConfiguration } from '../../../../dist/roles/definition.js';
+import { migrateNativeToPi } from '../../../../dist/roles/native-to-pi.js';
+import { rolePool } from '../../../../dist/roles/pool.js';
+import { managementAssistant, serviceRole } from '../../../../dist/service-roles/roles.js';
+
+const repos = ['v2', 'kept', 'legacy', 'defaults'];
+const admin = { id: 'admin', role: 'project_admin', repositories: repos };
+const url = repo => new URL(`http://local/api/repositories/${repo}/roles`);
+const get = (s, repo) => roleApi(s, admin, 'GET', url(repo), {});
+const put = (s, repo, body) => roleApi(s, admin, 'PUT', url(repo), { expected_revision: get(s, repo).revision, ...body }).configuration;
+const stored = (s, repo) => JSON.parse(s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repo).value);
+const save = (s, repo, value) => s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(value), 'roles:' + repo);
+const harnessOf = (s, repo) => Object.fromEntries(roleConfiguration(s, repo).roles.map(role => [role.role_id, role.harness_ref.id]));
+const builtinIds = rolePool.map(role => role.id).filter(id => id !== 'coordinator');
+
+function fixture(t) {
+  const s = new Store(':memory:', randomBytes(32));
+  s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
+  for (const id of repos) s.run('INSERT INTO repositories VALUES(?,?,?,?)', id, 'fixture/' + id, 'o', 'a');
+  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','kept','http://127.0.0.1:9/v1','fixture',?,'now')", s.secrets.seal({ value: 'fixture-key' }, 'model:m'));
+  t.after(() => s.close());
+  return s;
+}
+// What a database from before #1255 held: rows saved as Native next to other backends.
+function oldData(s) {
+  s.run("UPDATE service_roles SET harness='native',revision=3 WHERE id=?", managementAssistant);
+  for (const [id, harness] of [['custom-native', 'native'], ['custom-codex', 'codex']])
+    s.run("INSERT INTO service_roles(id,builtin,enabled,name,harness,revision,created_at,updated_at) VALUES(?,0,1,?,?,2,'then','then')", id, id, harness);
+  for (const [id, harness] of [['g-native', 'native'], ['g-claude', 'claude_code']]) {
+    s.run("INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,created_at,last_received_at) VALUES(?,'feishu','app','tenant',?,'group','connector',1,1)", 'chat-' + id, 'oc-' + id);
+    s.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,revision,model_id,prompt,harness,created_at,updated_at)
+      VALUES(?,?,'group-assistant','repositories',?,'admin','admin',4,NULL,'',?,1,1)`, id, 'chat-' + id, 'principal-' + id, harness);
+  }
+  // v2: dev chose Native, reviewer Codex.
+  put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
+  const v2 = stored(s, 'v2');
+  save(s, 'v2', { ...v2, roles: v2.roles.map(role => role.role_id === 'reviewer' ? { ...role, harness_ref: { id: 'codex', version: '1' } } : role) });
+  // kept: QA on Native with a model profile that answers in text_json, which Pi cannot take.
+  put(s, 'kept', { roles: [{ role_id: 'qa', harness_ref: { id: 'native' } }] });
+  const kept = stored(s, 'kept');
+  save(s, 'kept', { ...kept, roles: kept.roles.map(role => role.role_id === 'qa'
+    ? { ...role, model_profile_ref: { model_id: 'm', name: 'fixture', profile_hash: 'x', version: 1, api: 'openai-chat-completions', tool_calls: true, structured_output: 'text_json' } } : role) });
+  // legacy: from before RoleDefinitionV2, the manager named Native, dev Codex, an own role and the rest unnamed.
+  s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'native', dev: 'codex' }, roles: [{ id: 'security', prompt: '' }] }));
+  // defaults saved its own configuration and then restored the recommended one, which already runs Pi.
+  put(s, 'defaults', { roles: [{ role_id: 'ux', enabled: false }] });
+  put(s, 'defaults', { follow_default: true });
+}
+
+test('migration #1255: Native service roles, group bindings and project roles move to Pi once; other backends stay', t => {
+  const s = fixture(t);
+  oldData(s);
+  const before = { kept: s.get("SELECT value FROM settings WHERE key='roles:kept'").value, defaults: s.get("SELECT value FROM settings WHERE key='roles:defaults'").value };
+  const revisions = repo => s.all('SELECT revision,actor FROM role_config_revisions WHERE repository_id=? ORDER BY revision', repo).map(row => [row.revision, row.actor]);
+  const v2Revisions = revisions('v2');
+  s.run("DELETE FROM settings WHERE key='migration:1255:native-to-pi'");
+  const lines = [];
+  migrateNativeToPi(s, line => lines.push(line));
+
+  // Service roles: Native moves under a new revision, Codex stays.
+  const role = id => ({ ...s.get('SELECT harness,revision FROM service_roles WHERE id=?', id) });
+  assert.deepEqual([role(managementAssistant), role('custom-native'), role('custom-codex')],
+    [{ harness: 'pi', revision: 4 }, { harness: 'pi', revision: 3 }, { harness: 'codex', revision: 2 }]);
+  // Group bindings: the revision is part of the group's fence and stays.
+  const binding = id => ({ ...s.get('SELECT harness,revision FROM channel_service_bindings WHERE id=?', id) });
+  assert.deepEqual([binding('g-native'), binding('g-claude')], [{ harness: 'pi', revision: 4 }, { harness: 'claude_code', revision: 4 }]);
+
+  // v2: dev moves under a new configuration revision; the reviewer keeps Codex.
+  assert.deepEqual([harnessOf(s, 'v2').dev, harnessOf(s, 'v2').reviewer, harnessOf(s, 'v2').manager], ['pi', 'codex', 'pi']);
+  assert.deepEqual(revisions('v2'), [...v2Revisions, [v2Revisions.at(-1)[0] + 1, 'migration:1255']]);
+  assert.equal(stored(s, 'v2').updated_by, 'migration:1255');
+  // kept: QA's model profile needs text_json, so it stays Native and nothing is rewritten.
+  assert.equal(s.get("SELECT value FROM settings WHERE key='roles:kept'").value, before.kept);
+  assert.equal(harnessOf(s, 'kept').qa, 'native');
+  // legacy: the named Native entry becomes Pi, Codex stays, and the roles it does not name run Pi.
+  assert.deepEqual(stored(s, 'legacy').harnesses, { manager: 'pi', dev: 'codex' });
+  assert.deepEqual(harnessOf(s, 'legacy'), { ...Object.fromEntries(builtinIds.map(id => [id, 'pi'])), dev: 'codex', security: 'pi' });
+  // defaults is untouched.
+  assert.equal(s.get("SELECT value FROM settings WHERE key='roles:defaults'").value, before.defaults);
+
+  // One log line with the counts: the legacy project moved every role but dev (the own role included).
+  const legacyMoved = builtinIds.length - 1 + 1;
+  assert.deepEqual(lines, [`[migration:1255] Native → Pi: 2 service roles, 1 group bindings, ${1 + legacyMoved} roles in 2 projects; 1 roles stay Native (their pinned model profile needs text_json output, which Pi cannot use)`]);
+  assert.deepEqual(s.all("SELECT action,resource_id,repository_id FROM audit WHERE user_id='migration:1255' ORDER BY action,resource_id").map(row => [row.action, row.resource_id, row.repository_id]), [
+    ['channel.service_binding.native_to_pi', 'g-native', null],
+    ['roles.native_to_pi', '0', 'legacy'],
+    ['roles.native_to_pi', String(stored(s, 'v2').revision), 'v2'],
+    ['service_role.native_to_pi', 'custom-native', null],
+    ['service_role.native_to_pi', managementAssistant, null],
+  ]);
+
+  // It runs once: Native chosen by hand afterwards stays.
+  s.run("UPDATE service_roles SET harness='native' WHERE id='custom-native'");
+  migrateNativeToPi(s, line => lines.push(line));
+  assert.equal(role('custom-native').harness, 'native');
+  assert.equal(lines.length, 1);
+});
+
+test('a new database starts on Pi: the management assistant, a legacy configuration without backends, and the migration has nothing to do', t => {
+  const s = fixture(t);
+  assert.ok(s.get("SELECT 1 FROM settings WHERE key='migration:1255:native-to-pi'"));
+  assert.equal(serviceRole(s, managementAssistant).harness, 'pi');
+  assert.equal(s.get('SELECT dflt_value FROM pragma_table_info(?) WHERE name=?', 'service_roles', 'harness').dflt_value, "'pi'");
+  assert.equal(s.get('SELECT dflt_value FROM pragma_table_info(?) WHERE name=?', 'channel_service_bindings', 'harness').dflt_value, "'pi'");
+  s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: false, harnesses: {} }));
+  assert.deepEqual(new Set(Object.values(harnessOf(s, 'legacy'))), new Set(['pi']));
+  // A configuration saved as Native after start-up is a choice and is not migrated.
+  put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
+  const lines = [];
+  migrateNativeToPi(s, line => lines.push(line));
+  assert.deepEqual([harnessOf(s, 'v2').dev, lines], ['native', []]);
+});

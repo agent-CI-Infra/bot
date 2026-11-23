@@ -36,7 +36,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await goRolePage(page, { role: 'manager' });
     const managerPicker=page.getByRole('combobox',{name:'manager Agent 后端',exact:true});
     await expect(managerPicker).toHaveValue('pi');
-    h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{}}));
+    h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{manager:'native'}}));
     await page.reload();
     await goRolePage(page, { role: 'manager' });
     await expect(managerPicker).toHaveValue('native');

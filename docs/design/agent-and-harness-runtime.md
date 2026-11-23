@@ -48,6 +48,18 @@
   - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志；写入内容在控制面、manager 与 runner 三处统一限制上限为 32 KiB（超限返回 `400 invalid_cli_config_content`），由 manager 经 Docker exec 环境变量 `BOT_CLI_CONFIG_B64` 传入（不进入命令行 `argv`，runner 读取后立即清除环境变量）。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
 
+### 默认后端
+
+项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的列默认值和读写缺省值，以及控制台新建表单。`native` 仍可手动选择，冻结在任务里的配置快照不改写。
+
+旧库在启动时由 `migrateNativeToPi`（`src/roles/native-to-pi.ts`，标记 `migration:1255:native-to-pi`）在一个事务里一次性改写，并在启动日志写一行计数：
+
+- 服务角色：`native` → `pi`，递增 revision，旧页面不能悄悄把 `native` 存回去。
+- 群绑定：`native` → `pi`，revision 不变：它属于群的授权围栏，后端不改变群能做什么。
+- 项目角色：V2 配置里的 `native` 角色改为 `pi`，生成新配置版本（`updated_by: migration:1255`）；旧格式配置里写明 `native` 的条目改为 `pi`。角色覆写的模型要求 `text_json` 输出时 Pi 用不了，保持 `native` 并计入日志。
+
+新库启动时迁移无事可做、直接记下标记，所以之后手动选的 `native` 不会被改写。
+
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
 
 控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱通信，每次调用都由 manager 在容器里执行一次 runner（`docker exec`）。

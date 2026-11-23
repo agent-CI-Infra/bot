@@ -85,6 +85,7 @@ export async function say(byWho, conversation, content) {
 export async function assistantModel(admin, model, name = 'Assistant fixture') {
   const shared = (await admin('/api/models', 'POST', { model_name: name, api_url: model.url, api_key: 'fixture-provider-key' })).value.model;
   const role = (await admin('/api/service-roles')).value.service_roles.find(r => r.id === 'management-assistant');
-  await admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, model_id: shared.id });
+  // The fixture model answers in process: Native, not the default Pi (#1255; native-roles.mjs).
+  await admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, model_id: shared.id, harness: 'native' });
   return shared;
 }

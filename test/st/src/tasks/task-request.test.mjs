@@ -175,7 +175,7 @@ test('default and saved-disabled projects execute an ordinary request with Manag
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'manager-model-token'},'model:m'),'now');
   store.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
-  if(saved)store.run("INSERT INTO settings VALUES('roles:101',?)",JSON.stringify({enabled:false,harnesses:{}}));
+  if(saved)nativeRoles(store,'101');
   const contract={goal:'Write an observed report',scope:['report'],criteria:['Report an observed repository fact'],endpoint:'report'};
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES('request','101','task.request','running','report',?,'claim')",JSON.stringify({request:'Write an observed report',contract}));
   authorizeKnowledgeTask(store,'request');store.run("INSERT INTO task_claims VALUES('request','101','claim','now')");
