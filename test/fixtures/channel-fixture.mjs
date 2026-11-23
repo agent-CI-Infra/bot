@@ -151,6 +151,8 @@ export async function boundGroup(f, projects = ['101'], chat = 'oc_group', clien
   const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', {
     scope: { kind: 'repositories', repositories: projects },
     ...(f.groupModelId !== undefined ? { model_id: f.groupModelId } : {}),
+    // Native unless the test chose a backend (#1255; native-roles.mjs).
+    harness: f.groupHarness ?? 'native',
     enabled: true,
     expected_revision: revision,
     ...(f.groupPermissions ? { permissions: f.groupPermissions } : {}),

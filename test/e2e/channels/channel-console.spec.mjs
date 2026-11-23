@@ -302,7 +302,8 @@ for (const type of ['text', 'post']) test(`a mention-only ${type} message remain
     await post(f.h, f.id, question);
     const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
     expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', {
-      model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0
+      // Native: the fixture model answers in process (#1255).
+      model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, harness: 'native', enabled: true, expected_revision: 0
     })).status).toBe(200);
     scriptedModel(f, [(done, input) => {
       expect(input.request).toBe('@LaunchPad-Test');

@@ -129,7 +129,8 @@ export function serviceBindingStorage(store: Store): void {
   const bindingCols = store.all('PRAGMA table_info(channel_service_bindings)').map(c => c.name);
   if (!bindingCols.includes('model_id')) store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN model_id TEXT');
   if (!bindingCols.includes('prompt')) store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN prompt TEXT');
-  if (!bindingCols.includes('harness')) store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN harness TEXT NOT NULL DEFAULT 'native'");
+  // Pi is the default backend (#1255); a database from before it moves its Native bindings over once (src/roles/native-to-pi.ts).
+  if (!bindingCols.includes('harness')) store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
   migrateEmployees(store);
   migrateLevels(store);
   migrateActionsWrite(store);
@@ -147,7 +148,7 @@ function migrateInlineAssistant(store: Store): void {
       const role = store.hasTable('service_roles') ? store.get('SELECT * FROM service_roles WHERE id=?', binding.service_role_id) : undefined;
       const prompt = [String(role?.responsibility ?? '').trim(), String(role?.prompt ?? '').trim()].filter(Boolean).join('\n\n');
       const modelId = role?.model_id ?? null;
-      const harness = role?.harness && (harnesses as readonly string[]).includes(String(role.harness)) ? String(role.harness) : 'native';
+      const harness = role?.harness && (harnesses as readonly string[]).includes(String(role.harness)) ? String(role.harness) : 'pi';
       store.run('UPDATE channel_service_bindings SET model_id=?,prompt=?,harness=? WHERE id=? AND prompt IS NULL',
         modelId, prompt, harness, binding.id);
       store.audit('system', 'channel.service_binding.assistant_migrated', binding.id);
@@ -223,7 +224,7 @@ function migrateEmployees(store: Store): void {
       store.run("INSERT INTO principals(id,kind,maintenance) VALUES(?,'service',?)", principal, 'channel-binding:' + chat_id);
       store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,enabled,revision,migrated_from,model_id,prompt,harness,created_at,updated_at)
         VALUES(?,?,?,'repositories',?,?,?,?,1,1,'channel_employee',?,?,?, ?,?)`, id, chat_id, groupAssistant, principal, grants[0]!.maintainer_id, grants[0]!.maintainer_id,
-        modes.size === 1 ? grants[0]!.participation : 'mentions', migratedModel, defaultGroupAssistantPrompt, 'native', time, time);
+        modes.size === 1 ? grants[0]!.participation : 'mentions', migratedModel, defaultGroupAssistantPrompt, 'pi', time, time);
       for (const g of grants) grant(store, principal, chat_id, g.tenant_id, g.project_id, g.maintainer_id, time, levelPermissions('read'));
       store.audit(grants[0]!.maintainer_id, 'channel.service_binding.migrated', id);
     }
@@ -519,7 +520,7 @@ export class ChannelServiceBindings {
     if (!participations.includes(String(participation))) fail(400, 'channel_participation_invalid', 'participation');
     // Accommodate migrated legacy responsibility (<=2000) + "\n\n" + prompt (<=32000) = 34002 chars without making bindings unsavable.
     const prompt = input.prompt !== undefined ? optionalText(input.prompt, 35000, 'prompt') : String(previous?.prompt ?? '');
-    const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'native');
+    const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'pi');
     if (!(harnesses as readonly string[]).includes(harness)) fail(400, 'unknown_role_harness', 'harness');
     const permissions = this.levelInput(input, previous);
     const previewScope = this.scopeInput(actor, input.scope, chat);
@@ -609,7 +610,7 @@ export class ChannelServiceBindings {
       model_id: binding.model_id ?? null,
       model: modelRow ? { id: modelRow.id, model_name: modelRow.model_name, api_url: modelRow.api_url, key_configured: !!modelRow.api_key, project_id: modelRow.repository_id ?? null } : null,
       prompt: String(binding.prompt ?? ''),
-      harness: String(binding.harness ?? 'native'),
+      harness: String(binding.harness ?? 'pi'),
       usage: this.usage(binding.chat_id),
       model_gaps: gaps,
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,

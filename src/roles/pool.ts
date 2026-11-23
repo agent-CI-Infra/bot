@@ -80,9 +80,11 @@ rolePrompts.manager += ' When delegating dependent work, include known task/arti
 
 export const rolePool = Object.entries(rolePrompts).map(([id, duties]) => {
   const prompt = duties + '\n' + (id === 'qa' ? sharedInstructions.replace(scopeInstructions, '') : sharedInstructions);
-  return { id, prompt, version: createHash('sha256').update(prompt).digest('hex'), memory_scope: id, harness: 'native', writable: id === 'dev' };
+  return { id, prompt, version: createHash('sha256').update(prompt).digest('hex'), memory_scope: id, harness: 'pi', writable: id === 'dev' };
 });
-const configuredHarness = (configuration: any, id: string, fallback = 'native') => configuration.harnesses && Object.hasOwn(configuration.harnesses, id) ? configuration.harnesses[id] : fallback;
+// A legacy configuration (from before RoleDefinitionV2) names a backend per role in `harnesses`; a role it leaves out runs
+// the recommended backend, Pi (#1255; it was Native before).
+const configuredHarness = (configuration: any, id: string, fallback = 'pi') => configuration.harnesses && Object.hasOwn(configuration.harnesses, id) ? configuration.harnesses[id] : fallback;
 export const configuredRoles = (configuration: any = {}) => {
   const all = rolePool.map(r => ({ ...r, harness: configuredHarness(configuration, r.id, r.harness) }));
   for (const custom of configuration.roles ?? []) {

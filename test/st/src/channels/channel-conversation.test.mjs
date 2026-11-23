@@ -18,7 +18,7 @@ async function fixture(t,participation='mentions'){
     roles:[{role_id:'reviewer',harness_ref:{id:'native'},permissions:{task_management:'write',delegation:'deny',commands:'deny',conversation_history:'read'}}]});
   const discovery=inGroup('Discover this group','ou_alice');discovery.event.message.mentions=[];await post(h,f.id,discovery);
   const chat=h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
-  const bound=await f.admin('/api/channels/chats/'+chat.id+'/service-binding','PUT',{model_id:f.assistantModel.id,scope:{kind:'repositories',repositories:['101']},participation,enabled:true,expected_revision:0});
+  const bound=await f.admin('/api/channels/chats/'+chat.id+'/service-binding','PUT',{model_id:f.assistantModel.id,scope:{kind:'repositories',repositories:['101']},participation,harness:'native',enabled:true,expected_revision:0});
   assert.equal(bound.status,200,JSON.stringify(bound.value));
   f.modelState.respond=async(body,res)=>say(res,'Recorded local answer');
   return {...f,chat};

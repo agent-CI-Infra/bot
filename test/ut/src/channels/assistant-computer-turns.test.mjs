@@ -200,9 +200,11 @@ test('the status of assistant computers and the start-up warning for assistants 
   assert.deepEqual(await new AssistantComputerService(f.store, f.manager).status(), { available: false, reason: 'assistant_homes_missing' });
   const down = new AssistantComputerService(f.store, { call: async () => { throw new Error('connect ECONNREFUSED'); } }, f.homes);
   assert.deepEqual(await down.status(), { available: false, reason: 'manager_unavailable' });
-  // Nobody runs on a harness: nothing to warn about.
+  // Nobody runs on a harness (the management assistant set to Native by hand): nothing to warn about.
   serviceRoleStorage(f.store);
+  f.store.run("UPDATE service_roles SET harness='native' WHERE id='management-assistant'");
   assert.equal(await down.warnIfRequired(log), null);
+  // Pi, the default since #1255.
   f.store.run("UPDATE service_roles SET harness='pi' WHERE id='management-assistant'");
   assert.equal(await f.service.warnIfRequired(log), null, 'available: no warning');
   assert.match(await down.warnIfRequired(log), /the management assistant \(pi\) run on a harness that needs an assistant computer for every turn, but assistant computers are unavailable \(manager_unavailable\)/);

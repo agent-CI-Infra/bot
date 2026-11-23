@@ -272,6 +272,52 @@ export function retireAcpTaskExecutionConfigs(s: Store) {
 }
 
 /**
+ * The project role part of the one-time Native→Pi migration (#1255, run once by src/roles/native-to-pi.ts inside its
+ * transaction). A saved V2 configuration's Native roles move to Pi under a new configuration revision, keeping earlier
+ * revisions and frozen task snapshots; a role whose pinned model profile Pi cannot use (text_json structured output) stays
+ * on Native. A legacy configuration's `harnesses` entries naming Native become Pi; the roles it does not name already run Pi
+ * (src/roles/pool.ts). Configurations that follow the defaults already run Pi.
+ */
+export function moveNativeRolesToPi(s: Store): { projects: number; roles: number; kept: number } {
+  const pi = harnesses.find(h => h.id === 'pi')!, ref = harnessRef('pi'), counts = { projects: 0, roles: 0, kept: 0 };
+  for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%'")) {
+    let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+    if (!stored || typeof stored !== 'object' || followsDefault(stored)) continue;
+    const repositoryId = String(row.key).slice('roles:'.length);
+    if (stored.schema !== 2) {
+      // What ran Native before #1255: a role named Native, or one left out of the map.
+      const ids = [...rolePool.map(role => role.id), ...(stored.roles ?? []).map((role: any) => role?.id)].filter((id, at, all) => typeof id === 'string' && id !== 'coordinator' && all.indexOf(id) === at);
+      const named = stored.harnesses && typeof stored.harnesses === 'object' ? stored.harnesses : {};
+      const moved = ids.filter(id => (Object.hasOwn(named, id) ? named[id] : 'native') === 'native').length;
+      if (!moved) continue;
+      const map = Object.fromEntries(Object.entries(named).map(([id, harness]) => [id, harness === 'native' ? 'pi' : harness]));
+      s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify({ ...stored, harnesses: map }), row.key);
+      counts.projects++; counts.roles += moved;
+      s.audit('migration:1255', 'roles.native_to_pi', '0', repositoryId);
+      continue;
+    }
+    if (!Array.isArray(stored.roles)) continue;
+    const current = roleConfiguration(s, repositoryId, stored);
+    let moved = 0;
+    const roles = current.roles.map(role => {
+      if (role.harness_ref?.id !== 'native') return role;
+      const output = role.model_profile_ref?.structured_output;
+      if (output && !pi.structured_output.includes(output)) { counts.kept++; return role; }
+      moved++;
+      return { ...role, harness_ref: ref, revision: role.revision + 1 };
+    });
+    if (!moved) continue;
+    const now = new Date().toISOString(), { updated_at, updated_by, ...config } = { ...current, roles, revision: current.revision + 1 };
+    const saved = { ...config, updated_at: now, updated_by: 'migration:1255' };
+    s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:1255', now);
+    s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
+    counts.projects++; counts.roles += moved;
+    s.audit('migration:1255', 'roles.native_to_pi', String(saved.revision), repositoryId);
+  }
+  return counts;
+}
+
+/**
  * One-time migration (#1121): per-run isolated container profiles (`isolated-workspace`, `isolated-candidate`) are retired;
  * saved project configurations and frozen `task_execution_configs` downgrade safely to shared project-computer profiles.
  */

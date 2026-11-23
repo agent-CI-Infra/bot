@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
+import { nativeServiceAssistants } from './native-roles.mjs';
 
 /**
  * The tool results a fixture model has seen, as a model reads them. A result over its share of the context is cut, and the cut
@@ -21,6 +22,8 @@ export function replyWithTitle(response, title = '查看项目任务状态') {
 
 export async function managementFixture(t,options={}) {
   const h=await harness(t,undefined,options),{admin,password}=await setup(h),a=await account(admin);
+  // The fixture model answers in process: the management assistant runs Native (#1255; native-roles.mjs).
+  nativeServiceAssistants(h.store);
   await repository(admin,a.id,'101');await repository(admin,a.id,'102');await repository(admin,a.id,'201');
   h.store.run("UPDATE repositories SET full_name='agent-test-zone/admin-fixture-'||id,owner_id=CASE WHEN id='201' THEN '20' ELSE '10' END");
   const time=new Date().toISOString();
