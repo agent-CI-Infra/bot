@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { randomId, fail } from '../core/security.js';
-import { historyData, historyRefBytes, modelSnapshot, unreadable } from '../storage/payloads.js';
+import { historyData, historyRefBytes, logContent, modelSnapshot, unreadable } from '../storage/payloads.js';
 
 const botVersion=(()=>{try{return process.env.BOT_VERSION||execFileSync('git',['rev-parse','HEAD'],{cwd:fileURLToPath(new URL('../../',import.meta.url)),encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();}catch{return 'unknown';}})();
 const now=()=>new Date().toISOString();
@@ -85,20 +85,19 @@ export function traceStorage(store:Store){
   };
   // An operation recorded since #436 keeps its request and result in the run's trajectory file: the row and so this
   // snapshot hold only their small fields and refs, which traceSource expands. The update trigger fires on state
-  // changes only, so moving an old row's payload to a file adds no history.
+  // changes only, so moving an old row's payload to a file adds no history. Read-only poll/liveness calls never
+  // produce operation snapshots even if written to task_tools directly (#1266).
   store.db.exec('DROP TRIGGER IF EXISTS trace_task_tools_insert;DROP TRIGGER IF EXISTS trace_task_tools_update;');
   const operation="trace_snapshot(CASE WHEN NEW.request_ref IS NULL THEN json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result) "+
     "ELSE json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result,'request_ref',NEW.request_ref,'result_ref',NEW.result_ref) END)";
-  for(const [name,event] of [['insert','INSERT'],['update','UPDATE OF state']])store.db.exec(`CREATE TRIGGER trace_task_tools_${name} AFTER ${event} ON task_tools BEGIN
+  const pollFilter="WHEN coalesce(json_extract(NEW.request,'$.request.type'),json_extract(NEW.request,'$.type'),'') NOT IN ('workspace_agent_poll','workspace_harness_poll','workspace_agent_live','workspace_agent_runtime','workspace_agent_progress')";
+  for(const [name,event] of [['insert','INSERT'],['update','UPDATE OF state']])store.db.exec(`CREATE TRIGGER trace_task_tools_${name} AFTER ${event} ON task_tools ${pollFilter} BEGIN
       INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'operation',${operation},strftime('%Y-%m-%dT%H:%M:%fZ','now'),'task_tools:'||NEW.id);
     END;`);
   capture('github_effects','publication',"json_object('operation_id',NEW.id,'kind',NEW.kind,'state',NEW.state,'request',NEW.request,'response',NEW.response)");
-  // Low-volume lifecycle logs become part of the same query; existing detailed logs stay referenced.
-  // A large log's body is in its run's trajectory file (content_ref); the snapshot keeps the header and the ref.
+  // task_logs is the single store for task log lines (#1266): do not duplicate every JSON log into task_history as
+  // runtime_log. Existing historical runtime_log rows remain readable via historyData() and traceSource().
   store.db.exec(`DROP TRIGGER IF EXISTS trace_task_log;
-  CREATE TRIGGER trace_task_log AFTER INSERT ON task_logs WHEN json_valid(NEW.content) BEGIN
-    INSERT INTO task_history(task_id,type,data,created_at,run_id,source_ref) VALUES(NEW.task_id,'runtime_log',trace_snapshot(CASE WHEN NEW.content_ref IS NULL THEN NEW.content ELSE json_set(NEW.content,'$.content_ref',NEW.content_ref) END),coalesce(nullif(NEW.created_at,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')),NEW.run_id,'task_logs:'||NEW.id);
-  END;
   CREATE TRIGGER IF NOT EXISTS trace_model_finish AFTER UPDATE OF finished_at ON model_requests WHEN NEW.task_id IS NOT NULL AND OLD.finished_at IS NULL AND NEW.finished_at IS NOT NULL BEGIN
     INSERT INTO task_history(task_id,type,data,created_at,run_id,source_ref) VALUES(NEW.task_id,'model_request',json_object('request_id',NEW.id,'state',NEW.state,'http_status',NEW.http_status,'request_source','model_requests:'||NEW.id||':request','response_source','model_requests:'||NEW.id||':response'),NEW.finished_at,NEW.run_id,'model_requests:'||NEW.id);
   END;`);
@@ -166,7 +165,12 @@ export function traceSource(store:Store,taskId:string,source:string,access?:Memo
   const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){permitRun(run[1]);const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row)return safe(JSON.parse(row.snapshot));}
   const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data,run_id,type FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row){permitRun(row.run_id);
     let data:string;try{data=historyData(store,row);}catch(error){return {...unreadable(error),source_event_id:'task_history:'+row.id};}
-    return {...capturedSource(JSON.parse(data)),source_event_id:'task_history:'+row.id};}}
+    return {...capturedSource(JSON.parse(data)),source_event_id:'task_history:'+row.id};}
+    // New task_logs rows are no longer duplicated into task_history (#1266); resolve task_logs:<id> directly.
+    if(source.startsWith('task_logs:')){const logRow=store.get('SELECT id,content,content_ref,run_id FROM task_logs WHERE id=? AND task_id=?',source.slice('task_logs:'.length),taskId);if(logRow){permitRun(logRow.run_id??undefined);
+      let raw:string;try{raw=logContent(store,logRow);}catch(error){return unreadable(error);}
+      let parsed:unknown;try{parsed=JSON.parse(raw);}catch{parsed=raw;}
+      return capturedSource(parsed);}}}
   fail(404,'trace_source_not_found');
 }
 export function taskTrace(store:Store,taskId:string,url:URL,section:string,access?:MemoryAccess){

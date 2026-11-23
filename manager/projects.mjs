@@ -1159,10 +1159,10 @@ export class Projects {
     if (action === 'configure') validateSpec(input.request);
     if (action === 'execute') validateCall(input.request);
     if (action === 'delete' && input.request !== undefined && (!input.request || Object.keys(input.request).some(key => key !== 'delete_notes') || input.request.delete_notes !== true)) throw new ManagerError('invalid_operation', 400);
-    // Read-only container harness polling runs outside the shared parallel slot (unless a lifecycle action holds the
-    // exclusive lock) and skips ledger/trajectory fsyncs so active polling neither starves concurrent mailbox replies nor
-    // bloats the manager database (#705).
-    if (action === 'execute' && input.request.type === 'workspace_harness_poll') {
+    // Read-only runner polling and liveness probes run outside the shared parallel slot (unless a lifecycle action holds
+    // the exclusive lock) and skip ledger/trajectory fsyncs so active polling neither starves concurrent mailbox replies
+    // nor bloats the manager database (#705, #1266).
+    if (action === 'execute' && ['workspace_harness_poll', 'workspace_agent_poll', 'workspace_agent_live', 'workspace_agent_runtime'].includes(input.request.type)) {
       return this.gates.get(repo)?.exclusive ? this.lock(repo, () => this.executeHarnessPoll(repo, input), true) : this.executeHarnessPoll(repo, input);
     }
     // Running commands hold their slots; a new stop, reset or delete interrupts all of them by stopping the container.

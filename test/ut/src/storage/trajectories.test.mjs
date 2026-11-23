@@ -169,14 +169,16 @@ test('evidence references read the same content from a file as from the old colu
   const { legacy, files } = recordBoth(t);
   for (const source of ['task_tools:op', 'task_logs:log']) assert.deepEqual(traceSource(files.store, 't', source), traceSource(legacy.store, 't', source));
   assert.match(JSON.stringify(traceSource(files.store, 't', 'task_tools:op')), /ghp_SECRET123456789012345678901234567890/);
-  // The history rows the triggers wrote are small; read through task_history they expand to the old snapshots.
-  const history = store => store.all("SELECT id,length(data) n FROM task_history WHERE type IN ('operation','runtime_log') ORDER BY id");
+  // The operation history rows the triggers wrote are small; read through task_history they expand to the old snapshots.
+  // #1266: task_logs are no longer duplicated into task_history as runtime_log, while traceSource('task_logs:<id>') still resolves them.
+  const history = store => store.all("SELECT id,length(data) n FROM task_history WHERE type='operation' ORDER BY id");
   const old = history(legacy.store), current = history(files.store);
   assert.deepEqual(current.map(row => row.id), old.map(row => row.id));
   assert.ok(current.every(row => row.n < 4000)); assert.ok(old.some(row => row.n > 8192));
+  assert.equal(files.store.get("SELECT count(*) n FROM task_history WHERE type='runtime_log'").n, 0);
   for (const row of old) assert.deepEqual(traceSource(files.store, 't', 'task_history:' + row.id), traceSource(legacy.store, 't', 'task_history:' + row.id));
   // The console's event list shows the same: small snapshots inline, large ones by size.
-  const events = store => ['operation', 'runtime_log'].flatMap(type => taskTrace(store, 't', new URL('http://local/api/tasks/t/events?include_data=1&type=' + type), 'events').events)
+  const events = store => taskTrace(store, 't', new URL('http://local/api/tasks/t/events?include_data=1&type=operation'), 'events').events
     .map(({ data, body_chars }) => ({ data, body_chars }));
   assert.deepEqual(events(files.store), events(legacy.store));
   // The large log's row keeps its header for queries and a ref for the whole text; a small log stays inline.
@@ -401,4 +403,82 @@ test('large task file lists are stored once as blobs and read back through their
   const again = JSON.parse(storedInput(store, input, '103')).snapshot_files.$blob;
   writeFileSync(file, readFileSync(file, 'utf8').replace('file-1', 'file-X'));
   assert.equal(again, stored.snapshot_files.$blob); assert.throws(() => blobValue(store, stored.snapshot_files), error => error.code === 'trajectory_corrupt');
+});
+
+test('#1266 runner polls add no task_tools or task_history rows; effectful operations, publication and task_logs remain readable', async t => {
+  const { piAdapter } = await import('../../../../dist/agent/pi.js');
+  const { path } = database(t), store = new Store(path, key); t.after(() => store.close()); seed(store);
+  const run = beginRun(store, { id: 't' }, 'execution', {});
+  const task = { id: 't', repository_id: '101', attempt: 1, generation: 1, workspace_id: 'a'.repeat(48), trace_run_id: run.id };
+
+  let polls = 0;
+  const manager = {
+    async call(_method, _path, input) {
+      const type = input.request.type;
+      if (type === 'workspace_agent_runtime') return { ok: true, result: { agent: 'pi', version: '1.4.0', package: '@mariozechner/pi-coding-agent', node: process.version } };
+      if (type === 'workspace_agent_poll') {
+        polls++;
+        return { ok: true, result: polls < 6 ? { state: 'running', offset: polls, events: [] } : { state: 'completed', offset: polls, events: [], result: { summary: 'done' } } };
+      }
+      if (type === 'workspace_command') return { ok: true, result: { exit_code: 0, output: 'ok' } };
+      if (type === 'workspace_write') return { ok: true, result: { written: true } };
+      if (type === 'workspace_checkout') return { ok: true, result: { tree_sha: 'b'.repeat(40), files: [] } };
+      return { ok: true, result: { started: true, written: true } };
+    },
+  };
+  const workspace = new Workspace(store, manager, task, new Redactor(), async () => {}, () => {});
+
+  // 1) Pi run with multiple polls + runtime probe produces zero poll/runtime rows in task_tools or task_history.
+  const adapter = piAdapter({
+    store,
+    taskId: 't',
+    workspace,
+    redactor: new Redactor(),
+    guard: async () => {},
+    config: { prompt: 'hello', tools: [] },
+    runtime: { version: '1.4.0', report: () => {} },
+    offered: () => true,
+    complete: state => state.result,
+  });
+  const outcome = await adapter({
+    request: async () => { throw new Error('unused'); },
+    model: { id: 'm', model: 'm', url: 'http://127.0.0.1:9/v1', key: 'k' },
+  });
+  assert.deepEqual(outcome, { summary: 'done' });
+  assert.equal(polls, 6);
+  const pollToolRows = store.all("SELECT id,request FROM task_tools WHERE task_id='t' AND json_extract(request,'$.request.type') IN ('workspace_agent_poll','workspace_agent_runtime')");
+  assert.equal(pollToolRows.length, 0, 'polls and runtime probes must not create task_tools rows');
+  const pollHistoryRows = store.all("SELECT id,data FROM task_history WHERE task_id='t' AND type='operation' AND json_extract(data,'$.data.request') LIKE '%workspace_agent_poll%'");
+  assert.equal(pollHistoryRows.length, 0, 'polls must not create task_history operation rows');
+
+  // 2) Defense-in-depth: even a direct task_tools insert/update for poll/liveness types adds zero task_history rows.
+  const histBeforeDirect = store.get("SELECT count(*) n FROM task_history WHERE task_id='t' AND type='operation'").n;
+  for (const pollType of ['workspace_agent_poll', 'workspace_harness_poll', 'workspace_agent_live', 'workspace_agent_runtime', 'workspace_agent_progress']) {
+    store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,'t',?,NULL,'pending')", 'direct-' + pollType, JSON.stringify({ request: { type: pollType } }));
+    store.run("UPDATE task_tools SET state='completed',result='{}' WHERE id=?", 'direct-' + pollType);
+  }
+  assert.equal(store.get("SELECT count(*) n FROM task_history WHERE task_id='t' AND type='operation'").n, histBeforeDirect);
+
+  // 3) Effectful operations (command, write, checkout) and github_effects publication still record their states.
+  await workspace.call('cmd-1', { type: 'workspace_command', command: 'echo hi' });
+  await workspace.call('write-1', { type: 'workspace_write', path: 'a.txt', base64: Buffer.from('x').toString('base64'), offset: 0, final: true });
+  await workspace.call('checkout-1', { type: 'workspace_checkout', sha: 'a'.repeat(40) });
+  store.run("INSERT INTO github_effects(id,task_id,kind,state,request,response,marker) VALUES('pub-1','t','comment','pending','{\"body\":\"hi\"}',NULL,'m1')");
+  store.run("UPDATE github_effects SET state='completed',response='{\"id\":1}' WHERE id='pub-1'");
+
+  const opHistory = store.all("SELECT source_ref,json_extract(data,'$.data.state') AS state FROM task_history WHERE task_id='t' AND type='operation'");
+  for (const keyName of ['cmd-1', 'write-1', 'checkout-1']) {
+    const id = operationId(`t:1:${keyName}`);
+    const states = opHistory.filter(r => r.source_ref === 'task_tools:' + id).map(r => r.state);
+    assert.deepEqual(states, ['pending', 'completed'], `${keyName} must record pending and completed snapshots`);
+  }
+  const pubStates = store.all("SELECT json_extract(data,'$.data.state') AS state FROM task_history WHERE task_id='t' AND type='publication' AND source_ref='github_effects:pub-1'").map(r => r.state);
+  assert.deepEqual(pubStates, ['pending', 'completed']);
+
+  // 4) task_logs writes no duplicate runtime_log row into task_history, yet traceSource('task_logs:<id>') still resolves both inline and trajectory-backed logs.
+  insertTaskLog(store, task, JSON.stringify({ type: 'phase', phase: 'model', detail: 'inline log' }), 'now', 'log-inline');
+  insertTaskLog(store, task, JSON.stringify({ type: 'tool', name: 'run_command', output: 'z'.repeat(3000) }), 'now', 'log-large');
+  assert.equal(store.get("SELECT count(*) n FROM task_history WHERE task_id='t' AND type='runtime_log'").n, 0, 'task_logs must not duplicate into task_history');
+  assert.equal(traceSource(store, 't', 'task_logs:log-inline').data.detail, 'inline log');
+  assert.equal(traceSource(store, 't', 'task_logs:log-large').data.output, 'z'.repeat(3000));
 });

@@ -56,7 +56,7 @@ export function roleWorkspaces(workspace:Workspace){
 }
 
 /** The runner's view of a Pi session in one workspace; null when that workspace or session no longer exists. */
-async function piState(space:Workspace){try{const state=await space.call('pi:probe:'+randomId(),{type:'workspace_agent_poll',offset:0});return state.error?null:state;}catch{return null;}}
+async function piState(space:Workspace){try{const state=typeof (space as any).deliver==='function'?await space.deliver({type:'workspace_agent_poll',offset:0}):await space.call(`roles:probe:${randomId()}`,{type:'workspace_agent_poll',offset:0});return state.error?null:state;}catch{return null;}}
 const report=(space:Workspace,instance:Row,expected:string,recovery:string)=>(runtime:any)=>traceEvent(space.store,space.task.id,'harness_started',{harness:'pi',package:runtime.package,version:runtime.version,expected_version:expected,node:runtime.node,instance_id:instance.id,role:instance.role,workspace_id:space.task.workspace_id,recovery},space.task.trace_run_id);
 const computerEgress=(environment:any)=>typeof environment?.computer?.egress==='boolean'?environment.computer.egress:environment?.computer?.network_policy==='internet egress';
 /**

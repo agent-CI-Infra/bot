@@ -37,6 +37,8 @@ function legacy(store, { tasks = 3, operations = 4, size = 3000 } = {}) {
       ids.push(id);
     }
     store.run("INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,'now')", task + '-log', task, JSON.stringify({ type: 'tool', name: 'run_command', detail: 'why', output: 'L'.repeat(size) }));
+    // Pre-#1266 historical runtime_log row in task_history: must still migrate cleanly and read identically.
+    store.run("INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(?,'runtime_log',trace_snapshot(?),'now',?)", task, JSON.stringify({ type: 'tool', name: 'run_command', detail: 'why', output: 'L'.repeat(size) }), 'task_logs:' + task + '-log');
     store.run("INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,'now')", task + '-small', task, JSON.stringify({ type: 'phase', phase: 'prepare' }));
     store.run(`INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,finished_at,state,request_snapshot,response_snapshot)
       VALUES(?,?,'101','r','m','fixture','now','now','received',?,?)`, task + '-mr', task,
