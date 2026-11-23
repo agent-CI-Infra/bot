@@ -216,3 +216,47 @@ test('中文界面：安装档案的原文与今天逐字相同', async ({ page 
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
+
+test('English 界面：安装详情读取与重新同步失败在浏览器中保持纯英文且不溢出', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    let failSync = true;
+    await page.route('**/api/installations/archive/github.com/123/77**', route => {
+      const path = new URL(route.request().url()).pathname;
+      const send = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+      if (route.request().method() === 'POST' && failSync) {
+        return route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"internal"}' });
+      }
+      if (path.endsWith('/repositories')) return send({ repositories: [] });
+      if (path.endsWith('/events')) return send({ events: [] });
+      return send({ installation: detail });
+    });
+    await page.addInitScript(() => localStorage.setItem('launchpad.locale', 'en'));
+    await page.goto(f.h.admin + '/#/settings/installations/github.com/123/77');
+    await page.fill('input[name=username]', 'administrator');
+    await page.fill('input[name=password]', f.password);
+    await page.click('#access-submit');
+    await expect(page.locator('body.console-ready')).toHaveCount(1);
+    const resync = panel(page).getByRole('button', { name: 'Re-sync' });
+    await expect(resync).toBeEnabled();
+    await resync.click();
+    const syncErr = panel(page).locator('section.side-card').first().locator('p.view-error');
+    await expect(syncErr).toContainText('Re-sync failed: the service answered 500 · internal');
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height });
+      await expect(syncErr).toBeVisible();
+      expect(cjkWords(await syncErr.innerText()), `Chinese leaked in re-sync error at ${width}px`).toEqual([]);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `overflow at ${width}px`).toBe(true);
+    }
+    // Aborted detail read exercises the real browser network TypeError path end-to-end.
+    failSync = false;
+    await page.unroute('**/api/installations/archive/github.com/123/77**');
+    await page.route('**/api/installations/archive/github.com/123/77', route => route.abort('connectionrefused'));
+    await page.reload();
+    const readErr = panel(page).locator('section.side-card').first().locator('p.muted');
+    await expect(readErr).toContainText('Cannot read this installation: the network request failed, try again shortly');
+    expect(cjkWords(await readErr.innerText())).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});

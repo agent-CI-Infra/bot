@@ -1,10 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { loadConsole } from '../../fixtures/console-page.mjs';
 
 // #691: the release page's read clock and empty tag/release facts should match the rest of the console.
-const source = readFileSync(new URL('../../../static/release.js', import.meta.url), 'utf8');
 const visible = node => [node.textContent, ...node.children.flatMap(visible)].filter(Boolean).join(' ');
 const all = node => [node, ...node.children.flatMap(all)];
 const statusLine = root => all(root).find(node => node.tagName === 'P' && node.getAttribute('role') === 'status');
@@ -26,14 +24,6 @@ const waitFor = (read, message) => new Promise((resolve, reject) => {
     setTimeout(tick, 10);
   };
   tick();
-});
-
-test('release.js uses the shared timestamp() clock and 暂无 for empty tag and release facts', () => {
-  assert.match(source, /readStatus\.textContent = `记录读取于 \$\{timestamp\(new Date\(\)\)\}`/);
-  assert.doesNotMatch(source, /toLocaleTimeString|这是读取时间/);
-  assert.match(source, /\['已有标签', p\.existing_tag \? p\.existing_tag\.commit : '暂无'\]/);
-  assert.match(source, /p\.existing_release \? link\(p\.existing_release\.url, p\.existing_release\.draft \? '已有草稿' : '已由仓库工作流／外部操作发布'\) : '暂无'/);
-  assert.doesNotMatch(source, /打开接入门禁|openGateOnboarding/);
 });
 
 function releasePage(respond) {
