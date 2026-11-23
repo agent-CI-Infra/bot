@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { rmSync, mkdtempSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { Projects } from '../../../manager/projects.mjs';
 import { ManagerError } from '../../../manager/docker.mjs';
@@ -12,7 +13,7 @@ import { consoleSave } from '../helpers/console-save.mjs';
 const mib = 1024 * 1024;
 test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建；项目留空的资源跟随默认', async ({ page }) => {
   // The real manager project logic over a Docker stand-in with an 8-CPU, 32 GiB host.
-   const directory = mkdtempSync(resolve('.tmp/computer-defaults/manager-')), docker = new FakeDocker();
+  const directory = mkdtempSync(join(tmpdir(), 'computer-defaults-')), docker = new FakeDocker();
   docker.info = { NCPU: 8, MemTotal: 32768 * mib };
   const projects = new Projects({ database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
   const route = async (method, path, input) => {

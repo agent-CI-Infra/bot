@@ -43,12 +43,7 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     const web = (await admin('/api/management/commands/' + operation.id)).value;
-    writeFileSync('.tmp/channels-165/evidence.json', JSON.stringify({ transport: 'signed local HTTP callbacks and protocol fixtures; no live Feishu credentials',
-      query: { channel_operation: query.value.operation_id, state: queried.state, conversation_id: queried.conversation_id },
-      prompt: { channel_operation: changed.value.operation_id, conversation_id: result.conversation_id, operation_id: operation.id, state: web.state, channel: web.channel,
-        before_revision: web.before_revision, after_revision: web.after_revision, result: web.result },
-      binding_failure: { state: unprovedResult.state, error: unprovedResult.error, grants_before: grantsBefore, grants_after: h.store.get('SELECT count(*) n FROM scoped_grants').n },
-      unbound_group: { operation_id: group.value.operation_id, state: refused.state, binding_hint: true, leaked_private_facts: false }, page_errors: errors }, null, 2));
+    expect(web.state).toBe('succeeded');
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
 });

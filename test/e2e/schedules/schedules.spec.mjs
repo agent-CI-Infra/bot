@@ -51,7 +51,7 @@ test('user previews and creates a timezone-aware project scheduled task, then ex
     await expect.poll(() => f.h.store.get('SELECT state FROM schedules').state).toBe('paused');
     await page.setViewportSize({ width: 390, height: 844 }); await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    writeFileSync('.tmp/schedules-166/check-evidence.json', JSON.stringify({ schedule: plan, occurrence: run, page_errors: errors }, null, 2)); expect(errors).toEqual([]);
+    expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 test('user personal schedule pauses after revocation and its queued run never starts', async ({ page }) => {
@@ -66,7 +66,6 @@ test('user personal schedule pauses after revocation and its queued run never st
     const schedule = f.h.store.get('SELECT id,state,reason FROM schedules'), occurrence = f.h.store.get('SELECT id,state,reason FROM schedule_occurrences');
     expect(schedule.state).toBe('paused'); expect(occurrence.state).toBe('blocked'); expect(f.wire.sent.length).toBe(before);
     expect(f.h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='schedule.due'").n).toBe(0);
-    writeFileSync('.tmp/schedules-166/revocation-evidence.json', JSON.stringify({ schedule, occurrence, sends_before: before, sends_after: f.wire.sent.length }, null, 2));
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 test('a group destination of an event subscription stops at preview and before delivery once its binding no longer reaches the project', async ({ page }) => {
@@ -86,7 +85,6 @@ test('a group destination of an event subscription stops at preview and before d
     // The editor's default five-minute aggregation window has passed: the queued notification is checked before sending.
     const before = f.wire.sent.length; f.advance(300000); await f.worker.tick(); const delivery = f.h.store.get('SELECT id,state,last_error FROM notification_outbox');
     expect(delivery.state).toBe('blocked'); expect(f.wire.sent.length).toBe(before);
-    writeFileSync('.tmp/schedules-166/group-scope-evidence.json', JSON.stringify({ delivery, sends_before: before, sends_after: f.wire.sent.length }, null, 2));
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
