@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { ManagerError } from './docker.mjs';
-import { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
+import { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, resourceBounds, validResource } from './computer-resources.mjs';
+import { logFailure, validateCall as validateProjectCall } from './projects.mjs';
 
 /**
  * Assistant computers (#457): one short-lived container per conversation owner (a group, or a person's private chats and
