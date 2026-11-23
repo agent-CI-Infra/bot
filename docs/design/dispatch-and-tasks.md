@@ -29,7 +29,7 @@ flowchart TD
 ## 2. 通用任务引擎、队列与恢复（`src/tasks/`）
 
 - **统一任务抽象**：所有新任务统一为 `task.request`，携带通用检出目标 `target`（`issue` / `pr` / `branch` / `commit`）、版本化合同 `contract`（目标、范围、验收标准、交付终点）、可选直派角色 `executor_role` 与显式写入授权集合 `task_write_grants`（`review`、`pull_request`、`github`、`actions_rerun`）。
-- **任务一律以角色运行执行**：省略 `executor_role` 时由 Task Manager 团队协调，直派角色单独运行；Manager 开关退役前冻结、入口开关仍为关闭的旧任务，以单个 `dev` 角色在其配置的后端上运行（与 `src/roles/flow.ts` 对未受控入口的路由一致），不存在绕过角色的工具循环。
+- **任务一律以角色运行执行**：省略 `executor_role` 时由 Task Manager 团队协调（含重试报告评估），直派角色单独运行；Manager 开关退役前冻结、入口开关仍为关闭的旧任务，同样按退役开关解析、由 Manager 团队协调，不存在绕过角色的工具循环。
 - **三重写入闸门**：每次外部写入同时校验 **项目能力上限 `capability_ceiling` ∩ 任务 `task_write_grants` ∩ 来源/角色实时授权**；`grant_writes` 允许 Manager 或管理员在不越过上限的前提下动态调整运行中任务的写入授权。
 - **优先级队列与并发认领**：
   - 持久化 `priority`（`P0`–`P3`，默认 `P2`）与单调 `queue_seq`，在 `BEGIN IMMEDIATE` 事务中按优先级 + 序号原子认领，并受项目并发上限（1–32）约束；不抢占运行中任务。

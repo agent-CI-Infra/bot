@@ -16,7 +16,7 @@ import { skillFiles } from '../roles/definition.js';
 import { extractRepositorySkillFiles, pinRepositorySkillEntries, type PinnedRepositorySkills } from '../roles/skill-defaults.js';
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
-import { controlled, runRole, roleExecutionModel } from '../roles/run.js';
+import { runRole, roleExecutionModel } from '../roles/run.js';
 import { assertManagedExecution, sourcePolicies, taskReadScopes } from './management.js';
 import { ReadTokens } from '../agent/read-token.js';
 import { RepositoryExplorer, workspaceRepositoryTools } from '../agent/exploration.js';
@@ -294,19 +294,18 @@ export async function runRequest(
   const workspace = new Workspace(store, manager, task, redactor, guard, log);
   const spaces = roleWorkspaces(workspace);
   const origin = assertManagedExecution(store, task);
-  const generic = genericTask(task);
-  const entry = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request')) ? 'development' : 'request';
-  // A Task frozen before the Manager switches were retired (b45c5224) may still have its entry off. It keeps running
-  // without the Manager, as the single dev role on that role's configured backend, which is where flow.ts sends an
-  // uncontrolled entry too (#1256); no entry runs a bare tool loop.
-  const ownRole = origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null)
-    || (controlled(store, task, entry) ? null : 'dev');
+  // Without a named executor role the entry runs the Manager team. That includes a Task frozen before the Manager
+  // switches were retired (b45c5224) with its entry still off: it is resolved like the retired switches, so no entry
+  // runs a bare tool loop (#1256).
+  const ownRole = origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null);
 
   // #532: this entry's own limits follow the same budget configuration as every other entry — the executing role's
   // `budget_policy_ref` when it is `bounded` or `metered` — and keep today's entry defaults only when nothing is
   // configured. The command timeout keeps its role → project → default order inside resolveCommandTimeout.
   const budgetRole = () => ownRole ?? 'dev';
   const commandBudget = () => resolveCommandTimeout(store, task, budgetRole(), 180);
+  const generic = genericTask(task);
+  const entry = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request')) ? 'development' : 'request';
   const software = () => softwareRequest(task);
   const reviewDelivery = () => generic && input.delivery === 'review';
   if (software() && (!generic || ['acceptance', 'publish'].includes(String(task.phase)))) assertRequestPullRequest(store, task);
@@ -730,7 +729,7 @@ export async function runRequest(
     const stagedContextFiles = { ...contextFiles, ...repoSkillContextFiles };
     if (Object.keys(stagedContextFiles).length) await workspace.context(stagedContextFiles);
     await beginIssueProgress();
-    if (controlled(store, task, entry) && !ownRole) await assessRetryReport(store, task, workspace, github, guard, redactor);
+    if (!ownRole) await assessRetryReport(store, task, workspace, github, guard, redactor);
 
     const transferredConflictBases = new Set<string>();
     const activeConflictBaseSha = (): string | null => {

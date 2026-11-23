@@ -102,8 +102,9 @@ export async function saveManager(admin, id, change) {
 // The effective Manager prompt text of a project (#1122).
 export const managerSection = async (admin, id) => (await admin(`/api/repositories/${id}/manager`)).value.manager.prompt.effective;
 
-// Protocol fixtures for pre-Manager task snapshots (the Manager switch off), not project defaults: such a task runs as
-// the single dev role (#1256). Current/default Manager routing is exercised separately by manager-settings and roles-v2.
+// Protocol fixtures for pre-Manager task snapshots (the Manager switch off), not project defaults. An ordinary task
+// frozen this way runs under the Manager team (#1256). Current/default Manager routing is exercised separately by
+// manager-settings and roles-v2.
 export function pinLegacyTaskConfiguration(store, id) {
   const tasks = id ? store.all('SELECT * FROM tasks WHERE id=?', id) : store.all('SELECT * FROM tasks');
   for (const task of tasks) {
