@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommandOutput, maskedStream, outputLimit, backgroundOutputNotice } from './command-output.mjs';
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
-import { watchVolume, watchedVolume } from './disk.mjs';
+import { volume as readWorkspaceVolume, watchVolume, watchedVolume } from './disk.mjs';
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
 // persistent HOME of an assistant computer. Precompiled tools installed at build time live under /opt/preinstalled.
 const userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
@@ -32,7 +32,9 @@ export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=fal
   // Local mode shares the host process namespace: use task cleanup, never name-wide kills.
   if(local&&/(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value))return Promise.resolve({exit_code:126,output:'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.',timed_out:false,truncated:false});
   const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
-  const watch=watchVolume(volume ?? watchedVolume);
+  // Project computers watch only their data-disk work volume (never their RAM-backed /tmp tmpfs); assistant computers
+  // mount both /workspace and /tmp as disk-backed volumes, so watch both by severity tier (#1279).
+  const watch=watchVolume(volume ?? (assistant ? () => watchedVolume([workspaceRoot, '/tmp']) : readWorkspaceVolume));
   const run=keepBackground?backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory}):new Promise((resolve,reject)=>{
     const output=new CommandOutput();let fd,logPath=outputFile;
     if(logPath)fd=openSync(logPath,'w',0o600);

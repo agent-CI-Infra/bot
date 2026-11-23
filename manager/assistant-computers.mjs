@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { ManagerError } from './docker.mjs';
-import { CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
+import { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
 
 /**
  * Assistant computers (#457): one short-lived container per conversation owner (a group, or a person's private chats and
@@ -73,11 +73,11 @@ export function validateAssistantSettings(input, host = null) {
   if (input.egress !== undefined && typeof input.egress !== 'boolean') throw new ManagerError('invalid_assistant_settings', 400);
   // Docker refuses to create a container that is given more CPUs than the host has, and memory must stay within the
   // unified 75% host reserve cap (reserving 25% for the host OS, manager and control plane).
-  const hostCpus = typeof host === 'number' ? host : host?.cpus ?? null;
+  const hostCpus = typeof host === 'number' ? host : (host?.cpus ?? host?.fallback_cpus ?? null);
   const hostCapMb = typeof host === 'object' && host
     ? (host.memory_mb ? hostMemoryCap(host.memory_mb) : (host.fallback_cap_mb ?? null))
     : null;
-  if (hostCpus && input.cpus !== undefined && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
+  if (hostCpus !== null && input.cpus !== undefined && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
   if (hostCapMb !== null && input.memory_mb !== undefined && input.memory_mb > hostCapMb) throw new ManagerError('memory_exceeds_host', 400);
   return input;
 }
@@ -150,9 +150,9 @@ export class AssistantComputers {
         return this.lastHost;
       }
       // Valid response missing host CPU/memory fields is treated as unavailable (fail closed, never fail open to 16 GiB).
-      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
+      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB, fallback_cpus: CONSERVATIVE_FALLBACK_CPUS };
     } catch {
-      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
+      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB, fallback_cpus: CONSERVATIVE_FALLBACK_CPUS };
     }
   }
   async settingsView() {

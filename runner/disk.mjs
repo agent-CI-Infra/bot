@@ -21,13 +21,14 @@ export function volume(path = workspaceRoot) {
   } catch { return null; }
 }
 
-/** Checks both /workspace and /tmp (returns the tighter free-space state), so /tmp writes are also caught (#1279). */
-export function watchedVolume(paths = [workspaceRoot, '/tmp']) {
+/** Checks multiple mounts and returns the highest-severity state (full > low > healthy; ties broken by lowest free_bytes). */
+export function watchedVolume(paths = [workspaceRoot, '/tmp'], read = volume) {
+  const rank = s => (s.full ? 2 : s.low ? 1 : 0);
   let worst = null;
   for (const p of paths) {
-    const s = volume(p);
+    const s = read(p);
     if (!s) continue;
-    if (!worst || (s.full && !worst.full) || (s.low && !worst.low && !worst.full) || s.free_bytes < worst.free_bytes) worst = s;
+    if (!worst || rank(s) > rank(worst) || (rank(s) === rank(worst) && s.free_bytes < worst.free_bytes)) worst = s;
   }
   return worst;
 }

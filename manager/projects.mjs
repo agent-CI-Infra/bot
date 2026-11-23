@@ -41,6 +41,7 @@ const mib = 1024 * 1024;
 // (rounded down to 256 MiB). Applies uniformly to both inherited defaults (including 16 GiB on a 16 GiB host) and
 // explicit saves (#1279). When Docker /info transiently errors and no cached host info exists, fall back conservatively.
 export const CONSERVATIVE_FALLBACK_MEMORY_MB = 4096;
+export const CONSERVATIVE_FALLBACK_CPUS = 2;
 export function hostMemoryCap(hostMemoryMb) {
   if (!(typeof hostMemoryMb === 'number' && Number.isFinite(hostMemoryMb) && hostMemoryMb > 0)) return null;
   const reserveSafe = Math.floor((hostMemoryMb * 0.75) / 256) * 256;
@@ -126,6 +127,8 @@ export class Projects {
     this.reconcilingGlobal = null;
     this.globalReconcileState = { key: null, attempts: 0, nextRetryAt: 0 };
     this.globalBuildJob = null; this.projectBuildJobs = new Map();
+    // Atomic in-flight memory reservations across concurrent register/provision/configure/recover calls (#1279).
+    this.memoryReservations = new Map(); this.lastHost = null; this.lastFallback = null;
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
     this.images = new PrecompiledImageBuilder({ docker, db: this.db, deployment, logFailure });
@@ -353,28 +356,59 @@ export class Projects {
       setup_script: own.setup_script || '',
     };
   }
-  effectiveSpec(spec, host = this.lastHost ?? null) {
+  effectiveHost() {
+    return this.lastHost ?? this.lastFallback ?? null;
+  }
+  effectiveSpec(spec, host = this.effectiveHost()) {
     const effectiveMemoryMb = clampMemoryToHost(spec.memory_mb, host);
     const effectiveTmpMb = Math.min(spec.tmp_mb, effectiveMemoryMb);
     return { ...spec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
   }
-  allocatedMemoryMb(host = this.lastHost ?? null, excludeRepo = null) {
-    return this.list().filter(p => p.repository_id !== excludeRepo && ['ready', 'busy'].includes(p.state))
-      .reduce((sum, p) => {
-        const applied = p.applied ? JSON.parse(p.applied) : null;
-        return sum + (typeof applied?.memory_mb === 'number' ? applied.memory_mb : this.effectiveSpec(this.spec(p.repository_id), host).memory_mb);
-      }, 0);
+  allocatedMemoryMb(host = this.effectiveHost(), excludeRepo = null) {
+    const byRepo = new Map();
+    for (const p of this.list()) {
+      if (p.repository_id === excludeRepo || !['ready', 'busy'].includes(p.state)) continue;
+      const applied = p.applied ? JSON.parse(p.applied) : null;
+      byRepo.set(p.repository_id, typeof applied?.memory_mb === 'number' ? applied.memory_mb : this.effectiveSpec(this.spec(p.repository_id), host).memory_mb);
+    }
+    for (const [r, reserved] of this.memoryReservations) {
+      if (r === excludeRepo) continue;
+      byRepo.set(r, Math.max(byRepo.get(r) ?? 0, reserved));
+    }
+    let total = 0;
+    for (const v of byRepo.values()) total += v;
+    return total;
+  }
+  // Synchronous (atomic in Node's single-threaded event loop) aggregate memory check + reservation for repo (#1279).
+  reserveMemory(repo, requestedMb, hostInfo, hasOwnMemory) {
+    const hostCapMb = hostInfo?.memory_mb ? hostMemoryCap(hostInfo.memory_mb) : (hostInfo?.fallback_cap_mb ?? null);
+    let effectiveMemoryMb = requestedMb;
+    if (hostCapMb !== null) {
+      const otherAllocatedMb = this.allocatedMemoryMb(hostInfo, repo);
+      const remainingMb = hostCapMb - otherAllocatedMb;
+      if (effectiveMemoryMb > remainingMb) {
+        const clampedRemaining = Math.floor(remainingMb / 256) * 256;
+        if (hasOwnMemory || clampedRemaining < resourceBounds.memory_mb[0]) {
+          throw new ManagerError('host_memory_exhausted', 507);
+        }
+        effectiveMemoryMb = clampedRemaining;
+      }
+    }
+    this.memoryReservations.set(repo, effectiveMemoryMb);
+    return effectiveMemoryMb;
   }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
     const { spec: _saved, build, setup, applied, spec_revision: specRevision, configured_keys: configuredKeys, ...state } = project, rawSpec = this.spec(repo), own = this.own(repo);
-    const hostCapMb = this.lastHost?.memory_mb ? hostMemoryCap(this.lastHost.memory_mb) : (this.lastHost?.fallback_cap_mb ?? null);
-    const baseEff = this.effectiveSpec(rawSpec);
+    const host = this.effectiveHost();
+    const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
+    const hostCpusCap = host?.cpus ?? host?.fallback_cpus ?? null;
+    const baseEff = this.effectiveSpec(rawSpec, host);
     let effMemoryMb = baseEff.memory_mb;
     if (hostCapMb !== null && own.memory_mb === undefined) {
-      const remainingMb = Math.floor((hostCapMb - this.allocatedMemoryMb(this.lastHost, repo)) / 256) * 256;
+      const remainingMb = Math.floor((hostCapMb - this.allocatedMemoryMb(host, repo)) / 256) * 256;
       if (effMemoryMb > remainingMb && remainingMb >= resourceBounds.memory_mb[0]) effMemoryMb = remainingMb;
     }
     const spec = { ...baseEff, memory_mb: effMemoryMb, tmp_mb: Math.min(baseEff.tmp_mb, effMemoryMb) };
@@ -396,12 +430,12 @@ export class Projects {
       (isDeferredBuild && ['failed', 'cancelled'].includes(String(buildInfo?.state || '')))
       || (!!this.approvedImageId && resource?.image === this.approvedImageId)
     );
-    const effectiveDefaults = this.effectiveSpec(this.resourceDefaults());
+    const effectiveDefaults = this.effectiveSpec(this.resourceDefaults(), host);
     // inherited: the resources that follow the default; resources_pending: the container still has other resources.
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
       ...spec, configured_memory_mb: rawSpec.memory_mb, host_clamped: spec.memory_mb !== rawSpec.memory_mb,
-      host_memory_cap_mb: hostCapMb, host_cpus: this.lastHost?.cpus ?? null, host_memory_mb: this.lastHost?.memory_mb ?? null,
+      host_memory_cap_mb: hostCapMb, host_cpus: hostCpusCap, host_memory_mb: host?.memory_mb ?? null,
       spec_revision: Number(specRevision) || 0, configured_keys: configuredKeys ? JSON.parse(configuredKeys) : null, build: buildInfo, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
       defaults: resources(effectiveDefaults), global_defaults: { ...globalDefaults, ...resources(effectiveDefaults) },
       own: {
@@ -418,16 +452,22 @@ export class Projects {
       toolchain_missing: toolchainMissing } };
   }
   async hostInfo() {
+    const fallback = () => {
+      if (this.lastHost) return this.lastHost;
+      this.lastFallback = { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB, fallback_cpus: CONSERVATIVE_FALLBACK_CPUS };
+      return this.lastFallback;
+    };
     try {
       const info = await this.docker.request('GET', '/info');
       if (info?.NCPU > 0 && info?.MemTotal > 0) {
         this.lastHost = { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) };
+        this.lastFallback = null;
         return this.lastHost;
       }
       // Valid response missing host CPU/memory fields is treated as unavailable (fail closed, never fail open to 16 GiB).
-      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
+      return fallback();
     } catch {
-      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
+      return fallback();
     }
   }
   // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
@@ -473,7 +513,8 @@ export class Projects {
     // 75% safety cap (reserving 25% for host OS, manager and control plane); project /tmp tmpfs must fit in RAM.
     const host = await this.hostInfo();
     const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
-    if (host?.cpus && input.cpus !== undefined && input.cpus > host.cpus) throw new ManagerError('cpus_exceed_host', 400);
+    const hostCpusCap = host?.cpus ?? host?.fallback_cpus ?? null;
+    if (hostCpusCap !== null && input.cpus !== undefined && input.cpus > hostCpusCap) throw new ManagerError('cpus_exceed_host', 400);
     if (hostCapMb !== null && input.memory_mb !== undefined && input.memory_mb > hostCapMb) throw new ManagerError('memory_exceeds_host', 400);
     const nextMemoryMb = clampMemoryToHost(input.memory_mb ?? this.resourceDefaults().memory_mb, host);
     if (input.tmp_mb !== undefined && input.tmp_mb > nextMemoryMb) throw new ManagerError('tmp_exceeds_memory', 400);
@@ -819,83 +860,74 @@ export class Projects {
   async provision(repo, { forceSetup = false, deferBuild = false } = {}) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
     const hostInfo = await this.hostInfo();
-    // Apply the unified 75% host-memory reserve cap and aggregate project budget across running (ready/busy) projects (#1279).
+    // Atomically check and reserve aggregate project memory (synchronous, zero awaits between check and reserve, #1279).
     const baseSpec = this.effectiveSpec(spec, hostInfo);
-    const hostCapMb = hostInfo?.memory_mb ? hostMemoryCap(hostInfo.memory_mb) : (hostInfo?.fallback_cap_mb ?? null);
-    let effectiveMemoryMb = baseSpec.memory_mb;
-    if (hostCapMb !== null) {
-      const otherAllocatedMb = this.allocatedMemoryMb(hostInfo, repo);
-      const remainingMb = hostCapMb - otherAllocatedMb;
-      if (effectiveMemoryMb > remainingMb) {
-        const hasOwnMemory = this.own(repo).memory_mb !== undefined;
-        const clampedRemaining = Math.floor(remainingMb / 256) * 256;
-        if (hasOwnMemory || clampedRemaining < resourceBounds.memory_mb[0]) {
-          throw new ManagerError('host_memory_exhausted', 507);
-        }
-        effectiveMemoryMb = clampedRemaining;
+    const effectiveMemoryMb = this.reserveMemory(repo, baseSpec.memory_mb, hostInfo, this.own(repo).memory_mb !== undefined);
+    try {
+      const effectiveTmpMb = Math.min(baseSpec.tmp_mb, effectiveMemoryMb);
+      const effectiveSpec = { ...baseSpec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
+      // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
+      // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
+      // memory whether or not the host has swap.
+      const tmpfs = `rw,exec,nosuid,nodev,size=${effectiveTmpMb * mib},mode=1777`, memory = effectiveMemoryMb * mib, approved = await this.resolveImage(repo, effectiveSpec, { deferBuild });
+      // Repository variables reach commands through the runner, which reads the names listed in BOT_PROJECT_ENV_KEYS.
+      const env = ['HOME=/workspace/home', 'LANG=C.UTF-8', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(spec.env).join(',')}`];
+      let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
+      if (!resource) { this.db.prepare('INSERT INTO resources VALUES(?,?,?)').run(repo, generation, approved.Id); resource = { image: approved.Id }; }
+      if (!await this.inspect(repo, generation, 'volume')) await this.docker.request('POST', '/volumes/create', { Name: names.volume, Labels: this.labels(repo, generation, 'volume') });
+      await this.inspect(repo, generation, 'volume');
+      await this.notesVolume(repo);
+      const toolsVolume = await this.agentToolsVolume();
+      const resultMounts = await this.resultMount(computerResultOwner('project',repo));
+      let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
+      // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
+      // provisioned; the work volume and generation stay. This never happens in the middle of a command.
+      const networkStale = network && network.Internal !== !spec.egress, host = container?.HostConfig;
+      // Compare only the variables the manager sets (the image adds its own, such as PATH); old names come from BOT_PROJECT_ENV_KEYS.
+      const current = container?.Config?.Env || [], listed = current.find(e => e.startsWith('BOT_PROJECT_ENV_KEYS='))?.slice(21).split(',').filter(Boolean) || [];
+      const managed = new Set(['HOME', 'LANG', 'BOT_PROJECT_ENV_KEYS', ...Object.keys(spec.env), ...listed]);
+      const envStale = container && JSON.stringify(current.filter(e => managed.has(e.slice(0, e.indexOf('=')))).sort()) !== JSON.stringify([...env].sort());
+      const toolsMountStale = toolsVolume
+        ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === toolsVolume && m.Target === '/opt/agent-tools' && m.ReadOnly === true)
+        : !!host?.Mounts?.some(m => m.Target === '/opt/agent-tools');
+      if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
+        || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
+        || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
+        || toolsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
+        if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
+        await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
       }
-    }
-    const effectiveTmpMb = Math.min(baseSpec.tmp_mb, effectiveMemoryMb);
-    const effectiveSpec = { ...baseSpec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
-    // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
-    // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
-    // memory whether or not the host has swap.
-    const tmpfs = `rw,exec,nosuid,nodev,size=${effectiveTmpMb * mib},mode=1777`, memory = effectiveMemoryMb * mib, approved = await this.resolveImage(repo, effectiveSpec, { deferBuild });
-    // Repository variables reach commands through the runner, which reads the names listed in BOT_PROJECT_ENV_KEYS.
-    const env = ['HOME=/workspace/home', 'LANG=C.UTF-8', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(spec.env).join(',')}`];
-    let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
-    if (!resource) { this.db.prepare('INSERT INTO resources VALUES(?,?,?)').run(repo, generation, approved.Id); resource = { image: approved.Id }; }
-    if (!await this.inspect(repo, generation, 'volume')) await this.docker.request('POST', '/volumes/create', { Name: names.volume, Labels: this.labels(repo, generation, 'volume') });
-    await this.inspect(repo, generation, 'volume');
-    await this.notesVolume(repo);
-    const toolsVolume = await this.agentToolsVolume();
-    const resultMounts = await this.resultMount(computerResultOwner('project',repo));
-    let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
-    // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
-    // provisioned; the work volume and generation stay. This never happens in the middle of a command.
-    const networkStale = network && network.Internal !== !spec.egress, host = container?.HostConfig;
-    // Compare only the variables the manager sets (the image adds its own, such as PATH); old names come from BOT_PROJECT_ENV_KEYS.
-    const current = container?.Config?.Env || [], listed = current.find(e => e.startsWith('BOT_PROJECT_ENV_KEYS='))?.slice(21).split(',').filter(Boolean) || [];
-    const managed = new Set(['HOME', 'LANG', 'BOT_PROJECT_ENV_KEYS', ...Object.keys(spec.env), ...listed]);
-    const envStale = container && JSON.stringify(current.filter(e => managed.has(e.slice(0, e.indexOf('=')))).sort()) !== JSON.stringify([...env].sort());
-    const toolsMountStale = toolsVolume
-      ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === toolsVolume && m.Target === '/opt/agent-tools' && m.ReadOnly === true)
-      : !!host?.Mounts?.some(m => m.Target === '/opt/agent-tools');
-    if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
-      || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
-      || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
-      || toolsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
-      if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
-      await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
-    }
-    if (resource.image !== approved.Id) { this.db.prepare('UPDATE resources SET image=? WHERE repository_id=? AND generation=?').run(approved.Id, repo, generation); resource = { image: approved.Id }; }
-    if (networkStale) { await this.docker.request('DELETE', `/networks/${names.network}`); network = null; }
-    if (!network) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: !spec.egress, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
-    await this.inspect(repo, generation, 'network');
-    if (!container) {
-      const mounts = [
-        { Type: 'volume', Source: names.volume, Target: '/workspace' },
-        { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
-        ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
-        ...resultMounts,
-      ];
-      await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
-        Cmd: ['node', '/opt/runner/idle.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),
-        HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
-          Memory: memory, MemorySwap: memory, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
-          Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
-          Mounts: mounts } });
+      if (resource.image !== approved.Id) { this.db.prepare('UPDATE resources SET image=? WHERE repository_id=? AND generation=?').run(approved.Id, repo, generation); resource = { image: approved.Id }; }
+      if (networkStale) { await this.docker.request('DELETE', `/networks/${names.network}`); network = null; }
+      if (!network) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: !spec.egress, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
+      await this.inspect(repo, generation, 'network');
+      if (!container) {
+        const mounts = [
+          { Type: 'volume', Source: names.volume, Target: '/workspace' },
+          { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
+          ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
+          ...resultMounts,
+        ];
+        await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
+          Cmd: ['node', '/opt/runner/idle.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),
+          HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
+            Memory: memory, MemorySwap: memory, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
+            Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
+            Mounts: mounts } });
+        container = await this.inspect(repo, generation, 'container');
+      }
+      this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), repo);
+      if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
+      // Readiness is a protocol and journal check, not a Docker running flag.
+      const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
+      if (!health.ok || !health.result.ready) throw new ManagerError('runner_not_ready');
       container = await this.inspect(repo, generation, 'container');
+      this.update(repo, 'ready', 'ready', null, container.State.StartedAt);
+      this.prune(repo, true);
+      return this.get(repo);
+    } finally {
+      this.memoryReservations.delete(repo);
     }
-    this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), repo);
-    if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
-    // Readiness is a protocol and journal check, not a Docker running flag.
-    const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
-    if (!health.ok || !health.result.ready) throw new ManagerError('runner_not_ready');
-    container = await this.inspect(repo, generation, 'container');
-    this.update(repo, 'ready', 'ready', null, container.State.StartedAt);
-    this.prune(repo, true);
-    return this.get(repo);
   }
   // Removes journal records older than a day from a running computer's work volume, after each provision and every
   // six hours. It runs in the background and outside the project lock, without a time limit: it deletes only records no
@@ -1124,9 +1156,16 @@ export class Projects {
         // describe() reports image_pending=true so the control plane switches cleanly via claim-gated idle refresh.
         if (!commitSpec) return;
         if (current.desired === 'ready' && current.state !== 'reset_failed') {
-          this.background.delete(repo);
-          await this.stopGeneration(repo, current.generation);
-          await this.provision(repo);
+          const applyHost = await this.hostInfo();
+          const applyBase = this.effectiveSpec(this.spec(repo), applyHost);
+          this.reserveMemory(repo, applyBase.memory_mb, applyHost, this.own(repo).memory_mb !== undefined);
+          try {
+            this.background.delete(repo);
+            await this.stopGeneration(repo, current.generation);
+            await this.provision(repo);
+          } finally {
+            this.memoryReservations.delete(repo);
+          }
         }
       }).catch(error => logFailure(`project ${repo} apply after precompiled build failed`, error));
       job.applyPromise = apply;
@@ -1314,40 +1353,57 @@ export class Projects {
           };
           const hostInfoForConfigure = await this.hostInfo();
           const hostCapForConfigure = hostInfoForConfigure?.memory_mb ? hostMemoryCap(hostInfoForConfigure.memory_mb) : (hostInfoForConfigure?.fallback_cap_mb ?? null);
+          const hostCpusForConfigure = hostInfoForConfigure?.cpus ?? hostInfoForConfigure?.fallback_cpus ?? null;
           if (requested.cpus != null || requested.memory_mb != null || requested.tmp_mb != null) {
-            if (hostInfoForConfigure?.cpus && requested.cpus != null && requested.cpus > hostInfoForConfigure.cpus) throw Object.assign(new ManagerError('cpus_exceed_host', 400), { untouched: true });
+            if (hostCpusForConfigure !== null && requested.cpus != null && requested.cpus > hostCpusForConfigure) throw Object.assign(new ManagerError('cpus_exceed_host', 400), { untouched: true });
             if (hostCapForConfigure !== null && requested.memory_mb != null && requested.memory_mb > hostCapForConfigure) throw Object.assign(new ManagerError('memory_exceeds_host', 400), { untouched: true });
             const effectiveNextMemory = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure);
             if (requested.tmp_mb != null && requested.tmp_mb > effectiveNextMemory) throw Object.assign(new ManagerError('tmp_exceeds_memory', 400), { untouched: true });
           }
           nextSpec.memory_mb = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure);
           nextSpec.tmp_mb = Math.min(nextSpec.tmp_mb, nextSpec.memory_mb);
-          const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
-          if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
-          const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
-          const projectOverlay = { packages: normalizePackages(own.packages || []), setup_script: own.setup_script || '', env: own.env || {} };
-          const requestedKeys = Object.keys(requested);
-          const cache = await this.images.checkLayeredCache({ approvedImage: approved, globalSpec: globalEnv, projectSpec: projectOverlay, egress: nextSpec.egress });
-          const needsBuild = forceRebuild ? (nextSpec.packages.length > 0 || !!normalizeScript(globalEnv.setup_script) || !!normalizeScript(projectOverlay.setup_script)) : !cache.cached;
-          if (!needsBuild) {
-            const pendingJob = this.projectBuildJobs.get(repo);
-            if (pendingJob) { pendingJob.superseded = true; pendingJob.handle.cancel(); this.projectBuildJobs.delete(repo); }
-            this.db.prepare('UPDATE projects SET spec=?, spec_revision=spec_revision+1, configured_keys=? WHERE repository_id=?')
-              .run(JSON.stringify(own), JSON.stringify(requestedKeys), repo);
-            if (project.desired === 'ready' && project.state !== 'reset_failed') {
-              this.background.delete(repo); await this.stopGeneration(repo, project.generation); await this.provision(repo);
-            } else {
-              const finished_at = new Date().toISOString();
-              this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({
-                state: cache.tag ? 'ready' : 'none', tag: cache.tag, image_key: cache.image_key, toolchain,
-                packages: nextSpec.packages, can_cancel: false, finished_at,
-              }), repo);
-              this.recordPrecompiledSetup(repo, project.generation, globalEnv.setup_script, projectOverlay.setup_script, 'succeeded', finished_at, null);
+          // Pre-check & reserve aggregate memory BEFORE saving spec or stopping a running container (#1279 F2),
+          // throwing untouched 507 so the running project stays healthy if the host cannot fit the new size.
+          let reservedForConfigure = false;
+          if (project.desired === 'ready' && project.state !== 'reset_failed') {
+            try {
+              nextSpec.memory_mb = this.reserveMemory(repo, nextSpec.memory_mb, hostInfoForConfigure, own.memory_mb !== undefined);
+              nextSpec.tmp_mb = Math.min(nextSpec.tmp_mb, nextSpec.memory_mb);
+              reservedForConfigure = true;
+            } catch (error) {
+              throw Object.assign(error, { untouched: true });
             }
-          } else {
-            // Asynchronous build outside the project lock: running container and tasks stay uninterrupted while
-            // live progress streams and callers may cancel at any time.
-            this.startProjectBuild(repo, { approvedImage: approved, toolchain, globalSpec: globalEnv, nextOwn: own, nextSpec, requestedKeys, forceRebuild });
+          }
+          try {
+            const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
+            if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
+            const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;
+            const projectOverlay = { packages: normalizePackages(own.packages || []), setup_script: own.setup_script || '', env: own.env || {} };
+            const requestedKeys = Object.keys(requested);
+            const cache = await this.images.checkLayeredCache({ approvedImage: approved, globalSpec: globalEnv, projectSpec: projectOverlay, egress: nextSpec.egress });
+            const needsBuild = forceRebuild ? (nextSpec.packages.length > 0 || !!normalizeScript(globalEnv.setup_script) || !!normalizeScript(projectOverlay.setup_script)) : !cache.cached;
+            if (!needsBuild) {
+              const pendingJob = this.projectBuildJobs.get(repo);
+              if (pendingJob) { pendingJob.superseded = true; pendingJob.handle.cancel(); this.projectBuildJobs.delete(repo); }
+              this.db.prepare('UPDATE projects SET spec=?, spec_revision=spec_revision+1, configured_keys=? WHERE repository_id=?')
+                .run(JSON.stringify(own), JSON.stringify(requestedKeys), repo);
+              if (project.desired === 'ready' && project.state !== 'reset_failed') {
+                this.background.delete(repo); await this.stopGeneration(repo, project.generation); await this.provision(repo);
+              } else {
+                const finished_at = new Date().toISOString();
+                this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(JSON.stringify({
+                  state: cache.tag ? 'ready' : 'none', tag: cache.tag, image_key: cache.image_key, toolchain,
+                  packages: nextSpec.packages, can_cancel: false, finished_at,
+                }), repo);
+                this.recordPrecompiledSetup(repo, project.generation, globalEnv.setup_script, projectOverlay.setup_script, 'succeeded', finished_at, null);
+              }
+            } else {
+              // Asynchronous build outside the project lock: running container and tasks stay uninterrupted while
+              // live progress streams and callers may cancel at any time.
+              this.startProjectBuild(repo, { approvedImage: approved, toolchain, globalSpec: globalEnv, nextOwn: own, nextSpec, requestedKeys, forceRebuild });
+            }
+          } finally {
+            if (reservedForConfigure) this.memoryReservations.delete(repo);
           }
           result = this.describe(repo);
         } else if (action === 'refresh') {
