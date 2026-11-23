@@ -375,7 +375,8 @@ export class AssistantComputers {
       }
       // Aggregate memory admission on known hosts (#1279): cgroup Memory is a burst ceiling rather than reserved RAM,
       // so cap concurrently busy assistant containers at 2x the host's 75% safe memory cap (= 1.5x host RAM) minus
-      // memory already allocated to running project computers. Over-budget requests queue (no unconditional floor).
+      // memory of actively busy project computers (idle 'ready' project containers use ~7.5 MiB RSS and are excluded).
+      // Over-budget requests queue (no unconditional floor).
       const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
       if (hostCapMb !== null) {
         const busyLeases = [...this.leases.values()].filter(l => l.owner !== owner && (l.state === 'busy' || l.state === 'creating'));

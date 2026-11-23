@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { Projects } from '../../../../manager/projects.mjs';
+import { AssistantComputers } from '../../../../manager/assistant-computers.mjs';
 import { ManagerError } from '../../../../manager/docker.mjs';
 import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 import { fail } from '../../../../dist/core/security.js';
@@ -143,120 +144,65 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
   assert.equal(desc301.host_memory_cap_mb, 12288);
   assert.equal(desc301.resources_pending, false, 'applied matches effective clamped spec');
 
-  // 1b. Two projects on a 16 GiB host: second project fails closed when 301 consumes the full 12 GiB project budget,
-  // and succeeds (auto-clamped to remaining 6 GiB) once 301 is lowered to 6 GiB (total 12 GiB <= 75% host cap).
-  await assert.rejects(f.projects.register('304'), err => err.message === 'host_memory_exhausted' && err.status === 507);
-  await f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 6144 } });
-  assert.equal(f.host('301').Memory, 6144 * mib);
-  await f.projects.register('305');
-  assert.equal(f.host('305').Memory, 6144 * mib);
-  assert.equal(f.projects.allocatedMemoryMb(), 12288);
-  // 1c. Configuring 301 up to 12 GiB while 305 uses 6 GiB must fail closed BEFORE mutating spec or stopping 301 (#1279 F2).
-  await assert.rejects(
-    f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } }),
-    err => err.message === 'host_memory_exhausted' && err.status === 507,
-  );
-  assert.equal(f.projects.get('301').state, 'ready', '301 remains ready after aggregate memory rejection');
-  assert.equal(f.projects.get('305').state, 'ready', '305 remains ready');
-  assert.equal(f.host('301').Memory, 6144 * mib, '301 container stays untouched at 6 GiB');
-  assert.equal(f.projects.own('301').memory_mb, 6144, '301 saved spec is not mutated on rejected configure');
-  // Stop both 16 GiB test projects before running the concurrent admission test.
-  await f.projects.operate('301', 'stop', { operation_id: id(), generation: 1 });
-  await f.projects.operate('305', 'stop', { operation_id: id(), generation: 1 });
+  // 1b. Multiple enabled repositories on a 16 GiB host: Docker --memory is a per-container ceiling (idle project
+  // containers only run idle.mjs ~7.5 MiB RSS), so all repos register and stay ready with each container individually
+  // clamped to 75% host cap (12288 MiB), while busyMemoryMb() tracks only actively executing ('busy') projects.
+  await Promise.all([f.projects.register('304'), f.projects.register('305'), f.projects.register('306')]);
+  for (const repo of ['301', '304', '305', '306']) {
+    assert.equal(f.projects.get(repo).state, 'ready', `${repo} stays ready on multi-repo 16 GiB host`);
+    assert.equal(f.host(repo).Memory, 12288 * mib, `${repo} clamped individually to 75% host cap`);
+  }
+  assert.equal(f.projects.busyMemoryMb(), 0, 'idle ready project containers do not consume busyMemoryMb');
 
-  // 1d. Concurrent register() calls on an empty 16 GiB host must reserve memory atomically (#1279 F1):
-  // exactly one succeeds at 12288 MiB and the other rejects with 507 host_memory_exhausted (never 24576 MiB).
-  const concurrent = await Promise.allSettled([f.projects.register('306'), f.projects.register('307')]);
-  const fulfilled = concurrent.filter(r => r.status === 'fulfilled');
-  const rejected = concurrent.filter(r => r.status === 'rejected');
-  assert.equal(fulfilled.length, 1, 'exactly one concurrent register succeeds within 12 GiB host cap');
-  assert.equal(rejected.length, 1, 'second concurrent register is rejected atomically');
-  assert.equal(rejected[0].reason?.message, 'host_memory_exhausted');
-  assert.equal(rejected[0].reason?.status, 507);
-  assert.equal(f.projects.allocatedMemoryMb(), 12288);
-  const winnerRepo = fulfilled[0].value.repository_id;
-  await f.projects.operate(winnerRepo, 'stop', { operation_id: id(), generation: 1 });
+  // 1c. AssistantComputers wired to projects.busyMemoryMb() does not starve when idle projects exist,
+  // and strictly queues new assistant turns when actively busy projects exhaust the 2x hostCap budget.
+  const homes = join(f.directory, 'assistant-homes');
+  const ownerA = 'a'.repeat(32);
+  mkdirSync(join(homes, ownerA, 'home-1'), { recursive: true });
+  f.docker.homesMount = homes;
+  const assistants = new AssistantComputers({
+    docker: f.docker,
+    db: f.projects.db,
+    deployment: 'fixture',
+    image: 'approved',
+    homes,
+    allocatedMemoryMb: () => f.projects.busyMemoryMb(),
+  });
+  const acqIdle = await assistants.acquire(ownerA, { turn: 't-idle', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.equal(acqIdle.state, 'ready', 'idle projects must not starve assistant computer admission');
+  assert.equal(f.docker.containers.get(assistants.name(ownerA)).HostConfig.Memory, 12288 * mib);
+  await assistants.release(ownerA, { turn: 't-idle' });
+  await assistants.remove(ownerA);
 
-  // 1e. Host shrink during refresh must fail closed untouched without stopping a healthy running project (#1279 F8).
-  f.docker.info = { NCPU: 8, MemTotal: 32768 * mib }; // 75% cap = 24576 MiB
-  await f.projects.register('308');
-  await f.projects.operate('308', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } });
-  await f.projects.register('309');
-  await f.projects.operate('309', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } });
-  assert.equal(f.projects.allocatedMemoryMb(), 24576);
-  // Host shrinks to 16 GiB (cap = 12288 MiB): refreshing 308 while 309 holds 12288 MiB leaves 0 MiB -> untouched 507.
-  f.docker.info = { NCPU: 4, MemTotal: 16384 * mib };
-  await assert.rejects(
-    f.projects.operate('308', 'refresh', { operation_id: id(), generation: 1 }),
-    err => err.message === 'host_memory_exhausted' && err.status === 507,
-  );
-  assert.equal(f.projects.get('308').state, 'ready', '308 stays ready after host-shrink refresh rejection');
-  assert.equal(f.projects.get('309').state, 'ready', '309 stays ready');
-  assert.equal(f.docker.containers.get(f.projects.names('308', 1).container).State.Running, true, '308 container stays running');
-  await f.projects.operate('308', 'stop', { operation_id: id(), generation: 1 });
-  await f.projects.operate('309', 'stop', { operation_id: id(), generation: 1 });
+  // Mark two 12288 MiB projects as busy (= 24576 MiB = full 2x 12288 MiB budget) -> assistant turn strictly queues.
+  f.projects.db.prepare("UPDATE projects SET state='busy' WHERE repository_id IN ('301', '304')").run();
+  assert.equal(f.projects.busyMemoryMb(), 24576);
+  const acqBusy = await assistants.acquire(ownerA, { turn: 't-busy', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.deepEqual(acqBusy, { state: 'queued', reason: 'capacity', position: 1 });
+  f.projects.db.prepare("UPDATE projects SET state='ready' WHERE repository_id IN ('301', '304')").run();
+  for (const repo of ['301', '304', '305', '306']) await f.projects.operate(repo, 'stop', { operation_id: id(), generation: 1 });
 
-  // 1f. Concurrent start / reset / recovery + register on a 16 GiB host: memory is reserved BEFORE entering
-  // recovering/resetting or awaiting stopAll(), so a concurrent register() cannot steal the budget (#1279).
-  f.docker.info = { NCPU: 4, MemTotal: 16384 * mib }; // 75% cap = 12288 MiB
-  await f.projects.register('310');
-  await f.projects.operate('310', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 6144 } });
-  await f.projects.register('311');
-  await f.projects.operate('311', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 6144 } });
-  await f.projects.operate('310', 'stop', { operation_id: id(), generation: 1 });
-
-  const holdStopAllOnce = (targetRepo) => {
-    const orig = f.projects.stopAll.bind(f.projects);
-    let entered, release;
-    const arrived = new Promise(r => { entered = r; });
-    const gate = new Promise(r => { release = r; });
-    f.projects.stopAll = async (r) => {
-      if (r === targetRepo) {
-        f.projects.stopAll = orig;
-        entered();
-        await gate;
-      }
-      return orig(r);
-    };
-    return { arrived, release };
-  };
-
-  // Start A (310, stopped, 6144 MiB) while B (311, ready, 6144 MiB) runs; hold A in stopAll and try registering C (312).
-  let hold = holdStopAllOnce('310');
-  const startA = f.projects.operate('310', 'start', { operation_id: id(), generation: 1 });
-  await hold.arrived;
-  assert.equal(f.projects.get('310').state, 'recovering');
-  await assert.rejects(f.projects.register('312'), err => err.message === 'host_memory_exhausted' && err.status === 507);
-  hold.release();
-  await startA;
-  assert.equal(f.projects.get('310').state, 'ready');
-  assert.equal(f.projects.get('311').state, 'ready');
-  assert.equal(f.host('310').Memory, 6144 * mib);
-
-  // Equivalent reset + register race while A (310) is in resetting and held at stopAll.
-  hold = holdStopAllOnce('310');
-  const resetA = f.projects.operate('310', 'reset', { operation_id: id(), generation: 1 });
-  await hold.arrived;
-  assert.equal(f.projects.get('310').state, 'resetting');
-  await assert.rejects(f.projects.register('313'), err => err.message === 'host_memory_exhausted' && err.status === 507);
-  hold.release();
-  await resetA;
-  assert.equal(f.projects.get('310').state, 'ready');
-  assert.equal(f.projects.get('310').generation, 2);
-
-  // Equivalent check() crash-recovery + register race while A (310) is in recovering and held at stopAll.
-  f.docker.containers.get(f.projects.names('310', 2).container).State.Running = false;
-  hold = holdStopAllOnce('310');
-  const checkRun = f.projects.check();
-  await hold.arrived;
-  assert.equal(f.projects.get('310').state, 'recovering');
-  await assert.rejects(f.projects.register('314'), err => err.message === 'host_memory_exhausted' && err.status === 507);
-  hold.release();
-  await checkRun;
-  assert.equal(f.projects.get('310').state, 'ready');
-  assert.equal(f.projects.allocatedMemoryMb(), 12288);
-  await f.projects.operate('310', 'stop', { operation_id: id(), generation: 2 });
-  await f.projects.operate('311', 'stop', { operation_id: id(), generation: 1 });
+  // 1d. Upgrade recovery on a realistic 32 GiB host (31917 MiB RAM, 75% cap = 23808 MiB) with 11 active projects
+  // (8 inheriting default 16 GiB + 3 explicit 1-2 GiB) + 1 deleted project: ALL 11 recover to ready cleanly.
+  const f32 = fixture(t);
+  f32.docker.info = { NCPU: 14, MemTotal: 33468145664 }; // exact 31917 MiB host
+  const seedRepos = [
+    ['1001', null], ['1002', null], ['1003', { memory_mb: 1024 }], ['1004', { memory_mb: 2048 }],
+    ['1005', { memory_mb: 1024 }], ['1006', null], ['1007', null], ['1008', null],
+    ['1009', null], ['1010', null], ['1011', null],
+  ];
+  for (const [repo, spec] of seedRepos) {
+    f32.projects.db.prepare("INSERT INTO projects(repository_id,generation,state,desired,spec,applied) VALUES(?,1,'ready','ready',?,?)")
+      .run(repo, spec ? JSON.stringify(spec) : null, JSON.stringify({ cpus: 2, memory_mb: spec?.memory_mb ?? 4096, pids: 1024, tmp_mb: 1024 }));
+  }
+  f32.projects.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES('1012',1,'deleted','deleted')").run();
+  await f32.projects.recover();
+  for (const [repo, spec] of seedRepos) {
+    assert.equal(f32.projects.get(repo).state, 'ready', `repo ${repo} must recover cleanly on 32 GiB host`);
+    assert.equal(f32.host(repo).Memory, (spec?.memory_mb ?? 16384) * mib, `repo ${repo} memory ceiling`);
+  }
+  assert.equal(f32.projects.get('1012').state, 'deleted');
+  assert.equal(f32.projects.busyMemoryMb(), 0);
 
   // 2. 8 GiB host: clamps to 6 GiB (6144 MiB), explicit equal-to-host 8192 MiB is rejected on both setDefaults and configure.
   f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
