@@ -253,7 +253,7 @@ export class Publisher {
     const direct=this.store.get("SELECT 1 FROM tasks WHERE id=? AND repository_id=? AND kind IN ('task.request','task.development')",candidate.owner_task_id,this.task.repository_id)&&candidate.branch==='bot/task-'+candidate.owner_task_id;
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-')&&!direct)stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
-    const workflowFiles=assertWorkflowChangesAuthorized(this.task,this.github,candidate);
+    const workflowFiles=assertWorkflowChangesAuthorized(this.github,candidate);
     const save=()=>this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
     if(candidate.media?.length&&!candidate.hosted_media){
       this.store.transaction(()=>{
@@ -276,70 +276,88 @@ export class Publisher {
       if(actual===candidate.created_commit_sha){candidate.remote_sha=actual;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:actual,observed_at:new Date().toISOString()};save();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(current),operationId(this.task.id+':'+key));publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:actual,tree_sha:expected});return actual;}
       if(candidate.branch_confirmed || actual && actual!==candidate.expected_sha || !actual && candidate.expected_sha)stop('branch_head_changed','needs_replan','Publication branch differs from the expected head. Query read_publication_context; choose investigation, coordination, integration or help.');
     }
-    for(const file of candidate.files){
-      if(file.base64===undefined)continue; // Verified object already belongs to the source snapshot.
-      const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch',undefined,`发布前校验候选文件 ${file.path} 失败，内容与预期 SHA ${file.sha} 不一致。`);
-      const blob=await this.github.request('POST',this.github.path('/git/blobs'),{content:file.base64,encoding:'base64'});
-      if(blob.sha!==file.sha)stop('github_blob_mismatch',undefined,`GitHub 写入文件 ${file.path} 后返回的 SHA 不一致：预期 ${file.sha}，实际 ${blob.sha}。`);
+    const pushBranch=async(writeToken?:string)=>{
+      const writeRequest=(method:string,reqPath:string,body?:unknown)=>writeToken
+        ? this.github.request(method,reqPath,body,false,writeToken)
+        : this.github.request(method,reqPath,body);
+      const translateWorkflow403=<T>(work:()=>Promise<T>):Promise<T>=>work().catch(error=>{
+        if(workflowFiles.length&&error instanceof TaskError&&error.code==='github_permission_403')
+          stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
+        throw error;
+      });
+      for(const file of candidate.files){
+        if(file.base64===undefined)continue; // Verified object already belongs to the source snapshot.
+        const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch',undefined,`发布前校验候选文件 ${file.path} 失败，内容与预期 SHA ${file.sha} 不一致。`);
+        const blob=await translateWorkflow403(()=>writeRequest('POST',this.github.path('/git/blobs'),{content:file.base64,encoding:'base64'}));
+        if(blob.sha!==file.sha)stop('github_blob_mismatch',undefined,`GitHub 写入文件 ${file.path} 后返回的 SHA 不一致：预期 ${file.sha}，实际 ${blob.sha}。`);
+      }
+      // Skipped upstream entries (submodules, blobs GitHub will not let us download) stay as they are in the source tree.
+      // Hashing the merged manifest also rejects a candidate that overwrites an excluded path.
+      const skipped=candidate.skipped_files||[];
+      const entry=(f:any,sha=f.sha)=>({path:f.path,mode:f.mode,type:'blob',sha});
+      const snapshot=candidate.snapshot_files||[],upstream=new Map<string,any>(snapshot.map((f:any)=>[f.path,f])),paths=new Set(candidate.files.map((f:any)=>f.path));
+      const deletions=snapshot.filter((f:any)=>!paths.has(f.path)).map((f:any)=>entry(f,null));
+      const changes=candidate.files.filter((f:any)=>upstream.get(f.path)?.sha!==f.sha||upstream.get(f.path)?.mode!==f.mode).map((f:any)=>entry(f));
+      // Rebuilding a large repository's tree from every path can take GitHub longer than its 10-second request limit,
+      // which answers 502/504 on every retry, so only the changes go on top of the source tree. A path that turns from a
+      // file into a directory or back is not an update GitHub applies the same way; it, and any tree GitHub builds
+      // differently, falls back to the complete listing.
+      const before=[...upstream.keys(),...skipped.map((f:any)=>f.path)],files=new Set(before),directories=new Set(before.flatMap(parents));
+      const reshaped=changes.some((f:any)=>directories.has(f.path)||parents(f.path).some(path=>files.has(path)));
+      const create=(body:any)=>translateWorkflow403(()=>writeRequest('POST',this.github.path('/git/trees'),body));
+      let tree=candidate.source_tree&&changes.length+deletions.length&&!reshaped?await create({base_tree:candidate.source_tree,tree:[...changes,...deletions]}):null;
+      if(tree?.sha!==expected)tree=await create(skipped.length?{base_tree:candidate.source_tree,tree:[...candidate.files.map((f:any)=>entry(f)),...deletions]}:{tree:candidate.files.map((f:any)=>entry(f))});
+      if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
+      candidate.created_tree_sha=expected;
+      const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
+      const commit=candidate.created_commit_sha?{sha:candidate.created_commit_sha,tree:{sha:expected}}:await translateWorkflow403(()=>writeRequest('POST',this.github.path('/git/commits'),{message:this.published(implementationText(candidate,this.task.object_number).title),
+        tree:expected,parents:rebase?[candidate.base_sha]:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author}));
+      if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
+      candidate.created_commit_sha=commit.sha;save();
+      publicationFact(this.store,this.task,'commit_created',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected,expected_sha:candidate.expected_sha??null});
+      await this.validate();
+      const current=await observe();
+      if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','needs_replan',`发布分支 ${candidate.branch} 前发现 head 已变化，当前提交=${current.object.sha}。`);
+      if(!current&&candidate.expected_sha)stop('branch_disappeared','needs_replan',`待更新的分支 ${candidate.branch} 已不存在。`);
+      const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
+      const request=candidate.expected_sha?{sha:commit.sha,force:rebase}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
+      const find=async()=>{const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;};
+      // Pointing the bot's own branch at one commit is idempotent and GitHub reports the result exactly: a create that
+      // already landed answers 422 with the ref in place, a fast-forward to the same commit is a no-op. So an unknown answer
+      // (a 5xx or a dropped connection) is checked and sent again, instead of waiting for a person to release it.
+      const send=async()=>{
+        try{return await writeRequest(candidate.expected_sha?'PATCH':'POST',path,request);}
+        catch(error){
+          if(error instanceof TaskError&&error.code==='github_http_422'){const state=await find();if(state)return state;}
+          if(workflowFiles.length&&error instanceof TaskError&&error.code==='github_permission_403')
+            stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
+          throw error;
+        }
+      };
+      publicationFact(this.store,this.task,'branch_update_requested',{operation_key:key,branch:candidate.branch,target_sha:commit.sha,expected_sha:candidate.expected_sha??null});
+      const ref=await this.effect(key,'branch',request,send,find,true);
+      if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,`分支 ${candidate.branch} 发布未确认：预期提交 ${commit.sha}，返回 ${ref.object?.sha||'无提交'}。`);
+      const confirmed=await observe();
+      if(confirmed?.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,'Branch update receipt exists, but the current remote head is not confirmed. Query read_publication_context.');
+      candidate.remote_sha=commit.sha;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:commit.sha,observed_at:new Date().toISOString()};save();
+      publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected});
+      return commit.sha;
+    };
+    const needWorkflowToken=workflowFiles.length>0&&this.github.permissions?.workflows!=='write'&&this.github.isAppInstallation&&typeof this.github.withPermissions==='function';
+    if(!needWorkflowToken)return pushBranch();
+    let mintedOk=false;
+    try{
+      return await this.github.withPermissions({contents:'write',workflows:'write'},async(token,granted)=>{
+        if(granted&&Object.keys(granted).length>0&&granted.workflows!=='write')
+          stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,true));
+        mintedOk=true;
+        return pushBranch(token);
+      });
+    }catch(error){
+      if(!mintedOk&&error instanceof TaskError&&['github_permission_403','github_http_422'].includes(error.code))
+        stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,true));
+      throw error;
     }
-    // Skipped upstream entries (submodules, blobs GitHub will not let us download) stay as they are in the source tree.
-    // Hashing the merged manifest also rejects a candidate that overwrites an excluded path.
-    const skipped=candidate.skipped_files||[];
-    const entry=(f:any,sha=f.sha)=>({path:f.path,mode:f.mode,type:'blob',sha});
-    const snapshot=candidate.snapshot_files||[],upstream=new Map<string,any>(snapshot.map((f:any)=>[f.path,f])),paths=new Set(candidate.files.map((f:any)=>f.path));
-    const deletions=snapshot.filter((f:any)=>!paths.has(f.path)).map((f:any)=>entry(f,null));
-    const changes=candidate.files.filter((f:any)=>upstream.get(f.path)?.sha!==f.sha||upstream.get(f.path)?.mode!==f.mode).map((f:any)=>entry(f));
-    // Rebuilding a large repository's tree from every path can take GitHub longer than its 10-second request limit,
-    // which answers 502/504 on every retry, so only the changes go on top of the source tree. A path that turns from a
-    // file into a directory or back is not an update GitHub applies the same way; it, and any tree GitHub builds
-    // differently, falls back to the complete listing.
-    const before=[...upstream.keys(),...skipped.map((f:any)=>f.path)],files=new Set(before),directories=new Set(before.flatMap(parents));
-    const reshaped=changes.some((f:any)=>directories.has(f.path)||parents(f.path).some(path=>files.has(path)));
-    const create=async(body:any)=>{
-      try{return await this.github.request('POST',this.github.path('/git/trees'),body);}
-      catch(error){
-        if(workflowFiles.length&&error instanceof TaskError&&error.code==='github_permission_403')
-          stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
-        throw error;
-      }
-    };
-    let tree=candidate.source_tree&&changes.length+deletions.length&&!reshaped?await create({base_tree:candidate.source_tree,tree:[...changes,...deletions]}):null;
-    if(tree?.sha!==expected)tree=await create(skipped.length?{base_tree:candidate.source_tree,tree:[...candidate.files.map((f:any)=>entry(f)),...deletions]}:{tree:candidate.files.map((f:any)=>entry(f))});
-    if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
-    candidate.created_tree_sha=expected;
-    const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
-    const commit=candidate.created_commit_sha?{sha:candidate.created_commit_sha,tree:{sha:expected}}:await this.github.request('POST',this.github.path('/git/commits'),{message:this.published(implementationText(candidate,this.task.object_number).title),
-      tree:expected,parents:rebase?[candidate.base_sha]:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author});
-    if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
-    candidate.created_commit_sha=commit.sha;save();
-    publicationFact(this.store,this.task,'commit_created',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected,expected_sha:candidate.expected_sha??null});
-    await this.validate();
-    const current=await observe();
-    if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','needs_replan',`发布分支 ${candidate.branch} 前发现 head 已变化，当前提交=${current.object.sha}。`);
-    if(!current&&candidate.expected_sha)stop('branch_disappeared','needs_replan',`待更新的分支 ${candidate.branch} 已不存在。`);
-    const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
-    const request=candidate.expected_sha?{sha:commit.sha,force:rebase}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
-    const find=async()=>{const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;};
-    // Pointing the bot's own branch at one commit is idempotent and GitHub reports the result exactly: a create that
-    // already landed answers 422 with the ref in place, a fast-forward to the same commit is a no-op. So an unknown answer
-    // (a 5xx or a dropped connection) is checked and sent again, instead of waiting for a person to release it.
-    const send=async()=>{
-      try{return await this.github.request(candidate.expected_sha?'PATCH':'POST',path,request);}
-      catch(error){
-        if(error instanceof TaskError&&error.code==='github_http_422'){const state=await find();if(state)return state;}
-        if(workflowFiles.length&&error instanceof TaskError&&error.code==='github_permission_403')
-          stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
-        throw error;
-      }
-    };
-    publicationFact(this.store,this.task,'branch_update_requested',{operation_key:key,branch:candidate.branch,target_sha:commit.sha,expected_sha:candidate.expected_sha??null});
-    const ref=await this.effect(key,'branch',request,send,find,true);
-    if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,`分支 ${candidate.branch} 发布未确认：预期提交 ${commit.sha}，返回 ${ref.object?.sha||'无提交'}。`);
-    const confirmed=await observe();
-    if(confirmed?.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,'Branch update receipt exists, but the current remote head is not confirmed. Query read_publication_context.');
-    candidate.remote_sha=commit.sha;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:commit.sha,observed_at:new Date().toISOString()};save();
-    publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected});
-    return commit.sha;
   }
   async pullRequest(candidate:any,sha:string){
     if(candidate.media?.some((file: { path: string })=>!hostedMediaUrl(candidate.hosted_media,file.path)))

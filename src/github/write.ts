@@ -8,6 +8,7 @@ import { autoMergePolicy, githubMaintainer, isBotPullRequest, mergeBoundary, mer
 import { mergeQueue } from './merge-queue.js';
 import { hostedMediaUrl } from './hosted-pr-media.js';
 import { commentMediaSchema, planMarkdownMedia, publishHostedMedia, type StoredMedia } from './pull-request-media.js';
+import { formatWorkflowPaths, isWorkflowPath } from './workflow-changes.js';
 
 /**
  * github_write: one GitHub write tool for every agent, shaped like the GitHub REST API (#381).
@@ -303,11 +304,11 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   };
   if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges, workflow dispatches, and Actions run/job reruns or cancellations.`);
   if (input.merge_request !== undefined && !entry.merge && !entry.move) return { error: 'invalid_arguments', detail: 'merge_request goes only with PUT /pulls/{n}/merge or a write that moves the default branch.' };
-  // CI changes are bot pull requests that people review and merge (#931). github_write's token never has the Workflows
+  // CI changes are bot pull requests that people review and merge. github_write's token never has the Workflows
   // permission, so GitHub refuses a ref update that would change .github/workflows/; a file write there is refused here,
   // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
   if (entry.resource === 'contents' && /^\/contents\/\.github\/workflows(?:\/|$)/i.test(decodedPath(path)))
-    return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request: a development task a project administrator confirmed as a CI change, reviewed and merged by people.');
+    return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request through a development task, reviewed and merged by people.');
   const mediaTexts = extractHumanMediaTexts(entry, input.body);
   let mediaPlan: ReturnType<typeof planMarkdownMedia> | null = null;
   if (input.media !== undefined || mediaTexts.some(text => text.includes('workspace:'))) {
@@ -385,6 +386,18 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
       const reader = await client({ pull_requests: 'read', issues: 'read', contents: 'read' }, true, true), number = entry.number!;
       const pr = await reader.request('GET', reader.path('/pulls/' + number), undefined, true);
       if (!pr) return refuse('github_write_target_missing', `Pull request #${number} was not found in this repository.`);
+      // Workflow changes must always be reviewed and merged by a human maintainer on GitHub, never through github_write
+      // (even under auto_merge_policy=allow_all or on a PAT bot account). Fail closed if PR files cannot be verified.
+      const prFiles = await reader.pages(reader.path(`/pulls/${number}/files`)).catch(() => null);
+      if (!prFiles || prFiles.length >= 3000) {
+        return refuse('github_workflow_merge_check_unavailable', `Could not verify whether pull request #${number} modifies .github/workflows/ (${!prFiles ? 'failed to list PR files' : 'PR exceeds 3000-file API limit'}). Nothing was sent; a human maintainer must review and merge it on GitHub.`);
+      }
+      const touchedWorkflows = [...new Set(prFiles.flatMap((f: any) =>
+        [f?.filename, f?.previous_filename].filter(isWorkflowPath).map(String),
+      ))].sort();
+      if (touchedWorkflows.length) {
+        return refuse('github_workflow_write_forbidden', `Pull request #${number} modifies .github/workflows/ (${formatWorkflowPaths(touchedWorkflows)}). Workflow changes are never merged through github_write (even under auto_merge_policy=allow_all); a human maintainer must review and merge this pull request on GitHub.`, { files: touchedWorkflows });
+      }
       const own = isBotPullRequest(store, repositoryId, number, pr.user ?? null, reader.actorId), policy = autoMergePolicy(store, repositoryId);
       let request: string | null = null;
       if (mergeNeedsRequest(policy, own)) {

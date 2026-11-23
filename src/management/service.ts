@@ -194,11 +194,9 @@ export class ManagementService {
     const rules=await this.rules.view(project),manager=await managerView(this.store,this.rules,project);
     const sources={sha:rules.sha,updated_at:rules.updated_at,needs_refresh:rules.needs_refresh};
     this.scope(actor,project);
-    let taskCreation:{allowed:boolean;reason:string|null;workflow_changes?:boolean}={allowed:true,reason:null};
+    let taskCreation:{allowed:boolean;reason:string|null}={allowed:true,reason:null};
     try{this.check(actor,{operation:'task.create',target:{project_id:project},arguments:{}});}
     catch(error){if(!(error instanceof HttpError||error instanceof TaskError))throw error;taskCreation={allowed:false,reason:error.code};}
-    // Whether this person may confirm a development as a CI change (#931): project configuration rights.
-    if(taskCreation.allowed){try{authorize(actor,'config.write',{project_id:project});taskCreation.workflow_changes=true;}catch{taskCreation.workflow_changes=false;}}
     const roles=roleApi(this.store,this.user(actor),'GET',new URL('http://local/api/repositories/'+project+'/roles'),{}) as {configuration:any;preview:{error?:string}[]};
     return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,auto_merge_policy:autoMergePolicy(this.store,project),
       manager:{capability_ceiling:manager.capability_ceiling,prompt:manager.prompt,standing_rules:manager.standing_rules,events:manager.events,rules:manager.rules,migration:manager.migration},
@@ -308,7 +306,11 @@ export class ManagementService {
     if(input?.operation==='rules.update')throw Object.assign(new HttpError(410,'rules_update_removed'),{detail:rulesUpdateRemoved});
     if(input?.operation==='workflow.update')throw Object.assign(new HttpError(410,'workflow_update_removed'),{detail:'固定工作类型已退役（#1122）：请用 manager.update 修改统一 Manager 提示词与事件规则，或用 roles.update 修改角色提示词与权限。'});
     if(input?.operation==='configuration.pr')throw Object.assign(new HttpError(410,'configuration_pr_removed'),{detail:configurationPrRemoved});
-    validate(commandSchema,input);const submitted=input as unknown as ManagementCommand,entry=commands[submitted.operation]!;
+    // Deprecated compatibility field (#1269): accept legacy boolean workflow_changes on task.create and strip it cleanly.
+    const normalizedInput=input?.operation==='task.create'&&input?.arguments&&typeof input.arguments==='object'&&!Array.isArray(input.arguments)&&typeof (input.arguments as Json).workflow_changes==='boolean'
+      ? {...input,arguments:Object.fromEntries(Object.entries(input.arguments as Json).filter(([k])=>k!=='workflow_changes'))}
+      : input;
+    validate(commandSchema,normalizedInput);const submitted=normalizedInput as unknown as ManagementCommand,entry=commands[submitted.operation]!;
     validate(entry.arguments,submitted.arguments);
     if(!platformComputerOperations.has(submitted.operation))this.scope(actor,submitted.target.project_id,entry.capability);
     const hash=parameterHash(submitted);
@@ -382,8 +384,6 @@ export class ManagementService {
           result={...result,effect:'future_tasks'};
         }else if(operation.startsWith('task.')){
           const action=operation.slice(5),url=action==='create'?'/api/tasks':'/api/tasks/'+target.task_id+'/'+action;
-          // A CI change is confirmed by a person in the console (#931); an assistant's command cannot confirm it.
-          if(action==='create'&&args.workflow_changes===true&&!String(command.source_conversation).startsWith('console:'))fail(403,'workflow_changes_need_person');
           const body=action==='create'?{repository_id:target.project_id,...args}:action==='contract'?{...args,expected_revision:new TaskRecords(this.store).get(target.task_id!).revision}:args;
           result=this.tasks.api(user,action==='contract'?'PATCH':'POST',new URL('http://local'+url),body)!;
           if(!result)fail(409,'task_operation_unavailable');

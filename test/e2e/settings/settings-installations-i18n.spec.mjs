@@ -107,7 +107,7 @@ test('English 界面：安装档案列表不再出现中文', async ({ page }) =
     await expect(result).toContainText('Actions: set to "Read and write" (currently "No access")');
     await expect(result).toContainText('Subscribe to events: tick Issue comment, Pull request review (without them, comments, reviews and review replies do not trigger a review)');
     // A feature gap usually names one feature, so the sentence has to read as well for one as for many.
-    await expect(result).toContainText('Workflows: set to "Read and write" (currently "No access"); needed for Confirmed CI changes');
+    await expect(result).toContainText('Workflows: set to "Read and write" (currently "No access"); needed for CI workflow changes');
     await expect(result).toContainText('Subscribe to events: tick Workflow run; needed for Actions failure analysis. This is an event subscription, not the Workflows permission');
     await expect(result).toContainText("Open the App's Permissions & events");
     expect(cjkWords(await result.innerText()), 'Chinese text left in the English permission report').toEqual([]);
@@ -168,7 +168,7 @@ test('English 界面：账号行的权限检查报告不再出现中文', async 
     const result = row.locator('.permission-result');
     await expect(result).toContainText('Actions: set to "Read and write" (currently "No access")');
     await expect(result).toContainText('Subscribe to events: tick Issue comment, Pull request review (without them, comments, reviews and review replies do not trigger a review)');
-    await expect(result).toContainText('needed for Confirmed CI changes');
+    await expect(result).toContainText('needed for CI workflow changes');
     await expect(result).toContainText('needed for Actions failure analysis');
     await expect(result).toContainText("Open the App's Permissions & events");
     expect(cjkWords(await result.innerText()), 'Chinese text left in the English account-row report').toEqual([]);
@@ -204,7 +204,7 @@ test('中文界面：安装档案的原文与今天逐字相同', async ({ page 
     await expect(result).toContainText('Actions：改为「Read and write」（当前「No access」）');
     await expect(result).toContainText('Subscribe to events：勾选 Issue comment、Pull request review（缺少时评论、检视或检视回复不会触发检视）');
     await expect(result).toContainText('App 所有者打开 Permissions & events，把下列各项改好，然后点一次「Save changes」。');
-    await expect(result).toContainText('Workflows：改为「Read and write」（当前「No access」），经确认的 CI 改动需要');
+    await expect(result).toContainText('Workflows：改为「Read and write」（当前「No access」），CI 工作流改动需要');
     await expect(result).toContainText('Subscribe to events：勾选 Workflow run，Actions 失败分析需要。这是事件订阅，不是 Workflows 权限');
     await expect(result).toContainText('打开 App 的 Permissions & events');
     await expect(result).toContainText('改完后点「重新检查」。');

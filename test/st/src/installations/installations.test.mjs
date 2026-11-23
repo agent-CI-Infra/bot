@@ -419,7 +419,7 @@ test('sync conclusions count installations and retain gaps, account failures and
   // Bot accounts have no installation snapshot; their repositories carry the gaps, and an App-only feature gap counts.
   const bot = structuredClone(good); bot.repositories[0] = { id: '303', full_name: 'fixture/project-303', installation_id: null,
     access_gaps: [{ kind: 'account', name: 'github_app', features: ['release', 'ci_changes', 'actions_failures'] }] };
-  assert.equal(message(bot), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-303：项目挂在机器人账号上，不是 GitHub App 安装（影响发版本、经确认的 CI 改动、Actions 失败分析）。点仓库行上的提示查看处理方法。');
+  assert.equal(message(bot), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-303：项目挂在机器人账号上，不是 GitHub App 安装（影响发版本、CI 工作流改动、Actions 失败分析）。点仓库行上的提示查看处理方法。');
   assert.equal(conclusion(bot).tone, '');
   const appFeatures = structuredClone(good); appFeatures.results[0].app.feature_gaps = [{ kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   assert.match(message(appFeatures), /App 定义仍有缺口/);

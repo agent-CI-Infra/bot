@@ -79,7 +79,7 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
  if(!override&&config&&instance){const revision=Math.max(Number(instance.config_revision??0),Number(instance.pending_revision??0));
   if(revision>config.revision)config=configurationRevision(s,task.repository_id,revision)??config;}
  const workflow=String(task.kind??'task.request');
- return resolveRole(s,task.repository_id,role,workflow,{harness,pinned,configuration:config,entryExecutor,ciChange:workflowChanges(task),
+ return resolveRole(s,task.repository_id,role,workflow,{harness,pinned,configuration:config,entryExecutor,ciChange:workflowChanges(task,s),
   repositorySkills:taskRepositorySkills(s,task),
   fallbackModel:fixed?()=>({model:model??executionModel(s,task),source:'project'}):undefined});
 }

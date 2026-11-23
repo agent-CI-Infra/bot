@@ -48,8 +48,8 @@ export function appJwt(appId: string, privateKey: string): string {
 }
 // The permissions a GitHub App needs for review and development: the onboarding manifest asks for exactly these, and the
 // permission check compares existing Apps and installations with them. Tokens still request only what each use needs.
-// Only a task a person confirmed as a CI change asks for more (workflows), when it pushes its own bot branch; see
-// tasks/pull-request.ts. github_write never does.
+// A development pull request whose candidate actually modifies .github/workflows/ requests workflows: write on demand
+// right before pushing its bot branch; see github/publisher.ts and tasks/pull-request.ts. github_write never does.
 export const appPermissions: Record<string,string> = { contents:'write', issues:'write', pull_requests:'write', statuses:'write', actions:'write', checks:'write', metadata:'read' };
 // The webhook events those Apps subscribe to: opened and updated Issues and PRs, their comments, reviews and review comments.
 // installation and installation_repositories reach every App without a subscription. The permission check compares with these too.
@@ -257,14 +257,17 @@ export class GitHub {
     if (!Number.isSafeInteger(artifactId) || artifactId < 1) return stop('github_artifact_invalid', undefined, 'Actions artifact ID 无效。');
     return this.request('GET', this.path(`/actions/artifacts/${artifactId}/zip`), undefined, false, this.token, false, false, false, undefined, maxBytes);
   }
+  get isAppInstallation(): boolean { return !!this.installationId; }
   // A short-lived token of the App installation with permissions the task token was not given, for one control-plane write
-  // (resolving a review thread takes contents: write). It covers this repository only and is revoked after use; GitHub
-  // refuses it (422) when the installation does not grant those permissions. A Token account uses its own token.
-  async withPermissions<T>(permissions:Record<string,string>,use:(token:string)=>Promise<T>):Promise<T>{
-    if(!this.jwt||!this.installationId)return use(this.token);
+  // (for example resolving a review thread or pushing a bot branch that modifies .github/workflows/). It covers this
+  // repository only and is revoked after use; GitHub refuses it (422) when the installation does not grant those
+  // permissions. A Token account uses its own token.
+  async withPermissions<T>(permissions:Record<string,string>,use:(token:string,granted:Record<string,string>)=>Promise<T>):Promise<T>{
+    if(!this.installationId)return use(this.token,this.permissions);
     const access=await this.request('POST',`/app/installations/${this.installationId}/access_tokens`,{repository_ids:[Number(this.repository.id)],permissions},false,this.appToken());
     const token=String(access?.token||'');if(!token)stop('github_token_missing','waiting_permission',`GitHub 未返回安装 ${this.installationId} 的访问令牌。`);this.redactor.add(token);
-    try{return await use(token);}finally{await revokeInstallationToken(this.apiUrl,token).catch(()=>false);}
+    const granted=access.permissions&&typeof access.permissions==='object'?access.permissions:{...permissions};
+    try{return await use(token,granted);}finally{await revokeInstallationToken(this.apiUrl,token).catch(()=>false);}
   }
   // A GraphQL request; GitHub answers 200 with errors for a refused or invalid one.
   async graphql(query:string,variables:Record<string,unknown>,token=this.token):Promise<any>{

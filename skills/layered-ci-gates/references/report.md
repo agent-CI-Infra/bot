@@ -40,7 +40,7 @@ Numbered small pull requests, each leaving CI working:
 | # | Changes | Files | How it is validated | Setting changed after it merges |
 |---|---|---|---|---|
 
-The first is usually per-layer scripts plus the L1 + L2 aggregate check. Every pull request that changes `.github/workflows/` is a development task confirmed by a project administrator. State what the first task's request would say.
+The first is usually per-layer scripts plus the L1 + L2 aggregate check. Every pull request that changes `.github/workflows/` goes through a development task and is reviewed and merged by a person. State what the first task's request would say.
 
 ## 7. Open questions
 

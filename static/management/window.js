@@ -2,7 +2,7 @@ let managementChat = null, pendingRepositoryOnboarding = null;
 function repositoryOnboardingPrompt(repo) {
   const label = repo.full_name || ('仓库编号 ' + repo.id);
   if (repo.started) {
-    return `请帮我核对并优化仓库 ${label} 的接入配置：先读取当前已生效配置与仓库现状（文档、构建与测试命令、CI 工作流、现有标签和近期 Issue/PR），给出简要仓库画像和能力档说明，只针对与当前配置有差异的关键选择向我提问并给出推荐项；等我确认后再应用配置（若需要修改 .github/workflows/，请生成待我在控制台确认的开发任务）。`;
+    return `请帮我核对并优化仓库 ${label} 的接入配置：先读取当前已生效配置与仓库现状（文档、构建与测试命令、CI 工作流、现有标签和近期 Issue/PR），给出简要仓库画像和能力档说明，只针对与当前配置有差异的关键选择向我提问并给出推荐项；等我确认后再应用配置（若需要修改 .github/workflows/，请创建通过 bot PR 交付的开发任务）。`;
   }
   return `请帮我接入已安装仓库 ${label}：先只读分析仓库（README、目录结构、构建与测试命令、CI 工作流、现有标签与近期 Issue/PR），给出仓库画像、各能力上限（read / comment / develop）说明以及最多 5 个关键配置问题和推荐项；等我确认后再启动仓库（或提交启动申请）并按确认项完成配置。`;
 }
@@ -28,8 +28,8 @@ function managementRecommendations({ scope = 'platform', project = null, project
     { id: 'onboarding', title: '运行仓库接入助手', description: onboarding.description, prompt: onboarding.prompt },
     { id: 'gates', title: '优化门禁', description: '按分层门禁梳理测试与工作流缺口，确认后生成 CI 改动任务',
       prompt: targetName
-        ? `请帮我评估并优化仓库 ${targetName} 的 CI 门禁：先读取 layered-ci-gates 技能以及仓库现有的脚本、测试目录、.github/workflows/、近期 Actions 运行耗时与失败情况和分支规则，按分层门禁给出当前缺口、各层检查建议、需人工调整的仓库设置与拆分 PR 计划；等我确认方案后，再生成待我在控制台确认的 .github/workflows/ 开发任务。`
-        : '请帮我评估并优化仓库的 CI 门禁（仓库：，留空则先列出我可管理的仓库供选择）：先读取 layered-ci-gates 技能以及仓库现有的脚本、测试目录、.github/workflows/、近期 Actions 运行耗时与失败情况和分支规则，按分层门禁给出当前缺口、各层检查建议、需人工调整的仓库设置与拆分 PR 计划；等我确认方案后，再生成待我在控制台确认的 .github/workflows/ 开发任务。' },
+        ? `请帮我评估并优化仓库 ${targetName} 的 CI 门禁：先读取 layered-ci-gates 技能以及仓库现有的脚本、测试目录、.github/workflows/、近期 Actions 运行耗时与失败情况和分支规则，按分层门禁给出当前缺口、各层检查建议、需人工调整的仓库设置与拆分 PR 计划；等我确认方案后，再创建通过 bot PR 交付的 .github/workflows/ 开发任务。`
+        : '请帮我评估并优化仓库的 CI 门禁（仓库：，留空则先列出我可管理的仓库供选择）：先读取 layered-ci-gates 技能以及仓库现有的脚本、测试目录、.github/workflows/、近期 Actions 运行耗时与失败情况和分支规则，按分层门禁给出当前缺口、各层检查建议、需人工调整的仓库设置与拆分 PR 计划；等我确认方案后，再创建通过 bot PR 交付的 .github/workflows/ 开发任务。' },
     { id: 'actions', title: '分析 Actions 运行', description: '读取指定运行或近期失败作业日志，定位根因与修复建议',
       prompt: targetName
         ? `请帮我分析仓库 ${targetName} 的 GitHub Actions 运行（运行编号或链接：，留空则先查看近期失败的运行）：读取对应 workflow 配置、作业状态与失败日志，区分代码缺陷、环境配置或偶发波动，定位根因并给出修复建议。`

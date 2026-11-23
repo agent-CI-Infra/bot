@@ -366,9 +366,8 @@ export class OnboardingApply {
   }
 
   /**
-   * The CI suggestion as an ordinary development task whose contract is the suggestion (#931). The person confirmed the CI
-   * item, so the task may change `.github/workflows/` (workflow_changes): its bot branch asks for Workflows when it is pushed,
-   * and a person merges its PR.
+   * The CI suggestion as an ordinary development task whose contract is the suggestion. Its bot branch asks for
+   * Workflows permission on demand when `.github/workflows/` changes are pushed, and a person reviews and merges its PR.
    */
   private async ci(c: ItemContext): Promise<Outcome> {
     // An earlier attempt whose task was created before the receipt could say so (a restart in between) is that task.
@@ -376,7 +375,7 @@ export class OnboardingApply {
       `onboarding:${c.application.id}:ci:%`);
     if (earlier) return { state: 'succeeded', detail: { command_id: earlier.id, task_id: JSON.parse(earlier.result).id ?? null } };
     const ci = c.plan.ci as Json, files = (ci.files as string[]).length ? ci.files as string[] : ['.github/workflows/'];
-    const created = await this.command(c, 'task.create', { intent: 'development', workflow_changes: true, request: `接入向导第 ${c.application.version} 版确认的 CI 建议：\n\n${ci.summary}`,
+    const created = await this.command(c, 'task.create', { intent: 'development', request: `接入向导第 ${c.application.version} 版确认的 CI 建议：\n\n${ci.summary}`,
       contract: { goal: `按接入向导确认的建议调整本仓库的 CI：${String(ci.summary).slice(0, 2000)}`, scope: files.slice(0, 50),
         criteria: ['改动经 bot PR 交付，由人检视并合并；不直接修改默认分支', '只改建议列出的文件，必要时在 PR 里说明额外改动的原因'], endpoint: 'reviewable_pull_request' } });
     const receipt = this.store.get('SELECT result FROM management_commands WHERE id=?', String((created.detail as Json).command_id));

@@ -61,6 +61,7 @@ flowchart LR
   - 允许项目显式关闭 `delivery_gates.pull_request_qa`（前提是配置了有效 `test_command`）。
 - **幂等发布与未知状态对账**：
   - 评论、行内 Review（恒为 `COMMENT`，自动关闭已修复旧线程）、分支推送与 PR 创建全部经过持久 Outbox 与稳定写入键；大仓库使用 `base_tree` 增量构建 Git tree 并校验返回 tree 与候选完全一致。
+  - 当候选变更实际涉及 `.github/workflows/` 时，`Publisher.branch` / `publishRequestPullRequest` 在推送分支前按需向 GitHub App 申请短期 `workflows: write` 安装令牌（用完即撤销）；若安装未授予 `Workflows: Read and write`，则在写入任何 Git 对象前以 `github_workflows_permission_missing`（`waiting_permission`）中止并提示开通。
   - 网络中断导致远端结果未知时停留在 `waiting_publication`，重试前先按任务 marker/head 对账（bot 分支更新幂等则自动查证续发），避免重复发评论或开重复 PR。
 - **自动合并与并行集成**：
   - 人工合并（`POST /api/tasks/:id/merge`）持久化合并意图，核验候选、QA 与远端检查并支持三路集成与 Merge Queue 入队；

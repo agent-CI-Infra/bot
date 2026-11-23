@@ -1,4 +1,4 @@
-import { assertRequestPullRequest, isRequestedTask, pullRequestPermissions } from '../tasks/pull-request.js';
+import { assertRequestPullRequest, isRequestedTask } from '../tasks/pull-request.js';
 import { resumeParentTasks } from '../tasks/children.js';
 import { hasActiveEventSubscriptions, nextEventSubscriptionTimeout, onSubscriptionWake, resumeExpiredEventSubscriptions } from '../tasks/event-subscriptions.js';
 import { taskReadScopes } from '../tasks/management.js';
@@ -36,7 +36,6 @@ import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { checkPullRequestLabels } from '../github/pull-request-labels.js';
 import { assertMediaOutsideCode, collectPullRequestMedia, mediaPublicationError, planPullRequestMedia, pullRequestSummaryForProgress } from '../github/pull-request-media.js';
-import { changedWorkflowPaths, hasWorkflowChangesConfirmation, workflowChangesSubmissionError } from '../github/workflow-changes.js';
 import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
 import { assigneesOf, developmentReady } from '../review/queue.js';
 import { issueClaims } from '../review/claims.js';
@@ -354,7 +353,7 @@ export class TaskEngine {
       const writes=taskPermissions(this.store,task).writes,eventState:Record<string,any>={};
       // Event work reads Actions runs and logs; it writes only through its own tools.
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);github.purpose='task';await github.connect(task.kind.startsWith('development.')||writes.includes('pull_request'),undefined,
-        event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:pullRequestPermissions(task));
+        event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:undefined);
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
       // An Issue development was started by the Manager on a person's label, which is the human decision a review asked for.
@@ -861,10 +860,6 @@ export class TaskEngine {
             if(development)update({result:JSON.stringify({...args,summary,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
             if(development){carryRevisionRequests(this.store,task,input.revision?.requests||[],task.head_sha);carryUnconsumedTaskUpdates(this.store,String(task.id),task.head_sha?String(task.head_sha):null);}
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
-          }
-          if(!hasWorkflowChangesConfirmation(task)){
-            const touchedWorkflows=changedWorkflowPaths(snapshot.files,blobValue(this.store,input.snapshot_files)??[]);
-            if(touchedWorkflows.length)return workflowChangesSubmissionError(touchedWorkflows,'create_pull_request');
           }
           await validate();
           // Mandatory delivery checks remain live even when the execution behavior is fixed.

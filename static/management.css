@@ -229,7 +229,6 @@ body.management-page-mode { overflow: hidden; }
 .start-request-trust input { flex: none; width: auto; margin: 3px 0 0; padding: 0; }
 .start-request-decision textarea, .start-request-decision select { width: 100%; }
 .start-request .view-error:empty { display: none; }
-.management-workflow-confirm { display: grid; gap: var(--space-2); }
 @media (max-width: 767px) {
   .start-request { padding: var(--space-4); }
   .start-request-facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }

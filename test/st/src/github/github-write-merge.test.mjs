@@ -47,6 +47,13 @@ async function fixture(t) {
       const number = Number(match[1]), user = number === 10 ? { id: 900, login: 'fixture-bot', type: 'User' } : number === 11 ? null : { id: 501, login: 'maintainer', type: 'User' };
       return send({ number, node_id: 'PR_' + number, html_url: 'https://github.com/fixture/r/pull/' + number, state: 'open', user, head: { sha: head }, base: { ref: number === 9 ? 'queued' : number === 13 ? 'opaque' : number === 15 ? 'late' : 'main' } });
     }
+    if ((match = /^\/repos\/fixture\/r\/pulls\/(\d+)\/files$/.exec(path)) && req.method === 'GET') {
+      const number = Number(match[1]);
+      if (number === 16) return send([{ filename: '.github/workflows/ci.yml', status: 'modified' }]);
+      if (number === 17) return send({ message: 'Forbidden' }, 403);
+      if (number === 18) return send([{ filename: 'docs/ci.md', previous_filename: '.github/workflows/old.yml', status: 'renamed' }]);
+      return send([{ filename: 'src/app.ts', status: 'modified' }]);
+    }
     if (path.startsWith('/repos/fixture/r/contents/') && ['PUT', 'DELETE'].includes(req.method)) return send({ content: { path: path.slice(26), sha: 'f'.repeat(40) }, commit: { sha: merged } }, 201);
     if (path.startsWith('/repos/fixture/r/git/refs/heads/') && req.method === 'PATCH') return send({ ref: 'refs/heads/' + path.slice(32), object: { sha: merged, type: 'commit' } });
     if (path === '/repos/fixture/r/merges' && req.method === 'POST') return send({ sha: merged }, 201);
@@ -262,4 +269,22 @@ test('every prompt that can merge states the current level instead of a fixed ba
   assert.match(scoped, /o\/a: allow_all; o\/b: disallow/);
   assert.match(scoped, /disallow: never merge/); assert.match(scoped, /allow_all: you may merge any pull request/);
   assert.doesNotMatch(scoped, /non_bot_only:/);
+});
+
+test('github_write refuses merging PRs that touch .github/workflows/ even under allow_all, and fails closed when PR files cannot be read (#1269)', async t => {
+  const f = await fixture(t);
+  f.setPolicy('allow_all');
+  // #16 modifies .github/workflows/ci.yml; #18 renames out of .github/workflows/old.yml.
+  for (const [number, expectedPath] of [[16, '.github/workflows/ci.yml'], [18, '.github/workflows/old.yml']]) {
+    const refused = await f.write(merge(number));
+    assert.equal(refused.error, 'github_workflow_write_forbidden', `PR #${number}`);
+    assert.match(refused.detail, /never merged through github_write/);
+    assert.ok(refused.files.includes(expectedPath), JSON.stringify(refused));
+  }
+  // #17 fails to list PR files -> fail-closed refusal.
+  const unreadable = await f.write(merge(17));
+  assert.equal(unreadable.error, 'github_workflow_merge_check_unavailable');
+  assert.match(unreadable.detail, /human maintainer/);
+  assert.deepEqual(f.merges(), [], 'no merge request may be sent for workflow or unverifiable PRs');
+  assert.deepEqual(f.enqueues(), [], 'no merge queue enqueue may be sent for workflow or unverifiable PRs');
 });

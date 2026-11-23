@@ -9,9 +9,9 @@ type File = Bundle['files'][number] & {content:string};
 const hash = (value:string) => createHash('sha256').update(value).digest('hex');
 
 /**
- * Built-in skills a role gets without a project binding. The Manager always has roadmap decomposition. In a task a project
- * administrator confirmed as a CI change (#931), the roles that plan and write the change (controller and writer kinds)
- * also get layered CI gates (#1136). Other tasks and roles keep their configured and repository bundles.
+ * Built-in skills a role gets without a project binding. The Manager always has roadmap decomposition. In a task that
+ * targets `.github/workflows/` or CI gates, the roles that plan and write the change (controller and writer kinds) also
+ * get layered CI gates (#1136). Other tasks and roles keep their configured and repository bundles.
  */
 export function defaultSkillIds(role:{id:string;kind:string},ciChange:boolean):string[]{
   return [...(role.id==='manager'?['roadmap-decomposition']:[]),...(ciChange&&['controller','writer'].includes(role.kind)?['layered-ci-gates']:[])];

@@ -25,6 +25,7 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
 | `allow_all` | 包括 bot PR 在内，满足仓库规则时均可自动合并。 |
 
 - 目标分支启用 Merge Queue 时，合并操作自动转为入队（`enqueuePullRequest`）；无法确认是否要求队列时拒绝直合。
+- 修改 `.github/workflows/` 的 PR 受安全边界保护：**即使在 `allow_all` 策略下，`github_write` 也永不合并或入队此类 PR**（无法核实 PR 文件列表时按失败关闭拒绝），必须由人类维护者在 GitHub 检视合并。
 - 平台不替代仓库的分支保护和必需检查；若完全不希望 Manager 合并或写分支，可在「角色 → Manager」将 Contents 权限改为只读。
 - 人类用户在控制台界面发起的合并（`POST /api/tasks/:id/merge`）走独立校验流程，不受自动合并策略限制。
 
@@ -49,7 +50,7 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
   - **平台权限**：`delegation`（委派角色）、`project_tasks`（同项目其他任务只读查询 `list_project_tasks`/`read_project_task`，读写还可修改任务、声明依赖等待 `wait_for_tasks`、调整优先级与关联任务）、`project_memory`（项目共享知识读/写）。
   - **GitHub 资源权限**：`github_issues`、`github_pull_requests`、`github_actions`、`github_contents`（无/只读/读写），以及 `github_checks`、`github_statuses`（无/只读）。默认仅 Manager 具备 GitHub 写权限，其余内置角色只读。
   - **内置基础能力**：使用虚拟电脑（文件与命令）是所有工作角色的内置能力，不单独设权限开关。
-- **内置可选开发 Skill**：平台随包提供 `roadmap-decomposition`（Manager 默认自动加载）、`layered-ci-gates`（已确认 CI 改动任务自动加载）、`test-driven-development` 与 `systematic-debugging`（可在角色配置中按需绑定给 Dev）。
+- **内置可选开发 Skill**：平台随包提供 `roadmap-decomposition`（Manager 默认自动加载）、`layered-ci-gates`（涉及 `.github/workflows/` 或 CI 门禁的开发及 bot PR 修订任务自动加载）、`test-driven-development` 与 `systematic-debugging`（可在角色配置中按需绑定给 Dev）。
 
 ## 5. 仓库 Skill（`.agents/skills/`）
 

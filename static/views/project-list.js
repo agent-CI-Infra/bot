@@ -287,7 +287,7 @@ function installedBadges(row) {
 // GitHub's own wording for App permissions, shared by the project list and the App permission check.
 const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata', workflows: 'Workflows' };
 // What GitHub needs before an event can be ticked. Workflow run is easy to mistake for the Workflows permission, which
-// only lets an App edit .github/workflows files (a confirmed CI change PR needs it, Actions failure analysis does not).
+// only lets an App edit .github/workflows files (a PR changing workflows needs it, Actions failure analysis does not).
 const eventPermissionNotes = {
   workflow_run: '这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」，不需要 Workflows；App 没有 Actions 权限时这个选项不会出现，先补 Actions。',
   check_run: 'GitHub 要求 App 至少有 Checks「Read-only」权限。',

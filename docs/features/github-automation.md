@@ -52,10 +52,10 @@
   - 若确认为真实缺陷，先搜索已有开放 Issue，已有则补充证据，否则遵循仓库模板与规范新建 Issue（随后走常规检视/开发流程）。
   - 若发现定时 workflow 长期严重延迟，会按内置建议给出改为 bot 准点触发 `workflow_dispatch` 的优化方案。
 
-## 5. 受控的 CI 改动（`.github/workflows/`）
+## 5. CI 工作流改动（`.github/workflows/`）
 
-出于安全隔离，普通开发任务和 `github_write` **一律禁止修改 `.github/workflows/`**。需要由 bot 协助修改 CI 时：
+具备开发交付权限的任务（包括控制台/管理助手新建的开发任务、Issue 自动开发任务以及 Manager 派发的 bot PR 修订任务）均可按正常 PR 流程修改 `.github/workflows/`，不再需要单独的任务级控制台强制确认；`github_write` 工具仍禁止直接写入工作流文件：
 
-1. 由**项目管理员**在管理助手对话确认「执行前确认」卡片，或在控制台「新建任务」勾选 **「允许修改 `.github/workflows/`（CI 改动）」** 并选择交付为可检视 PR。
-2. bot 在项目电脑内按仓库实际技术栈与脚本修改 workflow（自动附带内置 `layered-ci-gates` 门禁设计 Skill），经测试与独立 QA 后仅在推送该 bot 分支时按需申请 `workflows: write` 权限开出 PR。
-3. CI 改动必须由人类维护者检视并合并 PR 后才在默认分支生效。
+1. bot 在项目电脑内按仓库实际技术栈与脚本修改 workflow（涉及 `.github/workflows/` 或门禁设计时自动附带内置 `layered-ci-gates` Skill），经过项目测试与独立 QA 后提交候选快照。
+2. 发布阶段当候选改动实际涉及 `.github/workflows/` 时，控制面仅在推送该 bot 分支前自动在 GitHub App 安装令牌中按需申请 `workflows: write` 权限；若 GitHub App 安装未开通 `Workflows: Read and write`，任务会停在 `waiting_permission` 并给出清晰的 `github_workflows_permission_missing` 权限开通提示。
+3. CI 改动必须由人类维护者在 GitHub 检视并合并 PR 后才在默认分支生效（控制面 `github_write` 永不直接写 `.github/workflows/`，且即使在 `auto_merge_policy=allow_all` 下也强制拒绝合并或入队包含 `.github/workflows/` 改动的 PR）。

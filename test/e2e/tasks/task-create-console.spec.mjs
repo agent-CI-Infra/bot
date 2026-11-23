@@ -205,34 +205,28 @@ test('a code delivery in a project below the develop capability ceiling is refus
   } finally { await f.close(); }
 });
 
-// #931: a CI change is a development task a project administrator confirms; only then may its bot branch change workflows.
-test('a project administrator confirms a CI change on a code PR; the box is not offered for reports or to members', async ({ page }) => {
+// #1269: workflow changes no longer require a separate console confirmation checkbox on the task creation form.
+test('code PR task creation has no workflow_changes checkbox and submits cleanly for both admins and members (#1269)', async ({ page }) => {
   const f = await fixture(), errors = []; page.on('pageerror', err => errors.push(err.message));
   try {
     f.h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
     await login(page, f); await fill(page);
-    const box = page.getByLabel('允许修改 .github/workflows/（CI 改动）', { exact: true });
-    await expect(box).toBeHidden();
     await page.getByLabel('交付类型', { exact: true }).selectOption('reviewable_pull_request');
-    await expect(box).toBeVisible(); await expect(box).not.toBeChecked();
-    await expect(page.locator('.task-create-ci')).toContainText('只有项目管理员可以勾选');
-    await box.check();
+    await expect(page.locator('input[name="workflow_changes"]')).toHaveCount(0);
+    await expect(page.locator('.task-create-form')).toContainText('按需申请 Workflows 权限');
     for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await box.scrollIntoViewIfNeeded();
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    // Back to a report: the box hides and its tick is not sent.
-    await page.getByLabel('交付类型', { exact: true }).selectOption('report'); await expect(box).toBeHidden();
-    await page.getByLabel('交付类型', { exact: true }).selectOption('reviewable_pull_request'); await expect(box).toBeChecked();
     await page.getByRole('button', { name: '提交任务', exact: true }).click();
     await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible();
     const receipt = f.h.store.get("SELECT * FROM management_commands WHERE operation='task.create'"), id = JSON.parse(receipt.result).id;
-    expect(JSON.parse(receipt.arguments).workflow_changes).toBe(true);
-    expect(JSON.parse(f.h.store.get('SELECT input FROM tasks WHERE id=?', id).input).workflow_changes.confirmed_by).toBeTruthy();
+    expect(JSON.parse(receipt.arguments).workflow_changes).toBeUndefined();
+    expect(JSON.parse(f.h.store.get('SELECT input FROM tasks WHERE id=?', id).input).workflow_changes).toBeUndefined();
     expect(errors).toEqual([]);
 
-    // A member who may create tasks but not configure the project does not see the box.
+    // A member with tasks.write also creates a PR task directly without any workflow_changes gate.
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(page.getByLabel('用户名', { exact: true })).toBeVisible();
     const member = await f.member('task-writer', { repository_ids: [] });
@@ -242,7 +236,11 @@ test('a project administrator confirms a CI change on a code PR; the box is not 
     await page.getByLabel('用户名', { exact: true }).fill('task-writer'); await page.getByLabel('密码', { exact: true }).fill(member.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
+    await fill(page);
     await page.getByLabel('交付类型', { exact: true }).selectOption('reviewable_pull_request');
-    await expect(box).toBeHidden();
+    await expect(page.locator('input[name="workflow_changes"]')).toHaveCount(0);
+    await page.getByRole('button', { name: '提交任务', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

@@ -24,9 +24,9 @@ launchpad 是一个开源的 GitHub 自动化与 AI 协作平台（Apache-2.0）
   - 当项目能力上限设为「可开发并开 PR」（`develop`）后，bot 可针对问题清晰且无人认领的 Issue 自主开发，也可通过给 Issue 加开发标签（默认 `bot-develop`）或维护者评论触发开发。
   - bot 在仓库专属的隔离虚拟电脑里改代码、跑测试、经过独立 QA 校验后推送 `bot/*` 分支并开出 PR，同时在原 Issue 上用一条持续更新的进展评论同步里程碑。
   - PR 开出后持续跟进：响应仓库成员的评论与评审意见、自动感知 CI 检查失败或合并冲突并安排修复。
-- **Actions 失败排查与受控 CI 改动**
+- **Actions 失败排查与 CI 工作流改动**
   - 自动监控默认分支与版本标签上失败的 Actions 运行：确认属外部波动时自动重跑一次失败作业；确认属真实缺陷时查重并按仓库规范提报 Issue。
-  - 需要修改 `.github/workflows/` 时，由项目管理员在控制台显式确认后以普通 bot PR 交付，人工合并后才生效。
+  - 具备开发交付权限的任务可按正常 bot PR 流程修改 `.github/workflows/`（发布前按需申请 GitHub App 的 `workflows: write` 权限），由人类维护者检视合并后生效。
 - **手动发版本与公开看板**
   - 在控制台「发版本」完成版本与提交预检、自动打标签、跟踪 Release 工作流并生成基于真实提交与 PR 的发行说明草稿，最后由人点击正式发布。
   - 内置公共 Dashboard（`/dashboard/`）与单仓看板（`/boards/<owner>/<repo>/`），无需配置 GitHub Pages，开关即用，实时呈现 Issue、PR、贡献者、发版与 Actions 趋势。

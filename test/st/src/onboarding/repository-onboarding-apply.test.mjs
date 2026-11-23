@@ -1,7 +1,7 @@
-// Applying confirmed repository onboarding in standard management assistant conversations (#932, #931, #1133):
+// Applying confirmed repository onboarding in standard management assistant conversations (#932, #1133, #1269):
 // trusted-organization and super-administrator immediate starts, same-turn configuration through standard management
-// commands and github_write, delegated schedule service principal creation via actor_id "auto", and staged console
-// confirmation for task.create with workflow_changes: true.
+// commands and github_write, delegated schedule service principal creation via actor_id "auto", and direct creation of
+// development PR tasks that modify `.github/workflows/`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
@@ -127,7 +127,7 @@ test('a super administrator starts an untrusted-organization repository immediat
   assert.deepEqual({ ...h.store.get("SELECT state,reason FROM onboarding_requests WHERE repository_id='104'") }, { state: 'lapsed', reason: 'project_started' });
 });
 
-test('workflow_changes task.create stages a console confirmation card for the model and executes only when confirmed by a project administrator in the console (#931, #1133)', async t => {
+test('CI workflow task.create executes directly without console confirmation card, while still enforcing capability ceiling (#1133, #1269)', async t => {
   const f = await identityFixture(t, { github: true }), { h, admin, state } = f;
   state.accessible = ['101']; repositoryRoutes(f);
   h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
@@ -139,13 +139,13 @@ test('workflow_changes task.create stages a console confirmation card for the mo
     if (steps === 1) {
       const cfg = toolResults(body).at(-1).value;
       return [call(1, ['management_command', { operation: 'task.create', target: { project_id: '101' }, expected_revision: cfg.revision,
-        arguments: { intent: 'development', workflow_changes: true, request: 'Add CI workflow running npm test', contract: ciContract } }])];
+        arguments: { intent: 'development', request: 'Add CI workflow running npm test', contract: ciContract } }])];
     }
-    return [{ role: 'assistant', content: '已生成工作流变更确认卡片，请在控制台点击确认执行。' }];
+    return [{ role: 'assistant', content: '已直接创建修改 .github/workflows/ci.yml 的开发 PR 任务。' }];
   });
   await assistantModel(admin, model);
 
-  // Project member with tasks.write ONLY (no config.write) cannot even stage workflow_changes: true.
+  // Project member with tasks.write (no config.write) can directly create a CI development task when project ceiling is develop.
   const memberPassword = testPassword();
   const user = (await admin('/api/users', 'POST', { username: 'task-member', password: memberPassword, repository_ids: [] })).value.user;
   const memberPrincipal = h.store.get('SELECT id FROM principals WHERE user_id=?', user.id).id;
@@ -156,52 +156,31 @@ test('workflow_changes task.create stages a console confirmation card for the mo
   const memberConv = (await member('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
   const memberTurn = await say(member, memberConv, '帮我提交 CI 变更任务');
   const memberStep = memberTurn.history.events.find(e => e.message_id === memberTurn.id && e.type === 'tool_result' && e.data.name === 'management_command').data.result;
-  assert.deepEqual([memberStep.state, memberStep.confirmation_required, memberStep.error], ['failed', false, 'capability_forbidden']);
-  assert.equal(h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='101'").n, 0);
+  assert.equal(memberStep.state, 'succeeded', JSON.stringify(memberStep));
+  assert.equal(memberStep.confirmation_required, undefined);
+  assert.equal(h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='101'").n, 1);
 
-  // Lowering project ceiling below develop refuses staging too.
+  // Lowering project ceiling below develop still refuses PR task creation.
   const repoAdmin = await person(f, 42, 'admin');
   const adminConv = (await repoAdmin('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
   h.store.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='101'");
   const ceilingTurn = await say(repoAdmin, adminConv, '尝试在 comment 上限下提交 CI 任务');
   const ceilingStep = ceilingTurn.history.events.find(e => e.message_id === ceilingTurn.id && e.type === 'tool_result' && e.data.name === 'management_command').data.result;
-  assert.deepEqual([ceilingStep.state, ceilingStep.confirmation_required, ceilingStep.error], ['failed', false, 'capability_ceiling']);
+  assert.equal(ceilingStep.state, 'failed');
+  assert.equal(ceilingStep.result?.error, 'capability_ceiling');
+  assert.equal(h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='101'").n, 1);
 
-  // Restore develop ceiling: model call stages confirmation_required without creating a task.
+  // Restore develop ceiling: model call creates the task immediately without staging a confirmation card.
   h.store.run("UPDATE policies SET capability_ceiling='develop' WHERE repository_id='101'");
-  const stagedTurn = await say(repoAdmin, adminConv, '请创建 CI workflow 变更 PR 任务');
-  const staged = stagedTurn.history.events.find(e => e.message_id === stagedTurn.id && e.type === 'tool_result' && e.data.name === 'management_command').data.result;
-  assert.equal(staged.confirmation_required, true);
-  assert.equal(staged.state, 'confirmation_required');
-  assert.equal(staged.preview_command.operation, 'task.create');
-  assert.equal(staged.preview_command.arguments.workflow_changes, true);
-  assert.equal(h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='101'").n, 0, 'task is not created before console confirmation');
-
-  // Member without config.write cannot confirm the preview command either.
-  const memberDirect = await member(`/api/management/conversations/${memberConv}/messages`, 'POST', { source_message: 'confirm:bad', command: staged.preview_command });
-  assert.equal(memberDirect.status, 201);
-  const memberDirectHistory = await settled(member, memberConv, memberDirect.value.id);
-  const memberDirectReceipt = memberDirectHistory.events.find(e => e.message_id === memberDirect.value.id && e.type === 'tool_result').data.result;
-  assert.equal(memberDirectReceipt.state, 'failed');
-  assert.equal(memberDirectReceipt.result.error, 'capability_forbidden');
-
-  // Project administrator confirms the preview command in the console conversation -> creates task with confirmed_by & audit!
-  const confirmed = await repoAdmin(`/api/management/conversations/${adminConv}/messages`, 'POST', { source_message: 'confirm:call-1-0', command: staged.preview_command });
-  assert.equal(confirmed.status, 201);
-  const confirmedHistory = await settled(repoAdmin, adminConv, confirmed.value.id);
-  const receipt = confirmedHistory.events.find(e => e.message_id === confirmed.value.id && e.type === 'tool_result').data.result;
+  const createdTurn = await say(repoAdmin, adminConv, '请创建 CI workflow 变更 PR 任务');
+  const receipt = createdTurn.history.events.find(e => e.message_id === createdTurn.id && e.type === 'tool_result' && e.data.name === 'management_command').data.result;
   assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
-  assert.equal(receipt.source_conversation, 'console:conversation:' + adminConv);
+  assert.equal(receipt.confirmation_required, undefined);
 
   const task = h.store.get('SELECT * FROM tasks WHERE id=?', receipt.result.id);
   const input = JSON.parse(task.input);
-  assert.equal(input.workflow_changes.confirmed_by, repoAdmin.principal);
+  assert.equal(input.workflow_changes, undefined);
   assert.deepEqual(input.contract.scope, ['.github/workflows/ci.yml']);
   assert.deepEqual(JSON.parse(h.store.get('SELECT writes FROM task_write_grants WHERE task_id=?', task.id).writes), ['pull_request']);
-  assert.equal(h.store.get("SELECT count(*) AS n FROM audit WHERE action='task.workflow_changes' AND resource_id=?", task.id).n, 1);
-
-  // Replaying the same source_message returns replayed: true and creates no duplicate task.
-  const replayed = await repoAdmin(`/api/management/conversations/${adminConv}/messages`, 'POST', { source_message: 'confirm:call-1-0', command: staged.preview_command });
-  assert.equal(replayed.value.replayed, true);
-  assert.equal(h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='101'").n, 1);
+  assert.equal(h.store.get("SELECT count(*) AS n FROM audit WHERE action='task.workflow_changes' AND resource_id=?", task.id).n, 0);
 });

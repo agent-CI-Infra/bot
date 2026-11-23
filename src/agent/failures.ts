@@ -222,7 +222,7 @@ const codeActions: Record<string,string> = {
   actions_development_not_approved:'确认原 Issue 仍开放、无人指派、人工开发标签仍在，且检视明确确认产品缺陷；条件不满足时先重新检视。',
   actions_permission_missing:'该仓库使用的 App 安装没有 Actions 权限：App 管理员在 Permissions & events 把 Actions 设为「Read and write」（读取运行只需只读，重跑需要写），再由安装所有者接受新权限。不需要 Workflows 权限。',
   actions_workflow_run_subscription_missing:'请 App 管理员在该仓库实际使用的 App 的 Permissions & events → Subscribe to events 勾选「Workflow run」并保存。这是 Webhook 事件订阅，只要求 Actions 读权限，不需要 Workflows 权限；安装设置出现待批准的变更时接受即可。',
-  workflow_changes_not_confirmed:'当前任务未经项目管理员在控制台确认允许修改 .github/workflows/，重试原任务不会生效。请由项目管理员在控制台新建勾选「允许修改 .github/workflows/（CI 改动）」的任务，或在控制台管理助手确认卡片后发起；若不需 Bot 改 workflow，请改由维护人手动修改。',
+  workflow_changes_not_confirmed:'旧版本曾要求项目管理员在控制台单独确认修改 .github/workflows/；当前版本已移除该限制，具备开发交付权限的任务可直接按 PR 流程修改工作流，点「重试」即可继续（需确保 GitHub App 已开通 Workflows: Read and write 权限）。',
   github_workflows_permission_missing:'GitHub App 安装缺少 Workflows: Read and write 权限：请管理员在 GitHub App 的 Permissions & events 中将 Workflows 设为「Read and write」，并在仓库对应安装中批准新权限后点「重试」。',
   actions_report_write_unknown:'提报写入结果不明，本功能只通过原 Issue 或评论 marker 对账，不盲目重发。',
   delivery_refused:'执行者多次调用了这个任务现在不能用的交付工具（没有授权、项目上限或开关、来源上限），什么都没写；点「重试」重新执行，或由 Manager 用 grant_writes 授予后再重试。',
