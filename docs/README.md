@@ -44,6 +44,7 @@
 - [存储架构、轨迹文件、工作区与项目知识引擎](design/storage-and-knowledge.md)
 - [控制台前端架构与管理 API 总览](design/console-and-api.md)
 - [外部执行端凭据代理与公开看板托管](design/external-and-public-board.md)
+- [测试分层、并行分片与防腐化设计](design/testing-architecture.md)
 
 ## 运行时固定路径资产
 

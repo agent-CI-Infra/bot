@@ -79,9 +79,11 @@ npm run test:e2e
 1. **资源隔离**：临时目录与 SQLite 放在 `mkdtempSync(join(tmpdir(), '<prefix>-'))` 并在 `t.after` 中清理；HTTP 服务一律监听 `127.0.0.1` 随机端口（`listen(0, '127.0.0.1')`）；使用本机 runner 工作区时用 `randomWorkspaceId()` 生成唯一 ID。
 2. **禁止访问外网**：`npm test` 经 `test/framework/test-network-guard.mjs` 阻止任何非回环网络连接；涉及真实外网的测试只能放进 `test/live/`。
 3. **测试纳入 CI**：新增测试必须能被 `test/framework/test-sets.mjs` 或 `test/e2e/playwright.config.mjs` 自动发现；`npm run check` 会对 `manager/`、`runner/`、`static/`、`test/` 等目录的 JS/MJS 做语法检查。
-4. **保持 E2E 精简高效**：
-   - 不在长期提交的 E2E 用例中保留无断言的 `page.screenshot(...)` 验收截图调用（PR 贴图应在独立验证时采集并按规范附在 PR 描述或评论中）。
-   - 轮询与定时等待优先使用 Playwright `page.clock` 推进虚拟时钟或在 `test/ut/static/` 测状态机，避免多秒真实 `page.waitForTimeout(...)` 死等；批量造数优先走 SQLite 事务而非大循环串行 HTTP 请求。
+4. **保持 E2E 精简高效与架构不腐化**（完整设计原则见 [`docs/design/testing-architecture.md`](docs/design/testing-architecture.md)）：
+   - 优先按业务主题归并回归用例并复用夹具，避免“一 Issue 一文件”式的单用例微 E2E 碎片化；与 `test/ut/static/` 重复的纯文案/错误码矩阵留在 UT。
+   - 不在长期提交的 E2E 用例中保留无断言的 `page.screenshot(...)` 验收截图或 `evidence.json` 写盘（PR 贴图应在独立验证时采集并按规范附在 PR 描述或评论中）。
+   - 轮询与定时等待优先使用 Playwright `page.clock` 推进虚拟时钟或在 `test/ut/static/` 测状态机，避免多秒真实 `page.waitForTimeout(...)` 死等；批量造数优先走 SQLite 事务而非大循环串行 HTTP 请求；多后端组合测试使用覆盖矩阵而非无收益的完整笛卡尔积。
+   - 新增或大幅改动重型 UT/ST 测试集导致 CI 双分片失衡时，用 `node test/framework/unit-shards.mjs weights` 从近期完整 CI `unit-balance.json` 刷新 `test/framework/test-set-weights.json`。
    - 临时日志、失败 trace 等产物一律写入被 git 忽略的 `.tmp/`，禁止提交进仓库。
 
 ### 其他常用开发约束
