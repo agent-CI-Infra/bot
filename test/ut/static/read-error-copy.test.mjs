@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readConsoleScriptSync } from '../../../dist/console/modules.js';
 import {loadConsole} from '../../fixtures/console-page.mjs';
 
 // #800: a read that fails because the network is gone showed the browser's own English text on the page
@@ -48,4 +49,36 @@ test('an HTTP error keeps its own message', async () => {
   const shown = text(page.$('cost-body'));
   assert.ok(shown.includes('502 · gateway_error'), shown);
   assert.ok(!shown.includes('网络连接失败'), 'an answered request is not a network failure');
+});
+
+test('an inbox read that fails on the network uses the same Chinese message and recovers on retry', async () => {
+  let offline = true;
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/tasks')) {
+      if (offline) throw network();
+      return [200, { tasks: [] }];
+    }
+    return [200, {}];
+  });
+  page.run(readConsoleScriptSync('static/shell.js').replace(/\ninitConsoleShell\(\);?\s*$/, '\n'));
+  page.run(`
+    try { Object.defineProperty(Node.prototype, 'isConnected', { configurable: true, get() { return true; } }); } catch {}
+    var projectRoute = () => null;
+    me = { id: 'admin', role: 'super_admin' };
+    tab = 'inbox';
+    renderVersion = 1;
+    location.hash = '#/inbox';
+  `);
+  await page.run('renderConsoleInbox(1)');
+  const inbox = () => page.$('console-page').querySelector('.console-inbox');
+  const shown = text(inbox());
+  assert.ok(shown.includes('待处理事项未能读取'), shown);
+  assert.ok(shown.includes('网络连接失败，请稍后重试。'), shown);
+  assert.ok(!shown.includes('Failed to fetch'), shown);
+  assert.ok(shown.includes('尚不能判断'), shown);
+  const retry = inbox().querySelectorAll('button').find(node => node.textContent === '重新加载');
+  assert.ok(retry, 'expected retry button on inbox error card');
+  offline = false;
+  await click(retry);
+  assert.ok(!text(inbox()).includes('待处理事项未能读取'), 'retry should clear the error card');
 });

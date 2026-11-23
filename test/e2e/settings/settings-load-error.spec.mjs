@@ -42,31 +42,21 @@ async function readFailureRecovers(page, base, { hash, patterns, heading, recove
   await expect(panel).not.toContainText('正在加载…');
 }
 
-test('项目管理 read failure shows the error card and recovers through 重新加载', async ({ page }) => {
+test('全局设置各页与对照页读取失败显示错误卡，并在点击重新加载后恢复', async ({ page }) => {
   test.setTimeout(120000);
   const h = await harness(), { password, admin } = await setup(h), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    // One real project: the recovery has to bring the list back, not just remove the card.
+    // One real project so 项目管理 and 存储 bring real tables back on recovery.
     await repository(admin, (await account(admin)).id, '101');
     await signIn(page, h.admin, password);
+
     await readFailureRecovers(page, h.admin, {
       hash: '#/settings/projects', patterns: [/\/api\/installations\?/],
       heading: '项目管理读取失败', recovered: 'fixture/project-101'
     });
     await expect(page.locator('#settings-panel .global-project-table')).toBeVisible();
-    expect(errors).toEqual([]);
-  } finally { await h.stop(); }
-});
 
-test('存储 read failure shows the error card and recovers through 重新加载', async ({ page }) => {
-  test.setTimeout(120000);
-  const h = await harness(), { password, admin } = await setup(h), errors = [];
-  page.on('pageerror', error => errors.push(error.message));
-  try {
-    // A real project, so the recovered page has its 按项目 table to show again.
-    await repository(admin, (await account(admin)).id, '101');
-    await signIn(page, h.admin, password);
     await readFailureRecovers(page, h.admin, {
       hash: '#/settings/storage', patterns: [/\/api\/storage(\?|$)/],
       heading: '存储读取失败', recovered: '这里统计'
@@ -74,32 +64,14 @@ test('存储 read failure shows the error card and recovers through 重新加载
     await expect(page.locator('.storage-share-table')).toContainText('fixture/project-101');
     await page.getByText('查看采集、回收与项目明细', { exact: true }).click();
     await expect(page.locator('#settings-panel .storage-projects').first()).toBeVisible();
-    expect(errors).toEqual([]);
-  } finally { await h.stop(); }
-});
 
-test('模型 read failure (接入向导 + 模型列表) shows the error card and recovers through 重新加载', async ({ page }) => {
-  test.setTimeout(120000);
-  const h = await harness(), { password } = await setup(h), errors = [];
-  page.on('pageerror', error => errors.push(error.message));
-  try {
-    await signIn(page, h.admin, password);
-    // The tab reads two endpoints together; both refused is the reported shape of the failure.
+    // The models tab reads two endpoints together; both refused is the reported shape of the failure.
     await readFailureRecovers(page, h.admin, {
       hash: '#/settings/models', patterns: [/\/api\/onboarding(\?|$)/, /\/api\/models(\?|$)/],
       heading: '模型读取失败', recovered: '默认共享模型'
     });
-    expect(errors).toEqual([]);
-  } finally { await h.stop(); }
-});
 
-// The control pages keep their own error cards and retry: the same mock that fails the settings tabs proves the
-// fixture is real, and neither page regressed.
-test('对照页 用量与成本 / 身份与权限 的错误态不回归', async ({ page }) => {
-  test.setTimeout(120000);
-  const h = await harness(), { password } = await setup(h);
-  try {
-    await signIn(page, h.admin, password);
+    // Control pages (用量与成本 / 身份与权限) keep their own error cards and retry recovery.
     await page.route('**/api/costs*', outage);
     await page.evaluate(() => { location.hash = '#/costs'; });
     const costs = page.locator('#cost-body [data-testid=console-state-error]');
@@ -109,11 +81,14 @@ test('对照页 用量与成本 / 身份与权限 的错误态不回归', async 
     await costs.getByTestId('console-state-retry').click();
     await expect(page.locator('#cost-body [data-testid=console-state-error]')).toHaveCount(0);
     await expect(page.locator('#cost-body .cost-summary')).toBeVisible();
+
     await page.route('**/api/identity', outage);
     await page.evaluate(() => { location.hash = '#/identity'; });
     await expect(page.getByRole('heading', { name: '身份与权限读取失败', exact: true })).toBeVisible();
     await page.unroute('**/api/identity');
     await page.getByRole('button', { name: '重新加载', exact: true }).click();
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+
+    expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

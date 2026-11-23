@@ -43,4 +43,6 @@ test('project/assistant computer image preinstalls Chromium and X11 virtual desk
   assert.equal(/bot-control-plane[^\n]*smoke=true/.test(files.imagesWorkflow), false, 'images.yml must not run Chromium smoke on bot-control-plane');
   assert.match(files.imagesWorkflow, /--entrypoint \/usr\/local\/bin\/bot-chromium/);
   assert.match(files.imagesWorkflow, /--entrypoint \/usr\/local\/bin\/bot-desktop/);
+  assert.match(files.project, /\bpython3-pil\b/, 'project/assistant image must preinstall Pillow');
+  assert.match(files.project, /\bimagemagick\b/, 'project/assistant image must preinstall ImageMagick');
 });
