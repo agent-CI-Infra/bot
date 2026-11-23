@@ -152,16 +152,38 @@ export class GitCache {
     return run?.code === 0 ? run.stdout : null;
   }
   // Exports a fixed commit's tree as a compressed tar.gz archive (no .git directory or remote config).
+  // Streams stdout with an optional hard byte cap so oversized repositories never fill the control-plane volume.
   // Written to a temporary file next to the cache; the caller removes it.
-  async archive(repository: string, commit: string): Promise<{ file: string; size: number }> {
+  async archive(repository: string, commit: string, maxBytes?: number): Promise<{ file: string; size: number }> {
     if (!objectId.test(commit)) throw new Error('invalid_commit');
     const dir = this.path(repository);
     const file = join(this.root, `archive-${randomBytes(12).toString('hex')}.tar.gz`);
     const out = await open(file, 'w', 0o600);
+    const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: this.root, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
     try {
-      const run = await this.git(['archive', '--format=tar.gz', commit], { cwd: dir, output: out.fd });
-      if (run.code !== 0) throw new Error(`git archive failed: ${run.stderr.trim() || 'exit ' + run.code}`);
-      return { file, size: (await out.stat()).size };
+      const child = spawn('git', ['archive', '--format=tar.gz', commit], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '', written = 0, exceeded = false;
+      child.stderr!.on('data', chunk => { stderr = (stderr + chunk).slice(-4000); });
+      const closed = new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', code => resolve(code));
+      });
+      for await (const chunk of child.stdout!) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        written += buf.length;
+        if (maxBytes && written > maxBytes) {
+          exceeded = true;
+          child.kill('SIGKILL');
+          break;
+        }
+        await out.write(buf);
+      }
+      const code = await closed.catch(error => { if (exceeded) return null; throw error; });
+      if (exceeded) {
+        throw Object.assign(new Error(`archive_too_large: exceeded ${maxBytes} bytes`), { code: 'archive_too_large', limit: maxBytes });
+      }
+      if (code !== 0) throw new Error(`git archive failed: ${stderr.trim() || 'exit ' + code}`);
+      return { file, size: written };
     } catch (error) {
       await rm(file, { force: true }).catch(() => {});
       throw error;

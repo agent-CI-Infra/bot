@@ -46,6 +46,8 @@ test('the assistant computer category saves timers and HOME limits together, eac
   assert.deepEqual(select('cpus').querySelectorAll('option').map(node => node.textContent), ['0.5 核', '1 核（默认）', '2 核', '4 核'], 'no size above the host');
   assert.match(text(resources), /4 CPU · 16 GB 内存/);
   assert.match(text(resources), /可访问外网（独立隔离网络）/);
+  assert.match(text(resources), /工作目录大小（软限额）/);
+  assert.match(text(resources), /应用层软限额/);
   assert.doesNotMatch(text(panel), /运行时/);
   const egressBox = resources.querySelectorAll('input').find(node => node.name === 'egress');
   assert.equal(egressBox.checked, true);

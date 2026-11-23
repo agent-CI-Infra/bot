@@ -30,13 +30,21 @@ export function logFailure(what, error) {
 // Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
 // The resource values are the built-in defaults: a super administrator replaces them in the global settings, and every
 // resource a project does not set itself follows the current default.
-const builtin = { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 20480 };
+const builtin = { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 4096 };
 const legacyBuiltin = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
 const defaults = { ...builtin, packages: [], env: {}, setup_script: '' };
 export const resourceBounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 65536] };
 const bounds = resourceBounds;
 const resourceKeys = Object.keys(bounds), resources = spec => Object.fromEntries(resourceKeys.map(key => [key, spec[key]]));
 const mib = 1024 * 1024;
+// Clamp an inherited/default memory target when the manager runs on a host with less RAM than the target (#1279),
+// keeping headroom for the host and control plane instead of creating a container larger than physical memory.
+export function clampMemoryToHost(memoryMb, hostMemoryMb) {
+  if (!(typeof hostMemoryMb === 'number' && Number.isFinite(hostMemoryMb) && hostMemoryMb > 0)) return memoryMb;
+  if (memoryMb <= hostMemoryMb) return memoryMb;
+  const reserveSafe = Math.floor((hostMemoryMb * 0.75) / 256) * 256;
+  return Math.min(hostMemoryMb, Math.max(resourceBounds.memory_mb[0], reserveSafe || Math.floor(hostMemoryMb)));
+}
 // CPUs in steps of 0.01, the other resources whole numbers, all inside their bounds (assistant computers pass their own).
 export function validResource(key, value, limits = bounds) {
   const [min, max] = limits[key];
@@ -200,7 +208,9 @@ export class Projects {
     if (!value) this.db.prepare("DELETE FROM settings WHERE key='global_build'").run();
     else this.db.prepare("INSERT INTO settings VALUES('global_build',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(value));
   }
-  // Effective global environment for assistant computers: shares global defaults, precompiled image and env.
+  // Effective global environment for assistant computers: shares global CPU/memory/PIDs/egress, precompiled image and env.
+  // Assistant computers keep their own disk-backed /workspace and /tmp soft limits (default 20 GiB), distinct from
+  // project computers' RAM-backed /tmp tmpfs default.
   assistantGlobalEnvironment() {
     const res = this.resourceDefaults(), envDefaults = this.globalEnvironmentDefaults(), globalImg = this.currentGlobalImage();
     const validBase = !this.approvedImageId || (globalImg?.base_image_id && globalImg.base_image_id === this.approvedImageId);
@@ -209,7 +219,7 @@ export class Projects {
       tag: validBase ? (globalImg?.tag || null) : null,
       base_image_id: this.approvedImageId || globalImg?.base_image_id || null,
       env: envDefaults.env,
-      defaults: { ...res, egress: envDefaults.egress },
+      defaults: { cpus: res.cpus, memory_mb: res.memory_mb, pids: res.pids, egress: envDefaults.egress },
       onStaleImage: () => { void this.reconcileGlobalImage().catch(error => logFailure('reconciling stale global image failed', error)); },
     };
   }
@@ -375,17 +385,29 @@ export class Projects {
       toolchain_pending: toolchainPending,
       toolchain_missing: toolchainMissing } };
   }
+  async hostInfo() {
+    const info = await this.docker.request('GET', '/info').catch(() => null);
+    return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null;
+  }
   // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
   async defaultsView() {
-    const info = await this.docker.request('GET', '/info').catch(() => null);
+    const host = await this.hostInfo();
     const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`).catch(() => null);
     const running = this.list().filter(p => ['ready', 'busy'].includes(p.state)).map(p => this.spec(p.repository_id));
+    const configured = this.resourceDefaults();
+    const effectiveMemoryMb = clampMemoryToHost(configured.memory_mb, host?.memory_mb);
+    const effectiveTmpMb = Math.min(configured.tmp_mb, effectiveMemoryMb);
+    const effective = { ...configured, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
+    const hostClamped = effectiveMemoryMb !== configured.memory_mb || effectiveTmpMb !== configured.tmp_mb
+      ? { memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb } : null;
     return {
-      defaults: this.resourceDefaults(),
+      defaults: effective,
+      configured_defaults: configured,
+      host_clamped: hostClamped,
       builtin,
       bounds,
-      host: info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null,
-      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + s.memory_mb, 0) },
+      host,
+      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + clampMemoryToHost(s.memory_mb, host?.memory_mb), 0) },
       environment: this.globalEnvironmentDefaults(),
       environment_builtin: { egress: this.egress, packages: [], setup_script: '', env: {} },
       build: this.globalBuildView(),
@@ -402,9 +424,12 @@ export class Projects {
     for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key])) throw new ManagerError('invalid_defaults', 400);
     for (const key of ['egress', 'rebuild']) if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new ManagerError('invalid_defaults', 400);
     validateSoftwareFields(input);
-    // Docker refuses to create a container that is given more CPUs than the host has.
-    const info = await this.docker.request('GET', '/info').catch(() => null);
-    if (info?.NCPU && input.cpus > info.NCPU) throw new ManagerError('cpus_exceed_host', 400);
+    // Docker refuses to create a container with more CPUs than the host has, and memory/tmpfs must not exceed host RAM.
+    const host = await this.hostInfo();
+    if (host?.cpus && input.cpus !== undefined && input.cpus > host.cpus) throw new ManagerError('cpus_exceed_host', 400);
+    if (host?.memory_mb && input.memory_mb !== undefined && input.memory_mb > host.memory_mb) throw new ManagerError('memory_exceeds_host', 400);
+    const nextMemoryMb = clampMemoryToHost(input.memory_mb ?? this.resourceDefaults().memory_mb, host?.memory_mb);
+    if (input.tmp_mb !== undefined && input.tmp_mb > nextMemoryMb) throw new ManagerError('tmp_exceeds_memory', 400);
 
     const resUpdates = Object.fromEntries(resourceKeys.filter(k => input[k] !== undefined).map(k => [k, input[k]]));
     if (Object.keys(resUpdates).length) {
@@ -459,12 +484,15 @@ export class Projects {
         return;
       }
     }
+    const host = await this.hostInfo();
+    const rawDefaults = this.resourceDefaults();
+    const buildResources = { ...rawDefaults, memory_mb: clampMemoryToHost(rawDefaults.memory_mb, host?.memory_mb) };
     const job = { handle: null, state: null, superseded: false, promise: null };
     const handle = this.images.startLayered({
       approvedImage: approved,
       globalSpec: envDefaults,
       projectSpec: null,
-      resources: this.resourceDefaults(),
+      resources: buildResources,
       egress: envDefaults.egress,
       forceRebuildGlobal: forceRebuild,
       onProgress: snapshot => {
@@ -743,10 +771,16 @@ export class Projects {
   }
   async provision(repo, { forceSetup = false, deferBuild = false } = {}) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
+    const hostInfo = await this.hostInfo();
+    const effectiveMemoryMb = clampMemoryToHost(spec.memory_mb, hostInfo?.memory_mb);
+    // Project /tmp is a RAM-backed tmpfs charged to the container memory cgroup (MemorySwap = Memory, no swap),
+    // so bound its size to the effective container memory limit as well (#1279).
+    const effectiveTmpMb = Math.min(spec.tmp_mb, effectiveMemoryMb);
+    const effectiveSpec = { ...spec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
     // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
     // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
     // memory whether or not the host has swap.
-    const tmpfs = `rw,exec,nosuid,nodev,size=${spec.tmp_mb * mib},mode=1777`, memory = spec.memory_mb * mib, approved = await this.resolveImage(repo, spec, { deferBuild });
+    const tmpfs = `rw,exec,nosuid,nodev,size=${effectiveTmpMb * mib},mode=1777`, memory = effectiveMemoryMb * mib, approved = await this.resolveImage(repo, effectiveSpec, { deferBuild });
     // Repository variables reach commands through the runner, which reads the names listed in BOT_PROJECT_ENV_KEYS.
     const env = ['HOME=/workspace/home', 'LANG=C.UTF-8', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(spec.env).join(',')}`];
     let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
@@ -1218,6 +1252,15 @@ export class Projects {
             env: { ...globalEnv.env, ...(own.env || {}) },
             setup_script: own.setup_script || '',
           };
+          const hostInfoForConfigure = await this.hostInfo();
+          if (requested.cpus != null || requested.memory_mb != null || requested.tmp_mb != null) {
+            if (hostInfoForConfigure?.cpus && requested.cpus != null && requested.cpus > hostInfoForConfigure.cpus) throw Object.assign(new ManagerError('cpus_exceed_host', 400), { untouched: true });
+            if (hostInfoForConfigure?.memory_mb && requested.memory_mb != null && requested.memory_mb > hostInfoForConfigure.memory_mb) throw Object.assign(new ManagerError('memory_exceeds_host', 400), { untouched: true });
+            const effectiveNextMemory = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure?.memory_mb);
+            if (requested.tmp_mb != null && requested.tmp_mb > effectiveNextMemory) throw Object.assign(new ManagerError('tmp_exceeds_memory', 400), { untouched: true });
+          }
+          nextSpec.memory_mb = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure?.memory_mb);
+          nextSpec.tmp_mb = Math.min(nextSpec.tmp_mb, nextSpec.memory_mb);
           const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
           if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
           const toolchain = approved.Config?.Labels?.['department.bot.toolchain'] || null;

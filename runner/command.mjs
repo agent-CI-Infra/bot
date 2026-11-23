@@ -32,7 +32,7 @@ export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=fal
   // Local mode shares the host process namespace: use task cleanup, never name-wide kills.
   if(local&&/(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value))return Promise.resolve({exit_code:126,output:'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.',timed_out:false,truncated:false});
   const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
-  const watch=assistant?null:watchVolume(volume);
+  const watch=watchVolume(volume);
   const run=keepBackground?backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory}):new Promise((resolve,reject)=>{
     const output=new CommandOutput();let fd,logPath=outputFile;
     if(logPath)fd=openSync(logPath,'w',0o600);

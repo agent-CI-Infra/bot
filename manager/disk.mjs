@@ -22,9 +22,9 @@ export function diskFull(error) {
 
 export class DiskGuard {
   constructor(path, { ttlMs = 10_000, log = line => console.warn(line), state = diskState } = {}) { this.path = path; this.ttlMs = ttlMs; this.log = log; this.read = state; this.at = 0; this.last = null; this.low = false; }
-  /** The disk now, statfs at most once per ttlMs; logs when the free space falls below the reserve and when it is back. */
-  check() {
-    if (Date.now() - this.at < this.ttlMs) return this.last;
+  /** The disk now, statfs at most once per ttlMs (or immediately when force=true); logs when the free space falls below the reserve and when it is back. */
+  check(force = false) {
+    if (!force && Date.now() - this.at < this.ttlMs) return this.last;
     this.at = Date.now(); this.last = this.read(this.path);
     const low = !!this.last?.low;
     if (low !== this.low) this.log(low ? `[disk] ${this.path}: ${gib(this.last.free_bytes)} free, below the reserve of ${gib(this.last.reserve_bytes)}; background writes pause`

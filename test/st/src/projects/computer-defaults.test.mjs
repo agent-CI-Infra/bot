@@ -36,18 +36,20 @@ function fixture(t) {
 test('computers follow the resource defaults unless their project sets its own value, and null returns to the default', async t => {
   const f = fixture(t); await f.projects.register('101');
   let view = await f.projects.defaultsView();
-  assert.deepEqual(view.defaults, { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 20480 }); assert.deepEqual(view.builtin, view.defaults);
+  assert.deepEqual(view.defaults, { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 4096 }); assert.deepEqual(view.builtin, view.defaults);
   assert.deepEqual(view.host, { cpus: 8, memory_mb: 32768 }); assert.deepEqual(view.allocated, { computers: 1, cpus: 2, memory_mb: 16384 });
   for (const input of [{}, { cpus: 0.1 }, { memory_mb: 100 }, { pids: 1.5 }, { tmp_mb: '64' }, { egress: 'no' }, { cpus: null }, []])
     await assert.rejects(f.projects.setDefaults(input), /invalid_defaults/);
-  // Docker cannot give a container more CPUs than the host has.
+  // Docker cannot give a container more CPUs or memory than the host has, and project /tmp tmpfs must fit in container RAM.
   await assert.rejects(f.projects.setDefaults({ cpus: 12 }), /cpus_exceed_host/);
+  await assert.rejects(f.projects.setDefaults({ memory_mb: 65536 }), /memory_exceeds_host/);
+  await assert.rejects(f.projects.setDefaults({ tmp_mb: 20480 }), /tmp_exceeds_memory/);
   assert.equal(f.projects.resourceDefaults().cpus, 2);
 
   await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 2048 } });
   assert.deepEqual(f.projects.describe('101').computer.inherited, ['cpus', 'pids', 'tmp_mb']);
   view = await f.projects.setDefaults({ cpus: 4, memory_mb: 8192 });
-  assert.deepEqual(view.defaults, { cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 20480 });
+  assert.deepEqual(view.defaults, { cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 4096 });
   // The running computer is not touched; it shows the new values as pending until it is refreshed.
   const computer = f.projects.describe('101').computer;
   assert.deepEqual([computer.cpus, computer.memory_mb, computer.resources_pending, f.host('101').NanoCpus], [4, 2048, true, 2e9]);
@@ -100,7 +102,7 @@ test('global settings change the defaults through the manager, and an idle compu
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('t1','101','review.issue','running','')");
   h.store.run("INSERT INTO task_claims VALUES('t1','101','token','2026-01-01')");
   const saved = await admin('/api/settings', 'PATCH', { computer_defaults: { cpus: 3, memory_mb: 6144 } });
-  assert.equal(saved.status, 200); assert.deepEqual(saved.value.settings.computer_defaults.defaults, { cpus: 3, memory_mb: 6144, pids: 1024, tmp_mb: 20480 });
+  assert.equal(saved.status, 200); assert.deepEqual(saved.value.settings.computer_defaults.defaults, { cpus: 3, memory_mb: 6144, pids: 1024, tmp_mb: 4096 });
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='settings.updated' AND resource_id='computer.defaults'"));
   await h.projects.reconcile();
   assert.deepEqual([f.host('101').NanoCpus, f.host('202').NanoCpus, f.host('202').PidsLimit], [2e9, 3e9, 2048]);
@@ -117,4 +119,24 @@ test('global settings change the defaults through the manager, and an idle compu
   await admin('/api/users', 'POST', { username: 'project-admin', password, role: 'project_admin', repository_ids: ['101'] });
   const member = h.client(); await member('/api/auth/login', 'POST', { username: 'project-admin', password });
   assert.equal((await member('/api/settings', 'PATCH', { computer_defaults: { cpus: 1 } })).status, 403);
+});
+
+test('small hosts clamp the 16 GB project default and reject explicit memory/tmp oversubscription (#1279)', async t => {
+  const f = fixture(t);
+  // Simulate an 8 GiB manager host.
+  f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
+  const view = await f.projects.defaultsView();
+  assert.equal(view.defaults.memory_mb, 6144, '16 GiB built-in default clamps to 75% of 8 GiB host');
+  assert.equal(view.defaults.tmp_mb, 4096, '4 GiB tmpfs default stays inside 6 GiB effective RAM');
+  assert.deepEqual(view.host_clamped, { memory_mb: 6144, tmp_mb: 4096 });
+  await assert.rejects(f.projects.setDefaults({ memory_mb: 16384 }), /memory_exceeds_host/);
+  await assert.rejects(f.projects.setDefaults({ tmp_mb: 8192 }), /tmp_exceeds_memory/);
+
+  await f.projects.register('301');
+  const hostCfg = f.host('301');
+  assert.equal(hostCfg.Memory, 6144 * mib);
+  assert.equal(hostCfg.MemorySwap, 6144 * mib);
+  assert.equal(hostCfg.Tmpfs['/tmp'], `rw,exec,nosuid,nodev,size=${4096 * mib},mode=1777`);
+  await assert.rejects(f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } }), /memory_exceeds_host/);
+  await assert.rejects(f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { tmp_mb: 8192 } }), /tmp_exceeds_memory/);
 });

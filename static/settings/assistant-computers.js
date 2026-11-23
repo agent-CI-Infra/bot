@@ -31,13 +31,14 @@ function assistantSettingsBody(view, redraw) {
 function assistantResourcesBody(view, redraw) {
   const { computers } = view.settings;
   if (!computers) return [note('暂时读不到 manager，无法显示助手电脑的资源，稍后再试。')];
-  const { settings, defaults, bounds, host } = computers;
+  const { settings, configured_settings: configuredSettings, host_clamped: hostClamped, defaults, bounds, host } = computers;
   const { grid, changes: changed } = resourceSelects(assistantResourceFields, { values: settings, bounds, host, marked: defaults, mark: '（默认）' });
   const egressEnabled = settings.egress !== false;
   const egress = checkbox('egress', egressEnabled, '允许访问外网（自由使用预装浏览器访问网页、安装依赖；与控制面内网隔离）');
   const egressInput = egress.querySelector('input');
   return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'], ['网络', egressEnabled ? '可访问外网（独立隔离网络）' : '无外网']]),
-    note('/workspace 工作目录与 /tmp 临时目录使用随容器生命周期自动创建与销毁的临时磁盘卷，不计入容器内存上限（默认 20 GB 空间、16 GB 内存，互不挤占）；容器空闲回收或重建时自动清空并删除临时卷，不影响持久化 HOME。助手电脑自动共用「工作电脑 → 虚拟电脑默认环境」中的全局预装软件包、预编译镜像与全局环境变量；未单独覆盖的资源项也跟随全局默认。'),
+    note('/workspace 工作目录与 /tmp 临时目录使用随容器生命周期自动创建与销毁的临时磁盘卷，不计入容器内存上限（默认 20 GB 应用层软限额、16 GB 内存，互不挤占）；受控检出与文件写入按软限额校验，同时受宿主机数据盘剩余空间安全预留门禁保护（普通命令无文件系统硬配额，但数据盘低于安全预留时自动拒写，并发忙碌容器总量亦受宿主机内存准入约束）。容器空闲回收或重建时自动清空并删除临时卷，不影响持久化 HOME。助手电脑自动共用「工作电脑 → 虚拟电脑默认环境」中的全局 CPU/内存/进程数、预装软件包、预编译镜像与全局环境变量。'),
+    ...(hostClamped ? [note(`当前主机总内存为 ${megabytes(host.memory_mb)}，低于已配置/默认内存（${megabytes(configuredSettings?.memory_mb ?? defaults.memory_mb)}），实际生效内存上限已自动收紧至 ${megabytes(settings.memory_mb)} 以保护宿主机与控制面。`)] : []),
     actionForm([grid, egress, note('保存后新建的电脑立即使用新值；已有的电脑在它的下一个回合开始时按新值重建，HOME 保留，/tmp 和工作目录清空，进行中的回合不受影响。')], '保存', async () => {
       const changes = changed();
       if (egressInput.checked !== egressEnabled) changes.egress = egressInput.checked;
