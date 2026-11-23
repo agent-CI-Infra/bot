@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { releaseFixture } from '../../fixtures/release-fixtures.mjs';
 
 async function login(page, address, username, password) {
@@ -24,15 +23,12 @@ test('发版本页读取时间与全站日期时间格式一致，空的标签�
     await expect(factValue(page, '已有 Release')).toHaveText('暂无');
     await expect(page.getByRole('button', { name: '打开接入门禁', exact: true })).toHaveCount(0);
     await expect(page.locator('.release-preflight-checks').getByRole('button')).toHaveCount(0);
-    mkdirSync('.tmp/release-read-copy-691', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: '.tmp/release-read-copy-691/desktop-1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('.release-panel p[role="status"]')).toBeVisible();
     await expect(factValue(page, '已有标签')).toHaveText('暂无');
     await expect(factValue(page, '已有 Release')).toHaveText('暂无');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/release-read-copy-691/mobile-390.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });

@@ -1,5 +1,4 @@
 import {test,expect} from '@playwright/test';
-import {mkdirSync} from 'node:fs';
 import {releaseFixture,run,target,writes} from '../../fixtures/release-fixtures.mjs';
 async function login(page,f){await page.goto(f.h.admin+'/#/projects/101/release');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByRole('heading',{name:'发版本',level:1,exact:true})).toBeVisible();}
 
@@ -7,7 +6,7 @@ test('release preparation exposes exact facts, waits for explicit writes and cle
  const cleanup=[],f=await releaseFixture({after:fn=>cleanup.push(fn)}),errors=[];page.on('pageerror',e=>errors.push(e.message));
  try{
   await login(page,f);await page.getByLabel('版本号',{exact:true}).fill('v1.2.3');await page.getByRole('button',{name:'检查候选提交',exact:true}).click();await expect(page.getByRole('button',{name:'确认打标签',exact:true})).toBeEnabled();await expect(page.locator('.release-preview')).toContainText(target);await expect(page.locator('.release-preview')).toContainText('新增提交');expect(writes(f.state)).toEqual([]);
-  mkdirSync('.tmp/release-progress-233/previews',{recursive:true});for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);if([390,1440].includes(width))await page.screenshot({path:`.tmp/release-progress-233/previews/console-release-preparation-${width===390?'mobile':'desktop'}.png`,fullPage:true});}
+  for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
   await page.route('**/releases/preflight?*',route=>route.fulfill({status:503,json:{error:'fixture_down'}}));await page.getByRole('button',{name:'检查候选提交',exact:true}).click();await expect(page.getByRole('button',{name:'确认打标签',exact:true})).toBeDisabled();await expect(page.locator('.release-preview')).not.toContainText(target);await expect(page.locator('.release-preview')).toContainText('读取失败');expect(writes(f.state)).toEqual([]);expect(errors).toEqual([]);
  }finally{for(const close of cleanup.reverse())await close();}
 });

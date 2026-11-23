@@ -1,7 +1,7 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 import { test,expect } from '@playwright/test';
-import { mkdirSync,rmSync,writeFileSync } from 'node:fs';
+import { rmSync,writeFileSync } from 'node:fs';
 import { command,managementFixture,query,settled } from '../../fixtures/management-fixture.mjs';
 
 test('mobile management opens its conversation list and sends on the first press while the editor is focused', async ({ page }) => {
@@ -52,8 +52,7 @@ test('mobile management opens its conversation list and sends on the first press
 test('management UI, direct API and model tools agree on real persisted query, configuration and task results',async({page})=>{
   test.setTimeout(90000);
   const f=await managementFixture(),{h,admin,password}=f,errors=[];
-  page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/management-164',{recursive:true});
-  try{
+  page.on('pageerror',e=>errors.push(e.message));  try{
     await page.setViewportSize({width:1440,height:1100});await page.goto(h.admin+'/#/management');
     await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
     await switchConsoleProject(page, '101');
@@ -66,7 +65,6 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     const direct=(await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value;
     expect(direct.task.status).toBe('waiting_environment');expect(direct.task.error_code).toBe('environment_not_ready');
-    await page.screenshot({path:'.tmp/management-164/query-desktop.png',fullPage:true});
     // The model submits a versioned command; the page and the Manager API see the resulting Manager prompt.
     await message.fill('更新任务默认提示词');await page.getByRole('button',{name:'发送',exact:true}).click();
     await expect(feed).toContainText('操作 更新 Manager 配置 · 已执行');
@@ -74,7 +72,6 @@ test('management UI, direct API and model tools agree on real persisted query, c
     const configured=(await query(admin,'get_effective_config',{project_id:'101'})).value;
     expect(configured.manager.prompt.effective).toBe('Inspect evidence and cite the original logs.');
     expect((await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe('Inspect evidence and cite the original logs.');
-    await page.screenshot({path:'.tmp/management-164/configuration-desktop.png',fullPage:true});
     // Pause from chat, then read the same state with direct and existing APIs.
     await message.fill('暂停这个任务');await page.getByRole('button',{name:'发送',exact:true}).click();
     await expect(feed).toContainText('操作 暂停任务 · 已执行');await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
@@ -87,7 +84,6 @@ test('management UI, direct API and model tools agree on real persisted query, c
     // The receipt is persisted on the server, so the project's conversation still shows it once that scope is chosen.
     await expect(feed).toContainText('操作 暂停任务 · 已执行');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    await page.screenshot({path:'.tmp/management-164/task-mobile.png',fullPage:true});
     const audit=(await query(admin,'list_audit',{project_id:'101'})).value.audit;
     writeFileSync('.tmp/management-164/evidence.json',JSON.stringify({scenario:'query/configuration/task management',query:{status:direct.task.status,reason:direct.task.error_code,logs:direct.logs_url,runs:direct.runs_url},prompt:configured.manager.prompt,commands:audit.map(r=>({id:r.id,operation:r.operation,state:r.state,channel:r.channel,principal_id:r.principal_id,expected_revision:r.expected_revision,before_revision:r.before_revision,after_revision:r.after_revision,result:r.result})),model_requests:h.store.all('SELECT id,request_id,state,input_tokens,output_tokens FROM model_requests'),page_errors:errors},null,2));
     expect(errors).toEqual([]);expect(h.store.get('SELECT count(*) n FROM tasks').n).toBe(2);
@@ -127,7 +123,6 @@ test('the management page keeps drafts and a running conversation across console
     expect(f.h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
     await expect(message).toBeInViewport(); await expect(page.getByRole('button', { name: '发送', exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/management-164/page-mobile.png' });
     await page.locator('#console-account').click();
     await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(chat).toHaveCount(0);
@@ -176,7 +171,6 @@ test('project chat links select the project, and a delayed old read cannot repla
     await expect(page.locator('#management-launcher')).toHaveCount(0);
     const sessions = page.getByRole('button', { name: '会话记录', exact: true });
     await sessions.click(); await expect(original).toBeVisible(); await expect(original).toHaveAttribute('aria-current', 'true');
-    mkdirSync('.tmp/management-fixes', { recursive: true }); await page.screenshot({ path: '.tmp/management-fixes/narrow-sidebar.png' });
     await original.click(); await expect(page.getByRole('complementary', { name: '会话记录', exact: true })).toBeHidden();
     await expect(message).toHaveValue('101 的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
@@ -251,8 +245,7 @@ test('loading a scope disables composing until its draft is restored, and abando
 test('management uses one shell header and a persistent conversation sidebar on desktop and mobile', async ({ page }) => {
   test.setTimeout(60000);
   const f = await managementFixture(), errors = [];
-  page.on('pageerror', error => errors.push(error.message)); mkdirSync('.tmp/management-display', { recursive: true });
-  try {
+  page.on('pageerror', error => errors.push(error.message));  try {
     await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/projects');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -279,7 +272,6 @@ test('management uses one shell header and a persistent conversation sidebar on 
     const rail = await page.locator('#console-sidebar').boundingBox(), sidebar = await page.locator('.management-sidebar').boundingBox();
     expect(pageBox.x).toBe(rail.x + rail.width); expect(pageBox.width).toBe(1440 - rail.width); expect(Math.abs(pageBox.y - header.height)).toBeLessThan(2); expect(pageBox.y + pageBox.height).toBe(1000);
     expect(sidebar.x).toBe(pageBox.x); expect(sidebar.width).toBeGreaterThan(200); expect(sidebar.x + sidebar.width).toBeLessThan((await message.boundingBox()).x);
-    await page.screenshot({ path: '.tmp/management-display/page-desktop.png' });
     await consoleNavigate(page, '身份与权限'); await expect(chat).toBeHidden();
     await consoleNavigate(page, '管理助手'); await expect(message).toHaveValue('保留这条尚未发送的草稿');
     await page.reload(); await expect(page).toHaveURL(/#\/projects\/101\/management$/);
@@ -296,8 +288,7 @@ test('management uses one shell header and a persistent conversation sidebar on 
     await expect(send).toBeInViewport(); await expect(message).toBeInViewport();
     await expect(page.locator('#console-mobile-nav a[data-page="assistant"]')).toHaveAttribute('aria-current', 'page');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/management-display/page-mobile.png' });
-    await sessions.click(); await page.screenshot({ path: '.tmp/management-display/page-mobile-sidebar.png' });
+    await sessions.click();
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(2); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
@@ -340,7 +331,6 @@ test('a rollback previews the command it would send, and sends it only after it 
       const head = el.querySelector('h3').getBoundingClientRect(), hit = document.elementFromPoint(head.left + 8, head.top + head.height / 2);
       return { top: b.top, bottom: b.bottom, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.bottom <= innerHeight }; });
     expect(shown.hit).toBe(true); expect(shown.inside).toBe(true);
-    await page.screenshot({ path: '.tmp/management-rollback/1440.png', fullPage: true });
     // Both phone widths keep the confirmation heading reachable within the conversation.
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
@@ -356,7 +346,6 @@ test('a rollback previews the command it would send, and sends it only after it 
       await confirm.evaluate(el => el.scrollIntoView({ block: 'center' }));
       await expect(confirm).toBeInViewport({ ratio: 1 });
       expect(await confirm.evaluate(el => { const b = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)); })).toBe(true);
-      await page.screenshot({ path: `.tmp/management-rollback/${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
     // 取消 drops the rollback without a command.
@@ -389,13 +378,11 @@ test('项目管理员在没有已启动项目或接口 403 时看到原因和重
     await expect(panel.getByText('正在读取会话…', { exact: true })).toHaveCount(0);
     await expect(panel.getByText('正在连接管理助手…')).toHaveCount(0);
     await expect(page.getByLabel('管理消息')).toBeDisabled();
-    await page.screenshot({ path: '.tmp/ui-522/after-empty-desktop.png', fullPage: true });
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await expect(panel.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible();
       await expect(panel.getByRole('button', { name: '重试', exact: true })).toBeInViewport({ ratio: 1 });
-      await page.screenshot({ path: `.tmp/ui-522/after-empty-${width}.png`, fullPage: true });
     }
 
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -508,19 +495,16 @@ test('管理助手空闲时提供符合项目范围的推荐，发送和执行�
     releaseSend();
     await expect(stop).toBeVisible();
     await expect(composer).toHaveValue('');
-    mkdirSync('.tmp/management-recommendations', { recursive: true });
     for (const [device, viewport] of [['desktop', { width: 1440, height: 1000 }], ['mobile', { width: 390, height: 844 }]]) {
       await page.setViewportSize(viewport);
       await expect(compactBar).toBeHidden();
       await expect(composer).toBeInViewport();
-      await page.screenshot({ path: `.tmp/management-recommendations/running-${device}.png` });
     }
     await composer.fill('下一条草稿');
     releaseModel();
     await expect(send).toBeEnabled();
     await expect(compactBar).toBeVisible();
     await expect(composer).toHaveValue('下一条草稿');
-    await page.screenshot({ path: '.tmp/management-recommendations/idle-mobile.png' });
 
     // Starting a fresh conversation brings back the welcome recommendation cards and hides the compact bar.
     await page.setViewportSize({ width: 390, height: 844 });

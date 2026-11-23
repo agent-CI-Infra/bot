@@ -41,13 +41,10 @@ test('任务详情展示浏览器截图证据，窄屏不横向溢出', async ({
     await expect(card.getByRole('img', { name: 'screenshot 第 1 步截图' })).toBeVisible();
     await expect(card.getByRole('link', { name: '打开截图', exact: true })).toHaveAttribute('href', '/api/tasks/browse-ui/browser-evidence/step-1.png');
     await card.scrollIntoViewIfNeeded();
-    mkdirSync('.tmp/908-evidence', { recursive: true });
-    await page.screenshot({ path: '.tmp/908-evidence/browser-evidence-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     await card.scrollIntoViewIfNeeded();
     await expect(card.getByRole('heading', { name: '浏览器证据', exact: true })).toBeVisible();
     await expect(card.getByRole('img', { name: 'screenshot 第 1 步截图' })).toBeVisible();
-    await page.screenshot({ path: '.tmp/908-evidence/browser-evidence-390.png' });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally {

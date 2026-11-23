@@ -1,17 +1,13 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, testPassword } from '../../fixtures/helpers.mjs';
 
 // #554: workspace navigation uses one linear SVG set; glyphs ⌂▤◷⋯ are gone,
 // and every entry keeps its visible text as the accessible name.
-const out = resolve('.tmp/console-icons-554');
 const glyphs = /[⌂▤◷⋯]/;
 
 test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别且无横向溢出', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness();
-  mkdirSync(out, { recursive: true });
   try {
     const { password } = await setup(h);
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -34,7 +30,6 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     const sidebarText = await sidebar.innerText();
     expect(sidebarText).not.toMatch(glyphs);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: `${out}/projects-icons-1440.png`, fullPage: true });
 
     // Switching the language re-translates every [data-i18n] node; the sidebar entries must keep their icons both ways.
     const sidebarEntries = sidebar.locator('#tabs [data-console-nav]');
@@ -53,7 +48,6 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     const moreLinks = page.locator('.console-groups .console-link-with-icon');
     expect(await moreLinks.count()).toBeGreaterThan(4);
     expect(await moreLinks.locator('svg.console-icon').count()).toBe(await moreLinks.count());
-    await page.screenshot({ path: `${out}/more-icons-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects');
@@ -69,13 +63,11 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     }
     expect(await mobile.innerText()).not.toMatch(glyphs);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: `${out}/projects-icons-390.png`, fullPage: true });
 
     await mobile.getByRole('link', { name: '更多', exact: true }).click();
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     expect(await page.locator('.console-groups .console-link-with-icon svg.console-icon').count()).toBeGreaterThan(4);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: `${out}/more-icons-390.png`, fullPage: true });
 
     // Empty and error states carry an inline SVG mark (a data: mask image would be blocked by the console CSP).
     const stateIcon = async (selector, name, size) => {
@@ -100,18 +92,15 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
       await page.goto(h.admin + '/#/inbox');
       // Pages keep other (hidden) list states in the DOM since #553; read the one on screen. Phones use a 24px mark.
       await stateIcon('.console-state-empty:visible', 'tray', width === 390 ? 24 : 32);
-      await page.screenshot({ path: `${out}/state-empty-${width}.png`, fullPage: true });
       await page.route('**/api/tasks?attention=*', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
       await page.reload();
       await stateIcon('.console-state-error:visible', 'alert', width === 390 ? 24 : 32);
-      await page.screenshot({ path: `${out}/state-error-${width}.png`, fullPage: true });
     }
   } finally { await h.stop(); }
 });
 
 test('#554 项目管理员的桌面侧栏「更多功能」也用线性图标（1440）', async ({ browser }) => {
   const h = await harness();
-  mkdirSync(out, { recursive: true });
   try {
     const { admin } = await setup(h);
     const memberPassword = testPassword();
@@ -129,7 +118,6 @@ test('#554 项目管理员的桌面侧栏「更多功能」也用线性图标（
     await expect(more.locator('svg.console-icon.console-icon-more')).toBeVisible();
     expect(await page.locator('#console-sidebar').innerText()).not.toMatch(glyphs);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: `${out}/projects-icons-project-admin-1440.png`, fullPage: true });
     await context.close();
   } finally { await h.stop(); }
 });

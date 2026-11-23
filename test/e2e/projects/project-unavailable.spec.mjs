@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 // #614: a project address this account cannot open says so in plain words, clears 正在读取项目… from the scope bar and
@@ -18,7 +18,6 @@ test('#614 无权限的项目地址：人话说明、面包屑「无法打开项
   try {
     const { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
     const password = testPassword(); await admin('/api/users', 'POST', { username: 'member', password, role: 'project_admin', repository_ids: ['101'] });
-    mkdirSync('.tmp/project-unavailable', { recursive: true });
     for (const width of [1440, 390]) {
       const { context, page, errors } = await signIn(browser, h, width, 'member', password);
       // The authorization contract is unchanged: a project that exists and one that does not answer the same way.
@@ -41,7 +40,6 @@ test('#614 无权限的项目地址：人话说明、面包屑「无法打开项
       // The raw code is still there for support, folded under 详细信息.
       await page.locator('#project-page summary', { hasText: '详细信息' }).click();
       await expect(page.locator('#project-page .console-state-details code')).toHaveText('403 · repository_forbidden');
-      await page.screenshot({ path: `.tmp/project-unavailable/forbidden-${width}.png`, fullPage: true });
       await page.locator('#project-page').getByRole('link', { name: '返回项目列表', exact: true }).click();
       await expect(page).toHaveURL(/#\/projects$/); await expect(page.locator('#rows')).toContainText('fixture/project-101');
       expect(errors).toEqual([]); await context.close();
@@ -53,7 +51,6 @@ test('#614 超级管理员打开不存在的项目：「找不到这个项目」
   const h = await harness();
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    mkdirSync('.tmp/project-unavailable', { recursive: true });
     for (const width of [1440, 390]) {
       const { context, page, errors } = await signIn(browser, h, width, 'administrator', password);
       // The service answers a super administrator 404 repository_not_found for a repository nobody registered (src/app/auth.ts).
@@ -70,7 +67,6 @@ test('#614 超级管理员打开不存在的项目：「找不到这个项目」
       await expect(back).toBeVisible(); await expect(back).toHaveAttribute('href', '#/projects');
       const box = await back.boundingBox(); expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(width);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/project-unavailable/missing-super-${width}.png`, fullPage: true });
       await back.click(); await expect(page).toHaveURL(/#\/projects$/); await expect(page.locator('#rows')).toContainText('fixture/project-101');
       expect(errors).toEqual([]); await context.close();
     }
@@ -81,7 +77,6 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
   const h = await harness();
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    mkdirSync('.tmp/project-unavailable', { recursive: true });
     for (const width of [1440, 390]) {
       const { context, page, errors } = await signIn(browser, h, width, 'administrator', password);
       let fail = true; await page.route('**/api/repositories/101', route => fail ? route.fulfill({ status: 500, json: { error: 'internal_error' } }) : route.continue());
@@ -95,7 +90,6 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
       const retry = state.getByRole('button', { name: '重试', exact: true });
       await expect(retry).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/project-unavailable/failed-${width}.png`, fullPage: true });
       fail = false; await retry.click();
       await expect(page.locator('#console-project-header .project-head h1')).toHaveText('fixture/project-101');
       await expect(page.locator('#console-context')).toHaveText('fixture / project-101');
@@ -111,7 +105,6 @@ test('an overview permission change replaces the old project header with the sha
   page.on('pageerror', error => errors.push(error.message));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    mkdirSync('.tmp/project-unavailable', { recursive: true });
     await page.goto(h.admin + '/#/projects/101/overview');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -131,7 +124,6 @@ test('an overview permission change replaces the old project header with the sha
       await expect(page.locator('#console-location')).toBeVisible();
       await expect(page.locator('#console-context')).toBeVisible(); await expect(page.locator('#console-context')).toHaveText('无法打开项目');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/project-unavailable/revoked-${width}.png`, fullPage: true });
       await page.unroute('**/api/repositories/101/role-board');
     }
     expect(errors).toEqual([]);

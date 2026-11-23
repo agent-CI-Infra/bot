@@ -1,10 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { identityFixture, openIdentityAdvanced } from '../../fixtures/identity-fixture.mjs';
 import { harness, setup, account } from '../../fixtures/helpers.mjs';
 
-const output = resolve('.tmp/login-onboarding-225');
 
 test.beforeEach(async ({ page }) => {
   await page.route('https://avatars.githubusercontent.com/**', route => route.fulfill({ contentType: 'image/svg+xml',
@@ -15,7 +14,6 @@ test('the first paint is a loading line, not an empty page, and the login card i
   const h = await harness();
   try {
     await setup(h);
-    mkdirSync(output, { recursive: true });
     // The shell used to stay empty until /api/setup and /api/auth/me came back; the boot line covers that gap.
     await page.goto(h.admin + '/');
     await expect(page.getByRole('status').first()).toBeHidden();
@@ -33,14 +31,13 @@ test('the first paint is a loading line, not an empty page, and the login card i
       expect(await page.getByLabel('用户名', { exact: true }).evaluate(el => getComputedStyle(el.closest('label')).fontSize)).toBe('14px');
       await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: resolve(output, `login-${width}.png`), fullPage: true });
     }
   } finally { await h.stop(); }
 });
 
 test('a pending grant says which condition it waits on, and an older server without the field still renders', async ({ page }) => {
   const f = await identityFixture(), errors = [];
-  page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  page.on('pageerror', e => errors.push(e.message));
   try {
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
@@ -50,7 +47,6 @@ test('a pending grant says which condition it waits on, and an older server with
     f.h.store.run('UPDATE github_installations SET revision=revision+1 WHERE ref=?', grant.installation_ref);
     await page.evaluate(() => start());
     await expect(page.locator('#identity-panel')).toContainText('安装待同步');
-    await page.screenshot({ path: resolve(output, 'identity-installation-pending-1440.png'), fullPage: true });
 
     f.h.store.run("UPDATE external_identities SET status='pending_verification' WHERE principal_id=?", grant.principal_id);
     await page.evaluate(() => start());
@@ -112,7 +108,6 @@ test('a setup failure replaces loading with an error and retries into the login 
   const h = await harness(); await setup(h);
   let failSetup = true, setupRequests = 0;
   try {
-    mkdirSync(output, { recursive: true });
     await page.route('**/api/setup', route => {
       if (route.request().method() !== 'GET') return route.continue();
       setupRequests++;
@@ -130,7 +125,6 @@ test('a setup failure replaces loading with an error and retries into the login 
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
       await expect(retry).toBeVisible(); await expect(retry).toBeEnabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: resolve(output, `boot-error-${width}.png`), fullPage: true });
     }
     failSetup = false; await retry.click();
     await expect(page.locator('#boot')).toBeHidden();

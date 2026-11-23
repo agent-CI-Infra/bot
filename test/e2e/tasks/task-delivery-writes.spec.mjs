@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { TaskCommands } from '../../../dist/tasks/commands.js';
@@ -8,7 +8,6 @@ import { traceEvent } from '../../../dist/tasks/trace.js';
 
 // #814: a generic task's details show what it may deliver, how its writes changed and which delivery tools each run had;
 // the project's capability ceiling form carries the QA gate before a PR.
-const shots = process.env.BOT_E2E_SCREENSHOTS;
 const login = async (page, url, password) => {
   await page.goto(url);
   await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
@@ -46,7 +45,6 @@ test('task details show the granted writes, their changes and each run\'s delive
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       // The card scrolls nothing sideways inside the task view either (a long person id once did at 390 px).
       expect(await card.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/task-writes-${width}.png` }); }
     }
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
@@ -64,7 +62,6 @@ test('the capability ceiling form turns the QA gate before a PR off and on', asy
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await gate.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (shots) await page.screenshot({ path: `${shots}/qa-gate-${width}.png` });
     }
     await gate.uncheck();
     await page.getByRole('button', { name: '保存能力上限', exact: true }).click();

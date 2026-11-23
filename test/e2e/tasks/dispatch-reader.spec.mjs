@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { promptReading } from '../helpers/prompt-editor.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
@@ -35,14 +34,12 @@ test('dispatch filters and recorded detail remain usable at six widths, with a s
     await reader.getByLabel('结束时间（不含）', { exact: true }).fill('2026-11-12T00:00');
     await reader.getByRole('button', { name: '应用分派筛选', exact: true }).click();
     await expect(reader.locator('[data-dispatch-event]')).toHaveCount(1); await expect(reader).toContainText('Visible event created');
-    mkdirSync('.tmp/manager-dispatch-229/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 950 }); await reader.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await reader.getByRole('button', { name: '查看分派详情', exact: true }).click();
       await expect(detail(page)).toContainText('Recorded fixture model'); await expect(detail(page)).toContainText('触发事件'); await expect(detail(page)).toContainText('当前没有可读取的关联任务');
       expect(await detail(page).evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/manager-dispatch-229/previews/manager-dispatch-${width}.png` });
       await detail(page).getByRole('button', { name: '关闭分派详情', exact: true }).click();
     }
     await reader.getByRole('combobox', { name: '分派结果', exact: true }).selectOption('ignore'); await reader.getByRole('button', { name: '应用分派筛选', exact: true }).click();
@@ -129,7 +126,7 @@ test('opening a linked task reports a rejected read without an unhandled rejecti
 
 test('cooling-down dispatch exposes paged recovery evidence and an immediate retry without resetting attempts', async ({page})=>{
  const {h,reader}=await prepared(page);
- const capture=async state=>{mkdirSync('.tmp/manager-dispatch-229/recovery',{recursive:true});for(const width of [1440,390]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(await detail(page).evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/manager-dispatch-229/recovery/'+state+'-'+width+'.png'});}await page.setViewportSize({width:1440,height:900});};
+ const capture=async state=>{for(const width of [1440,390]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(await detail(page).evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);}await page.setViewportSize({width:1440,height:900});};
  try{
   h.store.run("UPDATE dispatch_events SET state='pending',attempts=9,error=?,next_run_at=? WHERE id='failed'",JSON.stringify({code:'invalid_decision',detail:'Recoverable decision failure'}),Date.now()+600000);
   for(let attempt=1;attempt<=9;attempt++)h.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)','failed',attempt,new Date().toISOString(),JSON.stringify({code:'invalid_decision',detail:'Attempt evidence '+attempt}),Date.now()+600000,attempt%3===0?1:0);
@@ -143,5 +140,5 @@ test('cooling-down dispatch exposes paged recovery evidence and an immediate ret
 
 test('an explicitly cancelled dispatch has no manual retry action and the API cannot revive it',async({page})=>{
  const {h,reader,admin}=await prepared(page);
- try{h.store.run("UPDATE dispatch_events SET state='failed',error=? WHERE id='failed'",JSON.stringify({code:'dispatch_cancelled',detail:'Explicit user stop',terminal:true}));await reader.locator('[data-dispatch-event="failed"]').getByRole('button',{name:'查看分派详情',exact:true}).click();await expect(detail(page)).toContainText('Explicit user stop');await expect(detail(page).getByRole('button',{name:'重试这条分派',exact:true})).toBeHidden();mkdirSync('.tmp/manager-dispatch-229/recovery',{recursive:true});for(const width of [1440,390]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/manager-dispatch-229/recovery/cancelled-'+width+'.png'});}expect((await admin('/api/repositories/101/dispatch/failed/retry','POST',{})).status).toBe(409);expect(h.store.get("SELECT state FROM dispatch_events WHERE id='failed'").state).toBe('failed');}finally{await h.stop();}
+ try{h.store.run("UPDATE dispatch_events SET state='failed',error=? WHERE id='failed'",JSON.stringify({code:'dispatch_cancelled',detail:'Explicit user stop',terminal:true}));await reader.locator('[data-dispatch-event="failed"]').getByRole('button',{name:'查看分派详情',exact:true}).click();await expect(detail(page)).toContainText('Explicit user stop');await expect(detail(page).getByRole('button',{name:'重试这条分派',exact:true})).toBeHidden();for(const width of [1440,390]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}expect((await admin('/api/repositories/101/dispatch/failed/retry','POST',{})).status).toBe(409);expect(h.store.get("SELECT state FROM dispatch_events WHERE id='failed'").state).toBe('failed');}finally{await h.stop();}
 });

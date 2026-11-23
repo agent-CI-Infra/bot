@@ -1,6 +1,6 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { managementFixture } from '../../fixtures/management-fixture.mjs';
 
 async function fixture() {
@@ -38,12 +38,11 @@ test('the mobile project overview keeps a compact new-task entry and carries the
 test('new task uses a real management receipt, persists the contract and opens the task with its existing retry action', async ({ page }) => {
   const f = await fixture(), errors = []; page.on('pageerror', err => errors.push(err.message));
   try {
-    mkdirSync('.tmp/task-create-227', { recursive: true }); await login(page, f); await fill(page);
+     await login(page, f); await fill(page);
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 1000 });
       await page.evaluate(() => { document.activeElement.blur(); scrollTo(0, 0); });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/task-create-227/form-${width}.png`, fullPage: true });
     }
     await page.getByRole('button', { name: '提交任务', exact: true }).click();
     await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible(); expect(createCount(f)).toBe(1);
@@ -198,11 +197,9 @@ test('a code delivery in a project below the develop capability ceiling is refus
     await expect(message).toBeVisible();
     // One generic task kind since #814: a refused creation leaves no new task.
     expect(tasks()).toBe(before);
-    mkdirSync('.tmp/task-create-850', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 1000 }); await message.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/task-create-850/refused-${width}.png` });
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }
@@ -220,11 +217,9 @@ test('a project administrator confirms a CI change on a code PR; the box is not 
     await expect(box).toBeVisible(); await expect(box).not.toBeChecked();
     await expect(page.locator('.task-create-ci')).toContainText('只有项目管理员可以勾选');
     await box.check();
-    mkdirSync('.tmp/task-create-931', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await box.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/task-create-931/ci-change-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     // Back to a report: the box hides and its tick is not sent.

@@ -1,12 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, testPassword } from '../../fixtures/helpers.mjs';
 
 // #547: one platform user per row, with the login methods and the GitHub binding the server reports. A phone keeps the
 // table readable: the wrapper scrolls on its own, the page does not, and every row's entries stay reachable.
 // Playwright results and screenshots live under .tmp/ (CONTRIBUTING.md); nothing here writes into the tracked tree.
-const output = resolve('.tmp/users-table-547');
 const identity = (h, principal, login, status) => h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,
   connector,external_tenant,external_actor,display_name,status,verified_at) VALUES(?,?,'github','github.com','','',?,?,?,?)`,
   'ext-' + principal, principal, 'gh-' + principal, login, status, Date.now());
@@ -73,8 +70,6 @@ test('the user list is one table: local, GitHub and both, with the binding state
     const desktop = await widths(page);
     expect(desktop, 'desktop keeps the table in a wrapper').not.toBeNull();
     expect(desktop.scroll, 'the desktop table fits its card').toBeLessThanOrEqual(desktop.client + 1);
-    mkdirSync(output, { recursive: true });
-    await page.screenshot({ path: resolve(output, 'after-1440.png'), fullPage: true });
     for (const width of [768, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       await page.waitForTimeout(200);
@@ -99,12 +94,10 @@ test('the user list is one table: local, GitHub and both, with the binding state
         expect(scrolls.scroll, `${width}px cards fit their card`).toBeLessThanOrEqual(scrolls.client + 1);
         expect(await panel.getByRole('link', { name: '详情', exact: true }).first().isVisible()).toBe(true);
       }
-      await page.screenshot({ path: resolve(output, `after-${width}.png`), fullPage: true });
     }
     // 200% zoom of a 1440px window is a 720 CSS px viewport: the card layout, with 详情 still reachable.
     await page.setViewportSize({ width: 720, height: 900 });
     await expect(panel.getByRole('link', { name: '详情', exact: true }).first()).toBeVisible();
-    await page.screenshot({ path: resolve(output, 'after-zoom200.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

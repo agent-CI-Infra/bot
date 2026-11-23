@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 import { openModelCatalog } from '../helpers/open-model-folds.mjs';
-import {rmSync,mkdirSync} from 'node:fs';
+import { rmSync } from 'node:fs';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {harness,setup,account,repository,testPassword} from '../../fixtures/helpers.mjs';
@@ -12,7 +12,7 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   else if(req.url.endsWith('/chat/completions'))res.end(JSON.stringify({choices:[{message:{content:'ok'}}]}));
   else{res.statusCode=404;res.end('{}');}
  });upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
- const origin=`http://127.0.0.1:${upstream.address().port}`,h=await harness(),errors=[];page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/provider-editor',{recursive:true});
+ const origin=`http://127.0.0.1:${upstream.address().port}`,h=await harness(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  try{
   const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const ownKey=testPassword(),sharedKey=testPassword(),rotated=testPassword();
@@ -37,14 +37,14 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   // Enter in the filter only filters: with the URL, Key and models filled in, it must not create the provider.
   const filter=dialog.getByLabel('筛选上游模型',{exact:true});await filter.fill('gam');await filter.press('Enter');
   await expect(dialog.locator('.model-chips').first().getByRole('button')).toHaveText(['gamma ✓']);await expect(shared.locator('.provider-group')).toHaveCount(1);await filter.fill('');
-  await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/provider-editor/create-desktop.png',fullPage:true});await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(shared.locator('.provider-group')).toHaveCount(2);
+  await page.setViewportSize({width:1440,height:1000});await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(shared.locator('.provider-group')).toHaveCount(2);
   const added=shared.locator('.provider-group').filter({hasText:origin+'/other/v1'});await added.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
   await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/new/v1');await dialog.getByLabel('API Key（留空保持不变）',{exact:true}).fill(rotated);await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await expect(dialog.getByRole('status')).toContainText('返回 3 个模型');expect(requests.at(-1).key).toBe('Bearer '+rotated);expect(requests.at(-1).url).toBe('/new/v1/models');
-  await page.screenshot({path:'.tmp/provider-editor/edit-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/provider-editor/edit-mobile.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await page.route('**/api/models/*/provider',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"storage_unavailable"}'}));await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(dialog.getByRole('alert')).toContainText('storage_unavailable');await expect(dialog.getByLabel('接口 URL',{exact:true})).toHaveValue(origin+'/new/v1');await page.unroute('**/api/models/*/provider');
   await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(dialog).toHaveCount(0);const updated=shared.locator('.provider-group').filter({hasText:origin+'/new/v1'});await expect(updated.locator('.model-address')).toHaveText(['beta','gamma']);
   await updated.locator('.model-entry').first().getByRole('button',{name:'测试模型',exact:true}).click();await expect(updated.locator('.probe-result').first()).toContainText('测试通过');expect(requests.at(-1).key).toBe('Bearer '+rotated);
-  await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/provider-editor/list-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/provider-editor/list-mobile.png',fullPage:true});
+  await page.setViewportSize({width:1440,height:1000});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await updated.getByRole('button',{name:'编辑供应商',exact:true}).click();await dialog.getByRole('button',{name:'撤销供应商 Key',exact:true}).click();await page.getByRole('dialog',{name:'撤销此供应商的 API Key？',exact:true}).getByRole('button',{name:'撤销',exact:true}).click();await expect(dialog).toHaveCount(0);await expect(updated.locator('.model-entry').getByText('Key 已撤销',{exact:true})).toHaveCount(2);
   await updated.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');await dialog.getByLabel('API Key（留空保持不变）',{exact:true}).fill(rotated);await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(updated.getByRole('button',{name:'测试模型',exact:true})).toHaveCount(2);
   const before=(await admin('/api/models')).value.models.length;await shared.getByRole('button',{name:'新增供应商',exact:true}).click();await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/cancel/v1');await dialog.getByRole('button',{name:'取消',exact:true}).click();expect((await admin('/api/models')).value.models.length).toBe(before);

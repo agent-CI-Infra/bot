@@ -48,12 +48,10 @@ test('conversation titles and last activity update and sort the sidebar across r
     await page.reload();
     await expect(entries.first()).toContainText('排查等待中的任务');
     await expect(entries.nth(1)).toContainText('查看执行日志');
-    await page.screenshot({ path: '.tmp/management-session-titles/desktop.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole('button', { name: '会话记录', exact: true }).click();
     await expect(entries.first()).toContainText('排查等待中的任务');
     await expect(entries.nth(1).locator('time')).toBeVisible();
-    await page.screenshot({ path: '.tmp/management-session-titles/mobile.png' });
   } finally {
     await fixture.close();
     rmSync(fixture.h.directory, { recursive: true, force: true });

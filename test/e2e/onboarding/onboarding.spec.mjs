@@ -1,4 +1,4 @@
-import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{generateKeyPairSync,randomBytes}from'node:crypto';
+import{test,expect}from'@playwright/test';import{ rmSync }from'node:fs';import{generateKeyPairSync,randomBytes}from'node:crypto';
 import{harness,setup,account,repository,testPassword}from'../../fixtures/helpers.mjs';import{TaskEngine}from'../../../dist/agent/engine.js';import{Onboarding}from'../../../dist/onboarding/service.js';import{RuleService}from'../../../dist/rules/service.js';
 import { goRolePage } from '../helpers/open-role-advanced.mjs';
 
@@ -6,7 +6,6 @@ async function captureWizardStep(page, name) {
  for (const width of [1440,390]) {
   await page.setViewportSize({width,height:1000});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.screenshot({path:`.tmp/onboarding/${name}-${width}.png`,fullPage:true});
  }
 }
 
@@ -16,7 +15,7 @@ test('接入向导验证地址、准备 manifest、跳过安装、保存模型�
  try{
   await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByRole('heading',{name:'系统初始化',exact:true})).toBeVisible();
   await page.getByLabel('公网 HTTPS 地址',{exact:true}).fill('https://hooks.invalid');await page.getByRole('button',{name:'检查并使用',exact:true}).click();await expect(page.locator('#onboarding-panel')).toContainText('已验证地址');
-  mkdirSync('.tmp/onboarding',{recursive:true});await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/onboarding/wizard-desktop.png',fullPage:true});
+  await page.setViewportSize({width:1365,height:900});
   await page.getByRole('button',{name:'2. GitHub App',exact:true}).click();await expect(page.locator('#onboarding-panel')).toContainText('默认不申请组织级权限');await page.getByLabel('App 所属组织',{exact:true}).fill('fixture');await page.getByLabel('App 名称',{exact:true}).fill('Fixture bot');await page.getByRole('button',{name:'准备 GitHub 确认页',exact:true}).click();const manifestForm=page.locator('#onboarding-panel form[target=_blank]');await expect(manifestForm).toBeVisible();expect(await manifestForm.getAttribute('action')).toMatch(/^https:\/\/github.com\/organizations\/fixture\/settings\/apps\/new\?state=/);const manifest=JSON.parse(await manifestForm.locator('textarea[name=manifest]').inputValue());expect(manifest.default_events).toEqual(['issues','pull_request','issue_comment','pull_request_review','pull_request_review_comment','check_run','status']);await expect(manifestForm).toContainText('订阅 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment、check_run 和 status');await expect(manifestForm).toContainText('仓库成员与角色由仓库级只读令牌核验');await expect(page.locator('#onboarding-panel')).toContainText('已有 App 不会随代码更新自动新增事件订阅');await expect(page.locator('#onboarding-panel')).toContainText('Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存');expect(manifest.default_permissions.contents).toBe('write');expect(manifest.default_permissions.members).toBeUndefined();expect(manifest.callback_urls).toBeUndefined();expect(manifest.setup_url).toBe('https://hooks.invalid/onboarding/github/setup');expect(manifest.redirect_url).toBe(h.admin+'/onboarding/github/callback');
   await page.getByRole('button',{name:'4. 安装',exact:true}).click();await page.getByRole('button',{name:'暂时跳过安装',exact:true}).click();await expect(page.locator('.wizard-notice')).toContainText('仓库检视不会开始');
   await page.getByLabel('接口 URL',{exact:true}).fill('https://model.invalid/v1');await page.getByLabel('API Key',{exact:true}).fill(testPassword());await page.getByLabel('模型名',{exact:true}).fill('fixture-model');await page.getByRole('button',{name:'保存并继续',exact:true}).click();await expect(page.locator('#onboarding-panel')).toContainText('开发与跟进 bot PR · development · 内置文本');expect((await admin('/api/models')).value.models[0].api_key).toBeUndefined();
@@ -29,11 +28,10 @@ test('接入向导验证地址、准备 manifest、跳过安装、保存模型�
   await captureWizardStep(page,'wizard-complete');
   const a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'','.agents/skills/demo/SKILL.md':'Demo skill'});
   await page.goto(h.admin+'/#/projects/101/workflows/rules.files');await expect(page).toHaveURL(/#\/projects\/101\/roles$/);await goRolePage(page, { role: 'Manager' });await expect(page.getByRole('table',{name:'仓库 skill',exact:true})).toContainText('.agents/skills/demo/SKILL.md');await expect(page.locator('[data-retired-rules]')).toContainText('.bot/guide.md');await expect(page.getByRole('dialog')).toHaveCount(0);
-  await page.locator('#project-page .project-content').screenshot({path:'.tmp/onboarding/rules-overview-mobile.png'});
   // A skill is read-only here: it is changed in the repository. The console override editor is gone (#935).
   await page.locator('[data-rule-file=".agents/skills/demo/SKILL.md"]').getByRole('button',{name:'查看内容',exact:true}).click();const skill=page.locator('[data-rule-path=".agents/skills/demo/SKILL.md"]');await expect(skill).toContainText('Demo skill');
   await expect(skill.getByRole('button',{name:'添加控制台覆盖',exact:true})).toHaveCount(0);await expect(page.locator('#project-page')).not.toContainText('控制台覆盖');
-  await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/onboarding/rules-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/onboarding/rules-mobile.png',fullPage:true});expect(errors).toEqual([]);expect(h.store.get('SELECT count(*) n FROM tasks').n).toBe(0);
+  await page.setViewportSize({width:1365,height:900});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(errors).toEqual([]);expect(h.store.get('SELECT count(*) n FROM tasks').n).toBe(0);
  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
 test('GitHub 创建 App 后回到全局设置第 3 步配置 GitHub 登录，地址保留步骤，已保存 tunnel 时第 1 步选中 Cloudflare Tunnel',async({page})=>{

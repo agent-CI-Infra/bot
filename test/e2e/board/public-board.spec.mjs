@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { calendarRuns, publicBoardFixture, scheduledNightly } from '../../fixtures/public-board-fixtures.mjs';
-import { mkdirSync } from 'node:fs';
 
 test.use({ locale: 'zh-CN' });
 
@@ -9,7 +8,6 @@ test('public dashboard and repository board show generic data without console lo
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   // The browser and collectors use only this test's local services.
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
-  const shots = '.tmp/board-938'; mkdirSync(shots, { recursive: true });
   const capture = async (name, focus) => {
     for (const [width, height] of [[1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
@@ -17,7 +15,6 @@ test('public dashboard and repository board show generic data without console lo
       await page.waitForTimeout(400);
       if (focus) await focus.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${name} ${width}`).toBe(true);
-      await page.screenshot({ path: `${shots}/${name}-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
   };
@@ -121,10 +118,8 @@ test('the Actions calendar shows run details and keeps the date a reader scrolle
       await page.locator('.ci-calendar').scrollIntoViewIfNeeded();
       await page.mouse.move(1, 1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: testInfo.outputPath(`calendar-${width}.png`) });
       await latestAttempt.hover();
       await expect(page.locator('#tooltip')).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath(`calendar-detail-${width}.png`) });
     }
     const scroll = page.locator('.ci-lanes-scroll');
     await expect.poll(() => scroll.evaluate(el => el.scrollWidth > el.clientWidth && el.scrollLeft === 0)).toBe(true);
@@ -161,12 +156,10 @@ test('repository list switches replace legacy board execution and control public
     await privateSwitch.click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('项目：octo/hello'); await expect(dialog).toContainText('允许无需登录访问');
-    mkdirSync('.tmp/public-board-confirm-226/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       await expect(dialog.getByRole('button', {name: '取消', exact: true})).toBeInViewport();
-      if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/public-board-confirm-226/previews/public-board-open-${width}.png` });
     }
     await expect(privateSwitch).toHaveAttribute('aria-checked', 'false'); expect(writes).toBe(0);
     await dialog.getByRole('button', {name: '取消', exact: true}).click();
@@ -174,11 +167,9 @@ test('repository list switches replace legacy board execution and control public
     await expect(row('101')).toContainText('未启动');
     // Gate onboarding is gone (#931): the row offers no CI entry of its own.
     await expect(row('101').getByRole('button', { name: '接入门禁', exact: true })).toHaveCount(0);
-    mkdirSync('.tmp/project-list-931', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 }); await row('101').scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
-      await page.screenshot({ path: `.tmp/project-list-931/row-${width}.png` });
     }
     await page.setViewportSize({ width: 1920, height: 900 });
     await page.route('**/api/installations/101/board', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"temporary_unavailable"}' }));
@@ -195,15 +186,11 @@ test('repository list switches replace legacy board execution and control public
     expect((await f.get('/boards/octo/hello/data/snapshot.json')).status).toBe(200);
     await page.reload(); await expect(privateSwitch).toHaveAttribute('aria-checked', 'true'); await expect(publicSwitch).toHaveAttribute('aria-checked', 'false');
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: '.tmp/board-switch-desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await expect(privateSwitch).toBeVisible();
-    await page.screenshot({ path: '.tmp/board-switch-mobile.png', fullPage: true });
     const previousWrites = writes;
     await privateSwitch.click(); await expect(dialog).toContainText('保存后停止对外提供本项目看板');
-    mkdirSync('.tmp/public-board-confirm-226/previews', { recursive: true });
-    await page.screenshot({ path: '.tmp/public-board-confirm-226/previews/public-board-close-390.png' });
     await dialog.getByRole('button', {name: '取消', exact: true}).click();
     await expect(privateSwitch).toHaveAttribute('aria-checked', 'true'); expect(writes).toBe(previousWrites);
     await privateSwitch.click(); await dialog.getByRole('button', {name: '关闭公开看板', exact: true}).click(); await expect(privateSwitch).toHaveAttribute('aria-checked', 'false');

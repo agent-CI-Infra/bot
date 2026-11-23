@@ -1,13 +1,11 @@
 import { test, expect } from '@playwright/test';
 import { openRoleAdvanced } from '../helpers/open-role-advanced.mjs';
-import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { externalFixture } from '../../fixtures/external-helpers.mjs';
 
 // #561: long titles and notes ellipsize; 390 keeps 设置 visible and 退出登录 reachable in the #481 account menu; 1440 does not over-truncate medium names.
-const out = resolve('.tmp/text-overflow-561');
 
 /** After #514 the org-scope card lives inside a closed 高级／诊断 fold. Open it when present. */
 async function readyIdentity(page, url) {
@@ -61,7 +59,6 @@ async function assertOperationSeparated(page, expected, minCol = 44) {
 test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名称', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const a = await account(admin);
@@ -128,7 +125,6 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(list.overflow).toBe(390);
     // #1002: the 操作 caption and 设置 button must not share the same pixels.
     await assertOperationSeparated(page, longName, 44);
-    await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
     await page.setViewportSize({ width: 320, height: 700 });
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
@@ -180,7 +176,6 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(identity.accountRight).toBeLessThanOrEqual(390.5);
     expect(identity.overflow).toBe(390);
     expect(identity.clamp.some(v => v === '4')).toBeTruthy();
-    await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
 
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.goto(h.admin + '/#/projects');
@@ -223,11 +218,9 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     const subtitles = await page.evaluate(() => [...document.querySelectorAll('.console-ready .row-content > p')].map(p => ({ clamp: getComputedStyle(p).webkitLineClamp, title: p.title, text: p.textContent })));
     expect(subtitles.length).toBeGreaterThan(0);
     for (const line of subtitles) { expect(line.clamp).toBe('2'); expect(line.title).toBe(line.text); }
-    await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
 
     await readyIdentity(page, h.admin + '/#/identity');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: resolve(out, 'identity-1440.png'), fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/roles');
     await openRoleAdvanced(page);
@@ -249,13 +242,11 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(roles.title).toBe(roles.text);
     // The required-role reason explains a locked switch and is never clipped.
     expect(roles.reasonClamp === null || roles.reasonClamp === 'none').toBeTruthy();
-    await page.screenshot({ path: resolve(out, 'roles-1440.png'), fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/roles');
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
-    await page.screenshot({ path: resolve(out, 'roles-390.png'), fullPage: true });
   } finally {
     await h.stop();
   }

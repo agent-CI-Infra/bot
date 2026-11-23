@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { channelFixture, boundGroup, repositoryAssistant, inGroup, post, until } from '../../fixtures/channel-fixture.mjs';
 
 // A group answer that ends with stay_silent (#489) shows in the console as kept quiet on purpose, with the assistant's reason.
@@ -26,7 +25,6 @@ test('a turn ended with stay_silent shows its reason in the console and sends no
     const receipt = await post(f.h, f.id, lunch);
     await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', receipt.value.operation_id)?.state === 'completed');
     expect(f.wire.sent.filter(s => JSON.stringify(s.content).includes('无需回复'))).toEqual([]);
-    mkdirSync('.tmp/silent-turns', { recursive: true });
     // The binding links to its chat history, where the turn says it stayed quiet and why.
     await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '#/identity/feishu/groups');
     await page.getByRole('article', { name: '群聊助手绑定' }).getByRole('link', { name: '查看聊天记录', exact: true }).click();
@@ -35,7 +33,6 @@ test('a turn ended with stay_silent shows its reason in the console and sends no
       await expect(page.getByText('本轮保持安静，未发送回答：群友在闲聊午饭', { exact: true })).toBeVisible();
       await expect(page.getByText('本轮生成的回答', { exact: true })).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-      await page.screenshot({ path: `.tmp/silent-turns/conversation-${width}.png`, fullPage: true });
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }

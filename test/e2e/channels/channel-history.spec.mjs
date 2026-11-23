@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { bindFixture, channelFixture, envelope, post } from '../../fixtures/channel-fixture.mjs';
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
@@ -33,9 +33,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       const convLink = page.getByRole('link', { name: '查看该应用的飞书会话', exact: true });
       await expect(convLink).toHaveAttribute('href', '#/conversations?connector=' + id);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      mkdirSync('.tmp/issue-1228', { recursive: true });
       await convLink.evaluate(node => node.scrollIntoView({ block: 'center' }));
-      await page.screenshot({ path: `.tmp/issue-1228/app-detail-${viewport.width}.png` });
 
       // Step 2: Follow the link into #/conversations?connector=<id>, verify active connector filter and open the chat.
       await convLink.click();
@@ -43,7 +41,6 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await expect(page.locator('.channel-filter-banner')).toContainText('按应用筛选：研发协作助手 · 示例企业');
       await expect(page.getByRole('link', { name: '显示全部会话', exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/issue-1228/conversations-filter-${viewport.width}.png` });
       await page.locator('.channel-chat-choice').first().click();
       await expect(page).toHaveURL(new RegExp('#/conversations/' + chat.id + '\\?connector=' + id + '$'));
 
@@ -75,7 +72,6 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await syncFold.getByRole('button', { name: '显式重新同步可见历史', exact: true }).click();
       await expect(syncFold.getByRole('status')).toContainText('同步：正在同步');
       await syncFold.evaluate(node => node.scrollIntoView({ block: 'center' }));
-      await page.screenshot({ path: `.tmp/issue-1228/conversations-sync-${viewport.width}.png` });
 
       // Step 5: Expand super-admin retention & cleanup panel, save retention days, and perform confirmed cleanup.
       const retentionFold = page.locator('.channel-retention-details');
@@ -85,7 +81,6 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await expect(retentionFold.getByRole('status')).toContainText('保留策略：30 天');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await retentionFold.evaluate(node => node.scrollIntoView({ block: 'center' }));
-      await page.screenshot({ path: `.tmp/issue-1228/conversations-admin-${viewport.width}.png` });
       // Perform explicit cleanup before 100 days ago and verify confirm dialog, deletion, and formatted policy text.
       const cutoff = new Date(Date.now() - 100 * 86400000);
       const pad = n => String(n).padStart(2, '0');
@@ -94,7 +89,6 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await retentionFold.getByRole('button', { name: '清理指定时间之前的本地记录', exact: true }).click();
       const cleanDialog = page.getByRole('dialog');
       await expect(cleanDialog).toContainText('清理本地消息记录');
-      await page.screenshot({ path: `.tmp/issue-1228/cleanup-dialog-${viewport.width}.png` });
       await cleanDialog.getByRole('button', { name: '确认清理', exact: true }).click();
       await expect(retentionFold.getByRole('status')).toContainText('已清理');
       await expect(retentionFold.getByRole('status')).toContainText('保留策略：30 天');
@@ -123,7 +117,6 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await expect(page.getByLabel('本地消息搜索结果')).toContainText('my private message');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.locator('.channel-local-search').evaluate(node => node.scrollIntoView({ block: 'start' }));
-      await page.screenshot({ path: `.tmp/issue-1228/conversations-member-${viewport.width}.png` });
       expect(errors).toEqual([]);
     } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
   });

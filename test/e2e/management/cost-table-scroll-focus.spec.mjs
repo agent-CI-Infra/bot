@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { metricTask, usageRequest } from '../../fixtures/metrics-fixtures.mjs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
@@ -66,7 +66,6 @@ test('the cost tables that scroll at 390 are reachable, named, and measured agai
   }
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/904-captures', { recursive: true });
   try {
     await page.clock.setFixedTime(new Date('2026-11-03T16:45:00Z'));
     await loginCosts(page, h.admin, 'administrator', password);
@@ -76,7 +75,6 @@ test('the cost tables that scroll at 390 are reachable, named, and measured agai
     await expect(page.locator('.cost-summary')).toContainText('USD 14.00');
     const wide = assertBoxes(await boxes(page, '#costs-panel'), 'costs at 1440');
     expect(wide.filter(box => box.overflow && box.visible)).toHaveLength(0);
-    await page.screenshot({ path: '.tmp/904-captures/costs-1440.png', fullPage: true });
 
     // 390: the wide tables overflow, so each one is a reachable, named group.
     await page.setViewportSize({ width: 390, height: 844 });
@@ -97,7 +95,6 @@ test('the cost tables that scroll at 390 are reachable, named, and measured agai
     await page.keyboard.press('ArrowRight');
     await page.waitForTimeout(200);
     expect(await page.evaluate(() => document.activeElement.scrollLeft), 'the arrow key scrolls the focused table').toBeGreaterThan(scrolled.before);
-    await page.screenshot({ path: '.tmp/904-captures/costs-390-focused.png', fullPage: true });
 
     // A table inside a closed fold is measured when the fold opens, not once at load.
     const folds = page.locator('#costs-panel details');
@@ -109,7 +106,6 @@ test('the cost tables that scroll at 390 are reachable, named, and measured agai
     const insideFold = await page.locator('#costs-panel details .cost-table-scroll').evaluateAll(nodes => nodes.map(node => node.scrollWidth > node.clientWidth && node.getAttribute('tabindex') === '0'));
     expect(insideFold.some(Boolean), 'a table revealed by a fold is reachable').toBe(true);
     expect(opened.filter(box => box.overflow && box.visible).length).toBeGreaterThan(0);
-    await page.screenshot({ path: '.tmp/904-captures/costs-390-folds.png', fullPage: true });
 
     expect(errors).toEqual([]);
   } finally {
@@ -126,7 +122,6 @@ test('the storage tables that scroll at 390 are reachable and named, and a table
     await route.fulfill({ response, json });
   };
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/904-captures', { recursive: true });
   try {
     await page.route(/\/api\/storage(\?|$)/, withComputer);
     await page.goto(f.h.admin + '/#/settings/storage');
@@ -142,7 +137,6 @@ test('the storage tables that scroll at 390 are reachable and named, and a table
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.waitForTimeout(200);
     assertBoxes(await boxes(page, '#settings-panel'), 'storage at 1440');
-    await page.screenshot({ path: '.tmp/904-captures/storage-1440.png', fullPage: true });
 
     // 390: the storage tables are 520px wide in a ~342px column; the ones that overflow are reachable and named.
     await page.setViewportSize({ width: 390, height: 844 });
@@ -152,7 +146,6 @@ test('the storage tables that scroll at 390 are reachable and named, and a table
     const reachable = await page.locator('#settings-panel .storage-projects[tabindex="0"]').count();
     expect(reachable, 'a scrolling storage table is a Tab stop').toBeGreaterThan(0);
     expect(await tabIntoScrollBox(page, details), 'Tab enters a storage scroll box').toBe(true);
-    await page.screenshot({ path: '.tmp/904-captures/storage-390-focused.png', fullPage: true });
 
     expect(errors).toEqual([]);
   } finally {

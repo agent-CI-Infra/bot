@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 
 // #226 待我处理: every waiting item must say how urgent it is and how long it has waited, oldest first, so a person
@@ -35,13 +35,11 @@ test('待处理列表显示优先级与已等待时长，并按状态变更时�
     await expect(rows.nth(2)).toContainText('已等待 30 分钟');
     // The waiting line keeps the timestamp it was computed from.
     await expect(rows.nth(0)).toContainText('最近状态变更');
-    mkdirSync('.tmp/inbox-priority', { recursive: true });
     for (const [width, name] of [[390, 'inbox-390'], [768, 'inbox-768'], [1440, 'inbox-1440']]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await expect(rows.nth(0).locator('text=/P0 紧急止损/')).toBeVisible();
       await expect(rows.nth(0).getByRole('button', { name: '查看任务', exact: true })).toBeVisible();
-      await page.screenshot({ path: `.tmp/inbox-priority/${name}.png`, fullPage: true });
     }
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

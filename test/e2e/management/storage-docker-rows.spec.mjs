@@ -42,7 +42,6 @@ test('the data disk lists Docker containers, the volumes outside the deployment 
       await page.setViewportSize({ width, height });
       await page.waitForTimeout(250);
       // The whole page, not the table element: the review asks for screenshots of the screen (#680 F8).
-      await page.screenshot({ path: `.tmp/680-captures/storage-full-${width}.png`, fullPage: true, animations: 'disabled' });
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }

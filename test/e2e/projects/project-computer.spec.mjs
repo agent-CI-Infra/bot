@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { fail } from '../../../dist/core/security.js';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { RuleService } from '../../../dist/rules/service.js';
@@ -29,10 +29,9 @@ test('computer state, real zero metrics and the same activity records stay reada
   try{
     await login(page,f);await expect(card(page,'实时资源')).toContainText('0%');await expect(card(page,'机器')).toContainText('不是电脑心跳');await expect(card(page,'机器')).toContainText('2 CPU · 内存 2048 MB · 进程 512 个 · /tmp 512 MB');
     await expect(card(page,'运行与排队记录')).toContainText('运行任务记录1排队任务记录2');
-    mkdirSync('.tmp/project-computer-231',{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:1000});await page.evaluate(()=>scrollTo(0,0));
       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-      if([390,1440].includes(width))await page.screenshot({path:`.tmp/project-computer-231/computer-${width}.png`,fullPage:true});}
+      }
     await page.getByRole('link',{name:'查看运行与排队任务',exact:false}).click();await expect(page).toHaveURL(/#\/projects\/101\/activity$/);
     const queue=page.locator('#activity-status .side-card').filter({has:page.getByRole('heading',{name:'排队任务 2',exact:true})});
     await expect(queue.getByRole('button')).toHaveCount(2);
@@ -140,7 +139,7 @@ for(const suffix of ['', '/stats'])test(`a control-plane project 404 still clear
 });
 
 test('#553 an unreadable computer record shows one error state whose retry recovers the machine page',async({page})=>{
-  const f=await fixture(),out='.tmp/console-states-553';mkdirSync(out,{recursive:true});
+  const f=await fixture(),out='.tmp/console-states-553';
   try{await page.setViewportSize({width:1440,height:1000});
     await page.route('**/api/environments/101',route=>route.fulfill({status:500,json:{error:'internal_error'}}));
     await page.goto(f.h.admin+'/#/settings/computers/101');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);
@@ -151,10 +150,8 @@ test('#553 an unreadable computer record shows one error state whose retry recov
     // The retry inside the error state is the page's only refresh control, so it keeps the #computer-refresh id.
     await expect(page.locator('#computer-refresh')).toHaveCount(1);await expect(state.locator('#computer-refresh')).toHaveText('刷新电脑状态');
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    await page.screenshot({path:`${out}/machine-unknown-1440.png`,fullPage:true});
     await page.setViewportSize({width:390,height:844});await page.evaluate(()=>scrollTo(0,0));
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    await page.screenshot({path:`${out}/machine-unknown-390.png`,fullPage:true});
     await page.unrouteAll({behavior:'wait'});await state.locator('#computer-refresh').click();
     await expect(page.locator('#machine-status')).toContainText('运行任务记录');await expect(page.locator('[data-testid=console-state-error]')).toHaveCount(0);
   }finally{await f.close();}

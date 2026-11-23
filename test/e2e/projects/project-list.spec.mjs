@@ -3,7 +3,7 @@ import { TaskEngine } from '../../../dist/agent/engine.js';
 import {test,expect} from '@playwright/test';
 import { openProjectDanger } from '../helpers/open-basic-folds.mjs';
 import { clickGlobalProjectAction } from '../helpers/global-project-actions.mjs';
-import {mkdirSync,rmSync} from 'node:fs';
+import { rmSync } from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../../fixtures/helpers.mjs';
 
 test('项目按所有者分组，筛选和每页 50 条分页保持项目完整，隐藏与恢复仍可用', async ({page, browser}) => {
@@ -44,14 +44,12 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
     await expect(groups(page).locator('h2')).toHaveText([longOwner, 'b-owner']);
     expect(await groupedIds(page)).toEqual([{owner: '20', ids: ['101', '303']}, {owner: '10', ids: ['202']}]);
     await expect(row('101').getByRole('button', {name: '设置', exact: true})).toBeVisible();
-    mkdirSync('.tmp/project-org-groups', {recursive: true});
     for (const [label, width, height] of [['wide', 1920, 1080], ['desktop', 1440, 900], ['compact', 1024, 900], ['tablet', 768, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height}); await checkWidth(page);
       if (width === 390) {
         const content = await row('101').locator('.row-content').boundingBox(), actions = await row('101').locator(':scope > .actions').boundingBox();
         expect(content.width).toBeGreaterThan(300); expect(actions.y).toBeGreaterThan(content.y + content.height);
       }
-      if (label === 'desktop' || label === 'mobile') await page.screenshot({path: `.tmp/project-org-groups/installed-${label}.png`, fullPage: true});
     }
     await expect(row('101').getByRole('switch')).toHaveCount(0);
     await row('101').getByRole('button', {name: '设置', exact: true}).click(); await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
@@ -74,7 +72,6 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
       await expect(member.locator('#rows .row')).toHaveCount(3); await expect(member.locator('#rows')).not.toContainText('hidden-first');
       for (const [label, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
         await member.setViewportSize({width, height}); await checkWidth(member);
-        await member.screenshot({path: `.tmp/project-org-groups/member-${label}.png`, fullPage: true});
       }
     } finally { await context.close(); }
     // More than one page: the owner groups contain exactly the rows returned for that page.
@@ -239,17 +236,14 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
     await expect(row('101')).toBeHidden();
     await toggle.click(); await expect(row('101')).toBeVisible();
 
-    mkdirSync('.tmp/ui-project-table', {recursive: true});
     // Narrow screens keep the label/value pairing and never push the page sideways.
     for (const [label, width, height] of [['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height});
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await expect(row('101').locator('.project-cell[data-label="gates"]')).toBeVisible();
       expect(await row('101').evaluate(line => line.scrollWidth <= line.clientWidth)).toBe(true);
-      await page.screenshot({path: `.tmp/ui-project-table/${label}.png`, fullPage: true});
     }
     await page.setViewportSize({width: 1440, height: 900});
-    await page.screenshot({path: '.tmp/ui-project-table/desktop.png', fullPage: true});
 
     // A project administrator sees the same columns and none of the technical IDs.
     const memberPassword = testPassword();
@@ -313,20 +307,16 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     await expect(actions.locator('.project-actions-panel').getByRole('button')).toHaveText(['禁用', '删除']);
     await expect(actions.getByRole('button', {name: '接入门禁', exact: true})).toHaveCount(0);
-    mkdirSync('.tmp/global-project-table', {recursive: true});
-    await page.screenshot({path: '.tmp/global-project-table/desktop-actions.png', fullPage: true});
     await page.keyboard.press('Escape');
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(toggle).toBeFocused();
     // #1039: a settings card title is an h2 now, so click the card heading by role and level.
     await toggle.click(); await page.getByRole('heading', {name: '项目管理', exact: true, level: 2}).click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    await page.screenshot({path: '.tmp/global-project-table/desktop.png', fullPage: true});
     for (const [label, width, height] of [['compact', 1024, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height});
       if (width < 768) await expect(page.locator('#console-mobile-nav')).toBeVisible();
       await expect(row('101')).toBeVisible();
-      await page.screenshot({path: `.tmp/global-project-table/${label}.png`, fullPage: true});
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       expect(await page.locator('.global-project-row').evaluateAll(rows => rows.every(line => line.scrollWidth <= line.clientWidth + 1))).toBe(true);
       await expect(row('101').locator('.project-cell[data-label="access"]')).toBeVisible();
@@ -334,7 +324,6 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
         await toggle.click();
         const panel = await actions.locator('.project-actions-panel').boundingBox();
         expect(panel.x).toBeGreaterThanOrEqual(0); expect(panel.x + panel.width).toBeLessThanOrEqual(width);
-        await page.screenshot({path: '.tmp/global-project-table/mobile-actions.png', fullPage: true});
         await page.keyboard.press('Escape');
       }
     }
@@ -346,12 +335,10 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
     await expect(hiddenTable.locator('.project-table-head .project-cell')).toHaveText(['项目', '操作']);
     for (const id of ['601', '602']) await expect(row(id).locator(':scope > .project-cell')).toHaveCount(2);
     expect(await lefts('602')).toEqual(await lefts('601'));
-    await page.screenshot({path: '.tmp/global-project-table/hidden-desktop.png', fullPage: true});
     await page.setViewportSize({width: 390, height: 844});
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator('.global-project-row').evaluateAll(rows => rows.every(line => line.scrollWidth <= line.clientWidth + 1))).toBe(true);
     await expect(row('601').getByRole('button', {name: '恢复', exact: true})).toBeVisible();
-    await page.screenshot({path: '.tmp/global-project-table/hidden-mobile.png', fullPage: true});
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, {recursive: true, force: true}); }
 });

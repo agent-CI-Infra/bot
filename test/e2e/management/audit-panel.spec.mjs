@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 // #357 slice B: a read-only audit card on the project activity page. It renders the audit table as it is — actor, action,
@@ -78,15 +78,12 @@ test('the audit card names who did what to which object, says the table records 
     await rows.nth(4).locator('details.audit-tech>summary').click();
     await expect(rows.nth(4).getByText('knowledge/abcdef0123456789abcdef0123456789abcdef01.md', { exact: true })).toBeVisible();
     await expect(rows.nth(4).getByRole('link')).toHaveCount(0);
-    mkdirSync('.tmp/audit-readable-698', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     await card.evaluate(el => el.scrollIntoView({ block: 'start' }));
-    await page.screenshot({ path: '.tmp/audit-readable-698/audit-1440.png' });
     // A 40-character object id must not push the page sideways on a phone.
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await card.evaluate(el => el.scrollIntoView({ block: 'start' }));
-    await page.screenshot({ path: '.tmp/audit-readable-698/audit-390.png' });
     // Read-only: the card has no control that writes.
     expect(await card.locator('form, input, select, textarea').count()).toBe(0);
     expect(errors).toEqual([]);

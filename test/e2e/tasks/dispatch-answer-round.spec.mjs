@@ -1,10 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // Repeated dispatch failures remain recoverable; stopped development remains a separate event.
-const shots = process.env.BOT_E2E_SCREENSHOTS;
 
 test('dispatch records show retained retry evidence without a terminal attempt cap and a stopped development', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
@@ -35,13 +33,11 @@ test('dispatch records show retained retry evidence without a terminal attempt c
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/dispatch-answer-round-${width}.png` }); }
     }
     await page.keyboard.press('Escape');
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       await reader.locator('[data-dispatch-event="stopped"]').evaluate(node => node.scrollIntoView({ block: 'center' }));
-      if (shots) await page.screenshot({ path: `${shots}/dispatch-stopped-list-${width}.png` });
     }
     expect(errors).toEqual([]);
   } finally { await h.stop(); }

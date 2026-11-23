@@ -1,10 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { openRoleAdvanced, openRoleFromList } from '../helpers/open-role-advanced.mjs';
 
-const out = '.tmp/role-layout-569';
 
 async function loginRoles(page, h, password) {
   await page.goto(h.admin + '/#/projects/101/roles');
@@ -17,7 +15,6 @@ async function loginRoles(page, h, password) {
 test('#569 角色页用满内容区，不裁切文字；必需角色写明不能关闭的原因', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -49,7 +46,6 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     expect(layout.ratio).toBeGreaterThan(0.88);
     expect(layout.overflow).toBeLessThanOrEqual(1440);
     expect(layout.clipped).toEqual([]);
-    await page.screenshot({ path: `${out}/list-1440.png`, fullPage: true });
     // Every locked row's aria-describedby resolves to its own reason (no spaces, no shared ids).
     const described = await page.evaluate(() => [...document.querySelectorAll('input[type=checkbox][aria-describedby]')]
       .map(input => ({ id: input.getAttribute('aria-describedby'), text: document.getElementById(input.getAttribute('aria-describedby'))?.textContent || '' })));
@@ -66,7 +62,6 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     });
     expect(requiredBox.cursor).toBe('not-allowed');
     expect(requiredBox.width).toBeGreaterThanOrEqual(16);
-    await page.screenshot({ path: `${out}/form-required-1440.png`, fullPage: true });
 
     await page.getByTestId('role-list-link').click();
     await openRoleFromList(page, 'Developer');
@@ -81,7 +76,6 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     expect(editable.cursor).toBe('pointer');
     expect(editable.opacity).toBeGreaterThan(0.9);
     expect(editable.width).toBeGreaterThanOrEqual(16);
-    await page.screenshot({ path: `${out}/form-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -101,10 +95,8 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     expect(firstScreen.headingIn).toBe(true);
     expect(firstScreen.enableIn).toBe(true);
     expect(firstScreen.overflow).toBeLessThanOrEqual(390);
-    await page.screenshot({ path: `${out}/form-390.png`, fullPage: true });
 
     await page.getByTestId('role-list-link').click();
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/list-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });

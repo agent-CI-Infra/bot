@@ -1,6 +1,6 @@
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 import {test,expect} from '@playwright/test';
-import {mkdirSync,rmSync} from 'node:fs';
+import { rmSync } from 'node:fs';
 import {generateKeyPairSync} from 'node:crypto';
 import {externalFixture} from '../../fixtures/external-helpers.mjs';
 import {testPassword} from '../../fixtures/helpers.mjs';
@@ -36,8 +36,7 @@ test('read-only project access keeps client records readable without offering co
     await expect(panel).toContainText('当前身份仅可查看本项目');await expect(panel).toContainText('Read-only forward');await expect(mutations()).toHaveCount(0);
     await page.getByRole('link',{name:'查看客户端 '+client.client.name+' 的认证与活动详情',exact:true}).click();
     await expect(panel.locator('.external-client-detail')).toContainText(client.client.id);await expect(mutations()).toHaveCount(0);
-    mkdirSync('.tmp/external-authority-231/previews',{recursive:true});
-    for(const width of [390,1440]){await page.setViewportSize({width,height:900});await noOverflow(page);await page.screenshot({path:`.tmp/external-authority-231/previews/readonly-${width}.png`,fullPage:true});}
+    for(const width of [390,1440]){await page.setViewportSize({width,height:900});await noOverflow(page);}
     const refused=await page.evaluate(async id=>{try{await api('/api/external/clients/'+id,'PATCH',{enabled:false});return 200;}catch(error){return error.status;}},client.client.id);
     expect(refused).toBe(403);expect(h.store.get('SELECT enabled FROM external_clients WHERE id=?',client.client.id).enabled).toBe(1);
     await page.goto(h.adminBase+'/#/external');await expect(page.locator('#external-panel')).toContainText(client.client.name);
@@ -68,10 +67,9 @@ test('client details keep their own identity and bounded records across refresh,
     await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.copiedInstructions=text;}}}));
     await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();
     const instructions=await page.evaluate(()=>window.copiedInstructions);expect(instructions).toContain(own.client.id);expect(instructions).not.toContain(other.client.id);
-    await guide.locator(':scope > summary').click();mkdirSync('.tmp/external-clients-231/previews',{recursive:true});
+    await guide.locator(':scope > summary').click();
     for(const width of [320,390,768,1024,1440,1920]){
       await page.setViewportSize({width,height:1000});await noOverflow(page);
-      if([390,1440].includes(width))await page.screenshot({path:`.tmp/external-clients-231/previews/client-${width}.png`,fullPage:true});
     }
     await page.reload();await expect(detail).toContainText(own.client.id);
     await page.getByRole('link',{name:'返回客户端列表',exact:true}).click();await expect(page).toHaveURL(/\/101\/external$/);
@@ -191,12 +189,9 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await expect(guide.locator('.external-guide-advanced')).toContainText('request_id');
     await expect(guide.locator('.external-guide-advanced a')).toHaveAttribute('href','/docs/external-token-api.md');
     await guide.locator('.external-guide-advanced summary').click();
-    mkdirSync('.tmp/ui-524',{recursive:true});
     await page.setViewportSize({width:1440,height:900});await noOverflow(page);
     await expect(guide.locator('.external-guide-advanced')).not.toHaveAttribute('open','');
-    await page.screenshot({path:'.tmp/ui-524/guide-1440.png',fullPage:true});
     await page.setViewportSize({width:390,height:844});await noOverflow(page);
-    await page.screenshot({path:'.tmp/ui-524/guide-390.png',fullPage:true});
     await page.setViewportSize({width:1440,height:900});
     const select=guide.getByRole('combobox',{name:'复制指令所用客户端',exact:true});await select.selectOption(a.client.id);
     await expect(select.locator('option')).toHaveCount(2);await expect(select.locator('option[value="'+oidc.client.id+'"]')).toHaveCount(0);
@@ -211,10 +206,8 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     expect(exchanged).toContain('CLIENT_ID=\''+b.client.id+'\'');
     expect(exchanged).not.toContain('CLIENT_ID=\''+a.client.id+'\'');
     const doc=await page.request.get(h.adminBase+'/docs/external-token-api.md');expect(doc.status()).toBe(200);expect(await doc.text()).toContain('# token-poll');
-    mkdirSync('.tmp/external-e2e',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
-    await page.screenshot({path:'.tmp/external-e2e/global-desktop.png',fullPage:true});
+    await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
     await page.setViewportSize({width:390,height:844});await noOverflow(page);await visibleButton(page,guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}));
-    await page.screenshot({path:'.tmp/external-e2e/global-mobile.png',fullPage:true});
     await panel.getByRole('link',{name:'配置项目外部执行',exact:true}).first().click();await expect(page).toHaveURL(/\/projects\/101\/external$/);
     await expect(page.locator('#project-page .external-guide')).toHaveCount(1);
     await expect(page.locator('#project-page .external-guide').getByRole('button',{name:'复制给我的 AI agent',exact:true})).toBeVisible();
@@ -252,20 +245,20 @@ test('项目内登记与更换公钥、创建和编辑 Webhook，只展示当前
     await page.getByLabel('订阅名称',{exact:true}).fill('PR review events');await page.getByLabel('接收 URL',{exact:true}).fill('https://receiver.invalid/review');await save(page);
     await page.getByRole('button',{name:'已保存并关闭',exact:true}).click();await expect(panel).toContainText('PR review events');
     await panel.getByRole('button',{name:'编辑',exact:true}).click();await page.getByLabel('事件动作（留空表示全部）',{exact:true}).fill('synchronize');await save(page);await expect(panel).toContainText('synchronize');
-    mkdirSync('.tmp/external-e2e',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);await page.screenshot({path:'.tmp/external-e2e/project-desktop.png',fullPage:true});
+    await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
     const password=testPassword();await h.admin('/api/users','POST',{username:'member',password,repository_ids:['101']});await page.getByRole('button',{name:'退出登录',exact:true}).click();await login(page,h,'member',password);
     await consoleNavigate(page,'外部执行端');await expect(page.getByRole('button',{name:'设置兑换地址',exact:true})).toBeHidden();await expect(page.locator('#external-panel')).not.toContainText('仓库 202');
     await page.locator('#external-panel .external-guide > summary').click();await expect(page.getByRole('combobox',{name:'复制指令所用客户端',exact:true}).locator('option[value="'+foreign.client.id+'"]')).toHaveCount(0);
     await project(page,h);const row=panel.locator('.row',{hasText:'Local review workstation'}),rotated=generateKeyPairSync('rsa',{modulusLength:2048});
     await row.getByRole('button',{name:'更换公钥',exact:true}).click();await page.getByLabel('RSA 公钥（PEM）',{exact:true}).fill(rotated.publicKey.export({type:'spki',format:'pem'}));await save(page);
     await expect(page.getByRole('dialog',{name:'更换客户端公钥'})).not.toBeVisible();expect((await h.exchange(own.id,foreign.privateKey)).status).toBe(401);expect((await h.exchange(own.id,rotated.privateKey)).status).toBe(200);
-    await page.setViewportSize({width:390,height:844});await noOverflow(page);await page.screenshot({path:'.tmp/external-e2e/project-mobile.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await noOverflow(page);
     await panel.getByRole('button',{name:'新增客户端',exact:true}).click();const modal=page.locator('#external-fields');
     await modal.locator('.external-key-help summary').click();await expect(modal).toContainText('openssl pkey -in bot-client.pem -pubout -out bot-client.pub.pem');
     await page.getByLabel('RSA 公钥（PEM）',{exact:true}).fill(foreign.publicKey);await visibleButton(page,page.locator('#external-form').getByRole('button',{name:'保存',exact:true}));await noOverflow(page);
-    await page.screenshot({path:'.tmp/external-e2e/public-key-mobile.png'});await modal.locator('select[name=auth_type]').selectOption('github_actions_oidc');
+    await modal.locator('select[name=auth_type]').selectOption('github_actions_oidc');
     await expect(modal.locator('.external-key-help')).toBeHidden();await expect(page.getByLabel('RSA 公钥（PEM）',{exact:true})).toBeHidden();await expect(page.getByLabel('Audience',{exact:true})).toBeVisible();
-    await page.screenshot({path:'.tmp/external-e2e/oidc-mobile.png'});await page.getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByRole('dialog',{name:'新增客户端'})).not.toBeVisible();
+    await page.getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByRole('dialog',{name:'新增客户端'})).not.toBeVisible();
     await page.goto(h.adminBase+'/#/projects/202/external');await expect(panel).toContainText('repository_forbidden');await expect(panel).not.toContainText('Foreign client');
     expect(errors).toEqual([]);
   }finally{await cleanup(h);}
@@ -300,15 +293,12 @@ test('项目说明原页展开收起并复制当前项目客户端，刷新读�
     const first=await page.evaluate(()=>navigator.clipboard.readText());expect(first).toContain(a.client.id);expect(first).toContain('绑定仓库 ID：101');expect(first).toContain(audience);expect(first).not.toContain(b.client.id);expect(first).not.toContain(foreign.client.id);
     await select.selectOption(b.client.id);await copy.click();const second=await page.evaluate(()=>navigator.clipboard.readText());expect(second).toContain(b.client.id);expect(second).not.toContain(a.client.id);
     expect(requests).toContain('/api/external/settings');expect(requests).not.toContain('/api/external/clients');
-    mkdirSync('.tmp/project-external-guide',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
-    await page.screenshot({path:'.tmp/project-external-guide/desktop.png',fullPage:true});
+    await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
     await guide.locator(':scope > summary').click();await expect(copy).toBeHidden();await expect(guide).not.toHaveAttribute('open','');
-    await expect(page).toHaveURL(/\/projects\/101\/external$/);await page.screenshot({path:'.tmp/project-external-guide/desktop-collapsed.png',fullPage:true});
+    await expect(page).toHaveURL(/\/projects\/101\/external$/);
     await guide.locator(':scope > summary').click();await expect(copy).toBeVisible();await expect(select).toHaveValue(b.client.id);
     await page.setViewportSize({width:390,height:844});await noOverflow(page);await visibleButton(page,copy);
-    await page.screenshot({path:'.tmp/project-external-guide/mobile.png',fullPage:true});
     await guide.locator(':scope > summary').focus();await guide.locator(':scope > summary').press('Enter');await expect(copy).toBeHidden();await noOverflow(page);
-    await page.screenshot({path:'.tmp/project-external-guide/mobile-collapsed.png',fullPage:true});
     await guide.locator(':scope > summary').press('Enter');await expect(copy).toBeVisible();await copy.click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain(b.client.id);
     const updated='https://updated.invalid/external/token';await h.admin('/api/external/settings','PUT',{token_audience:updated});await page.reload();
     await expect(guide).toContainText(updated);await copy.click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain(updated);

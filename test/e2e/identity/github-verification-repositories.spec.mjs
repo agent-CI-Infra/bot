@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 
@@ -11,7 +10,6 @@ import { consoleNavigate } from '../helpers/console-navigation.mjs';
 // fresh rows beside a notice saying the read failed, and offer a second retry for one read). The recovery is a read of the
 // whole list — the notice's button — because the project picker stands for the whole list while the list page reads one
 // page of it (offset, limit 51, maybe a filter). A page or filtered read is a slice: the notice and the picker stay put.
-const output = '.tmp/ui-866';
 const noOverflow = async page => expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 
 // The check is held at its first installation read, so the page can be put where the failure will happen before it ends.
@@ -40,7 +38,6 @@ async function checkedConsole(page, f) {
 test('项目页上核验完成而列表读取失败：只读一次、不出现第二个重试，只有整份列表的读取才清提示', async ({ page }) => {
   const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
-  mkdirSync(output, { recursive: true });
   const c = await checkedConsole(page, f);
   const rows = page.locator('#rows'), retry = c.line.getByRole('button', { name: '重新读取项目列表' });
   const shots = async name => {
@@ -51,7 +48,6 @@ test('项目页上核验完成而列表读取失败：只读一次、不出现�
         const box = await retry.boundingBox();
         expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(width); expect(box.height).toBeGreaterThan(0);
       }
-      await page.screenshot({ path: `${output}/${name}-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
   };

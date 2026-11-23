@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 
 async function fixture() {
@@ -22,17 +22,12 @@ const open = (page, id) => page.locator(`[data-task-id="${id}"]`).getByRole('but
 test('task logs load a bounded recent page, load earlier evidence on demand and retain expanded output', async ({ page }) => {
   const f = await fixture(), errors = []; page.on('pageerror', err => errors.push(err.message));
   try {
-    mkdirSync('.tmp/task-trace-227', { recursive: true });
     await login(page, f); await open(page, 'trace-page');
     await expect(page.locator('#timeline .step')).toHaveCount(100);
     await expect(page.locator('#timeline')).not.toContainText('Public output 0');
     await expect(page.locator('#timeline')).toContainText('Public output 214');
     await expect(page.locator('#task-view')).not.toContainText('PRIVATE_REASONING_SENTINEL');
     await expect(page.locator('#task-log-controls')).toContainText('还有更早记录');
-    for (const width of [390, 1440]) {
-      await page.setViewportSize({ width, height: 900 });
-      await page.screenshot({ path: `.tmp/task-trace-227/paging-${width}.png` });
-    }
     await page.getByRole('button', { name: '加载更早日志', exact: true }).click();
     await expect(page.locator('#timeline .step')).toHaveCount(200);
     await page.getByRole('button', { name: '加载更早日志', exact: true }).click();
@@ -46,7 +41,6 @@ test('task logs load a bounded recent page, load earlier evidence on demand and 
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.locator('#task-view').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-      if (width === 390 || width === 1440) await page.screenshot({ path: `.tmp/task-trace-227/detail-${width}.png` });
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }

@@ -76,13 +76,11 @@ test('a moved file keeps the old path in its history and that version stays rest
     const desktop = await measure();
     expect(desktop.hit).toBe(true); expect(desktop.top).toBeGreaterThanOrEqual(0); expect(desktop.bottom).toBeLessThanOrEqual(900);
     expect(desktop.scrollWidth).toBeLessThanOrEqual(desktop.innerWidth);
-    await page.screenshot({ path: '.tmp/knowledge-move-history/1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(move).toContainText('自 草稿.md');
     const mobile = await measure();
     expect(mobile.hit).toBe(true); expect(mobile.top).toBeGreaterThanOrEqual(0); expect(mobile.bottom).toBeLessThanOrEqual(844);
     expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.innerWidth);
-    await page.screenshot({ path: '.tmp/knowledge-move-history/390.png' });
     expect(f.errors).toEqual([]);
   } finally { await f.close(); }
 });

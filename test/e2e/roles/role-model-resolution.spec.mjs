@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor } from '../helpers/prompt-editor.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { goRolePage, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
@@ -37,11 +36,9 @@ test('project default inheritance and explicit role models use saved configurati
     await page.getByLabel('dev 模型', { exact: true }).selectOption(models[1].id);
     await read(page).click(); await expect(fact(page, '模型名称')).toHaveText('Project base');
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('Retain the local unsaved prompt.');
-    mkdirSync('.tmp/model-resolution-1122/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 1000 }); await panel(page).scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
-      if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/model-resolution-1122/previews/model-resolution-${width === 390 ? 'mobile' : 'desktop'}.png` });
     }
     await goRolePage(page, { role: 'Reviewer' }); await openRoleFormAdvanced(page); await read(page).click();
     await expect(fact(page, '模型来源')).toHaveText('角色'); await expect(fact(page, '模型名称')).toHaveText('Role fixed');

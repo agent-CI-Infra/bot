@@ -2,7 +2,6 @@ import {test,expect} from '@playwright/test';
 import { openModelCatalog } from '../helpers/open-model-folds.mjs';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
-import {mkdirSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../../fixtures/helpers.mjs';
 
 test('provider search, draft tests, pricing and conflict comparison share real state on desktop and mobile',async({page})=>{
@@ -31,7 +30,6 @@ test('provider search, draft tests, pricing and conflict comparison share real s
     await page.setViewportSize({width:390,height:600});await expect(editor.getByRole('button',{name:'保存',exact:true})).toBeInViewport();
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     const bounds=await editor.boundingBox();expect([bounds.x,bounds.y,bounds.width,bounds.height]).toEqual([0,0,390,600]);
-    mkdirSync('.tmp/model-console',{recursive:true});await page.screenshot({path:'.tmp/model-console/editor-mobile.png'});
     const latest=(await admin(`/api/models/${group[0].id}`)).value.model;
     await admin(`/api/models/${group[0].id}`,'PATCH',{version:latest.version,model_name:'alpha-updated'});
     await editor.getByRole('button',{name:'保存',exact:true}).click();await expect(editor.getByRole('alert')).toContainText('草稿已保留');
@@ -43,7 +41,7 @@ test('provider search, draft tests, pricing and conflict comparison share real s
     // frame between the old and the new row. expect.poll re-reads until the rendered set is the expected one.
     await expect.poll(async()=>(await own.locator('.model-address').allTextContents()).sort()).toEqual(['alpha-updated','beta','model-79']);
     const models=(await admin('/api/models')).value.models;expect(models.filter(m=>m.repository_id==='101').every(m=>m.api_url===origin+'/draft/v1')).toBe(true);expect(models.find(m=>m.model_name==='shared').api_url).toBe(origin+'/v1');
-    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/model-console/models-desktop.png',fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
     expect(await page.content()).not.toContain(key);
   }finally{await h.stop();await new Promise(resolve=>server.close(resolve));}
 });

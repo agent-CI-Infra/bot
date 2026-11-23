@@ -39,7 +39,6 @@ test('the console issues a binding string and only the server-confirmed binding 
     expect(identities()).toBe(1);
     // Only after the server confirms does the page show the new binding, and it names the bound account.
     await expect(page.locator('.channel-binding').filter({ hasText: '已绑定' })).toHaveCount(2, { timeout: 15000 });
-    await page.screenshot({ path: '.tmp/channels-console/1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('.channel-binding').filter({ hasText: '已绑定' })).toHaveCount(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -50,7 +49,6 @@ test('the console issues a binding string and only the server-confirmed binding 
       return { top: b.top, bottom: b.bottom, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.top <= innerHeight - 40 };
     });
     expect(bound.hit).toBe(true); expect(bound.inside).toBe(true);
-    await page.screenshot({ path: '.tmp/channels-console/390.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

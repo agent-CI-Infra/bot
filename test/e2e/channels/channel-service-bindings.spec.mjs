@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { transport, connector, bindFixture, inGroup, post } from '../../fixtures/channel-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -61,11 +60,8 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(github.getByLabel('只读', { exact: true })).toBeChecked();
     await expect(tasks.getByLabel('只读 + 可新增', { exact: true })).toBeChecked();
     await expect(platform.getByLabel('项目共享知识', { exact: true })).toHaveValue('read');
-    mkdirSync('.tmp/issue-1206', { recursive: true });
     await github.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -100); });
-    await page.screenshot({ path: `.tmp/issue-1206/group-editor-${width}.png` });
     await platform.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -100); });
-    await page.screenshot({ path: `.tmp/issue-1206/group-platform-${width}.png` });
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding).toContainText('GitHub 只读');
     await expect(binding).toContainText('项目任务 只读 + 可新增');
@@ -86,7 +82,6 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await github.getByLabel('Contents', { exact: true }).selectOption('write');
     await platform.getByLabel('项目共享知识', { exact: true }).selectOption('write');
     await github.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -100); });
-    await page.screenshot({ path: `.tmp/issue-1206/group-editor-custom-${width}.png` });
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding).toContainText(/GitHub 逐项：.*Contents 读写/);
     await expect(binding).toContainText('项目任务 完全可读写');
@@ -119,7 +114,6 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(timer.getByText(/^接下来：/)).toBeVisible();
     expect({ ...h.store.get('SELECT kind,state,cron,timezone FROM channel_schedules') }).toEqual({ kind: 'group', state: 'active', cron: '0 18 * * 1-5', timezone: 'Asia/Shanghai' });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    mkdirSync('.tmp/channel-service-bindings-312', { recursive: true }); await page.screenshot({ path: `.tmp/channel-service-bindings-312/binding-${width}.png`, fullPage: true });
     await timer.getByRole('button', { name: '暂停', exact: true }).click();
     await expect(page.getByRole('article', { name: '定时任务 工作日巡检' }).getByText('已暂停 · 工作日巡检', { exact: true })).toBeVisible();
     expect(h.store.get('SELECT reason FROM channel_schedules').reason).toBe('user_paused');

@@ -57,9 +57,7 @@ test('the administrator can inspect shares and reclaim expired files from storag
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await parent.getByRole('heading', { name: '整机磁盘' }).evaluate(el => el.scrollIntoView({ block: 'start' }));
       await page.evaluate(() => scrollBy(0, -85));
-      await page.screenshot({ path: `.tmp/storage-overview/capacity-${width}.png` });
       await shares.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/storage-overview/projects-${width}.png` });
       expect(await shares.getByRole('table').evaluate(el => el.scrollWidth <= el.parentElement.clientWidth + 1)).toBe(true);
     }
     await parent.getByText('保留天数与项目设置', { exact: true }).click();
@@ -81,10 +79,6 @@ test('the administrator can inspect shares and reclaim expired files from storag
     await expect(parent.locator('.storage-settings')).toContainText('浏览器证据 1 个目录');
     await parent.getByText('保留天数与项目设置', { exact: true }).click();
     expect(existsSync(eligible)).toBe(false); expect(existsSync(protectedDir)).toBe(true);
-    for (const [width, height] of [[1440, 900], [390, 844]]) {
-      await page.setViewportSize({ width, height }); await reclaim.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/storage-overview/reclaim-${width}.png` });
-    }
     await reclaim.click(); await expect(parent.getByText(/没有可回收内容/)).toBeVisible();
     // Let any storage refresh finish before removing the route and reloading.
     await page.unrouteAll({ behavior: 'wait' });

@@ -1,11 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { openProjectDanger } from '../helpers/open-basic-folds.mjs';
-import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { testPassword } from '../../fixtures/helpers.mjs';
 import { consoleSave } from '../helpers/console-save.mjs';
 
-const output = '.tmp/project-settings-226';
 async function login(page, f, path, username = 'administrator', password = f.password) {
   await page.goto(f.h.admin + path);
   await page.getByLabel('用户名', { exact: true }).fill(username);
@@ -16,7 +14,6 @@ async function login(page, f, path, username = 'administrator', password = f.pas
 test('settings preserve a draft across refresh and save errors, with separate confirmed lifecycle actions', async ({ page }) => {
   const f = await identityFixture(), errors = []; page.on('pageerror', err => errors.push(err.message));
   try {
-    mkdirSync(output, { recursive: true });
     f.h.store.run("UPDATE installed_repositories SET private=1 WHERE repository_id='101'");
     await login(page, f, '/#/projects/101/basic');
     const branch = page.getByLabel('基准分支', { exact: true });
@@ -36,7 +33,6 @@ test('settings preserve a draft across refresh and save errors, with separate co
       await page.setViewportSize({ width, height: 900 });
       await page.evaluate(() => scrollTo(0, 0));
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (width === 390 || width === 1440) await page.screenshot({ path: `${output}/settings-${width}.png`, fullPage: true });
     }
     await openProjectDanger(page);
     const danger = page.locator('.project-danger');
@@ -93,7 +89,6 @@ test('project members show inherited and explicit sources, and removing a local 
       await page.setViewportSize({ width, height: 900 });
       await page.evaluate(() => scrollTo(0, 0));
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (width === 390 || width === 1440) await page.screenshot({ path: `${output}/members-${width}.png`, fullPage: true });
     }
     const assignment = page.locator('.history li').filter({ hasText: 'inherited-member' });
     await assignment.getByRole('button', { name: '移除', exact: true }).click();
@@ -149,11 +144,8 @@ test('member read failures replace previous grants, and a project administrator 
       const widths = await member.locator('.members-layout').evaluate(grid => ({ grid: grid.getBoundingClientRect().width,
         card: [...grid.children].find(child => !child.hidden).getBoundingClientRect().width }));
       expect(Math.abs(widths.card - widths.grid)).toBeLessThanOrEqual(1);
-      mkdirSync('.tmp/console-states-553', { recursive: true });
-      await member.screenshot({ path: '.tmp/console-states-553/members-member-1440.png', fullPage: true });
       await member.setViewportSize({ width: 390, height: 844 });
       expect(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await member.screenshot({ path: '.tmp/console-states-553/members-member-390.png', fullPage: true });
     } finally { await context.close(); }
   } finally { await f.close(); }
 });

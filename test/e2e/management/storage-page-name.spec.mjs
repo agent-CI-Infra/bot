@@ -45,7 +45,6 @@ test('the storage page names itself for both roles and drops the jargon from its
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       await page.waitForTimeout(200);
-      await page.screenshot({ path: `.tmp/799-captures/super-${width}.png`, fullPage: true });
     }
 
     // The project administrator reaches the same address with a workspace path and a plain category bar.
@@ -72,7 +71,6 @@ test('the storage page names itself for both roles and drops the jargon from its
       for (const width of [1440, 390]) {
         await member.setViewportSize({ width, height: width === 390 ? 844 : 900 });
         await member.waitForTimeout(200);
-        await member.screenshot({ path: `.tmp/799-captures/member-${width}.png`, fullPage: true });
       }
     } finally { await context.close(); }
     expect(errors).toEqual([]);

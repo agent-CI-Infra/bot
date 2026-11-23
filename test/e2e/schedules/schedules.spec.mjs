@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { openScheduleTimeRules, openScheduleIdentity } from '../helpers/open-schedule-folds.mjs';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { randomId } from '../../../dist/core/security.js';
 import { defaultLimits } from '../../../dist/schedules/types.js';
 import { migrateDailyReports } from '../../../dist/schedules/migration.js';
@@ -25,8 +25,7 @@ async function login(page, f, username = 'administrator', password = f.password)
 const read = async (f, operation) => (await f.admin('/api/management/query', 'POST', { operation, target: { project_id: '101' }, arguments: {} })).value;
 test('user previews and creates a timezone-aware project scheduled task, then explicitly runs and stops it; nothing goes to Feishu', async ({ page }) => {
   test.setTimeout(90000); const f = await environment(), errors = [];
-  page.on('pageerror', e => errors.push(e.message)); mkdirSync('.tmp/schedules-166', { recursive: true });
-  try {
+  page.on('pageerror', e => errors.push(e.message));  try {
     await page.setViewportSize({ width: 1440, height: 1100 }); await login(page, f);
     // #1027: a project plan has no Feishu destination and one kind of work, written as what to do.
     await expect(page.getByLabel('计划目的地', { exact: true })).toHaveCount(0);
@@ -37,7 +36,6 @@ test('user previews and creates a timezone-aware project scheduled task, then ex
     await page.getByLabel('计划时区', { exact: true }).fill('Asia/Shanghai'); await page.getByLabel('Cron 表达式', { exact: true }).fill('0 9 * * *');
     await page.getByRole('button', { name: '预览触发时间', exact: true }).click();
     await expect(page.getByLabel('计划预览')).toContainText('Asia/Shanghai'); await expect(page.getByLabel('计划预览')).toContainText('未来触发');
-    await page.screenshot({ path: '.tmp/schedules-166/check-preview-desktop.png', fullPage: true });
     await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
     const plan = (await read(f, 'list_schedules')).schedules[0];
@@ -53,13 +51,11 @@ test('user previews and creates a timezone-aware project scheduled task, then ex
     await expect.poll(() => f.h.store.get('SELECT state FROM schedules').state).toBe('paused');
     await page.setViewportSize({ width: 390, height: 844 }); await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/schedules-166/check-paused-mobile.png', fullPage: true });
     writeFileSync('.tmp/schedules-166/check-evidence.json', JSON.stringify({ schedule: plan, occurrence: run, page_errors: errors }, null, 2)); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 test('user personal schedule pauses after revocation and its queued run never starts', async ({ page }) => {
-  test.setTimeout(90000); const f = await environment(); mkdirSync('.tmp/schedules-166', { recursive: true });
-  try {
+  test.setTimeout(90000); const f = await environment();  try {
     // The same human can own a personal schedule and later lose their project authorization.
     await login(page, f); await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
@@ -74,8 +70,7 @@ test('user personal schedule pauses after revocation and its queued run never st
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 test('a group destination of an event subscription stops at preview and before delivery once its binding no longer reaches the project', async ({ page }) => {
-  test.setTimeout(90000); const f = await environment(); mkdirSync('.tmp/schedules-166', { recursive: true });
-  try {
+  test.setTimeout(90000); const f = await environment();  try {
     const chat = await boundGroup(f, ['101']), groupDestination = await registerDestination(f.admin, chat); await f.service.tick();
     await login(page, f); const editor = page.getByRole('region', { name: '事件订阅管理', exact: true });
     await page.getByLabel('订阅目的地', { exact: true }).selectOption(groupDestination); await page.getByLabel('订阅名称', { exact: true }).fill('群里的失败通知');
@@ -91,7 +86,6 @@ test('a group destination of an event subscription stops at preview and before d
     // The editor's default five-minute aggregation window has passed: the queued notification is checked before sending.
     const before = f.wire.sent.length; f.advance(300000); await f.worker.tick(); const delivery = f.h.store.get('SELECT id,state,last_error FROM notification_outbox');
     expect(delivery.state).toBe('blocked'); expect(f.wire.sent.length).toBe(before);
-    await page.screenshot({ path: '.tmp/schedules-166/group-scope-rejected.png', fullPage: true });
     writeFileSync('.tmp/schedules-166/group-scope-evidence.json', JSON.stringify({ delivery, sends_before: before, sends_after: f.wire.sent.length }, null, 2));
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -149,10 +143,9 @@ test('a delayed preview cannot replace the current timezone or an edited form',a
 test('schedule editor steps and timezone preview stay reachable at six widths',async({page})=>{
  const f=await environment(),errors=[];page.on('pageerror',error=>errors.push(error.message));
  try{
-  await login(page,f);await page.goto(f.h.admin+'/#/projects/101/schedules');await expect(page.getByRole('region',{name:'项目定时任务列表'})).toBeVisible();mkdirSync('.tmp/schedule-editor-234/previews',{recursive:true});
-  for(const width of [320,390,768,1024,1440,1920]){
+  await login(page,f);await page.goto(f.h.admin+'/#/projects/101/schedules');await expect(page.getByRole('region',{name:'项目定时任务列表'})).toBeVisible();  for(const width of [320,390,768,1024,1440,1920]){
    await page.setViewportSize({width,height:1000});if(width<=760)for(const name of ['要做什么','身份与维护人','触发时间','运行限制']){await page.getByRole('navigation',{name:'计划编辑步骤'}).getByRole('button',{name,exact:true}).click();await expect(page.locator('.schedule-editor-section').filter({has:page.getByRole('heading',{name,exact:true})})).toBeVisible();}
-   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),String(width)).toBe(true);if([390,1440].includes(width))await page.screenshot({path:'.tmp/schedule-editor-234/previews/'+width+'.png',fullPage:true});
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),String(width)).toBe(true);
   }
   expect(errors).toEqual([]);expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
  }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
@@ -342,7 +335,6 @@ test('schedule preview matches the server after a timezone change, is reachable 
 // #1027: daily report plans of an older version are moved to their chats' timers at start; the page lists each one.
 test('the daily report migration report lists every moved plan and the stopped plan cannot be edited', async ({ page }) => {
   test.setTimeout(90000); const f = await environment(), errors = []; page.on('pageerror', e => errors.push(e.message));
-  mkdirSync('.tmp/schedules-1027', { recursive: true });
   try {
     const spec = { name: '项目日报', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal, workflow: 'report.daily', parameters: {},
       timezone: 'Asia/Shanghai', cron: '0 9 * * *', start_at: f.now(), enabled: true, misfire: 'skip', grace_ms: 60000, destination_id: f.destination, limits: defaultLimits };
@@ -361,9 +353,9 @@ test('the daily report migration report lists every moved plan and the stopped p
     const list = page.getByRole('region', { name: '项目定时任务列表', exact: true });
     await expect(list).toContainText('项目日报（已停用）'); await expect(list).toContainText('已迁移到飞书会话的定时任务');
     await expect(page.getByLabel('编辑计划', { exact: true }).locator('option[value="daily-moved"]')).toHaveCount(0);
-    await report.scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/schedules-1027/migration-1440.png' });
+    await report.scrollIntoViewIfNeeded();
     await page.setViewportSize({ width: 390, height: 844 }); await report.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/schedules-1027/migration-390.png' }); expect(errors).toEqual([]);
+     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

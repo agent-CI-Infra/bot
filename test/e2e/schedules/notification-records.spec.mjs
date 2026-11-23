@@ -1,6 +1,6 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { channelFixture, privateChat, registerDestination } from '../../fixtures/channel-fixture.mjs';
 
 async function environment() {
@@ -31,8 +31,7 @@ test('notification timeline shows real source, events, attempts and destination 
   try{
     await login(page,f);await card(page).locator(':scope > summary').click();
     await expect(card(page)).toContainText('失败事件通知');await expect(card(page)).toContainText('事件订阅');await expect(card(page)).toContainText('Asia/Shanghai');await expect(card(page)).toContainText('第 1 次 · 已送达');await expect(card(page)).toContainText('当前有效');await expect(card(page)).toContainText('私聊');await expect(card(page)).toContainText('task:browser-failure');await expect(card(page)).toContainText('task.failed');
-    mkdirSync('.tmp/notification-trace-234',{recursive:true});
-    for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);if([390,1440].includes(width)){await card(page).locator(':scope > summary').evaluate(node=>node.scrollIntoView({block:'start'}));await page.screenshot({path:'.tmp/notification-trace-234/notification-'+width+'.png',fullPage:true});}}
+    for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);if([390,1440].includes(width)){await card(page).locator(':scope > summary').evaluate(node=>node.scrollIntoView({block:'start'}));}}
     expect(errors).toEqual([]);expect(f.h.store.get('select manual_retries from notification_outbox').manual_retries).toBe(0);
   }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
 });

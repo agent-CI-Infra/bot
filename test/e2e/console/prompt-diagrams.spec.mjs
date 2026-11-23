@@ -1,7 +1,7 @@
 // #1123: Manager prompts open in a reading view whose ```mermaid blocks are drawn as flow diagrams. The diagram source is
 // untrusted, so the page must stay inert whatever the block says, and the drawing must fit 390 / 768 / 1440 widths.
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { goRolePage } from '../helpers/open-role-advanced.mjs';
@@ -30,7 +30,6 @@ test('the Manager prompt reads as text with drawn diagrams, stays inert on hosti
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('dialog', dialog => { errors.push('dialog: ' + dialog.message()); void dialog.dismiss(); });
-  mkdirSync('.tmp/prompt-diagrams', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     const saved = (await admin('/api/repositories/101/manager')).value.manager.prompt.revision;
@@ -82,7 +81,6 @@ test('the Manager prompt reads as text with drawn diagrams, stays inert on hosti
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const box = await figures.nth(0).locator('.diagram-canvas').evaluate(node => ({ client: node.clientWidth, page: innerWidth, right: node.getBoundingClientRect().right }));
       expect(box.right).toBeLessThanOrEqual(box.page);
-      await page.screenshot({ path: `.tmp/prompt-diagrams/reading-${width}.png` });
     }
 
     // 编辑源码: the same textarea, with a preview that follows typing.
@@ -95,10 +93,8 @@ test('the Manager prompt reads as text with drawn diagrams, stays inert on hosti
     await expect(preview.getByRole('heading', { name: '新流程', exact: true })).toBeVisible();
     await expect(preview.locator('figure.diagram')).toHaveAttribute('data-diagram', 'ready', { timeout: 20000 });
     await expect(preview.locator('svg text').filter({ hasText: '检视' })).toHaveCount(1);
-    await page.screenshot({ path: '.tmp/prompt-diagrams/edit-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/prompt-diagrams/edit-390.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('button', { name: 'Manager 提示词：阅读视图', exact: true }).click();
     await expect(reading.getByRole('heading', { name: '新流程', exact: true })).toBeVisible();
@@ -132,7 +128,6 @@ test('the built-in Manager prompt reads as six scenarios with a drawn flow each 
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/prompt-diagrams', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     expect((await admin('/api/repositories/101/manager')).value.manager.prompt.customized).toBe(false);
@@ -163,7 +158,6 @@ test('the built-in Manager prompt reads as six scenarios with a drawn flow each 
       expect(frames.every(frame => frame.inside)).toBe(true);
       if (width >= 768) expect(frames.map(frame => frame.fits)).toEqual([true, true, true, true, true, true]);
       await figures.nth(3).scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/prompt-diagrams/builtin-${width}.png` });
     }
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
@@ -203,9 +197,8 @@ test('a streamed management answer draws its finished diagram and keeps the page
     await expect(figure.locator('svg text').filter({ hasText: '新建 Issue' })).toHaveCount(1);
     await expect(feed.getByText('确认后再保存。', { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await figure.scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/prompt-diagrams/management-390.png' });
+    await figure.scrollIntoViewIfNeeded();
     await page.setViewportSize({ width: 1440, height: 1000 }); await figure.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: '.tmp/prompt-diagrams/management-1440.png' });
     expect(errors).toEqual([]);
   } finally { release(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

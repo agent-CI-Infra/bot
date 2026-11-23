@@ -1,9 +1,7 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { managementFixture } from '../../fixtures/management-fixture.mjs';
 
-const out = '.tmp/ui-874';
 
 // #641: a connect that never returns must end in a stated failure with a working retry, and the page must stay
 // inside the available viewport at every width without covering the shell header or mobile navigation.
@@ -336,11 +334,9 @@ test('#874 断流错误后重连成功，状态栏从 alert 回到 status，普�
     await expect(status).toContainText('就绪');
     await expect(status).toHaveAttribute('role', 'status');
     // The line that now carries ordinary progress, at each width.
-    mkdirSync(out, { recursive: true });
     for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
-      await page.screenshot({ path: `${out}/status-recovered-${width}.png`, fullPage: true });
     }
   } finally { release(); await f.close(); }
 });

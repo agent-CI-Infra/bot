@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { consoleSave } from '../helpers/console-save.mjs';
 
@@ -38,8 +37,7 @@ for (const width of [390, 1440]) test(`configuration recovery returns to the sam
     await expect(page).toHaveURL(/#\/inbox\/all\/50$/); await expect(open(page)).toBeFocused();
     // Saving configuration does not prove this task resumed; it stays until its task record actually changes.
     await expect(item(page)).toBeVisible(); expect(h.store.get("SELECT status FROM tasks WHERE id='inbox-50'").status).toBe('waiting_configuration');
-    mkdirSync('.tmp/inbox-recovery-226/previews', { recursive: true });
-    await open(page).click(); await page.screenshot({ path: `.tmp/inbox-recovery-226/previews/inbox-recovery-${width}.png` });
+    await open(page).click();
     await detail(page).getByRole('button', { name: '重试', exact: true }).click();
     await expect(detail(page).locator('#task-badges')).toContainText('待执行');
     await detail(page).getByRole('button', { name: '关闭', exact: true }).click();

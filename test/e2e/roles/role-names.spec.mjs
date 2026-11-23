@@ -1,11 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { consoleSave } from '../helpers/console-save.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
 
-const out = '.tmp/role-names-568';
 const storedNames = ['Manager', 'Developer', 'Tester', 'Reviewer', 'UX reviewer', 'Independent QA'];
 
 async function login(page, url, password) {
@@ -27,7 +25,6 @@ async function checkOverview(page) {
 test('中文界面在总览、角色列表和表单保留名称原文，内置职责使用中文', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -49,7 +46,6 @@ test('中文界面在总览、角色列表和表单保留名称原文，内置�
     await expect(table).toContainText('负责项目事件分派、任务内多角色编排与跨任务排期及依赖协调。');
     await expect(table).toContainText('在入口已有的权限范围内实现或调查任务。');
     await expect(table).not.toContainText('Implements or investigates');
-    await page.screenshot({ path: `${out}/list-zh-1440.png`, fullPage: true });
 
     await openRoleFromList(page, 'Developer');
     await expect(page.getByLabel('显示名称', { exact: true })).toHaveValue('Developer');
@@ -58,15 +54,12 @@ test('中文界面在总览、角色列表和表单保留名称原文，内置�
     await expect(page.getByTestId('role-id')).toBeHidden();
     await expect(page.getByText('这份提示词会发给模型', { exact: false })).toBeVisible();
     await expect(page.getByText('推荐配置使用英文模板', { exact: false })).toBeVisible();
-    await page.screenshot({ path: `${out}/form-zh-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `${out}/form-zh-390.png`, fullPage: true });
     await openRoleFormAdvanced(page);
     await expect(page.getByTestId('role-id')).toHaveText('角色标识：dev');
     await expect(page.getByTestId('role-id')).toBeVisible();
     await page.getByTestId('role-list-link').click();
     await expect(page.getByRole('heading', { name: '角色概览', exact: true }).or(page.getByRole('heading', { name: 'Roles', exact: true }))).toBeVisible();
-    await page.screenshot({ path: `${out}/list-zh-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
 
@@ -102,15 +95,12 @@ test('英文界面在总览、角色列表和表单保留相同名称，内置�
     await expect(page.getByLabel('Display name', { exact: true })).toHaveValue('Developer');
     await expect(page.getByLabel('Duty', { exact: true })).toHaveValue("Implements or investigates the task within the entry point's existing authority.");
     await expect(page.getByRole('heading', { name: 'Basics', exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/form-en-1440.png`, fullPage: true });
     await openRoleFormAdvanced(page);
     await expect(page.getByTestId('role-id')).toHaveText('Role id：dev');
     await page.getByTestId('role-list-link').click();
     await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/list-en-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/list-en-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
 

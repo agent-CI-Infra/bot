@@ -1,10 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 // #697: switching to another page of the same project shows that page's loading state at once, and the 当前页面 picker
 // follows the address. The previous page must not stay on screen under the new address while the project is re-read.
-const out = '.tmp/project-subpage-loading-697';
 const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
 
 async function holdProject(page) {
@@ -22,7 +20,6 @@ test('同一项目内切换子页面立即显示新页面的加载态，「当�
   test.setTimeout(120000);
   const h = await harness(undefined, manager), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -50,12 +47,10 @@ test('同一项目内切换子页面立即显示新页面的加载态，「当�
     await expect(body.getByText('项目成员与授权来源', { exact: true })).toHaveCount(0);
     await expect(picker).toHaveValue('#/projects/101/release');
     await expect(body.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/switch-loading-390.png` });
     gate.held = false; gate.release();
     await expect(body.getByRole('heading', { name: '准备新版本', exact: true })).toBeVisible();
     await expect(loading).toHaveCount(0);
     await expect(picker).toHaveValue('#/projects/101/release');
-    await page.screenshot({ path: `${out}/switch-done-390.png` });
 
     // Going back to the page already rendered while another page's read is out names that page again at once.
     gate.held = true;
@@ -78,7 +73,6 @@ test('同一项目内切换子页面立即显示新页面的加载态，「当�
     await expect(loading.getByRole('heading', { name: '正在打开「角色」', exact: true })).toBeVisible();
     await expect(body.getByRole('heading', { name: '准备新版本', exact: true })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: '项目设置类别' }).locator('[aria-current=page]')).toHaveText('角色');
-    await page.screenshot({ path: `${out}/switch-loading-1440.png` });
     gate.held = false; gate.release();
     await expect(loading).toHaveCount(0);
     await expect(body.getByText('正在打开「角色」', { exact: true })).toHaveCount(0);

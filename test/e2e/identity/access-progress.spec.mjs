@@ -1,10 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { identityFixture, openIdentityAdvanced } from '../../fixtures/identity-fixture.mjs';
 import { Onboarding } from '../../../dist/onboarding/service.js';
 import { testPassword } from '../../fixtures/helpers.mjs';
 
-const output = '.tmp/access-progress-225';
 async function localLogin(page, f, path) {
   await page.goto(f.h.admin + path);
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -23,7 +21,6 @@ async function readyWizard(f) {
 test('the seven-step wizard exposes missing setup at six widths and resumes the addressed step', async ({ page }) => {
   const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
-    mkdirSync(output, { recursive: true });
     await localLogin(page, f, '/#/settings/onboarding/6');
     await expect(page.getByRole('heading', { name: '接入尚未完成' })).toBeVisible();
     await expect(page.getByRole('button', { name: '完成向导', exact: true })).toBeDisabled();
@@ -33,7 +30,6 @@ test('the seven-step wizard exposes missing setup at six widths and resumes the 
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const action = page.getByRole('button', { name: '前往第 1 步：公网 HTTPS', exact: true });
       await expect(action).toBeVisible();
-      if (width === 390 || width === 1440) await page.screenshot({ path: `${output}/wizard-missing-${width}.png`, fullPage: true });
     }
     await page.getByRole('button', { name: '前往第 1 步：公网 HTTPS', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding\/0$/);
@@ -76,10 +72,8 @@ test('the installation step uses current effective installations instead of the 
     const count = page.locator('dt').filter({ hasText: '当前有效安装数' }).locator('xpath=following-sibling::dd[1]');
     await expect(count).toHaveText('1');
     await expect(page.locator('.onboarding-progress')).toContainText('1 个有效安装');
-    mkdirSync('.tmp/onboarding-readiness-225', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => scrollTo(0, 0));
-    await page.screenshot({ path: '.tmp/onboarding-readiness-225/installations-desktop.png', fullPage: true });
     f.h.store.run("UPDATE github_installations SET status='suspended'");
     await page.reload(); await expect(count).toHaveText('0');
     await expect(page.locator('.onboarding-step').nth(3)).toHaveAttribute('data-ready', 'false');
@@ -99,10 +93,8 @@ for(const endpoint of ['onboarding','installations'])test(`a failed ${endpoint} 
     await expect(page.getByRole('heading', { name: '接入状态待重新核验', exact: true })).toBeVisible();
     await expect(finish).toBeDisabled(); await expect(page.locator('.onboarding-step[data-ready=unknown]')).toHaveCount(7);
     await expect(page.locator('#onboarding-panel [role=alert]').last()).toContainText('status_unavailable');
-    mkdirSync('.tmp/onboarding-readiness-225', { recursive: true });
     await page.setViewportSize({ width: 390, height: 900 }); await page.evaluate(() => scrollTo(0, 0));
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/onboarding-readiness-225/readiness-unknown-mobile.png', fullPage: true });
     failure = false; await page.getByRole('button', { name: '重新读取接入状态', exact: true }).click();
     await expect(page.getByRole('button', { name: '前往第 5 步：模型', exact: true })).toBeVisible(); await expect(finish).toBeDisabled();
     expect(writes).toBe(1);
@@ -152,7 +144,6 @@ test('identity and effective grants remain visible when optional provider and Fe
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (width === 390 || width === 1440) await page.screenshot({ path: `${output}/identity-partial-${width}.png`, fullPage: true });
     }
     failures = false;
     await page.locator('.identity-provider').getByRole('button', { name: '重新加载', exact: true }).click();

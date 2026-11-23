@@ -5,11 +5,9 @@
 // project basic settings has no duplicate onboarding entry, and picks onboarding / gate / Actions / Issue prompts from
 // the assistant's recommendation list on #/projects/103/management. GitHub and the model are local fixtures.
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, assistantModel } from '../../fixtures/onboarding-fixture.mjs';
 
-const output = '.tmp/repository-onboarding-1133';
 const toolResults = body => body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
 
 const script = (context, body) => {
@@ -75,11 +73,9 @@ for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手�
   const cleanups = [], t = { after: fn => cleanups.push(fn) }, errors = [];
   const f = await identityFixture(undefined, { github: true });
   const viewport = { width, height: width === 390 ? 844 : 900 };
-  mkdirSync(output, { recursive: true });
   const shot = async (target, name) => {
     expect(await target.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     await target.evaluate(() => { document.activeElement?.blur?.(); scrollTo(0, 0); });
-    await target.screenshot({ path: `${output}/${width}-${name}.png`, fullPage: true });
   };
   page.on('pageerror', error => errors.push(error.message));
   try {

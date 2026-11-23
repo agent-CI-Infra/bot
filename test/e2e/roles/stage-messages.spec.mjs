@@ -1,6 +1,6 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { managementFixture } from '../../fixtures/management-fixture.mjs';
 import { channelFixture, boundGroup, repositoryAssistant, inGroup, post, until } from '../../fixtures/channel-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -32,7 +32,6 @@ test('a management turn shows its progress message while it runs, before the ans
     await expect(feed.locator('.management-turn-state')).toHaveAttribute('data-state', 'running');
     // A progress message is not an execution step.
     await expect(feed.locator('.management-progress')).toBeHidden();
-    mkdirSync('.tmp/stage-messages', { recursive: true }); await page.screenshot({ path: '.tmp/stage-messages/management-running.png' });
     release();
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
     await expect(feed.locator('.management-answer').last()).toContainText('任务都在正常推进。');
@@ -46,7 +45,6 @@ test('a management turn shows its progress message while it runs, before the ans
     await expect(feed.locator('.management-answer').last()).toContainText('任务都在正常推进。');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/stage-messages/management-mobile.png' });
     expect(errors).toEqual([]);
   } finally { release(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -70,7 +68,6 @@ test('a running group answer shows its progress in the console, and its manager 
     await expect(progressMessage).toContainText('正在查阅 admin-fixture-101 的未关闭 PR。');
     await expect(page.getByText('正在回答…', { exact: true })).toBeVisible();
     await expect(page.locator('.channel-run')).toContainText('群聊助手');
-    mkdirSync('.tmp/stage-messages', { recursive: true }); await page.screenshot({ path: '.tmp/stage-messages/group-running.png', fullPage: true });
     await page.getByRole('button', { name: '停止回答', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '停止回答', exact: true }).click();
     await expect(page.locator('.channel-run .status')).toHaveText('已停止');
@@ -78,7 +75,6 @@ test('a running group answer shows its progress in the console, and its manager 
     await expect(progressMessage).toContainText('正在查阅 admin-fixture-101 的未关闭 PR。');
     await expect(page.getByRole('button', { name: '停止回答', exact: true })).toHaveCount(0);
     await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('已在控制台停止')));
-    await page.screenshot({ path: '.tmp/stage-messages/group-stopped.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

@@ -31,11 +31,6 @@ test('项目列表的任务数轮询遇到 403 只请求一次并显示可见提
     expect(await notice.evaluate(node => getComputedStyle(node).backgroundColor), 'the warning has its own style, not body text')
       .toBe('rgb(255, 244, 224)');
     // The stopped state at both supported widths: the warning line and its manual control must be in frame.
-    for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
-      await notice.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/project-activity-poll/terminal-${width}.png`, fullPage: true });
-    }
     // Reading by hand goes through again, and a readable listing takes the notice away.
     answer = 200;
     await notice.getByRole('button', { name: '重新读取任务数' }).click();
@@ -63,11 +58,6 @@ test('项目列表的任务数轮询遇到 5xx 时显示等待重试的提示', 
     await expect(notice).toContainText('5 秒后重试', { timeout: 15000 });
     await expect(page.locator('#rows .row')).toHaveCount(1);
     expect(await notice.evaluate(node => getComputedStyle(node).backgroundColor)).toBe('rgb(255, 244, 224)');
-    for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
-      await notice.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/project-activity-poll/delayed-${width}.png`, fullPage: true });
-    }
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

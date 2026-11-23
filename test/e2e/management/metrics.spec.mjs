@@ -1,6 +1,6 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import {test,expect} from '@playwright/test';
-import {mkdirSync,rmSync} from 'node:fs';
+import { rmSync } from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../../fixtures/helpers.mjs';
 import {metricTask,usageRequest} from '../../fixtures/metrics-fixtures.mjs';
 async function login(page,url,username,password){await page.goto(url);await page.getByLabel('用户名',{exact:true}).fill(username);await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();}
@@ -17,13 +17,12 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
   usageRequest(h.store,'foreign-usage',model.id,{cost:3});usageRequest(h.store,'development-usage',model.id,{date:'2026-10-23',cost:4});
   usageRequest(h.store,'development-usage',model.id,{date:'2026-10-23',priced:false,usage:{prompt_tokens:100,completion_tokens:20,prompt_cache_hit_tokens:50}});
   usageRequest(h.store,'development-usage',model.id,{date:'2026-10-23',usage:null});await h.projects.reconcile();
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/metrics-evidence',{recursive:true});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
   try{
     await login(page,h.admin,'administrator',password);await page.goto(h.admin+'/#/tasks/review-usage');
     await expect(page.locator('#task-side')).toContainText('用量统计');await expect(page.locator('#task-side')).toContainText('USD 1.560000');
     await expect(page.locator('#task-side .task-metrics')).toContainText('运行 1 分 5 秒');await expect(page.locator('#task-side .task-metrics')).toContainText('输入 1,000,000');
     await expect(page.locator('#task-side .task-metrics')).toContainText('输出 100,000');await expect(page.locator('#task-side .task-metrics')).toContainText('缓存 800,000');await expect(page.locator('#task-side .task-metrics')).toContainText('命中率 80.0%');
-    await page.screenshot({path:'.tmp/metrics-evidence/task-detail.png',fullPage:true});
     await page.goto(h.admin+'/#/tasks/development-usage');await expect(page.locator('#task-side')).toContainText('统计不完整');
     await page.goto(h.admin+'/#/projects/101/overview/tasks');
     await page.locator('.workbench-task-row[data-task-id="review-usage"] button').first().click();
@@ -42,9 +41,9 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.locator('rect[data-project]')).toHaveCount(3);const segment=page.locator('rect[data-project="101"][data-date="2026-10-22"]');
     await segment.focus();await expect(page.locator('.cost-chart-detail')).toContainText('fixture/project-101');await expect(page.locator('.cost-chart-detail')).toContainText('USD 1.56');await expect(page.locator('.cost-chart-detail')).toContainText('当日 34.2%');
     await expect(page.locator('.cost-legend')).toContainText('fixture/project-101');await expect(page.locator('.cost-legend')).toContainText('fixture/project-202');
-    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/metrics-evidence/cost-desktop.png',fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    expect(await page.locator('.cost-chart-scroll').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/cost-mobile.png',fullPage:true});
+    expect(await page.locator('.cost-chart-scroll').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);
     await switchConsoleProject(page, '101');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 5.56');await expect(page.locator('rect[data-project="202"]')).toHaveCount(0);
     await page.getByLabel('费用币种',{exact:true}).selectOption('CNY');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('未定价');
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'metrics-member',password:memberPassword,repository_ids:['101']});
@@ -54,10 +53,9 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
       await member.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await member.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');await member.getByRole('button',{name:'查看统计',exact:true}).click();
       await expect(member.locator('.cost-summary')).toContainText('USD 5.56');await expect(member.locator('#costs-panel')).not.toContainText('project-202');
       await member.locator('.console-scope-trigger:visible').click(); await expect(member.locator('#console-scope-projects [role=option]')).toHaveCount(1); await member.keyboard.press('Escape');
-      await member.screenshot({path:'.tmp/metrics-evidence/cost-member.png',fullPage:true});
     }finally{await context.close();}
     await page.goto(h.admin+'/#/tasks/review-usage');await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);
-    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/task-mobile.png',fullPage:true});expect(errors).toEqual([]);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
 
@@ -68,7 +66,7 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
   usageRequest(h.store,'unpriced-own',model.id,{priced:false,usage:{prompt_tokens:1000,completion_tokens:100,prompt_cache_hit_tokens:800}});
   usageRequest(h.store,'unpriced-foreign',model.id,{priced:false,usage:{prompt_tokens:2000,completion_tokens:200,prompt_cache_hit_tokens:1600}});
   usageRequest(h.store,'unpriced-own',model.id,{date:'2026-10-23',priced:false,usage:null});
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/metrics-evidence',{recursive:true});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const filter=async(targetPage,from,to)=>{
     await targetPage.getByLabel('开始日期（本地）',{exact:true}).fill(from);
     await targetPage.getByLabel('结束日期（本地）',{exact:true}).fill(to);
@@ -83,8 +81,8 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     const own=chart.locator('rect[data-project="101"]');await expect(own).toHaveAttribute('data-value','1100');await own.focus();
     await expect(page.locator('.cost-chart-detail')).toContainText('1,100（输入 1,000，输出 100）');await expect(page.locator('.cost-chart-detail')).toContainText('当日 33.3%');
     await expect(chart).toContainText('缓存命中已包含在输入中，不重复相加');await expect(page.locator('.cost-summary')).toContainText('未定价');
-    await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-desktop.png'});
-    await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-mobile.png'});
+    await chart.scrollIntoViewIfNeeded();
+    await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();
     await switchConsoleProject(page, '101');await filter(page,'2026-10-22','2026-10-23');
     await expect(chart.locator('rect[data-project="202"]')).toHaveCount(0);await expect(chart.locator('rect')).toHaveCount(1);
     await filter(page,'2026-10-23','2026-10-23');await expect(chart).toContainText('没有完整的用量记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);

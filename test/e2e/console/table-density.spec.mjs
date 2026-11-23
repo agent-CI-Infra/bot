@@ -1,16 +1,12 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // #560: numbers right, text left; role duty clamped; 390 stacks. Does not restyle the project list (#544).
-const out = resolve('.tmp/table-density-560');
 
 test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const a = await account(admin);
@@ -40,7 +36,6 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
       for (const column of [1, 2]) await expect(row.nth(column)).toHaveCSS('text-align', 'right');
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: `${out}/costs-after-1440.png`, fullPage: true });
 
     // The drill-down under a task count lists text; it must not inherit the numeric right alignment.
     await page.locator('#costs-panel .statistics-task-summary tr[data-kind="review.issue"] button').click();
@@ -49,7 +44,6 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     const drillAlign = await drill.evaluate(table => [...table.querySelectorAll('th, tbody tr:first-child td')].map(el => getComputedStyle(el).textAlign));
     expect(drillAlign.length).toBeGreaterThan(1);
     expect(drillAlign.every(align => align === 'left' || align === 'start')).toBeTruthy();
-    await page.screenshot({ path: `${out}/costs-drill-after-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/roles');
     // A fresh project shows the default configuration in force directly (#1068).
@@ -77,7 +71,6 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     expect(roles.hasDutyTitle).toBe(true);
     // rows should not wildly diverge just from padding (content still varies; all at least a control height)
     expect(roles.rowHeights.every(h => h >= 40)).toBeTruthy();
-    await page.screenshot({ path: `${out}/roles-after-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/roles');
@@ -92,10 +85,8 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     expect(mobile.thead).toBe('none');
     expect(mobile.display).toBe('block');
     expect(mobile.overflow).toBe(390);
-    await page.screenshot({ path: `${out}/roles-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/costs');
     await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });

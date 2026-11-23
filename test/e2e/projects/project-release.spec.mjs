@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { releaseFixture, run, target, previous, other, writes } from '../../fixtures/release-fixtures.mjs';
 import { testPassword } from '../../fixtures/helpers.mjs';
 import { runEventTasks, releaseGitHub, observationAgent } from '../../fixtures/event-tasks.mjs';
@@ -37,16 +36,14 @@ test('项目页完整 beta 发版：确认 SHA、Release lane、草稿编辑和�
     await page.getByRole('button', { name: '正式发布', exact: true }).click(); await expect(page.getByRole('dialog')).not.toBeVisible();
     expect(f.state.releases[0].draft).toBe(true);
     await page.getByRole('button', { name: '丢弃本地编辑并刷新正文' }).click();
-    await page.setViewportSize({ width: 1440, height: 1000 }); mkdirSync('.tmp/project-release', { recursive: true });
-    await page.screenshot({ path: '.tmp/project-release/draft-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/project-release/draft-mobile.png', fullPage: true });
     await page.getByRole('button', { name: '正式发布', exact: true }).click(); await expect(dialog).toContainText('发布后仍为预发布版本');
     await dialog.getByRole('button', { name: '正式发布', exact: true }).click();
     await expect.poll(() => f.state.releases[0].draft).toBe(false); expect(f.state.releases[0].prerelease).toBe(true);
     await expect(page.locator('#project-page')).toContainText('已人工发布');
-    await page.screenshot({ path: '.tmp/project-release/published-mobile.png', fullPage: true }); expect(errors).toEqual([]);
+     expect(errors).toEqual([]);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 test('其他项目管理员看不到发版入口，直接请求本项目发布接口返回 403', async ({ page }) => {
@@ -86,8 +83,6 @@ test('填写的版本不高于上一枚版本标签时提示更高版本并禁�
     await version.fill('v1.2.1'); await page.getByRole('button', { name: '检查候选提交' }).click();
     const refused = panel.getByText('版本 v1.2.1 不高于上一枚版本标签 v1.2.2，不能发布。请填写更高的版本，例如 v1.2.3 或 v1.3.0。', { exact: true });
     await expect(refused).toHaveClass(/release-check-failed/); await expect(confirm).toBeDisabled();
-    mkdirSync('.tmp/project-release-version-order', { recursive: true });
-    await page.screenshot({ path: '.tmp/project-release-version-order/not-higher.png', fullPage: true });
     await version.fill('v1.2.3'); await page.getByRole('button', { name: '检查候选提交' }).click();
     await expect(panel).toContainText('版本 v1.2.3 高于上一枚版本标签 v1.2.2'); await expect(confirm).toBeEnabled();
     expect(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n).toBe(0); expect(writes(f.state)).toHaveLength(0);
@@ -107,8 +102,6 @@ test('已有草稿后跳过同提交的新版本，有新提交时确认并展�
     await version.fill('v1.2.4'); await page.getByRole('button', { name: '检查候选提交' }).click();
     await expect(page.locator('#project-page')).toContainText('没有新变更，跳过本次发布'); await expect(confirm).toBeDisabled();
     await expect(page.locator('.release-record').getByRole('heading', { name: first.version, exact: true })).toBeVisible();
-    mkdirSync('.tmp/project-release-active-draft', { recursive: true });
-    await page.screenshot({ path: '.tmp/project-release-active-draft/no-changes.png', fullPage: true });
     f.state.histories[target] = structuredClone(f.state.commits); f.state.head = other;
     f.state.commits.unshift({ sha: other, commit: { message: 'Add another change' }, html_url: 'https://github.com/fixture/project-101/commit/' + other });
     await page.getByRole('button', { name: '检查候选提交' }).click(); await expect(confirm).toBeEnabled();
@@ -127,7 +120,6 @@ test('已有草稿后跳过同提交的新版本，有新提交时确认并展�
     expect(f.state.releases).toHaveLength(2); expect(f.state.releases.every(release => release.draft === true)).toBe(true);
     expect(f.state.releases[0]).toEqual(firstDraft); expect(f.h.store.all('SELECT active FROM project_releases').every(row => row.active === 0)).toBe(true);
     expect(writes(f.state).some(request => request.body?.draft === false || request.method === 'DELETE')).toBe(false);
-    await page.screenshot({ path: '.tmp/project-release-active-draft/two-drafts.png', fullPage: true });
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 test('运行分析从失败探索代码、其他Issue与PR，并展示脱敏日志证据', async ({ page }) => {
@@ -175,6 +167,5 @@ test('运行分析从失败探索代码、其他Issue与PR，并展示脱敏日�
     await expect(advice.locator('img')).toHaveCount(0); await expect(advice).toContainText('<img src=x'); await expect(advice).not.toContainText('**');
     expect(await page.evaluate(() => window.adviceInjected)).toBeUndefined();
     await expect(page.locator('#project-page')).toContainText('related build 日志 · run 801 / attempt 2');
-    mkdirSync('.tmp/release-observation', { recursive: true }); await page.screenshot({ path: '.tmp/release-observation/log-evidence.png', fullPage: true });
   } finally { release?.(); for (const close of cleanup.reverse()) await close(); }
 });

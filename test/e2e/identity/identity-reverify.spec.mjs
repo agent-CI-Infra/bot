@@ -3,14 +3,12 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { identityFixture, openIdentityAdvanced } from '../../fixtures/identity-fixture.mjs';
 
-const output = resolve('.tmp/identity-reverify-225');
 
 // #225 最后一条未覆盖的验收：待核验的身份必须由用户主动「重新验证 GitHub 权限」
 // 触发一次服务端复核，且页面只显示服务端复核后的状态，不能靠前端把标签改绿。
 test('重新验证 GitHub 权限：待验证身份经服务端复核后回到已验证', async ({ page }) => {
   const f = await identityFixture(), errors = [];
   page.on('pageerror', e => errors.push(e.message));
-  mkdirSync(output, { recursive: true });
   try {
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
@@ -24,7 +22,6 @@ test('重新验证 GitHub 权限：待验证身份经服务端复核后回到已
     await expect(panel.locator('.identity-connection-status')).toContainText('GitHub 授权待验证');
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: resolve(output, 'reverify-pending-1440.png'), fullPage: true });
 
     const posts = [];
     page.on('request', r => { if (r.method() === 'POST' && new URL(r.url()).pathname === '/api/identity/refresh') posts.push(r.url()); });
@@ -52,12 +49,10 @@ test('重新验证 GitHub 权限：待验证身份经服务端复核后回到已
     await expect(done).toHaveText('重新验证 GitHub 权限');
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: resolve(output, 'reverify-verified-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     const reverifyButton = page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true });
     await reverifyButton.scrollIntoViewIfNeeded();
     await expect(reverifyButton).toBeInViewport();
-    await page.screenshot({ path: resolve(output, 'reverify-verified-390.png'), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 
     expect(errors).toEqual([]);
@@ -90,10 +85,8 @@ test('重新验证 GitHub 权限：需要重新授权时显示原因并跳转到
     await expect(panel.getByRole('alert')).toContainText('需要重新授权', { timeout: 10_000 });
     await authorized;
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: resolve(output, 'reverify-error-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
-    await page.screenshot({ path: resolve(output, 'reverify-error-390.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -121,12 +114,10 @@ test('重新验证 GitHub 权限：安装仍待确认时显示原因而不是成
     await expect(refresh).toHaveText('重新验证 GitHub 权限');
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: resolve(output, 'reverify-pending-result-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await refresh.scrollIntoViewIfNeeded();
     await expect(refresh).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
-    await page.screenshot({ path: resolve(output, 'reverify-pending-result-390.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -163,12 +154,10 @@ test('重新验证 GitHub 权限：请求超时后显示错误并恢复按钮', 
     await expect(refresh).toHaveText('重新验证 GitHub 权限');
     await expect(page).toHaveURL(/#\/identity/);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: resolve(output, 'reverify-timeout-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await refresh.scrollIntoViewIfNeeded();
     await expect(refresh).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
-    await page.screenshot({ path: resolve(output, 'reverify-timeout-390.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -192,22 +181,17 @@ test('从 GitHub 安装返回后自动刷新、从 GitHub 登录返回后等登�
     await openIdentityAdvanced(page);
     await expect(page.getByRole('button', { name: '刷新身份与授权' })).toHaveCount(0);
     const { mkdirSync } = await import('node:fs');
-    mkdirSync('.tmp/ui-516', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: '.tmp/ui-516/setup-return-1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/ui-516/setup-return-390.png', fullPage: true });
     const beforeAuth = refreshed;
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.admin + '/?github_auth=1#/identity');
     await expect(page.locator('#identity-panel').getByRole('status')).toHaveText('已从 GitHub 授权返回，身份与授权已刷新。');
     // #708: signing in already started the check on the server; the page waits for it rather than starting another.
     expect(refreshed).toBe(beforeAuth);
-    await page.screenshot({ path: '.tmp/ui-516/auth-return-1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/ui-516/auth-return-390.png', fullPage: true });
   } finally { await f.close(); }
 });
 
