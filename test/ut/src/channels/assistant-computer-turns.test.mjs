@@ -78,25 +78,51 @@ test('list_files lists ~/memory without starting a computer, enforces symlink bo
   const withLink = await turn.execute('list_files', { path: '~/memory', recursive: true });
   assert.ok(withLink.entries.some(e => e.path === 'escape' && e.type === 'symlink'));
   assert.ok(!withLink.entries.some(e => e.path.includes('secret.md')));
-  // Concurrent rename + symlink swap during recursive listing never escapes via TOCTOU.
+  // Concurrent rename + symlink swap while recursive listing is in flight never escapes via TOCTOU.
   const raceDir = join(home, 'memory', 'race');
   const raceMoved = join(home, 'memory', 'race-moved');
+  const raceOther = join(f.homes, 'd'.repeat(32), 'home-1');
   mkdirSync(join(raceDir, 'deep'), { recursive: true });
+  mkdirSync(join(raceOther, 'deep'), { recursive: true });
   writeFileSync(join(raceDir, 'deep', 'ok.md'), 'inside');
-  for (let i = 0; i < 20; i++) {
+  writeFileSync(join(raceOther, 'secret.md'), 'other owner secret');
+  writeFileSync(join(raceOther, 'deep', 'secret.md'), 'other deep secret');
+  for (let i = 0; i < 80; i++) {
+    const name = `f-${String(i).padStart(3, '0')}.md`;
+    writeFileSync(join(raceDir, name), 'inside');
+    writeFileSync(join(raceOther, name), 'SECRET'.repeat(33));
+  }
+  let inFlightSucceeded = 0;
+  for (let i = 0; i < 80 && inFlightSucceeded < 5; i++) {
+    let finished = false;
     const listing = f.service.homes.list(home, 'memory/race', true);
+    listing.then(() => { finished = true; }, () => { finished = true; });
+    for (let tick = 0; tick < i; tick++) await new Promise(resolve => setImmediate(resolve));
+    const inFlight = !finished;
     renameSync(raceDir, raceMoved);
-    symlinkSync(other, raceDir);
+    symlinkSync(raceOther, raceDir);
+    let result = null;
+    let caught = null;
     try {
-      const result = await listing;
-      assert.ok(!result.entries.some(e => e.path.includes('secret.md')), JSON.stringify(result.entries));
+      result = await listing;
     } catch (error) {
-      assert.ok(['invalid_path', 'file_not_found'].includes(error.code), error.code);
+      caught = error;
     } finally {
       rmSync(raceDir, { force: true });
       renameSync(raceMoved, raceDir);
     }
+    if (caught) {
+      assert.ok(['invalid_path', 'file_not_found'].includes(caught.code), caught.code);
+      continue;
+    }
+    assert.ok(!result.entries.some(e => e.path.includes('secret.md')), JSON.stringify(result.entries));
+    if (!result.exists) continue;
+    const files = result.entries.filter(e => e.type === 'file');
+    assert.equal(files.length, 81);
+    assert.ok(files.every(e => e.size === 6), 'every file entry must come from the original HOME inode, never the swapped symlink target');
+    if (inFlight) inFlightSucceeded++;
   }
+  assert.ok(inFlightSucceeded >= 5, `expected >= 5 in-flight swaps during traversal, got ${inFlightSucceeded}`);
   rmSync(raceDir, { recursive: true, force: true });
   assert.equal(created(f), 0, 'all HOME memory list/read/write calls start no container');
   // Exact truncation boundary: 200 entries -> truncated: false; 201 entries -> 200 entries + truncated: true.
