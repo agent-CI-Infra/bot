@@ -145,6 +145,37 @@ test('an unparseable number is refused with a field error instead of clearing th
   } finally { await f.close(); }
 });
 
+// As text the field no longer has min/max/step for the browser to enforce, so the bounds and the step are checked by
+// the form itself and named beside the field (#865).
+test('a value outside the bounds or off the step is refused with that reason and never saved', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), error = configField(page, 'CPU（核）').locator('.machine-config-error');
+    await cpu.fill('99');
+    await expect(cpu).toHaveValue('99');
+    await expect(error).toBeVisible(); await expect(error).toHaveText('需不大于 16');
+    await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    await consoleSave(page).click();
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    await cpu.fill('1.1');
+    await expect(error).toHaveText('取值步长是 0.25');
+    await consoleSave(page).click();
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    // A value the field accepts ends the refusal and saves.
+    await cpu.fill('2');
+    await expect(error).toBeHidden();
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(configures).toBe(1);
+    expect(f.manager.projects.own('101').cpus).toBe(2);
+  } finally { await f.close(); }
+});
+
 test('an explicitly cleared resource field says it follows the global default and saves null', async ({ page }) => {
   const f = await fixture();
   try {
@@ -209,8 +240,8 @@ test('a resource the default branch .bot/computer.yaml used to set is cleared li
   } finally { await f.close(); }
 });
 
-// A refusal must also survive the paths that look like an explicit clear: a paste fires `beforeinput` with the refused
-// text and then `input` with an empty value, and Backspace in an already empty field fires only a delete (#903).
+// A refusal must also survive the paths that look like an explicit clear: a paste into a text field lands its text and
+// fires input with that text, and Backspace in an already empty field fires only a delete (#903).
 test('a pasted non-number is refused, sends no configure and keeps the saved spec', async ({ page, context }) => {
   const f = await fixture();
   try {
@@ -222,7 +253,8 @@ test('a pasted non-number is refused, sends no configure and keeps the saved spe
     await cpu.fill('');
     await page.evaluate(() => navigator.clipboard.writeText('abc'));
     await cpu.click(); await page.keyboard.press('Control+V');
-    await expect(cpu).toHaveValue('');
+    // The pasted text stays in the field and is refused, never read as an empty "follow the global default" field.
+    await expect(cpu).toHaveValue('abc');
     await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
     await expect(cpu).toHaveAttribute('aria-invalid', 'true');
     await expect(field.locator('.machine-config-follow')).toBeHidden();
@@ -240,7 +272,7 @@ test('a pasted non-number is refused, sends no configure and keeps the saved spe
   } finally { await f.close(); }
 });
 
-test('Backspace in a refused empty field keeps the refusal, sends no configure and keeps the saved spec', async ({ page }) => {
+test('Backspace edits the refused entry instead of passing for an explicit clear, and no configure goes out', async ({ page }) => {
   const f = await fixture();
   try {
     await login(page, f);
