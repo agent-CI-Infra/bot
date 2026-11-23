@@ -48,6 +48,7 @@ class FakeElement {
   close() { if (!this.open) return; this.open = false; for (const listener of this.listeners.close || []) listener({ type: 'close' }); }
   focus() { this.ownerFocus = true; }
   scrollIntoView() {}
+  contains(node) { for (let parent = node; parent; parent = parent.parentElement) if (parent === this) return true; return false; }
   remove() { if (this.parentElement) { this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1); this.parentElement = null; } }
   querySelectorAll(selector) { return select(this, selector); }
   querySelector(selector) { return select(this, selector)[0] || null; }
@@ -94,7 +95,7 @@ export function loadConsole(files, respond) {
   const Option = function (text, value) { return Object.assign(new FakeElement('option'), { textContent: text, value, disabled: false }); };
   const context = vm.createContext({ document, Node: FakeElement, Option, fetch, location: { hash: '', pathname: '/' }, history: { pushState() {} }, addEventListener() {},
     matchMedia: media => ({ media, matches: false, addEventListener() {} }),
-    setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, console });
+    setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, AbortController, console });
   context.window = context;
   context.navigator = { language: 'zh-CN' };
   context.localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
