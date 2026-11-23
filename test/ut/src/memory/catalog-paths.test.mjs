@@ -2,15 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { knowledgePath } from '../../../../dist/memory/catalog.js';
 
-// #533: the sensitive-path check refused any path whose component was named `credentials`, so ordinary code and
-// documentation such as `src/auth/credentials.ts` or `docs/credentials.md` could not be referenced by a project
-// memory. The check is fail-closed again: every `credentials.*` file stays refused except a positive allowlist of
-// source and documentation extensions, so backups and renamed copies (`credentials.json.bak`,
-// `credentials.json.orig`) and credential files with other extensions (`.txt`, `.csv`, `.xml`, `.p12`, `.secret`)
-// do not slip through.
-test('source and documentation files named credentials are allowed', () => {
-  for (const path of ['src/auth/credentials.ts', 'docs/credentials.md', 'credentials.js', 'src/credentials.py', 'credentials.mjs', 'credentials.mdx', 'credentials.html', 'credentials.css', 'credentials.vue', 'credentials.svelte', 'credentials.rs', 'credentials.go', 'credentials.java', 'credentials.rb', 'credentials.sh'])
+// #533: the sensitive-path check refused any path whose component was named `credentials`, so ordinary code such as
+// `src/auth/credentials.ts` could not be referenced by a project memory. #1195 opened a positive allowlist over the
+// suffix after `credentials.` and included the documentation and markup suffixes, which reopened the shape most
+// likely to hold a pasted key: `docs/credentials.md`. The allowlist is now source files only.
+test('source files named credentials are allowed', () => {
+  for (const path of ['src/auth/credentials.ts', 'credentials.js', 'src/credentials.py', 'credentials.mjs', 'credentials.tsx', 'credentials.jsx', 'credentials.cjs', 'credentials.rs', 'credentials.go', 'credentials.java', 'credentials.kt', 'credentials.rb', 'credentials.php', 'credentials.sh'])
     assert.doesNotThrow(() => knowledgePath(path), `${path} is not a credential file`);
+});
+
+test('documentation and markup names for credentials are refused', () => {
+  // The three shapes this slice was opened for, one explicit assertion each so a regression names the path.
+  for (const path of ['docs/credentials.md', 'credentials.md', 'credentials.css'])
+    assert.throws(() => knowledgePath(path), /memory_sensitive_path/, `${path} must be refused`);
+  // The rest of the documentation/markup suffixes #1195 let through, plus a directory shaped like one.
+  for (const path of ['credentials.mdx', 'credentials.html', 'credentials.scss', 'credentials.vue', 'credentials.svelte', 'credentials.md/x', 'docs/credentials.css/styles.css'])
+    assert.throws(() => knowledgePath(path), /memory_sensitive_path/, `${path} must be refused`);
 });
 
 test('credential files, their backups and renamed copies stay refused', () => {
