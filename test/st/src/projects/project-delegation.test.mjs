@@ -57,7 +57,7 @@ test('a project administrator delegates and revokes inside their project only, a
   // Never beyond A's projects, the organization or what only grant managers turn on.
   assert.equal((await byA('/api/identity/grants', 'POST', { principal_id: B, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] })).status, 403);
   assert.equal((await byA('/api/identity/grants', 'POST', { principal_id: B, tenant_id: tenant, capabilities: ['tasks.read'] })).value.error, 'organization_delegation_forbidden');
-  assert.equal((await byA('/api/identity/grants', 'POST', { principal_id: B, tenant_id: tenant, project_id: '101', capabilities: ['knowledge.review'] })).value.error, 'capability_forbidden');
+  assert.equal((await byA('/api/identity/grants', 'POST', { principal_id: B, tenant_id: tenant, project_id: '101', capabilities: ['knowledge.review'] })).value.error, 'invalid_capabilities');
   assert.equal((await byA('/api/identity/grants', 'POST', { github_login: 'nobody', tenant_id: tenant, project_id: '101', capabilities: ['tasks.read'] })).value.error, 'principal_not_found');
   assert.equal((await byA('/api/identity/grants', 'POST', { principal_id: A, tenant_id: tenant, project_id: '101', capabilities: ['tasks.read'] })).value.error, 'self_delegation_forbidden');
   // The project's members page tells A what A may give and take back here.

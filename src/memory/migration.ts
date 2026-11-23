@@ -15,6 +15,7 @@ export interface LegacyMigrationResult {
 const MIGRATION_DIR = 'migrated-memories';
 const MIGRATION_ACTOR = 'migration:legacy-project-memory';
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+const MAX_STEM_UTF8_BYTES = 200;
 
 export function memoryMigrationStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS project_memory_migrations(
@@ -27,13 +28,26 @@ export function memoryMigrationStorage(store: Store): void {
   CREATE INDEX IF NOT EXISTS project_memory_migrations_repo ON project_memory_migrations(repository_id);`);
 }
 
+function truncateUtf8Bytes(input: string, maxBytes: number): string {
+  if (Buffer.byteLength(input, 'utf8') <= maxBytes) return input;
+  let out = '';
+  let bytes = 0;
+  for (const ch of input) {
+    const chBytes = Buffer.byteLength(ch, 'utf8');
+    if (bytes + chBytes > maxBytes) break;
+    out += ch;
+    bytes += chBytes;
+  }
+  return out.trimEnd();
+}
+
 function sanitizeStem(raw: unknown): string {
-  const cleaned = String(raw ?? '')
+  const normalized = String(raw ?? '')
     .replace(/[/\\]/g, '-')
     .replace(CONTROL_CHARS, '-')
     .replace(/^\.+/, '')
-    .trim()
-    .slice(0, 120);
+    .trim();
+  const cleaned = truncateUtf8Bytes(normalized, MAX_STEM_UTF8_BYTES);
   if (!cleaned || ['.', '..', '.git'].includes(cleaned.toLowerCase()) || /^\.(?:write|expired)-/.test(cleaned)) {
     return 'memory';
   }
@@ -63,6 +77,11 @@ function formatMigratedMarkdown(row: Row, data: Record<string, any>, redact: (te
 function isConflictError(error: unknown): boolean {
   const code = String((error as any)?.code ?? (error as any)?.message ?? '');
   return (error as any)?.status === 409 && code === 'note_path_conflict';
+}
+
+function isPermanentClientError(error: unknown): boolean {
+  const status = Number((error as any)?.status);
+  return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 409, 429].includes(status);
 }
 
 /**
@@ -183,13 +202,20 @@ export async function migrateLegacyProjectMemories(
       }
 
       if (!migratedPath) {
-        result.failed++;
+        record(memoryId, repoId, null, 'skipped_path_conflict');
+        result.skipped++;
         continue;
       }
       record(memoryId, repoId, migratedPath, 'migrated');
       store.audit('system', 'memory.migrated', migratedPath, repoId);
       result.migrated++;
-    } catch {
+    } catch (error) {
+      if (isPermanentClientError(error)) {
+        // Non-retryable 4xx contract error: record in ledger so one bad entry cannot trigger infinite retries.
+        record(memoryId, repoId, null, 'skipped_invalid');
+        result.skipped++;
+        continue;
+      }
       // Transient manager error: do not mark migrated so a later run retries cleanly.
       result.failed++;
     }

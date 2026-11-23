@@ -221,6 +221,8 @@ test('the gateway fences other tasks and guessed ids while sharing same-task rol
   // An experience candidate needs evidence the role can see, writes to physical ../notes/, and is not written twice for one request id.
   assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: [otherTask] } })).error, 'experience_evidence_invalid');
   assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: ['project_memories:hist-foreign:1'] } })).error, 'experience_evidence_invalid');
+  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: ['notes:f:' + '0'.repeat(32) + ':1'] } })).error, 'experience_evidence_invalid');
+  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: [`notes:${shared.id}:99`] } })).error, 'experience_evidence_invalid');
   const first = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding, `notes:${shared.id}:1`] } });
   const again = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding, `notes:${shared.id}:1`] } });
   assert.ok(first.receipt?.id && first.receipt.path === 'lesson.md');
