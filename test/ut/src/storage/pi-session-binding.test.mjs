@@ -23,10 +23,14 @@ async function run(t, { binding = {}, events = [], final }) {
   const task = { ...store.get("SELECT * FROM tasks WHERE id='t1'"), trace_run_id: 'run-1' };
   const saved = [], logs = [], config = [];
   let polled = false;
-  const workspace = { task, log: event => logs.push(event), async deliver() { return {}; }, async call(_key, request) {
+  const poll = () => { if (polled) return final; polled = true; return { state: 'running', events, offset: events.length }; };
+  const workspace = { task, log: event => logs.push(event), async deliver(request) {
+    if (request.type === 'workspace_agent_poll') return poll();
+    return {};
+  }, async call(_key, request) {
     if (request.type === 'workspace_agent_config') { config.push(Buffer.from(request.base64, 'base64')); return { written: true }; }
     if (request.type === 'workspace_agent_start') return { started: true };
-    if (request.type === 'workspace_agent_poll') { if (polled) return final; polled = true; return { state: 'running', events, offset: events.length }; }
+    if (request.type === 'workspace_agent_poll') return poll();
     return {};
   } };
   const spec = { store, task, redactor: new Redactor(), guard: async () => {}, runAccess: runAccess(), system: 's', prompt: 'p', tools: [],
