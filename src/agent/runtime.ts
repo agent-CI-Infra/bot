@@ -7,7 +7,6 @@ import { beginRun, endRun, traceEvent, traceSnapshot, withRunTraceScope } from '
 import { insertTaskLog } from '../storage/payloads.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
-import { randomId } from '../core/security.js';
 import { requestModel, modelOutputTokens, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
 import type { PiRoleEnvironment } from './pi.js';
@@ -156,11 +155,10 @@ export interface AgentSpec<T> {
   finalizationTools?: string[];
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */
   adapter?: (services: AgentServices) => Promise<T>;
-  /** Sub-agents for the default tool loop: start_agent runs a new session whose tools are a subset of these tools. */
-  agents?: { system: string; tools: (requested: unknown) => any[] };
 }
-// The start_agent tool. A sub-agent has its own session: it sees its instructions and task, never the caller's messages,
-// and gets at most the caller's permissions; it cannot publish, finish the task or start more agents.
+// The start_agent tool, which a role's runner answers (runner/subagent.mjs). A sub-agent has its own session: it sees its
+// instructions and task, never the caller's messages, and gets at most the caller's permissions; it cannot publish,
+// finish the task or start more agents. The control-plane tool loop has no sub-agents (#1256).
 export const startAgentTool = { type: 'function', function: { name: 'start_agent',
   description: 'Start an independent agent with its own session for a focused part of this task, for example an independent review of a change. It does not see this conversation: put everything it needs in instructions and task. It gets at most your permissions (narrow them with permissions) and cannot publish, finish the task or start other agents. Returns its final answer.',
   parameters: { type: 'object', additionalProperties: false, required: ['instructions', 'task'], properties: {
@@ -296,7 +294,7 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
         // The model cannot call an unadvertised tool, even if an executor happens to support it.
         if(!names.has(call.function.name))spec.onDenied?.(call.function.name,'not_offered');else spec.screen?.(call.function.name,args);
         const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
-          : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
+          : call.function.name === 'start_agent' ? { error: 'tool_not_allowed' }
           : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };
         const preview=boundedResult(spec.redactor.clean(result),Math.floor(batchBytes/message.tool_calls.length),value=>spec.resultSession?.preserve(value,call.function.name));
         if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(preview))},spec.task.trace_run_id,'tool',[toolEvent]);
@@ -324,21 +322,4 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
     }
   }
   return stop('agent_turn_limit', 'failed', `Agent 达到 ${maxTurns} 轮上限，请检查已取得的证据后继续。`);
-}
-// A sub-agent runs the same loop with fresh messages. Its tools come from the trusted narrowing function and are kept
-// only where the caller has them too, so neither the prompt nor the model can widen them.
-async function subagent<T>(spec: AgentSpec<T>, services: AgentServices, args: any) {
-  if (!args || typeof args.instructions !== 'string' || typeof args.task !== 'string' || !args.task.trim()) return { error: 'start_agent_invalid' };
-  const parent = new Set((spec.tools ?? []).map(tool => tool.function?.name));
-  const tools = spec.agents!.tools(args.permissions).filter(tool => tool.function?.name !== 'start_agent' && tool.function?.name !== spec.finish?.name && parent.has(tool.function?.name));
-  const id = 'agent-' + randomId().slice(0, 12);
-  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined, onTurnEnd: undefined, repairInvalid: undefined, finalizationTools: undefined };
-  try {
-    const result = await runTools(child, { ...services, request: (body, requestId, onToken) => services.request(body, `${id}:${requestId}`, onToken) });
-    return { agent_id: id, tools: tools.map(tool => tool.function.name), result };
-  } catch (error) {
-    // The sub-agent's own failure is its caller's evidence; a revoked task or a model outage still stops everything.
-    if (error instanceof TaskError && ['agent_turn_limit', 'agent_output_invalid', 'agent_tool_calls_invalid'].includes(error.code)) return { agent_id: id, error: error.code };
-    throw error;
-  }
 }

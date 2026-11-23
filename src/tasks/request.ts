@@ -4,9 +4,9 @@ import { applyIntegration } from './integration.js';
 import { blobValue, storedInput } from '../storage/payloads.js';
 import { assessRetryReport } from '../roles/retries.js';
 import { taskTraceAccess } from '../memory/access.js';
-import { executionModel, executionRuleFiles, taskConfiguration, trustedTaskRuleFiles } from './configuration.js';
+import { executionRuleFiles, taskConfiguration, trustedTaskRuleFiles } from './configuration.js';
 import { assertRequestPullRequest, genericTask, pullRequestRefusal, softwareRequest, requestPolicyHash, publishRequestPullRequest } from './pull-request.js';
-import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRequestQaRequired, toolGrant } from './grants.js';
+import { effectiveWrites, grantedWrites, projectGrantLimit, pullRequestQaRequired, toolGrant } from './grants.js';
 import { checkPullRequestLabels, pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 import { pullRequestSummaryRules } from '../github/text.js';
 import { assertMediaOutsideCode, collectPullRequestMedia, planPullRequestMedia, pullRequestMediaSchema, type CandidateMedia } from '../github/pull-request-media.js';
@@ -17,7 +17,7 @@ import { extractRepositorySkillFiles, pinRepositorySkillEntries, type PinnedRepo
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
 import { controlled, runRole, roleExecutionModel } from '../roles/run.js';
-import { assertManagedExecution, sourcePolicies, taskReadScopes, taskRolePolicies } from './management.js';
+import { assertManagedExecution, sourcePolicies, taskReadScopes } from './management.js';
 import { ReadTokens } from '../agent/read-token.js';
 import { RepositoryExplorer, workspaceRepositoryTools } from '../agent/exploration.js';
 import {
@@ -31,7 +31,7 @@ import { grantedTaskWrite, postReviewTool, rerunFailedRunTool, taskGithubWrite, 
 import { scheduledIssueWrite } from './schedule-write.js';
 import { githubWriteTool, grantedGithubWriteTool, withMergePolicy } from '../github/write.js';
 import { autoMergePolicy, mergeBoundary } from '../github/merge-policy.js';
-import { permitsTool, githubWriteAllowed } from '../roles/permissions.js';
+import { githubWriteAllowed } from '../roles/permissions.js';
 import { ProjectMemory, memoryTools, memoryTool } from '../memory/project.js';
 import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
 import { relatedDeliveryIndex, relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
@@ -43,7 +43,7 @@ import type { GitCache } from '../agent/git-cache.js';
 import { GitHub, repositoryTree } from '../github/client.js';
 import { Workspace } from '../agent/workspace.js';
 import { Redactor, stop, sha, validWorkspaceToolPath, TaskError, blobSha } from '../agent/common.js';
-import { runAgent, type AgentSpec } from '../agent/runtime.js';
+import { type AgentSpec } from '../agent/runtime.js';
 import { taskTools, taskRecordInstructions } from './record-tools.js';
 import { TaskRecords, type Verdict } from './service.js';
 import { evaluateDelivery, shouldRunQa, skipQa } from './acceptance.js';
@@ -294,31 +294,19 @@ export async function runRequest(
   const workspace = new Workspace(store, manager, task, redactor, guard, log);
   const spaces = roleWorkspaces(workspace);
   const origin = assertManagedExecution(store, task);
-  const ownRole = origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null);
+  const generic = genericTask(task);
+  const entry = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request')) ? 'development' : 'request';
+  // A Task frozen before the Manager switches were retired (b45c5224) may still have its entry off. It keeps running
+  // without the Manager, as the single dev role on that role's configured backend, which is where flow.ts sends an
+  // uncontrolled entry too (#1256); no entry runs a bare tool loop.
+  const ownRole = origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null)
+    || (controlled(store, task, entry) ? null : 'dev');
 
   // #532: this entry's own limits follow the same budget configuration as every other entry — the executing role's
   // `budget_policy_ref` when it is `bounded` or `metered` — and keep today's entry defaults only when nothing is
   // configured. The command timeout keeps its role → project → default order inside resolveCommandTimeout.
   const budgetRole = () => ownRole ?? 'dev';
-  const entryBudget = () => {
-    try {
-      const snapshot = taskConfiguration(store, task)?.roles;
-      const saved = snapshot ?? (() => {
-        const value = store.get('SELECT value FROM settings WHERE key=?', 'roles:' + task.repository_id)?.value;
-        return value ? JSON.parse(String(value)) : null;
-      })();
-      const definition = Array.isArray(saved?.roles) ? saved.roles.find((role: any) => role?.role_id === budgetRole()) : null;
-      const budget = definition?.budget_policy_ref;
-      return budget && (budget.id === 'bounded' || budget.id === 'metered') ? budget : null;
-    } catch { return null; }
-  };
-  const entryMaxTurns = () => {
-    const configured = entryBudget()?.max_turns;
-    return Number.isSafeInteger(configured) && configured >= 1 && configured <= 256 ? Number(configured) : 64;
-  };
   const commandBudget = () => resolveCommandTimeout(store, task, budgetRole(), 180);
-  const generic = genericTask(task);
-  const entry = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request')) ? 'development' : 'request';
   const software = () => softwareRequest(task);
   const reviewDelivery = () => generic && input.delivery === 'review';
   if (software() && (!generic || ['acceptance', 'publish'].includes(String(task.phase)))) assertRequestPullRequest(store, task);
@@ -331,15 +319,12 @@ export async function runRequest(
         await spaces.prepare(ownRole);
         return (await runRole(spec, ownRole, undefined, undefined, { prepare: spaces.worker })).result;
       })
-    : controlled(store, task, entry)
-      ? async (spec, validateOwnNomination) => runTeam(spec, { ...spaces, entry, workspace, validateOwnNomination })
-      : runAgent;
+    : async (spec, validateOwnNomination) => runTeam(spec, { ...spaces, entry, workspace, validateOwnNomination });
 
-  const roleRuns = executeAgent !== runAgent;
-  // #532 review (B1/B2): only a direct entry run takes this entry's own configured limits. A role run (\`runTeam\`, or the
-  // single executing role of \`runRole\`) resolves its own role budget, so the shared AgentSpec keeps the neutral entry
-  // defaults (64 turns, 180-second command default) and the dev budget never travels into other roles.
-  const entryCommandDefault = roleRuns ? 180 : commandBudget().defaultSeconds;
+  // #532 review (B1/B2): a role run (\`runTeam\`, or the single executing role of \`runRole\`) resolves its own role
+  // budget, so the shared AgentSpec keeps the neutral entry defaults (64 turns, 180-second command default) and the dev
+  // budget never travels into other roles.
+  const entryCommandDefault = 180;
   const githubWrite = taskGithubWrite(store, task, redactor, guard, githubUrl, () => spaces.current);
   const grantedWrite = grantedTaskWrite(store, task, redactor, guard, githubUrl, () => spaces.current);
   const readScopes = () => taskReadScopes(store, task).filter(scope => scope !== 'metadata');
@@ -925,10 +910,7 @@ export async function runRequest(
         };
         const writable = covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
         const execution = randomId();
-        const model = ownRole ? roleExecutionModel(store, task, ownRole) : controlled(store, task, entry) ? undefined : executionModel(store, task, task.kind);
-        if (generic && !roleRuns) {
-          records.history(task.id, 'delivery_tools', { attempt: task.attempt, tools: ['submit_report', ...grantCatalog.filter(g => effective().includes(g.id)).map(g => g.tool)] });
-        }
+        const model = ownRole ? roleExecutionModel(store, task, ownRole) : undefined;
         const limit = projectGrantLimit(store, task.repository_id);
         const deliveryTools = generic
           ? [
@@ -940,8 +922,7 @@ export async function runRequest(
               ...(targetSpec?.type === 'issue' && limit.includes('pull_request') ? [milestoneTool] : []),
             ]
           : [submit];
-        const legacyGithubWrite = !generic && (roleRuns || taskRolePolicies(store, task).every(policy => permitsTool(policy, 'github_write')));
-        const offered = (tools: any[]) => (roleRuns || !generic ? tools : tools.filter(t => offeredNow(t.function.name) !== false));
+        const legacyGithubWrite = !generic;
 
         const subscriptionCtx = taskEventSubscriptionContext(store, String(task.id));
         let verifiedConflictMerge = null as { baseSha: string; gitMerged: boolean; rebased: boolean } | null;
@@ -1003,7 +984,7 @@ export async function runRequest(
             project_memory: new ProjectMemory(store).context(task),
             context_files: Object.keys(contextFiles).map(p => '../context/' + p),
           }),
-          tools: offered([
+          tools: ([
             read,
             command,
             ...deliveryTools,
@@ -1017,7 +998,7 @@ export async function runRequest(
             ...memoryTools,
           ]),
           requestPrefix: `execution:${execution}:`,
-          maxTurns: roleRuns ? 64 : entryMaxTurns(),
+          maxTurns: 64,
           maxOutputChars: 60000,
           ...(generic ? { grants: offeredNow } : {}),
           finish: {
@@ -1111,7 +1092,7 @@ export async function runRequest(
           },
           repairInvalid: error =>
             error instanceof TaskError && ['pull_request_labels_refused', 'pull_request_media_invalid', 'delivery_refused', 'review_inline_out_of_diff', 'conflict_not_integrated'].includes(error.code) ? error.detail : undefined,
-          finalizationTools: offered(deliveryTools.filter(t => ['submit_report', 'open_pull_request', 'post_review', 'submit_delivery'].includes(t.function.name)))
+          finalizationTools: (deliveryTools.filter(t => ['submit_report', 'open_pull_request', 'post_review', 'submit_delivery'].includes(t.function.name)))
             .map(t => t.function.name)
             .concat(writable ? ['write_file', 'record_progress'] : []),
           execute: async (name, args) => {
