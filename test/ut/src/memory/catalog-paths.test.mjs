@@ -28,3 +28,20 @@ test('credential files, their backups and renamed copies stay refused', () => {
   ])
     assert.throws(() => knowledgePath(path), /memory_sensitive_path/, `${path} must stay refused`);
 });
+
+// #533: a key is sensitive whatever container holds it. The previous check only looked for `name.pem`/`name.key`
+// ending the component, so a PKCS#12 or JKS store, a GPG/ASCII-armored key and a backup copy of a key
+// (`cert.pem.bak`, `vault.keystore.old`) were all referenced as ordinary repository files.
+test('binary key containers and backups of key material stay refused', () => {
+  for (const path of ['tls/server.p12', 'certs/app.jks', 'keys/mail.gpg', 'tls/server.p12.bak',
+    'vault.keystore.old', 'cert.pem.bak', 'keys/tls.key.bak', 'vault.kdbx'])
+    assert.throws(() => knowledgePath(path), /memory_sensitive_path/, `${path} must stay refused`);
+  // Regression: the containers the old check already refused keep being refused.
+  for (const path of ['certs/server.pem', 'keys/private.pem', 'id_ed25519'])
+    assert.throws(() => knowledgePath(path), /memory_sensitive_path/, `${path} must stay refused`);
+});
+
+test('a longer name that merely starts like a key file is not refused', () => {
+  for (const path of ['server.pemx', 'notes.md', 'tls/server.pemx', 'docs/keystore-notes.md'])
+    assert.doesNotThrow(() => knowledgePath(path), `${path} is not a key file`);
+});
