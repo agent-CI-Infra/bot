@@ -60,6 +60,7 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await page.getByLabel('助手模型', { exact: true }).selectOption(sharedModel.id);
     await page.getByText('高级设置：Agent 后端', { exact: true }).click();
     await page.getByLabel('Agent 后端', { exact: true }).selectOption('pi');
+    await page.screenshot({ path: `.tmp/channel-assistant-roles/advanced-copy-${width}.png`, fullPage: true });
     await save.click();
     await expect(page.getByRole('article', { name: '群聊助手绑定' })).toHaveCount(2);
     await expect(page.getByRole('article', { name: '群聊助手绑定' }).last()).toContainText('Shared team model');

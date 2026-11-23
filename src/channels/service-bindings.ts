@@ -517,7 +517,8 @@ export class ChannelServiceBindings {
     if (chat.chat_type !== 'group') fail(400, 'channel_service_binding_group_required');
     const participation = input.participation ?? previous?.participation ?? 'mentions';
     if (!participations.includes(String(participation))) fail(400, 'channel_participation_invalid', 'participation');
-    const prompt = input.prompt !== undefined ? optionalText(input.prompt, 32000, 'prompt') : String(previous?.prompt ?? '');
+    // Accommodate migrated legacy responsibility (<=2000) + "\n\n" + prompt (<=32000) = 34002 chars without making bindings unsavable.
+    const prompt = input.prompt !== undefined ? optionalText(input.prompt, 35000, 'prompt') : String(previous?.prompt ?? '');
     const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'native');
     if (!(harnesses as readonly string[]).includes(harness)) fail(400, 'unknown_role_harness', 'harness');
     const permissions = this.levelInput(input, previous);
@@ -553,9 +554,15 @@ export class ChannelServiceBindings {
       // The revision check above makes `previous` the binding as it is now, so an advanced edit never builds on a stale copy.
       const items = permissions;
       for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time, items);
-      if (locked) this.store.run(`UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,model_id=?,prompt=?,harness=?,enabled=1,revision=?,updated_at=? WHERE id=?`,
-        groupAssistant, scope.kind, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, binding);
-      else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,model_id,prompt,harness,enabled,revision,created_at,updated_at)
+      if (locked) {
+        this.store.run(`UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,model_id=?,prompt=?,harness=?,enabled=1,revision=?,updated_at=? WHERE id=?`,
+          groupAssistant, scope.kind, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, binding);
+        // Preserve a pre-#1249 binding's persistent assistant HOME when migrating its role slot to group-assistant;
+        // AssistantHomes.prepare() still seals the HOME if repositories were narrowed.
+        if (locked.service_role_id !== groupAssistant && this.store.hasTable('assistant_homes')) {
+          this.store.run('UPDATE assistant_homes SET service_role_id=? WHERE binding_id=? AND service_role_id=?', groupAssistant, binding, locked.service_role_id);
+        }
+      } else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,model_id,prompt,harness,enabled,revision,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, groupAssistant, scope.kind, principal, actor.principal_id, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, time);
       invalidateIfLost(this.store, principal, before, 'channel_service_binding_configured');
       // Summaries and replies derived under the previous scope must not return into the new one.

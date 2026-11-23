@@ -266,7 +266,9 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     : m.all_projects || (Array.isArray(m.authorized_projects) && m.authorized_projects.includes(projectId));
   const modelGapsForScope = m => {
     if (organizationKind.checked && m.project_id !== null) return ['整个组织只能使用部署共享模型'];
-    return selectedScopeProjects().filter(p => !modelServesProject(m, p.id)).map(p => p.full_name);
+    const scopeProjects = selectedScopeProjects();
+    if (organizationKind.checked && !m.all_projects && !scopeProjects.length) return ['当前组织尚未启用项目，仅开放对全部项目可用的共享模型'];
+    return scopeProjects.filter(p => !modelServesProject(m, p.id)).map(p => p.full_name);
   };
   let preferredModelId = '';
   const updateModelFeedback = () => {
@@ -282,7 +284,9 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     if (gaps.length) {
       modelWarning.textContent = organizationKind.checked && selected.project_id !== null
         ? '所选模型是单个项目的专属模型，绑定整个组织时只能选择部署共享模型。请更换模型或改按单个仓库勾选。'
-        : `所选模型尚未覆盖当前范围内的：${gaps.join('、')}。请更换对全部范围都可用的模型，或调整所选仓库。`;
+        : organizationKind.checked && !selected.all_projects && !selectedScopeProjects().length
+          ? '所选共享模型仅授权了部分项目，当前组织尚未启用项目，不能绑定。请改选对全部项目可用的共享模型。'
+          : `所选模型尚未覆盖当前范围内的：${gaps.join('、')}。请更换对全部范围都可用的模型，或调整所选仓库。`;
       modelWarning.hidden = false;
     } else if (!selected.key_configured) {
       modelWarning.textContent = '所选模型的 API Key 已撤销，保存后本群无法回答，请更换模型或先补回 Key。';
@@ -321,7 +325,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   modelSelect.addEventListener('change', () => { preferredModelId = modelSelect.value; updateModelFeedback(); });
 
   const promptInput = textarea('binding_prompt', '', {
-    maxLength: 32000,
+    maxLength: 35000,
     rows: 4,
     placeholder: '选填：补充本群助手的职责、回答风格或协作要求（附加在内置安全提示之后，不能扩大工具或权限）',
   });

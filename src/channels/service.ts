@@ -672,7 +672,7 @@ export class ChannelService {
     if (['uninstalled', 'audience_changed', 'message_recalled', 'bot_removed', 'chat_archived'].includes(e.kind)) { this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
     this.source(e);
     if (e.kind === 'bot_added') {
-      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。群聊助手须由已绑定飞书、对相关仓库有配置权限的维护人在控制台「个人设置 → 飞书绑定」点击「创建群绑定」另行启用，并选择服务角色和项目范围。'), row.id + ':notice', row.id);
+      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。群聊助手须由已绑定飞书、对相关仓库有配置权限的维护人在控制台「个人设置 → 飞书绑定」点击「创建群绑定」另行启用，并选择仓库范围、权限与助手模型。'), row.id + ':notice', row.id);
       this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return;
     }
     // Result cards no longer carry refresh actions; a click on an older card is answered as stale.
