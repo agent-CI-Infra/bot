@@ -21,14 +21,18 @@ export function volume(path = workspaceRoot) {
   } catch { return null; }
 }
 
+const volumeRank = s => (s.full ? 2 : s.low ? 1 : 0);
+const worseVolume = (current, candidate) => !current
+  || volumeRank(candidate) > volumeRank(current)
+  || (volumeRank(candidate) === volumeRank(current) && candidate.free_bytes < current.free_bytes);
+
 /** Checks multiple mounts and returns the highest-severity state (full > low > healthy; ties broken by lowest free_bytes). */
 export function watchedVolume(paths = [workspaceRoot, '/tmp'], read = volume) {
-  const rank = s => (s.full ? 2 : s.low ? 1 : 0);
   let worst = null;
   for (const p of paths) {
     const s = read(p);
     if (!s) continue;
-    if (!worst || rank(s) > rank(worst) || (rank(s) === rank(worst) && s.free_bytes < worst.free_bytes)) worst = s;
+    if (worseVolume(worst, s)) worst = s;
   }
   return worst;
 }
@@ -73,7 +77,7 @@ export function failedFull(input, error, read = volume) {
  */
 export function watchVolume(read = volume, everyMs = 1000) {
   let lowest = read();
-  const sample = () => { const now = read(); if (now && (!lowest || now.free_bytes < lowest.free_bytes)) lowest = now; return now; };
+  const sample = () => { const now = read(); if (now && worseVolume(lowest, now)) lowest = now; return now; };
   const timer = setInterval(sample, everyMs); timer.unref?.();
   return {
     stop() { clearInterval(timer); },
