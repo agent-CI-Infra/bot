@@ -717,12 +717,13 @@ test('Codex roles keep separate threads; QA always starts a new one; legacy isol
   assert.equal(savedIso.configuration.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'task-workspace');
   assert.equal(savedIso.configuration.roles.find(r => r.role_id === 'reviewer').environment_profile_ref.id, 'candidate-checkout');
 
-  roleApi(f.s, admin, 'PUT', url, {
+  const savedLocal = roleApi(f.s, admin, 'PUT', url, {
     expected_revision: savedIso.configuration.revision,
     enabled: true,
     roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', model_source: 'subscription' } }],
   });
-  await assert.rejects(roleRuns.prepare(f.spec, 'reviewer'), { code: 'subscription_mode_not_implemented' });
+  assert.equal(savedLocal.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.model_source, 'local_config');
+  await assert.rejects(runRole(f.spec, 'reviewer'), { code: 'codex_local_config_missing' });
 });
 
 test('LineRpc reassembles split lines and characters, correlates answers and fails pending requests on a broken stream', async () => {
@@ -890,4 +891,58 @@ test('#1171 Codex disables checkout AGENTS.md on untrusted PR checkouts, injects
     runRole({ ...leaky.spec, finish: { name: 'finish', validate: v => v } }, 'reviewer', undefined, 'codex'),
     { code: 'harness_permission_mismatch' },
   );
+});
+
+test('#1260 Codex local_config mode injects zero platform model config, stages /workspace/home allowlist, cleans up copies, and fails closed when missing', async t => {
+  const f = fixture(t);
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] };
+  const url = new URL('http://local/api/repositories/r/roles');
+  roleApi(f.s, admin, 'PUT', url, {
+    expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision,
+    enabled: true,
+    roles: [{ role_id: 'dev', harness_ref: { id: 'codex', model_source: 'local_config' } }],
+  });
+  // 1. Without /workspace/home/.codex config files -> fails closed with codex_local_config_missing!
+  await assert.rejects(runRole(f.spec, 'dev'), e => e.code === 'codex_local_config_missing' && e.state === 'waiting_configuration');
+
+  // 2. Write allowlisted files via runner/cli-config.mjs to <stateDirectory>/home/.codex.
+  const { inspectCliConfigs, writeCliConfig, deleteCliConfig } = await import('../../../../runner/cli-config.mjs');
+  const workspaceRoot = join(f.root, 'sessions');
+  const workspaceHome = join(workspaceRoot, 'home');
+  const writeCfg = await writeCliConfig(workspaceRoot, 'codex', 'config.toml', 'model = "gpt-local-1260"\n');
+  const writeAuth = await writeCliConfig(workspaceRoot, 'codex', 'auth.json', '{"OPENAI_API_KEY":"local-codex-secret-1260"}');
+  assert.equal(writeCfg.exists, true);
+  assert.equal(writeAuth.exists, true);
+  const inspected = await inspectCliConfigs(workspaceRoot);
+  assert.equal(inspected.codex.configured, true);
+  assert.equal(inspected.codex.files['config.toml'].exists, true);
+  assert.equal(inspected.codex.files['auth.json'].exists, true);
+  assert.equal(JSON.stringify(inspected).includes('local-codex-secret-1260'), false, 'inspect never echoes content');
+  await assert.rejects(() => writeCliConfig(workspaceRoot, 'codex', '../evil.txt', 'x'), /invalid_cli_config_file/);
+
+  const out = await runRole(f.spec, 'dev');
+  assert.equal(out.result.summary, 'actual fixture result');
+
+  const launch = JSON.parse(readFileSync(join(f.home, 'launch.json'), 'utf8'));
+  for (const forbidden of ['CODEX_RELAY_URL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'BOT_NATIVE_MODEL_KEY']) {
+    assert.equal(launch.env_names.includes(forbidden), false, `must not inject ${forbidden}`);
+  }
+  assert.equal(launch.args.some(a => String(a).includes('model_providers.bot_direct')), false, 'must not inject bot_direct config flag');
+  assert.equal(launch.staged_files.config_toml.exists, true);
+  assert.equal(launch.staged_files.config_toml.mode, 0o600);
+  assert.match(launch.staged_files.config_toml.content, /gpt-local-1260/);
+  assert.equal(launch.staged_files.auth_json.exists, true);
+  assert.equal(launch.staged_files.auth_json.mode, 0o600);
+
+  // Staged copies are removed after shutdown while threads stay intact, and /workspace/home source remains.
+  assert.equal(existsSync(join(f.home, 'config.toml')), false, 'staged config.toml cleaned up on exit');
+  assert.equal(existsSync(join(f.home, 'auth.json')), false, 'staged auth.json cleaned up on exit');
+  assert.equal(existsSync(join(f.home, 'threads')), true, 'codex threads preserved');
+  assert.equal(existsSync(join(workspaceHome, '.codex', 'config.toml')), true, 'source config.toml preserved');
+  assert.equal(JSON.stringify(f.events()).includes('local-codex-secret-1260'), false);
+
+  // Deleting both files restores unconfigured state.
+  await deleteCliConfig(workspaceRoot, 'codex', 'config.toml');
+  await deleteCliConfig(workspaceRoot, 'codex', 'auth.json');
+  assert.equal((await inspectCliConfigs(workspaceRoot)).codex.configured, false);
 });

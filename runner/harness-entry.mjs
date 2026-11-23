@@ -10,11 +10,12 @@ import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { maskedStream } from './command-output.mjs';
 import { environment as baseEnv, workspaceTag } from './command.mjs';
 import { startModelRelay } from './model-relay.mjs';
-import { local, runnerRoot, tasksDirectory } from './paths.mjs';
+import { local, runnerRoot, tasksDirectory, workspaceRoot } from './paths.mjs';
 import { bashProfile, loginProfile } from './login-profile.mjs';
 import { ACP_LEASE_MS, acpLeaseFile, acpRunHome, reapAcpDescendants } from './acp-lease.mjs';
 import { releaseWorkSwarmPorts, workSwarmToolNames } from './workswarm.mjs';
 import { icodeProductId, requiresAcpRunHome, workswarmProductId } from './acp-products.mjs';
+import { cleanupStagedCliConfig, stageLocalCliConfig } from './cli-config.mjs';
 import { createTokenExchange } from './token-exchange.mjs';
 
 const ID48_RE = /^[a-f0-9]{48}$/;
@@ -181,10 +182,14 @@ let relay = null;
 let credHelper = null;
 let cliChild = null;
 let pollTimer = null;
+let stagedLocalConfigs = [];
 
 const shutdown = async (finalPatch = {}) => {
   runAbort.abort();
   if (pollTimer) clearInterval(pollTimer);
+  await cleanupStagedCliConfig(stagedLocalConfigs);
+  stagedLocalConfigs = [];
+  await unlink(`${agentDir}/staged-cli-config.json`).catch(() => {});
   await Promise.allSettled([
     relay?.close?.(),
     credHelper?.close?.(),
@@ -247,7 +252,8 @@ try {
     await rename(tmpProfile, `${homeDir}/${name}`);
   }
 
-  const gateway = rawConfig.model_transport === 'gateway';
+  const localConfig = !acp && rawConfig.model_source === 'local_config';
+  const gateway = !localConfig && rawConfig.model_transport === 'gateway';
   if (acp && (!gateway || !instanceId)) throw new Error('acp_launch_invalid');
   if(gateway) relay = await startModelRelay({
     agentDir, signal: runAbort.signal,
@@ -255,7 +261,7 @@ try {
       allowedTools: new Set(await workSwarmToolNames(agentDir)),
     } : {}),
   });
-  const nativeModel = gateway ? undefined : rawConfig.native_model;
+  const nativeModel = localConfig || gateway ? undefined : rawConfig.native_model;
   if(nativeModel?.key)addSecret(nativeModel.key);
   credHelper = await startCredentialHelperServer({ agentDir, runToken, addSecret, signal: runAbort.signal });
 
@@ -303,11 +309,21 @@ try {
   let actualResume = false;
 
   if (harness === 'claude_code') {
-    // Explicit provider credentials take precedence over an unrelated native login.
+    // Explicit provider credentials take precedence over an unrelated native login; local_config never injects any model env.
     if(gateway||nativeModel){delete childEnv.ANTHROPIC_AUTH_TOKEN;delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;}
+    if(localConfig){
+      delete childEnv.ANTHROPIC_BASE_URL;
+      delete childEnv.ANTHROPIC_API_KEY;
+      delete childEnv.ANTHROPIC_AUTH_TOKEN;
+      delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+    }
     const claudeHome = local && rawConfig.claude_home_override?.startsWith('/')
       ? await ensureSafeDirectory(rawConfig.claude_home_override, dirname(rawConfig.claude_home_override))
       : await ensureSafeDirectory(`${homeDir}/.claude`, homeDir);
+    if (localConfig) {
+      stagedLocalConfigs = await stageLocalCliConfig(workspaceRoot, 'claude_code', claudeHome, addSecret);
+      await writeFile(`${agentDir}/staged-cli-config.json`, JSON.stringify(stagedLocalConfigs), { mode: 0o600 });
+    }
     await stageSessionSkills(claudeHome,rawConfig.resources);
     await ensureSafeDirectory(`${homeDir}/.config`, homeDir);
     await ensureSafeDirectory(`${homeDir}/.cache`, homeDir);
@@ -353,7 +369,7 @@ try {
       '--verbose',
       '--tools', 'default',
       '--disallowedTools', disallowed.join(','),
-      '--setting-sources', '',
+      '--setting-sources', localConfig ? 'user' : '',
       '--add-dir', repoDir,
       '--settings', JSON.stringify({ autoUpdatesChannel: 'stable', disableAllHooks:true }),
       '--mcp-config', JSON.stringify(mcpConfig),
@@ -361,7 +377,7 @@ try {
       '--disable-slash-commands',
       '--dangerously-skip-permissions',
       '--no-chrome',
-      '--model', String(rawConfig.model || 'claude-sonnet-4-5-20250929'),
+      ...(!localConfig ? ['--model', String(rawConfig.model || 'claude-sonnet-4-5-20250929')] : []),
       ...(rawConfig.max_turns?['--max-turns',String(rawConfig.max_turns)]:[]),
       '--system-prompt', String(rawConfig.system_prompt || ''),
       ...(actualResume ? ['--resume', sessionId] : ['--session-id', sessionId]),
@@ -392,6 +408,14 @@ try {
     const codexHome = local && typeof rawConfig.codex_home_override === 'string' && rawConfig.codex_home_override.startsWith('/')
       ? await ensureSafeDirectory(rawConfig.codex_home_override, dirname(rawConfig.codex_home_override))
       : await ensureSafeDirectory(`${cliStateRoot}/codex-home`, cliStateRoot);
+    if (localConfig) {
+      delete childEnv.CODEX_RELAY_URL;
+      delete childEnv.OPENAI_BASE_URL;
+      delete childEnv.OPENAI_API_KEY;
+      delete childEnv.BOT_NATIVE_MODEL_KEY;
+      stagedLocalConfigs = await stageLocalCliConfig(workspaceRoot, 'codex', codexHome, addSecret);
+      await writeFile(`${agentDir}/staged-cli-config.json`, JSON.stringify(stagedLocalConfigs), { mode: 0o600 });
+    }
     await stageSessionSkills(codexHome,rawConfig.resources);
     if(gateway) await writeFile(
       `${codexHome}/config.toml`,
@@ -406,13 +430,13 @@ try {
       }),
       { mode: 0o600 },
     );
-    const nativeProvider = nativeModel ? ['-c',`model_providers.bot_direct = { name = "Bot direct", base_url = ${tomlString(nativeModel.baseUrl)}, env_key = "BOT_NATIVE_MODEL_KEY", wire_api = "responses" }`] : [];
+    const nativeProvider = !localConfig && nativeModel ? ['-c',`model_providers.bot_direct = { name = "Bot direct", base_url = ${tomlString(nativeModel.baseUrl)}, env_key = "BOT_NATIVE_MODEL_KEY", wire_api = "responses" }`] : [];
     const untrustedDocFlag = rawConfig.execution_access?.trustedCheckout === false ? ['-c', 'project_doc_max_bytes=0'] : [];
     spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), ...untrustedDocFlag, ...nativeProvider, 'app-server'];
     Object.assign(childEnv, {
       CODEX_HOME: codexHome,
       ...(gateway ? {CODEX_RELAY_URL: relay.url,OPENAI_BASE_URL: `${relay.url}/v1`,OPENAI_API_KEY: runToken}
-        : nativeModel ? {BOT_NATIVE_MODEL_KEY:nativeModel.key} : {}),
+        : !localConfig && nativeModel ? {BOT_NATIVE_MODEL_KEY:nativeModel.key} : {}),
     });
   }
 
@@ -463,7 +487,8 @@ try {
     state: 'running',
     cli_pid: cliChild.pid ?? null,
     ...(acp ? { harness, ...(isolatedAcpHome ? { acp_product_id: productId } : {}) } : {}),
-    model_transport: gateway ? 'gateway' : 'direct',
+    model_transport: localConfig ? 'local_config' : gateway ? 'gateway' : 'direct',
+    ...(localConfig ? { model_source: 'local_config' } : {}),
     relay_url: relay?.url ?? null,
     session_id: sessionId,
     actual_resume: actualResume,

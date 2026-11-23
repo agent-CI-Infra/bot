@@ -1,13 +1,11 @@
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { acpVersion, icodeProductId, icodeReleases, icodeTestedVersion, readAcpProduct, workswarmProductId, workswarmRelease } from '../../runner/acp-products.mjs';
+import { icodeProductId, workswarmProductId } from '../../runner/acp-products.mjs';
 import type { Store, Row } from '../storage/database.js';
 import {
   DEFAULT_AGENT_TOOLS_ROOT,
   inspectAgentTools,
   type AgentToolCli,
 } from '../harness/agent-tools.js';
-import { subscriptionStatusView } from '../harness/subscription.js';
+import { subscriptionStatusView, type CliConfigSnapshot } from '../harness/subscription.js';
 import { openModel, selectedModel, visibleModel } from '../agent/model.js';
 import { stop, TaskError } from '../agent/common.js';
 import { modelProtocol } from '../models/catalog.js';
@@ -253,7 +251,7 @@ function backendModel(cli: string, store?: Store, repositoryId?: string) {
       modelErrorCode = err instanceof TaskError ? err.code : 'model_not_configured';
       const config = roleConfiguration(store, repositoryId);
       const boundRoles = config.roles.filter(
-        r => r.enabled && r.harness_ref.id === cli && r.harness_ref.model_source !== 'subscription',
+        r => r.enabled && r.harness_ref.id === cli && r.harness_ref.model_source !== 'local_config',
       );
       if (boundRoles.length > 0) {
         const rows = boundRoles.map(r =>
@@ -289,6 +287,7 @@ function containerCliStatus(
   store?: Store,
   repositoryId?: string,
   toolsRoot?: string,
+  cliConfig?: CliConfigSnapshot | null,
 ): BackendRuntimeStatus {
   const root = toolsRoot ?? process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT;
   const inspected = inspectAgentTools(root);
@@ -299,6 +298,12 @@ function containerCliStatus(
   const installedVersions = [...info.compatible_versions, ...info.incompatible_versions];
 
   const { modelCount, modelRelayReady, resolvedModel, connectivity, modelErrorCode } = backendModel(cli, store, repositoryId);
+  const localConfigView = subscriptionStatusView(cli, cliConfig);
+  const usesLocalConfig = Boolean(
+    store && repositoryId && roleConfiguration(store, repositoryId).roles.some(
+      r => r.enabled && r.harness_ref.id === cli && r.harness_ref.model_source === 'local_config',
+    ),
+  );
   const displayRoot = inspected.container_root;
   let reasonCode: string | null = null;
   let reason: string | null = null;
@@ -308,7 +313,7 @@ function containerCliStatus(
     reason = formatter
       ? formatter(label, displayRoot, info.compatible_range, installedVersions)
       : `${label} 工具卷不可用（${reasonCode}）。`;
-  } else if (!modelRelayReady && !configOverride) {
+  } else if (!modelRelayReady && !configOverride && !usesLocalConfig) {
     reasonCode = modelErrorCode ?? 'model_not_configured';
     reason = relayUnavailable(label, modelCount);
   }
@@ -335,62 +340,44 @@ function containerCliStatus(
     connectivity,
     reason_code: reasonCode,
     reason,
-    subscription: subscriptionStatusView(cli),
+    subscription: localConfigView,
   };
 }
 
 function acpReleaseStatus(id: typeof icodeProductId | typeof workswarmProductId, store?: Store, repositoryId?: string, toolsRoot?: string): BackendRuntimeStatus {
   const root = toolsRoot ?? process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT;
-  const directory = join(root, 'acp', id);
+  const inspected = inspectAgentTools(root);
+  const info = inspected.clis[id];
   const icode = id === icodeProductId;
-  const name = icode ? 'iCode' : 'WorkSwarm';
-  const tested = icode ? icodeTestedVersion : workswarmRelease.version;
-  const volumePresent = existsSync(root);
-  const supportedVersions = icode ? [...icodeReleases]
-    .filter(([, release]) => Object.hasOwn(release.sha256, process.arch))
-    .map(([version]) => version) : [tested];
-  let selected: string | null = null;
-  let installed: string[] = [];
-  let reasonCode: string | null = null;
+  const name = info.name;
+  const tested = info.tested_version;
+  let reasonCode: string | null = info.available ? null : (info.reason ?? 'acp_product_not_installed');
   let reason: string | null = null;
-  if (!volumePresent) {
-    reasonCode = 'agent_tools_volume_missing';
+  if (reasonCode === 'agent_tools_volume_missing') {
     reason = `工具卷 ${DEFAULT_AGENT_TOOLS_ROOT} 未挂载，无法安装 ${name}。`;
-  } else if (!supportedVersions.length) {
-    reasonCode = 'icode_arch_unsupported';
-    reason = '当前项目电脑架构没有受支持的 iCode Linux 离线包。';
-  } else {
-    try {
-      installed = readdirSync(directory).filter(version => {
-        if (!acpVersion.test(version)) return false;
-        try { readAcpProduct(root, id, version); return true; }
-        catch { return false; }
-      }).sort();
-      selected = readAcpProduct(root, id).version;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? (error as Error).message;
-      if (code === 'ENOENT' && !existsSync(join(directory, 'selected'))) {
-        reasonCode = installed.length ? 'acp_product_not_selected' : 'acp_product_not_installed';
-        reason = installed.length
-          ? `尚未选用 ${name} 版本，请由平台管理员选用已安装的版本。`
-          : icode ? `尚未安装 iCode ${tested}，请由平台管理员安装官方 Linux 离线包。`
-            : `尚未安装 WorkSwarm ${tested}，请由平台管理员按部署文档安装。`;
-      } else {
-        reasonCode = 'acp_product_invalid';
-        reason = `无法读取当前选用的 ${name} 版本。请检查工具卷中的安装并重新选用已验证的版本。`;
-      }
-    }
+  } else if (reasonCode === 'icode_arch_unsupported' || reasonCode === 'platform_arch_unsupported') {
+    reason = icode ? '当前项目电脑架构没有受支持的 iCode Linux 离线包。' : `当前主机架构暂不支持 ${name}。`;
+  } else if (reasonCode === 'acp_product_not_selected') {
+    reason = `尚未选用 ${name} 版本，请由平台管理员选用已安装的版本。`;
+  } else if (reasonCode === 'acp_product_not_installed') {
+    reason = info.removed
+      ? `${name} 已由平台管理员移除，请到「全局设置 → Agent CLI 工具卷」重新安装。`
+      : info.last_error
+        ? `${name} 自动安装失败（${info.last_error}），请到「全局设置 → Agent CLI 工具卷」查看原因并重试。`
+        : `尚未安装 ${name} ${tested}，请到「全局设置 → Agent CLI 工具卷」安装或等待控制面自动安装完成。`;
+  } else if (reasonCode === 'acp_product_invalid') {
+    reason = `无法读取当前选用的 ${name} 版本。请检查工具卷中的安装并重新安装或选用已验证的版本。`;
   }
   const model = backendModel(id, store, repositoryId);
-  if (selected && !model.modelRelayReady) {
+  if (info.selected_version && !model.modelRelayReady) {
     reasonCode = model.modelErrorCode ?? 'model_not_configured';
     reason = relayUnavailable(name, model.modelCount);
   }
   return {
     source: 'tool_volume', ready: reasonCode === null, status: reasonCode === null ? 'ready' : 'unavailable',
-    volume_root: DEFAULT_AGENT_TOOLS_ROOT, volume_present: volumePresent, cli_installed: installed.length > 0,
-    installed_versions: installed, compatible_versions: installed, incompatible_versions: [],
-    selected_version: selected, compatible_range: supportedVersions.join('、'), tested_version: tested,
+    volume_root: DEFAULT_AGENT_TOOLS_ROOT, volume_present: inspected.volume_present, cli_installed: info.compatible_versions.length > 0,
+    installed_versions: info.compatible_versions, compatible_versions: info.compatible_versions, incompatible_versions: info.incompatible_versions,
+    selected_version: info.selected_version, compatible_range: info.compatible_range, tested_version: tested,
     node_version: null, config_override: false, model_relay_ready: model.modelRelayReady,
     model_count: model.modelCount, resolved_model: model.resolvedModel, connectivity: model.connectivity,
     reason_code: reasonCode, reason, subscription: null,
@@ -426,7 +413,7 @@ function declaredRuntimeStatus(h: RegisteredRoleHarness): BackendRuntimeStatus {
   };
 }
 
-export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: string) {
+export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: string, cliConfig?: CliConfigSnapshot | null) {
   return [...harnesses]
     .sort((a, b) => Number(b.id === recommendedBackend) - Number(a.id === recommendedBackend))
     .map(h => {
@@ -436,7 +423,7 @@ export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: 
       const runtime_status = h.id === icodeProductId || h.id === workswarmProductId
         ? acpReleaseStatus(h.id, store, repositoryId, toolsRoot)
         : h.tool_volume
-        ? containerCliStatus(h.tool_volume, store, repositoryId, toolsRoot)
+        ? containerCliStatus(h.tool_volume, store, repositoryId, toolsRoot, cliConfig)
         // Task tools alone do not place a driver in the project computer: a control-plane driver reports its evidence
         // through the platform and has no workspace install path to describe (#1192 review F2).
         : h.environment === 'workspace' && h.capabilities.raw_evidence === 'task_tools' ? declaredRuntimeStatus(h) : null;
@@ -448,7 +435,7 @@ export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: 
         version: h.version,
         kinds: h.kinds,
         model_source: h.externalModel ? 'external_harness' : 'project',
-        supported_model_sources: h.tool_volume ? ['gateway', 'subscription'] : ['gateway'],
+        supported_model_sources: h.tool_volume ? ['gateway', 'local_config'] : ['gateway'],
         integration_issue: null,
         runtime_status,
       };

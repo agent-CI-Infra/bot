@@ -63,7 +63,7 @@ test('withdrawn role models and changed configuration do not show a substitute o
   } finally { await h.stop(); }
 });
 
-test('container CLI backends resolve project models in gateway mode and reject reserved subscription mode without substituting', async ({ page }) => {
+test('container CLI backends resolve project models in gateway mode and resolve local_config mode without platform model', async ({ page }) => {
   const { h, admin, revision } = await prepared(page);
   try {
     const gwSave = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: null }] });
@@ -72,11 +72,11 @@ test('container CLI backends resolve project models in gateway mode and reject r
     await expect(fact(page, 'Agent 后端')).toContainText('Codex');
     await expect(fact(page, '模型来源')).toHaveText('项目默认');
     await expect(fact(page, '模型名称')).toHaveText('Project base');
-    const subSave = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: gwSave.value.configuration.revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex', model_source: 'subscription' }, model_profile_ref: null }] });
+    const subSave = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: gwSave.value.configuration.revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex', model_source: 'local_config' }, model_profile_ref: null }] });
     expect(subSave.status).toBe(200);
     await page.reload(); await openRoleFormAdvanced(page); await expect(panel(page)).toBeVisible(); await read(page).click();
-    await expect(panel(page).getByRole('status')).toContainText('解析失败，当前结果未知：供应商订阅模式未实现，任务不会静默回退到平台模型网关。');
-    await expect(panel(page).locator('dd')).toHaveCount(0);
+    await expect(fact(page, '模型来源')).toHaveText('项目电脑内自行配置（不注入模型配置）');
+    await expect(fact(page, '模型名称')).toHaveText('由项目电脑内的配置决定');
   } finally { await h.stop(); }
 });
 

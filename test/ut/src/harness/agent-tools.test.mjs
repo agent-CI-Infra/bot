@@ -15,19 +15,23 @@ import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { agentToolsApi } from '../../../../dist/app/agent-tools.js';
 import {
+  AGENT_PRODUCT_REGISTRY,
+  AGENT_TOOL_PRODUCTS,
   AgentToolManager,
+  AgentToolsAutoInstaller,
   COMPATIBLE_CLI_RANGES,
   detectElfInterpreterLibc,
   detectHostLibc,
   inspectAgentTools,
   parseSemver,
   satisfiesCliRange,
+  satisfiesProductVersion,
   selectCompatibleCliVersion,
 } from '../../../../dist/harness/agent-tools.js';
 import { Projects } from '../../../../manager/projects.mjs';
 import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 
-import { buildTarGz, hashes, startMockToolUpstream } from '../../../fixtures/agent-tools-fixture.mjs';
+import { buildTarGz, createMockAcpBuilder, hashes, startMockToolUpstream } from '../../../fixtures/agent-tools-fixture.mjs';
 
 const hex48 = () => randomBytes(24).toString('hex');
 
@@ -850,4 +854,336 @@ test('a failed prune that finishes after a successful install does not overwrite
   release();
   await assert.rejects(pending, { status: 400, code: 'agent_tool_invalid' });
   assert.equal(store.get('SELECT value FROM settings WHERE key=?', 'agent_tools.retain_count').value, '2');
+});
+
+test('#1260 unified product registry covers all third-party agents except Pi and every default version satisfies compatibility', () => {
+  assert.deepEqual([...AGENT_TOOL_PRODUCTS], ['claude_code', 'codex', 'icode', 'workswarm']);
+  assert.equal(AGENT_TOOL_PRODUCTS.includes('pi'), false, 'built-in Pi must not be in tool volume registry');
+  for (const product of AGENT_PRODUCT_REGISTRY) {
+    assert.equal(satisfiesProductVersion(product.id, product.defaultVersion, 'x64'), true, `${product.id}@${product.defaultVersion} must satisfy range`);
+  }
+});
+
+test('#1260 installs iCode and WorkSwarm (via isolated acpBuilder + uv on volume), rejects tampered/unverified/unisolated builds', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-acp-1260-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+
+  // Without acpBuilder, WorkSwarm fails closed with agent_tool_isolated_installer_required (never executes uv pip sync in control plane).
+  const noBuilder = new AgentToolManager({ volumeRoot: root, containerRoot: '/opt/agent-tools', arch: 'x64', sources: upstream.sources });
+  await assert.rejects(
+    () => noBuilder.install({ cli: 'workswarm', version: '0.2.9' }),
+    { code: 'agent_tool_isolated_installer_required' },
+  );
+
+  // Unverified ACP versions are rejected.
+  await assert.rejects(() => noBuilder.install({ cli: 'icode', version: '9.9.9' }), { code: 'agent_tool_version_unverified' });
+  await assert.rejects(() => noBuilder.install({ cli: 'workswarm', version: '9.9.9' }), { code: 'agent_tool_version_unverified' });
+
+  // Tampered iCode archive is rejected and leaves no partial directory.
+  upstream.setTamperICodeHash(true);
+  await assert.rejects(() => noBuilder.install({ cli: 'icode', version: '0.36.0' }), { code: 'agent_tool_hash_mismatch' });
+  assert.equal(existsSync(join(root, 'acp', 'icode', '0.36.0')), false);
+  upstream.setTamperICodeHash(false);
+
+  // Authentic iCode installation succeeds and sets selected pointer.
+  const icodeOut = await noBuilder.install({ cli: 'icode', version: '0.36.0' });
+  assert.equal(icodeOut.compatible, true);
+  assert.equal(icodeOut.installed.version, '0.36.0');
+  assert.equal(readFileSync(join(root, 'acp', 'icode', 'selected'), 'utf8').trim(), '0.36.0');
+  assert.equal(noBuilder.status().clis.icode.available, true);
+  assert.equal(noBuilder.status().clis.icode.selected_version, '0.36.0');
+
+  // With isolated acpBuilder, WorkSwarm downloads uv into volume, verifies hashes, stages source, and delegates build.
+  const mockBuilder = createMockAcpBuilder(root);
+  const withBuilder = new AgentToolManager({
+    volumeRoot: root,
+    containerRoot: '/opt/agent-tools',
+    arch: 'x64',
+    sources: upstream.sources,
+    acpBuilder: mockBuilder.builder,
+  });
+
+  upstream.setTamperWorkSwarmHash(true);
+  await assert.rejects(() => withBuilder.install({ cli: 'workswarm', version: '0.2.9' }), { code: 'agent_tool_hash_mismatch' });
+  assert.equal(mockBuilder.calls.length, 0, 'tampered wheel never reaches isolated builder');
+  upstream.setTamperWorkSwarmHash(false);
+
+  const wsOut = await withBuilder.install({ cli: 'workswarm', version: '0.2.9' });
+  assert.equal(wsOut.compatible, true);
+  assert.equal(wsOut.installed.version, '0.2.9');
+  assert.equal(mockBuilder.calls.length, 1);
+  assert.match(mockBuilder.calls[0].containerUvBin, /^\/opt\/agent-tools\/uv\/0\.13\.9\/bin\/uv$/);
+  assert.match(mockBuilder.calls[0].containerSourceDir, /^\/opt\/agent-tools\/\.staging\/workswarm-src-0\.2\.9-/);
+  assert.equal(withBuilder.status().uv_versions.includes('0.13.9'), true);
+  assert.equal(withBuilder.status().clis.workswarm.available, true);
+  assert.equal(withBuilder.status().clis.workswarm.selected_version, '0.2.9');
+});
+
+test('#1260 auto-install reconciles empty volume idempotently, respects opt-out/backoff, and honors manual remove across restarts', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-auto-1260-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const mockBuilder = createMockAcpBuilder(root);
+  let now = Date.parse('2026-11-23T00:00:00.000Z');
+  const makeManager = (opts = {}) => new AgentToolManager({
+    volumeRoot: root,
+    containerRoot: '/opt/agent-tools',
+    arch: 'x64',
+    sources: upstream.sources,
+    acpBuilder: mockBuilder.builder,
+    clock: () => now,
+    ...opts,
+  });
+
+  // 1. Opt-out disables auto-install completely (0 network requests).
+  const disabled = makeManager({ autoInstallEnabled: false });
+  const disabledRes = await disabled.reconcileAutoInstall();
+  assert.equal(upstream.requestCount, 0);
+  assert.deepEqual(disabledRes.installed, []);
+  assert.equal(disabled.status().auto_install_enabled, false);
+
+  // 2. Partial failure (codex returns 502) does not block claude_code, icode, workswarm; persists error & backoff.
+  upstream.setFailProduct('codex', true);
+  const mgr1 = makeManager({ autoInstallEnabled: true });
+  const res1 = await mgr1.reconcileAutoInstall();
+  assert.deepEqual(res1.installed.sort(), ['claude_code@2.1.319', 'icode@0.36.0', 'workswarm@0.2.9']);
+  assert.equal(res1.failed.length, 1);
+  assert.equal(res1.failed[0].product, 'codex');
+  const st1 = mgr1.status();
+  assert.equal(st1.clis.claude_code.available, true);
+  assert.equal(st1.clis.icode.available, true);
+  assert.equal(st1.clis.workswarm.available, true);
+  assert.equal(st1.clis.codex.available, false);
+  assert.equal(st1.clis.codex.auto_install_state, 'failed');
+  assert.equal(st1.clis.codex.last_error, 'agent_tool_download_failed');
+  assert.ok(st1.clis.codex.next_retry_at);
+
+  // 3. Restart within backoff window skips all 4 agents (0 requests).
+  upstream.resetRequestCount();
+  upstream.setFailProduct('codex', false);
+  const mgr2 = makeManager({ autoInstallEnabled: true });
+  const res2 = await mgr2.reconcileAutoInstall();
+  assert.equal(upstream.requestCount, 0, 'within backoff window, no downloads occur');
+  assert.deepEqual(res2.installed, []);
+
+  // 4. Advance clock past 5-minute backoff -> codex installs cleanly; next reconcile is 100% idempotent.
+  now += 6 * 60_000;
+  const res3 = await mgr2.reconcileAutoInstall();
+  assert.deepEqual(res3.installed, ['codex@0.166.0']);
+  assert.equal(mgr2.status().clis.codex.available, true);
+  assert.equal(mgr2.status().clis.codex.last_error, null);
+
+  upstream.resetRequestCount();
+  const res4 = await makeManager({ autoInstallEnabled: true }).reconcileAutoInstall();
+  assert.equal(upstream.requestCount, 0, 'idempotent second run does zero network downloads');
+  assert.deepEqual(res4.installed, []);
+
+  // 5. Whole-agent remove sets removed: true -> restart does NOT reinstall! Manual install clears removed.
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  const superUser = { id: 'u-super', role: 'super_admin', repositories: [] };
+
+  const removed = await agentToolsApi(store, mgr2, superUser, 'POST', '/api/agent-tools/remove', { cli: 'icode' });
+  assert.equal(removed.removed_agent, true);
+  assert.deepEqual(removed.removed, ['0.36.0']);
+  assert.equal(removed.status.clis.icode.available, false);
+  assert.equal(removed.status.clis.icode.removed, true);
+  assert.equal(removed.status.clis.icode.auto_install_state, 'removed');
+
+  upstream.resetRequestCount();
+  const afterRestart = await makeManager({ autoInstallEnabled: true }).reconcileAutoInstall();
+  assert.equal(upstream.requestCount, 0, 'removed agent is NOT reinstalled on restart');
+  assert.deepEqual(afterRestart.installed, []);
+
+  const reinstalled = await agentToolsApi(store, makeManager(), superUser, 'POST', '/api/agent-tools/install', { cli: 'icode' });
+  assert.equal(reinstalled.status.clis.icode.available, true);
+  assert.equal(reinstalled.status.clis.icode.removed, false);
+
+  // 6. AgentToolsAutoInstaller start/stop lifecycle runs cleanly without throwing.
+  const runner = new AgentToolsAutoInstaller(makeManager({ autoInstallEnabled: false }));
+  runner.start();
+  runner.stop();
+});
+
+test('#1260 upgrade semantics, single-version vs whole-agent remove, in-use 409 protection, and ACP selected pointer protection', async t => {
+  const { root, tools, store, superUser } = await toolApiScaffold(t, 'agent-tools-ops-1260-');
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0' });
+  // Upgrade refuses same or lower version for CLIs.
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/upgrade', { cli: 'codex', version: '0.166.0' }),
+    { status: 400, code: 'agent_tool_invalid' },
+  );
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/upgrade', { cli: 'codex', version: '0.165.0' }),
+    { status: 400, code: 'agent_tool_invalid' },
+  );
+  // Upgrade to strictly higher version succeeds.
+  const upgraded = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/upgrade', { cli: 'codex', version: '0.167.0' });
+  assert.equal(upgraded.status.clis.codex.selected_version, '0.167.0');
+
+  // Single non-last version remove does NOT mark agent as removed.
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
+  recordRunCliVersion(store, run.id, '0.166.0');
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/remove', { cli: 'codex', version: '0.166.0' }),
+    { status: 409, code: 'agent_tool_version_in_use' },
+  );
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/remove', { cli: 'codex' }),
+    { status: 409, code: 'agent_tool_version_in_use' },
+  );
+  endRun(store, run, 'completed', null);
+
+  const singleDel = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/remove', { cli: 'codex', version: '0.166.0' });
+  assert.equal(singleDel.removed_agent, false);
+  assert.equal(singleDel.status.clis.codex.removed, false);
+  assert.equal(singleDel.status.clis.codex.selected_version, '0.167.0');
+
+  // Deleting the LAST remaining version marks removed: true.
+  const lastDel = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/remove', { cli: 'codex', version: '0.167.0' });
+  assert.equal(lastDel.removed_agent, true);
+  assert.equal(lastDel.status.clis.codex.removed, true);
+
+  // ACP selected pointer protection on prune and auto-switch/clear on single-version delete (F4).
+  const { icodeReleases } = await import('../../../../runner/agent-products.mjs');
+  const rel36 = icodeReleases.get('0.36.0');
+  icodeReleases.set('0.35.0', { ...rel36, version: '0.35.0' });
+  t.after(() => icodeReleases.delete('0.35.0'));
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'icode', version: '0.36.0' });
+  // Create a synthetic older 0.35.0 ACP directory + manifest and select 0.35.0 to test selected protection.
+  const acpBase = join(root, 'acp', 'icode');
+  const olderDir = join(acpBase, '0.35.0');
+  mkdirSync(join(olderDir, 'bin'), { recursive: true });
+  writeFileSync(join(olderDir, 'bin', 'icode'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const manifest36 = JSON.parse(readFileSync(join(acpBase, '0.36.0', 'manifest.json'), 'utf8'));
+  writeFileSync(join(olderDir, 'manifest.json'), JSON.stringify({ ...manifest36, version: '0.35.0' }, null, 2));
+  writeFileSync(join(acpBase, 'selected'), '0.35.0\n');
+
+  const prunedAcp = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', { cli: 'icode', retain_count: 1 });
+  assert.equal(existsSync(olderDir), true, 'ACP selected version 0.35.0 is protected from prune');
+  assert.equal(readFileSync(join(acpBase, 'selected'), 'utf8').trim(), '0.35.0');
+  assert.deepEqual(prunedAcp.pruned.icode, []);
+
+  // Deleting selected 0.35.0 -> auto-switches selected pointer to remaining 0.36.0!
+  const delSelected = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/remove', { cli: 'icode', version: '0.35.0' });
+  assert.equal(delSelected.removed_agent, false);
+  assert.equal(readFileSync(join(acpBase, 'selected'), 'utf8').trim(), '0.36.0');
+  assert.equal(delSelected.status.clis.icode.selected_version, '0.36.0');
+
+  // Deleting last remaining 0.36.0 clears selected pointer and marks removed: true.
+  const delLastAcp = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/remove', { cli: 'icode', version: '0.36.0' });
+  assert.equal(delLastAcp.removed_agent, true);
+  assert.equal(existsSync(join(acpBase, 'selected')), false);
+});
+
+test('#1260 manager installAcpProduct runs one-shot hardened container mounting ONLY agent-tools volume', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'mgr-acp-installer-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const docker = new FakeDocker();
+  docker.toolsMount = '/opt/agent-tools';
+  const projects = new Projects({ database: join(dir, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
+  t.after(() => projects.db.close());
+
+  let capturedContainerConfig = null;
+  const origRequest = docker.request.bind(docker);
+  docker.request = async (method, path, body, raw, timeout) => {
+    if (path.startsWith('/containers/create')) capturedContainerConfig = body;
+    return origRequest(method, path, body, raw, timeout);
+  };
+
+  const out = await projects.installAcpProduct({
+    product: 'workswarm',
+    version: '0.2.9',
+    source_dir: '/opt/agent-tools/.staging/workswarm-src-0.2.9-abc123',
+    uv_bin: '/opt/agent-tools/uv/0.13.9/bin/uv',
+  });
+  assert.equal(out.ok, true);
+  assert.ok(capturedContainerConfig, 'installer container was created');
+  assert.equal(capturedContainerConfig.Image, 'sha256:fixture');
+  assert.equal(capturedContainerConfig.User, '10001:10001');
+  assert.equal(capturedContainerConfig.HostConfig.ReadonlyRootfs, true);
+  assert.deepEqual(capturedContainerConfig.HostConfig.CapDrop, ['ALL']);
+  assert.deepEqual(capturedContainerConfig.HostConfig.SecurityOpt, ['no-new-privileges:true']);
+  // Security boundary (F1): ONLY agent-tools volume is mounted; ZERO control-plane secrets/DB/sockets!
+  assert.deepEqual(capturedContainerConfig.HostConfig.Mounts, [
+    { Type: 'volume', Source: 'fixture-agent-tools', Target: '/opt/agent-tools', ReadOnly: false },
+  ]);
+  assert.ok(capturedContainerConfig.HostConfig.NetworkMode.includes('build'), 'uses isolated build egress network, never control network');
+  assert.equal(docker.containers.size, 0, 'one-shot installer container is removed after exit');
+
+  // Path traversal in source_dir or uv_bin is rejected.
+  await assert.rejects(
+    () => projects.installAcpProduct({ product: 'workswarm', version: '0.2.9', source_dir: '/keys/master.key', uv_bin: '/opt/agent-tools/uv/0.13.9/bin/uv' }),
+    /invalid_input/,
+  );
+  await assert.rejects(
+    () => projects.installAcpProduct({ product: 'workswarm', version: '0.2.9', source_dir: '/opt/agent-tools/.staging/../keys', uv_bin: '/opt/agent-tools/uv/0.13.9/bin/uv' }),
+    /invalid_input/,
+  );
+});
+
+test('#1260 /api/environments/:id/cli-config proxies to manager without storing or echoing file contents in control plane', async t => {
+  const { ProjectService } = await import('../../../../dist/projects/service.js');
+  const { inspectCliConfigs, writeCliConfig, deleteCliConfig } = await import('../../../../runner/cli-config.mjs');
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'cli-config-api-'));
+  t.after(() => rmSync(workspaceRoot, { recursive: true, force: true }));
+
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('101','org/repo','org','a')");
+  store.run("INSERT INTO policies(repository_id,enabled) VALUES('101',1)");
+
+  const manager = {
+    async call(method, path, body) {
+      if (path === '/v1/projects/101/cli-config') {
+        if (method === 'GET') return { available: true, clis: await inspectCliConfigs(workspaceRoot) };
+        if (method === 'PUT') return await writeCliConfig(workspaceRoot, body.cli, body.file, body.content);
+        if (method === 'DELETE') return await deleteCliConfig(workspaceRoot, body.cli, body.file);
+      }
+      throw new Error(`unexpected manager call ${method} ${path}`);
+    },
+  };
+  const service = new ProjectService(store, manager);
+  const admin = { id: 'u-admin', role: 'super_admin', repositories: ['101'] };
+  const viewer = { id: 'u-view', role: 'project_admin', repositories: ['101'] };
+  const secretToken = 'sk-local-cli-secret-must-never-persist-1260';
+
+  // Read-only viewer cannot write or delete CLI configs.
+  await assert.rejects(
+    () => service.api(viewer, 'PUT', new URL('http://local/api/environments/101/cli-config'), { cli: 'claude_code', file: '.credentials.json', content: secretToken }),
+    { status: 403 },
+  );
+
+  // Admin writes config -> response contains metadata only, never content.
+  const written = await service.api(admin, 'PUT', new URL('http://local/api/environments/101/cli-config'), {
+    cli: 'claude_code',
+    file: '.credentials.json',
+    content: JSON.stringify({ accessToken: secretToken }),
+  });
+  assert.equal(written.exists, true);
+  assert.equal(JSON.stringify(written).includes(secretToken), false);
+
+  const status = await service.api(admin, 'GET', new URL('http://local/api/environments/101/cli-config'), {});
+  assert.equal(status.available, true);
+  assert.equal(status.clis.claude_code.configured, true);
+  assert.equal(status.clis.claude_code.files['.credentials.json'].exists, true);
+  assert.equal(JSON.stringify(status).includes(secretToken), false);
+
+  // Control-plane SQLite (audit & settings) contains ZERO secret content.
+  assert.equal(JSON.stringify(store.all('SELECT * FROM audit')).includes(secretToken), false);
+  assert.equal(JSON.stringify(store.all('SELECT * FROM settings')).includes(secretToken), false);
+
+  const deleted = await service.api(admin, 'DELETE', new URL('http://local/api/environments/101/cli-config'), {
+    cli: 'claude_code',
+    file: '.credentials.json',
+  });
+  assert.equal(deleted.exists, false);
+  const afterDelete = await service.api(admin, 'GET', new URL('http://local/api/environments/101/cli-config'), {});
+  assert.equal(afterDelete.clis.claude_code.configured, false);
 });

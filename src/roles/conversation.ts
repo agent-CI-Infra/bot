@@ -136,7 +136,7 @@ export class RoleConversations {
           spec.harnessAccess=harnessAccess(resolved.definition.permissions,egress,this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:allowed('read_file'),write:allowed('write_file')&&(!source.caller.principal_capabilities||source.caller.principal_capabilities.includes('tasks.write')),commands:allowed('run_command')&&(!source.caller.principal_capabilities||source.caller.principal_capabilities.includes('tasks.write'))});
           spec.harnessAccess.github.scopes=spec.harnessAccess.github.scopes.filter(scope=>githubReadScopes(source.caller.permissions??{}).includes(scope));
           spec.roleWorkspace=space;
-          spec.containerOptions={...spec.containerOptions,manager:this.manager,egress};
+          spec.containerOptions={...spec.containerOptions,manager:this.manager,egress,...(snapshot.harness.model_source==='local_config'?{modelSource:'local_config' as const}:{})};
           spec.pi={workspace:space,key:prefix+':'+space.task.workspace_id+':'+id,resume:false,runtime:{version:snapshot.harness.version,report:runtime=>traceEvent(this.store,id,'harness_started',{...runtime,recovery:'rebuilt_from_authorized_conversation'})}};
         }
         if(driver.externalModel||runsInTaskCheckout(driver))await guard(true);

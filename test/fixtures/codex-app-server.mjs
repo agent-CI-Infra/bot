@@ -1,7 +1,7 @@
 // Protocol fixture of `codex app-server` 0.166.0 (stdio JSON-RPC lines without a "jsonrpc" member). It is a contract test
 // double for the client, never a substitute for a real Codex run. Scenarios are selected with FIXTURE_* variables.
 import { createInterface } from 'node:readline';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
@@ -16,6 +16,18 @@ mkdirSync(threads, { recursive: true });
 const flag = name => env['FIXTURE_' + name] === 'true';
 const log = (file, value) => appendFileSync(join(home, file), JSON.stringify(value) + '\n');
 writeFileSync(join(home, 'pid'), String(process.pid));
+{
+  const cfgPath = join(home, 'config.toml');
+  const authPath = join(home, 'auth.json');
+  writeFileSync(join(home, 'launch.json'), JSON.stringify({
+    args: process.argv.slice(2),
+    env_names: Object.keys(process.env),
+    staged_files: {
+      config_toml: existsSync(cfgPath) ? { exists: true, mode: statSync(cfgPath).mode & 0o777, content: readFileSync(cfgPath, 'utf8') } : { exists: false },
+      auth_json: existsSync(authPath) ? { exists: true, mode: statSync(authPath).mode & 0o777 } : { exists: false },
+    },
+  }));
+}
 
 // Output is one ordered byte stream; FRAGMENT writes it in 7-byte pieces, splitting lines and multi-byte characters.
 let queue = Promise.resolve();

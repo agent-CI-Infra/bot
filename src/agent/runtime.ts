@@ -96,6 +96,7 @@ export interface AgentSpec<T> {
   /** Trusted container harness options (never populated from model output). */
   containerOptions?: {
     modelTransport?: import('../harness/model-connection.js').ModelTransport;
+    modelSource?: import('../harness/subscription.js').HarnessModelSource;
     manager?: import('../projects/service.js').Manager;
     egress?: boolean;
     githubApiUrl?: string;

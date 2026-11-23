@@ -14,14 +14,56 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, posix, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { TaskError } from '../agent/common.js';
 import { extractTarGzAsync, isSubpath } from './tool-archives.js';
+import {
+  AGENT_PRODUCT_MAP,
+  AGENT_PRODUCT_REGISTRY,
+  AGENT_TOOL_ACP_PRODUCTS,
+  AGENT_TOOL_CLIS,
+  AGENT_TOOL_PRODUCTS,
+  BUNDLED_NODE_VERSION,
+  BUNDLED_UV_RELEASE,
+  COMPATIBLE_CLI_RANGES,
+  icodeLaunch,
+  icodeProductId,
+  icodeReleases,
+  supportedProductVersions,
+  workswarmProductId,
+  workswarmReleases,
+  type AgentToolAcpProduct,
+  type AgentToolArch,
+  type AgentToolCli,
+  type AgentToolProduct,
+  type CliCompatibilityRange,
+} from '../../runner/agent-products.mjs';
+import {
+  acpProductExecutable,
+  acpVersion,
+  readAcpProduct,
+  type AcpProductManifest,
+} from '../../runner/acp-products.mjs';
+import { stageAcpSource } from '../../runner/acp-install-worker.mjs';
 
 export { extractTarGz, extractTarGzAsync } from './tool-archives.js';
+export {
+  AGENT_PRODUCT_MAP,
+  AGENT_PRODUCT_REGISTRY,
+  AGENT_TOOL_ACP_PRODUCTS,
+  AGENT_TOOL_CLIS,
+  AGENT_TOOL_PRODUCTS,
+  BUNDLED_NODE_VERSION,
+  BUNDLED_UV_RELEASE,
+  COMPATIBLE_CLI_RANGES,
+  supportedProductVersions,
+  type AgentToolAcpProduct,
+  type AgentToolArch,
+  type AgentToolCli,
+  type AgentToolProduct,
+  type CliCompatibilityRange,
+};
 
-export type AgentToolCli = 'claude_code' | 'codex';
-export type AgentToolArch = 'x64' | 'arm64';
 export type AgentToolLibc = 'glibc' | 'musl';
 
 export interface Semver {
@@ -31,47 +73,22 @@ export interface Semver {
   raw: string;
 }
 
-export interface CliCompatibilityRange {
-  cli: AgentToolCli;
-  min: string;
-  maxExclusive: string;
-  range: string;
-  tested: string;
-}
-
-export const AGENT_TOOL_CLIS: readonly AgentToolCli[] = ['claude_code', 'codex'] as const;
 export const DEFAULT_AGENT_TOOLS_ROOT = '/opt/agent-tools';
 export const DEFAULT_CLI_RETAIN_COUNT = 3;
 export const CLI_RETAIN_BOUNDS = [1, 10] as const;
-export const BUNDLED_NODE_VERSION = '22.15.0';
 
-export const COMPATIBLE_CLI_RANGES: Record<AgentToolCli, CliCompatibilityRange> = {
-  claude_code: {
-    cli: 'claude_code',
-    min: '2.1.0',
-    maxExclusive: '3.0.0',
-    range: '>=2.1.0 <3.0.0',
-    tested: '2.1.319',
-  },
-  codex: {
-    cli: 'codex',
-    min: '0.166.0',
-    maxExclusive: '1.0.0',
-    range: '>=0.166.0 <1.0.0',
-    tested: '0.166.0',
-  },
-};
+const DEFAULT_AUTO_INSTALL_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000, 6 * 60 * 60_000] as const;
 
 export interface AgentToolArtifact {
-  role: 'package' | 'native_binary' | 'node_runtime' | 'static_binary';
+  role: 'package' | 'native_binary' | 'node_runtime' | 'static_binary' | 'offline_archive' | 'python_wheel' | 'uv_runtime' | 'source_bundle';
   source_url: string;
   sha256: string;
   bytes: number;
 }
 
 export interface AgentToolManifest {
-  schema: 'bot.agent-tools/1';
-  cli: AgentToolCli;
+  schema: 'bot.agent-tools/1' | 'bot.acp-product/1';
+  cli: AgentToolProduct;
   version: string;
   arch: AgentToolArch;
   libc?: AgentToolLibc;
@@ -93,6 +110,31 @@ export interface NodeRuntimeManifest {
   bytes: number;
 }
 
+export interface UvRuntimeManifest {
+  schema: 'bot.agent-tools-uv/1';
+  version: string;
+  arch: AgentToolArch;
+  installed_at: string;
+  container_executable: string;
+  source_url: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface ProductVolumeState {
+  removed: boolean;
+  last_error: string | null;
+  last_error_detail: string | null;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
+  failed_attempts: number;
+}
+
+interface VolumeStateFile {
+  schema: 'bot.agent-tools-state/1';
+  products: Partial<Record<AgentToolProduct, ProductVolumeState>>;
+}
+
 export interface SelectedCliVersion {
   cli: AgentToolCli;
   version: string;
@@ -105,8 +147,13 @@ export interface SelectedCliVersion {
 }
 
 export interface CliAvailabilityStatus {
-  cli: AgentToolCli;
+  cli: AgentToolProduct;
+  name: string;
+  kind: 'cli' | 'acp';
   available: boolean;
+  default_version: string;
+  allow_custom_version: boolean;
+  supported_versions: string[];
   compatible_range: string;
   tested_version: string;
   selected_version: string | null;
@@ -116,6 +163,12 @@ export interface CliAvailabilityStatus {
   incompatible_versions: string[];
   installed_manifests: AgentToolManifest[];
   reason: string | null;
+  removed: boolean;
+  auto_install_state: 'idle' | 'installing' | 'failed' | 'removed';
+  last_error: string | null;
+  last_error_detail: string | null;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
 }
 
 export interface AgentToolsVolumeStatus {
@@ -124,12 +177,28 @@ export interface AgentToolsVolumeStatus {
   volume_present: boolean;
   arch: AgentToolArch | null;
   node_versions: string[];
-  clis: Record<AgentToolCli, CliAvailabilityStatus>;
+  uv_versions: string[];
+  auto_install_enabled: boolean;
+  clis: Record<AgentToolProduct, CliAvailabilityStatus>;
 }
 
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
+
+export function isAgentToolProduct(value: unknown): value is AgentToolProduct {
+  return typeof value === 'string' && AGENT_PRODUCT_MAP.has(value);
+}
+
+export function isAgentToolCli(value: unknown): value is AgentToolCli {
+  return typeof value === 'string' && (AGENT_TOOL_CLIS as readonly string[]).includes(value);
+}
+
+export function isAutoInstallEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.BOT_AGENT_TOOLS_AUTO_INSTALL;
+  if (raw === undefined || raw === '') return true;
+  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase());
+}
 
 export function parseSemver(value: unknown): Semver | null {
   if (typeof value !== 'string') return null;
@@ -155,6 +224,11 @@ export function satisfiesCliRange(cli: AgentToolCli, version: string): boolean {
   const parsed = parseSemver(version);
   if (!parsed) return false;
   return compareSemver(parsed, range.min) >= 0 && compareSemver(parsed, range.maxExclusive) < 0;
+}
+
+export function satisfiesProductVersion(product: AgentToolProduct, version: string, arch: AgentToolArch = resolveSupportedArch() ?? 'x64'): boolean {
+  if (isAgentToolCli(product)) return satisfiesCliRange(product, version);
+  return supportedProductVersions(product, arch).includes(version);
 }
 
 export function resolveSupportedArch(arch = process.arch): AgentToolArch | null {
@@ -214,10 +288,6 @@ export function detectElfInterpreterLibc(execPath: string): AgentToolLibc | null
 
 let cachedHostLibc: AgentToolLibc | null = null;
 
-/**
- * Detect host Linux libc without calling `process.report.getReport()`: generating a diagnostic report walks V8 heap,
- * libuv handles, and native symbol tables synchronously (~5s per call on a long-lived control-plane process).
- */
 export function detectHostLibc(): AgentToolLibc {
   if (cachedHostLibc) return cachedHostLibc;
   if (process.platform === 'linux') {
@@ -238,6 +308,53 @@ export function detectHostLibc(): AgentToolLibc {
   return 'glibc';
 }
 
+function emptyProductState(): ProductVolumeState {
+  return {
+    removed: false,
+    last_error: null,
+    last_error_detail: null,
+    last_attempt_at: null,
+    next_retry_at: null,
+    failed_attempts: 0,
+  };
+}
+
+function readVolumeState(rootReal: string): VolumeStateFile {
+  const statePath = resolve(rootReal, '.state.json');
+  try {
+    const st = lstatSync(statePath);
+    if (!st.isFile() || st.isSymbolicLink() || st.size > 128 * 1024) return { schema: 'bot.agent-tools-state/1', products: {} };
+    const parsed = JSON.parse(readFileSync(statePath, 'utf8'));
+    if (parsed?.schema !== 'bot.agent-tools-state/1' || !parsed.products || typeof parsed.products !== 'object') {
+      return { schema: 'bot.agent-tools-state/1', products: {} };
+    }
+    return { schema: 'bot.agent-tools-state/1', products: parsed.products };
+  } catch {
+    return { schema: 'bot.agent-tools-state/1', products: {} };
+  }
+}
+
+function productStateOf(volumeState: VolumeStateFile, product: AgentToolProduct): ProductVolumeState {
+  const raw = volumeState.products[product];
+  if (!raw || typeof raw !== 'object') return emptyProductState();
+  return {
+    removed: raw.removed === true,
+    last_error: typeof raw.last_error === 'string' ? raw.last_error : null,
+    last_error_detail: typeof raw.last_error_detail === 'string' ? raw.last_error_detail : null,
+    last_attempt_at: typeof raw.last_attempt_at === 'string' ? raw.last_attempt_at : null,
+    next_retry_at: typeof raw.next_retry_at === 'string' ? raw.next_retry_at : null,
+    failed_attempts: Number.isSafeInteger(raw.failed_attempts) && raw.failed_attempts >= 0 ? raw.failed_attempts : 0,
+  };
+}
+
+function writeVolumeState(rootReal: string, state: VolumeStateFile): void {
+  const statePath = resolve(rootReal, '.state.json');
+  const tmpPath = resolve(rootReal, `.state.json.tmp.${randomBytes(6).toString('hex')}`);
+  writeFileSync(tmpPath, JSON.stringify(state, null, 2) + '\n', { mode: 0o644 });
+  chmodSync(tmpPath, 0o644);
+  renameSync(tmpPath, statePath);
+}
+
 function verifySafeExecutable(rootReal: string, filePath: string): boolean {
   try {
     const st = lstatSync(filePath);
@@ -250,7 +367,6 @@ function verifySafeExecutable(rootReal: string, filePath: string): boolean {
   }
 }
 
-// The `node_version` a claude_code manifest still names, read from the raw file when it no longer parses into a manifest.
 function brokenManifestNodeVersion(rootReal: string, version: string): string | null {
   try {
     const raw = readFileSync(resolve(rootReal, 'claude_code', version, 'manifest.json'), 'utf8');
@@ -322,6 +438,54 @@ function readValidCliManifest(
   }
 }
 
+function acpManifestToView(manifest: AcpProductManifest, product: AgentToolAcpProduct, arch: AgentToolArch, containerRoot: string, versionDir: string): AgentToolManifest {
+  let installedAt = '';
+  try {
+    installedAt = typeof (manifest as any).installed_at === 'string' && (manifest as any).installed_at
+      ? (manifest as any).installed_at
+      : lstatSync(join(versionDir, 'manifest.json')).mtime.toISOString();
+  } catch {
+    installedAt = '';
+  }
+  const artifacts: AgentToolArtifact[] = [];
+  if (Array.isArray((manifest as any).artifacts) && (manifest as any).artifacts.length) {
+    for (const art of (manifest as any).artifacts) {
+      artifacts.push({
+        role: art.role ?? 'source_bundle',
+        source_url: String(art.source_url ?? manifest.source),
+        sha256: String(art.sha256 ?? manifest.sourceSha256),
+        bytes: Number(art.bytes ?? 0),
+      });
+    }
+  } else {
+    artifacts.push({
+      role: product === icodeProductId ? 'offline_archive' : 'source_bundle',
+      source_url: manifest.source,
+      sha256: manifest.sourceSha256,
+      bytes: 0,
+    });
+    if (manifest.lockSha256) {
+      artifacts.push({
+        role: 'python_wheel',
+        source_url: `${manifest.source} (uv.lock)`,
+        sha256: manifest.lockSha256,
+        bytes: 0,
+      });
+    }
+  }
+  return {
+    schema: 'bot.acp-product/1',
+    cli: product,
+    version: manifest.version,
+    arch,
+    installed_at: installedAt,
+    container_executable: posix.join(containerRoot, 'acp', product, manifest.version, acpProductExecutable(product)),
+    container_node_executable: null,
+    node_version: null,
+    artifacts,
+  };
+}
+
 function listValidNodeVersions(rootReal: string, arch: AgentToolArch): string[] {
   const nodeRoot = resolve(rootReal, 'node');
   if (!existsSync(nodeRoot)) return [];
@@ -349,18 +513,166 @@ function listValidNodeVersions(rootReal: string, arch: AgentToolArch): string[] 
   return valid.sort((a, b) => compareSemver(b, a));
 }
 
+function listValidUvVersions(rootReal: string, arch: AgentToolArch): string[] {
+  const uvRoot = resolve(rootReal, 'uv');
+  if (!existsSync(uvRoot)) return [];
+  let entries: string[];
+  try {
+    const st = lstatSync(uvRoot);
+    if (!st.isDirectory() || st.isSymbolicLink()) return [];
+    entries = readdirSync(uvRoot);
+  } catch {
+    return [];
+  }
+  const valid: string[] = [];
+  for (const name of entries) {
+    if (!parseSemver(name)) continue;
+    const dir = resolve(uvRoot, name);
+    const manifestPath = resolve(dir, 'manifest.json');
+    const binPath = resolve(dir, 'bin', 'uv');
+    try {
+      const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      if (m?.schema === 'bot.agent-tools-uv/1' && m.version === name && m.arch === arch && SHA256_RE.test(m.sha256) && verifySafeExecutable(rootReal, binPath)) {
+        valid.push(name);
+      }
+    } catch {}
+  }
+  return valid.sort((a, b) => compareSemver(b, a));
+}
+
+function autoStateFields(
+  state: ProductVolumeState,
+  installing: boolean,
+): Pick<CliAvailabilityStatus, 'removed' | 'auto_install_state' | 'last_error' | 'last_error_detail' | 'last_attempt_at' | 'next_retry_at'> {
+  return {
+    removed: state.removed,
+    auto_install_state: installing ? 'installing' : state.removed ? 'removed' : state.last_error ? 'failed' : 'idle',
+    last_error: state.last_error,
+    last_error_detail: state.last_error_detail,
+    last_attempt_at: state.last_attempt_at,
+    next_retry_at: state.next_retry_at,
+  };
+}
+
+function inspectAcpProductAvailability(
+  volumeRoot: string,
+  product: AgentToolAcpProduct,
+  options: { containerRoot?: string; arch?: AgentToolArch | null; installing?: boolean } = {},
+): CliAvailabilityStatus {
+  const entry = AGENT_PRODUCT_MAP.get(product)!;
+  const containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
+  const arch = options.arch === undefined ? resolveSupportedArch() : options.arch;
+  const supported = arch ? supportedProductVersions(product, arch) : [];
+  const base: CliAvailabilityStatus = {
+    cli: product,
+    name: entry.name,
+    kind: 'acp',
+    available: false,
+    default_version: entry.defaultVersion,
+    allow_custom_version: entry.allowCustomVersion,
+    supported_versions: supported,
+    compatible_range: supported.join('、') || entry.defaultVersion,
+    tested_version: entry.defaultVersion,
+    selected_version: null,
+    container_executable: null,
+    node_version: null,
+    compatible_versions: [],
+    incompatible_versions: [],
+    installed_manifests: [],
+    reason: null,
+    ...autoStateFields(emptyProductState(), Boolean(options.installing)),
+  };
+  if (!arch) return { ...base, reason: 'platform_arch_unsupported' };
+  if (!volumeRoot || !isAbsolute(volumeRoot) || !existsSync(volumeRoot)) {
+    return { ...base, reason: 'agent_tools_volume_missing' };
+  }
+  let rootReal: string;
+  try {
+    const st = lstatSync(volumeRoot);
+    if (!st.isDirectory() || st.isSymbolicLink()) return { ...base, reason: 'agent_tools_volume_missing' };
+    rootReal = realpathSync(volumeRoot);
+  } catch {
+    return { ...base, reason: 'agent_tools_volume_missing' };
+  }
+  const volumeState = readVolumeState(rootReal);
+  const pState = productStateOf(volumeState, product);
+  const stateFields = autoStateFields(pState, Boolean(options.installing));
+
+  if (!supported.length) {
+    return { ...base, ...stateFields, reason: product === icodeProductId ? 'icode_arch_unsupported' : 'platform_arch_unsupported' };
+  }
+
+  const parent = join(rootReal, 'acp', product);
+  const manifests: AgentToolManifest[] = [];
+  if (existsSync(parent)) {
+    try {
+      const pst = lstatSync(parent);
+      if (pst.isDirectory() && !pst.isSymbolicLink()) {
+        for (const name of readdirSync(parent)) {
+          if (!acpVersion.test(name)) continue;
+          try {
+            const raw = readAcpProduct(rootReal, product, name);
+            manifests.push(acpManifestToView(raw, product, arch, containerRoot, join(parent, name)));
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+  manifests.sort((a, b) => {
+    const pa = parseSemver(a.version), pb = parseSemver(b.version);
+    if (pa && pb) return compareSemver(pb, pa);
+    return b.version.localeCompare(a.version);
+  });
+
+  let selected: AgentToolManifest | null = null;
+  let reason: string | null = null;
+  try {
+    const selRaw = readAcpProduct(rootReal, product);
+    selected = manifests.find(m => m.version === selRaw.version) ?? acpManifestToView(selRaw, product, arch, containerRoot, join(parent, selRaw.version));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? (error as Error).message;
+    if (code === 'ENOENT' && !existsSync(join(parent, 'selected'))) {
+      reason = manifests.length ? 'acp_product_not_selected' : 'acp_product_not_installed';
+    } else {
+      reason = 'acp_product_invalid';
+    }
+  }
+
+  const versions = manifests.map(m => m.version);
+  return {
+    ...base,
+    ...stateFields,
+    available: Boolean(selected),
+    selected_version: selected?.version ?? null,
+    container_executable: selected?.container_executable ?? null,
+    compatible_versions: versions,
+    incompatible_versions: [],
+    installed_manifests: manifests,
+    reason: selected ? null : reason,
+  };
+}
+
 export function inspectCliAvailability(
   volumeRoot: string,
-  cli: AgentToolCli,
-  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc } = {},
+  cli: AgentToolProduct,
+  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc; installing?: boolean } = {},
 ): CliAvailabilityStatus {
+  if (!isAgentToolCli(cli)) {
+    return inspectAcpProductAvailability(volumeRoot, cli, options);
+  }
+  const entry = AGENT_PRODUCT_MAP.get(cli)!;
   const range = COMPATIBLE_CLI_RANGES[cli];
   const containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
   const arch = options.arch === undefined ? resolveSupportedArch() : options.arch;
   const libc = options.libc ?? detectHostLibc();
   const base: CliAvailabilityStatus = {
     cli,
+    name: entry.name,
+    kind: 'cli',
     available: false,
+    default_version: entry.defaultVersion,
+    allow_custom_version: entry.allowCustomVersion,
+    supported_versions: [entry.defaultVersion],
     compatible_range: range.range,
     tested_version: range.tested,
     selected_version: null,
@@ -370,6 +682,7 @@ export function inspectCliAvailability(
     incompatible_versions: [],
     installed_manifests: [],
     reason: null,
+    ...autoStateFields(emptyProductState(), Boolean(options.installing)),
   };
   if (!arch) return { ...base, reason: 'platform_arch_unsupported' };
   if (!volumeRoot || !isAbsolute(volumeRoot) || !existsSync(volumeRoot)) {
@@ -384,34 +697,37 @@ export function inspectCliAvailability(
     return { ...base, reason: 'agent_tools_volume_missing' };
   }
 
+  const volumeState = readVolumeState(rootReal);
+  const pState = productStateOf(volumeState, cli);
+  const stateFields = autoStateFields(pState, Boolean(options.installing));
+
   const cliDir = resolve(rootReal, cli);
-  if (!existsSync(cliDir)) return { ...base, reason: 'cli_not_installed' };
+  if (!existsSync(cliDir)) return { ...base, ...stateFields, reason: 'cli_not_installed' };
   let dirEntries: string[];
   try {
     const st = lstatSync(cliDir);
-    if (!st.isDirectory() || st.isSymbolicLink()) return { ...base, reason: 'cli_not_installed' };
+    if (!st.isDirectory() || st.isSymbolicLink()) return { ...base, ...stateFields, reason: 'cli_not_installed' };
     dirEntries = readdirSync(cliDir);
   } catch {
-    return { ...base, reason: 'cli_not_installed' };
+    return { ...base, ...stateFields, reason: 'cli_not_installed' };
   }
 
   const manifests: AgentToolManifest[] = [];
-  for (const entry of dirEntries) {
-    const manifest = readValidCliManifest(rootReal, cli, entry, arch, containerRoot, libc);
+  for (const entryName of dirEntries) {
+    const manifest = readValidCliManifest(rootReal, cli, entryName, arch, containerRoot, libc);
     if (manifest) manifests.push(manifest);
   }
   manifests.sort((a, b) => compareSemver(b.version, a.version));
-  if (!manifests.length) return { ...base, reason: 'cli_not_installed' };
+  if (!manifests.length) return { ...base, ...stateFields, reason: 'cli_not_installed' };
 
   const compatible = manifests.filter(m => satisfiesCliRange(cli, m.version));
   const incompatible = manifests.filter(m => !satisfiesCliRange(cli, m.version));
   const selected = compatible[0] ?? null;
 
   return {
-    cli,
+    ...base,
+    ...stateFields,
     available: Boolean(selected),
-    compatible_range: range.range,
-    tested_version: range.tested,
     selected_version: selected?.version ?? null,
     container_executable: selected?.container_executable ?? null,
     node_version: selected?.node_version ?? null,
@@ -424,32 +740,48 @@ export function inspectCliAvailability(
 
 export function inspectAgentTools(
   volumeRoot = DEFAULT_AGENT_TOOLS_ROOT,
-  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc } = {},
+  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc; installing?: ReadonlySet<string>; autoInstallEnabled?: boolean } = {},
 ): AgentToolsVolumeStatus {
   const containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
   const arch = options.arch === undefined ? resolveSupportedArch() : options.arch;
   const libc = options.libc ?? detectHostLibc();
   let volumePresent = false;
   let nodeVersions: string[] = [];
+  let uvVersions: string[] = [];
   if (volumeRoot && isAbsolute(volumeRoot) && existsSync(volumeRoot)) {
     try {
       const st = lstatSync(volumeRoot);
       if (st.isDirectory() && !st.isSymbolicLink()) {
         volumePresent = true;
-        if (arch) nodeVersions = listValidNodeVersions(realpathSync(volumeRoot), arch);
+        if (arch) {
+          const real = realpathSync(volumeRoot);
+          nodeVersions = listValidNodeVersions(real, arch);
+          uvVersions = listValidUvVersions(real, arch);
+        }
       }
     } catch {}
   }
+  const clis = Object.fromEntries(
+    AGENT_TOOL_PRODUCTS.map(product => [
+      product,
+      inspectCliAvailability(volumeRoot, product, {
+        containerRoot,
+        arch,
+        libc,
+        installing: options.installing?.has(product) ?? false,
+      }),
+    ]),
+  ) as Record<AgentToolProduct, CliAvailabilityStatus>;
+
   return {
     volume_root: volumeRoot,
     container_root: containerRoot,
     volume_present: volumePresent,
     arch,
     node_versions: nodeVersions,
-    clis: {
-      claude_code: inspectCliAvailability(volumeRoot, 'claude_code', { containerRoot, arch, libc }),
-      codex: inspectCliAvailability(volumeRoot, 'codex', { containerRoot, arch, libc }),
-    },
+    uv_versions: uvVersions,
+    auto_install_enabled: options.autoInstallEnabled ?? isAutoInstallEnabled(),
+    clis,
   };
 }
 
@@ -476,14 +808,21 @@ export function selectCompatibleCliVersion(
   };
 }
 
-// ---------------------------------------------------------------- Trusted Installer & Pruner
+// ---------------------------------------------------------------- Trusted Installer, Remover & Auto-Installer
 
 export interface TrustedToolSources {
   npmRegistryBase: string;
   nodeDistBase: string;
   githubApiBase: string;
   githubDownloadOrigins: string[];
+  rawGithubOrigins: string[];
   allowLoopbackHttp?: boolean;
+  /** Test-only digest overrides; honored strictly when `allowLoopbackHttp === true`. */
+  testDigests?: {
+    uv?: Record<string, string>;
+    icode?: Record<string, string>;
+    workswarm?: Record<string, { pyprojectSha256: string; lockSha256: string; wheelSha256: string; sourceSha256: string }>;
+  };
 }
 
 export const DEFAULT_TRUSTED_SOURCES: TrustedToolSources = {
@@ -494,6 +833,9 @@ export const DEFAULT_TRUSTED_SOURCES: TrustedToolSources = {
     'https://github.com',
     'https://objects.githubusercontent.com',
     'https://release-assets.githubusercontent.com',
+  ],
+  rawGithubOrigins: [
+    'https://raw.githubusercontent.com',
   ],
 };
 
@@ -557,6 +899,16 @@ function buildClaudeLauncherScript(
   return lines.join('\n') + '\n';
 }
 
+export interface AcpIsolatedBuildRequest {
+  product: AgentToolAcpProduct;
+  version: string;
+  sourceDir: string;
+  containerSourceDir: string;
+  uvBin: string;
+  containerUvBin: string;
+  offline?: boolean;
+}
+
 export interface AgentToolManagerOptions {
   volumeRoot?: string;
   containerRoot?: string;
@@ -566,7 +918,12 @@ export interface AgentToolManagerOptions {
   sources?: Partial<TrustedToolSources>;
   fetcher?: typeof fetch;
   timeoutMs?: number;
-  protectedVersions?: (cli: AgentToolCli) => Iterable<string>;
+  protectedVersions?: (cli: AgentToolProduct) => Iterable<string>;
+  /** Executes Python/uv ACP product builds (WorkSwarm) inside an isolated installer container. */
+  acpBuilder?: (req: AcpIsolatedBuildRequest) => Promise<void>;
+  autoInstallEnabled?: boolean;
+  autoInstallBackoffMs?: readonly number[];
+  clock?: () => number;
 }
 
 export class AgentToolManager {
@@ -578,10 +935,13 @@ export class AgentToolManager {
   private readonly sources: TrustedToolSources;
   private readonly fetcher: typeof fetch;
   private readonly timeoutMs: number;
-  private readonly protectedVersions?: (cli: AgentToolCli) => Iterable<string>;
+  private readonly protectedVersions?: (cli: AgentToolProduct) => Iterable<string>;
+  private readonly acpBuilder?: (req: AcpIsolatedBuildRequest) => Promise<void>;
+  private readonly autoInstallEnabled?: boolean;
+  private readonly autoInstallBackoffMs: readonly number[];
+  private readonly clock: () => number;
+  private readonly installing = new Set<AgentToolProduct>();
   private queue: Promise<unknown> = Promise.resolve();
-  // The provider and the volume root in effect for the install running right now, so installClaudeCode/installCodex/
-  // ensureNodeRuntime can re-read the active set at the point where they replace a directory (see replaceVersionDir).
   private activeVersionProvider: (() => Iterable<string>) | null = null;
 
   constructor(options: AgentToolManagerOptions = {}) {
@@ -590,10 +950,19 @@ export class AgentToolManager {
     this.nodeVersion = options.nodeVersion ?? BUNDLED_NODE_VERSION;
     this.libc = options.libc ?? detectHostLibc();
     this.explicitArch = options.arch;
-    this.sources = { ...DEFAULT_TRUSTED_SOURCES, ...(options.sources ?? {}) };
+    this.sources = {
+      ...DEFAULT_TRUSTED_SOURCES,
+      ...(options.sources ?? {}),
+      githubDownloadOrigins: options.sources?.githubDownloadOrigins ?? DEFAULT_TRUSTED_SOURCES.githubDownloadOrigins,
+      rawGithubOrigins: options.sources?.rawGithubOrigins ?? DEFAULT_TRUSTED_SOURCES.rawGithubOrigins,
+    };
     this.fetcher = options.fetcher ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 180_000;
     this.protectedVersions = options.protectedVersions;
+    this.acpBuilder = options.acpBuilder;
+    this.autoInstallEnabled = options.autoInstallEnabled;
+    this.autoInstallBackoffMs = options.autoInstallBackoffMs ?? DEFAULT_AUTO_INSTALL_BACKOFF_MS;
+    this.clock = options.clock ?? (() => Date.now());
   }
 
   private serialized<T>(fn: () => Promise<T>): Promise<T> {
@@ -620,6 +989,12 @@ export class AgentToolManager {
       throw new TaskError('agent_tools_volume_missing', 'waiting_configuration', 'volume_root_not_directory');
     }
     return realpathSync(this.volumeRoot);
+  }
+
+  private updateProductState(rootReal: string, product: AgentToolProduct, updater: (prev: ProductVolumeState) => ProductVolumeState): void {
+    const state = readVolumeState(rootReal);
+    state.products[product] = updater(productStateOf(state, product));
+    writeVolumeState(rootReal, state);
   }
 
   private assertAllowedOrigin(rawUrl: string, allowedOrigins: string[]): URL {
@@ -696,7 +1071,6 @@ export class AgentToolManager {
     }
   }
 
-  /** The versions active runs hold, read now: the provider queries the store on every call. */
   private activeVersions(): Set<string> {
     const active = new Set<string>();
     const provider = this.activeVersionProvider;
@@ -707,26 +1081,22 @@ export class AgentToolManager {
     return active;
   }
 
-  /**
-   * Replace the final directory with the staged one, refusing when an active run would lose what it is executing.
-   * install() already refuses early, but a run admitted while the downloads were in flight is not in that snapshot;
-   * re-reading the active set here leaves only the two filesystem calls below as a window.
-   */
   private replaceVersionDir(
     stageDir: string,
     finalDir: string,
-    target: { cli: AgentToolCli | 'node'; version: string; rootReal: string; arch: AgentToolArch },
+    target: { cli: AgentToolProduct | 'node' | 'uv'; version: string; rootReal: string; arch: AgentToolArch },
   ): void {
     const active = this.activeVersions();
     const inUse = target.cli === 'node'
       ? this.activeClaudeDependsOnNode(target.rootReal, active, target.version, target.arch)
-      : active.has(target.version);
+      : target.cli === 'uv'
+        ? false
+        : active.has(target.version);
     if (inUse) throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${target.cli}@${target.version}`);
     if (existsSync(finalDir)) rmSync(finalDir, { recursive: true, force: true });
     renameSync(stageDir, finalDir);
   }
 
-  /** The Node runtime already on the volume when it can be reused as-is; null means the install would replace it. */
   private existingNodeRuntime(rootReal: string, arch: AgentToolArch, nodeVer: string): NodeRuntimeManifest | null {
     const finalDir = resolve(rootReal, 'node', nodeVer);
     const existingManifestPath = resolve(finalDir, 'manifest.json');
@@ -739,7 +1109,18 @@ export class AgentToolManager {
     return null;
   }
 
-  /** True when an active claude_code run's manifest names this Node version, so replacing Node would break that run. */
+  private existingUvRuntime(rootReal: string, arch: AgentToolArch, uvVer: string): UvRuntimeManifest | null {
+    const finalDir = resolve(rootReal, 'uv', uvVer);
+    const existingManifestPath = resolve(finalDir, 'manifest.json');
+    const existingBinPath = resolve(finalDir, 'bin', 'uv');
+    if (!existsSync(existingManifestPath) || !verifySafeExecutable(rootReal, existingBinPath)) return null;
+    try {
+      const existing = JSON.parse(readFileSync(existingManifestPath, 'utf8')) as UvRuntimeManifest;
+      if (existing.schema === 'bot.agent-tools-uv/1' && existing.version === uvVer && existing.arch === arch && SHA256_RE.test(existing.sha256)) return existing;
+    } catch {}
+    return null;
+  }
+
   private activeClaudeDependsOnNode(rootReal: string, active: Iterable<string>, nodeVer: string, arch: AgentToolArch): boolean {
     for (const version of active) {
       const manifest = readValidCliManifest(rootReal, 'claude_code', version, arch, this.containerRoot, this.libc);
@@ -816,6 +1197,82 @@ export class AgentToolManager {
     }
   }
 
+  private async ensureUvRuntime(rootReal: string, arch: AgentToolArch): Promise<{ hostBin: string; containerBin: string; artifact: AgentToolArtifact }> {
+    const uvVer = BUNDLED_UV_RELEASE.version;
+    const asset = BUNDLED_UV_RELEASE.assets[arch];
+    const finalDir = resolve(rootReal, 'uv', uvVer);
+    const existing = this.existingUvRuntime(rootReal, arch, uvVer);
+    if (existing) {
+      return {
+        hostBin: resolve(finalDir, 'bin', 'uv'),
+        containerBin: existing.container_executable,
+        artifact: { role: 'uv_runtime', source_url: existing.source_url, sha256: existing.sha256, bytes: existing.bytes },
+      };
+    }
+
+    const primaryOrigin = this.sources.githubDownloadOrigins[0]?.replace(/\/+$/, '');
+    if (!primaryOrigin) throw new TaskError('agent_tool_download_failed', 'failed', 'github_download_origin_missing');
+    const downloadUrl = `${primaryOrigin}/${BUNDLED_UV_RELEASE.repo}/releases/download/${uvVer}/${asset.name}`;
+    const archiveBytes = await this.fetchBytes(downloadUrl, this.sources.githubDownloadOrigins);
+    const actualSha256 = createHash('sha256').update(archiveBytes).digest('hex');
+    const expectedUvSha = (this.sources.allowLoopbackHttp === true ? this.sources.testDigests?.uv?.[arch] : undefined) ?? asset.sha256;
+    verifyDigestHex(actualSha256, expectedUvSha, asset.name);
+
+    const stagingRoot = resolve(rootReal, '.staging');
+    mkdirSync(stagingRoot, { recursive: true, mode: 0o755 });
+    const stageDir = resolve(stagingRoot, `uv-${uvVer}-${randomBytes(8).toString('hex')}`);
+    try {
+      mkdirSync(stageDir, { recursive: true, mode: 0o755 });
+      chmodSync(stageDir, 0o755);
+      const unpackDir = resolve(stageDir, 'unpacked');
+      await extractTarGzAsync(archiveBytes, unpackDir, {
+        stripComponents: 0,
+        include: rel => rel === asset.entry || rel === 'uv',
+      });
+      const extracted = existsSync(resolve(unpackDir, asset.entry))
+        ? resolve(unpackDir, asset.entry)
+        : existsSync(resolve(unpackDir, 'uv'))
+          ? resolve(unpackDir, 'uv')
+          : null;
+      if (!extracted || !lstatSync(extracted).isFile() || lstatSync(extracted).isSymbolicLink()) {
+        throw new TaskError('agent_tool_archive_invalid', 'failed', 'uv_binary_missing_in_archive');
+      }
+      const binDir = resolve(stageDir, 'bin');
+      mkdirSync(binDir, { recursive: true, mode: 0o755 });
+      chmodSync(binDir, 0o755);
+      const targetBin = resolve(binDir, 'uv');
+      renameSync(extracted, targetBin);
+      chmodSync(targetBin, 0o755);
+      rmSync(unpackDir, { recursive: true, force: true });
+
+      const containerBin = posix.join(this.containerRoot, 'uv', uvVer, 'bin', 'uv');
+      const manifest: UvRuntimeManifest = {
+        schema: 'bot.agent-tools-uv/1',
+        version: uvVer,
+        arch,
+        installed_at: new Date().toISOString(),
+        container_executable: containerBin,
+        source_url: downloadUrl,
+        sha256: actualSha256,
+        bytes: archiveBytes.length,
+      };
+      const manifestPath = resolve(stageDir, 'manifest.json');
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
+      chmodSync(manifestPath, 0o644);
+      const uvParent = resolve(rootReal, 'uv');
+      mkdirSync(uvParent, { recursive: true, mode: 0o755 });
+      chmodSync(uvParent, 0o755);
+      this.replaceVersionDir(stageDir, finalDir, { cli: 'uv', version: uvVer, rootReal, arch });
+      return {
+        hostBin: resolve(finalDir, 'bin', 'uv'),
+        containerBin,
+        artifact: { role: 'uv_runtime', source_url: downloadUrl, sha256: actualSha256, bytes: archiveBytes.length },
+      };
+    } finally {
+      rmSync(stageDir, { recursive: true, force: true });
+    }
+  }
+
   private async installClaudeCode(rootReal: string, version: string, arch: AgentToolArch, expectedSha256?: string, expectedNativeSha256?: string): Promise<AgentToolManifest> {
     const nodeArtifact = await this.ensureNodeRuntime(rootReal, arch);
     const npmBase = this.sources.npmRegistryBase.replace(/\/+$/, '');
@@ -841,8 +1298,6 @@ export class AgentToolManager {
     const optionalDeps = (pkgMeta.optionalDependencies && typeof pkgMeta.optionalDependencies === 'object')
       ? pkgMeta.optionalDependencies as Record<string, string>
       : {};
-    // Match the target container libc (`node:22-bookworm-slim` is glibc; the `-musl` package is dynamically linked
-    // against `/lib/ld-musl-*.so.1` and cannot execute on glibc).
     const glibcPkg = `@anthropic-ai/claude-code-linux-${arch}`;
     const muslPkg = `@anthropic-ai/claude-code-linux-${arch}-musl`;
     const desiredNativePkg = this.libc === 'musl' ? muslPkg : glibcPkg;
@@ -1012,15 +1467,178 @@ export class AgentToolManager {
     }
   }
 
+  private writeAcpSelectedPointer(rootReal: string, product: AgentToolAcpProduct, version: string): void {
+    readAcpProduct(rootReal, product, version);
+    const parent = resolve(rootReal, 'acp', product);
+    const tmp = resolve(parent, `.selected-${randomBytes(6).toString('hex')}`);
+    writeFileSync(tmp, version + '\n', { mode: 0o644 });
+    chmodSync(tmp, 0o644);
+    renameSync(tmp, resolve(parent, 'selected'));
+  }
+
+  private async installICode(rootReal: string, version: string, arch: AgentToolArch, expectedSha256?: string): Promise<AgentToolManifest> {
+    const release = icodeReleases.get(version);
+    const pinnedSha = (this.sources.allowLoopbackHttp === true ? this.sources.testDigests?.icode?.[`${version}:${arch}`] : undefined) ?? release?.sha256[arch];
+    const assetName = release?.assets[arch];
+    if (!release || !pinnedSha || !assetName) {
+      throw new TaskError('agent_tool_version_unverified', 'waiting_configuration', `icode@${version} (${arch})`);
+    }
+    if (expectedSha256) verifyDigestHex(pinnedSha, expectedSha256, 'icode_offline_archive');
+    const primaryOrigin = this.sources.githubDownloadOrigins[0]?.replace(/\/+$/, '');
+    if (!primaryOrigin) throw new TaskError('agent_tool_download_failed', 'failed', 'github_download_origin_missing');
+    const downloadUrl = `${primaryOrigin}/${release.repo}/releases/download/${release.tag}/${assetName}`;
+    const archiveBytes = await this.fetchBytes(downloadUrl, this.sources.githubDownloadOrigins);
+    const actualSha256 = createHash('sha256').update(archiveBytes).digest('hex');
+    verifyDigestHex(actualSha256, pinnedSha, assetName);
+
+    const stagingRoot = resolve(rootReal, '.staging');
+    mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+    const stageDir = resolve(stagingRoot, `icode-${version}-${randomBytes(8).toString('hex')}`);
+    try {
+      mkdirSync(stageDir, { recursive: true, mode: 0o755 });
+      chmodSync(stageDir, 0o755);
+      const unpackDir = resolve(stageDir, 'unpacked');
+      await extractTarGzAsync(archiveBytes, unpackDir, {
+        stripComponents: 0,
+        include: rel => rel === 'icode',
+      });
+      const extracted = resolve(unpackDir, 'icode');
+      if (!existsSync(extracted) || !lstatSync(extracted).isFile() || lstatSync(extracted).isSymbolicLink()) {
+        throw new TaskError('agent_tool_archive_invalid', 'failed', 'icode_binary_missing_in_archive');
+      }
+      const binDir = resolve(stageDir, 'bin');
+      mkdirSync(binDir, { recursive: true, mode: 0o755 });
+      chmodSync(binDir, 0o755);
+      const targetBin = resolve(binDir, 'icode');
+      renameSync(extracted, targetBin);
+      chmodSync(targetBin, 0o755);
+      rmSync(unpackDir, { recursive: true, force: true });
+
+      const installedAt = new Date().toISOString();
+      const acpManifest = {
+        schema: 'bot.acp-product/1' as const,
+        id: icodeProductId,
+        version,
+        distribution: 'linux-offline' as const,
+        installed_at: installedAt,
+        source: `https://github.com/${release.repo}/commit/${release.commit}`,
+        sourceSha256: release.sha256[arch]!,
+        artifacts: [
+          { role: 'offline_archive', source_url: downloadUrl, sha256: actualSha256, bytes: archiveBytes.length },
+        ],
+        launch: icodeLaunch,
+      };
+      const manifestPath = resolve(stageDir, 'manifest.json');
+      writeFileSync(manifestPath, JSON.stringify(acpManifest, null, 2) + '\n', { mode: 0o644 });
+      chmodSync(manifestPath, 0o644);
+
+      const finalDir = resolve(rootReal, 'acp', icodeProductId, version);
+      mkdirSync(dirname(finalDir), { recursive: true, mode: 0o755 });
+      chmodSync(dirname(finalDir), 0o755);
+      this.replaceVersionDir(stageDir, finalDir, { cli: icodeProductId, version, rootReal, arch });
+      this.writeAcpSelectedPointer(rootReal, icodeProductId, version);
+      return acpManifestToView(readAcpProduct(rootReal, icodeProductId, version), icodeProductId, arch, this.containerRoot, finalDir);
+    } finally {
+      rmSync(stageDir, { recursive: true, force: true });
+    }
+  }
+
+  private async installWorkSwarm(rootReal: string, version: string, arch: AgentToolArch, expectedSha256?: string): Promise<AgentToolManifest> {
+    const release = workswarmReleases.get(version);
+    if (!release) {
+      throw new TaskError('agent_tool_version_unverified', 'waiting_configuration', `workswarm@${version}`);
+    }
+    const override = this.sources.allowLoopbackHttp === true ? this.sources.testDigests?.workswarm?.[version] : undefined;
+    const expectedPyprojectSha = override?.pyprojectSha256 ?? release.pyprojectSha256;
+    const expectedLockSha = override?.lockSha256 ?? release.lockSha256;
+    const expectedWheelSha = override?.wheelSha256 ?? release.wheelSha256;
+    const expectedSourceSha = override?.sourceSha256 ?? release.sourceSha256;
+    if (expectedSha256) verifyDigestHex(expectedWheelSha, expectedSha256, release.wheel);
+    if (!this.acpBuilder) {
+      throw new TaskError(
+        'agent_tool_isolated_installer_required',
+        'waiting_configuration',
+        'WorkSwarm installation requires the isolated manager installer container.',
+      );
+    }
+    const uv = await this.ensureUvRuntime(rootReal, arch);
+    const rawOrigin = this.sources.rawGithubOrigins[0]?.replace(/\/+$/, '');
+    const ghOrigin = this.sources.githubDownloadOrigins[0]?.replace(/\/+$/, '');
+    if (!rawOrigin || !ghOrigin) throw new TaskError('agent_tool_download_failed', 'failed', 'trusted_origin_missing');
+
+    const pyprojectUrl = `${rawOrigin}/${release.repo}/${release.commit}/pyproject.toml`;
+    const lockUrl = `${rawOrigin}/${release.repo}/${release.commit}/uv.lock`;
+    const wheelUrl = `${ghOrigin}/${release.repo}/releases/download/${release.tag}/${release.wheel}`;
+
+    const pyprojectBytes = await this.fetchBytes(pyprojectUrl, this.sources.rawGithubOrigins);
+    verifyDigestHex(createHash('sha256').update(pyprojectBytes).digest('hex'), expectedPyprojectSha, 'pyproject.toml');
+    const lockBytes = await this.fetchBytes(lockUrl, this.sources.rawGithubOrigins);
+    verifyDigestHex(createHash('sha256').update(lockBytes).digest('hex'), expectedLockSha, 'uv.lock');
+    const wheelBytes = await this.fetchBytes(wheelUrl, this.sources.githubDownloadOrigins);
+    verifyDigestHex(createHash('sha256').update(wheelBytes).digest('hex'), expectedWheelSha, release.wheel);
+
+    const stagingRoot = resolve(rootReal, '.staging');
+    mkdirSync(stagingRoot, { recursive: true, mode: 0o755 });
+    chmodSync(stagingRoot, 0o755);
+    const stageName = `workswarm-src-${version}-${randomBytes(8).toString('hex')}`;
+    const sourceDir = resolve(stagingRoot, stageName);
+    const containerSourceDir = posix.join(this.containerRoot, '.staging', stageName);
+    try {
+      mkdirSync(sourceDir, { recursive: true, mode: 0o755 });
+      chmodSync(sourceDir, 0o755);
+      writeFileSync(resolve(sourceDir, 'pyproject.toml'), pyprojectBytes, { mode: 0o644 });
+      writeFileSync(resolve(sourceDir, 'uv.lock'), lockBytes, { mode: 0o644 });
+      writeFileSync(resolve(sourceDir, release.wheel), wheelBytes, { mode: 0o644 });
+      const stagedHash = stageAcpSource(sourceDir);
+      verifyDigestHex(stagedHash, expectedSourceSha, 'workswarm_source_bundle');
+
+      const active = this.activeVersions();
+      if (active.has(version)) {
+        throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${workswarmProductId}@${version}`);
+      }
+
+      await this.acpBuilder({
+        product: workswarmProductId,
+        version,
+        sourceDir,
+        containerSourceDir,
+        uvBin: uv.hostBin,
+        containerUvBin: uv.containerBin,
+      });
+
+      const finalDir = resolve(rootReal, 'acp', workswarmProductId, version);
+      const verified = readAcpProduct(rootReal, workswarmProductId, version);
+      this.writeAcpSelectedPointer(rootReal, workswarmProductId, version);
+      return acpManifestToView(verified, workswarmProductId, arch, this.containerRoot, finalDir);
+    } finally {
+      rmSync(sourceDir, { recursive: true, force: true });
+    }
+  }
+
   status(): AgentToolsVolumeStatus {
-    return inspectAgentTools(this.volumeRoot, { containerRoot: this.containerRoot, arch: this.explicitArch, libc: this.libc });
+    return inspectAgentTools(this.volumeRoot, {
+      containerRoot: this.containerRoot,
+      arch: this.explicitArch,
+      libc: this.libc,
+      installing: this.installing,
+      autoInstallEnabled: this.autoInstallEnabled,
+    });
   }
 
   select(cli: AgentToolCli): SelectedCliVersion {
     return selectCompatibleCliVersion(this.volumeRoot, cli, { containerRoot: this.containerRoot, arch: this.explicitArch, libc: this.libc });
   }
 
-  install(input: { cli: AgentToolCli; version: string; sha256?: string; nativeSha256?: string; retainCount?: number; protectedVersions?: Iterable<string> | (() => Iterable<string>) }): Promise<{
+  install(input: {
+    cli: AgentToolProduct;
+    version?: string;
+    mode?: 'install' | 'upgrade';
+    sha256?: string;
+    nativeSha256?: string;
+    retainCount?: number;
+    protectedVersions?: Iterable<string> | (() => Iterable<string>);
+    fromAutoInstall?: boolean;
+  }): Promise<{
     installed: AgentToolManifest;
     compatible: boolean;
     pruned: string[];
@@ -1028,10 +1646,12 @@ export class AgentToolManager {
     protected_invalid: string[];
   }> {
     return this.serialized(async () => {
-      if (!AGENT_TOOL_CLIS.includes(input.cli)) {
+      if (!isAgentToolProduct(input.cli)) {
         throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'unsupported_cli');
       }
-      const parsed = parseSemver(input.version);
+      const entry = AGENT_PRODUCT_MAP.get(input.cli)!;
+      const versionStr = (input.version ?? entry.defaultVersion).trim();
+      const parsed = parseSemver(versionStr);
       if (!parsed) {
         throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_version');
       }
@@ -1044,67 +1664,242 @@ export class AgentToolManager {
       const arch = this.requireArch();
       const rootReal = this.requireVolumeRoot();
       rmSync(resolve(rootReal, '.staging'), { recursive: true, force: true });
+
+      if (input.mode === 'upgrade' && isAgentToolCli(input.cli)) {
+        const before = inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch, libc: this.libc });
+        if (before.selected_version && compareSemver(parsed.raw, before.selected_version) <= 0) {
+          throw new TaskError(
+            'agent_tool_invalid',
+            'waiting_configuration',
+            `upgrade_version_must_exceed_selected:${before.selected_version}`,
+          );
+        }
+      }
+      if (!isAgentToolCli(input.cli) && !supportedProductVersions(input.cli, arch).includes(parsed.raw)) {
+        throw new TaskError('agent_tool_version_unverified', 'waiting_configuration', `${input.cli}@${parsed.raw}`);
+      }
+
       const supplied = input.protectedVersions;
       this.activeVersionProvider = typeof supplied === 'function' ? supplied : () => supplied ?? [];
+      this.installing.add(input.cli);
       try {
         const active = this.activeVersions();
-        // Reinstalling a version an active run is executing would delete its directory before the replacement is ready,
-        // so refuse while it runs. replaceVersionDir() repeats the check where the directory is actually swapped for one
-        // admitted during the download; prune keeps protecting the same set further down.
         if (active.has(parsed.raw)) {
           throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${parsed.raw}`);
         }
         if (input.cli === 'claude_code') {
           const nodeVer = parseSemver(this.nodeVersion)?.raw;
-          // Only refuse when this install would really replace Node: a reusable runtime is left alone by ensureNodeRuntime.
           if (nodeVer && !this.existingNodeRuntime(rootReal, arch, nodeVer) && this.activeClaudeDependsOnNode(rootReal, active, nodeVer, arch)) {
             throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `node@${nodeVer}`);
           }
         }
-        const installed = input.cli === 'claude_code'
-          ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase(), input.nativeSha256?.toLowerCase())
-          : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
+        let installed: AgentToolManifest;
+        if (input.cli === 'claude_code') {
+          installed = await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase(), input.nativeSha256?.toLowerCase());
+        } else if (input.cli === 'codex') {
+          installed = await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
+        } else if (input.cli === icodeProductId) {
+          installed = await this.installICode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
+        } else {
+          installed = await this.installWorkSwarm(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
+        }
+
+        // Clear any removed flag or previous error upon successful install/upgrade.
+        this.updateProductState(rootReal, input.cli, () => ({
+          removed: false,
+          last_error: null,
+          last_error_detail: null,
+          last_attempt_at: new Date(this.clock()).toISOString(),
+          next_retry_at: null,
+          failed_attempts: 0,
+        }));
+
         const protectedSet = new Set<string>([installed.version, ...active]);
         const sweep = input.retainCount !== undefined
           ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet)
           : { removed: [], protectedInvalid: [] };
         return {
           installed,
-          compatible: satisfiesCliRange(input.cli, parsed.raw),
+          compatible: satisfiesProductVersion(input.cli, parsed.raw, arch),
           pruned: sweep.removed,
           protected_invalid: sweep.protectedInvalid,
           status: inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch, libc: this.libc }),
         };
+      } catch (err) {
+        const code = err instanceof TaskError ? err.code : 'agent_tool_download_failed';
+        const detail = err instanceof TaskError ? (err.detail ?? err.code) : String((err as Error)?.message || 'install_failed').slice(0, 300);
+        const nowMs = this.clock();
+        try {
+          this.updateProductState(rootReal, input.cli, prev => {
+            const attempts = input.fromAutoInstall ? prev.failed_attempts + 1 : prev.failed_attempts;
+            const backoff = this.autoInstallBackoffMs[Math.min(Math.max(0, attempts - 1), this.autoInstallBackoffMs.length - 1)] ?? 300_000;
+            return {
+              removed: input.fromAutoInstall ? prev.removed : false,
+              last_error: code,
+              last_error_detail: detail,
+              last_attempt_at: new Date(nowMs).toISOString(),
+              next_retry_at: input.fromAutoInstall ? new Date(nowMs + backoff).toISOString() : prev.next_retry_at,
+              failed_attempts: attempts,
+            };
+          });
+        } catch {}
+        throw err;
+      } finally {
+        this.installing.delete(input.cli);
+        this.activeVersionProvider = null;
+      }
+    });
+  }
+
+  /**
+   * Deletes either a single version (`version` specified) or the entire Agent (`version` omitted).
+   * Running versions are always protected (409 `agent_tool_version_in_use`).
+   * Whole-Agent removal (or removing the last installed version) marks `removed: true` so startup auto-install skips it
+   * until an administrator explicitly clicks Install again (#1260).
+   */
+  remove(input: {
+    cli: AgentToolProduct;
+    version?: string;
+    protectedVersions?: Iterable<string> | (() => Iterable<string>);
+  }): Promise<{ removed: string[]; removed_agent: boolean; status: AgentToolsVolumeStatus }> {
+    return this.serialized(async () => {
+      if (!isAgentToolProduct(input.cli)) {
+        throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'unsupported_cli');
+      }
+      if (input.version !== undefined && !acpVersion.test(input.version.trim())) {
+        throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_version');
+      }
+      const arch = this.requireArch();
+      const rootReal = this.requireVolumeRoot();
+      const supplied = input.protectedVersions ?? (this.protectedVersions ? () => this.protectedVersions!(input.cli) : undefined);
+      this.activeVersionProvider = typeof supplied === 'function' ? supplied : () => supplied ?? [];
+      try {
+        const active = this.activeVersions();
+        const targetVersion = input.version?.trim();
+        const removed: string[] = [];
+
+        if (isAgentToolCli(input.cli)) {
+          const cliDir = resolve(rootReal, input.cli);
+          if (targetVersion) {
+            if (active.has(targetVersion)) {
+              throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${targetVersion}`);
+            }
+            const verDir = resolve(cliDir, targetVersion);
+            if (existsSync(verDir) && isSubpath(rootReal, verDir) && verDir !== cliDir) {
+              rmSync(verDir, { recursive: true, force: true });
+              removed.push(targetVersion);
+            }
+            if (input.cli === 'claude_code') this.pruneUnreferencedNodeRuntimes(rootReal, arch);
+            const after = inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch, libc: this.libc });
+            const markRemoved = after.installed_manifests.length === 0;
+            if (markRemoved) {
+              this.updateProductState(rootReal, input.cli, () => ({ ...emptyProductState(), removed: true }));
+            }
+            return { removed, removed_agent: markRemoved, status: this.status() };
+          }
+          // Whole-agent removal: refuse if any installed version is active.
+          if (existsSync(cliDir) && lstatSync(cliDir).isDirectory()) {
+            const entries = readdirSync(cliDir);
+            for (const v of entries) {
+              if (active.has(v)) {
+                throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${v}`);
+              }
+            }
+            for (const v of entries) {
+              const verDir = resolve(cliDir, v);
+              if (isSubpath(rootReal, verDir) && verDir !== cliDir) {
+                rmSync(verDir, { recursive: true, force: true });
+                removed.push(v);
+              }
+            }
+          }
+          if (input.cli === 'claude_code') this.pruneUnreferencedNodeRuntimes(rootReal, arch);
+          this.updateProductState(rootReal, input.cli, () => ({ ...emptyProductState(), removed: true }));
+          return { removed, removed_agent: true, status: this.status() };
+        }
+
+        // ACP product (`icode` or `workswarm`)
+        const parent = resolve(rootReal, 'acp', input.cli);
+        const selectedFile = resolve(parent, 'selected');
+        if (targetVersion) {
+          if (active.has(targetVersion)) {
+            throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${targetVersion}`);
+          }
+          const verDir = resolve(parent, targetVersion);
+          const before = inspectAcpProductAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch });
+          const remaining = before.compatible_versions.filter(v => v !== targetVersion);
+          if (before.selected_version === targetVersion) {
+            if (remaining.length > 0) {
+              this.writeAcpSelectedPointer(rootReal, input.cli, remaining[0]!);
+            } else if (existsSync(selectedFile)) {
+              rmSync(selectedFile, { force: true });
+            }
+          }
+          if (existsSync(verDir) && isSubpath(rootReal, verDir) && verDir !== parent) {
+            rmSync(verDir, { recursive: true, force: true });
+            removed.push(targetVersion);
+          }
+          const markRemoved = remaining.length === 0;
+          if (markRemoved) {
+            this.updateProductState(rootReal, input.cli, () => ({ ...emptyProductState(), removed: true }));
+          }
+          return { removed, removed_agent: markRemoved, status: this.status() };
+        }
+
+        // Whole ACP agent removal
+        if (existsSync(parent) && lstatSync(parent).isDirectory()) {
+          const entries = readdirSync(parent).filter(name => acpVersion.test(name));
+          for (const v of entries) {
+            if (active.has(v)) {
+              throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${v}`);
+            }
+          }
+          if (existsSync(selectedFile)) rmSync(selectedFile, { force: true });
+          for (const v of entries) {
+            const verDir = resolve(parent, v);
+            if (isSubpath(rootReal, verDir) && verDir !== parent) {
+              rmSync(verDir, { recursive: true, force: true });
+              removed.push(v);
+            }
+          }
+        }
+        this.updateProductState(rootReal, input.cli, () => ({ ...emptyProductState(), removed: true }));
+        return { removed, removed_agent: true, status: this.status() };
       } finally {
         this.activeVersionProvider = null;
       }
     });
   }
 
-  prune(options: { cli?: AgentToolCli; retainCount?: number; protectedVersions?: Partial<Record<AgentToolCli, Iterable<string>>> | Iterable<string> | ((cli: AgentToolCli) => Iterable<string>) } = {}): Promise<{ pruned: Record<AgentToolCli, string[]>; protected_invalid: Record<AgentToolCli, string[]>; status: AgentToolsVolumeStatus }> {
+  prune(options: {
+    cli?: AgentToolProduct;
+    retainCount?: number;
+    protectedVersions?: Partial<Record<AgentToolProduct, Iterable<string>>> | Iterable<string> | ((cli: AgentToolProduct) => Iterable<string>);
+  } = {}): Promise<{ pruned: Record<AgentToolProduct, string[]>; protected_invalid: Record<AgentToolProduct, string[]>; status: AgentToolsVolumeStatus }> {
     return this.serialized(async () => {
       const retainCount = options.retainCount ?? DEFAULT_CLI_RETAIN_COUNT;
       if (!Number.isSafeInteger(retainCount) || retainCount < CLI_RETAIN_BOUNDS[0] || retainCount > CLI_RETAIN_BOUNDS[1]) {
         throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_retain_count');
       }
       const arch = this.requireArch();
+      const emptyMap = () => Object.fromEntries(AGENT_TOOL_PRODUCTS.map(p => [p, [] as string[]])) as Record<AgentToolProduct, string[]>;
       if (!existsSync(this.volumeRoot)) {
-        return { pruned: { claude_code: [], codex: [] }, protected_invalid: { claude_code: [], codex: [] }, status: this.status() };
+        return { pruned: emptyMap(), protected_invalid: emptyMap(), status: this.status() };
       }
       const rootReal = this.requireVolumeRoot();
       rmSync(resolve(rootReal, '.staging'), { recursive: true, force: true });
-      const targets = options.cli ? [options.cli] : [...AGENT_TOOL_CLIS];
-      const pruned: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };
-      const protectedInvalid: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };
+      const targets = options.cli ? [options.cli] : [...AGENT_TOOL_PRODUCTS];
+      const pruned = emptyMap();
+      const protectedInvalid = emptyMap();
       const isFn = typeof options.protectedVersions === 'function';
       const isIterable = !isFn && options.protectedVersions && typeof (options.protectedVersions as any)[Symbol.iterator] === 'function';
       for (const cli of targets) {
-        if (!AGENT_TOOL_CLIS.includes(cli)) throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'unsupported_cli');
+        if (!isAgentToolProduct(cli)) throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'unsupported_cli');
         const extra = isFn
-          ? (options.protectedVersions as (cli: AgentToolCli) => Iterable<string>)(cli)
+          ? (options.protectedVersions as (c: AgentToolProduct) => Iterable<string>)(cli)
           : isIterable
             ? (options.protectedVersions as Iterable<string>)
-            : (options.protectedVersions as Partial<Record<AgentToolCli, Iterable<string>>> | undefined)?.[cli];
+            : (options.protectedVersions as Partial<Record<AgentToolProduct, Iterable<string>>> | undefined)?.[cli];
         const sweep = this.pruneLocked(rootReal, arch, cli, retainCount, extra);
         pruned[cli] = sweep.removed;
         protectedInvalid[cli] = sweep.protectedInvalid;
@@ -1113,10 +1908,39 @@ export class AgentToolManager {
     });
   }
 
-  private pruneLocked(rootReal: string, arch: AgentToolArch, cli: AgentToolCli, retainCount: number, extraProtected?: Iterable<string>): { removed: string[]; protectedInvalid: string[] } {
+  private pruneLocked(rootReal: string, arch: AgentToolArch, cli: AgentToolProduct, retainCount: number, extraProtected?: Iterable<string>): { removed: string[]; protectedInvalid: string[] } {
     if (!Number.isSafeInteger(retainCount) || retainCount < CLI_RETAIN_BOUNDS[0] || retainCount > CLI_RETAIN_BOUNDS[1]) {
       throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_retain_count');
     }
+    const stagingTrash = resolve(rootReal, '.staging');
+    mkdirSync(stagingTrash, { recursive: true, mode: 0o700 });
+
+    const protectedNames = new Set<string>();
+    for (const name of [...(this.protectedVersions?.(cli) ?? []), ...(extraProtected ?? [])]) {
+      if (typeof name === 'string' && name.trim()) protectedNames.add(name.trim());
+    }
+
+    if (!isAgentToolCli(cli)) {
+      const parent = resolve(rootReal, 'acp', cli);
+      if (!existsSync(parent)) return { removed: [], protectedInvalid: [] };
+      const info = inspectAcpProductAvailability(this.volumeRoot, cli, { containerRoot: this.containerRoot, arch });
+      // Always protect the currently selected ACP version so prune can never dangle `selected` (#1260 F4).
+      if (info.selected_version) protectedNames.add(info.selected_version);
+      const validVersions = [...info.compatible_versions];
+      const keepSet = new Set<string>([...validVersions.slice(0, retainCount), ...protectedNames]);
+      const removed: string[] = [];
+      for (const ver of validVersions) {
+        if (keepSet.has(ver)) continue;
+        const verPath = resolve(parent, ver);
+        if (!isSubpath(rootReal, verPath) || verPath === parent) continue;
+        const trashPath = resolve(stagingTrash, `trash-${cli}-${ver}-${randomBytes(6).toString('hex')}`);
+        renameSync(verPath, trashPath);
+        rmSync(trashPath, { recursive: true, force: true });
+        removed.push(ver);
+      }
+      return { removed, protectedInvalid: [] };
+    }
+
     const cliDir = resolve(rootReal, cli);
     if (!existsSync(cliDir)) return { removed: [], protectedInvalid: [] };
 
@@ -1129,7 +1953,6 @@ export class AgentToolManager {
     }
     validVersions.sort((a, b) => compareSemver(b, a));
 
-    // Retain the newest N compatible versions; if fewer than N compatible versions exist, retain newest remaining up to N.
     const compatible = validVersions.filter(v => satisfiesCliRange(cli, v));
     const incompatible = validVersions.filter(v => !satisfiesCliRange(cli, v));
     const keepSet = new Set<string>(compatible.slice(0, retainCount));
@@ -1137,27 +1960,10 @@ export class AgentToolManager {
       if (keepSet.size >= retainCount) break;
       keepSet.add(v);
     }
-    // Never remove versions currently bound to active running task_runs or explicitly protected (e.g. just installed).
-    for (const v of this.protectedVersions?.(cli) ?? []) {
-      if (typeof v === 'string' && v.trim()) keepSet.add(v.trim());
-    }
-    for (const v of extraProtected ?? []) {
-      if (typeof v === 'string' && v.trim()) keepSet.add(v.trim());
-    }
+    for (const v of protectedNames) keepSet.add(v);
 
     const removed: string[] = [];
     const protectedInvalid: string[] = [];
-    const stagingTrash = resolve(rootReal, '.staging');
-    mkdirSync(stagingTrash, { recursive: true, mode: 0o700 });
-
-    // A directory whose manifest cannot be read is normally a leftover of an interrupted install and is cleared here.
-    // The exception is a directory one of the protected names still points at — an active run executes it, or it was
-    // just installed — because deleting it would break that run even though nothing can describe the directory any more.
-    // Those are kept and reported instead (#751), so the caller can show them rather than silently losing a version.
-    const protectedNames = new Set<string>();
-    for (const name of [...(this.protectedVersions?.(cli) ?? []), ...(extraProtected ?? [])]) {
-      if (typeof name === 'string' && name.trim()) protectedNames.add(name.trim());
-    }
     for (const bad of brokenDirs) {
       const badPath = resolve(cliDir, bad);
       if (!isSubpath(rootReal, badPath) || badPath === cliDir) continue;
@@ -1173,9 +1979,6 @@ export class AgentToolManager {
       removed.push(ver);
     }
 
-    // Node runtimes are launched by claude_code alone and only its manifests name them, so this sweep follows that pass
-    // (a codex-only sweep would otherwise delete the runtime a kept claude_code directory still executes, the same way
-    // the directory itself was being deleted before #751).
     if (cli === 'claude_code') this.pruneUnreferencedNodeRuntimes(rootReal, arch, protectedInvalid);
     return { removed, protectedInvalid };
   }
@@ -1186,10 +1989,6 @@ export class AgentToolManager {
     for (const m of claudeStatus.installed_manifests) {
       if (m.node_version) referencedNodes.add(m.node_version);
     }
-    // A protected directory whose manifest no longer validates is still the one a run executes, and the runtime it
-    // launches is still named in the text of that manifest even when the file has stopped parsing. When not even the
-    // text names it, nothing on the volume can say which runtime it needs, so the sweep keeps them all: a runtime kept
-    // one sweep too long costs disk, a deleted one takes the binary away from a live run.
     for (const version of unreadable) {
       const named = brokenManifestNodeVersion(rootReal, version);
       if (named) referencedNodes.add(named); else return;
@@ -1203,5 +2002,102 @@ export class AgentToolManager {
         rmSync(dir, { recursive: true, force: true });
       }
     }
+  }
+
+  /**
+   * One background reconciliation pass for startup auto-installation (#1260):
+   * - Skips when `BOT_AGENT_TOOLS_AUTO_INSTALL=0` or volume/arch unavailable.
+   * - Skips any agent marked `removed: true` by an administrator.
+   * - Skips any agent whose default version (or a newer compatible version for CLIs) is already installed.
+   * - Respects persisted exponential backoff (`next_retry_at`) after failures so offline restarts do not loop.
+   */
+  async reconcileAutoInstall(options: {
+    retainCount?: () => number;
+    protectedVersions?: (cli: AgentToolProduct) => Iterable<string>;
+    onInstalled?: (product: AgentToolProduct, version: string) => void;
+    onFailed?: (product: AgentToolProduct, version: string, error: unknown) => void;
+  } = {}): Promise<{ installed: string[]; skipped: string[]; failed: { product: AgentToolProduct; error: string }[] }> {
+    const installed: string[] = [];
+    const skipped: string[] = [];
+    const failed: { product: AgentToolProduct; error: string }[] = [];
+    const enabled = this.autoInstallEnabled ?? isAutoInstallEnabled();
+    if (!enabled) return { installed, skipped: [...AGENT_TOOL_PRODUCTS], failed };
+    const snap = this.status();
+    if (!snap.volume_present || !snap.arch) return { installed, skipped: [...AGENT_TOOL_PRODUCTS], failed };
+
+    const nowMs = this.clock();
+    for (const entry of AGENT_PRODUCT_REGISTRY) {
+      const current = this.status().clis[entry.id];
+      if (!current) continue;
+      if (current.removed) {
+        skipped.push(entry.id);
+        continue;
+      }
+      const alreadyReady = entry.kind === 'cli'
+        ? current.selected_version !== null && compareSemver(current.selected_version, entry.defaultVersion) >= 0
+        : current.selected_version === entry.defaultVersion;
+      if (alreadyReady) {
+        skipped.push(entry.id);
+        continue;
+      }
+      if (current.next_retry_at && Date.parse(current.next_retry_at) > nowMs) {
+        skipped.push(entry.id);
+        continue;
+      }
+      try {
+        const retainCount = options.retainCount ? options.retainCount() : DEFAULT_CLI_RETAIN_COUNT;
+        await this.install({
+          cli: entry.id,
+          version: entry.defaultVersion,
+          retainCount,
+          protectedVersions: () => options.protectedVersions ? options.protectedVersions(entry.id) : (this.protectedVersions?.(entry.id) ?? []),
+          fromAutoInstall: true,
+        });
+        installed.push(`${entry.id}@${entry.defaultVersion}`);
+        options.onInstalled?.(entry.id, entry.defaultVersion);
+      } catch (error) {
+        const code = error instanceof TaskError ? error.code : 'agent_tool_download_failed';
+        failed.push({ product: entry.id, error: code });
+        options.onFailed?.(entry.id, entry.defaultVersion, error);
+      }
+    }
+    return { installed, skipped, failed };
+  }
+}
+
+/** Background startup & retry driver wired only from `src/main.ts`, never from `createControlPlane` (#1260 F7). */
+export class AgentToolsAutoInstaller {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private running: Promise<unknown> | null = null;
+  private stopped = false;
+
+  constructor(
+    private readonly tools: AgentToolManager,
+    private readonly options: {
+      retainCount?: () => number;
+      protectedVersions?: (cli: AgentToolProduct) => Iterable<string>;
+      onInstalled?: (product: AgentToolProduct, version: string) => void;
+      onFailed?: (product: AgentToolProduct, version: string, error: unknown) => void;
+      intervalMs?: number;
+    } = {},
+  ) {}
+
+  start(): void {
+    if (this.stopped || !isAutoInstallEnabled()) return;
+    const kick = () => {
+      if (this.stopped || this.running) return;
+      this.running = this.tools.reconcileAutoInstall(this.options)
+        .catch(err => console.error('[agent-tools] auto-install pass failed:', err))
+        .finally(() => { this.running = null; });
+    };
+    setTimeout(kick, 1000).unref();
+    this.timer = setInterval(kick, this.options.intervalMs ?? 5 * 60_000);
+    this.timer.unref?.();
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.running) await this.running.catch(() => {});
   }
 }

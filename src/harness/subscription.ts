@@ -2,98 +2,95 @@ import { TaskError } from '../agent/common.js';
 import type { AgentToolCli } from './agent-tools.js';
 
 /**
- * Reserved subscription model source interfaces for `claude_code` and `codex` (#705).
+ * Model source selector for container CLIs (`claude_code` and `codex`) (#705, #1260).
  *
- * This legacy model-source selector names platform model configuration, not the wire transport.
- * External Harnesses default to native direct connections; `modelTransport: 'gateway'` explicitly
- * selects the loopback model relay. Managed subscription credential staging remains reserved.
+ * - `'gateway'`: platform-managed model (direct or loopback model relay).
+ * - `'local_config'`: platform injects NO model configuration (no base URL, API key, `--model`, or
+ *   Codex `config.toml`/`bot_direct`); the CLI reads administrator-written configuration files from the
+ *   project computer's persistent HOME (`/workspace/home`) staged into the isolated per-run session directory.
  *
- * In `'subscription'` mode (reserved for a future release), the CLI would connect directly to vendor domains
- * allowlisted for the container, using sealed subscription credentials staged into the run's CLI state directory
- * only for the duration of the run, with CLI session transcripts collected when the run ends.
- * First release reserves configuration and interfaces only.
+ * Legacy `'subscription'` values in stored configurations normalize to `'local_config'`.
  */
-export type HarnessModelSource = 'gateway' | 'subscription';
+export type HarnessModelSource = 'gateway' | 'local_config';
 
-export const HARNESS_MODEL_SOURCES: readonly HarnessModelSource[] = ['gateway', 'subscription'] as const;
+export const HARNESS_MODEL_SOURCES: readonly HarnessModelSource[] = ['gateway', 'local_config'] as const;
 
-export const SUBSCRIPTION_CAPABLE_HARNESSES: ReadonlySet<string> = new Set<AgentToolCli>(['claude_code', 'codex']);
+export const LOCAL_CONFIG_CAPABLE_HARNESSES: ReadonlySet<string> = new Set<AgentToolCli>(['claude_code', 'codex']);
+/** Back-compat alias kept for existing callers/tests. */
+export const SUBSCRIPTION_CAPABLE_HARNESSES = LOCAL_CONFIG_CAPABLE_HARNESSES;
 
 export const SUBSCRIPTION_PROVIDER_DOMAINS: Record<AgentToolCli, readonly string[]> = {
   claude_code: ['api.anthropic.com', 'claude.ai'],
   codex: ['api.openai.com', 'chatgpt.com', 'auth.openai.com'],
 };
 
+export const LOCAL_CONFIG_FILES: Record<AgentToolCli, readonly string[]> = {
+  claude_code: ['/workspace/home/.claude/settings.json', '/workspace/home/.claude/.credentials.json'],
+  codex: ['/workspace/home/.codex/config.toml', '/workspace/home/.codex/auth.json'],
+};
+
+export const LOCAL_CONFIG_SECURITY_NOTICE =
+  '这些凭据存放在项目电脑的 /workspace/home 中，同一项目内任意 Agent 的原生 Shell 都可以读取。控制面不读取、不保存文件内容。';
+
 export const SUBSCRIPTION_NOT_IMPLEMENTED_MESSAGE =
-  '订阅模式暂未实现：首版仅预留配置项与接口（尚未实现订阅登录、容器域名白名单放行与结束会话采集），请将模型来源切换为“平台网关”。';
+  '仅 Claude Code 与 Codex 支持「项目电脑内自行配置」模式；请将模型来源切换回「平台模型」。';
 
-export interface SubscriptionCredentialBundle {
-  harness: AgentToolCli;
-  principal_id: string;
-  owner_confirmed_tos: boolean;
-  recommended_isolation: 'project_computer';
-  allowlisted_domains: readonly string[];
-  staged_files: Record<string, string>;
-  expires_at: string | null;
-}
-
-export interface SubscriptionStatusView {
+export interface LocalModelConfigStatusView {
   supported: boolean;
-  implemented: false;
-  configured: false;
-  recommended_isolation: 'project_computer';
+  implemented: true;
+  mode: 'local_config';
+  configured: boolean | null;
+  available: boolean;
+  config_files: readonly string[];
+  files?: Record<string, { path: string; exists: boolean; bytes: number | null; updated_at: string | null }>;
   allowlisted_domains: readonly string[];
   notice: string;
 }
 
-export interface SubscriptionCredentialStore {
-  status(projectId: string, harness: AgentToolCli): SubscriptionStatusView;
-  stageForRun(input: {
-    runId: string;
-    projectId: string;
-    harness: AgentToolCli;
-    isolation: 'none';
-  }): Promise<SubscriptionCredentialBundle>;
-  cleanupRun(runId: string): Promise<void>;
-  collectSessionTranscript(input: {
-    runId: string;
-    projectId: string;
-    harness: AgentToolCli;
-    files: Record<string, string>;
-  }): Promise<void>;
+export type SubscriptionStatusView = LocalModelConfigStatusView;
+
+export interface CliConfigSnapshot {
+  available: boolean;
+  reason?: string | null;
+  clis?: Partial<Record<AgentToolCli, {
+    configured: boolean;
+    files: Record<string, { path: string; exists: boolean; bytes: number | null; updated_at: string | null }>;
+  }>>;
 }
 
-export function subscriptionStatusView(harness: AgentToolCli): SubscriptionStatusView {
+export function subscriptionStatusView(harness: AgentToolCli, snapshot?: CliConfigSnapshot | null): LocalModelConfigStatusView {
+  const entry = snapshot?.available ? snapshot.clis?.[harness] : undefined;
   return {
     supported: true,
-    implemented: false,
-    configured: false,
-    recommended_isolation: 'project_computer',
+    implemented: true,
+    mode: 'local_config',
+    configured: snapshot ? (snapshot.available ? Boolean(entry?.configured) : null) : null,
+    available: Boolean(snapshot?.available),
+    config_files: LOCAL_CONFIG_FILES[harness],
+    ...(entry?.files ? { files: entry.files } : {}),
     allowlisted_domains: SUBSCRIPTION_PROVIDER_DOMAINS[harness],
-    notice: SUBSCRIPTION_NOT_IMPLEMENTED_MESSAGE,
+    notice: LOCAL_CONFIG_SECURITY_NOTICE,
   };
 }
 
-export function isHarnessModelSource(value: unknown): value is HarnessModelSource {
-  return value === 'gateway' || value === 'subscription';
+export function normalizeHarnessModelSource(value: unknown): HarnessModelSource | null {
+  if (value === 'gateway') return 'gateway';
+  if (value === 'local_config' || value === 'subscription') return 'local_config';
+  return null;
 }
 
-export function assertHarnessModelSourceImplemented(source: HarnessModelSource | undefined, field?: string): void {
-  if (source === 'subscription') {
+export function isHarnessModelSource(value: unknown): value is HarnessModelSource | 'subscription' {
+  return normalizeHarnessModelSource(value) !== null;
+}
+
+export function assertHarnessModelSourceImplemented(
+  source: HarnessModelSource | 'subscription' | undefined,
+  field?: string,
+  harnessId?: string,
+): void {
+  const normalized = normalizeHarnessModelSource(source ?? 'gateway');
+  if (normalized === 'local_config' && harnessId && !LOCAL_CONFIG_CAPABLE_HARNESSES.has(harnessId)) {
     const prefix = field ? `${field}：` : '';
     throw new TaskError('subscription_mode_not_implemented', 'waiting_configuration', prefix + SUBSCRIPTION_NOT_IMPLEMENTED_MESSAGE);
   }
 }
-
-export const reservedSubscriptionStore: SubscriptionCredentialStore = {
-  status(_projectId, harness) {
-    return subscriptionStatusView(harness);
-  },
-  async stageForRun() {
-    throw new TaskError('subscription_mode_not_implemented', 'waiting_configuration', SUBSCRIPTION_NOT_IMPLEMENTED_MESSAGE);
-  },
-  async cleanupRun() {},
-  async collectSessionTranscript() {
-    throw new TaskError('subscription_mode_not_implemented', 'waiting_configuration', SUBSCRIPTION_NOT_IMPLEMENTED_MESSAGE);
-  },
-};

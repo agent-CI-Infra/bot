@@ -14,11 +14,14 @@ function roleModelResolution(role, state, access) {
     try {
       const value = await api(`/api/repositories/${repositoryId}/roles/resolve`, 'POST', { role: role.role_id, expected_revision: version });
       if (!live() || sequence !== request) return;
-      const snapshot = value.snapshot, model = snapshot.model, external = model.source === 'external_harness';
+      const snapshot = value.snapshot, model = snapshot.model, external = model.source === 'external_harness', localConfig = model.source === 'local_config';
       const facts = element('dl');
       for (const [caption, text] of [['配置版本', snapshot.config_revision], ['角色版本', snapshot.role_revision],
-        ['Agent 后端', `${harnessName(snapshot.harness.id)} · ${snapshot.harness.version}`], ['模型来源', external ? '执行器自带模型' : own(modelSources, model.source) || model.source],
-        ['模型名称', external ? '由执行器管理，不使用项目模型' : model.name], ['模型标识', external ? '不适用' : model.id], ['模型记录版本', external ? '不适用' : model.version]]) {
+        ['Agent 后端', `${harnessName(snapshot.harness.id)} · ${snapshot.harness.version}`],
+        ['模型来源', external ? '执行器自带模型' : localConfig ? '项目电脑内自行配置（不注入模型配置）' : own(modelSources, model.source) || model.source],
+        ['模型名称', external ? '由执行器管理，不使用项目模型' : localConfig ? '由项目电脑内的配置决定' : model.name],
+        ['模型标识', external || localConfig ? '不适用' : model.id],
+        ['模型记录版本', external || localConfig ? '不适用' : model.version]]) {
         facts.append(element('dt', caption), element('dd', String(text)));
       }
       result.append(facts, note('解析标识：' + value.snapshot_id)); status.textContent = '已读取已保存配置；没有保存草稿或启动任务。';
@@ -28,7 +31,9 @@ function roleModelResolution(role, state, access) {
       const reasons = { role_configuration_changed: '配置版本已变化，请读取最新角色配置并比较草稿后再检查。', role_disabled: '此角色已停用。',
         role_model_not_available: '显式选择的角色模型已删除、撤销或不可访问，不会换用其他模型。', role_model_profile_changed: '角色模型的地址或名称已变化，需要重新保存角色配置。',
         model_unavailable: '继承的模型当前不可用，不会换用其他模型。', model_not_configured: '项目尚未配置可用的默认模型，且此角色未单独指定模型。',
-        subscription_mode_not_implemented: '供应商订阅模式未实现，任务不会静默回退到平台模型网关。',
+        subscription_mode_not_implemented: '仅 Claude Code 与 Codex 支持项目电脑内自行配置模式。',
+        claude_local_config_missing: '项目电脑 /workspace/home 下未找到 Claude Code 配置文件，请先在机器配置中写入。',
+        codex_local_config_missing: '项目电脑 /workspace/home 下未找到 Codex 配置文件，请先在机器配置中写入。',
         harness_model_profile_unsupported: '此执行器使用自带模型，不能指定项目模型。', harness_role_unsupported: '执行器不支持此角色类型。' };
       status.textContent = `解析失败，当前结果未知：${reasons[err.code] || readErrorText(err)}${err.field ? '（配置项：' + err.field + '）' : ''}`;
     } finally { if (live() && sequence === request) read.disabled = false; }
@@ -60,12 +65,21 @@ function roleSettingsCard(role, state, redraw, access) {
     field('Agent 后端', roleBackendPicker(role, state, redraw)),
     ...(runtimeBox ? [runtimeBox] : []),
   );
-  if (backendInfo?.supported_model_sources?.includes('subscription')) {
+  if (backendInfo?.supported_model_sources?.some(isRoleLocalConfigSource)) {
     agent.append(field('模型来源', roleModelSourcePicker(role, state, redraw)));
-    if (role.harness_ref?.model_source === 'subscription') {
-      const subWarn = element('p', '供应商订阅模式未实现（subscription_mode_not_implemented）：保存后任务启动时将明确拒绝执行，不会回退到平台模型网关。日常运行请选择「平台网关（容器内模型中转）」。', 'view-error');
-      subWarn.dataset.testid = 'subscription-not-implemented';
-      agent.append(subWarn);
+    if (isRoleLocalConfigSource(role.harness_ref?.model_source)) {
+      const localCfg = backendInfo.runtime_status?.subscription;
+      const filesText = (localCfg?.config_files || []).join('、');
+      const cfgNotice = element('div', '', 'role-local-config-notice');
+      cfgNotice.dataset.testid = 'local-config-notice';
+      cfgNotice.append(
+        note(`模型由项目电脑内的配置决定：平台不会注入模型地址、API Key、--model 或 config.toml。每次运行前仅把 ${filesText || '/workspace/home 下的配置文件'} 复制到当前会话隔离目录，运行结束后清除副本。`),
+        note(localCfg?.notice || '这些凭据存放在项目电脑的 /workspace/home 中，同一项目内任意 Agent 的原生 Shell 都可以读取。控制面不读取、不保存文件内容。'),
+      );
+      if (typeof current === 'object' && current?.id) {
+        cfgNotice.append(consoleLink(`#/projects/${current.id}/machine`, '前往机器配置写入 CLI 配置文件', '在项目电脑 /workspace/home 中写入或删除配置文件'));
+      }
+      agent.append(cfgNotice);
     }
   }
   agent.append(field('模型', roleModelPicker(role, state, redraw)));

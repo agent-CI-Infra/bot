@@ -15,18 +15,33 @@ const claudeManifest = {
   artifacts: [{ role: 'package', source_url: 'https://registry.example/claude-code-2.1.319.tgz', sha256: 'a'.repeat(64), bytes: 4321 }],
 };
 const claude = (overrides = {}) => ({
-  cli: 'claude_code', available: true, compatible_range: '>=2.1.0 <3.0.0', tested_version: '2.1.319', selected_version: '2.1.319',
+  cli: 'claude_code', name: 'Claude Code', kind: 'cli', available: true, default_version: '2.1.319', allow_custom_version: true, supported_versions: [],
+  compatible_range: '>=2.1.0 <3.0.0', tested_version: '2.1.319', selected_version: '2.1.319',
   container_executable: '/opt/agent-tools/claude_code/2.1.319/bin/claude', node_version: '22.15.0',
-  compatible_versions: ['2.1.310', '2.1.319'], incompatible_versions: ['3.0.0'], installed_manifests: [claudeManifest], reason: null, ...overrides,
+  compatible_versions: ['2.1.310', '2.1.319'], incompatible_versions: ['3.0.0'], installed_manifests: [claudeManifest], reason: null,
+  removed: false, auto_install_state: 'idle', last_error: null, last_error_detail: null, last_attempt_at: null, next_retry_at: null, ...overrides,
 });
 const codex = (overrides = {}) => ({
-  cli: 'codex', available: false, compatible_range: '>=0.166.0 <1.0.0', tested_version: '0.166.0', selected_version: null,
+  cli: 'codex', name: 'Codex', kind: 'cli', available: false, default_version: '0.166.0', allow_custom_version: true, supported_versions: [],
+  compatible_range: '>=0.166.0 <1.0.0', tested_version: '0.166.0', selected_version: null,
   container_executable: null, node_version: null, compatible_versions: [], incompatible_versions: [], installed_manifests: [],
-  reason: 'cli_not_installed', ...overrides,
+  reason: 'cli_not_installed', removed: false, auto_install_state: 'idle', last_error: null, last_error_detail: null, last_attempt_at: null, next_retry_at: null, ...overrides,
+});
+const icode = (overrides = {}) => ({
+  cli: 'icode', name: 'iCode', kind: 'acp', available: false, default_version: '0.36.0', allow_custom_version: false, supported_versions: ['0.36.0'],
+  compatible_range: '0.36.0', tested_version: '0.36.0', selected_version: null,
+  container_executable: null, node_version: null, compatible_versions: [], incompatible_versions: [], installed_manifests: [],
+  reason: 'cli_not_installed', removed: false, auto_install_state: 'idle', last_error: null, last_error_detail: null, last_attempt_at: null, next_retry_at: null, ...overrides,
+});
+const workswarm = (overrides = {}) => ({
+  cli: 'workswarm', name: 'WorkSwarm', kind: 'acp', available: false, default_version: '0.2.9', allow_custom_version: false, supported_versions: ['0.2.9'],
+  compatible_range: '0.2.9', tested_version: '0.2.9', selected_version: null,
+  container_executable: null, node_version: null, compatible_versions: [], incompatible_versions: [], installed_manifests: [],
+  reason: 'cli_not_installed', removed: false, auto_install_state: 'idle', last_error: null, last_error_detail: null, last_attempt_at: null, next_retry_at: null, ...overrides,
 });
 const status = (overrides = {}) => ({
-  volume_root: '/srv/agent-tools', container_root: '/opt/agent-tools', volume_present: true, arch: 'x64', node_versions: ['22.15.0'],
-  retain_count: 3, retain_bounds: [1, 10], clis: { claude_code: claude(), codex: codex() }, ...overrides,
+  volume_root: '/srv/agent-tools', container_root: '/opt/agent-tools', volume_present: true, arch: 'x64', node_versions: ['22.15.0'], uv_versions: ['0.13.9'], auto_install_enabled: true,
+  retain_count: 3, retain_bounds: [1, 10], clis: { claude_code: claude(), codex: codex(), icode: icode(), workswarm: workswarm() }, ...overrides,
 });
 // #1039: a settings card title is an h2 (its sub-sections are h3), so match the card by the heading it starts with.
 const section = (panel, title) => panel.querySelectorAll('section').find(node => (node.querySelector('h2') || node.querySelector('h3'))?.textContent === title);
@@ -69,7 +84,7 @@ test('the tool volume category shows the volume, each CLI, every manifest and a 
   const install = section(panel, '安装版本').querySelector('form');
   const field = name => install.querySelectorAll('input').find(node => node.name === name);
   const select = name => install.querySelectorAll('select').find(node => node.name === name);
-  assert.deepEqual(select('cli').querySelectorAll('option').map(node => node.value), ['claude_code', 'codex']);
+  assert.deepEqual(select('cli').querySelectorAll('option').map(node => node.value), ['claude_code', 'codex', 'icode', 'workswarm']);
   assert.equal(field('version').value, '');
   assert.ok(field('sha256'), 'an exact download hash can be given');
   assert.ok(field('native_sha256'), 'Claude Code checks its native binary too');
@@ -84,12 +99,28 @@ test('the tool volume category shows the volume, each CLI, every manifest and a 
     'Codex has no native subtraction to check');
   // The prune form says which versions it keeps and that a running version is never removed.
   const prune = section(panel, '清理旧版本').querySelector('form');
-  assert.deepEqual(prune.querySelectorAll('select').find(node => node.name === 'cli').querySelectorAll('option').map(node => node.value), ['', 'claude_code', 'codex']);
+  assert.deepEqual(prune.querySelectorAll('select').find(node => node.name === 'cli').querySelectorAll('option').map(node => node.value), ['', 'claude_code', 'codex', 'icode', 'workswarm']);
   assert.ok(prune.querySelectorAll('input').find(node => node.name === 'retain_count'));
   assert.match(text(section(panel, '清理旧版本')), /正在运行/);
   // A directory whose manifest cannot be read is cleared unless a running or just-installed version still points at it,
   // so the note must not promise that every unreadable version survives (#740 review F3).
   assert.match(text(section(panel, '清理旧版本')), /清单读不到的残留平时会被清理/);
+
+  // #1260: Every registered third-party agent has install/upgrade/remove buttons; generic container_acp is read-only with no buttons; Pi is not listed as a managed card.
+  for (const title of ['Claude Code', 'Codex', 'iCode', 'WorkSwarm']) {
+    const card = section(panel, title);
+    assert.ok(card, `${title} card exists`);
+    const actions = card.querySelectorAll('button').map(b => b.dataset.action).filter(Boolean);
+    for (const act of ['install', 'upgrade', 'remove']) {
+      assert.ok(actions.includes(act), `${title} has ${act} button`);
+    }
+  }
+  const genericAcp = section(panel, '容器内 ACP（通用）');
+  assert.ok(genericAcp, 'generic container_acp explanatory card exists');
+  assert.equal(genericAcp.querySelectorAll('button').length, 0, 'generic container_acp has no install/upgrade/delete buttons');
+  assert.equal(section(panel, 'Pi'), undefined, 'built-in Pi is not a tool-volume card');
+  assert.match(text(volume), /0\.13\.9/);
+  assert.match(text(volume), /启动自动安装/);
 });
 
 test('installing a version redraws the page from the status the service answered with', async () => {

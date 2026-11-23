@@ -130,9 +130,21 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
   const sharedManagement = new ManagementService(store,rules,taskCommands,options.projects?.manager??options.engine?.manager,options.githubUrl);
   const assistants = new AssistantComputerService(store, options.projects?.manager ?? options.engine?.manager, options.assistantHomes);
+  const toolsManager = options.projects?.manager ?? options.engine?.manager;
   const agentTools = options.agentTools ?? new AgentToolManager({
     volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT,
     protectedVersions: cli => activeCliVersions(store, cli),
+    ...(toolsManager ? {
+      acpBuilder: async req => {
+        await toolsManager.call('POST', '/v1/agent-tools/install-acp', {
+          product: req.product,
+          version: req.version,
+          source_dir: req.containerSourceDir,
+          uv_bin: req.containerUvBin,
+          offline: Boolean(req.offline),
+        }, 20 * 60_000);
+      },
+    } : {}),
   });
   sharedManagement.assistants = assistants;
   sharedManagement.reconcileProjects = () => {
@@ -485,7 +497,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       }
     };
     guard();
-    if (path === '/api/agent-tools/install') res.setTimeout(300_000);
+    if (path === '/api/agent-tools/install' || path === '/api/agent-tools/upgrade') res.setTimeout(1_200_000);
     const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? await taskChecksApi(store, user, method, url, options.githubUrl) ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');

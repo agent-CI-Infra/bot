@@ -195,8 +195,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
  const scopedInput=()=>visibleMemorySnapshot(s,task.repository_id,(()=>{try{return taskRecordContext(JSON.parse(shared.sourceInput));}catch{return {input:shared.sourceInput};}})(),taskTraceAccess(s,{...task,active_role:role}));
  const definition=JSON.parse(instance.definition),harness=instance.harness,snapshot=resolved.snapshot,driver=roleHarness(harness),persistence=driver.session;
  // The role's explicit model wins; otherwise the caller's pinned execution model, which follows the workflow/project order.
- // A driver with its own model gets no project model at all.
- const model=snapshot.model.source==='role'||driver.externalModel?resolved.model:spec.model??(taskConfiguration(s,task)?executionModel(s,task,workflow):resolved.model);if(model.key)spec.redactor.add(model.key);
+ // A driver with its own model or local project-computer config gets no project model at all.
+ const localModelConfig=snapshot.harness.model_source==='local_config';
+ const model=snapshot.model.source==='role'||driver.externalModel||localModelConfig?resolved.model:spec.model??(taskConfiguration(s,task)?executionModel(s,task,workflow):resolved.model);if(model.key)spec.redactor.add(model.key);
  const env=await options.prepare?.(instance,resolved)||{};
  let released=false;const release=async()=>{if(released)return;released=true;await env.release?.();};
  try{
@@ -260,7 +261,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const access={get token(){return live.bound?.token??'';},check(presented:unknown,capability?:string){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{tenant_id:b.ctx.tenant_id,project_id:b.ctx.project_id,task_id:b.ctx.task_id!,run_id:b.run_id,lease_epoch:b.epoch,role},capability);}};
   let executionRun:string|undefined;
   resultMounted=(spec.harnessAccess?.commands ?? tools.some(t=>t.function.name==='run_command')) && !!(env.roleWorkspace ?? spec.roleWorkspace ?? env.pi?.workspace ?? spec.pi?.workspace ?? env.containerOptions?.manager ?? spec.containerOptions?.manager);
-  const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,roleWorkspace:env.roleWorkspace??spec.roleWorkspace,containerOptions:env.containerOptions?{...spec.containerOptions,...env.containerOptions}:spec.containerOptions,
+  const baseContainerOptions=env.containerOptions?{...spec.containerOptions,...env.containerOptions}:spec.containerOptions;
+  const containerOptions=localModelConfig?{...(baseContainerOptions??{}),modelSource:'local_config' as const}:baseContainerOptions;
+  const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,roleWorkspace:env.roleWorkspace??spec.roleWorkspace,containerOptions,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
    harnessTurnLimit:bounded?.max_turns??spec.harnessTurnLimit,
    maxTurns:availableTurns<limitTurns?availableTurns:configuredTurns,maxOutputTokens:bounded?.max_output_tokens??spec.maxOutputTokens,

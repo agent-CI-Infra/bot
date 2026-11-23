@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Protocol fixture only. This executable is not Claude Code and is never used as live-model evidence.
 import { createInterface } from 'node:readline';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 
@@ -100,6 +100,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     const persisted = join(process.env.CLAUDE_CONFIG_DIR, 'projects', 'fixture');
     mkdirSync(persisted, { recursive: true });
     writeFileSync(join(persisted, sid + '.jsonl'), '{}\n');
+    const stagedSettingsPath = join(process.env.CLAUDE_CONFIG_DIR, 'settings.json');
+    const stagedCredsPath = join(process.env.CLAUDE_CONFIG_DIR, '.credentials.json');
+    let localModel = null;
+    if (existsSync(stagedSettingsPath)) {
+      try { localModel = JSON.parse(readFileSync(stagedSettingsPath, 'utf8'))?.model ?? null; } catch {}
+    }
     writeFileSync(
       join(process.env.HOME, 'launch.json'),
       JSON.stringify({
@@ -108,13 +114,17 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: process.cwd(),
         resumed: process.argv.includes('--resume'),
         mcp_config: mcpConfig,
+        staged_files: {
+          settings: existsSync(stagedSettingsPath) ? { exists: true, mode: statSync(stagedSettingsPath).mode & 0o777 } : { exists: false },
+          credentials: existsSync(stagedCredsPath) ? { exists: true, mode: statSync(stagedCredsPath).mode & 0o777 } : { exists: false },
+        },
       }),
     );
 
     send({
       type: 'system',
       subtype: 'init',
-      model: arg('--model'),
+      model: arg('--model') ?? localModel ?? 'claude-local-default',
       tools: mode === 'extra_tool' ? [...allTools, 'EnterWorktree'] : allTools,
       mcp_servers: [{ name: 'bot', status: 'connected' }],
     });

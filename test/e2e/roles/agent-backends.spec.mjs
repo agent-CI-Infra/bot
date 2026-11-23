@@ -80,7 +80,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await expect(swarmStatus).toContainText('WorkSwarm');
     await expect(swarmStatus).toContainText('0.2.9');
     await expect(swarmStatus).toContainText('未就绪');
-    await expect(swarmStatus.getByRole('link', { name: '打开工具卷设置' })).toHaveCount(0);
+    await expect(swarmStatus.getByRole('link', { name: '打开工具卷设置' })).toHaveCount(1);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -114,29 +114,38 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     const reviewerModelSource = page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true });
     await expect(reviewerModelSource).toHaveValue('gateway');
-    await reviewerModelSource.selectOption('subscription');
-    await expect(page.getByTestId('subscription-not-implemented')).toBeVisible();
-    await expect(page.getByTestId('subscription-not-implemented')).toContainText('未实现');
+    await reviewerModelSource.selectOption('local_config');
+    await expect(page.getByTestId('local-config-notice')).toBeVisible();
+    await expect(page.getByTestId('local-config-notice')).toContainText('模型由项目电脑内的配置决定');
+    await expect(page.getByRole('combobox', { name: 'reviewer 模型', exact: true })).toBeDisabled();
+    mkdirSync('.tmp/agent-backends', { recursive: true });
+    for (const [w, hgt] of [[1440, 1000], [390, 844]]) {
+      await page.setViewportSize({ width: w, height: hgt });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.getByTestId('local-config-notice').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `.tmp/agent-backends/local-config-${w}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'dev' });
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
-    // #740: a role page whose CLI is unavailable is where a super administrator gets the way into the tool volume.
+    // #740 / #1260: a role page whose tool is unavailable is where a super administrator gets the way into the tool volume.
     await expect(page.getByTestId('backend-runtime-status')).toContainText('未就绪');
     const roleToolsLink = page.getByTestId('backend-runtime-status').getByRole('link', { name: '打开工具卷设置' });
     await expect(roleToolsLink).toBeVisible();
     await expect(roleToolsLink).toHaveAttribute('href', '#/settings/agent-tools');
-    await expect(page.getByTestId('backend-runtime-status')).toContainText('安装或清理 Claude Code 与 Codex 的版本');
+    await expect(page.getByTestId('backend-runtime-status')).toContainText('安装、升级或删除第三方 Agent 工具');
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const savedSub = (await admin('/api/repositories/101/roles')).value;
-    expect(savedSub.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref).toMatchObject({ id: 'codex', model_source: 'subscription' });
+    expect(savedSub.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref).toMatchObject({ id: 'codex', model_source: 'local_config' });
     await page.reload();
     await goRolePage(page, { role: 'reviewer' });
-    await expect(page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true })).toHaveValue('subscription');
-    await expect(page.getByTestId('subscription-not-implemented')).toBeVisible();
-    // Switch model_source from subscription back to gateway and verify explicit persistence (#705 M6).
+    await expect(page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true })).toHaveValue('local_config');
+    await expect(page.getByTestId('local-config-notice')).toBeVisible();
+    // Switch model_source from local_config back to gateway and verify explicit persistence (#705 M6 / #1260).
     await page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true }).selectOption('gateway');
-    await expect(page.getByTestId('subscription-not-implemented')).toHaveCount(0);
+    await expect(page.getByTestId('local-config-notice')).toHaveCount(0);
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value;
@@ -151,7 +160,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await goRolePage(page, { role: 'reviewer' });
     await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('codex');
     await expect(page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true })).toHaveValue('gateway');
-    await expect(page.getByTestId('subscription-not-implemented')).toHaveCount(0);
+    await expect(page.getByTestId('local-config-notice')).toHaveCount(0);
     await expect(page.getByTestId('backend-runtime-status')).toContainText('连通性未探测');
     await expect(page.getByTestId('probe-role-model')).toBeVisible();
     const scrollUnderSticky = async (targetPage, locator) => {
