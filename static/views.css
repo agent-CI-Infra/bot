@@ -1028,3 +1028,16 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 /* #935: a repository that still has .bot/ files is told they were imported and can be deleted. */
 .retired-rules{display:grid;gap:var(--space-2);padding:var(--space-4);margin:var(--space-3) 0 0;background:var(--color-brand-weak);border-left:3px solid var(--color-brand);border-radius:var(--radius-2)}
 .retired-rules>.muted{margin:0}
+/* #1260: Agent tool volume per-agent controls and CLI local config cards. */
+.agent-tools-actions{margin-top:var(--space-3);align-items:center}
+.agent-tools-actions input{width:auto;flex:0 1 210px;min-width:140px;max-width:100%}
+.agent-tools-version-head{justify-content:space-between;align-items:center;margin-top:var(--space-3)}
+.agent-tools-version-head>p{margin:0;flex:1 1 220px;min-width:0;overflow-wrap:anywhere}
+.agent-tools-action-feedback:empty{display:none}
+.role-local-config-notice{display:grid;gap:var(--space-2);padding:var(--space-4);margin:var(--space-2) 0;background:var(--color-surface-alt);border:1px solid var(--color-border);border-radius:var(--radius-2)}
+.role-local-config-notice>p{margin:0}
+.cli-config-editor{display:grid;gap:var(--space-3);margin-top:var(--space-4)}
+.cli-config-editor>button{justify-self:start}
+@media (max-width: 600px){
+  .agent-tools-actions input{flex:1 1 100%;width:100%}
+}

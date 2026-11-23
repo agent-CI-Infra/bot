@@ -15,6 +15,7 @@ import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, satisfiesCliRange, sel
 import { readProviderCredentialFile, type FileBackedModelProvider } from './model-gateway.js';
 import { filterPlatformTools, withContainerHarnessSession } from './container-session.js';
 import { modelTransport, type ModelTransport } from './model-connection.js';
+import type { HarnessModelSource } from './subscription.js';
 
 export interface ClaudeProviderConfig {
   baseUrl: string;
@@ -34,12 +35,13 @@ export interface ClaudeConfiguration {
 
 export interface ClaudePreparation {
   modelTransport: ModelTransport;
+  modelSource?: HarnessModelSource;
   mode: 'volume' | 'config_file';
   config?: ClaudeConfiguration;
   command: string;
   nodeExecutable?: string;
   version: string;
-  model: string;
+  model?: string;
   primaryModel?: RuntimeModel;
   fileProvider?: FileBackedModelProvider;
   configurationHash: string;
@@ -211,8 +213,15 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
       if (!match || match[1] !== config.version || !satisfiesCliRange('claude_code', match[1])) {
         return fail('claude_version_unsupported');
       }
-      const configurationHash = contentHash({ ...config, command, modelTransport:modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport), protocol: claudeCodeRuntime.protocol });
-      const fileProvider: FileBackedModelProvider | undefined = config.provider ? {
+      const localConfig = spec.containerOptions?.modelSource === 'local_config';
+      const configurationHash = contentHash({
+        ...config,
+        command,
+        modelTransport: localConfig ? 'direct' : modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport),
+        ...(localConfig ? { modelSource: 'local_config' } : {}),
+        protocol: claudeCodeRuntime.protocol,
+      });
+      const fileProvider: FileBackedModelProvider | undefined = !localConfig && config.provider ? {
         id: 'claude_config_provider',
         baseUrl: config.provider.baseUrl,
         credentialFile: config.provider.credentialFile,
@@ -221,18 +230,19 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
         authHeader: 'x-api-key',
       } : undefined;
       const prepared: ClaudePreparation = {
-        modelTransport: modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport),
+        modelTransport: localConfig ? 'direct' : modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport),
+        modelSource: localConfig ? 'local_config' : 'gateway',
         mode: 'config_file',
         config,
         command,
         version: match[1],
-        model: config.model,
-        fileProvider,
+        ...(localConfig ? {} : { model: config.model }),
+        ...(fileProvider ? { fileProvider } : {}),
         configurationHash,
       };
       spec.harnessPreparation = prepared;
       spec.harnessBinding = {
-        model_revision: `claude_code:${config.model}:${configurationHash}`,
+        model_revision: localConfig ? `claude_code:local_config:${configurationHash}` : `claude_code:${config.model}:${configurationHash}`,
         harness_revision: `claude_code@${match[1]}:${configurationHash}`,
         cli_version: match[1],
       };
@@ -256,6 +266,33 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
     command = selected.container_executable;
     nodeExecutable = selected.container_node_executable ?? undefined;
     cliVersion = selected.version;
+  }
+
+  const localConfig = spec.containerOptions?.modelSource === 'local_config';
+  if (localConfig) {
+    const configurationHash = contentHash({
+      cli: 'claude_code',
+      version: cliVersion,
+      command,
+      modelSource: 'local_config',
+      protocol: claudeCodeRuntime.protocol,
+    });
+    const prepared: ClaudePreparation = {
+      modelTransport: 'direct',
+      modelSource: 'local_config',
+      mode: 'volume',
+      command,
+      ...(nodeExecutable ? { nodeExecutable } : {}),
+      version: cliVersion,
+      configurationHash,
+    };
+    spec.harnessPreparation = prepared;
+    spec.harnessBinding = {
+      model_revision: `claude_code:local_config:${configurationHash}`,
+      harness_revision: `claude_code@${cliVersion}:${configurationHash}`,
+      cli_version: cliVersion,
+    };
+    return prepared;
   }
 
   const fileProvider = spec.containerOptions?.fileProvider;
@@ -373,7 +410,7 @@ export async function runClaudeCode<T>(
   await spec.guard();
   if (signal.aborted) throw signal.reason;
 
-  if (prepared.fileProvider?.credentialFile) {
+  if (prepared.fileProvider?.credentialFile && prepared.model) {
     await preflightFileProvider(prepared.fileProvider, prepared.model, signal);
   }
 
@@ -490,6 +527,7 @@ export async function runClaudeCode<T>(
     emit({ type: 'configuration', stage: 'usage', messageId, usage: snapshot, raw_cursor: cursor });
   };
 
+  let observedModel: string | null = prepared.model ?? null;
   const saveState = () => {
     if (!activeSession) return;
     spec.harnessState?.save({
@@ -502,6 +540,7 @@ export async function runClaudeCode<T>(
       inputHash,
       configurationHash: prepared.configurationHash,
       version: activeSession.cliVersion,
+      ...(observedModel ? { model: observedModel } : {}),
       recoveryMode,
       run_id: ctx.run_id,
       lease_epoch: ctx.lease_epoch,
@@ -526,9 +565,12 @@ export async function runClaudeCode<T>(
     if (result) return fail('claude_protocol_incompatible');
     if (m.session_id && m.session_id !== sid) return fail('claude_session_scope_mismatch');
     if (m.type === 'init') {
+      const localConfig = prepared.modelSource === 'local_config';
+      const reportedModel = typeof m.model === 'string' && m.model.trim() ? m.model.trim() : null;
+      const modelOk = localConfig ? Boolean(reportedModel) : m.model === prepared.model;
       if (
         initialized ||
-        m.model !== prepared.model ||
+        !modelOk ||
         !Array.isArray(m.tools) ||
         m.tools.some((n: string) => !isAllowedClaudeTool(n, allowedMcpSet, egress)) ||
         !Array.isArray(m.mcp_servers) ||
@@ -537,15 +579,17 @@ export async function runClaudeCode<T>(
         return fail('claude_capability_mismatch');
       }
       initialized = true;
+      if (reportedModel) observedModel = reportedModel;
       saveState();
       emit({
         type: 'session_bound',
         sessionRef: sid,
         recoveryMode,
         version: activeSession?.cliVersion ?? prepared.version,
-        configuredModel: prepared.model,
+        configuredModel: prepared.model ?? reportedModel,
+        ...(localConfig ? { modelSource: 'local_config', actualModel: reportedModel } : {}),
         configurationHash: prepared.configurationHash,
-        usage: prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
+        usage: !localConfig && prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
       });
       return;
     }
@@ -636,8 +680,9 @@ export async function runClaudeCode<T>(
       {
         cli: 'claude_code',
         modelTransport: prepared.modelTransport,
+        ...(prepared.modelSource ? { modelSource: prepared.modelSource } : {}),
         ...(prepared.config?.env?.CLAUDE_CONFIG_DIR ? {claudeHomeOverride:prepared.config.env.CLAUDE_CONFIG_DIR} : {}),
-        model: prepared.model,
+        ...(prepared.model ? { model: prepared.model } : {}),
         systemPrompt,
         maxTurns: spec.harnessAccess ? spec.harnessTurnLimit : spec.maxTurns,
         maxOutputTokens: spec.maxOutputTokens ?? 8192,

@@ -400,6 +400,40 @@ export class ProjectService {
         FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id
         WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args).map(row => ({ ...row, running_tasks: JSON.parse(row.running_tasks) })) };
     }
+    const cliConfigMatch = /^\/api\/environments\/([^/]+)\/cli-config$/.exec(url.pathname);
+    if (cliConfigMatch) {
+      const id = cliConfigMatch[1]!;
+      repository(this.store, user, id);
+      if (this.removing.has(id) && method !== 'GET') fail(409, 'repository_deleting');
+      if (method === 'GET') {
+        return await this.manager.call('GET', `/v1/projects/${id}/cli-config`, undefined, 15_000);
+      }
+      requireProjectConfigWrite(user, id);
+      if (method === 'PUT') {
+        fields(input, ['cli', 'file', 'content']);
+        if (typeof input.cli !== 'string' || typeof input.file !== 'string' || typeof input.content !== 'string') {
+          fail(400, 'invalid_cli_config');
+        }
+        // Forward directly to manager → runner; control plane never stores or logs config file contents (#1260).
+        const written = await this.manager.call('PUT', `/v1/projects/${id}/cli-config`, {
+          cli: input.cli,
+          file: input.file,
+          content: input.content,
+        }, 15_000);
+        this.store.audit(user.id, 'environment.cli_config_written', `${input.cli}:${input.file}`, id);
+        return written;
+      }
+      if (method === 'DELETE') {
+        fields(input, ['cli', 'file']);
+        const cli = typeof input.cli === 'string' ? input.cli : url.searchParams.get('cli');
+        const file = typeof input.file === 'string' ? input.file : url.searchParams.get('file');
+        if (!cli || !file) fail(400, 'invalid_cli_config');
+        const removed = await this.manager.call('DELETE', `/v1/projects/${id}/cli-config`, { cli, file }, 15_000);
+        this.store.audit(user.id, 'environment.cli_config_deleted', `${cli}:${file}`, id);
+        return removed;
+      }
+      return fail(405, 'method_not_allowed');
+    }
     const cancelBuild = /^\/api\/environments\/([^/]+)\/build\/cancel$/.exec(url.pathname);
     if (cancelBuild) {
       if (method !== 'POST') return fail(405, 'method_not_allowed');

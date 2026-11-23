@@ -24,6 +24,9 @@ import { StorageReport } from './app/storage.js';
 import { RetentionCleanup } from './storage/retention.js';
 import { compactDatabase, IncrementalVacuum } from '../manager/compaction.mjs';
 import { commandTimeoutLimit } from './agent/command.js';
+import { AgentToolManager, AgentToolsAutoInstaller, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tools.js';
+import { agentToolsRetainCount } from './app/agent-tools.js';
+import { activeCliVersions } from './roles/role-run.js';
 
 process.umask(0o077);
 commandTimeoutLimit();
@@ -107,9 +110,34 @@ try { store.trajectories.sweepOrphans(); } catch (error) { console.error('[traje
 const retention = new RetentionCleanup(store, manager);
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards'),
   homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes', tools: '/opt/agent-tools', machine: process.env.BOT_HOST_STORAGE_DIR }, vacuum, retention, workspaces);
+const agentTools = new AgentToolManager({
+  volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT,
+  protectedVersions: cli => activeCliVersions(store, cli),
+  acpBuilder: async req => {
+    await manager.call('POST', '/v1/agent-tools/install-acp', {
+      product: req.product,
+      version: req.version,
+      source_dir: req.containerSourceDir,
+      uv_bin: req.containerUvBin,
+      offline: Boolean(req.offline),
+    }, 20 * 60_000);
+  },
+});
+const agentToolsAuto = new AgentToolsAutoInstaller(agentTools, {
+  retainCount: () => agentToolsRetainCount(store),
+  protectedVersions: cli => activeCliVersions(store, cli),
+  onInstalled: (product, version) => {
+    store.audit('system', 'agent_tools.auto_installed', `${product}@${version}`);
+    console.log(`[agent-tools] auto-installed ${product}@${version}`);
+  },
+  onFailed: (product, version, error) => {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`[agent-tools] auto-install failed for ${product}@${version}: ${reason}`);
+  },
+});
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, installations, external, onboarding, integrations, releases, boards,
-  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage, agentTools,
   // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
   notesReclaimer: reclaimer,
   notesOrphanThreshold: count('BOT_NOTES_ORPHAN_THRESHOLD', 10),
@@ -127,12 +155,12 @@ server.listen(8791, '0.0.0.0', () => {
   // payloads written before #436 out of their rows, slice by slice.
   const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
   void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
-  storage.start();modelCatalog(store).start();vacuum.start();retention.start();
+  storage.start();modelCatalog(store).start();vacuum.start();retention.start();agentToolsAuto.start();
 });
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer); clearInterval(trajectorySweep); clearInterval(reclaimTimer); workspaces.close(); engine.obsolete.close();
-  server.close(async () => { await Promise.all([storage.stop(),githubRefresh.close(),modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
+  server.close(async () => { await Promise.all([agentToolsAuto.stop(),storage.stop(),githubRefresh.close(),modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

@@ -73,14 +73,14 @@ test('new roles default to Pi; general backends preserve role authority and cont
   const claude = f.view().backends.find(b => b.id === 'claude_code');
   assert.equal(claude.available, true);
   assert.deepEqual(claude.kinds, ['controller', 'writer', 'observer', 'evaluator']);
-  assert.deepEqual(claude.supported_model_sources, ['gateway', 'subscription']);
+  assert.deepEqual(claude.supported_model_sources, ['gateway', 'local_config']);
   assert.ok(claude.runtime_status && typeof claude.runtime_status.compatible_range === 'string');
   const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
   assert.equal(f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'claude_code' } }] }).roles.find(r => r.role_id === 'manager').harness_ref.id, 'claude_code');
   // Codex App Server (#171 / #705) is a container worker backend like Claude Code.
   const codex = f.view().backends.find(b => b.id === 'codex');
-  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['controller', 'writer', 'observer', 'evaluator'], 'project', ['gateway', 'subscription'], null]);
+  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['controller', 'writer', 'observer', 'evaluator'], 'project', ['gateway', 'local_config'], null]);
   assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
   assert.equal(f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'manager').harness_ref.id, 'codex');
   for (const backend of ['acp', 'opencode']) {

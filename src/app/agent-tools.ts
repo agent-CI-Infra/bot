@@ -4,12 +4,13 @@ import { fail, fields, type Json } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
 import { activeCliVersions } from '../roles/role-run.js';
 import {
-  AGENT_TOOL_CLIS,
+  AGENT_PRODUCT_MAP,
   AgentToolManager,
   CLI_RETAIN_BOUNDS,
   DEFAULT_CLI_RETAIN_COUNT,
+  isAgentToolProduct,
   parseSemver,
-  type AgentToolCli,
+  type AgentToolProduct,
 } from '../harness/agent-tools.js';
 
 const RETAIN_COUNT_KEY = 'agent_tools.retain_count';
@@ -28,11 +29,11 @@ function validateRetainCount(value: unknown): number {
   return value as number;
 }
 
-function validateCli(value: unknown): AgentToolCli {
-  if (typeof value !== 'string' || !AGENT_TOOL_CLIS.includes(value as AgentToolCli)) {
+function validateProduct(value: unknown): AgentToolProduct {
+  if (!isAgentToolProduct(value)) {
     return fail(400, 'invalid_agent_tool_cli');
   }
-  return value as AgentToolCli;
+  return value;
 }
 
 /** The one writer of the saved default: call it only on the success path, so a failed call never changes the setting. */
@@ -42,7 +43,7 @@ function saveRetainCount(store: Store, retainCount: number): void {
 
 function mapToolError(err: unknown): never {
   if (err instanceof TaskError) {
-    const status = err.code === 'agent_tool_invalid' ? 400
+    const status = err.code === 'agent_tool_invalid' || err.code === 'agent_tool_version_unverified' ? 400
       : err.code === 'agent_tool_version_in_use' ? 409
       : err.code === 'agent_tool_download_failed' || err.code === 'agent_tool_hash_mismatch' || err.code === 'agent_tool_archive_invalid' ? 502
       : 503;
@@ -73,27 +74,30 @@ export async function agentToolsApi(
     return fail(405, 'method_not_allowed');
   }
 
-  if (path === '/api/agent-tools/install') {
+  if (path === '/api/agent-tools/install' || path === '/api/agent-tools/upgrade') {
     if (method !== 'POST') return fail(405, 'method_not_allowed');
     fields(input, ['cli', 'version', 'sha256', 'native_sha256', 'retain_count']);
-    const cli = validateCli(input.cli);
-    const ver = parseSemver(input.version);
+    const cli = validateProduct(input.cli);
+    const entry = AGENT_PRODUCT_MAP.get(cli)!;
+    const rawVersion = input.version === undefined || input.version === '' ? entry.defaultVersion : input.version;
+    const ver = parseSemver(rawVersion);
     if (!ver) return fail(400, 'invalid_agent_tool_version');
     const sha256 = input.sha256 === undefined ? undefined : typeof input.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(input.sha256) ? input.sha256.toLowerCase() : fail(400, 'invalid_agent_tool_sha256');
     const nativeSha256 = input.native_sha256 === undefined ? undefined : cli === 'claude_code' && typeof input.native_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(input.native_sha256) ? input.native_sha256.toLowerCase() : fail(400, 'invalid_agent_tool_native_sha256');
     const retainCount = input.retain_count === undefined ? agentToolsRetainCount(store) : validateRetainCount(input.retain_count);
+    const mode = path === '/api/agent-tools/upgrade' ? 'upgrade' : 'install';
     try {
       const outcome = await tools.install({
         cli,
         version: ver.raw,
+        mode,
         sha256,
         nativeSha256,
         retainCount,
         protectedVersions: () => activeCliVersions(store, cli),
       });
-      // The installer has already pruned to retainCount; save it only now, so a failed install keeps the old default.
       if (input.retain_count !== undefined) saveRetainCount(store, retainCount);
-      store.audit(user.id, 'agent_tools.installed', `${cli}@${ver.raw}`);
+      store.audit(user.id, mode === 'upgrade' ? 'agent_tools.upgraded' : 'agent_tools.installed', `${cli}@${ver.raw}`);
       return {
         installed: outcome.installed as unknown as Json,
         compatible: outcome.compatible,
@@ -106,10 +110,36 @@ export async function agentToolsApi(
     }
   }
 
+  if (path === '/api/agent-tools/remove') {
+    if (method !== 'POST') return fail(405, 'method_not_allowed');
+    fields(input, ['cli', 'version']);
+    const cli = validateProduct(input.cli);
+    const version = input.version === undefined || input.version === ''
+      ? undefined
+      : typeof input.version === 'string' && /^[0-9][a-zA-Z0-9._+-]{0,63}$/.test(input.version.trim())
+        ? input.version.trim()
+        : fail(400, 'invalid_agent_tool_version');
+    try {
+      const outcome = await tools.remove({
+        cli,
+        version,
+        protectedVersions: () => activeCliVersions(store, cli),
+      });
+      store.audit(user.id, 'agent_tools.removed', version ? `${cli}@${version}` : cli);
+      return {
+        removed: outcome.removed,
+        removed_agent: outcome.removed_agent,
+        status: view(),
+      };
+    } catch (err) {
+      return mapToolError(err);
+    }
+  }
+
   if (path === '/api/agent-tools/prune') {
     if (method !== 'POST') return fail(405, 'method_not_allowed');
     fields(input, ['cli', 'retain_count']);
-    const cli = input.cli === undefined ? undefined : validateCli(input.cli);
+    const cli = input.cli === undefined ? undefined : validateProduct(input.cli);
     const retainCount = input.retain_count === undefined ? agentToolsRetainCount(store) : validateRetainCount(input.retain_count);
     try {
       const outcome = await tools.prune({ cli, retainCount, protectedVersions: c => activeCliVersions(store, c) });

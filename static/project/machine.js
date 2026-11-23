@@ -191,9 +191,11 @@ function machineSection(globalSettings = false) {
   toolbar.after(sourceReadError);
   if(unread)toolbar.after(note('已保存的机器配置读取失败，不能区分项目自己的值和默认值。请重新读取配置后保存。'));
   const concurrency = globalSettings ? null : concurrencyForm();
+  const cliConfig = globalSettings ? null : cliConfigCard(canConfigure);
   const page = element('div', '', 'machine-settings');
   if (concurrency) page.append(concurrency);
   page.append(form);
+  if (cliConfig) page.append(cliConfig);
   if (canEdit) {
     attachUnifiedSettingsBar(page, [form, concurrency].filter(Boolean), {
       dirty: () => form.settingDirty() || !!(concurrency && concurrency.settingDirty?.()),
@@ -205,6 +207,135 @@ function machineSection(globalSettings = false) {
     attachUnifiedSettingsBar(page, [concurrency]);
   }
   return [status, page];
+}
+
+// #1260: Write-only editor for Claude Code / Codex local model configs in /workspace/home.
+// Control plane never stores, reads back, or logs file contents; only existence/size/mtime are shown.
+function cliConfigCard(canConfigure) {
+  const target = current, id = target.id, token = typeof renderToken === 'number' ? renderToken : 0;
+  const section = card('CLI 本地模型配置（项目电脑内自行配置）');
+  section.dataset.testid = 'machine-cli-config';
+  section.append(
+    note('当 Claude Code 或 Codex 角色选择「项目电脑内自行配置（不注入模型配置）」时，运行前会从项目电脑的 /workspace/home 读取这里写入的配置文件并复制到当前会话隔离目录，运行结束后清除副本。'),
+    note('安全说明：这些凭据存放在项目电脑的 /workspace/home 中，同一项目内任意 Agent 的原生 Shell 都可以读取。控制面不读取、不保存、不回显文件内容。'),
+  );
+  const statusHost = element('div', '', 'cli-config-status');
+  statusHost.append(note('正在检查项目电脑内的 CLI 配置文件…'));
+  const feedback = element('p', '', 'muted'); feedback.setAttribute('role', 'status');
+  section.append(statusHost, feedback);
+
+  const fileDefs = {
+    claude_code: [
+      ['settings.json', '.claude/settings.json（模型与基础配置）'],
+      ['.credentials.json', '.claude/.credentials.json（认证凭据）'],
+    ],
+    codex: [
+      ['config.toml', '.codex/config.toml（模型与提供方配置）'],
+      ['auth.json', '.codex/auth.json（认证凭据）'],
+    ],
+  };
+
+  const live = () => current === target && (typeof renderToken !== 'number' || renderToken === token) && section.isConnected;
+  const loadStatus = async () => {
+    try {
+      const data = await api(`/api/environments/${id}/cli-config`);
+      if (!live()) return;
+      statusHost.replaceChildren();
+      if (!data?.available) {
+        statusHost.append(note(`项目电脑当前未运行或暂不可访问（${data?.reason || 'unavailable'}），启动项目电脑后可检查与写入配置文件。`));
+        return;
+      }
+      const { table, body } = projectTable(['CLI', '配置文件', '状态', '操作'], 'CLI 本地配置文件状态');
+      for (const [cliId, cliTitle] of [['claude_code', 'Claude Code'], ['codex', 'Codex']]) {
+        const files = data.clis?.[cliId]?.files || {};
+        for (const [fileName] of fileDefs[cliId]) {
+          const info = files[fileName] || { path: '', exists: false, bytes: null, updated_at: null };
+          const row = document.createElement('tr');
+          row.dataset.cli = cliId; row.dataset.file = fileName;
+          tableCell(row, 'CLI', element('strong', cliTitle));
+          tableCell(row, '配置文件', element('code', info.path || fileName));
+          tableCell(row, '状态', info.exists
+            ? note(`已存在（${info.bytes ?? 0} 字节${info.updated_at ? ' · 更新于 ' + timestamp(info.updated_at) : ''}）`)
+            : note('未配置'));
+          const opCell = element('div', '', 'actions');
+          if (canConfigure && info.exists) {
+            const delBtn = button('删除', async () => {
+              if (typeof askConfirm === 'function' && !await askConfirm({
+                title: `删除 ${info.path || fileName}？`,
+                body: ['删除后使用「项目电脑内自行配置」的该 CLI 任务将无法读取此文件。'],
+                action: '删除',
+                danger: true,
+              })) return;
+              delBtn.disabled = true;
+              try {
+                await api(`/api/environments/${id}/cli-config`, 'DELETE', { cli: cliId, file: fileName });
+                feedback.className = 'view-success';
+                feedback.textContent = `已删除 ${info.path || fileName}`;
+                await loadStatus();
+              } catch (err) {
+                feedback.className = 'view-error';
+                feedback.textContent = '删除失败：' + readErrorText(err);
+                delBtn.disabled = false;
+              }
+            }, 'quiet destructive');
+            opCell.append(delBtn);
+          } else {
+            opCell.append(note('—'));
+          }
+          tableCell(row, '操作', opCell);
+          body.append(row);
+        }
+      }
+      statusHost.append(table);
+    } catch (err) {
+      if (!live()) return;
+      statusHost.replaceChildren(note('暂时无法检查 CLI 配置文件状态：' + readErrorText(err)));
+    }
+  };
+
+  if (canConfigure) {
+    const cliSelect = document.createElement('select'); cliSelect.name = 'cli_config_cli';
+    for (const [val, label] of [['claude_code', 'Claude Code'], ['codex', 'Codex']]) cliSelect.add(new Option(label, val));
+    const fileSelect = document.createElement('select'); fileSelect.name = 'cli_config_file';
+    const syncFiles = () => {
+      fileSelect.replaceChildren();
+      for (const [val, label] of fileDefs[cliSelect.value] || []) fileSelect.add(new Option(label, val));
+    };
+    cliSelect.addEventListener('change', syncFiles); syncFiles();
+    const contentBox = textarea('cli_config_content', '', {
+      rows: 6,
+      spellcheck: false,
+      className: 'code',
+      placeholder: '粘贴配置文件内容（仅写入项目电脑 /workspace/home，写入后自动清空输入框，控制面不保存、不回显）',
+    });
+    const writeBtn = button('写入配置文件', async () => {
+      const content = contentBox.value;
+      if (!content.trim()) { feedback.className = 'view-error'; feedback.textContent = '请先输入配置文件内容。'; return; }
+      writeBtn.disabled = true;
+      feedback.className = 'muted'; feedback.textContent = '正在写入项目电脑…';
+      try {
+        const res = await api(`/api/environments/${id}/cli-config`, 'PUT', {
+          cli: cliSelect.value,
+          file: fileSelect.value,
+          content,
+        });
+        contentBox.value = '';
+        feedback.className = 'view-success';
+        feedback.textContent = `已写入 ${res?.path || fileSelect.value}（${res?.bytes ?? 0} 字节），输入框已清空。`;
+        await loadStatus();
+      } catch (err) {
+        feedback.className = 'view-error';
+        feedback.textContent = '写入失败：' + readErrorText(err);
+      } finally {
+        writeBtn.disabled = false;
+      }
+    });
+    const editor = element('div', '', 'cli-config-editor');
+    editor.append(field('CLI', cliSelect), field('目标文件', fileSelect), field('文件内容（只写不回显）', contentBox), writeBtn);
+    section.append(editor);
+  }
+  void loadStatus();
+  return section;
 }
 // The concurrency form with its own save bar, for the page that cannot read the computer spec at all.
 function concurrencyPage() {

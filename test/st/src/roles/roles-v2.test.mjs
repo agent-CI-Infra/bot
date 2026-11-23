@@ -732,11 +732,18 @@ test('backend selection is independent of role; container CLIs use gateway relay
   const { snapshot, model } = resolveRole(f.s, 'r', 'reviewer', 'development.issue');
   assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.harness.id, model.model], ['role', 'm2', 'codex', 'reviewer-model']);
   assert.ok(!JSON.stringify(snapshot).includes('fixture-private-value'));
-  // Reserved subscription mode saves cleanly on external container CLIs and fails closed before any run starts.
-  put({ expected_revision: 1, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', model_source: 'subscription' } }] });
-  assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'development.issue'), e => e.code === 'subscription_mode_not_implemented' && e.detail.startsWith('roles.reviewer.harness_ref.model_source'));
-  await assert.rejects(runRole(f.spec, 'reviewer'), e => e.code === 'subscription_mode_not_implemented');
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n, 0, 'nothing started');
+  // Local config mode (including legacy 'subscription' alias) saves cleanly on Claude Code / Codex and resolves without platform model.
+  const localSaved = put({ expected_revision: 1, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', model_source: 'subscription' } }] }).configuration;
+  assert.equal(localSaved.roles.find(r => r.role_id === 'reviewer').harness_ref.model_source, 'local_config');
+  const localResolved = resolveRole(f.s, 'r', 'reviewer', 'development.issue');
+  assert.equal(localResolved.model.id, 'codex:local_config');
+  assert.equal(localResolved.model.key, '');
+  assert.equal(localResolved.snapshot.model.source, 'local_config');
+  // Non-CLI backends (e.g., native) reject local_config / subscription model_source.
+  assert.throws(
+    () => put({ expected_revision: 2, roles: [{ role_id: 'reviewer', harness_ref: { id: 'native', model_source: 'local_config' } }] }),
+    e => e.code === 'subscription_mode_not_implemented',
+  );
   assert.equal(harnesses.filter(h => ['claude_code', 'codex', 'pi', 'native', 'process'].includes(h.id)).length, 5);
 });
 

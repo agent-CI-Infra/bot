@@ -12,12 +12,13 @@ import {capabilityNames} from './protocol.js';
 import {catalog} from './catalog.js';
 import {defaultPermissions} from './permissions.js';
 import {roleConfiguration,saveConfiguration,configurationRevision,resolveRole,modelProfileHash,defaultRoles} from './definition.js';
-import {cachedRuleFiles} from '../rules/service.js';
+import { cachedRuleFiles } from '../rules/service.js';
+import type { CliConfigSnapshot } from '../harness/subscription.js';
 // A resolve error names the configuration field before "：" in its detail; the API returns it as field.
 const resolveError=(error:unknown):never=>{if(error instanceof TaskError)fail(409,error.code,/^(roles\.[^：]+)：/.exec(error.detail??'')?.[1]);throw error;};
 const host=(url:string)=>{try{return new URL(url).host;}catch{return null;}};
 /** Every entry to role configuration (console, API, management agent) is this one service with the same project grant. */
-export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Json|undefined{
+export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json,cliConfig?:CliConfigSnapshot|null):Json|undefined{
  const config=/^\/api\/repositories\/([^/]+)\/roles(?:\/(resolve))?$/.exec(url.pathname);
  if(config){const repo=config[1]!;repository(s,user,repo);
   if(config[2]==='resolve'){
@@ -47,7 +48,7 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
     // role_defaults; this adds the defaults of the project's own roles, by kind. The management assistant reads this view
     // whole, so it stays as small as that.
     permission_defaults:Object.fromEntries(current.roles.filter(r=>!builtIn.some(b=>b.role_id===r.role_id)).map(r=>[r.role_id,defaultPermissions(r.role_id,r.kind)])),
-    role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(builtIn.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.filter(id=>id!=='run_isolation').map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses,backends:agentBackends(s,repo),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
+    role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(builtIn.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.filter(id=>id!=='run_isolation').map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses,backends:agentBackends(s,repo,undefined,cliConfig),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
     skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(source.files).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }

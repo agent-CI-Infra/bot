@@ -1368,6 +1368,7 @@ export class Projects {
   }
   async recover() {
     const interrupted = this.reconcileInterruptedBuilds();
+    await this.cleanupOrphanedInstallers().catch(error => logFailure('cleaning orphaned ACP installer containers failed', error));
     await this.reconcileGlobalImage().catch(error => logFailure('reconciling global precompiled image on start failed', error));
     for (const row of this.list()) await this.lock(row.repository_id, async () => {
       const pending = this.db.prepare("SELECT action FROM operations WHERE repository_id=? AND state='running'").all(row.repository_id);
@@ -1462,6 +1463,123 @@ export class Projects {
       throw new ManagerError('invalid_retention', 400);
     this.db.prepare("INSERT INTO settings VALUES('payload_retention',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ days: input.payload_days }));
     return this.expiry.state();
+  }
+  async cleanupOrphanedInstallers() {
+    const filters = encodeURIComponent(JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, 'department.bot.kind=acp-installer'] }));
+    const containers = await this.docker.request('GET', `/containers/json?all=true&filters=${filters}`).catch(() => []);
+    for (const c of Array.isArray(containers) ? containers : []) {
+      if (c?.Id) await this.docker.request('DELETE', `/containers/${encodeURIComponent(c.Id)}?force=true`).catch(() => {});
+    }
+  }
+  /**
+   * Runs Python/uv ACP product installation (e.g. WorkSwarm with sdist dependencies) in an ephemeral one-shot container
+   * mounting ONLY the `agent-tools` volume (no `/keys`, `/data`, `/internal`, `/workspace`, or Docker socket) on the
+   * isolated build egress network, so PEP 517 build scripts never execute inside the control-plane container (#1260).
+   */
+  async installAcpProduct(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ManagerError('invalid_input', 400);
+    const allowedKeys = ['product', 'version', 'source_dir', 'uv_bin', 'offline'];
+    if (Object.keys(input).some(k => !allowedKeys.includes(k))) throw new ManagerError('invalid_input', 400);
+    const { product, version, source_dir: sourceDir, uv_bin: uvBin, offline = false } = input;
+    if (typeof product !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(product)) throw new ManagerError('invalid_input', 400);
+    if (typeof version !== 'string' || !/^[0-9][a-zA-Z0-9._+-]{0,63}$/.test(version)) throw new ManagerError('invalid_input', 400);
+    if (typeof sourceDir !== 'string' || !sourceDir.startsWith('/opt/agent-tools/.staging/') || sourceDir.includes('..') || sourceDir.includes('\0')) {
+      throw new ManagerError('invalid_input', 400);
+    }
+    if (typeof uvBin !== 'string' || !uvBin.startsWith('/opt/agent-tools/uv/') || uvBin.includes('..') || uvBin.includes('\0')) {
+      throw new ManagerError('invalid_input', 400);
+    }
+    if (typeof offline !== 'boolean') throw new ManagerError('invalid_input', 400);
+    const toolsVolume = await this.agentToolsVolume();
+    if (!toolsVolume) throw new ManagerError('agent_tools_volume_missing', 503);
+    const baseImage = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
+    if (!baseImage?.Id) throw new ManagerError('project_image_missing', 503);
+    const networkMode = offline ? 'none' : await this.images.ensureBuildNetwork();
+    const name = `dbot-${this.deployment}-acp-install-${randomId().slice(0, 12)}`;
+    const cmd = [
+      'node', '/opt/runner/acp-install-worker.mjs',
+      '--root', '/opt/agent-tools',
+      '--product', product,
+      '--version', version,
+      '--source-dir', sourceDir,
+      '--uv-bin', uvBin,
+      ...(offline ? ['--offline'] : []),
+    ];
+    await this.docker.request('POST', `/containers/create?name=${encodeURIComponent(name)}`, {
+      Image: baseImage.Id,
+      User: '10001:10001',
+      WorkingDir: '/tmp',
+      Cmd: cmd,
+      Env: ['LANG=C.UTF-8', 'HOME=/tmp', 'TMPDIR=/tmp'],
+      Labels: {
+        'department.bot.deployment': this.deployment,
+        'department.bot.kind': 'acp-installer',
+        'department.bot.product': product,
+      },
+      HostConfig: {
+        ReadonlyRootfs: true,
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges:true'],
+        Privileged: false,
+        Memory: 4096 * mib,
+        MemorySwap: 4096 * mib,
+        NanoCpus: Math.round(2 * 1e9),
+        PidsLimit: 512,
+        NetworkMode: networkMode,
+        Init: true,
+        RestartPolicy: { Name: 'no' },
+        Tmpfs: { '/tmp': `rw,exec,nosuid,nodev,size=${1024 * mib},mode=1777` },
+        Mounts: [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: false }],
+      },
+    });
+    try {
+      await this.docker.request('POST', `/containers/${encodeURIComponent(name)}/start`);
+      const waited = await this.docker.request('POST', `/containers/${encodeURIComponent(name)}/wait`, undefined, false, 20 * 60_000);
+      const code = Number(waited?.StatusCode ?? -1);
+      if (code !== 0) {
+        const rawLogs = await this.docker.request('GET', `/containers/${encodeURIComponent(name)}/logs?stdout=true&stderr=true&tail=40`, undefined, true, 10_000).catch(() => Buffer.alloc(0));
+        const text = Buffer.isBuffer(rawLogs) ? rawLogs.toString('utf8').replace(/[\x00-\x08\x0e-\x1f]/g, '').trim().slice(-600) : '';
+        throw Object.assign(new ManagerError('acp_install_failed', 502), { detail: `exit=${code}${text ? ': ' + text : ''}` });
+      }
+      return { ok: true, product, version };
+    } finally {
+      await this.docker.request('DELETE', `/containers/${encodeURIComponent(name)}?force=true`).catch(() => {});
+    }
+  }
+  /** Inspects, writes, or deletes allowlisted CLI config files under `/workspace/home` without returning or logging file content. */
+  async cliConfig(repo, method, input = {}) {
+    const project = this.get(repo);
+    if (!project || !['ready', 'busy'].includes(project.state)) {
+      if (method === 'GET') {
+        return { available: false, reason: 'computer_not_ready', clis: { claude_code: { configured: false, files: {} }, codex: { configured: false, files: {} } } };
+      }
+      throw new ManagerError('environment_not_ready', 409);
+    }
+    const container = this.names(repo, project.generation).container;
+    if (method === 'GET') {
+      const answer = await this.docker.runner(container, { operation_id: randomId(), type: 'cli_config_status' }, 15_000);
+      if (!answer?.ok) throw new ManagerError(answer?.error || 'cli_config_failed', 503);
+      return { available: true, reason: null, clis: answer.result };
+    }
+    if (method === 'PUT') {
+      if (!input || Object.keys(input).some(k => !['cli', 'file', 'content'].includes(k)) ||
+          typeof input.cli !== 'string' || typeof input.file !== 'string' || typeof input.content !== 'string') {
+        throw new ManagerError('invalid_input', 400);
+      }
+      const answer = await this.docker.runner(container, { operation_id: randomId(), type: 'cli_config_write', cli: input.cli, file: input.file, content: input.content }, 15_000);
+      if (!answer?.ok) throw new ManagerError(answer?.error || 'cli_config_failed', answer?.error?.startsWith('invalid_') ? 400 : 409);
+      return answer.result;
+    }
+    if (method === 'DELETE') {
+      if (!input || Object.keys(input).some(k => !['cli', 'file'].includes(k)) ||
+          typeof input.cli !== 'string' || typeof input.file !== 'string') {
+        throw new ManagerError('invalid_input', 400);
+      }
+      const answer = await this.docker.runner(container, { operation_id: randomId(), type: 'cli_config_delete', cli: input.cli, file: input.file }, 15_000);
+      if (!answer?.ok) throw new ManagerError(answer?.error || 'cli_config_failed', answer?.error?.startsWith('invalid_') ? 400 : 409);
+      return answer.result;
+    }
+    throw new ManagerError('method_not_allowed', 405);
   }
   async shutdown() {
     await this.images.shutdown();

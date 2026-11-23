@@ -14,6 +14,7 @@ import type { ModelAuthHeader, ModelInterfaceType } from '../models/catalog.js';
 import type { FileBackedModelProvider } from './model-gateway.js';
 import { filterPlatformTools, withContainerHarnessSession, type RunningContainerHarness } from './container-session.js';
 import { modelTransport, type ModelTransport } from './model-connection.js';
+import type { HarnessModelSource } from './subscription.js';
 
 export interface CodexProviderConfig {
   baseUrl: string;
@@ -41,6 +42,7 @@ export interface CodexConfiguration {
 
 export interface CodexPreparation {
   modelTransport: ModelTransport;
+  modelSource?: HarnessModelSource;
   mode: 'volume' | 'config_file';
   config?: CodexConfiguration;
   command: string;
@@ -170,10 +172,11 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     }
     const command = resolveExecutableOnPath(config.command);
     const executableArgs = stripTrailingAppServerArg(config.args);
-    const connectionMode = modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport);
-    let fileProvider: FileBackedModelProvider | undefined = spec.containerOptions?.fileProvider;
+    const localConfig = spec.containerOptions?.modelSource === 'local_config';
+    const connectionMode = localConfig ? 'direct' : modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport);
+    let fileProvider: FileBackedModelProvider | undefined = localConfig ? undefined : spec.containerOptions?.fileProvider;
     let primaryModel: RuntimeModel | undefined;
-    if (!fileProvider && config.provider) {
+    if (!localConfig && !fileProvider && config.provider) {
       fileProvider = {
         id: 'codex_config_provider',
         baseUrl: config.provider.baseUrl,
@@ -182,23 +185,30 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
         interfaceType: config.provider.interfaceType ?? 'openai-responses',
         authHeader: config.provider.authHeader ?? 'bearer',
       };
-    } else if (!fileProvider && connectionMode === 'gateway') {
+    } else if (!localConfig && !fileProvider && connectionMode === 'gateway') {
       try {
         primaryModel = (spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel);
       } catch {
         primaryModel = undefined;
       }
     }
-    const configurationHash = contentHash({ ...config, command, modelTransport:connectionMode, protocol: 'codex-app-server' });
+    const configurationHash = contentHash({
+      ...config,
+      command,
+      modelTransport: connectionMode,
+      ...(localConfig ? { modelSource: 'local_config' } : {}),
+      protocol: 'codex-app-server',
+    });
     const prepared: CodexPreparation = {
       modelTransport: connectionMode,
+      modelSource: localConfig ? 'local_config' : 'gateway',
       mode: 'config_file',
       config,
       command,
       executableArgs,
       version: config.version,
-      ...(config.model ? { model: config.model } : {}),
-      ...(connectionMode === 'direct' && (fileProvider || primaryModel) ? { modelProvider: 'bot_direct' } : config.modelProvider ? { modelProvider: config.modelProvider } : {}),
+      ...(!localConfig && config.model ? { model: config.model } : {}),
+      ...(!localConfig ? (connectionMode === 'direct' && (fileProvider || primaryModel) ? { modelProvider: 'bot_direct' } : config.modelProvider ? { modelProvider: config.modelProvider } : {}) : {}),
       ...(primaryModel ? { primaryModel } : {}),
       ...(fileProvider ? { fileProvider } : {}),
       configurationHash,
@@ -226,6 +236,33 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     const selected = selectCompatibleCliVersion(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, 'codex');
     command = selected.container_executable;
     cliVersion = selected.version;
+  }
+
+  const localConfig = spec.containerOptions?.modelSource === 'local_config';
+  if (localConfig) {
+    const configurationHash = contentHash({
+      cli: 'codex',
+      version: cliVersion,
+      command,
+      modelSource: 'local_config',
+      protocol: 'codex-app-server',
+    });
+    const prepared: CodexPreparation = {
+      modelTransport: 'direct',
+      modelSource: 'local_config',
+      mode: 'volume',
+      command,
+      executableArgs,
+      version: cliVersion,
+      configurationHash,
+    };
+    spec.harnessPreparation = prepared;
+    spec.harnessBinding = {
+      model_revision: `codex:local_config:${configurationHash}`,
+      harness_revision: `codex@${cliVersion}:${configurationHash}`,
+      cli_version: cliVersion,
+    };
+    return prepared;
   }
 
   const fileProvider = spec.containerOptions?.fileProvider;
@@ -332,8 +369,11 @@ export async function runCodex<T>(
       {
         cli: 'codex',
         modelTransport: prepared.modelTransport,
-        modelProvider: prepared.modelProvider,
-        model: prepared.model ?? 'gpt-5-codex',
+        ...(prepared.modelSource ? { modelSource: prepared.modelSource } : {}),
+        ...(prepared.modelSource !== 'local_config' ? {
+          modelProvider: prepared.modelProvider,
+          model: prepared.model ?? 'gpt-5-codex',
+        } : {}),
         maxTurns: spec.maxTurns,
         maxOutputTokens: spec.maxOutputTokens ?? 8192,
         sessionKey,
@@ -455,8 +495,9 @@ export async function runCodex<T>(
             previousSessionRef: previous?.sessionId ?? null,
             recoveryMode: opened.recovery,
             agentInfo: opened.agentInfo ?? null,
-            configuredModel: prepared.model ?? null,
-            usage: prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
+            configuredModel: prepared.model ?? (typeof opened.bound?.model === 'string' ? opened.bound.model : null),
+            ...(prepared.modelSource === 'local_config' ? { modelSource: 'local_config' } : {}),
+            usage: prepared.modelSource !== 'local_config' && prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
             protocol: 'codex-app-server',
             ...opened.bound,
           });

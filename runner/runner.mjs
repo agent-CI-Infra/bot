@@ -11,6 +11,7 @@ import { listTaskDirectories, removeTaskDirectories } from './task-dirs.mjs';
 import { storageScan } from './storage-scan.mjs';
 import {local,workspaceRoot,assistant,worktreesDirectory} from './paths.mjs';
 import { assistantFile } from './assistant-files.mjs';
+import { deleteCliConfig, inspectCliConfigs, writeCliConfig } from './cli-config.mjs';
 import { refuseFull, failedFull } from './disk.mjs';
 
 const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
@@ -93,7 +94,21 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
     const rows = await processes(), owner = scoped ? await ownership(rows, { environ: pid => readFile(`/proc/${pid}/environ`, 'utf8').catch(() => ''),
       cwd: pid => readlink(`/proc/${pid}/cwd`).catch(() => '') }) : null;
     const live = rows.filter(p => !keep.has(p.pid) && p.state !== 'Z' && (!owner || !isRunner(p) && owner(p.pid) === workspaceId));
-    if (!live.length) return { killed, remaining: 0 };
+    if (!live.length) {
+      if (scoped && !keepAgent) {
+        const marker = `${tasksRoot}${workspaceId}/agent/staged-cli-config.json`;
+        try {
+          const paths = JSON.parse(await readFile(marker, 'utf8'));
+          if (Array.isArray(paths) && paths.length) {
+            const { cleanupStagedCliConfig } = await import('./cli-config.mjs');
+            await cleanupStagedCliConfig(paths);
+          }
+          const { unlink } = await import('node:fs/promises');
+          await unlink(marker).catch(() => {});
+        } catch {}
+      }
+      return { killed, remaining: 0 };
+    }
     for (const p of live) try { process.kill(p.pid, 'SIGKILL'); killed++; } catch { /* Already gone. */ }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -127,18 +142,22 @@ let result;
 if (request.type === 'journal_clear' && assistant) {
   try { for (const name of await readdir(journal)) await rm(`${journal}/${name}`, { force: true }); result = { ok: true, result: { cleared: true } }; }
   catch { result = { ok: false, error: 'journal_clear_failed' }; }
-} else if (['tail', 'reap', 'reap_operation', 'usage', 'storage_scan', 'prune', 'tasks_list', 'tasks_remove', 'worktrees_list', 'worktrees_remove', 'workspace_harness_poll'].includes(request.type)) {
-  // Reading progress or usage, measuring the work volume, stopping leftovers, removing old journal records and listing or
-  // removing task directories and shared worktrees are repeatable and never journaled.
+} else if (['tail', 'reap', 'reap_operation', 'usage', 'storage_scan', 'prune', 'tasks_list', 'tasks_remove', 'worktrees_list', 'worktrees_remove', 'workspace_harness_poll', 'cli_config_status', 'cli_config_write', 'cli_config_delete'].includes(request.type)) {
+  // Reading progress or usage, measuring the work volume, stopping leftovers, removing old journal records, listing or
+  // removing task directories and shared worktrees, and managing /workspace/home CLI config files are repeatable and
+  // never journaled (so CLI config credentials never enter .runner-journal).
   try {
     result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'storage_scan' ? await storageScan(workspace)
       : request.type === 'prune' ? { journal: await pruneJournal(journal), store: await pruneStore() }
       : request.type === 'tasks_list' ? await listTaskDirectories() : request.type === 'tasks_remove' ? await removeTaskDirectories(request.entries)
       : request.type === 'worktrees_list' ? await listTaskDirectories(worktreesDirectory) : request.type === 'worktrees_remove' ? await removeTaskDirectories(request.entries, worktreesDirectory)
       : request.type === 'reap_operation' ? await reapOperation(request.target_operation_id)
+      : request.type === 'cli_config_status' ? await inspectCliConfigs(workspace)
+      : request.type === 'cli_config_write' ? await writeCliConfig(workspace, request.cli, request.file, request.content)
+      : request.type === 'cli_config_delete' ? await deleteCliConfig(workspace, request.cli, request.file)
       : request.type === 'workspace_harness_poll' ? await execute(request) : await reap(request) };
   }
-  catch (error) { result = { ok: false, error: request.type === 'workspace_harness_poll' ? 'runner_operation_failed' : request.type + '_failed', ...(request.type.startsWith('tasks_') || request.type.startsWith('worktrees_') || request.type === 'workspace_harness_poll' ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
+  catch (error) { result = { ok: false, error: request.type.startsWith('cli_config_') ? String(error?.message || 'cli_config_failed') : request.type === 'workspace_harness_poll' ? 'runner_operation_failed' : request.type + '_failed', ...(request.type.startsWith('tasks_') || request.type.startsWith('worktrees_') || request.type === 'workspace_harness_poll' ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   // A work volume that ran full answers disk_full (#671, runner/disk.mjs): the control plane stops the task waiting for space.

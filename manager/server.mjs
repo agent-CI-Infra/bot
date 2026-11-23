@@ -50,6 +50,15 @@ export function createManagerServer({ projects, token, assistants = null }) {
       else if (req.method === 'POST' && path === '/v1/defaults/build/cancel') result = projects.cancelGlobalBuild();
       else if (req.method === 'GET' && path === '/v1/precompiled-images') result = await projects.listPrecompiledImages(assistants?.activeImages());
       else if (req.method === 'POST' && path === '/v1/precompiled-images/prune') result = await projects.prunePrecompiledImages(assistants?.activeImages(), { force: true });
+      else if (req.method === 'POST' && path === '/v1/agent-tools/install-acp') result = await projects.installAcpProduct(await json(req));
+      else if (['GET', 'PUT', 'DELETE'].includes(req.method) && /^\/v1\/projects\/[1-9]\d{0,19}\/cli-config$/.test(path)) {
+        const repoId = path.split('/')[3];
+        const bodyInput = req.method === 'GET' ? {}
+          : req.method === 'DELETE' && url.searchParams.has('cli')
+            ? { cli: url.searchParams.get('cli'), file: url.searchParams.get('file') }
+            : await json(req, 64 * 1024);
+        result = await projects.cliConfig(repoId, req.method, bodyInput);
+      }
       else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/build\/cancel$/.test(path)) result = projects.cancelBuild(path.split('/')[3]);
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
       else if (/^\/v1\/projects\/[1-9]\d{0,19}\/file-tree(?:\/[^/]+)?(?:\/(?:versions|restore|move))?$/.test(path)) {

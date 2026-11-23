@@ -17,6 +17,7 @@ import { roleConfiguration } from '../roles/definition.js';
 import { taskPermissions } from '../tasks/configuration.js';
 import { taskReadScopes } from '../tasks/management.js';
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, selectCompatibleCliVersion, type AgentToolCli } from './agent-tools.js';
+import type { HarnessModelSource } from './subscription.js';
 import { createMailboxModelGateway, type FileBackedModelProvider, type PolledModelRequestEntry } from './model-gateway.js';
 import { modelTransport, nativeModelConnection, type ModelTransport } from './model-connection.js';
 
@@ -50,13 +51,14 @@ export const persistentCliStateWorkspaceId = (instanceId: string): string =>
 
 export interface ContainerHarnessLaunch {
   modelTransport?: ModelTransport;
+  modelSource?: HarnessModelSource;
   modelProvider?: string;
   claudeHomeOverride?: string;
   cli: AgentToolCli | 'container_acp';
   acpProduct?: AcpProductManifest;
   backendId?: string;
   acpLocalLeaseMs?: number;
-  model: string;
+  model?: string;
   systemPrompt?: string;
   maxTurns?: number;
   maxOutputTokens?: number;
@@ -307,7 +309,8 @@ export async function withContainerHarnessSession<T, R>(
   const acp = launch.cli === 'container_acp';
   const icode = acp && launch.acpProduct?.id === icodeProductId;
   const workswarm = acp && launch.acpProduct?.id === workswarmProductId;
-  const connectionMode = acp ? 'gateway' : modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
+  const localConfig = !acp && (launch.modelSource ?? spec.containerOptions?.modelSource) === 'local_config';
+  const connectionMode = localConfig ? 'local_config' : acp ? 'gateway' : modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
   const supported = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
   const nativeModel = connectionMode === 'direct' ? nativeModelConnection(launch.primaryModel, launch.fileProvider ?? spec.containerOptions?.fileProvider,supported) : undefined;
   if (nativeModel) {
@@ -360,14 +363,15 @@ export async function withContainerHarnessSession<T, R>(
       image_input: launch.primaryModel?.capabilities?.image_input ?? false,
     } } : {}),
     model_transport: connectionMode,
+    ...(localConfig ? { model_source: 'local_config' } : {}),
     ...(nativeModel ? { native_model: nativeModel } : {}),
-    ...(launch.modelProvider ? { model_provider: launch.modelProvider } : {}),
+    ...(!localConfig && launch.modelProvider ? { model_provider: launch.modelProvider } : {}),
     ...(launch.claudeHomeOverride ? { claude_home_override: launch.claudeHomeOverride } : {}),
     executable,
     ...(executableArgs.length ? { executable_args: executableArgs } : {}),
     ...(nodeExecutable ? { node_executable: nodeExecutable } : {}),
     run_token: runToken,
-    model: launch.model,
+    ...(!localConfig && launch.model ? { model: launch.model } : {}),
     system_prompt: launch.systemPrompt ?? '',
     max_turns: spec.harnessAccess ? spec.harnessTurnLimit : launch.maxTurns ?? spec.maxTurns,
     execution_access: spec.harnessAccess,
@@ -408,6 +412,12 @@ export async function withContainerHarnessSession<T, R>(
   try {
     started = await transport.deliver({ type: 'workspace_harness_start', instance_id: instanceId });
     if (!started?.started) {
+      if (started?.error === 'claude_local_config_missing' || started?.error === 'codex_local_config_missing') {
+        const detail = started.error === 'claude_local_config_missing'
+          ? '项目电脑中缺少 /workspace/home/.claude/settings.json 或 /workspace/home/.claude/.credentials.json，不会回退到平台模型。'
+          : '项目电脑中缺少 /workspace/home/.codex/config.toml 或 /workspace/home/.codex/auth.json，不会回退到平台模型。';
+        stop(started.error, 'waiting_configuration', detail);
+      }
       const reason = started?.detail || started?.error || (started?.state ? `state:${String(started.state)}` : 'startup_failed');
       stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
     }

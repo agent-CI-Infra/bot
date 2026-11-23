@@ -25,8 +25,8 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'claude_protocol_incompatible','claude_gateway_scope_unverified','claude_gateway_protocol_invalid','claude_timeout','claude_stream_interrupted','claude_stream_truncated','claude_process_exit','claude_result_missing','claude_capability_mismatch',
     // #671: the data disk of the control plane or the manager is full; a repeated call whose stored result was removed.
     'disk_full','operation_result_expired',
-    // #705: read-only /opt/agent-tools CLI volume availability, compatibility and archive integrity.
-    'agent_tools_volume_missing','cli_not_installed','cli_version_incompatible','platform_arch_unsupported','agent_tool_invalid','agent_tool_hash_mismatch','agent_tool_archive_invalid'] },
+    // #705/#1260: read-only /opt/agent-tools volume availability, compatibility, archive integrity and isolated installer.
+    'agent_tools_volume_missing','cli_not_installed','cli_version_incompatible','platform_arch_unsupported','agent_tool_invalid','agent_tool_hash_mismatch','agent_tool_archive_invalid','agent_tool_isolated_installer_required','agent_tool_version_unverified'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_skill_file','pull_request_file_limit','agent_context_too_large','github_pagination_limit','pull_request_media_invalid',
     // The repository's .agents/skills/ are the repository's to fix.
@@ -64,7 +64,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported',
     // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.
     'unsupported_capability','role_budget_exhausted','role_usage_unknown','conversation_harness_context_required','model_revision_changed','role_recovery_unsupported','claude_usage_budget_unknown','claude_tool_name_unsupported','claude_submission_tool_required',
-    'subscription_mode_not_implemented'] },
+    'subscription_mode_not_implemented','claude_local_config_missing','codex_local_config_missing'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
   bot: { label:'Bot 自身问题', codes:['harness_permission_mismatch','pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','invalid_runner_request','pi_execution_failed','model_request_invalid','github_read_token_limit','acp_invalid_prompt',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed','publication_receipt_mismatch',
@@ -149,7 +149,11 @@ const codeActions: Record<string,string> = {
   workswarm_model_protocol_unsupported:'请选择支持 Chat Completions 或 Anthropic Messages 的模型。',
   icode_protocol_unsupported:'请平台管理员核对 agent-tools 卷中选用的 iCode 版本，重新安装并选定受支持的官方 Linux 离线包，再点「重试」。',
   acp_process_exited:'容器内 ACP 进程异常退出，bot 会自动重试。若反复出现，请查看本次运行日志并检查产品配置，再手动重试。',
-  subscription_mode_not_implemented:'供应商订阅模式接口当前仅作预留，尚未实现；请在「角色」页将模型来源切回「平台网关」后再试。',
+  subscription_mode_not_implemented:'当前后端不支持「项目电脑内自行配置」模式；仅 Claude Code 与 Codex 支持此模式，请在「角色」页切换回「平台模型」后再试。',
+  claude_local_config_missing:'该角色配置为「项目电脑内自行配置」，但项目电脑中缺少 /workspace/home/.claude/settings.json 或 /workspace/home/.claude/.credentials.json，任务不会回退到平台模型。请项目管理员在「项目设置 → 机器配置」写入配置文件后重试。',
+  codex_local_config_missing:'该角色配置为「项目电脑内自行配置」，但项目电脑中缺少 /workspace/home/.codex/config.toml 或 /workspace/home/.codex/auth.json，任务不会回退到平台模型。请项目管理员在「项目设置 → 机器配置」写入配置文件后重试。',
+  agent_tool_isolated_installer_required:'安装 WorkSwarm 需要经 manager 启动仅挂载 agent-tools 卷的隔离安装容器（避免在控制面内执行第三方包构建脚本）。请确认 manager 已就绪后重试，或使用离线命令行脚本安装。',
+  agent_tool_version_unverified:'iCode 与 WorkSwarm 仅允许安装平台已核验并固定 SHA-256 哈希的受支持版本。请选择平台内置清单中的版本后重试。',
   container_workspace_required:'Claude Code 与 Codex 需要项目容器或隔离运行容器工作区；请确认已配置虚拟电脑或隔离运行环境后再试。',
   agent_tools_volume_missing:'未挂载只读 CLI 工具卷 /opt/agent-tools；请确认已配置 agent-tools 卷并由管理员通过 POST /api/agent-tools/install 安装对应 CLI。',
   cli_not_installed:'只读工具卷 /opt/agent-tools 中尚未安装该执行后端所需的 CLI；请管理员通过管理接口 POST /api/agent-tools/install 安装后重试。',

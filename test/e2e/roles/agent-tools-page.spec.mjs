@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
-import { startMockToolUpstream } from '../../fixtures/agent-tools-fixture.mjs';
+import { createMockAcpBuilder, startMockToolUpstream } from '../../fixtures/agent-tools-fixture.mjs';
 import { AgentToolManager } from '../../../dist/harness/agent-tools.js';
 import { beginRun } from '../../../dist/tasks/trace.js';
 import { allocateLease, recordRunCliVersion } from '../../../dist/roles/role-run.js';
@@ -23,8 +23,9 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
   const root = mkdtempSync(join(tmpdir(), 'agent-tools-page-')), cleanups = [];
   const t = { after: fn => cleanups.push(fn) };
   const upstream = await startMockToolUpstream(t, 'x64');
+  const mockBuilder = createMockAcpBuilder(root);
   const h = await harness(undefined, undefined, {
-    agentTools: new AgentToolManager({ volumeRoot: root, containerRoot: '/opt/agent-tools', arch: 'x64', sources: upstream.sources }),
+    agentTools: new AgentToolManager({ volumeRoot: root, containerRoot: '/opt/agent-tools', arch: 'x64', sources: upstream.sources, acpBuilder: mockBuilder.builder }),
   });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -36,11 +37,29 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
     await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: ['101'] });
 
     await fill(page, h.admin + '/#/settings/agent-tools', 'administrator', password);
-    // An empty volume is an empty state plus a usable form, not a dead end.
+    // An empty volume is an empty state plus a usable form and per-agent actions for all 4 third-party agents (excluding built-in Pi).
     await expect(page.locator('nav.project-nav a', { hasText: 'Agent CLI 工具卷' })).toHaveAttribute('aria-current', 'page');
     await expect(page.getByRole('heading', { name: '工具卷', exact: true })).toBeVisible();
-    await expect(page.locator('.agent-tools-cli[data-cli="codex"]')).toContainText('尚未安装');
+    for (const cli of ['claude_code', 'codex', 'icode', 'workswarm']) {
+      const card = page.locator(`.agent-tools-cli[data-cli="${cli}"]`);
+      await expect(card).toContainText('尚未安装');
+      await expect(card.locator('button[data-action="install"]')).toBeVisible();
+      await expect(card.locator('button[data-action="upgrade"]')).toBeVisible();
+      await expect(card.locator('button[data-action="remove"]')).toBeVisible();
+    }
+    const genericCard = page.locator('.agent-tools-generic-acp');
+    await expect(genericCard).toBeVisible();
+    await expect(genericCard.locator('button')).toHaveCount(0);
     await expect(page.locator('.agent-tools-install select[name="cli"]')).toBeVisible();
+
+    // Per-agent one-click install for iCode & WorkSwarm, then remove iCode with confirmation.
+    await page.locator('.agent-tools-cli[data-cli="icode"] button[data-action="install"]').click();
+    await expect(page.locator('.agent-tools-cli[data-cli="icode"]')).toContainText('当前选用 0.36.0');
+    await page.locator('.agent-tools-cli[data-cli="workswarm"] button[data-action="install"]').click();
+    await expect(page.locator('.agent-tools-cli[data-cli="workswarm"]')).toContainText('当前选用 0.2.9');
+    await page.locator('.agent-tools-cli[data-cli="icode"] button[data-action="remove"]').click();
+    await page.locator('.confirm-dialog button[type="submit"]').click();
+    await expect(page.locator('.agent-tools-cli[data-cli="icode"]')).toContainText('已手动删除');
 
     // Installing a Codex version through the page downloads it from the mock release API and refreshes the page.
     await page.locator('.agent-tools-install select[name="cli"]').selectOption('codex');

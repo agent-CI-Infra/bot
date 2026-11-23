@@ -225,6 +225,7 @@ export function inputCandidate(s: Store, task: Row, role: string, kind: string):
   return { ref, evidence: null };
 }
 export function modelRevision(snapshot: RoleSnapshot) {
+  if (snapshot.model.source === 'local_config') return `local_config:${snapshot.harness.id}@${snapshot.harness.version}`;
   return snapshot.model.source === 'external_harness' ? `external_harness:${snapshot.harness.id}@${snapshot.harness.version}` : `${snapshot.model.source}:${snapshot.model.id}@${snapshot.model.version}:${snapshot.model.profile_hash ?? 'none'}`;
 }
 /**

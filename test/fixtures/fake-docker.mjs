@@ -68,8 +68,13 @@ export class FakeDocker {
       this.created = (this.created || 0) + 1; return {}; }
     if (kind === 'containers') {
       const row = this.containers.get(name);
+      if (method === 'GET' && path.includes('/logs')) return Buffer.from(this.installerLogs ?? 'ok\n');
       if (method === 'GET') return row || null;
       if (path.endsWith('/start')) { row.State = { Running: true, StartedAt: String(++this.starts) }; return {}; }
+      if (path.includes('/wait')) {
+        row.State.Running = false;
+        return { StatusCode: this.installerExitCode ?? 0 };
+      }
       if (path.includes('/stop')) { row.State.Running = false; return {}; }
       if (method === 'DELETE') { this.containers.delete(name); return {}; }
     }

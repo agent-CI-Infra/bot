@@ -438,16 +438,17 @@ test('Claude Code rejects invalid config, downgrades legacy isolated-workspace p
   });
   assert.equal(savedIsolated.configuration.roles.find(r => r.role_id === 'dev').environment_profile_ref.id, 'task-workspace');
 
-  // Subscription mode is reserved (#705): saving model_source: 'subscription' succeeds and fails closed at prepare/run with subscription_mode_not_implemented.
+  // Local config mode (#1260): saving legacy 'subscription' normalizes to 'local_config' and resolves without platform model.
   const savedSub = roleApi(f.s, admin, 'PUT', url, {
     expected_revision: savedIsolated.configuration.revision,
     enabled: true,
     roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code', model_source: 'subscription' } }],
   });
-  assert.equal(savedSub.configuration.roles.find(r => r.role_id === 'dev').harness_ref.model_source, 'subscription');
+  assert.equal(savedSub.configuration.roles.find(r => r.role_id === 'dev').harness_ref.model_source, 'local_config');
   const viewSub = roleApi(f.s, admin, 'GET', url, {});
-  assert.equal(viewSub.preview.find(p => p.role === 'dev').error, 'subscription_mode_not_implemented');
-  await assert.rejects(roleRuns.prepare(f.spec, 'dev'), { code: 'subscription_mode_not_implemented' });
+  assert.equal(viewSub.preview.find(p => p.role === 'dev').model.source, 'local_config');
+  // With no config files in /workspace/home, running in local_config mode fails closed with claude_local_config_missing!
+  await assert.rejects(runRole(f.spec, 'dev'), { code: 'claude_local_config_missing' });
 });
 
 test('wire parser rejects oversized and unterminated records without retaining private fields', () => {
@@ -840,4 +841,54 @@ test('#1171 Claude Code explicitly strips inherited CLAUDE_CODE_ADDITIONAL_DIREC
     !untrustedLaunch.env_names.includes('CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD'),
     'untrusted checkout must delete inherited CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD from childEnv',
   );
+});
+
+test('#1260 Claude Code local_config mode injects zero platform model config, stages /workspace/home allowlist, cleans up copies, and fails closed when missing', async t => {
+  const f = await claudeFixture(t);
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] };
+  const url = new URL('http://local/api/repositories/r/roles');
+  roleApi(f.s, admin, 'PUT', url, {
+    expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision,
+    enabled: true,
+    roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code', model_source: 'local_config' } }],
+  });
+  // Even with no platform model configured on the project, local_config resolves without error.
+  f.s.run("UPDATE policies SET model_id=NULL WHERE repository_id='r'");
+
+  // 1. Without /workspace/home/.claude config files -> fails closed with claude_local_config_missing, never falls back to platform model!
+  await assert.rejects(runRole(f.spec, 'dev'), e => e.code === 'claude_local_config_missing' && e.state === 'waiting_configuration');
+  assert.equal(f.modelCalls, 0);
+
+  // 2. Write allowlisted config files to project computer persistent HOME (<stateDirectory>/home/.claude).
+  const homeClaudeDir = join(f.config.stateDirectory, 'home', '.claude');
+  mkdirSync(homeClaudeDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(homeClaudeDir, 'settings.json'), JSON.stringify({ model: 'claude-custom-local-4-5' }), { mode: 0o600 });
+  writeFileSync(join(homeClaudeDir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'local-only-secret-token' } }), { mode: 0o600 });
+
+  const out = await runRole(f.spec, 'dev');
+  assert.equal(out.result.summary, 'read through gateway');
+  assert.equal(f.modelCalls, 0, 'platform model gateway was never called');
+
+  const st = f.state('dev');
+  const launch = JSON.parse(readFileSync(join(f.cliHome(st), 'launch.json'), 'utf8'));
+  // Zero platform model env vars or --model flags injected.
+  for (const forbidden of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'BOT_NATIVE_MODEL_KEY']) {
+    assert.equal(launch.env_names.includes(forbidden), false, `must not inject ${forbidden}`);
+  }
+  assert.equal(launch.args.includes('--model'), false, 'must not inject --model');
+  assert.equal(launch.args[launch.args.indexOf('--setting-sources') + 1], 'user', 'passes --setting-sources user in local_config mode');
+  // Staged copies were present with 0600 permissions during launch.
+  assert.equal(launch.staged_files.settings.exists, true);
+  assert.equal(launch.staged_files.settings.mode, 0o600);
+  assert.equal(launch.staged_files.credentials.exists, true);
+  assert.equal(launch.staged_files.credentials.mode, 0o600);
+
+  // After shutdown, staged copies in session CLAUDE_CONFIG_DIR are deleted while transcript persists, and source files stay intact.
+  const sessionClaudeDir = join(f.cliHome(st), '.claude');
+  assert.equal(existsSync(join(sessionClaudeDir, 'settings.json')), false, 'staged settings.json cleaned up on exit');
+  assert.equal(existsSync(join(sessionClaudeDir, '.credentials.json')), false, 'staged .credentials.json cleaned up on exit');
+  assert.equal(existsSync(join(sessionClaudeDir, 'projects', 'fixture')), true, 'session transcript preserved');
+  assert.equal(existsSync(join(homeClaudeDir, 'settings.json')), true, 'source file in /workspace/home preserved');
+  assert.equal(st.model, 'claude-custom-local-4-5');
+  assert.equal(JSON.stringify(f.s.all('SELECT data FROM task_history')).includes('local-only-secret-token'), false);
 });

@@ -66,17 +66,20 @@ function roleChoices(title, object, key, choices, state) {
   }
   return group;
 }
+function isRoleLocalConfigSource(source) {
+  return source === 'local_config' || source === 'subscription';
+}
 function roleModelPicker(role, state, redraw) {
   const { data } = state, backend = data.harnesses.find(entry => entry.id === role.harness_ref.id);
-  const subscription = role.harness_ref?.model_source === 'subscription';
+  const localConfig = isRoleLocalConfigSource(role.harness_ref?.model_source);
   const external = !!backend?.externalModel;
-  const defaultLabel = subscription ? '供应商订阅模式（预留 · 未实现）' : external ? 'Agent 自带模型' : '继承项目默认模型';
-  const select = roleSelect(role.role_id + ' 模型', role.model_profile_ref?.model_id || '', [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.shared ? '（共享）' : '')])], id => {
+  const defaultLabel = localConfig ? '模型由项目电脑内的配置决定' : external ? 'Agent 自带模型' : '继承项目默认模型';
+  const select = roleSelect(role.role_id + ' 模型', localConfig ? '' : (role.model_profile_ref?.model_id || ''), [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.shared ? '（共享）' : '')])], id => {
     markRoleDirty(state);
     role.model_profile_ref = id ? { model_id: id, api: backend?.model_api?.[0] || 'openai-chat-completions', tool_calls: true, structured_output: backend?.structured_output?.includes('tool_call') ? 'tool_call' : backend?.structured_output?.[0] || 'tool_call' } : null;
   });
   if (redraw) select.addEventListener('change', redraw);
-  select.disabled = external || subscription; return select;
+  select.disabled = external || localConfig; return select;
 }
 function roleBackendPicker(role, state, redraw) {
   const candidates = state.data.backends.filter(backend => backend.kinds.includes(role.kind) || backend.id === role.harness_ref.id);
@@ -86,21 +89,22 @@ function roleBackendPicker(role, state, redraw) {
     !backend.available || !backend.kinds.includes(role.kind),
   ]), id => {
     const info = state.data.backends.find(entry => entry.id === id);
-    const supportsSubscription = !!info?.supported_model_sources?.includes('subscription');
-    const keepSubscription = supportsSubscription && role.harness_ref?.model_source === 'subscription';
-    role.harness_ref = supportsSubscription ? { id, model_source: keepSubscription ? 'subscription' : 'gateway' } : { id };
+    const supportsLocal = !!info?.supported_model_sources?.some(isRoleLocalConfigSource);
+    const keepLocal = supportsLocal && isRoleLocalConfigSource(role.harness_ref?.model_source);
+    role.harness_ref = supportsLocal ? { id, model_source: keepLocal ? 'local_config' : 'gateway' } : { id };
     markRoleDirty(state);
-    if (state.data.harnesses.find(backend => backend.id === id)?.externalModel || keepSubscription) role.model_profile_ref = null;
+    if (state.data.harnesses.find(backend => backend.id === id)?.externalModel || keepLocal) role.model_profile_ref = null;
     redraw();
   });
 }
 function roleModelSourcePicker(role, state, redraw) {
-  return roleSelect(role.role_id + ' 模型来源', role.harness_ref?.model_source || 'gateway', [
-    ['gateway', '平台网关（容器内模型中转）'],
-    ['subscription', '供应商订阅（预留 · 未实现）'],
+  const currentSource = isRoleLocalConfigSource(role.harness_ref?.model_source) ? 'local_config' : 'gateway';
+  return roleSelect(role.role_id + ' 模型来源', currentSource, [
+    ['gateway', '平台模型（直连或中转）'],
+    ['local_config', '项目电脑内自行配置（不注入模型配置）'],
   ], source => {
-    role.harness_ref = { id: role.harness_ref.id, model_source: source === 'subscription' ? 'subscription' : 'gateway' };
-    if (source === 'subscription') role.model_profile_ref = null;
+    role.harness_ref = { id: role.harness_ref.id, model_source: source === 'local_config' ? 'local_config' : 'gateway' };
+    if (source === 'local_config') role.model_profile_ref = null;
     markRoleDirty(state);
     redraw();
   });
@@ -129,10 +133,20 @@ function roleBackendRuntimeBox(role, state) {
     return declaredBox;
   }
   const cliReady = !!(rt.config_override || rt.selected_version);
-  const isSubscription = role.harness_ref?.model_source === 'subscription';
+  const isLocalConfig = isRoleLocalConfigSource(role.harness_ref?.model_source);
+  const localStatus = rt.subscription || null;
   let roleModelReady = false, targetModelId = null, targetModelName = null, targetSourceLabel = '', conn = null, relayText = '';
-  if (isSubscription) {
-    relayText = '未就绪（供应商订阅模式预留未实现，请切换回平台网关）';
+  if (isLocalConfig) {
+    if (localStatus?.configured === true) {
+      roleModelReady = true;
+      relayText = '项目电脑内自行配置（已检测到配置文件，不注入平台模型配置）';
+    } else if (localStatus?.configured === false) {
+      roleModelReady = false;
+      relayText = '未检测到配置文件（请先在「项目设置 → 机器配置」写入，否则启动任务时将拒绝执行）';
+    } else {
+      roleModelReady = true;
+      relayText = '项目电脑内自行配置（项目电脑当前未运行，暂无法检查配置文件）';
+    }
   } else if (role.model_profile_ref?.model_id) {
     const chosen = (state.data.models || []).find(entry => entry.id === role.model_profile_ref.model_id);
     if (chosen) {
@@ -169,23 +183,23 @@ function roleBackendRuntimeBox(role, state) {
     ? (rt.reason || `${info.name} 容器运行条件尚未就绪。`)
     : !roleModelReady
       ? relayText
-      : connFailed
-        ? `${info.name} CLI 已就绪，但模型 ${targetModelName} 连通探测或最近请求失败（${conn.detail || conn.error || '请求失败'}）。`
-        : `${info.name} 容器运行配置已就绪（${conn?.state === 'ok' ? '最近连通正常' : '模型连通性未探测'}）。`;
+      : isLocalConfig
+        ? `${info.name} 已选择「项目电脑内自行配置」模式，平台不注入模型配置。`
+        : connFailed
+          ? `${info.name} CLI 已就绪，但模型 ${targetModelName} 连通探测或最近请求失败（${conn.detail || conn.error || '请求失败'}）。`
+          : `${info.name} 容器运行配置已就绪（${conn?.state === 'ok' ? '最近连通正常' : '模型连通性未探测'}）。`;
   head.append(badge(statusLabel, statusTone), ' ', summaryText);
-  const operatorInstalled = info.id === 'icode' || info.id === 'workswarm';
-  const unselectedVersion = operatorInstalled ? (rt.cli_installed ? '尚未选用' : '未安装') : '无可用兼容版本';
+  const unselectedVersion = rt.cli_installed ? '无可用兼容版本' : '未安装';
   box.append(head, facts([
     ['工具卷', `${rt.volume_root}（${rt.volume_present ? '已挂载' : '未挂载'}）`],
     ['兼容版本范围', rt.compatible_range || '—'],
     ['已安装版本', rt.installed_versions?.length ? rt.installed_versions.join(', ') : (rt.config_override ? '本地配置覆盖' : '未安装')],
     ['当前选用版本', rt.selected_version || (rt.config_override ? '本地配置覆盖' : unselectedVersion)],
-    ['容器内模型中转', relayText],
+    [isLocalConfig ? '模型配置' : '容器内模型中转', relayText],
   ]));
-  // #740: an uninstalled tool volume used to end here. A super administrator gets the way in; anyone else is told who
-  // can install it, because global settings only offers 存储 to a project administrator.
-  if (!cliReady && !operatorInstalled) {
-    if (typeof me === 'object' && me && me.role === 'super_admin') box.append(consoleLink('#/settings/agent-tools', '打开工具卷设置', '安装或清理 Claude Code 与 Codex 的版本'));
+  // #740 / #1260: all 4 tool-volume agents (Claude Code, Codex, iCode, WorkSwarm) are managed in global settings.
+  if (!cliReady) {
+    if (typeof me === 'object' && me && me.role === 'super_admin') box.append(consoleLink('#/settings/agent-tools', '打开工具卷设置', '安装、升级或删除第三方 Agent 工具'));
     else box.append(note('请平台管理员在「全局设置 → Agent CLI 工具卷」中安装兼容版本。'));
   }
   if (overallReady && targetModelId && state.data.can_edit !== false && typeof current === 'object' && current?.id) {

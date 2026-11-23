@@ -1114,7 +1114,12 @@ export class TaskEngine {
     const coordination=coordinationApi(this.store,user,method,url,input);if(coordination!==undefined)return coordination;
     const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;
     const probed=await roleProbeApi(this.store,user,method,url,input);if(probed!==undefined)return probed;
-    const roles=roleApi(this.store,user,method,url,input);if(roles!==undefined)return roles;
+    let cliConfig: import('../harness/subscription.js').CliConfigSnapshot | null | undefined;
+    const roleGet = method === 'GET' ? /^\/api\/repositories\/([^/]+)\/roles$/.exec(url.pathname) : null;
+    if (roleGet && this.manager) {
+      cliConfig = await this.manager.call('GET', `/v1/projects/${roleGet[1]}/cli-config`, undefined, 2000).catch(() => null);
+    }
+    const roles=roleApi(this.store,user,method,url,input,cliConfig);if(roles!==undefined)return roles;
     const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
     const live=/^\/api\/tasks\/([^/]+)\/live$/.exec(url.pathname);
     if(live&&method==='GET')return this.live(user,live[1]!,url);

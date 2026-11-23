@@ -36,11 +36,16 @@
 | `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
 | `native` | 控制面进程内 | 内置标准工具循环与 `ToolTranscript` 折叠，适合轻量控制面/服务角色会话。 |
 | `process` | 独立 Node 子进程 | 隔离事件循环、JSON-line RPC 通信，不继承控制面环境变量与凭据。 |
-| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持原生直连或显式回环模型中转（`runner/model-relay.mjs`）。 |
-| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账。 |
+| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持平台模型（原生直连或回环中转）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
+| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
 | `icode`、`workswarm`、`container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
 
 - **容器内短期 Git/`gh` 只读凭证**：`claude_code`、`codex`、`icode` 和 `container_acp` 使用运行级身份，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
+- **Claude Code / Codex「项目电脑内自行配置」（`model_source: 'local_config'`）**：
+  - `harness_ref.model_source` 规范值为 `'gateway' | 'local_config'`（旧配置 `'subscription'` 自动归一化为 `'local_config'`）。
+  - 选择 `local_config` 时，控制面与 `runner/harness-entry.mjs` **不注入**任何平台模型配置（无 `ANTHROPIC_*`、`--model`、`CODEX_RELAY_URL`、`OPENAI_*`、`BOT_NATIVE_MODEL_KEY`、`config.toml` 或 `-c model_providers.bot_direct`），同时保持每次运行独立的 `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。
+  - 启动 CLI 前由 `runner/cli-config.mjs` 仅将 `/workspace/home` 下的白名单文件（Claude Code：`.claude/settings.json`、`.claude/.credentials.json`；Codex：`.codex/config.toml`、`.codex/auth.json`）以 `0600` 权限复制到当前会话目录（Claude Code 传 `--setting-sources user`），运行结束立即删除副本但保留会话 transcript。未检测到任一配置文件时以 `claude_local_config_missing` / `codex_local_config_missing` 失败关闭，绝不回退到平台模型。
+  - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
 
 ### 服务助手回合（`src/harness/service-session.ts`）
@@ -52,6 +57,15 @@
 - **编辑后重启**：回合边界、每次经控制面的工具调用和会话结束时比较来源版本。版本变了就结束当前会话：旧版本下经控制面的工具调用不执行，答复不采用（Pi 自带的 `read`/`edit`/`write`/`bash` 直接在助手电脑上运行，不经这道检查）；清空会话绑定，用重建的上下文开新会话，已并入的消息重新提供。跨轮续接的会话在来源版本变化后也不再续接。
 - **保持安静**：允许安静的轮次里，`stay_silent` 是会话的结束工具；被拒绝（例如 `reply_required`）时作为观察返回模型，回合继续。
 - **邮箱清理**：新会话写入配置时，runner 清除上一进程没答复的工具、令牌和模型请求，新会话不会把它们当成自己的请求。
+
+### 第三方 Agent 工具卷统一管理（`runner/agent-products.mjs`、`src/harness/agent-tools.ts`）
+
+- **单一产品注册表**：除内置于项目电脑镜像的 `pi` 外，所有容器内第三方 Agent（`claude_code`、`codex`、`icode`、`workswarm`）的默认版本、兼容范围、受支持架构与发行包 SHA-256 摘要统一声明在 `runner/agent-products.mjs`，并派生到 `src/harness/agent-tools.ts`、`src/roles/backends.ts`、`runner/acp-products.mjs` 与离线安装脚本。
+- **启动自动安装与状态持久化**：仅 `src/main.ts` 在监听启动后拉起非阻塞的 `AgentToolsAutoInstaller`（受 `BOT_AGENT_TOOLS_AUTO_INSTALL=0` 开关控制，`createControlPlane` 内部不自动联网）。工具卷根目录 `.state.json` 记录各 Agent 的 `removed` 标记、失败原因与指数退避重试时间（5m / 15m / 1h / 6h）；整项删除或删除最后一个版本会写入 `removed: true` 防止重启自动重装，手动安装/升级成功后清除。
+- **按产品分流的安装与安全边界**：
+  - `claude_code`（npm + 受管 Node 22.15.0）、`codex`（GitHub Release）、`icode`（GitHub Release 离线包纯 JS 解包）以及 `uv` 0.13.9（GitHub musl 静态包，落地至 `/opt/agent-tools/uv/<ver>/bin/uv`，无需改动控制面镜像）均在控制面校验可信来源与 SHA-256 后原子落盘。
+  - `workswarm` 因上游 `uv.lock` 含源码包（需执行 PEP 517 构建），控制面仅下载并校验 `pyproject.toml`、`uv.lock`、`workswarm` wheel 及合并 `sourceSha256` 到 `.staging/`，随后调用 `manager` 的 `POST /v1/agent-tools/install-acp` 启动一次性隔离容器（`BOT_PROJECT_IMAGE`、`USER 10001:10001`、`ReadonlyRootfs: true`、`CapDrop: ALL`、`no-new-privileges:true`、专用外网构建网络且**仅挂载 `agent-tools` 卷**，零接触 `/keys/master.key`、`control.sqlite`、`manager.token` 与 `control` 网络）执行 `runner/acp-install-worker.mjs`。缺少隔离安装器时以 `agent_tool_isolated_installer_required` 失败关闭。
+  - 运行中版本保护：`remove`、`install` 与 `prune` 均校验 `activeCliVersions`（含 Node/`uv` 运行时依赖）并返回 `409 agent_tool_version_in_use`；ACP 的 `selected` 指针在 `prune` 中受保护，单版本删除时自动切换到剩余最高合法版本或清空。
 
 ### 容器内 ACP
 

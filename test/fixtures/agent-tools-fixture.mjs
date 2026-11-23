@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { BUNDLED_UV_RELEASE, icodeReleases, workswarmLaunch, workswarmReleases } from '../../runner/agent-products.mjs';
 
-// The mock download upstream for the agent tool volume: an in-memory npm registry, a Node dist server and a GitHub
-// release API that serve deterministic archives. `test/ut/src/harness/agent-tools.test.mjs` drives it through the installer, and the
-// console page spec injects the same sources into a real control plane, so both read one upstream instead of two.
+// The mock download upstream for the agent tool volume: an in-memory npm registry, a Node dist server, a GitHub
+// release API, raw GitHub source endpoints, and GitHub download origins serving deterministic archives for all 4
+// managed agents (Claude Code, Codex, iCode, WorkSwarm) plus Node and uv runtimes.
 /** Builds a minimal USTAR .tar.gz archive in memory for deterministic tests. */
 export function buildTarGz(entries) {
   const blocks = [];
@@ -56,6 +59,39 @@ export function hashes(bytes) {
   };
 }
 
+function stageBundleDigest(files) {
+  const digest = createHash('sha256');
+  for (const [name, content] of Object.entries(files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    digest.update(JSON.stringify([name, createHash('sha256').update(content).digest('hex')]) + '\n');
+  }
+  return digest.digest('hex');
+}
+
+export function createMockAcpBuilder(volumeRoot) {
+  const calls = [];
+  const builder = async req => {
+    calls.push({ ...req });
+    const release = workswarmReleases.get(req.version);
+    const versionDir = join(volumeRoot, 'acp', req.product, req.version);
+    mkdirSync(join(versionDir, 'venv', 'bin'), { recursive: true });
+    const pyBin = join(versionDir, 'venv', 'bin', 'python');
+    writeFileSync(pyBin, '#!/bin/sh\necho "workswarm-mock-python"\n', { mode: 0o755 });
+    chmodSync(pyBin, 0o755);
+    writeFileSync(join(versionDir, 'manifest.json'), JSON.stringify({
+      schema: 'bot.acp-product/1',
+      id: req.product,
+      version: req.version,
+      python: release?.python ?? '3.13.18',
+      installed_at: new Date().toISOString(),
+      source: `https://github.com/${release?.repo ?? 'openJiuwen-ai/jiuwenswarm'}/commit/${release?.commit ?? '0'.repeat(40)}`,
+      sourceSha256: release?.sourceSha256 ?? '0'.repeat(64),
+      lockSha256: release?.lockSha256 ?? '0'.repeat(64),
+      launch: workswarmLaunch,
+    }, null, 2) + '\n', { mode: 0o644 });
+  };
+  return { builder, calls };
+}
+
 export async function startMockToolUpstream(t, arch = 'x64') {
   const nodeArch = arch === 'x64' ? 'x64' : 'arm64';
   const rustArch = arch === 'x64' ? 'x86_64' : 'aarch64';
@@ -70,8 +106,18 @@ export async function startMockToolUpstream(t, arch = 'x64') {
   ]);
   const nodeHash = hashes(nodeTar);
 
+  const uvAsset = BUNDLED_UV_RELEASE.assets[arch];
+  const uvTar = buildTarGz([
+    {
+      name: uvAsset.entry,
+      mode: 0o755,
+      content: `#!/bin/sh\necho "uv ${BUNDLED_UV_RELEASE.version}"\n`,
+    },
+  ]);
+  const uvHash = hashes(uvTar);
+
   const claudeVersions = new Map();
-  for (const ver of ['1.9.0', '2.1.310', '2.1.315', '2.1.319', '3.0.0']) {
+  for (const ver of ['1.9.0', '2.1.310', '2.1.315', '2.1.319', '2.1.320', '3.0.0']) {
     const muslOnlyWrapper = ver === '2.1.315';
     const pkgTar = buildTarGz([
       {
@@ -118,7 +164,7 @@ export async function startMockToolUpstream(t, arch = 'x64') {
   }
 
   const codexVersions = new Map();
-  for (const ver of ['0.165.0', '0.166.0', '0.167.0', '1.0.0']) {
+  for (const ver of ['0.165.0', '0.166.0', '0.167.0', '0.168.0', '1.0.0']) {
     const binName = `codex-${rustArch}-unknown-linux-musl`;
     const tar = buildTarGz([
       {
@@ -130,13 +176,43 @@ export async function startMockToolUpstream(t, arch = 'x64') {
     codexVersions.set(ver, { tar, hash: hashes(tar), assetName: `${binName}.tar.gz` });
   }
 
+  const icodeRelease = icodeReleases.get('0.36.0');
+  const icodeTar = buildTarGz([
+    {
+      name: 'icode',
+      mode: 0o755,
+      content: '#!/bin/sh\necho "icode 0.36.0"\n',
+    },
+  ]);
+  const icodeHash = hashes(icodeTar);
+
+  const wsRelease = workswarmReleases.get('0.2.9');
+  const wsPyproject = Buffer.from('[project]\nname = "workswarm"\nversion = "0.2.9"\n', 'utf8');
+  const wsLock = Buffer.from('version = 1\n# mock uv.lock for 0.2.9\n', 'utf8');
+  const wsWheel = Buffer.from('PK\x03\x04mock-workswarm-0.2.9-wheel', 'utf8');
+  const wsDigests = {
+    pyprojectSha256: hashes(wsPyproject).sha256,
+    lockSha256: hashes(wsLock).sha256,
+    wheelSha256: hashes(wsWheel).sha256,
+    sourceSha256: stageBundleDigest({
+      'pyproject.toml': wsPyproject,
+      'uv.lock': wsLock,
+      [wsRelease.wheel]: wsWheel,
+    }),
+  };
+
   let tamperClaudeHash = false;
+  let tamperICodeHash = false;
+  let tamperWorkSwarmHash = false;
   let untrustedRedirect = false;
   let rateLimitGithubApi = false;
+  const failingProducts = new Set();
+  let requestCount = 0;
   // Runs while the codex archive is being served, i.e. after install() passed its entry check and before the replace.
   let beforeCodexDownload = null;
 
   const server = createServer((req, res) => {
+    requestCount++;
     const base = `http://127.0.0.1:${server.address().port}`;
     const u = new URL(req.url, base);
 
@@ -151,8 +227,47 @@ export async function startMockToolUpstream(t, arch = 'x64') {
       return;
     }
 
+    if (u.pathname === `/gh-dl/${BUNDLED_UV_RELEASE.repo}/releases/download/${BUNDLED_UV_RELEASE.version}/${uvAsset.name}`) {
+      if (failingProducts.has('uv')) { res.writeHead(502); res.end('uv failed'); return; }
+      res.writeHead(200, { 'content-type': 'application/gzip' });
+      res.end(uvTar);
+      return;
+    }
+
+    if (u.pathname === `/gh-dl/${icodeRelease.repo}/releases/download/${icodeRelease.tag}/${icodeRelease.assets[arch]}`) {
+      if (failingProducts.has('icode')) { res.writeHead(502); res.end('icode failed'); return; }
+      if (untrustedRedirect) {
+        res.writeHead(302, { location: 'https://evil.example.invalid/icode.tar.gz' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/gzip' });
+      res.end(tamperICodeHash ? Buffer.concat([icodeTar, Buffer.from('x')]) : icodeTar);
+      return;
+    }
+
+    if (u.pathname === `/gh-raw/${wsRelease.repo}/${wsRelease.commit}/pyproject.toml`) {
+      if (failingProducts.has('workswarm')) { res.writeHead(502); res.end('workswarm failed'); return; }
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(wsPyproject);
+      return;
+    }
+    if (u.pathname === `/gh-raw/${wsRelease.repo}/${wsRelease.commit}/uv.lock`) {
+      if (failingProducts.has('workswarm')) { res.writeHead(502); res.end('workswarm failed'); return; }
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(wsLock);
+      return;
+    }
+    if (u.pathname === `/gh-dl/${wsRelease.repo}/releases/download/${wsRelease.tag}/${wsRelease.wheel}`) {
+      if (failingProducts.has('workswarm')) { res.writeHead(502); res.end('workswarm failed'); return; }
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(tamperWorkSwarmHash ? Buffer.concat([wsWheel, Buffer.from('bad')]) : wsWheel);
+      return;
+    }
+
     const claudeMeta = /^\/npm\/@anthropic-ai%2fclaude-code\/([^/]+)$/.exec(u.pathname);
     if (claudeMeta) {
+      if (failingProducts.has('claude_code')) { res.writeHead(502); res.end('claude failed'); return; }
       const ver = claudeMeta[1];
       const item = claudeVersions.get(ver);
       if (!item) { res.writeHead(404); res.end('{}'); return; }
@@ -237,6 +352,7 @@ export async function startMockToolUpstream(t, arch = 'x64') {
 
     const codexRelMatch = /^\/gh-api\/repos\/openai\/codex\/releases\/tags\/rust-v([^/]+)$/.exec(u.pathname);
     if (codexRelMatch) {
+      if (failingProducts.has('codex')) { res.writeHead(502); res.end('codex failed'); return; }
       if (rateLimitGithubApi) {
         res.writeHead(403, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ message: 'API rate limit exceeded' }));
@@ -259,6 +375,7 @@ export async function startMockToolUpstream(t, arch = 'x64') {
 
     const codexDlMatch = /^\/gh-dl\/openai\/codex\/releases\/download\/rust-v([^/]+)\/([^/]+)$/.exec(u.pathname);
     if (codexDlMatch) {
+      if (failingProducts.has('codex')) { res.writeHead(502); res.end('codex failed'); return; }
       if (untrustedRedirect) {
         res.writeHead(302, { location: 'https://evil.example.invalid/codex.tar.gz' });
         res.end();
@@ -287,14 +404,28 @@ export async function startMockToolUpstream(t, arch = 'x64') {
       nodeDistBase: `${origin}/node-dist`,
       githubApiBase: `${origin}/gh-api`,
       githubDownloadOrigins: [`${origin}/gh-dl`],
+      rawGithubOrigins: [`${origin}/gh-raw`],
       allowLoopbackHttp: true,
+      testDigests: {
+        uv: { [arch]: uvHash.sha256 },
+        icode: { [`0.36.0:${arch}`]: icodeHash.sha256 },
+        workswarm: { '0.2.9': wsDigests },
+      },
     },
     setTamperClaudeHash: v => { tamperClaudeHash = v; },
+    setTamperICodeHash: v => { tamperICodeHash = v; },
+    setTamperWorkSwarmHash: v => { tamperWorkSwarmHash = v; },
     setUntrustedRedirect: v => { untrustedRedirect = v; },
     setRateLimitGithubApi: v => { rateLimitGithubApi = v; },
+    setFailProduct: (name, fail) => { if (fail) failingProducts.add(name); else failingProducts.delete(name); },
     setBeforeCodexDownload: fn => { beforeCodexDownload = fn; },
+    get requestCount() { return requestCount; },
+    resetRequestCount: () => { requestCount = 0; },
     claudeVersions,
     codexVersions,
+    icodeHash,
+    uvHash,
+    wsDigests,
   };
 }
 
