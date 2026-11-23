@@ -112,7 +112,7 @@ export class AssistantHomes {
     return next;
   }
   /** The owner's current HOME generation, made on first use; a new binding or role, or a narrower scope, seals the old one. */
-  prepare(owner: ComputerOwner, facts: HomeFacts): Promise<{ id: string; generation: number; mode: 'rw' | 'ro'; directory: string }> {
+  prepare(owner: ComputerOwner, facts: HomeFacts, options: { touch?: boolean } = {}): Promise<{ id: string; generation: number; mode: 'rw' | 'ro'; directory: string }> {
     const id = ownerId(owner);
     return this.exclusive(id, async () => {
       const repositories = [...new Set(facts.repositories)].sort(), now = Date.now();
@@ -129,9 +129,12 @@ export class AssistantHomes {
         if (reason) {
           // Data the HOME may hold from a scope or role it no longer has is sealed, never mounted again, and removed after retention.
           this.store.run('INSERT OR REPLACE INTO assistant_home_sealed VALUES(?,?,?,?,?)', id, row.generation, now, reason, row.bytes);
-          this.store.run(`UPDATE assistant_homes SET generation=generation+1,binding_id=?,service_role_id=?,repositories=?,bytes=NULL,files=NULL,measured_at=NULL,over_limit=0
-            WHERE owner=?`, facts.binding ?? null, facts.role ?? null, JSON.stringify(repositories), id);
-        } else if (repositories.length !== previous.length) this.store.run('UPDATE assistant_homes SET repositories=? WHERE owner=?', JSON.stringify(repositories), id);
+          this.store.run(`UPDATE assistant_homes SET generation=generation+1,binding_id=?,service_role_id=?,repositories=?,bytes=NULL,files=NULL,measured_at=NULL,over_limit=0${options.touch ? ',active_at=?' : ''}
+            WHERE owner=?`, ...(options.touch ? [facts.binding ?? null, facts.role ?? null, JSON.stringify(repositories), now, id] : [facts.binding ?? null, facts.role ?? null, JSON.stringify(repositories), id]));
+        } else if (repositories.length !== previous.length || options.touch) {
+          this.store.run(`UPDATE assistant_homes SET repositories=?${options.touch ? ',active_at=?' : ''} WHERE owner=?`,
+            ...(options.touch ? [JSON.stringify(repositories), now, id] : [JSON.stringify(repositories), id]));
+        }
       });
       const row = this.row(id)!, directory = this.directory(id, row.generation);
       // Owner directories are readable by the manager's group (it checks the generation exists before mounting it).
