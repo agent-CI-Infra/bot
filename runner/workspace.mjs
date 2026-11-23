@@ -276,14 +276,35 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     }finally{await unlink(stage).catch(()=>{});}
   }
   if(input.type.startsWith('workspace_agent_')||input.type.startsWith('workspace_harness_'))return agentOperation(input,root);
-  const noteTarget=(value)=>{
+  const resolvedNotes=resolve(notesRoot),realNotes=await realpath(notesRoot).catch(()=>resolvedNotes);
+  const notesLinkPrefix=resolve(root,'notes')+sep;
+  const noteTarget=async(value)=>{
     if(typeof value!=='string')return null;
     if(value.startsWith('../notes/'))return value.slice(9);
-    const resolvedNotes=resolve(notesRoot);
-    if(value.startsWith('/')){const full=resolve(value);if(full.startsWith(resolvedNotes+sep))return full.slice(resolvedNotes.length+1);}
+    const full=value.startsWith('/')?resolve(value):resolve(repo,value);
+    if(full.startsWith(resolvedNotes+sep))return full.slice(resolvedNotes.length+1);
+    if(full.startsWith(realNotes+sep))return full.slice(realNotes.length+1);
+    if(full.startsWith(notesLinkPrefix))return full.slice(notesLinkPrefix.length);
+    if(value.startsWith('/')||value.startsWith('../')||value.includes('/../')){
+      // Resolve symlinked paths (e.g. /workspace/tasks/<ws>/notes/<file>) so writes into the project notes volume
+      // always go through Notes (0o660 + history/catalog) instead of falling through to outsideRepo's 0o600 open (#1278).
+      let probe=full;const tail=[];
+      for(;;){
+        const resolved=await realpath(probe).catch(()=>null);
+        if(resolved!==null){
+          const realFull=tail.length?resolved+sep+tail.join(sep):resolved;
+          if(realFull.startsWith(realNotes+sep))return realFull.slice(realNotes.length+1);
+          break;
+        }
+        const parent=dirname(probe);
+        if(parent===probe)break;
+        tail.unshift(probe.slice(parent.length+(parent.endsWith(sep)?0:1)));
+        probe=parent;
+      }
+    }
     return null;
   };
-  const notePath=!input.sha&&!input.snapshot?noteTarget(input.path):null;
+  const notePath=!input.sha&&!input.snapshot?await noteTarget(input.path):null;
   if(notePath!==null&&input.type==='workspace_write'){
     if(input.mode!=='100644'||typeof input.base64!=='string'||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_note_write');
     const chunk=Buffer.from(input.base64,'base64');
@@ -305,6 +326,8 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
       if(input.final&&!['100644','100755'].includes(input.mode))throw new Error('invalid_mode');
       const data=Buffer.from(input.base64,'base64'),target=await computerPath(input.path,true);
+      const realParent=await realpath(dirname(target));
+      if(realParent===realNotes||realParent.startsWith(realNotes+sep))throw new Error('invalid_note_write');
       const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
       try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);await handle.sync();}finally{await handle.close();}
       return {written:true};

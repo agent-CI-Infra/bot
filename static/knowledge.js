@@ -232,8 +232,15 @@ function knowledgeSection() {
     const quarantined = state.trash ? [] : listing.quarantined || [];
     if (quarantined.length) {
       const readable = path => String(path).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, c => '\\u' + c.codePointAt(0).toString(16).padStart(4, '0'));
-      const panel = element('details', '', 'knowledge-quarantined'); panel.append(element('summary', `另有 ${quarantined.length} 个无法打开的旧文件（名字含控制字符）`));
-      const items = element('ul'); for (const row of quarantined) items.append(element('li', `${readable(row.path)} · 名字含控制字符，无法打开`));
+      const hasName = quarantined.some(row => row.reason !== 'permission_denied'), hasPerm = quarantined.some(row => row.reason === 'permission_denied');
+      const summaryText = hasPerm && hasName
+        ? `另有 ${quarantined.length} 个无法打开的文件（权限不可读或名字含控制字符）`
+        : hasPerm
+          ? `另有 ${quarantined.length} 个无法打开的文件（文件权限不可读）`
+          : `另有 ${quarantined.length} 个无法打开的旧文件（名字含控制字符）`;
+      const reasonText = row => row.reason === 'permission_denied' ? '文件权限不可读，无法打开' : '名字含控制字符，无法打开';
+      const panel = element('details', '', 'knowledge-quarantined'); panel.append(element('summary', summaryText));
+      const items = element('ul'); for (const row of quarantined) items.append(element('li', `${readable(row.path)} · ${reasonText(row)}`));
       panel.append(items); main.append(panel);
     }
     if (state.trash || state.query) {

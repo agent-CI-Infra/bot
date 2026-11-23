@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, stat, readFile, writeFile, symlink, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -255,4 +255,50 @@ test('a queued move whose source is an unaddressable old name is retired while t
   assert.equal((await reopened.read(file.id)).content,'body');
   await reopened.save(file.id,'again',1);
   assert.equal(JSON.parse(await readFile(path,'utf8')).pending,null);
+});
+
+test('#1278 unreadable entries (EACCES) are quarantined instead of failing the whole listing, and owner scans heal 0o600 files', async t => {
+  const { root, tree } = await fixture(t);
+  await tree.create('healthy.md', 'healthy body');
+  const cataloged = await tree.create('cataloged-locked.md', 'cataloged body');
+  // 1) A 0o600 file owned by the current process self-heals to include group rw (0o660) on scan.
+  const healPath = join(root, 'self-heal.md');
+  await writeFile(healPath, 'healed', { mode: 0o600 });
+  await chmod(healPath, 0o600);
+  await new Notes(root).entries();
+  assert.equal((await stat(healPath)).mode & 0o660, 0o660, 'owner scan restores 0o660 group rw bits');
+
+  // 2) Creating a directory under manager umask 0o077 still yields 0o770.
+  const prevUmask = process.umask(0o077);
+  try { await tree.createDirectory('umask-dir'); } finally { process.umask(prevUmask); }
+  assert.equal((await stat(join(root, 'umask-dir'))).mode & 0o777, 0o770);
+
+  // 3) Real kernel EACCES (skipped only when running as root uid=0 with CAP_DAC_OVERRIDE).
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+  const uncatalogedPath = join(root, '2317-verification.md');
+  const catalogedPath = join(root, 'cataloged-locked.md');
+  const lockedDir = join(root, 'locked-dir');
+  await writeFile(uncatalogedPath, 'locked uncataloged');
+  await mkdir(lockedDir);
+  await writeFile(join(lockedDir, 'inside.md'), 'inside');
+  await chmod(uncatalogedPath, 0o000);
+  await chmod(catalogedPath, 0o000);
+  await chmod(lockedDir, 0o000);
+  try {
+    const listed = await new FileTree(root).list({ recursive: true });
+    assert.deepEqual(listed.files.map(f => f.path), ['healthy.md', 'self-heal.md']);
+    assert.deepEqual(
+      listed.quarantined.map(q => ({ path: q.path, reason: q.reason })),
+      [
+        { path: '2317-verification.md', reason: 'permission_denied' },
+        { path: 'cataloged-locked.md', reason: 'permission_denied' },
+        { path: 'locked-dir', reason: 'permission_denied' },
+      ],
+    );
+    await assert.rejects(new FileTree(root).read(cataloged.id), error => error.code === 'EACCES');
+  } finally {
+    await chmod(lockedDir, 0o700).catch(() => {});
+    await chmod(uncatalogedPath, 0o600).catch(() => {});
+    await chmod(catalogedPath, 0o600).catch(() => {});
+  }
 });

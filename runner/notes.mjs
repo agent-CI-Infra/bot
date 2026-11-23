@@ -8,6 +8,7 @@ import { noteComponent, notePath, withNoteDirectory, withNoteParent } from './no
 const internal = name => name.startsWith('.write-') || name.startsWith('.expired-');
 // An externally replaced file is unavailable on its own; it must not become a deletion revision or hide other files.
 const unavailableEntry = error => ['ELOOP','ENOTDIR','ENOENT'].includes(error.code) || ['invalid_note_file','invalid_note_path'].includes(error.message);
+const permissionError = error => ['EACCES','EPERM'].includes(error?.code);
 export const noteName = noteComponent;
 // A filesystem lock coordinates the manager and every task process on the same mounted volume.
 // A lease recovers writers killed during stop/reset. An expired writer must still own its lease before committing.
@@ -47,7 +48,7 @@ export class Notes {
     if (await realpath(this.root) !== this.canonicalRoot) throw new Error('invalid_notes_directory');
   }
   async entries() {
-    await this.directory(); const files = [], directories = [''];
+    await this.directory(); const files = [], directories = [''], unreadable = [];
     const visit = async directory => withNoteDirectory(this.root, directory, async path => {
       for (const entry of await readdir(path, { withFileTypes: true })) {
         if (internal(entry.name)) continue;
@@ -60,12 +61,21 @@ export class Notes {
           if (!entry.isFile()) continue;
           await withNoteParent(this.root, relative, async target => {
             const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-            try { const info=await handle.stat(); if (!info.isFile()) throw new Error('invalid_note_file'); files.push({ name: relative, bytes: info.size }); } finally { await handle.close(); }
+            try {
+              const info=await handle.stat(); if (!info.isFile()) throw new Error('invalid_note_file');
+              // When the owning process (e.g., uid 10001 inside a project computer) observes a file missing group rw
+              // bits, restore 0o660 so the shared manager group can read it without CAP_DAC_OVERRIDE (#1278).
+              if ((info.mode & 0o060) !== 0o060) await handle.chmod((info.mode & 0o7777) | 0o660).catch(() => {});
+              files.push({ name: relative, bytes: info.size });
+            } finally { await handle.close(); }
           }, { canonicalRoot: this.canonicalRoot });
-        } catch(error) { if (!unavailableEntry(error)) throw error; }
+        } catch(error) {
+          if (permissionError(error)) { unreadable.push({ path: relative, reason: 'permission_denied' }); continue; }
+          if (!unavailableEntry(error)) throw error;
+        }
       }
     }, { canonicalRoot: this.canonicalRoot });
-    await visit(''); return { files: files.sort((a,b)=>a.name.localeCompare(b.name)), directories };
+    await visit(''); return { files: files.sort((a,b)=>a.name.localeCompare(b.name)), directories, unreadable };
   }
   async list() { return (await this.entries()).files; }
   async state(name) {
@@ -164,10 +174,12 @@ export class Notes {
     return this.lockedFile(name, index => this.view(index, revision));
   }
   async versions(name) { return this.lockedFile(name, async index => { if (!index.value.versions.length) throw Object.assign(new Error('ENOENT: note_not_found'), { code: 'ENOENT' }); return { versions: [...index.value.versions].reverse(), current_revision: index.value.versions.at(-1).revision }; }); }
-  async files(includeDeleted = false) {
+  async files(includeDeleted = false, scanned = null) {
     await this.directory();
     return this.withLock(async check => {
-      const names = new Set([...(await this.entries()).files.map(f => f.name),...this.catalog.value.files.map(row=>row.path)]);
+      const entryScan = scanned ?? await this.entries();
+      const unreadable = new Map(entryScan.unreadable.map(item => [item.path, { id: this.catalog.paths.get(item.path)?.id ?? null, path: item.path, reason: item.reason }]));
+      const names = new Set([...entryScan.files.map(f => f.name),...this.catalog.value.files.map(row=>row.path)]);
       await this.historyRoot();
       const histories = await withNoteDirectory(this.root, '.write-history', path => readdir(path), { internal: true, canonicalRoot: this.canonicalRoot });
       for (const entry of histories) {
@@ -183,17 +195,24 @@ export class Notes {
       const files = [];
       for (const name of names) {
         let index;
-        try { index = await this.observe(name, 'filesystem', check); } catch(error) { if (unavailableEntry(error)) continue; throw error; }
+        try { index = await this.observe(name, 'filesystem', check); } catch(error) {
+          if (permissionError(error)) { unreadable.set(name, { id: this.catalog.paths.get(name)?.id ?? null, path: name, reason: 'permission_denied' }); continue; }
+          if (unavailableEntry(error)) continue;
+          throw error;
+        }
         const version = index.value.versions.at(-1);
         if (version && (includeDeleted || !version.deleted)) files.push({ id:index.row?.id,name, ...version });
       }
-      return { files: files.sort((a, b) => a.name.localeCompare(b.name)) };
+      return { files: files.sort((a, b) => a.name.localeCompare(b.name)), unreadable: [...unreadable.values()].sort((a, b) => a.path.localeCompare(b.path)) };
     });
   }
   async saveFile(name, content, expectedRevision, actor = 'workspace', options = {}) {
     if (typeof content !== 'string') throw new Error('invalid_note_content');
     return this.lockedFile(name, async (index, check) => {
       this.expected(index, expectedRevision);
+      if (options.createParent && name.includes('/')) {
+        await withNoteDirectory(this.root, name.slice(0, name.lastIndexOf('/')), () => {}, { create: true, canonicalRoot: this.canonicalRoot });
+      }
       const previous = await withNoteParent(this.root,name,path=>lstat(path),{canonicalRoot:this.canonicalRoot}).catch(error => { if (error.code !== 'ENOENT') throw error; });
       if (previous && !previous.isFile()) throw new Error('invalid_note_file');
       const last = index.value.versions.at(-1);if(last?.binary)throw Object.assign(new Error('unsupported_note_format'),{status:415});
@@ -224,7 +243,7 @@ export class Notes {
     }, true);
   }
   async read(name) { const file = await this.file(name);if(file.binary)throw new Error('unsupported_note_format'); if (file.deleted) throw Object.assign(new Error('ENOENT: note_not_found'), { code: 'ENOENT' }); return { content: file.content }; }
-  async write(name, content) { await this.saveFile(name, content); return { written: true }; }
+  async write(name, content) { await this.saveFile(name, content, undefined, 'workspace', { createParent: true }); return { written: true }; }
   async delete(name) { await this.removeFile(name); return { deleted: true }; }
 }
 

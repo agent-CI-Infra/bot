@@ -623,6 +623,7 @@ export class Projects {
         return await notes.delete(name);
       } catch (error) {
         if (error.code === 'ENOENT') throw new ManagerError('note_not_found', 404);
+        if (error.code === 'EACCES' || error.code === 'EPERM') throw new ManagerError('note_permission_denied', 503);
         if (/^(invalid_note|notes_(?:lock_expired|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
         throw error;
       }
@@ -647,6 +648,7 @@ export class Projects {
         throw new ManagerError('invalid_notes_request', 400);
       } catch (error) {
         if (error.code === 'ENOENT') throw new ManagerError('note_not_found', 404);
+        if (error.code === 'EACCES' || error.code === 'EPERM') throw new ManagerError('note_permission_denied', 503);
         if (error.message === 'note_revision_changed') throw new ManagerError(error.message, 409);
         if (/^(invalid_note|notes_(?:lock_expired|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
         throw error;
@@ -681,6 +683,7 @@ export class Projects {
       }catch(error){
         if(error instanceof ManagerError)throw error;
         if(error.code==='ENOENT')throw new ManagerError('note_not_found',404);
+        if(error.code==='EACCES'||error.code==='EPERM')throw new ManagerError('note_permission_denied',503);
         if(error.message==='unsupported_note_format')throw new ManagerError(error.message,415);
         if(error.message==='note_revision_changed')throw new ManagerError(error.message,409);
         if(/^(?:invalid_note|notes_|note_(?:path_conflict|not_found|move_)|directory_)/.test(error.message))throw new ManagerError(error.message,error.status??400);

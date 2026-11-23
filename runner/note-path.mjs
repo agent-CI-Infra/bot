@@ -1,4 +1,4 @@
-import { open, mkdir, realpath } from 'node:fs/promises';
+import { open, mkdir, chmod, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 
 // A name is one path component. Besides the separators it may not carry a control character: NUL already, and now the
@@ -43,11 +43,15 @@ export async function withNoteDirectory(root, relative, run, { create = false, i
     for (const component of parts) {
       const parent = handles.at(-1), path = '/proc/self/fd/' + parent.fd + '/' + component;
       if (create) {
-        try { await mkdir(path, { mode: 0o770 }); await parent.sync(); }
+        try { await mkdir(path, { mode: 0o770 }); await chmod(path, 0o770); await parent.sync(); }
         catch (error) { if (error.code !== 'EEXIST') throw error; }
       }
       const child = await directory(path); handles.push(child); expected += '/' + component;
       if (await realpath('/proc/self/fd/' + child.fd) !== expected) throw new Error('invalid_note_path');
+      if (create) {
+        const info = await child.stat();
+        if ((info.mode & 0o770) !== 0o770) await child.chmod(0o770).catch(() => {});
+      }
     }
     return await run('/proc/self/fd/' + handles.at(-1).fd, handles.at(-1));
   } finally { for (const handle of handles.reverse()) await handle.close(); }
