@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { piAdapter } from '../../../../dist/agent/pi.js';
+import { agentPollWaitLimit } from '../../../../runner/agent.mjs';
 
 // The control plane's side of a Pi session's mailbox (src/agent/pi.ts): how it starts the session and how often it polls,
 // against a runner that holds polls (#1277) and against one that answers at once (an older image, a test double).
@@ -56,7 +57,8 @@ test('with a runner that holds polls, one call starts the session and polls foll
   assert.deepEqual([config.type, config.request.start, config.request.runtime_version], ['workspace_agent_config', true, '1.4.0']);
   assert.ok(!types(mailbox).includes('workspace_agent_runtime') && !types(mailbox).includes('workspace_agent_start'), types(mailbox).join());
   const polls = rest.filter(call => call.type === 'workspace_agent_poll').map(call => call.request);
-  assert.ok(polls.every(request => request.wait_ms === 3000));
+  // The control plane asks for exactly what the runner allows (runner/agent.mjs).
+  assert.ok(polls.every(request => request.wait_ms === agentPollWaitLimit));
   // The control tool runs in the background and the model request was answered: the next polls wait past both.
   assert.deepEqual([polls[0].known_tool_ids, polls[0].known_model_ids], [undefined, undefined]);
   assert.deepEqual(polls[1].known_tool_ids, [T]); assert.deepEqual(polls[2].known_model_ids, [M]);

@@ -44,7 +44,8 @@ export function validateCall(call) {
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.grace_ms != null && !(Number.isSafeInteger(call.grace_ms) && call.grace_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.instance_id !== undefined && !/^[a-f0-9]{48}$/.test(call.instance_id)) throw new ManagerError('invalid_runner_request', 400);
-  // A Pi session's long poll may wait up to 3 s (runner/agent.mjs, #1277); other harness polls up to 1 s.
+  // A Pi session's long poll may wait up to 3 s (#1277), as runner/agent.mjs (agentPollWaitLimit) and src/agent/pi.ts
+  // (pollWait) declare; other harness polls up to 1 s.
   if (call.wait_ms !== undefined && !(Number.isSafeInteger(call.wait_ms) && call.wait_ms >= 0 && call.wait_ms <= (call.type === 'workspace_agent_poll' ? 3000 : 1000))) throw new ManagerError('invalid_runner_request', 400);
   for (const key of ['known_tool_ids', 'known_token_ids', 'known_model_ids', 'known_boundary_ids']) {
     if (call[key] !== undefined && !validIdArray(call[key])) throw new ManagerError('invalid_runner_request', 400);

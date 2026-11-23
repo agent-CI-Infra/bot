@@ -36,9 +36,13 @@ const reads = new Set(['read', 'workspace_read', 'workspace_source', 'workspace_
   'git_have', 'git_export', 'workspace_agent_poll', 'workspace_agent_live', 'workspace_agent_runtime', 'workspace_harness_poll']);
 const guarded = type => !assistant && !reads.has(type);
 const answer = (input, reason, state) => ({ ok: false, error: 'disk_full', detail: `${input.type}${input.path ? ' ' + input.path : ''}: ${String(reason).slice(0, 2000)}; the work volume has ${describeVolume(state)}` });
+// A Pi session starts with workspace_agent_start or continue, or with the last configuration piece that carries start
+// (#1277): those are refused, so no session starts on a full volume; the other configuration pieces are not.
+const startsAgent = input => ['workspace_agent_start', 'workspace_agent_continue'].includes(input.type)
+  || input.type === 'workspace_agent_config' && input.final === true && input.start === true;
 /** The answer to a call that must not run on the volume now, or null. */
 export function refuseFull(input, read = volume) {
-  if (!guarded(input.type) || input.type.startsWith('workspace_agent_') && !['workspace_agent_start', 'workspace_agent_continue'].includes(input.type)
+  if (!guarded(input.type) || input.type.startsWith('workspace_agent_') && !startsAgent(input)
     || ['workspace_harness_stdin', 'workspace_harness_interrupt'].includes(input.type)) return null;
   const state = read(); return state?.full ? answer(input, 'refused, nothing was run', state) : null;
 }
