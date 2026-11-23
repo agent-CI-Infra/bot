@@ -67,9 +67,9 @@ npm run test:e2e
 
 全部测试集中在 `test/` 下：
 
-- `test/ut/`：单元测试，目录结构与源码对应。
+- `test/ut/`：单元测试，目录结构与源码对应；纯前端文案、错误码格式化、分页与轮询状态机应优先放在 `test/ut/static/`（通过 `loadConsole` 在毫秒级完成覆盖）。
 - `test/st/`：进程内服务集成测试（启动真实 SQLite、本地 HTTP 服务与本地夹具）。
-- `test/e2e/`：Playwright 浏览器端到端测试（配置见 `test/e2e/playwright.config.mjs`）。
+- `test/e2e/`：Playwright 浏览器端到端测试（配置见 `test/e2e/playwright.config.mjs`），聚焦**用户视角的完整主流程与真实浏览器布局/交互**，避免重复覆盖已在 `test/ut/static/` 测过的纯文案或错误码矩阵。
 - `test/docker/`：真实 Docker 容器与 Compose 系统测试（`npm run test:docker`、`test:agent`、`test:external:docker`、`test:assistant:docker`、`test:deploy:docker`、`test:commands:docker`）。
 - `test/live/`：需要真实外部服务或本机 CLI 的实况/探针测试（`*.live.test.mjs`），不包含在 `npm test` 中。
 - `test/framework/`：并行测试集发现、分片与回环网络守卫。
@@ -79,7 +79,10 @@ npm run test:e2e
 1. **资源隔离**：临时目录与 SQLite 放在 `mkdtempSync(join(tmpdir(), '<prefix>-'))` 并在 `t.after` 中清理；HTTP 服务一律监听 `127.0.0.1` 随机端口（`listen(0, '127.0.0.1')`）；使用本机 runner 工作区时用 `randomWorkspaceId()` 生成唯一 ID。
 2. **禁止访问外网**：`npm test` 经 `test/framework/test-network-guard.mjs` 阻止任何非回环网络连接；涉及真实外网的测试只能放进 `test/live/`。
 3. **测试纳入 CI**：新增测试必须能被 `test/framework/test-sets.mjs` 或 `test/e2e/playwright.config.mjs` 自动发现；`npm run check` 会对 `manager/`、`runner/`、`static/`、`test/` 等目录的 JS/MJS 做语法检查。
-4. **临时产物放 `.tmp/`**：测试日志、截图等临时文件一律写入被 git 忽略的 `.tmp/`，禁止提交进仓库。
+4. **保持 E2E 精简高效**：
+   - 不在长期提交的 E2E 用例中保留无断言的 `page.screenshot(...)` 验收截图调用（PR 贴图应在独立验证时采集并按规范附在 PR 描述或评论中）。
+   - 轮询与定时等待优先使用 Playwright `page.clock` 推进虚拟时钟或在 `test/ut/static/` 测状态机，避免多秒真实 `page.waitForTimeout(...)` 死等；批量造数优先走 SQLite 事务而非大循环串行 HTTP 请求。
+   - 临时日志、失败 trace 等产物一律写入被 git 忽略的 `.tmp/`，禁止提交进仓库。
 
 ### 其他常用开发约束
 
