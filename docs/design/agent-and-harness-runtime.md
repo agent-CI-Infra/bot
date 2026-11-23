@@ -119,6 +119,8 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 
 ## 4. 虚拟电脑生命周期与自动预编译镜像引擎（`manager/`、`runner/`）
 
+项目电脑和助手电脑共用 `manager/computer-resources.mjs` 中的资源值校验、单容器宿主机内存上限计算和保守回退值。各自的生命周期与并发准入仍由对应的电脑管理器负责。
+
 ### 统一环境与两级预编译镜像（`manager/precompiled-images.mjs`）
 
 - **一套全局默认环境 + 项目增量叠加**：全局 `computer_defaults`（默认资源、外网开关、全局 `packages`、全局 `setup_script` 与全局 `env`）同时驱动管理助手电脑、群助手电脑与项目电脑；项目级软件配置自动叠加在全局默认之上。

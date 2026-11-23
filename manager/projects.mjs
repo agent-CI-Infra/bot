@@ -7,6 +7,7 @@ import { dirname } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
+import { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, resourceBounds, validResource } from './computer-resources.mjs';
 import { collectDockerUsage, readDockerContainers, readDockerVolumes } from './docker-usage.mjs';
 import { Notes, noteName } from '../runner/notes.mjs';
 import { FileTree } from './file-tree.mjs';
@@ -20,6 +21,7 @@ import { MAX_CLI_CONFIG_BYTES } from '../runner/cli-config.mjs';
 import { PrecompiledImageBuilder, reservedEnv, normalizePackages, normalizeScript, computeImageKey } from './precompiled-images.mjs';
 
 export { validateCall };
+export { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, resourceBounds, validResource };
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -27,39 +29,15 @@ export function logFailure(what, error) {
   const reason = error instanceof ManagerError ? error.message + (error.detail ? ` (${error.detail})` : '') : error?.stack || String(error);
   console.error(`[manager] ${what}: ${reason}`);
 }
-// Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
+// Default project computer spec.
 // The resource values are the built-in defaults: a super administrator replaces them in the global settings, and every
 // resource a project does not set itself follows the current default.
 const builtin = { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 4096 };
 const legacyBuiltin = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
 const defaults = { ...builtin, packages: [], env: {}, setup_script: '' };
-export const resourceBounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 65536] };
 const bounds = resourceBounds;
 const resourceKeys = Object.keys(bounds), resources = spec => Object.fromEntries(resourceKeys.map(key => [key, spec[key]]));
 const mib = 1024 * 1024;
-// Unified single-container memory cap: reserve 25% of host RAM for the host OS, Docker, manager, and control plane
-// (rounded down to 256 MiB). Applies uniformly to both inherited defaults (including 16 GiB on a 16 GiB host) and
-// explicit saves (#1279). When Docker /info transiently errors and no cached host info exists, fall back conservatively.
-export const CONSERVATIVE_FALLBACK_MEMORY_MB = 4096;
-export const CONSERVATIVE_FALLBACK_CPUS = 2;
-export function hostMemoryCap(hostMemoryMb) {
-  if (!(typeof hostMemoryMb === 'number' && Number.isFinite(hostMemoryMb) && hostMemoryMb > 0)) return null;
-  const reserveSafe = Math.floor((hostMemoryMb * 0.75) / 256) * 256;
-  return Math.min(hostMemoryMb, Math.max(resourceBounds.memory_mb[0], reserveSafe || Math.floor(hostMemoryMb)));
-}
-export function clampMemoryToHost(memoryMb, hostOrMb) {
-  if (hostOrMb && typeof hostOrMb === 'object') {
-    const cap = hostOrMb.memory_mb ? hostMemoryCap(hostOrMb.memory_mb) : (hostOrMb.fallback_cap_mb ?? null);
-    return cap !== null && memoryMb > cap ? cap : memoryMb;
-  }
-  const cap = hostMemoryCap(hostOrMb);
-  return cap !== null && memoryMb > cap ? cap : memoryMb;
-}
-// CPUs in steps of 0.01, the other resources whole numbers, all inside their bounds (assistant computers pass their own).
-export function validResource(key, value, limits = bounds) {
-  const [min, max] = limits[key];
-  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (key === 'cpus' ? Math.round(value * 100) === value * 100 : Number.isInteger(value));
-}
 // Debian package names only (no options, files or URLs); environment names that the computer or runner own (or that can
 // dynamically inject code into the runner) are refused.
 export const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]{1,99}(?::[a-z0-9-]{1,20})?$/;
