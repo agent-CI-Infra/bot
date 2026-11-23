@@ -8,6 +8,7 @@ import { queueWebhook } from '../../../../dist/review/queue.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { harnesses } from '../../../../dist/roles/harness.js';
 import { captureTaskConfiguration } from '../../../../dist/tasks/configuration.js';
+import { publicationContext } from '../../../../dist/tasks/publication.js';
 
 const review = { summary: 'Reviewed the initial commit.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' };
 const issue = { number: 1, state: 'open', title: 'First issue', body: 'Please review this project.', user: { id: 5, login: 'author' } };
@@ -106,6 +107,14 @@ test('PR #1094: a Manager-controlled review publishes after an attempt bump reus
   assert.match(decision.detail, new RegExp(`更新 ${updates.w}、${updates.v} .*下一轮`));
   const fact = JSON.parse(h.store.get("SELECT data FROM task_history WHERE task_id=? AND type='publication_state' AND json_extract(data,'$.event')='review_publication'", h.taskId).data);
   assert.deepEqual([fact.covered_through, fact.carried], [updates.u, [updates.w, updates.v]]);
+  // The unified decision history and publication context expose publish and next_round; attempts still only publication_state.
+  const decisions = h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id", h.taskId).map(row => JSON.parse(row.data));
+  assert.deepEqual(decisions.map(value => [value.decision, value.covered_through, value.carried, value.carried_updates]), [
+    ['publish', updates.u, [updates.w, updates.v], 2], ['next_round', updates.u, [updates.w, updates.v], 2]]);
+  const context = await publicationContext(h.store, task(h));
+  assert.deepEqual(context.decisions.map(value => value.decision), ['publish', 'next_round']);
+  assert.equal(context.latest_decision.decision, 'next_round');
+  assert.ok(context.attempts.every(value => value.event !== 'publish'));
   // W and V start the next round: V, the latest, is its trigger, W is merged; U, which the published result answered, is not.
   const input = JSON.parse(current.input);
   assert.deepEqual([current.status, current.phase, current.attempt, input.round], ['queued', 'prepare', 3, 2]);
@@ -144,10 +153,74 @@ test('a single-session review publishes even when a comment comes while it publi
   // The session took U, so the result covers it; W came after and is carried.
   const [decision] = logs(h, 'publication_decision');
   assert.deepEqual([decision.covered_through, decision.carried], [updates.u, [updates.w]]);
+  const decisions = h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id", h.taskId).map(row => JSON.parse(row.data));
+  assert.deepEqual(decisions.map(value => [value.decision, value.covered_through, value.carried]), [
+    ['publish', updates.u, [updates.w]], ['next_round', updates.u, [updates.w]]]);
   const input = JSON.parse(current.input);
   assert.deepEqual([current.status, input.round, input.trigger.source.id, current.review_update_cursor], ['queued', 2, 402, updates.w]);
   // The timeline: the session took U, the publication carried W, and the next round took W.
   const timeline = h.store.all('SELECT content FROM task_logs WHERE task_id=? ORDER BY rowid', h.taskId).map(row => JSON.parse(row.content))
     .filter(value => ['review_update', 'publication_decision', 'published', 'continued'].includes(value.type)).map(value => value.type === 'review_update' ? JSON.parse(value.detail).source.id : value.type);
   assert.deepEqual(timeline, [401, 'publication_decision', 'published', 'continued', 402]);
+});
+
+test('a review Manager can defer publication; the defer decision is on the task timeline and in read_publication_context', async t => {
+  let h;
+  const prompts = [];
+  h = await emptyRepositoryFixture(t, {
+    // The Manager (Native) explicitly defers instead of nominating a delivery.
+    github(path, send, _res, body) {
+      if (path !== '/v1/chat/completions' || !body.tools?.some(tool => tool.function.name === 'finish_coordination')) return false;
+      const latest = body.messages.filter(message => message.role === 'user').at(-1).content;
+      prompts.push(JSON.parse(latest));
+      send({ choices: [{ message: call('finish_coordination', { action: 'wait', reason: 'Wait for a design answer before publishing', resume_condition: 'The design question is answered', delay_seconds: 30 }) }] });
+      return true;
+    },
+  });
+  h.setBranch('ready');
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['101'] }, url = new URL('http://local/api/repositories/101/roles');
+  const roles = ['test', 'reviewer', 'ux', 'qa', 'manager'].map(role_id => ({ role_id, harness_ref: { id: 'native' } }));
+  roleApi(h.store, admin, 'PUT', url, { expected_revision: roleApi(h.store, admin, 'GET', url, {}).revision, enabled: true, controller: { entries: { review: true } },
+    roles: [...roles, { role_id: 'dev', harness_ref: { id: 'pi' } }] });
+  h.store.run('DELETE FROM task_execution_configs WHERE task_id=?', h.taskId); captureTaskConfiguration(h.store, h.taskId);
+  const current = await driven(h)();
+  assert.equal(prompts.length, 1);
+  assert.deepEqual([current.status, current.error_code], ['retry_wait', 'manager_deferred']);
+  const decisions = h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id", h.taskId).map(row => JSON.parse(row.data));
+  assert.deepEqual(decisions.map(value => [value.decision, value.manager_action, value.reason, value.covered_through]), [
+    ['defer', 'wait', 'Wait for a design answer before publishing', 0]]);
+  const context = await publicationContext(h.store, task(h));
+  assert.deepEqual(context.attempts, []);
+  assert.equal(context.latest_decision.decision, 'defer');
+  assert.equal(context.latest_decision.manager_action, 'wait');
+});
+
+test('a review Manager on a Harness backend that ends a turn without nominating records one defer', async t => {
+  let h;
+  h = await emptyRepositoryFixture(t, {
+    // The Manager runs on Pi in the project computer; its session ends the turn with prose, not a delivery nomination.
+    execute(request) {
+      if (request.type === 'workspace_agent_runtime') return { ok: true, result: { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: harnesses.find(h => h.id === 'pi').version, node: process.version } };
+      if (request.type === 'workspace_agent_start') return { ok: true, result: { started: true } };
+      if (request.type === 'workspace_agent_boundary') return { ok: true, result: {} };
+      if (request.type !== 'workspace_agent_poll') return undefined;
+      return { ok: true, result: { state: 'completed', result: { harness_turn: true, text: 'Waiting for the design answer before publishing.', session_id: 'manager-session' } } };
+    },
+  });
+  h.setBranch('ready');
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['101'] }, url = new URL('http://local/api/repositories/101/roles');
+  const roles = ['test', 'reviewer', 'ux', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' } }));
+  roleApi(h.store, admin, 'PUT', url, { expected_revision: roleApi(h.store, admin, 'GET', url, {}).revision, enabled: true, controller: { entries: { review: true } },
+    roles: [...roles, { role_id: 'manager', harness_ref: { id: 'pi' } }, { role_id: 'dev', harness_ref: { id: 'pi' } }] });
+  h.store.run('DELETE FROM task_execution_configs WHERE task_id=?', h.taskId); captureTaskConfiguration(h.store, h.taskId);
+  const current = await driven(h)();
+  assert.deepEqual([current.status, current.error_code], ['retry_wait', 'manager_deferred']);
+  // Both the finish_coordination and the turn-end path reach the same disposition handling: exactly one defer, no attempt.
+  const decisions = h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='publication_decision' ORDER BY id", h.taskId).map(row => JSON.parse(row.data));
+  assert.deepEqual(decisions.map(value => [value.decision, value.manager_action, value.reason]),
+    [['defer', 'continue', 'Waiting for the design answer before publishing.']]);
+  assert.ok(h.store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='manager_observation'", h.taskId), 'the turn is still recorded as an observation');
+  const context = await publicationContext(h.store, task(h));
+  assert.deepEqual(context.attempts, []);
+  assert.equal(context.latest_decision.manager_action, 'continue');
 });
