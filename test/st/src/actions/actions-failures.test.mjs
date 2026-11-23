@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { ActionsFailures, scanPageSize } from '../../../../dist/actions/service.js';
 import { failedStepOutput } from '../../../../dist/actions/classifier.js';
 import { configureDispatch, ruleDecider } from '../../../../dist/dispatch/worker.js';
@@ -139,7 +139,7 @@ test('the Manager dispatches a default-branch failure and the task can file or r
   await f.hook();
   await f.scan();
   const event = f.events()[0];
-  nativeRoles(f.h.store, '101');
+  scriptedRoles(f.h.store, '101');
   const context = dispatchContext(f.h.store, event);
   const decision = await managerDecision(f.h.store, context, f.apiUrl);
   assert.equal(decision.role, 'dev');

@@ -14,7 +14,7 @@ import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
 import { configureModelRetry } from '../../../../dist/agent/runtime.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 const pass={outcome:'pass',reason:'Read the actual submitted report from its pinned Git object',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 const call=(name,args,id)=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -97,7 +97,7 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
  store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)','a','fixture','bot_account',null,store.secrets.seal({token:'fixture-github-token'},'account:a'),'now');
  store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
   // These historical tasks and the follow-ups they create run in process, as they did before #1068.
-  nativeRoles(store,'101');
+  scriptedRoles(store,'101');
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
  const memorySeed=await manager.call('POST','/v1/projects/101/file-tree',{path:'memory/reuse.md',content:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',actor:'user:owner',create_parents:true});
@@ -191,7 +191,7 @@ test('default and saved-disabled projects execute an ordinary request with Manag
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'manager-model-token'},'model:m'),'now');
   store.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
-  if(saved)nativeRoles(store,'101');
+  if(saved)scriptedRoles(store,'101');
   const contract={goal:'Write an observed report',scope:['report'],criteria:['Report an observed repository fact'],endpoint:'report'};
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES('request','101','task.request','running','report',?,'claim')",JSON.stringify({request:'Write an observed report',contract}));
   authorizeKnowledgeTask(store,'request');store.run("INSERT INTO task_claims VALUES('request','101','claim','now')");
@@ -199,7 +199,7 @@ test('default and saved-disabled projects execute an ordinary request with Manag
   assert.equal(new TaskRecords(store).get('request').progress.status,'completed',JSON.stringify(store.all("SELECT content FROM task_logs WHERE task_id='request'")));
   assert.deepEqual(store.all("SELECT DISTINCT role FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role),['dev','manager','qa']);
   // The defaults run every role on the recommended backend; the legacy configuration kept Native.
-  assert.deepEqual(store.all("SELECT DISTINCT role,harness FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role+':'+row.harness),['dev','manager','qa'].map(role=>role+':'+(saved?'native':'pi')));
+  assert.deepEqual(store.all("SELECT DISTINCT role,harness FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role+':'+row.harness),['dev','manager','qa'].map(role=>role+':'+(saved?'scripted':'pi')));
   assert.equal(new TaskRecords(store).get('request').acceptance.outcome,'pass');
   assert.equal(store.get("SELECT actions_failures_enabled FROM policies WHERE repository_id='101'").actions_failures_enabled,0);
  });

@@ -16,7 +16,7 @@ import { instanceUsage, revokeRunTokens } from '../../../../dist/roles/role-run.
 import { claudeCodeRuntime, ClaudeJsonStream } from '../../../../dist/harness/claude-code-protocol.js';
 import { claudeBinary } from '../../../../dist/harness/claude-code.js';
 import { contentHash } from '../../../../dist/roles/protocol.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const model = 'claude-sonnet-4-5-20250929';
@@ -33,7 +33,7 @@ export async function claudeFixture(t, { mode = 'normal', native = false, respon
   const s = new Store(join(root, 'db'), randomBytes(32));
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
   s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')");
-  nativeRoles(s, 'r');
+  scriptedRoles(s, 'r');
   s.run("INSERT INTO repositories VALUES('other','private/other','o','a')");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt) VALUES('t','r','task.request','running','Claude protocol fixture','{}',1)");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('o','other','task.request','running','Secret other task','{}')");

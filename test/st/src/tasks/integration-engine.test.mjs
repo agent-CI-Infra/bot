@@ -23,7 +23,7 @@ import {traceEvent} from '../../../../dist/tasks/trace.js';
 import {checkpoint} from '../../../../dist/tasks/checkpoint.js';
 import {candidateKey,deliveryCandidate,latestRoleCandidate} from '../../../../dist/roles/schedule.js';
 import {acceptanceFixture} from '../../../fixtures/acceptance-fixture.mjs';
-import {nativeHarnesses} from '../../../fixtures/native-roles.mjs';
+import {scriptedHarnesses} from '../../../fixtures/scripted-roles.mjs';
 import {randomWorkspaceId} from '../../../fixtures/helpers.mjs';
 
 const toolCall=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:randomBytes(8).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -93,7 +93,7 @@ export async function fixture(t,mode='clean',options={}){
  s.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)','account','fixture','bot_account',null,s.secrets.seal({token:'fixture-token-for-GitHub'},'account:account'),'');s.run("INSERT INTO repositories VALUES('101','fixture/project','10','account')");
  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101',endpoint+'/v1','fixture',s.secrets.seal({value:'fixture-model-key'},'model:m'),'');
  s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,test_command) VALUES('101','m',1,1,'node check.cjs')");
- s.run("INSERT INTO settings VALUES('roles:101',?)",JSON.stringify({enabled:true,harnesses:nativeHarnesses(),roles:[]}));
+ s.run("INSERT INTO settings VALUES('roles:101',?)",JSON.stringify({enabled:true,harnesses:scriptedHarnesses(),roles:[]}));
  const workspaceId=randomWorkspaceId(),input={object_hash:null,base_branch:'main',snapshot_sha:base,snapshot_tree:treeA,source_tree:treeA,context:{implementation_goal:'Keep bounded totals and preserve all features.'}};
  s.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,workspace_id,generation,head_sha,created_at) VALUES('t','101','development.issue',7,'queued','publish','fixture',?,?,1,?,?)",JSON.stringify(input),workspaceId,base,new Date().toISOString());
  const records=new TaskRecords(s);records.contract('t',{goal:'Keep bounded totals and preserve all features.',scope:['fixture'],criteria:['No feature lost; bounded total'],endpoint:'reviewable_pull_request'});

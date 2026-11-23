@@ -24,7 +24,7 @@ import { assertRequestPullRequest } from '../../../../dist/tasks/pull-request.js
 import { taskPermissions } from '../../../../dist/tasks/configuration.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 const pass = { outcome: 'pass', reason: 'Read the fixed candidate: add now sums both numbers and the project test passes', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true };
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -64,7 +64,7 @@ async function engineFixture(t, { manager, dev, qa }) {
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'delivery-model-token' }, 'model:m'), 'now');
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','node --test')");
   // The scripted Manager reads the in-process message format; the default Pi backend has its own coverage.
-  nativeRoles(store, '101');
+  scriptedRoles(store, '101');
   const commands = new TaskCommands(store);
   const state = async () => (await fetch(gh + '/fixture/state')).json();
   const create = body => commands.api(operator, 'POST', new URL('http://local/api/tasks'), { repository_id: '101', ...body }).id;

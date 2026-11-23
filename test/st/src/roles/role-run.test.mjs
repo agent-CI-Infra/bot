@@ -19,7 +19,7 @@ import { traceEvent, beginRun } from '../../../../dist/tasks/trace.js';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../../../../dist/roles/protocol.js';
 import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, instanceUsage, recordCheckpoint } from '../../../../dist/roles/role-run.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const call = (name, args, id = 'c' + randomBytes(3).toString('hex')) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -34,7 +34,7 @@ async function fixture(t, handler, { usage = () => ({ prompt_tokens: 100, comple
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
   s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')"); s.run("INSERT INTO repositories VALUES('other','private/other','o','a')");
   // RoleRun protocol cases drive roles in process, as on the configuration a project had before #1068.
-  nativeRoles(s, 'r');
+  scriptedRoles(s, 'r');
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t','r','task.request','running','implement fixture','{}',1,1)");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('o','other','task.request','running','other project','{}',1,1)");
   const records = new TaskRecords(s);
@@ -90,7 +90,7 @@ test('a role run binds a validated RunContext, a scheduler epoch and a token; ev
   const ctx = validateRunContext(JSON.parse(run.run_context));
   assert.deepEqual([ctx.task_id, ctx.project_id, ctx.tenant_id, ctx.principal_ref, ctx.lease_epoch, run.lease_epoch, ctx.resume_from_run_id], ['t', 'r', 'account:a', 'installation:a', 1, 1, undefined]);
   assert.match(ctx.assignment_id, /^entry:/); assert.equal(ctx.source_ref, 'contract:revision:' + f.s.get("SELECT revision FROM task_records WHERE task_id='t'").revision); assert.match(ctx.configuration_snapshot_ref, /^role_snapshots:[a-f0-9]{64}$/);
-  assert.equal(ctx.harness_revision, 'native@1'); assert.match(ctx.model_revision, /^project:m@/);
+  assert.equal(ctx.harness_revision, 'scripted@test'); assert.match(ctx.model_revision, /^project:m@/);
   assert.deepEqual(JSON.parse(run.admission).missing, []);
   // The token was short-lived and is revoked once the result is collected.
   const token = f.s.get('SELECT * FROM role_run_tokens WHERE run_id=?', run.id);

@@ -13,7 +13,7 @@ import { configureModelRetry } from '../../../../dist/agent/runtime.js';
 import { setGrant } from '../../../../dist/tasks/grants.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 const pass = { outcome: 'pass', reason: 'Reviewed the fixed candidate and its evidence.', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true };
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -61,7 +61,7 @@ async function fixture(t, respond) {
 
   store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', 'a', 'fixture', 'bot_account', null, store.secrets.seal({ token: 'fixture-github-token' }, 'account:a'), 'now');
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
-  nativeRoles(store, '101');
+  scriptedRoles(store, '101');
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'fixture-model-key' }, 'model:m'), 'now');
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling) VALUES('101','m',1,1,'comment')");
   const engine = new TaskEngine(store, manager, gh + '/github');

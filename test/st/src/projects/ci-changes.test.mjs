@@ -17,7 +17,7 @@ import { TaskCommands } from '../../../../dist/tasks/commands.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { managerPrompt } from '../../../../dist/dispatch/settings.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
@@ -347,7 +347,7 @@ test('ordinary development task (open_pull_request) modifies .github/workflows/ 
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'wf-model-token' }, 'model:m'), 'now');
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','true')");
-  nativeRoles(store, '101');
+  scriptedRoles(store, '101');
 
   const commands = new TaskCommands(store);
   const operator = { id: 'u1', role: 'project_admin', repositories: ['101'] };
@@ -512,7 +512,7 @@ test('Manager-dispatched PR revision (development.pr) updates .github/workflows/
       store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
       store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'wf-model-token' }, 'model:m'), 'now');
       store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','true')");
-      nativeRoles(store, '101');
+      scriptedRoles(store, '101');
 
       const now = new Date().toISOString();
       store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,created_at,updated_at) VALUES('src','101','development.issue',1,'pr_opened','done','Open CI PR','{}',?,?)", now, now);
