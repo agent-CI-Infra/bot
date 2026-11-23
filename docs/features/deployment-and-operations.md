@@ -95,7 +95,7 @@ docker compose up -d
 
 - 目标服务器必须安装 **GNU coreutils 的 `timeout`**（需支持 `15m`/`35m` 等时长后缀，缺失会以退出码 `127` 失败）。
 - 远端命令限时：`docker compose pull` 最多 **15 分钟**，`docker compose up -d --force-recreate` 最多 **35 分钟**（覆盖 manager 最长 30 分钟启动宽限），随后等待 `bot` 健康检查最多 **85 分钟**（包含启动时数据库压缩耗时），全部计入 Deploy 步骤的 145 分钟预算内。
-- 超时后先发 `SIGTERM`，30 秒宽限期未退出再发 `SIGKILL`：正常超时退出码为 **`124`**，触发宽限期强杀退出码为 **`137`**。部署中断或失败排查后，在 Actions 中对该 Release 运行直接 **Re-run failed jobs** 即可幂等恢复。
+- 超时后先发 `SIGTERM`，30 秒宽限期未退出再发 `SIGKILL`：正常超时退出码为 **`124`**，触发宽限期强杀退出码为 **`137`**。核心常驻服务（`bot`、`manager`、`webhook`、`tunnel`）均启用 `init: true`，并在 `SIGTERM` 时主动清理空闲连接与限定排空时间，确保在 `stop_grace_period` 内自主退出而不触发 Docker `SIGKILL`。若某服务停止失败导致 `up -d --force-recreate` 中断，失败 `EXIT` trap 会在打印 `docker compose ps -a` 前兜底拉起处于 `created` 状态的规范入口容器（先 `webhook` 后 `tunnel`），避免公网进入 HTTP 530；部署中断或失败排查后，在 Actions 中对该 Release 运行直接 **Re-run failed jobs** 即可幂等恢复。
 - 可通过 Actions → Release → Run workflow 手动运行只读 SSH 连通性预检（不发版、不改容器）。
 
 ## 4. 数据卷、备份与存储维护

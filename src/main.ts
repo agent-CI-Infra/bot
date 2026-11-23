@@ -164,10 +164,23 @@ server.listen(8791, '0.0.0.0', () => {
   void runLegacyMemoryMigration();
   storage.start();modelCatalog(store).start();vacuum.start();retention.start();agentToolsAuto.start();
 });
+// Bound HTTP draining and shutdown below compose.yaml stop_grace_period (100s) so deployments never hit Docker SIGKILL.
+const shutdownDrainMs = 5_000, shutdownLimitMs = 80_000;
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
-  clearInterval(timer); clearInterval(syncTimer); clearInterval(trajectorySweep); clearInterval(reclaimTimer); workspaces.close(); engine.obsolete.close();
-  server.close(async () => { await Promise.all([agentToolsAuto.stop(),storage.stop(),githubRefresh.close(),modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
-  setTimeout(() => process.exit(1), 100_000).unref();
+  clearInterval(timer); clearInterval(syncTimer); clearInterval(trajectorySweep); clearInterval(reclaimTimer); stalls.stop(); workspaces.close(); engine.obsolete.close();
+  const forceExit = setTimeout(() => { console.error('[bot] shutdown timed out before stop_grace_period, exiting'); process.exit(1); }, shutdownLimitMs);
+  forceExit.unref?.();
+  const forceConnections = setTimeout(() => server.closeAllConnections?.(), shutdownDrainMs);
+  forceConnections.unref?.();
+  server.close(async () => {
+    clearTimeout(forceConnections);
+    const settled = await Promise.allSettled([agentToolsAuto.stop(), storage.stop(), githubRefresh.close(), modelCatalog(store).close(), installations.close(), engine.close(), external.forwarder.close(), releases.close(), boards.close(), actionsFailures.close(), migration.stop(), vacuum.stop(), retention.stop()]);
+    for (const entry of settled) if (entry.status === 'rejected') console.error('[bot] shutdown step failed:', entry.reason);
+    try { store.close(); } catch (error) { console.error('[bot] store close failed:', error); }
+    clearTimeout(forceExit);
+    process.exit(0);
+  });
+  server.closeIdleConnections?.();
 });

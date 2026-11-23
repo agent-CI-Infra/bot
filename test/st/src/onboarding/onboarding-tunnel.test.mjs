@@ -94,7 +94,9 @@ test('invalid and ambiguous pastes cannot create or replace tunnel credentials',
 function bridge(config) {
   const handlers = [];
   vm.runInNewContext(readFileSync('webhook/main.mjs', 'utf8').replace("import http from 'node:http';", ''), {
-    http: { createServer(handler) { handlers.push(handler); return { listen() {} }; } },
+    http: { createServer(handler) { handlers.push(handler); return { listen() { return this; }, close() {}, closeIdleConnections() {}, closeAllConnections() {} }; } },
+    process: { on() {}, exit() {} },
+    setTimeout: () => ({ unref() {} }), clearTimeout() {},
     fetch: async () => new Response(JSON.stringify(config)), URL, AbortSignal,
   });
   return async path => {

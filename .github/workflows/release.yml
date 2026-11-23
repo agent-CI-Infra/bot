@@ -218,8 +218,20 @@ jobs:
           remote "bash -s -- $dir $(printf %q "$TAG")" <<'SCRIPT'
           set -euo pipefail
           cd "$1"
-          # Whatever step fails, show every container of the project, including stopped and never-started ones.
-          trap 'status=$?; if [ "$status" -ne 0 ]; then docker compose ps -a || true; fi' EXIT
+          recover_ingress() {
+            for target in webhook tunnel; do
+              for id in $(docker compose ps -a -q "$target" 2>/dev/null || true); do
+                read -r name canonical state < <(docker inspect --format '{{.Name}} {{index .Config.Labels "com.docker.compose.project"}}-{{index .Config.Labels "com.docker.compose.service"}}-{{index .Config.Labels "com.docker.compose.container-number"}} {{.State.Status}}' "$id" 2>/dev/null || true)
+                if [ "$name" = "/$canonical" ] && [ "$state" = created ]; then
+                  echo "Restoring $canonical left in created state after deploy failure"
+                  docker start "$id" > /dev/null 2>&1 || true
+                fi
+              done
+            done
+          }
+          # Whatever step fails, restore any recreated ingress containers left in created state (avoiding HTTP 530),
+          # then show every container of the project, including stopped and never-started ones.
+          trap 'status=$?; if [ "$status" -ne 0 ]; then recover_ingress || true; docker compose ps -a || true; fi' EXIT
           # Pin the version in .env, so a later plain `docker compose up -d` keeps it; other settings stay.
           touch .env
           sed -i '/^BOT_IMAGE_TAG=/d' .env

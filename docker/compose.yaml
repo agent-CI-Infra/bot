@@ -87,6 +87,7 @@ services:
       - /tmp:size=512m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    init: true
     restart: unless-stopped
   tunnel:
     image: ghcr.io/agent-ci-infra/bot-cloudflare-tunnel:${BOT_IMAGE_TAG:-latest}
@@ -96,6 +97,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    init: true
     restart: unless-stopped
   # Fixed gateway from the tunnel network to the business listener bot:8791 (the whole public entry). It runs from the
   # control-plane image but stays a separate container, so the tunnel never joins the control network and cannot reach
@@ -109,6 +111,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    init: true
     restart: unless-stopped
   manager:
     image: ghcr.io/agent-ci-infra/bot-computer-manager:${BOT_IMAGE_TAG:-latest}
@@ -147,6 +150,7 @@ services:
       - /tmp:size=512m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    init: true
     stop_grace_period: 100s
     restart: unless-stopped
   # Exits at once; it exists so Compose pulls the project image into the local Docker before the manager starts.

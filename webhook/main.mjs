@@ -11,7 +11,7 @@ proxy.requestTimeout=30000;proxy.headersTimeout=10000;proxy.listen(8791,'0.0.0.0
 
 // The control plane reads non-sensitive tunnel readiness/routes through this bridge.
 // No token, headers or other cloudflared configuration is returned.
-http.createServer(async(req,res)=>{
+const metrics=http.createServer(async(req,res)=>{
   try{
     if(!['/ready','/config'].includes(req.url)||req.method!=='GET'){res.writeHead(404);res.end();return;}
     const response=await fetch('http://tunnel:2000'+req.url,{signal:AbortSignal.timeout(2500),redirect:'error'});
@@ -24,3 +24,17 @@ http.createServer(async(req,res)=>{
     });res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({config:{ingress}}));
   }catch{res.writeHead(503);res.end();}
 }).listen(8794,'0.0.0.0');
+
+// Exit before Docker's default 10s stop_grace_period so deployments do not escalate to SIGKILL.
+let stopping=false;
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{
+  if(stopping)return;stopping=true;
+  const servers=[proxy,metrics];
+  let remaining=servers.length;
+  const forceConnections=setTimeout(()=>{for(const server of servers)server.closeAllConnections?.();},3_000);
+  forceConnections.unref?.();
+  const forceExit=setTimeout(()=>process.exit(0),5_000);
+  forceExit.unref?.();
+  const done=()=>{if(--remaining===0){clearTimeout(forceConnections);clearTimeout(forceExit);process.exit(0);}};
+  for(const server of servers){server.close(done);server.closeIdleConnections?.();}
+});
