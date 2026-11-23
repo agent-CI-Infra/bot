@@ -139,13 +139,19 @@ export class Workspace {
       if(error instanceof TrajectoryError)stop('trajectory_unreadable',undefined,`${error.code}: ${error.detail}`);throw error;
     }
   }
-  // Hands a credential to the task agent. Unlike call(), the request is not recorded in task_tools, so the token is
-  // never stored; a lost answer only means the agent asks again.
+  // Hands a credential or read-only poll/liveness call to the runner without writing task_tools or task_history;
+  // a lost answer is safe to repeat.
   async deliver(request:any){
     await this.guard();
     useWorkspace(this.store,this.task,request.type);
-    const response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
-      request:{...request,workspace_id:this.task.workspace_id}},90000).catch(()=>null);
+    let response:any;
+    try {
+      response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
+        request:{...request,workspace_id:this.task.workspace_id}},90000);
+    } catch (error) {
+      if (error instanceof HttpError && error.code === 'disk_full') stop('disk_full','waiting_environment',`manager 的数据盘空间不足，调用未完成：${request.type}`);
+      response=null;
+    }
     // Nothing records this answer, so the same call can simply be made again once there is space.
     if(response?.error==='disk_full')stop('disk_full','waiting_environment',`项目电脑的工作卷空间不足，调用未完成：${response.detail||request.type}`);
     return response?.ok?response.result:{error:response?.error||'runner_operation_failed',...(response?.detail?{detail:response.detail}:{})};

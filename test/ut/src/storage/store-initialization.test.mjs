@@ -73,7 +73,7 @@ test('reopening replaces board task triggers atomically against a competing conn
 
 for (const [trigger, source] of [
   ['trace_history_scope', 'task_history'], ['trace_task_tools_insert', 'task_history'],
-  ['trace_task_tools_update', 'task_history'], ['trace_task_log', 'task_history'],
+  ['trace_task_tools_update', 'task_history'],
   ['inherit_task_origin', 'task_origins'],
 ]) {
   test(`reopening replaces ${trigger} atomically against a competing connection`, t => {
@@ -97,3 +97,13 @@ for (const [trigger, source] of [
     assert.deepEqual(reopened.all('PRAGMA foreign_key_check'),[]);
   });
 }
+
+test('reopening drops legacy trace_task_log trigger so task_logs are not duplicated into task_history (#1266)', t => {
+  const { path, key } = database(t);
+  const initial = new Store(path, key);
+  initial.db.exec("CREATE TRIGGER trace_task_log AFTER INSERT ON task_logs BEGIN SELECT 1; END;");
+  initial.close();
+  const reopened = new Store(path, key);
+  t.after(() => reopened.close());
+  assert.equal(reopened.get("SELECT name FROM sqlite_schema WHERE type='trigger' AND name='trace_task_log'"), undefined);
+});

@@ -29,7 +29,9 @@ async function fixture(t,{stream=true,failDelivery=false,failures=0}={}){
   await writeFile(dir+'/request.json',JSON.stringify({id:requestId}));
   const requests=[],progress=[],replies=[];let replied=false,source,signal;
   const work={log:()=>{},deliver:async input=>{
-    requests.push(input);const result=await agentOperation(input,root);progress.push(input);return result;
+    requests.push(input);
+    if(input.type==='workspace_agent_poll')return replied?{state:'completed',result:finish}:{state:'running',request:{id:requestId,body:{stream,messages:[{role:'user',content:'review'}]}}};
+    const result=await agentOperation(input,root);progress.push(input);return result;
   },call:async(_key,input)=>{
     requests.push(input);
     if(input.type==='workspace_agent_poll')return replied?{state:'completed',result:finish}:{state:'running',request:{id:requestId,body:{stream,messages:[{role:'user',content:'review'}]}}};

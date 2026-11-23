@@ -489,6 +489,12 @@ test('M2: manager executes workspace_harness_poll without SQLite/trajectory writ
     if (req.type === 'workspace_harness_poll') {
       return { ok: true, result: { state: 'running', stdout_base64: '', next_offset: 0, stdout_size: 0, has_more: false, token_requests: [], tool_requests: [], model_requests: [] } };
     }
+    if (req.type === 'workspace_agent_poll') {
+      return { ok: true, result: { state: 'running', offset: 0, events: [] } };
+    }
+    if (req.type === 'workspace_agent_runtime') {
+      return { ok: true, result: { agent: 'pi', version: '1.4.0' } };
+    }
     return { ok: true, result: { written: true } };
   };
 
@@ -513,6 +519,15 @@ test('M2: manager executes workspace_harness_poll without SQLite/trajectory writ
   }
   const opsAfterPolls = f.projects.db.prepare('SELECT count(*) n FROM operations').get().n;
   assert.equal(opsAfterPolls, opsBefore, 'workspace_harness_poll must not insert rows into manager operations table');
+  // #1266: workspace_agent_poll and workspace_agent_runtime also skip manager operations/trajectories and slot contention.
+  for (const pollReq of [
+    { type: 'workspace_agent_poll', workspace_id: wsId, offset: 0 },
+    { type: 'workspace_agent_runtime', workspace_id: wsId },
+  ]) {
+    const res = await f.projects.operate('101', 'execute', { operation_id: hex48(), generation, request: pollReq });
+    assert.equal(res.ok, true);
+  }
+  assert.equal(f.projects.db.prepare('SELECT count(*) n FROM operations').get().n, opsBefore, 'workspace_agent_poll and workspace_agent_runtime must not insert rows into manager operations table');
 
   releaseCmd();
   await longCmd;

@@ -98,6 +98,9 @@ export function piAdapter<T>(session: PiSession<T>) {
     const abort = () => reject(cancelled()); signal.addEventListener('abort', abort, { once: true });
     work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
+  const deliver = (fallbackKey: string, request: any) => typeof (workspace as any).deliver === 'function'
+    ? workspace.deliver(request)
+    : workspace.call(fallbackKey, request);
   const pause = (ms: number) => abortable(new Promise(resolve => setTimeout(resolve, ms)));
   return async ({ request, model, outputTokens }: AgentServices): Promise<T> => {
     config.model_transport = modelTransport(config.model_transport);
@@ -115,7 +118,8 @@ export function piAdapter<T>(session: PiSession<T>) {
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;
     if (session.runtime) {
-      const runtime = await workspace.call(key + ':runtime:' + randomId(), { type: 'workspace_agent_runtime' });
+      const runtime = await deliver(key + ':runtime', { type: 'workspace_agent_runtime' });
+      if (runtime.error === 'runner_operation_failed') stop('execution_interrupted', 'waiting_environment', '查询 Pi 运行时信息时中断。');
       if (runtime.error || runtime.agent !== 'pi') stop('pi_runtime_unavailable', 'waiting_environment', '项目电脑的 runner 不支持 Pi 运行时查询，请升级项目电脑镜像。');
       session.runtime.report(runtime);
       if (runtime.version !== session.runtime.version) stop('harness_version_mismatch', 'waiting_configuration', `项目电脑的 Pi 版本是 ${runtime.version}，角色配置固定的是 ${session.runtime.version}；不会换用其他版本。`);
@@ -163,9 +167,9 @@ export function piAdapter<T>(session: PiSession<T>) {
         if (backgroundError !== null) throw backgroundError;
         await guard();
         wakePending = false;
-        const state = conversation ? await workspace.deliver({ type: 'workspace_agent_poll', offset })
-          : await workspace.call(key + ':poll:' + randomId(), { type: 'workspace_agent_poll', offset });
-        if (conversation) await guard();
+        // Read-only liveness/event polls are safe to repeat; deliver() avoids flooding task_tools and task_history (#1266).
+        const state = await deliver(`${key}:poll:${randomId()}`, { type: 'workspace_agent_poll', offset });
+        await guard();
         if (backgroundError !== null) throw backgroundError;
         for (const event of state.events || []) {
           // A service turn's streamed text goes to its conversation, not the log: the model event that ends it has it all.
