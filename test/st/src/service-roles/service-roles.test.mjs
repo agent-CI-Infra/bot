@@ -203,13 +203,17 @@ test('the full management role cannot lend computer execution to a read-only ope
   const f=await managementFixture(t,store=>({engine:engine=new TaskEngine(store,manager),assistantHomes:assistant.homes}));
   const reader=await f.member('computer-reader',{repository_ids:['101']});
   f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?',JSON.stringify(['tasks.read']),reader.id);
+  let readerTools,readerObservation;
   f.modelState.respond=async(body,res)=>{
-    if(body.messages.some(m=>m.role==='tool'))return reply(res,'命令已执行');
+    const toolMsg=body.messages.find(m=>m.role==='tool');
+    if(toolMsg){if(!readerObservation)readerObservation=JSON.parse(toolMsg.content);return reply(res,'命令已执行');}
+    if(!readerTools)readerTools=body.tools.map(t=>t.function.name);
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'computer',type:'function',function:{name:'run_command',arguments:JSON.stringify({command:'printf computer-check'})}}]}}]}));
   };
   const denied=await web(f,'执行检查',reader.client);
-  assert.equal(denied.message.state,'failed');assert.equal(assistant.docker.created||0,0);
-  assert.equal(denied.events.find(e=>e.type==='tool_error').data.error,'capability_forbidden');
+  assert.equal(denied.message.state,'completed');assert.equal(assistant.docker.created||0,0);
+  assert.ok(!readerTools.includes('run_command')&&!readerTools.includes('list_files')&&!readerTools.includes('write_file'));
+  assert.deepEqual(readerObservation,{error:'tool_not_allowed'});
   assert.equal(f.h.store.get('SELECT count(*) n FROM assistant_homes').n,0);
   const allowed=await web(f,'执行检查');
   assert.equal(allowed.message.state,'completed',JSON.stringify(allowed.events));

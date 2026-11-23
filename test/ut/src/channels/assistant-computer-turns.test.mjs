@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { AssistantComputerService, ownerId } from '../../../../dist/service-roles/assistant-computers.js';
@@ -71,11 +71,33 @@ test('list_files lists ~/memory without starting a computer, enforces symlink bo
   mkdirSync(other, { recursive: true });
   writeFileSync(join(other, 'secret.md'), 'other owner secret');
   symlinkSync(other, join(home, 'memory', 'escape'));
+  symlinkSync(join(other, 'secret.md'), join(home, 'memory', 'file-escape'));
   await assert.rejects(turn.execute('list_files', { path: '~/memory/escape' }), { code: 'invalid_path' });
   await assert.rejects(turn.execute('list_files', { path: '~/memory/escape/missing' }), { code: 'invalid_path' });
+  await assert.rejects(turn.execute('list_files', { path: '~/memory/file-escape' }), { code: 'invalid_path' });
   const withLink = await turn.execute('list_files', { path: '~/memory', recursive: true });
   assert.ok(withLink.entries.some(e => e.path === 'escape' && e.type === 'symlink'));
   assert.ok(!withLink.entries.some(e => e.path.includes('secret.md')));
+  // Concurrent rename + symlink swap during recursive listing never escapes via TOCTOU.
+  const raceDir = join(home, 'memory', 'race');
+  const raceMoved = join(home, 'memory', 'race-moved');
+  mkdirSync(join(raceDir, 'deep'), { recursive: true });
+  writeFileSync(join(raceDir, 'deep', 'ok.md'), 'inside');
+  for (let i = 0; i < 20; i++) {
+    const listing = f.service.homes.list(home, 'memory/race', true);
+    renameSync(raceDir, raceMoved);
+    symlinkSync(other, raceDir);
+    try {
+      const result = await listing;
+      assert.ok(!result.entries.some(e => e.path.includes('secret.md')), JSON.stringify(result.entries));
+    } catch (error) {
+      assert.ok(['invalid_path', 'file_not_found'].includes(error.code), error.code);
+    } finally {
+      rmSync(raceDir, { force: true });
+      renameSync(raceMoved, raceDir);
+    }
+  }
+  rmSync(raceDir, { recursive: true, force: true });
   assert.equal(created(f), 0, 'all HOME memory list/read/write calls start no container');
   // Exact truncation boundary: 200 entries -> truncated: false; 201 entries -> 200 entries + truncated: true.
   const manyDir = join(home, 'many');
