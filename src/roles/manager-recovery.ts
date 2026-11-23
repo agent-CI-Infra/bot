@@ -1,5 +1,5 @@
 import type {GitHub} from '../github/client.js';
-import {publicationContext} from '../tasks/publication.js';
+import {publicationContext,publicationDecision} from '../tasks/publication.js';
 import {versionTools} from '../tasks/versions.js';
 import type {Store,Row} from '../storage/database.js';
 import {Redactor,stop} from '../agent/common.js';
@@ -18,7 +18,8 @@ export async function recoverWithManager(s:Store,task:Row,guard:()=>Promise<void
  const result=await runRole({store:s,task,redactor,guard,system:'Task Manager recovery. You own how work continues. Read the saved interruption, evidence and current source. Transient failures, exhausted attempts and QA feedback do not by themselves need a human. Choose resume when safe, wait with an automatic retry condition, or needs_help only with a concrete person/action and recovery condition. You cannot override QA, authorization, cancellation, or merge policy. Never request a checkout merely because local and published commit SHAs differ.',prompt:JSON.stringify({feedback:input.manager_feedback,task:records.context(task.id)}),tools,model:roleExecutionModel(s,task,controller),maxTurns:24,
  execute:async(name,args)=>name==='read_publication_context'?publicationContext(s,task,args,remote):name==='read_task_record'?traceSource(s,task.id,args.ref,taskTraceAccess(s,task)):name==='read_task_history'?records.tool(task.id,name,args,taskTraceAccess(s,task)):name==='read_recovery_source'?readSource():{error:'tool_not_allowed'},
  finish:{name:'finish_coordination',validate:v=>{if(!['resume','continue','wait','needs_help'].includes(v?.action)||!v.reason?.trim()||['wait','needs_help'].includes(v.action)&&!v.resume_condition?.trim()||v.action==='needs_help'&&!v.help_from?.trim())return stop('role_result_invalid','retry_wait');return v;}}},controller,undefined,undefined,{rebuildContext:true,prepare});
- const decision=result.result;traceEvent(s,task.id,'manager_disposition',decision,task.trace_run_id,'role:manager',[result.reference]);
+ const decision=result.result,disposition=traceEvent(s,task.id,'manager_disposition',decision,task.trace_run_id,'role:manager',[result.reference]);
+ if(String(task.kind).startsWith('review.')&&['continue','wait'].includes(decision.action))publicationDecision(s,task,'defer',{reason:decision.reason,manager_action:decision.action,caused_by:[disposition]});
  if(decision.action==='needs_help')return stop('manager_needs_help','needs_help',JSON.stringify(decision));
  if(decision.action!=='resume')return stop('manager_deferred','retry_wait',JSON.stringify(decision),Math.max(5,Math.min(86400,Number(decision.delay_seconds)||30))*1000);
  if(decision.goal){const old=records.get(task.id).contract;records.contract(task.id,{...old,goal:decision.goal,criteria:decision.criteria??old.criteria});}

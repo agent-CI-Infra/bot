@@ -322,7 +322,7 @@ export class TaskCommands {
         }
         if('error' in evidence&&evidence.error==='evidence_not_offered'){
           const match=/^task_history:(\d+)$/.exec(args.source as string),row=match?this.store.get('SELECT type FROM task_history WHERE task_id=? AND id=?',id,Number(match[1])):null;
-          if(row&&['manager_recovery_queued','repository_evolved','publication','publication_state','merge_requested','merge_version_context','merge_queue','version_reference','version_comparison','integration_result','integration_requested','integration_decision'].includes(row.type)){
+          if(row&&['manager_recovery_queued','repository_evolved','publication','publication_state','publication_decision','merge_requested','merge_version_context','merge_queue','version_reference','version_comparison','integration_result','integration_requested','integration_decision'].includes(row.type)){
             const offset=args.offset??0,length=args.length??12000;if(!Number.isSafeInteger(offset)||Number(offset)<0||!Number.isSafeInteger(length)||Number(length)<1||Number(length)>32000)fail(400,'invalid_evidence_range');
             const raw=JSON.stringify(traceSource(this.store,id,args.source as string,access));return {record:{source:args.source,type:row.type,offset,total:raw.length,chunk:raw.slice(Number(offset),Number(offset)+Number(length))}};
           }

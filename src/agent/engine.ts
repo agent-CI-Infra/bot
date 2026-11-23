@@ -61,7 +61,7 @@ import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, skillF
 import { repositoryConcurrency } from '../app/settings.js';
 import { pendingReviewUpdates, resultCoverage, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
 import { continueFinishedReview, continuationContext, continuationUpdates, resumeFinishedReviews } from '../review/continuation.js';
-import { publicationFact } from '../tasks/publication.js';
+import { publicationDecision, publicationFact } from '../tasks/publication.js';
 import { type GitCache } from './git-cache.js';
 import { covers, projectCeiling, stopAboveCeiling, taskRequiredCeiling } from '../projects/ceiling.js';
 import { eventAdapterId, eventWork } from '../tasks/event-adapters.js';
@@ -914,6 +914,7 @@ export class TaskEngine {
           const carried=continuationUpdates(this.store,task,covered),ids=carried.map(update=>update.id);
           const decision={decision:'publish',covered_through:covered,carried:ids,reasons:[...new Set(carried.map(update=>String(update.data?.reason||'update')))]};
           publicationFact(this.store,task,'review_publication',decision);
+          publicationDecision(this.store,task,'publish',{reason:'accepted_result_publishes_by_default',covered_through:covered,carried:ids,reasons:decision.reasons});
           log({type:'publication_decision',...decision,detail:ids.length
             ?`检视结果已通过验收，开始发布到 GitHub。更新 ${ids.join('、')} 不在这份结果的覆盖范围内，这次发布不回应它们；发布完成后它们开始下一轮检视，改写同一条总结评论。`
             :'检视结果已通过验收，开始发布到 GitHub；收到的更新都在这份结果里。'});
