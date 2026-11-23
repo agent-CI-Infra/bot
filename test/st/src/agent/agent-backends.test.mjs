@@ -355,3 +355,16 @@ test('a task-tools driver that does not declare the workspace gets no project-co
   assert.ok(controlPlane, 'the registered driver is listed');
   assert.equal(controlPlane.runtime_status, null, 'task tools on the control plane are not a workspace declaration');
 });
+
+// #1256 review: the test-only scripted driver stays registered for the whole process, and a Playwright worker runs many
+// specs in one process. Registered as unlisted, it runs where a configuration names it, but no backend listing offers it.
+test('an unlisted driver runs where configured but no backend listing offers it', async t => {
+  const { scriptedHarness } = await import('../../../fixtures/scripted-driver.mjs');
+  const { roleHarness } = await import('../../../../dist/roles/harness.js');
+  assert.equal(roleHarness(scriptedHarness).id, scriptedHarness, 'a configuration naming it resolves the driver');
+  const f = await fixture(t, () => call('finish', {}));
+  const view = f.view();
+  assert.ok(view.harnesses.some(h => h.id === 'pi') && !view.harnesses.some(h => h.id === scriptedHarness));
+  assert.ok(view.backends.some(b => b.id === 'pi') && !view.backends.some(b => b.id === scriptedHarness));
+  assert.ok(!agentBackends().some(b => b.id === scriptedHarness));
+});

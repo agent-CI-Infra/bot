@@ -11,7 +11,7 @@ import { stop, TaskError } from '../agent/common.js';
 import { modelProtocol } from '../models/catalog.js';
 import { testUpstreamModel } from '../app/model-probe.js';
 import { type Json } from '../core/security.js';
-import { harnesses, type RegisteredRoleHarness } from './harness.js';
+import { harnesses, listedHarnesses, type RegisteredRoleHarness } from './harness.js';
 import { roleConfiguration } from './definition.js';
 
 export const recommendedBackend = 'pi';
@@ -414,7 +414,7 @@ function declaredRuntimeStatus(h: RegisteredRoleHarness): BackendRuntimeStatus {
 }
 
 export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: string, cliConfig?: CliConfigSnapshot | null) {
-  return [...harnesses]
+  return listedHarnesses()
     .sort((a, b) => Number(b.id === recommendedBackend) - Number(a.id === recommendedBackend))
     .map(h => {
       // The readiness row comes from what the driver declares (#1042): a tool-volume CLI is inspected there, any other

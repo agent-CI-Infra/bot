@@ -1,5 +1,6 @@
 // A test-only role driver (#1256). In-process tests of role and task mechanics run their scripted fake model through it.
-// It is registered in the test process only, so no project, role or console can ever choose it. It keeps its own model
+// It is registered in the test process only and as unlisted (`listed: false`), so no production process has it and no
+// backend listing offers it, even in a long-lived test process such as a Playwright worker. It keeps its own model
 // and tool exchange, the process driver's worker loop (runner/role-worker.mjs) without the child process, and never runs
 // the control-plane tool loop that #1257 removes.
 // The store first: entered at roles/harness.js, the module graph would run tasks/followups.js before tasks/priority.js
@@ -13,7 +14,7 @@ import { traceEvent } from '../../dist/tasks/trace.js';
 import { consumePendingTaskUpdates } from '../../dist/review/bot-pr-wake.js';
 
 export const scriptedHarness = 'scripted';
-registerRoleHarness({ id: scriptedHarness, version: 'test', session: 'checkpoint_transcript', events: 'tool_observations',
+registerRoleHarness({ id: scriptedHarness, version: 'test', listed: false, session: 'checkpoint_transcript', events: 'tool_observations',
   kinds: ['controller', 'writer', 'observer', 'evaluator'], structured_output: ['tool_call', 'text_json'],
   capabilities: { raw_evidence: 'control_plane_tools', cancel: 'abort_signal', isolation: 'none', version_binding: true, output_validation: true,
     fresh_context: true, recovery: ['checkpoint_restore', 'rebuilt_from_task_records'] } },

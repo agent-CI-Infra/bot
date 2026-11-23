@@ -480,7 +480,7 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
   assert.ok(observed.systemTexts.length > sysCountBeforeReqBotPr, 'task.request continuing bot_pr must have invoked Pi model');
 });
 
-test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Native roles & Event Dispatch Manager read trusted base-branch skills and companion files; bad .agents/skills/ stops at waiting_configuration', { timeout: 90000 }, async t => {
+test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-process roles & Event Dispatch Manager read trusted base-branch skills and companion files; bad .agents/skills/ stops at waiting_configuration', { timeout: 90000 }, async t => {
   configureDispatch(null);
   t.after(() => configureDispatch(ruleDecider));
 
