@@ -22,7 +22,7 @@ function fixture(t) {
   mkdirSync(homes, { recursive: true });
   const docker = new FakeDocker();
   docker.homesMount = homes;
-  docker.info = { NCPU: 8, MemTotal: 32768 * mib };
+  docker.info = { NCPU: 8, MemTotal: 65536 * mib };
   const projects = new Projects({ database: join(dir, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
   const assistants = new AssistantComputers({
     docker, db: projects.db, deployment: 'fixture', image: 'approved', homes,

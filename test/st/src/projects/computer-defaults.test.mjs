@@ -177,6 +177,25 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
   const winnerRepo = fulfilled[0].value.repository_id;
   await f.projects.operate(winnerRepo, 'stop', { operation_id: id(), generation: 1 });
 
+  // 1e. Host shrink during refresh must fail closed untouched without stopping a healthy running project (#1279 F8).
+  f.docker.info = { NCPU: 8, MemTotal: 32768 * mib }; // 75% cap = 24576 MiB
+  await f.projects.register('308');
+  await f.projects.operate('308', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } });
+  await f.projects.register('309');
+  await f.projects.operate('309', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } });
+  assert.equal(f.projects.allocatedMemoryMb(), 24576);
+  // Host shrinks to 16 GiB (cap = 12288 MiB): refreshing 308 while 309 holds 12288 MiB leaves 0 MiB -> untouched 507.
+  f.docker.info = { NCPU: 4, MemTotal: 16384 * mib };
+  await assert.rejects(
+    f.projects.operate('308', 'refresh', { operation_id: id(), generation: 1 }),
+    err => err.message === 'host_memory_exhausted' && err.status === 507,
+  );
+  assert.equal(f.projects.get('308').state, 'ready', '308 stays ready after host-shrink refresh rejection');
+  assert.equal(f.projects.get('309').state, 'ready', '309 stays ready');
+  assert.equal(f.docker.containers.get(f.projects.names('308', 1).container).State.Running, true, '308 container stays running');
+  await f.projects.operate('308', 'stop', { operation_id: id(), generation: 1 });
+  await f.projects.operate('309', 'stop', { operation_id: id(), generation: 1 });
+
   // 2. 8 GiB host: clamps to 6 GiB (6144 MiB), explicit equal-to-host 8192 MiB is rejected on both setDefaults and configure.
   f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
   view = await f.projects.defaultsView();

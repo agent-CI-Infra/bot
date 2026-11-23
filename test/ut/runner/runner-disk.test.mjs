@@ -88,7 +88,7 @@ test('the agent stops on a tool result that ran out of space', () => {
   for (const result of [{ exit_code: 1, output: 'ENOSPC' }, { error: 'file_too_large' }, { written: true }, null]) assert.equal(toolDiskFull(result), null);
 });
 
-test('watchedVolume ranks mounts strictly by severity (full > low > healthy) before breaking ties by free_bytes (#1279 F10)', () => {
+test('watchedVolume ranks mounts strictly by severity (full > low > healthy) before breaking ties by free_bytes (#1279 F10)', async () => {
   const mk = (free, tot) => ({ free_bytes: free, total_bytes: tot, full: free < fullBytes(tot), low: free < lowBytes(tot) });
   // Large /workspace is low (8 GiB free of 500 GiB -> low=true), small /tmp is healthy (3.5 GiB free of 4 GiB -> low=false):
   // /tmp has fewer absolute free bytes, but /workspace is in a higher severity tier and must win.
@@ -114,4 +114,11 @@ test('watchedVolume ranks mounts strictly by severity (full > low > healthy) bef
 
   // Same severity tier (both healthy) breaks ties by lowest free_bytes.
   assert.deepEqual(watchedVolume(['/workspace', '/tmp'], p => (p === '/workspace' ? wsHealthy : tmpHealthy)), tmpHealthy);
+
+  // watchVolume preserves full > low severity across mixed-size mounts even when a low mount has fewer raw free bytes (#1279 F9).
+  const stream = [tmpLow, wsFull, wsHealthy];
+  const watch = watchVolume(() => (stream.length > 1 ? stream.shift() : stream[0]), 2);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const marked = watch.mark({ exit_code: 1, output: 'Error: failed without enospc text', truncated: false, timed_out: false });
+  assert.deepEqual(marked.disk_full, { free_bytes: wsHealthy.free_bytes, lowest_free_bytes: wsFull.free_bytes, total_bytes: wsHealthy.total_bytes });
 });

@@ -1409,7 +1409,23 @@ export class Projects {
         } else if (action === 'refresh') {
           // Applies the current spec, such as changed resource defaults, to a ready computer. provision replaces the container
           // only when it differs; the work volume and generation stay. The control plane sends it only while no task runs there.
-          if (project.desired === 'ready' && project.state === 'ready') { this.background.delete(repo); await this.provision(repo); }
+          // Pre-check & reserve aggregate memory before touching the running container (#1279 F8), so a host shrink or
+          // capacity exhaustion leaves the healthy container untouched instead of stopping and marking it failed.
+          if (project.desired === 'ready' && project.state === 'ready') {
+            const refreshHost = await this.hostInfo();
+            const refreshBase = this.effectiveSpec(this.spec(repo), refreshHost);
+            try {
+              this.reserveMemory(repo, refreshBase.memory_mb, refreshHost, this.own(repo).memory_mb !== undefined);
+            } catch (error) {
+              throw Object.assign(error, { untouched: true });
+            }
+            try {
+              this.background.delete(repo);
+              await this.provision(repo);
+            } finally {
+              this.memoryReservations.delete(repo);
+            }
+          }
           result = this.describe(repo);
         } else if (action === 'execute') {
           if (project.state === 'ready') this.update(repo, 'busy', 'ready', null, project.started_at);
