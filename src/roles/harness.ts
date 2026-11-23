@@ -84,7 +84,11 @@ export interface RoleHarnessMetadata {id:string;version:string;session:string;ev
  /** The driver brings its own model (ACP agents): no project model is resolved, called or accounted for it. */
  externalModel?:boolean;
  /** What the driver's protocol does, checked by RoleRun admission (see protocol.ts). Undeclared means unsupported. */
- capabilities?:HarnessCapabilities}
+ capabilities?:HarnessCapabilities;
+ /** false: the driver runs where a configuration names it, but no backend listing (role editor, agent backends) offers it. */
+ listed?:boolean}
+/** The drivers a person may choose from: every registered one except those registered as unlisted. */
+export const listedHarnesses=()=>harnesses.filter(h=>h.listed!==false);
 const openai=['openai-chat-completions'];
 const containerRelayApis=['openai-chat-completions','openai-responses','anthropic-messages'];
 // All project roles execute on the control plane or shared project computer (`isolation: 'none'`).
@@ -97,7 +101,7 @@ const containerAcp: RegisteredRoleHarness = {
 };
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 /** A registered driver: every declaration is filled in except `tool_volume`, which only tool-volume CLIs carry (#1042). */
-export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume'>> & {tool_volume?:AgentToolCli};
+export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume'|'listed'>> & {tool_volume?:AgentToolCli;listed?:boolean};
 export const harnesses:RegisteredRoleHarness[]=[
  {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},tool_volume:'claude_code',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
