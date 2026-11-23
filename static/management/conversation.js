@@ -201,7 +201,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     }
     const assistant = element('div', '', 'management-assistant'), avatar = element('span', '✦', 'management-avatar'); avatar.setAttribute('aria-hidden', 'true');
     const content = element('div', '', 'management-assistant-content'), meta = element('div', '', 'management-assistant-meta');
-    const badge = element('span', '', 'management-turn-state'), elapsed = element('span', '', 'management-elapsed');
+    const badge = element('span', '', 'management-turn-state'), elapsed = element('span', '', 'management-elapsed'), activity = element('span', '', 'management-activity');
     const copyLabel = '复制本回合回答', copyStatus = element('span', '', 'sr-only');
     copyStatus.setAttribute('role', 'status');
     let copyTimer;
@@ -214,22 +214,25 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       } catch { showError(new Error('复制失败，请选中回答后复制。')); }
     }, 'btn-text management-copy-turn');
     copy.setAttribute('aria-label', copyLabel); copy.title = copyLabel;
-    meta.append(element('strong', '管理助手'), badge, elapsed, copy, copyStatus);
+    meta.append(element('strong', '管理助手'), badge, elapsed, activity, copy, copyStatus);
     const progress = element('details', '', 'management-progress'), progressSummary = element('summary', '执行进展'), stepsBody = element('div', '', 'management-steps');
     progress.hidden = true; progress.open = true; progress.append(progressSummary, stepsBody);
     const replies = element('div', '', 'management-replies'); content.append(meta, progress, replies); assistant.append(avatar, content); item.append(assistant); feed.append(item);
-    const value = { item, replies, badge, elapsed, copy, answers: [], progress, progressSummary, stepsBody, steps: [], provisional: null,
+    const value = { item, replies, badge, elapsed, activity, lastActivity: NaN, copy, answers: [], progress, progressSummary, stepsBody, steps: [], provisional: null,
       state: record?.state ?? 'pending', stage: '正在连接助手', startedAt: record?.created_at ?? new Date().toISOString(), finishedAt: record?.updated_at, notice: null };
     turns.set(id, value); paintTurn(value); return value;
   };
   function paintTurn(value) {
     const running = ['pending', 'running'].includes(value.state);
-    const uncertain = value.steps.some(step => ['unknown', 'executing'].includes(step.state));
-    value.badge.textContent = running ? value.stage : { completed: uncertain ? '结果待确认' : value.steps.some(step => step.state === 'failed' || step.state === 'rejected') ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
+    // A command on the computer that exits non-zero is an observation for the assistant, not a failed operation of the turn.
+    const uncertain = value.steps.some(step => !step.native && ['unknown', 'executing'].includes(step.state));
+    value.badge.textContent = running ? value.stage : { completed: uncertain ? '结果待确认' : value.steps.some(step => !step.native && (step.state === 'failed' || step.state === 'rejected')) ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
     value.badge.dataset.state = running ? 'running' : uncertain ? 'unknown' : value.state;
     const end = running ? Date.now() : Date.parse(value.finishedAt || value.startedAt), seconds = Math.max(0, Math.floor((end - Date.parse(value.startedAt)) / 1000));
     value.elapsed.textContent = seconds < 60 ? seconds + ' 秒' : Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒';
-    const completed = value.steps.filter(step => step.state === 'succeeded').length;
+    value.activity.textContent = running ? managementActivity(value.lastActivity, Date.now()) : ''; value.activity.hidden = !value.activity.textContent;
+    for (const step of value.steps) if (step.native && step.state === 'running') setStepState(step, 'running');
+    const completed = value.steps.filter(step => step.state === 'succeeded' || step.native?.result).length;
     value.progressSummary.textContent = '执行进展 · ' + completed + '/' + value.steps.length + ' 步完成';
     value.progress.hidden = !value.steps.length;
     value.copy.hidden = !value.answers.length;
@@ -259,6 +262,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   function setStepState(step, state) {
     step.state = state; step.box.dataset.state = state;
+    // A native step tells how long it has run, or how it ended and how long it took.
+    if (step.native && (state === 'running' || step.native.result)) { step.status.textContent = managementNativeStatus(step.native.result, Date.now() - step.native.startedAt); return; }
     step.status.textContent = { running: '进行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', unknown: '待确认', executing: '执行中', interrupted: '结果未确认' }[state] ?? state;
   }
   function toolStep(value, data, sequence) {
@@ -283,6 +288,28 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     }
     const step = { id: data.call_id ?? 'legacy-' + sequence, box, detail, status: state, name: data.name, state: 'running' };
     value.steps.push(step); setStepState(step, 'running'); paintTurn(value); return step;
+  }
+  // A Pi turn's own tool on the computer (#1296): a collapsed line with what it works on, then how it ended.
+  function nativeStep(value, data, sequence, at) {
+    const box = element('details', '', 'management-step management-native-step'), summary = element('summary', '', 'management-step-summary');
+    const indicator = element('span', '', 'management-step-indicator'); indicator.setAttribute('aria-hidden', 'true');
+    const caption = element('span', managementNativeCaption(data.name, true), 'management-step-caption');
+    const state = element('span', '', 'management-step-status'), detail = element('div', '', 'management-step-detail');
+    summary.append(indicator, caption);
+    if (data.preview) {
+      const snippet = element('code', data.preview, 'management-step-preview'); snippet.title = data.preview; summary.append(snippet);
+      detail.append(element('p', data.preview, 'management-step-target'));
+    }
+    summary.append(state); box.append(summary, detail); value.stepsBody.append(box);
+    const step = { id: data.call_id ?? 'legacy-' + sequence, box, detail, status: state, caption, name: data.name, state: 'running', native: { startedAt: Number.isFinite(at) ? at : Date.now(), result: null } };
+    value.steps.push(step); setStepState(step, 'running'); paintTurn(value); return step;
+  }
+  function nativeResult(value, data, sequence, at) {
+    const step = value.steps.find(item => item.native && item.id === data.call_id) ?? nativeStep(value, data, sequence, at);
+    const result = data.result ?? {};
+    step.native.result = result; step.caption.textContent = managementNativeCaption(step.name, false);
+    if (result.tail) { const tail = element('details', '', 'management-step-arguments'); tail.append(element('summary', '输出末尾'), element('pre', result.tail)); step.detail.append(tail); }
+    setStepState(step, result.state === 'failed' ? 'failed' : 'succeeded');
   }
   // The event log keeps a receipt as it stood when the call ran, so every rendered receipt re-reads its command before
   // telling the person what is true now; re-reading never repeats the command.
@@ -365,10 +392,20 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   };
   function event(row) {
     if (row.sequence <= cursor) return; cursor = row.sequence;
-    const data = row.data, currentTurn = turn(row.message_id), replies = currentTurn.replies;
+    const data = row.data, currentTurn = turn(row.message_id), replies = currentTurn.replies, at = Date.parse(row.created_at);
+    if (Number.isFinite(at) && !(at <= currentTurn.lastActivity)) currentTurn.lastActivity = at;
     if (row.type === 'running' || row.type === 'model_start') {
       currentTurn.state = 'running'; currentTurn.stage = data.turn > 0 ? '正在整理结果' : '正在分析请求';
       if (row.type === 'model_start') finishAnswer(currentTurn);
+    } else if (row.type === 'tool_call' && data.native) {
+      finishAnswer(currentTurn);
+      currentTurn.stage = nativeStep(currentTurn, data, row.sequence, at).caption.textContent;
+    } else if (row.type === 'tool_result' && data.native) {
+      nativeResult(currentTurn, data, row.sequence, at); currentTurn.stage = '正在整理结果';
+    } else if (row.type === 'progress') {
+      // Notices of a Pi turn (#1296): compaction, a restart after an edit, steps left out by the rate limit.
+      const text = managementProgressNotice(data);
+      if (text) { currentTurn.stepsBody.append(element('p', text, 'management-step-note')); if (data.notice === 'compacting') currentTurn.stage = '正在压缩上下文'; }
     } else if (row.type === 'tool_call') {
       finishAnswer(currentTurn);
       const step = toolStep(currentTurn, data, row.sequence);

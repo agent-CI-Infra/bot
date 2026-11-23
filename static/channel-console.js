@@ -101,7 +101,9 @@ async function channelBindingOverview(data) {
 
 const channelStepLabels = { running: '开始执行', model_start: '请求模型', model_done: '模型已返回', model_request: '模型请求已记录', model_retry: '模型请求失败，等待后重试', tool_call: '调用工具', tool_result: '工具已返回', tool_error: '工具调用失败', done: '本轮完成', error: '本轮失败', stopped: '已停止' };
 const channelToolLabels = { list_projects: '查看项目范围', list_project_tasks: '查询项目任务', read_project_task: '读取任务', create_project_task: '创建项目任务', manage_project_task: '管理项目任务',
-  start_own_task: '开始独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务', management_query: '查询管理信息', management_command: '执行管理操作', github_read: '读取 GitHub', github_write: '写入 GitHub', send_message: '发布进展消息' };
+  start_own_task: '开始独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务', management_query: '查询管理信息', management_command: '执行管理操作', github_read: '读取 GitHub', github_write: '写入 GitHub', send_message: '发布进展消息',
+  // Pi's own tools on the assistant's computer (#1296).
+  bash: '在电脑上执行命令', read: '读取电脑文件', write: '写入电脑文件', edit: '修改电脑文件', grep: '在电脑上搜索', find: '在电脑上查找文件', ls: '查看电脑目录' };
 const channelTime = value => timestamp(typeof value === 'number' ? value : Date.parse(value));
 async function renderChannelConsole(request) {
   const page = $('console-page'), owner = me, address = location.hash, root = element('div', '', 'channel-console');

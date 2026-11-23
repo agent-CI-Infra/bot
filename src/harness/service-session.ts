@@ -13,6 +13,8 @@ import type {PiServiceTurn} from '../agent/pi.js';
 import {chatContextBytes} from '../agent/tool-context.js';
 import {staySilentName} from '../service-roles/stay-silent.js';
 import {traceEvent} from '../tasks/trace.js';
+import {configuredRedactor} from '../core/redaction.js';
+import {progressText,serviceProgressReader,type ServiceProgress} from './service-progress.js';
 
 /**
  * What the native loop of a service assistant does around its model requests, for a turn on Pi (#1253). The other
@@ -30,6 +32,9 @@ export interface ServiceTurnControl {
  source?: {version:()=>unknown;prompt:()=>string;seen:unknown};
  /** Answers a stay_silent call (#489) when the turn offers that tool. A silent answer ends the turn without a reply. */
  silence?: (args:unknown)=>Json|Promise<Json>;
+ /** The session's own work as it happens (#1296): native tool calls, model steps, compaction and restarts, bounded and
+  * redacted. Called only while the session runs; the caller decides what it records. */
+ progress?: (progress:ServiceProgress)=>void;
 }
 // Thrown within an attempt whose source changed; serviceHarnessTurn catches it and starts again, it never ends a turn.
 const sourceEdited='service_turn_source_edited';
@@ -69,6 +74,13 @@ export async function serviceHarnessTurn(
    responded:toolCalls=>{if(toolCalls)steered.incoming?.resume();else steered.incoming?.pause();},
    retry:async retry=>{await spec.onModelRetry?.({retry:retry.retry,retries:retry.retries,code:'model_unavailable',...(retry.error?{detail:retry.error}:{}),delay_ms:retry.delay_ms,request_id:'pi'});},
   };
+  // What the session does on the computer reaches the conversation as progress (#1296), cleaned as anything shown to a person.
+  const read=steered?.progress&&serviceProgressReader(text=>progressText(text,[spec.redactor,configuredRedactor(spec.store)]));
+  const onHarnessEvent=read?(event:{type:string;[key:string]:unknown})=>{
+   spec.onHarnessEvent?.(event);
+   // Progress is a view of the turn: a failure to read or record it never ends the turn.
+   try{const progress=read(event);if(progress)steered!.progress!(progress);}catch{}
+  }:spec.onHarnessEvent;
   // A Pi turn answers in text, as the native loop does, so the answer streams; it ends silently only through stay_silent.
   const silent=!!steered?.silence&&(spec.tools??[]).some(t=>t.function.name===staySilentName);
   const finishTool={type:'function',function:{name:'finish',description:'Finish this conversational turn. This does not accept or complete a business task.',parameters:{type:'object',properties:{message:{type:'string'}},required:['message'],additionalProperties:false}}};
@@ -80,7 +92,7 @@ export async function serviceHarnessTurn(
     if(result.error)throw new SubmissionError(String(result.error),{detail:result.detail});
     silenced=true;return '';
    }}:undefined):{name:'finish',validate:args=>{if(typeof args?.message!=='string')throw new Error('invalid_reply');return args.message;}},onTurnEnd:turn=>turn.text,
-   roleWorkspace:workspace,containerOptions:{...spec.containerOptions,manager:workspace.manager,egress},
+   roleWorkspace:workspace,containerOptions:{...spec.containerOptions,manager:workspace.manager,egress},onHarnessEvent,
    harnessSessionKey:binding,
    harnessAccess:harnessAccess(JSON.parse(role.permissions??'{}'),egress,null,{read:!!spec.tools?.some(t=>t.function.name==='read_file'),write:!!spec.tools?.some(t=>t.function.name==='write_file'),commands:!!spec.tools?.some(t=>t.function.name==='run_command')}),
    harnessState:{value:state,save:value=>save(steered?.source&&value.harness?{...value,source_version:version??null}:value)},
@@ -101,6 +113,7 @@ export async function serviceHarnessTurn(
    // The request was edited: a new session answers the edited request, never the one built on the old request, and the
    // messages merged so far are offered to it again.
    traceEvent(spec.store,spec.task.id,'harness_event',{type:'source_edited'});
+   try{steered!.progress?.({kind:'notice',notice:'restarted'});}catch{}
    // The version is read first: an edit made while the context is rebuilt starts the turn once more.
    save({});version=steered!.source!.version();prompt=steered!.source!.prompt();steered!.incoming?.refresh?.();
   }

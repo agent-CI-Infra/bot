@@ -1,4 +1,5 @@
 import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
+import {piNativeTools,ProgressBudget,type ServiceProgress} from '../harness/service-progress.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
@@ -142,7 +143,7 @@ export class ChannelServiceSessions {
     const incoming = this.incomingMessages?.(turn, id);
     // Persist step metadata, never tool arguments, results or private model reasoning.
     const event = (type: string, name = '') => this.store.run('INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,?,?,?)', id, type,
-      !name || name === staySilentName || serviceTools.some(tool => tool.function.name === name) ? name : 'unknown_tool', Date.now());
+      !name || name === staySilentName || serviceTools.some(tool => tool.function.name === name) || piNativeTools.includes(name) ? name : 'unknown_tool', Date.now());
     event('running');
     // The binding's level (#849), not the role's: changing it is a new binding revision, so check() ends this turn first.
     const permissions = (): RolePermissions => this.bindings.permissions(binding);
@@ -503,8 +504,17 @@ export class ChannelServiceSessions {
           };
           if (harness === 'pi') {
             // Pi gets the context the loop below starts from, and works the turn the same way (#1253).
-            reply = redactor.text(await harnessTurn({ prompt: seed }, { incoming, merged: batch => { mustReply ||= batch.direct; },
-              source: { version: () => this.ledger.sourceVersion(chat.id), prompt: rebuilt, seen: sourceVersion }, ...(turn.allowSilence ? { silence: quiet } : {}) }));
+            // Pi's native tool calls and model steps join the turn's steps (#1296), by name as every step is, while the turn runs.
+            const budget = new ProgressBudget(); let progressing = true;
+            const piSteps = (step: ServiceProgress) => {
+              if (!progressing || step.kind === 'notice' || this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'running' || !budget.admit(step)) return;
+              if (step.kind === 'model_step') event('model_start');
+              else event(step.kind === 'tool_started' ? 'tool_call' : step.state === 'failed' ? 'tool_error' : 'tool_result', step.name);
+            };
+            try {
+              reply = redactor.text(await harnessTurn({ prompt: seed }, { incoming, merged: batch => { mustReply ||= batch.direct; },
+                source: { version: () => this.ledger.sourceVersion(chat.id), prompt: rebuilt, seen: sourceVersion }, ...(turn.allowSilence ? { silence: quiet } : {}), progress: piSteps }));
+            } finally { progressing = false; }
             check(); incoming?.finish();
             if (silence === undefined && !reply.trim() && !media?.attachments.length && !cardTurn.staged && mustReply) return fail(502, 'conversation_reply_invalid');
             return;

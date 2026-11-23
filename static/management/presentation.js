@@ -68,3 +68,37 @@ const managementCommandStates = {
   not_operator: ['未执行：只有发起人可以执行', '只有这条命令的发起人可以执行它；命令保持原状态，没有执行。']
 };
 const managementCommandState = state => managementCommandStates[state] ?? [state, '当前状态：' + state];
+// A Pi turn's own tools on the assistant's computer (#1296): what the step does while it runs, and once it has ended.
+const managementNativeSteps = {
+  bash: ['正在电脑上执行', '在电脑上执行'], read: ['正在读取电脑文件', '读取电脑文件'], write: ['正在写入电脑文件', '写入电脑文件'],
+  edit: ['正在修改电脑文件', '修改电脑文件'], grep: ['正在电脑上搜索', '在电脑上搜索'], find: ['正在电脑上查找文件', '在电脑上查找文件'],
+  ls: ['正在查看电脑目录', '查看电脑目录']
+};
+const managementNativeCaption = (name, running) => managementNativeSteps[name]?.[running ? 0 : 1] ?? (running ? '正在电脑上操作' : '电脑上的操作');
+function managementDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return '不到 1 秒';
+  if (ms < 60000) return (Math.round(ms / 100) / 10) + ' 秒';
+  const seconds = Math.floor(ms / 1000);
+  return Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒';
+}
+// The status of a native step: running for how long, or how it ended (its exit code when the command failed) and its duration.
+function managementNativeStatus(result, runningMs) {
+  if (!result) return ['执行中', managementDuration(runningMs)].filter(Boolean).join(' · ');
+  const failed = result.state === 'failed';
+  const outcome = failed ? (Number.isInteger(result.exit_code) ? '退出码 ' + result.exit_code : '失败') : '已完成';
+  return [outcome, managementDuration(result.duration_ms)].filter(Boolean).join(' · ');
+}
+const managementProgressNotices = {
+  compacting: '会话内容较长，正在压缩上下文', compacted: '上下文已压缩，继续处理', compaction_failed: '上下文压缩没有完成',
+  image_recovery: '模型拒绝了图片，已去掉图片后继续', restarted: '请求已修改，按修改后的请求重新开始'
+};
+const managementProgressNotice = data => data.notice === 'skipped' ? `另有 ${data.count} 个电脑步骤未逐条显示（步骤较密时会合并）`
+  : managementProgressNotices[data.notice] ?? null;
+// How long ago a running turn last did something, so a long command is visibly alive.
+function managementActivity(lastAt, now) {
+  if (!Number.isFinite(lastAt)) return '';
+  const seconds = Math.max(0, Math.floor((now - lastAt) / 1000));
+  if (seconds < 3) return '刚刚有活动';
+  return '最近活动 ' + (seconds < 60 ? seconds + ' 秒前' : Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒前');
+}

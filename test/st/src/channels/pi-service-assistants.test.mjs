@@ -35,8 +35,9 @@ const settled = (f, conversation, message) => until(async () => (await f.admin('
 function gate(t) { let release; const wait = new Promise(r => { release = r; }); t.after(() => release()); return { wait, release }; }
 
 // Each conversation owner's computer is a workspace of a local project computer running this checkout's runner and Pi SDK.
-// f.computerCalls records when a turn starts taking its computer early (#1254) and when its Pi session takes it.
-function piComputers(t, f) {
+// f.computerCalls records when a turn starts taking its computer early (#1254) and when its Pi session takes it. With
+// `commands`, the assistant offers its computer tools, so its Pi session runs native commands in that workspace.
+function piComputers(t, f, { commands = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'bot-pi-assistants-')), manager = new LocalManager('101', root), store = f.h.store;
   t.after(async () => { await manager.recover(); rmSync(root, { recursive: true, force: true }); });
   f.computerCalls = [];
@@ -46,16 +47,16 @@ function piComputers(t, f) {
       const workspace = new Workspace(store, manager, { ...task, repository_id: '101', workspace_id: workspaceId, generation: 1 }, redactor, async () => {}, log, 'service_role_operations');
       await workspace.call('init', { type: 'workspace_init' }); return workspace;
     } });
-  f.service.management.service.assistants = { turn: computer, available: () => false, resolve() {}, start() {}, async close() {} };
+  f.service.management.service.assistants = { turn: computer, available: () => commands, resolve() {}, start() {}, async close() {} };
   return manager.call('PUT', '/v1/projects/101');
 }
-async function piManagement(t, f) {
-  await piComputers(t, f);
+async function piManagement(t, f, options) {
+  await piComputers(t, f, options);
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'management-assistant');
   assert.equal((await f.admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, harness: 'pi' })).status, 200);
 }
-async function piGroup(t) {
-  const f = await channelFixture(t); await repositoryAssistant(f); f.chat = await boundGroup(f); await piComputers(t, f);
+async function piGroup(t, options) {
+  const f = await channelFixture(t); await repositoryAssistant(f); f.chat = await boundGroup(f); await piComputers(t, f, options);
   const binding = f.service.serviceBindings.get(f.chat.id);
   const saved = await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind: 'repositories', repositories: ['101'] }, participation: 'all', harness: 'pi', enabled: true, expected_revision: binding.revision });
@@ -84,6 +85,73 @@ test('the console shows a Pi management turn\'s answer as it is written, after i
   assert.equal(events.find(e => e.type === 'reply').data.text, '任务在等待项目电脑。');
   // The computer is taken as the turn starts, before the request is put together and the session needs it (#1254).
   assert.deepEqual(f.computerCalls, ['warm', 'session']);
+});
+
+// The page shows what a Pi turn does on its computer (#1296): each native command and model step, bounded and redacted.
+test('a Pi management turn records its native commands as bounded, redacted steps in order; its answer is unchanged (#1296)', { skip: piSkip, timeout: 120000 }, async t => {
+  const f = await channelFixture(t); await piManagement(t, f, { commands: true }); const bodies = [];
+  const token = 'ghp_' + 'A'.repeat(36);
+  const command = `echo ${token} build ok; API_TOKEN=s3cr3t-value-0001 true --password=pa55word-0001 -u admin:pa55word-0002; exit 3\necho never-shown-second-line`;
+  f.modelState.respond = async (body, res) => {
+    bodies.push(body);
+    if (bodies.length === 1) return call(res, 'bash', { command });
+    return stream(res, ['命令以退出码 3 结束', '。']);
+  };
+  const conversation = (await f.admin('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
+  const message = (await f.admin('/api/management/conversations/' + conversation + '/messages', 'POST', { source_message: 'pi-native', content: '跑一下构建' })).value;
+  const events = (await settled(f, conversation, message.id)).events.filter(e => e.message_id === message.id);
+  assert.deepEqual(events.filter(e => e.type === 'error'), []);
+  assert.ok(bodies[0].tools.some(tool => tool.function.name === 'bash'), 'the session runs commands natively');
+  assert.match(toolResults(bodies[1]).join('\n'), /Command exited with code 3/);
+  // In order: the model step, the command as it starts and as it ends, the next step, then the answer as it was written.
+  const steps = events.filter(e => e.data.native || e.type === 'model_start').map(e => [e.type, e.data.name ?? e.data.turn]);
+  assert.deepEqual(steps, [['model_start', 0], ['tool_call', 'bash'], ['tool_result', 'bash'], ['model_start', 1]]);
+  const started = events.find(e => e.type === 'tool_call' && e.data.native), ended = events.find(e => e.type === 'tool_result' && e.data.native);
+  assert.equal(started.data.preview, 'echo [REDACTED] build ok; API_TOKEN=[REDACTED] true --password=[REDACTED] -u [REDACTED]; exit 3 …');
+  assert.equal(ended.data.call_id, started.data.call_id);
+  assert.equal(ended.data.result.state, 'failed'); assert.equal(ended.data.result.exit_code, 3);
+  assert.ok(Number.isFinite(ended.data.result.duration_ms));
+  assert.match(ended.data.result.tail, /^\[REDACTED\] build ok\n/); assert.match(ended.data.result.tail, /Command exited with code 3$/);
+  // Payloads are small, and no credential of the command reaches the conversation.
+  for (const event of events.filter(e => e.data.native)) assert.ok(JSON.stringify(event.data).length < 1024, JSON.stringify(event.data));
+  const stored = JSON.stringify(f.h.store.all('SELECT data FROM management_events WHERE message_id=?', message.id));
+  for (const secret of [token, 's3cr3t-value-0001', 'pa55word-0001', 'pa55word-0002', 'never-shown-second-line']) assert.ok(!stored.includes(secret), secret);
+  const types = events.map(e => e.type);
+  assert.ok(types.lastIndexOf('model_start') < types.indexOf('text') && types.lastIndexOf('text') < types.indexOf('reply'));
+  assert.equal(events.find(e => e.type === 'reply').data.text, '命令以退出码 3 结束。');
+  // Once the turn has ended nothing more is recorded for it.
+  const count = () => f.h.store.get('SELECT count(*) n FROM management_events WHERE message_id=?', message.id).n, before = count();
+  const late = f.service.management.piSteps(message.id);
+  late.record({ kind: 'model_step', step: 3 }); late.record({ kind: 'tool_started', call_id: 'late', name: 'bash', preview: 'echo late' }); late.close();
+  assert.equal(count(), before);
+});
+
+test('a stopped Pi management turn records no more progress, though its command still runs (#1296)', { skip: piSkip, timeout: 120000 }, async t => {
+  const f = await channelFixture(t); await piManagement(t, f, { commands: true }); let requests = 0;
+  f.modelState.respond = async (body, res) => { requests++; return requests === 1 ? call(res, 'bash', { command: 'sleep 2; echo finished-after-stop' }) : say(res, '不该出现'); };
+  const conversation = (await f.admin('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
+  const message = (await f.admin('/api/management/conversations/' + conversation + '/messages', 'POST', { source_message: 'pi-stop', content: '等一会儿' })).value;
+  const running = () => f.h.store.get("SELECT 1 FROM management_events WHERE message_id=? AND type='tool_call' AND json_extract(data,'$.native')", message.id);
+  await until(running, Boolean, 60000);
+  assert.equal((await f.admin('/api/management/conversations/' + conversation + '/messages/' + message.id + '/stop', 'POST', {})).value.state, 'stopped');
+  const stoppedAt = f.h.store.get("SELECT sequence FROM management_events WHERE message_id=? AND type='stopped'", message.id).sequence;
+  // The command ends on the computer after the stop: its end, and anything after it, is not recorded.
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.deepEqual(f.h.store.all('SELECT type FROM management_events WHERE message_id=? AND sequence>?', message.id, stoppedAt), []);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM management_events WHERE message_id=? AND type='tool_result'", message.id).n, 0);
+  assert.equal(requests, 1);
+});
+
+test('a Pi group turn lists its native commands and model steps among its steps, by name only (#1296)', { skip: piSkip, timeout: 120000 }, async t => {
+  const f = await piGroup(t, { commands: true }), bodies = [];
+  f.modelState.respond = async (body, res) => { bodies.push(body); return bodies.length === 1 ? call(res, 'bash', { command: 'echo group-output GH_TOKEN=s3cr3t-group' }) : say(res, '电脑上看过了。'); };
+  const asked = await post(f.h, f.id, inGroup('帮我在电脑上看一下'));
+  assert.equal((await done(f, asked)).state, 'completed');
+  assert.ok(bodies[0].tools.some(tool => tool.function.name === 'bash'));
+  const turn = f.h.store.get('SELECT * FROM channel_service_turns');
+  assert.deepEqual(f.h.store.all("SELECT type,name FROM channel_service_events WHERE turn_id=? AND type IN ('model_start','tool_call','tool_result','tool_error') ORDER BY sequence", turn.id)
+    .map(e => [e.type, e.name]), [['model_start', ''], ['tool_call', 'bash'], ['tool_result', 'bash'], ['model_start', '']]);
+  await until(() => sent(f).some(s => s.includes('电脑上看过了')));
 });
 
 test('a Pi group turn starts from the native context and ends silently through stay_silent (#1253, #489)', { skip: piSkip, timeout: 120000 }, async t => {
