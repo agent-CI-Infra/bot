@@ -397,6 +397,20 @@ export class Projects {
     this.memoryReservations.set(repo, effectiveMemoryMb);
     return effectiveMemoryMb;
   }
+  async withMemoryReservation(repo, fn, { untouchedOnExhausted = false } = {}) {
+    const hostInfo = await this.hostInfo();
+    const baseSpec = this.effectiveSpec(this.spec(repo), hostInfo);
+    try {
+      this.reserveMemory(repo, baseSpec.memory_mb, hostInfo, this.own(repo).memory_mb !== undefined);
+    } catch (error) {
+      throw untouchedOnExhausted ? Object.assign(error, { untouched: true }) : error;
+    }
+    try {
+      return await fn(hostInfo);
+    } finally {
+      this.memoryReservations.delete(repo);
+    }
+  }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
@@ -1156,16 +1170,11 @@ export class Projects {
         // describe() reports image_pending=true so the control plane switches cleanly via claim-gated idle refresh.
         if (!commitSpec) return;
         if (current.desired === 'ready' && current.state !== 'reset_failed') {
-          const applyHost = await this.hostInfo();
-          const applyBase = this.effectiveSpec(this.spec(repo), applyHost);
-          this.reserveMemory(repo, applyBase.memory_mb, applyHost, this.own(repo).memory_mb !== undefined);
-          try {
+          await this.withMemoryReservation(repo, async () => {
             this.background.delete(repo);
             await this.stopGeneration(repo, current.generation);
             await this.provision(repo);
-          } finally {
-            this.memoryReservations.delete(repo);
-          }
+          });
         }
       }).catch(error => logFailure(`project ${repo} apply after precompiled build failed`, error));
       job.applyPromise = apply;
@@ -1259,8 +1268,10 @@ export class Projects {
       try {
         const project = this.get(repo);
         if (project?.generation !== generation || project.desired !== 'ready' || !['ready', 'busy'].includes(project.state)) return;
-        this.update(repo, 'recovering', 'ready'); this.background.delete(repo);
-        await this.stopAll(repo); await this.provision(repo);
+        await this.withMemoryReservation(repo, async () => {
+          this.update(repo, 'recovering', 'ready'); this.background.delete(repo);
+          await this.stopAll(repo); await this.provision(repo);
+        });
       } catch (error) {
         // desired stays ready, so the control plane starts it again.
         logFailure(`project ${repo} restart failed`, error); this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'recovery_failed');
@@ -1412,19 +1423,10 @@ export class Projects {
           // Pre-check & reserve aggregate memory before touching the running container (#1279 F8), so a host shrink or
           // capacity exhaustion leaves the healthy container untouched instead of stopping and marking it failed.
           if (project.desired === 'ready' && project.state === 'ready') {
-            const refreshHost = await this.hostInfo();
-            const refreshBase = this.effectiveSpec(this.spec(repo), refreshHost);
-            try {
-              this.reserveMemory(repo, refreshBase.memory_mb, refreshHost, this.own(repo).memory_mb !== undefined);
-            } catch (error) {
-              throw Object.assign(error, { untouched: true });
-            }
-            try {
+            await this.withMemoryReservation(repo, async () => {
               this.background.delete(repo);
               await this.provision(repo);
-            } finally {
-              this.memoryReservations.delete(repo);
-            }
+            }, { untouchedOnExhausted: true });
           }
           result = this.describe(repo);
         } else if (action === 'execute') {
@@ -1461,12 +1463,19 @@ export class Projects {
           // #774: re-enabling or resetting a project that still owes a notes purge reclaims the old notes first, so the new
           // generation cannot read them; a refusal here leaves the row as it was instead of starting on top of the residue.
           // The state is not part of the test (#783): the purge marker is what says the cleanup is still owed.
-          if (['start', 'reset'].includes(action)) await this.reclaimStaleNotes(repo);
-          this.update(repo, action === 'reset' ? 'resetting' : 'recovering', action === 'stop' ? 'stopped' : action === 'delete' ? 'deleted' : 'ready');
-          await this.stopAll(repo);
-          if (action === 'reset') this.db.prepare('UPDATE projects SET generation=generation+1 WHERE repository_id=?').run(repo);
-          if (action === 'start' || action === 'reset') result = await this.provision(repo);
-          else {
+          if (action === 'start' || action === 'reset') {
+            await this.reclaimStaleNotes(repo);
+            // Atomically reserve aggregate memory BEFORE transitioning to recovering/resetting or stopping containers (#1279),
+            // so concurrent register() calls cannot steal the budget during stopAll() and capacity exhaustion stays untouched.
+            result = await this.withMemoryReservation(repo, async () => {
+              this.update(repo, action === 'reset' ? 'resetting' : 'recovering', 'ready');
+              await this.stopAll(repo);
+              if (action === 'reset') this.db.prepare('UPDATE projects SET generation=generation+1 WHERE repository_id=?').run(repo);
+              return this.provision(repo);
+            }, { untouchedOnExhausted: true });
+          } else {
+            this.update(repo, 'recovering', action === 'stop' ? 'stopped' : 'deleted');
+            await this.stopAll(repo);
             if (action === 'delete') {
               for (const { generation } of this.db.prepare('SELECT generation FROM resources WHERE repository_id=?').all(repo)) {
                 if (await this.inspect(repo, generation, 'container')) await this.docker.request('DELETE', `/containers/${this.names(repo, generation).container}`);
@@ -1559,8 +1568,10 @@ export class Projects {
         if (pending.some(p => p.action === 'reset')) { this.update(row.repository_id, 'reset_failed', 'stopped', 'reset_interrupted'); return; }
         if (row.state === 'reset_failed') return;
         if (row.desired === 'ready') {
-          this.update(row.repository_id, 'recovering', 'ready');
-          await this.provision(row.repository_id, { deferBuild: true });
+          await this.withMemoryReservation(row.repository_id, async () => {
+            this.update(row.repository_id, 'recovering', 'ready');
+            await this.provision(row.repository_id, { deferBuild: true });
+          });
           // Preserve the interrupted-build notice when recovery reused a cached image (and did not enqueue a new build).
           if (interrupted.has(row.repository_id) && !this.projectBuildJobs.has(row.repository_id)) {
             this.db.prepare('UPDATE projects SET build=? WHERE repository_id=?').run(interrupted.get(row.repository_id), row.repository_id);
@@ -1605,7 +1616,11 @@ export class Projects {
       try {
         const container = await this.inspect(row.repository_id, current.generation, 'container');
         if (!container?.State.Running || container.State.StartedAt !== current.started_at) {
-          this.update(row.repository_id, 'recovering', 'ready'); await this.stopAll(row.repository_id); await this.provision(row.repository_id);
+          await this.withMemoryReservation(row.repository_id, async () => {
+            this.update(row.repository_id, 'recovering', 'ready');
+            await this.stopAll(row.repository_id);
+            await this.provision(row.repository_id);
+          });
         }
       } catch (error) { logFailure(`project ${row.repository_id} recovery after its container stopped failed`, error); this.update(row.repository_id, 'failed', 'stopped', 'recovery_failed'); }
     })));

@@ -196,6 +196,68 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
   await f.projects.operate('308', 'stop', { operation_id: id(), generation: 1 });
   await f.projects.operate('309', 'stop', { operation_id: id(), generation: 1 });
 
+  // 1f. Concurrent start / reset / recovery + register on a 16 GiB host: memory is reserved BEFORE entering
+  // recovering/resetting or awaiting stopAll(), so a concurrent register() cannot steal the budget (#1279).
+  f.docker.info = { NCPU: 4, MemTotal: 16384 * mib }; // 75% cap = 12288 MiB
+  await f.projects.register('310');
+  await f.projects.operate('310', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 6144 } });
+  await f.projects.register('311');
+  await f.projects.operate('311', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 6144 } });
+  await f.projects.operate('310', 'stop', { operation_id: id(), generation: 1 });
+
+  const holdStopAllOnce = (targetRepo) => {
+    const orig = f.projects.stopAll.bind(f.projects);
+    let entered, release;
+    const arrived = new Promise(r => { entered = r; });
+    const gate = new Promise(r => { release = r; });
+    f.projects.stopAll = async (r) => {
+      if (r === targetRepo) {
+        f.projects.stopAll = orig;
+        entered();
+        await gate;
+      }
+      return orig(r);
+    };
+    return { arrived, release };
+  };
+
+  // Start A (310, stopped, 6144 MiB) while B (311, ready, 6144 MiB) runs; hold A in stopAll and try registering C (312).
+  let hold = holdStopAllOnce('310');
+  const startA = f.projects.operate('310', 'start', { operation_id: id(), generation: 1 });
+  await hold.arrived;
+  assert.equal(f.projects.get('310').state, 'recovering');
+  await assert.rejects(f.projects.register('312'), err => err.message === 'host_memory_exhausted' && err.status === 507);
+  hold.release();
+  await startA;
+  assert.equal(f.projects.get('310').state, 'ready');
+  assert.equal(f.projects.get('311').state, 'ready');
+  assert.equal(f.host('310').Memory, 6144 * mib);
+
+  // Equivalent reset + register race while A (310) is in resetting and held at stopAll.
+  hold = holdStopAllOnce('310');
+  const resetA = f.projects.operate('310', 'reset', { operation_id: id(), generation: 1 });
+  await hold.arrived;
+  assert.equal(f.projects.get('310').state, 'resetting');
+  await assert.rejects(f.projects.register('313'), err => err.message === 'host_memory_exhausted' && err.status === 507);
+  hold.release();
+  await resetA;
+  assert.equal(f.projects.get('310').state, 'ready');
+  assert.equal(f.projects.get('310').generation, 2);
+
+  // Equivalent check() crash-recovery + register race while A (310) is in recovering and held at stopAll.
+  f.docker.containers.get(f.projects.names('310', 2).container).State.Running = false;
+  hold = holdStopAllOnce('310');
+  const checkRun = f.projects.check();
+  await hold.arrived;
+  assert.equal(f.projects.get('310').state, 'recovering');
+  await assert.rejects(f.projects.register('314'), err => err.message === 'host_memory_exhausted' && err.status === 507);
+  hold.release();
+  await checkRun;
+  assert.equal(f.projects.get('310').state, 'ready');
+  assert.equal(f.projects.allocatedMemoryMb(), 12288);
+  await f.projects.operate('310', 'stop', { operation_id: id(), generation: 2 });
+  await f.projects.operate('311', 'stop', { operation_id: id(), generation: 1 });
+
   // 2. 8 GiB host: clamps to 6 GiB (6144 MiB), explicit equal-to-host 8192 MiB is rejected on both setDefaults and configure.
   f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
   view = await f.projects.defaultsView();
