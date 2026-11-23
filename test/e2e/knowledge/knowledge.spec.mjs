@@ -217,7 +217,7 @@ test('manager_not_ready reads as a service still starting, not as an empty direc
   }finally{await f.close();}
 });
 
-test('a write that reports manager_unavailable keeps write wording and retries the write, not a read',async({page})=>{
+test('a write that reports manager_unavailable keeps write wording and retries the current draft, not a read',async({page})=>{
   const f=await fixture(page);
   try{
     const base='/api/repositories/101/knowledge-files',file=(await f.admin(base,'POST',{name:'write-fault.txt',content:'original body'})).value.file,filePath=base+'/'+encodeURIComponent(file.id);
@@ -233,9 +233,10 @@ test('a write that reports manager_unavailable keeps write wording and retries t
     await expect(exact(page,'重试操作')).toBeVisible();
     const readsBefore=reads;await exact(page,'重试操作').click();await expect.poll(()=>writes).toBe(2);
     expect(reads).toBe(readsBefore);expect((await f.admin(base+'/'+encodeURIComponent(file.id))).value.file.content).toBe('original body');
-    await page.unroute('**'+filePath);await exact(page,'重试操作').click();
-    await expect(page.locator('.knowledge-editor')).toHaveCount(0);await expect(page.locator('.knowledge-content')).toContainText('saved despite the manager fault');
-    expect((await f.admin(base+'/'+encodeURIComponent(file.id))).value.file.content).toBe('saved despite the manager fault');expect(f.errors).toEqual([]);
+    // Editing between the failed save and the retry must save the current draft, not the text captured before the first failure.
+    await page.getByLabel('内容',{exact:true}).fill('typed after the failed save');await page.unroute('**'+filePath);await exact(page,'重试操作').click();
+    await expect(page.locator('.knowledge-editor')).toHaveCount(0);await expect(page.locator('.knowledge-content')).toContainText('typed after the failed save');
+    expect((await f.admin(base+'/'+encodeURIComponent(file.id))).value.file.content).toBe('typed after the failed save');expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 
