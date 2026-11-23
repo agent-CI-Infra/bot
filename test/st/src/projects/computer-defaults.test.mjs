@@ -151,9 +151,31 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
   await f.projects.register('305');
   assert.equal(f.host('305').Memory, 6144 * mib);
   assert.equal(f.projects.allocatedMemoryMb(), 12288);
-  // Stop both 16 GiB test projects before switching the fixture host to 8 GiB.
+  // 1c. Configuring 301 up to 12 GiB while 305 uses 6 GiB must fail closed BEFORE mutating spec or stopping 301 (#1279 F2).
+  await assert.rejects(
+    f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } }),
+    err => err.message === 'host_memory_exhausted' && err.status === 507,
+  );
+  assert.equal(f.projects.get('301').state, 'ready', '301 remains ready after aggregate memory rejection');
+  assert.equal(f.projects.get('305').state, 'ready', '305 remains ready');
+  assert.equal(f.host('301').Memory, 6144 * mib, '301 container stays untouched at 6 GiB');
+  assert.equal(f.projects.own('301').memory_mb, 6144, '301 saved spec is not mutated on rejected configure');
+  // Stop both 16 GiB test projects before running the concurrent admission test.
   await f.projects.operate('301', 'stop', { operation_id: id(), generation: 1 });
   await f.projects.operate('305', 'stop', { operation_id: id(), generation: 1 });
+
+  // 1d. Concurrent register() calls on an empty 16 GiB host must reserve memory atomically (#1279 F1):
+  // exactly one succeeds at 12288 MiB and the other rejects with 507 host_memory_exhausted (never 24576 MiB).
+  const concurrent = await Promise.allSettled([f.projects.register('306'), f.projects.register('307')]);
+  const fulfilled = concurrent.filter(r => r.status === 'fulfilled');
+  const rejected = concurrent.filter(r => r.status === 'rejected');
+  assert.equal(fulfilled.length, 1, 'exactly one concurrent register succeeds within 12 GiB host cap');
+  assert.equal(rejected.length, 1, 'second concurrent register is rejected atomically');
+  assert.equal(rejected[0].reason?.message, 'host_memory_exhausted');
+  assert.equal(rejected[0].reason?.status, 507);
+  assert.equal(f.projects.allocatedMemoryMb(), 12288);
+  const winnerRepo = fulfilled[0].value.repository_id;
+  await f.projects.operate(winnerRepo, 'stop', { operation_id: id(), generation: 1 });
 
   // 2. 8 GiB host: clamps to 6 GiB (6144 MiB), explicit equal-to-host 8192 MiB is rejected on both setDefaults and configure.
   f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
@@ -187,7 +209,20 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
     assert.equal(coldView.defaults.memory_mb, 4096, mode);
     assert.equal(coldView.host_memory_cap_mb, 4096, mode);
     await assert.rejects(f2.projects.setDefaults({ memory_mb: 8192 }), /memory_exceeds_host/);
+    await assert.rejects(f2.projects.setDefaults({ cpus: 16 }), /cpus_exceed_host/);
     await f2.projects.register('303');
     assert.equal(f2.host('303').Memory, 4096 * mib, mode);
+    // describe() reflects the conservative fallback (4096 MiB / 2 CPUs) with resources_pending=false (#1279 F5/F6).
+    const coldDesc = f2.projects.describe('303').computer;
+    assert.equal(coldDesc.memory_mb, 4096, mode);
+    assert.equal(coldDesc.configured_memory_mb, 16384, mode);
+    assert.equal(coldDesc.host_memory_cap_mb, 4096, mode);
+    assert.equal(coldDesc.host_cpus, 2, mode);
+    assert.equal(coldDesc.host_clamped, true, mode);
+    assert.equal(coldDesc.resources_pending, false, mode);
+    await assert.rejects(
+      f2.projects.operate('303', 'configure', { operation_id: id(), generation: 1, request: { cpus: 16 } }),
+      /cpus_exceed_host/,
+    );
   }
 });

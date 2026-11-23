@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { command } from '../../../runner/command.mjs';
-import { failedFull, fullBytes, lowBytes, noSpace, refuseFull, toolDiskFull, volume, watchVolume } from '../../../runner/disk.mjs';
+import { failedFull, fullBytes, lowBytes, noSpace, refuseFull, toolDiskFull, volume, watchVolume, watchedVolume } from '../../../runner/disk.mjs';
 
 // #671: a project computer's work volume that runs full. The runner refuses or marks the call, and the control plane
 // stops the task as disk_full (test/st/src/storage/storage-guard.test.mjs).
@@ -86,4 +86,32 @@ test('the agent stops on a tool result that ran out of space', () => {
   assert.match(toolDiskFull({ exit_code: 1, output: '', disk_full: { free_bytes: 3 * GiB, lowest_free_bytes: 0, total_bytes: total } }), /volume ran full \(0 MiB free of 1024000 MiB at the lowest\)/);
   assert.match(toolDiskFull({ error: "ENOSPC: no space left on device, write '/workspace/tasks/x/repo/a.txt'" }), /^ENOSPC/);
   for (const result of [{ exit_code: 1, output: 'ENOSPC' }, { error: 'file_too_large' }, { written: true }, null]) assert.equal(toolDiskFull(result), null);
+});
+
+test('watchedVolume ranks mounts strictly by severity (full > low > healthy) before breaking ties by free_bytes (#1279 F10)', () => {
+  const mk = (free, tot) => ({ free_bytes: free, total_bytes: tot, full: free < fullBytes(tot), low: free < lowBytes(tot) });
+  // Large /workspace is low (8 GiB free of 500 GiB -> low=true), small /tmp is healthy (3.5 GiB free of 4 GiB -> low=false):
+  // /tmp has fewer absolute free bytes, but /workspace is in a higher severity tier and must win.
+  const wsLow = mk(8 * GiB, 500 * GiB);
+  const tmpHealthy = mk(3.5 * GiB, 4 * GiB);
+  assert.equal(wsLow.low, true);
+  assert.equal(tmpHealthy.low, false);
+  const pick1 = watchedVolume(['/workspace', '/tmp'], p => (p === '/workspace' ? wsLow : tmpHealthy));
+  assert.deepEqual(pick1, wsLow);
+
+  // Full always beats low even if full mount has more raw bytes than a tiny low mount.
+  const wsFull = mk(900 * MiB, 500 * GiB);
+  const tmpLow = mk(100 * MiB, 4 * GiB);
+  assert.equal(wsFull.full, true);
+  assert.equal(tmpLow.full, false);
+  assert.equal(tmpLow.low, true);
+  assert.deepEqual(watchedVolume(['/workspace', '/tmp'], p => (p === '/workspace' ? wsFull : tmpLow)), wsFull);
+
+  // Healthy /workspace + full /tmp picks /tmp.
+  const wsHealthy = mk(100 * GiB, 500 * GiB);
+  const tmpFull = mk(10 * MiB, 4 * GiB);
+  assert.deepEqual(watchedVolume(['/workspace', '/tmp'], p => (p === '/workspace' ? wsHealthy : tmpFull)), tmpFull);
+
+  // Same severity tier (both healthy) breaks ties by lowest free_bytes.
+  assert.deepEqual(watchedVolume(['/workspace', '/tmp'], p => (p === '/workspace' ? wsHealthy : tmpHealthy)), tmpHealthy);
 });

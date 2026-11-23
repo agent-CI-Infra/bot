@@ -694,6 +694,7 @@ test('assistant computers enforce small-host memory clamping, aggregate admissio
     const coldView = await coldAssistants.settingsView();
     assert.equal(coldView.settings.memory_mb, 4096, mode);
     await assert.rejects(coldAssistants.setSettings({ memory_mb: 8192 }), /memory_exceeds_host/);
+    await assert.rejects(coldAssistants.setSettings({ cpus: 16 }), /cpus_exceed_host/);
     const coldAcq = await coldAssistants.acquire(ownerC, { turn: `t-cold-${mode}`, fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
     assert.equal(coldAcq.state, 'ready');
     assert.equal(coldDocker.containers.get(coldAssistants.name(ownerC)).HostConfig.Memory, 4096 * 1024 * 1024, mode);
