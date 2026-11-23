@@ -115,8 +115,8 @@ test('directory HTTP API keeps stable ids, body search previews, exact history a
  // Name/path search and full-text multi-word body search both return previews.
  const pathHit=(await admin(base+'?query=renamed')).value.files;
  assert.equal(pathHit[0].path,'docs/renamed.txt');assert.equal(pathHit[0].match_in,'path');
- const bodyHit=(await admin(base+'?query='+encodeURIComponent('keyword beta'))).value.files;
- assert.equal(bodyHit.length,1);assert.equal(bodyHit[0].path,'docs/renamed.txt');assert.equal(bodyHit[0].match_in,'content');assert.ok(bodyHit[0].preview.includes('keyword alpha beta'));
+ const bodyHit=(await admin(base+'?query='+encodeURIComponent('keyword beta'))).value;
+ assert.equal(bodyHit.scan_limited,false);assert.equal(bodyHit.files.length,1);assert.equal(bodyHit.files[0].path,'docs/renamed.txt');assert.equal(bodyHit.files[0].match_in,'content');assert.ok(bodyHit.files[0].preview.includes('keyword alpha beta'));
  assert.equal((await admin(endpoint+'/move','POST',{path:'old.txt',expected_revision:2})).status,409);
  assert.equal((await admin(endpoint,'PUT',{content:'stale',expected_revision:1})).status,409);
  assert.equal((await admin(endpoint,'DELETE',{expected_revision:2})).value.file.revision,3);
@@ -185,6 +185,19 @@ test('a legacy id that decodes to an internal name is an unknown file, not a for
  }
  const write=await admin(base+'/'+encodeURIComponent(id('.git')),'PUT',{content:'x',expected_revision:1});
  assert.deepEqual([write.status,write.value.error],[404,'note_not_found']);
- const ordinary=await admin(base+'/'+encodeURIComponent(id('missing.txt')));
- assert.deepEqual([ordinary.status,ordinary.value.error],[404,'note_not_found']);
+ assert.equal((await admin(base+'/'+encodeURIComponent(id('missing.txt')))).value.error,'note_not_found');
+});
+
+test('body search flags scan_limited when an oversized text file exceeds the per-file scan bound',async t=>{
+ const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const base='/api/repositories/101/knowledge-files';
+ await admin(base,'POST',{name:'small.md',content:'needle in small note'});
+ await writeFile(join(f.projects.notesRoot,'101','oversized.txt'),'oversized-only-needle '+'a'.repeat(540*1024));
+ const hit=(await admin(base+'?query=oversized-only-needle')).value;
+ assert.equal(hit.scan_limited,true);
+ assert.deepEqual(hit.files,[]);
+ const small=(await admin(base+'?query=small+note')).value;
+ assert.equal(small.scan_limited,true);
+ assert.equal(small.files.length,1);
+ assert.equal(small.files[0].path,'small.md');
 });

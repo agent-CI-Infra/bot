@@ -5,11 +5,11 @@ import type { Store } from '../storage/database.js';
 export const projectCapabilities = ['tasks.read', 'tasks.manage_own', 'tasks.write', 'roles.edit', 'knowledge.read', 'knowledge.write', 'schedules.manage', 'config.write', 'release.manage'];
 // What GitHub collaborators get by default (#847): Write and Maintain ask, create tasks and manage their own; Triage and Read ask.
 /** Capabilities no check ever reads any more; a grant that drops one loses nothing. */
-export const retiredCapabilities = ['roles.publish'];
+export const retiredCapabilities = ['roles.publish', 'knowledge.review'];
 export const memberCapabilities = ['tasks.read', 'tasks.write', 'tasks.manage_own'];
 export const readerCapabilities = ['tasks.read'];
 // A grant manager may explicitly delegate these; default/derived project grants never include them.
-export const explicitDelegationCapabilities = ['knowledge.review'];
+export const explicitDelegationCapabilities: string[] = [];
 export const tenantId = (owner: string): string => `github.com:${owner}`;
 
 // Unknown owners stay quarantined. Names, sender and requester are never identity evidence.

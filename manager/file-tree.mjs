@@ -49,6 +49,7 @@ export class FileTree {
       if(!deletedOnly&&!ctx.directories.includes(directory))fail('directory_not_found',404);
       const files=[];
       let scannedBytes=0;
+      let scanLimited=false;
       for(const raw of ctx.files){
         const file=publicFile(this.row(ctx,raw.id),raw);
         if(deletedOnly){if(!file.deleted)continue;}
@@ -57,8 +58,10 @@ export class FileTree {
           if(!deletedOnly&&!recursive&&file.directory!==directory)continue;
           if(!preview){files.push(file);continue;}
           let content=null;
-          if(!file.deleted&&!file.binary&&file.sha256&&Number(file.bytes??0)<=MAX_SEARCH_FILE_BYTES&&scannedBytes<MAX_SEARCH_SCAN_BYTES){
-            try{content=await ctx.notes.blob(file.sha256);scannedBytes+=Buffer.byteLength(content);}catch{}
+          if(!file.deleted&&!file.binary&&file.sha256){
+            if(Number(file.bytes??0)<=MAX_SEARCH_FILE_BYTES&&scannedBytes<MAX_SEARCH_SCAN_BYTES){
+              try{content=await ctx.notes.blob(file.sha256);scannedBytes+=Buffer.byteLength(content);}catch{}
+            }else scanLimited=true;
           }
           files.push({...file,preview:makePreview(content,'',[])});
           continue;
@@ -66,13 +69,15 @@ export class FileTree {
         const pathLower=file.path.toLowerCase();
         const pathMatch=pathLower.includes(needle)||(terms.length>1&&terms.every(term=>pathLower.includes(term)));
         let content=null,contentMatch=false;
-        if(!file.deleted&&!file.binary&&file.sha256&&Number(file.bytes??0)<=MAX_SEARCH_FILE_BYTES&&scannedBytes<MAX_SEARCH_SCAN_BYTES){
-          try{
-            content=await ctx.notes.blob(file.sha256);
-            scannedBytes+=Buffer.byteLength(content);
-            const contentLower=content.toLowerCase();
-            contentMatch=contentLower.includes(needle)||(terms.length>1&&terms.every(term=>pathLower.includes(term)||contentLower.includes(term)));
-          }catch{}
+        if(!file.deleted&&!file.binary&&file.sha256){
+          if(Number(file.bytes??0)<=MAX_SEARCH_FILE_BYTES&&scannedBytes<MAX_SEARCH_SCAN_BYTES){
+            try{
+              content=await ctx.notes.blob(file.sha256);
+              scannedBytes+=Buffer.byteLength(content);
+              const contentLower=content.toLowerCase();
+              contentMatch=contentLower.includes(needle)||(terms.length>1&&terms.every(term=>pathLower.includes(term)||contentLower.includes(term)));
+            }catch{}
+          }else scanLimited=true;
         }
         if(!pathMatch&&!contentMatch)continue;
         files.push({...file,preview:makePreview(content,needle,terms),match_in:pathMatch&&contentMatch?'both':contentMatch?'content':'path'});
@@ -83,7 +88,7 @@ export class FileTree {
       for(const row of ctx.catalog.quarantined)quarantinedByPath.set(row.path,{id:row.id,path:row.path,reason:'unsupported_name'});
       for(const row of ctx.unreadable||[])if(!quarantinedByPath.has(row.path))quarantinedByPath.set(row.path,row);
       const quarantined=[...quarantinedByPath.values()].sort((a,b)=>a.path.localeCompare(b.path));
-      return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),quarantined,revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':needle||recursive?'all_directories':'directory'};
+      return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),quarantined,revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':needle||recursive?'all_directories':'directory',scan_limited:scanLimited};
     });
   }
   createDirectory(path){

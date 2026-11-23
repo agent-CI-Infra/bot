@@ -99,6 +99,7 @@ export async function searchProjectNotes(
     total: allFiles.length,
     next_offset: offset + slice.length < allFiles.length ? offset + slice.length : null,
     search_scope: tree?.search_scope ?? 'all_directories',
+    scan_limited: Boolean(tree?.scan_limited),
   };
 }
 

@@ -15,7 +15,7 @@ const legacyItems: PermissionItem[] = [
   access('conversation_history', '当前会话记录', ['search_conversation_history', 'read_conversation_message', 'read_conversation_summary'], [], '只查询当前已授权会话的本地记录和摘要；不会联网回源，不开放其他群或私信。'),
   access('task_management', '任务管理', ['list_managed_tasks', 'read_managed_task'], ['create_task', 'manage_task'], '读取获准任务，或创建、追加、继续、暂停和结束自己拥有或已分派的事项。默认由自己执行；选择其他角色另需委派权限，不增加 GitHub 写权限。'),
   action('scope_differences', '记录范围差异', ['record_scope_difference'], '登记实际修改与原计划的差异及证据，不改变任务目标或授权。'),
-  access('project_memory', '项目知识', ['search_project_memory', 'read_project_memory'], ['remember_project_memory'], '查询项目知识，或提交知识候选；仍受知识本身的可见范围限制。'),
+  access('project_memory', '项目知识', ['search_project_memory', 'read_project_memory'], ['remember_project_memory'], '查询或写入项目共享笔记（../notes/），与同项目角色和控制台共享。'),
   access('role_memory', '角色知识', ['search_role_memory', 'read_role_memory'], ['remember_role_memory'], '查询或记录当前角色的知识。'),
   access('skills', '技能包', ['read_skill'], [], '读取绑定在当前角色上的技能文件。'),
   access('related_artifacts', '关联交付物', ['read_related_artifact'], [], '读取任务提供的关联交付物。'),
@@ -62,7 +62,7 @@ export const retiredPermissionItems = ['playbooks', 'computer', 'browser'] as co
 export const permissionItems: PermissionItem[] = [
   platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task','list_managed_tasks','create_task','manage_task','grant_writes'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
   platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','wait_for_tasks','set_task_priority','relate_task'],'查询同项目其他任务；读写还可修改任务、声明依赖等待（wait_for_tasks）、调整优先级和关联任务。自己的任务与子任务默认可用。')),
-  platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
+  platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'读写项目共享笔记（../notes/），与同项目角色和控制台共享；自己的私有记忆默认可用。')),
   platform(access('project_configuration','项目设置与角色配置',['management_query'],['management_command'],'按操作核对项目配置、角色和共享规则的读取或修改权限；不会增加操作者授权。')),
   platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理仓库的项目级定时任务和事件通知订阅，目标与收件人仍受项目范围限制；不影响飞书群或私聊自己的会话定时任务。')),
   github(access('github_issues','Issue',githubReads,['github_write'],'只读：查看 Issue、评论和标签。读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。')),

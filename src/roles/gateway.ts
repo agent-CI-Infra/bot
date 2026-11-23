@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { TaskError } from '../agent/common.js';
 import { traceEvent, traceSource } from '../tasks/trace.js';
-import { isPhysicalNoteId, memoryTool, type NotesBridge } from '../memory/project.js';
+import { isPhysicalNoteId, memoryTool, readProjectNote, type NotesBridge } from '../memory/project.js';
 import { memoryAuthorize, taskControllerReads, taskTraceAccess } from '../memory/access.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { roleAuthority, type RoleSnapshot } from './definition.js';
@@ -103,9 +103,26 @@ export class TaskToolGateway {
       const prior = s.get("SELECT h.data FROM task_history h JOIN task_runs r ON r.id=h.run_id WHERE h.task_id=? AND h.type='gateway_call' AND r.lease_scope=? AND json_extract(h.data,'$.tool')='propose_experience' AND json_extract(h.data,'$.request_id')=? AND json_extract(h.data,'$.outcome')='served' ORDER BY h.id DESC LIMIT 1", task.id, run.lease_scope, requestId);
       if (prior) return { receipt: JSON.parse(String(prior.data)).receipt, reused: true };
     }
-    if (!Array.isArray(args.evidence) || !args.evidence.length || args.evidence.length > 20 || args.evidence.some((ref: unknown) => typeof ref !== 'string' || !this.visible(task, run, role, ref))) return refusal('experience_evidence_invalid');
+    if (!Array.isArray(args.evidence) || !args.evidence.length || args.evidence.length > 20) return refusal('experience_evidence_invalid');
+    for (const ref of args.evidence) {
+      if (typeof ref !== 'string' || !(await this.evidenceVisible(task, run, role, ref))) return refusal('experience_evidence_invalid');
+    }
     const saved = await memoryTool(s, scoped, 'remember_project_memory', { ...(typeof args.path === 'string' ? { path: args.path } : {}), key: String(args.key ?? '').slice(0, 120), body: String(args.body ?? '').slice(0, 32000) }, this.notes);
     return saved?.error ? saved : { receipt: { id: saved.id, path: saved.path, revision: saved.revision, evidence: args.evidence } };
+  }
+  /** Verifies evidence references for propose_experience, including physical existence and revision of notes:<id>:<rev>. */
+  private async evidenceVisible(task: Row, run: Row, role: string, ref: string): Promise<boolean> {
+    if (!this.visible(task, run, role, ref)) return false;
+    const noteRef = /^notes:(.+):(\d+)$/.exec(ref);
+    if (!noteRef) return true;
+    const rev = Number(noteRef[2]);
+    if (!Number.isSafeInteger(rev) || rev < 1 || !this.notes?.manager) return false;
+    try {
+      const file = await readProjectNote(this.notes.manager, String(task.repository_id), noteRef[1]!, rev);
+      return Boolean(file && !file.deleted && Number(file.revision) === rev);
+    } catch {
+      return false;
+    }
   }
   /** Whether this run's role may expand a reference of its own task (#1121: roles within the same task share observations transparently). */
   private visible(task: Row, run: Row, role: string, ref: string): boolean {

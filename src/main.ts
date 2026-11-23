@@ -156,9 +156,10 @@ server.listen(8791, '0.0.0.0', () => {
   // payloads written before #436 out of their rows, slice by slice.
   const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
   void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
+  let migrationAttempts = 0;
   const runLegacyMemoryMigration = () => migrateLegacyProjectMemories(store, manager).then(res => {
     if (res.migrated || res.failed) console.log(`[memory] legacy migration: migrated=${res.migrated} skipped=${res.skipped} failed=${res.failed}`);
-    if (res.failed && !stopping) setTimeout(() => { if (!stopping) void runLegacyMemoryMigration(); }, 30_000).unref();
+    if (res.failed && !stopping && ++migrationAttempts < 10) setTimeout(() => { if (!stopping) void runLegacyMemoryMigration(); }, 30_000).unref();
   }).catch(error => console.error('[memory] legacy migration failed:', error));
   void runLegacyMemoryMigration();
   storage.start();modelCatalog(store).start();vacuum.start();retention.start();agentToolsAuto.start();

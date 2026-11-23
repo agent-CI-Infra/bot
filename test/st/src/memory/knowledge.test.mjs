@@ -125,6 +125,46 @@ test('legacy SQLite project_memories migrate safely and idempotently into physic
   ]);
 });
 
+test('legacy migration byte-bounds long multibyte titles and records permanent 4xx errors without retrying forever', async t => {
+  const { s, manager } = fixture(t);
+  createLegacyTables(s);
+  const cjkTitle = '中文知识标题'.repeat(20); // 120 UTF-16 chars, 360 UTF-8 bytes (> 255 byte path component limit)
+  const emojiTitle = '🚀笔记'.repeat(60); // 4-byte UTF-8 surrogate pairs
+  s.run("INSERT INTO project_memories VALUES('mb000001','101','cjk.long',1,?,'2026-01-01T00:00:00Z')",
+    JSON.stringify({ kind: 'experience', status: 'active', body: 'CJK body preserved', catalog: { title: cjkTitle } }));
+  s.run("INSERT INTO project_memories VALUES('mb000002','101','emoji.long',1,?,'2026-01-02T00:00:00Z')",
+    JSON.stringify({ kind: 'experience', status: 'active', body: 'Emoji body preserved', catalog: { title: emojiTitle } }));
+
+  const migrated = await migrateLegacyProjectMemories(s, manager, '101');
+  assert.deepEqual([migrated.migrated, migrated.skipped, migrated.failed], [2, 0, 0]);
+  for (const item of migrated.items) {
+    assert.equal(item.status, 'migrated');
+    const basename = item.note_path.split('/').at(-1);
+    assert.ok(Buffer.byteLength(basename, 'utf8') <= 255, `component too long: ${Buffer.byteLength(basename, 'utf8')} bytes`);
+    assert.equal(basename.isWellFormed(), true, 'must not split UTF-16 surrogate pairs');
+  }
+  const cjkNote = await readProjectNote(manager, '101', migrated.items.find(i => i.memory_id === 'mb000001').note_path);
+  assert.ok(cjkNote.content.includes(`# ${cjkTitle}`));
+  assert.ok(cjkNote.content.includes('CJK body preserved'));
+
+  // Permanent 4xx error from manager records skipped_invalid in the ledger so retries stop immediately.
+  s.run("INSERT INTO project_memories VALUES('bad40001','101','perm.bad',1,?,'2026-01-03T00:00:00Z')",
+    JSON.stringify({ kind: 'experience', status: 'active', body: 'Will hit permanent 400' }));
+  const badManager = {
+    call: async (method, path) => {
+      if (method === 'POST' && path.endsWith('/file-tree')) {
+        throw Object.assign(new Error('invalid_note_path'), { status: 400, code: 'invalid_note_path' });
+      }
+      return {};
+    },
+  };
+  const permanent = await migrateLegacyProjectMemories(s, badManager, '101');
+  assert.deepEqual([permanent.migrated, permanent.skipped, permanent.failed], [0, 1, 0]);
+  assert.equal(s.get("SELECT status FROM project_memory_migrations WHERE memory_id='bad40001'").status, 'skipped_invalid');
+  const next = await migrateLegacyProjectMemories(s, badManager, '101');
+  assert.deepEqual([next.migrated, next.skipped, next.failed], [0, 0, 0]);
+});
+
 test('fresh databases do not create legacy project_memories tables and historical traceSource replay enforces project authorization', async t => {
   const { s, actor, task } = fixture(t);
   assert.equal(s.hasTable('project_memories'), false);
