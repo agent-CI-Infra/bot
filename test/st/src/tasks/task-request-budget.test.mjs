@@ -1,8 +1,8 @@
 // #532 (maintainer, 2026-11-15): ordinary tasks created from chats (task.request / task.development) must take their turn
 // limit and command timeout from the same budget configuration as every other entry. This test drives an ordinary request
-// task in process (legacy roles, no role controller), configures the project's dev role with `bounded` budget
-// `max_turns: 8` and `command_timeout_seconds: 30`, and asserts the agent loop follows the configuration instead of the
-// entry literals (64 turns / 180 seconds).
+// task in process (a task frozen with the Manager switch off, which the Manager team runs since #1256), configures the
+// project's dev role with `bounded` budget `max_turns: 8` and `command_timeout_seconds: 30`, and asserts the delegated dev
+// run follows the configuration instead of the entry literals (64 turns / 180 seconds).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -32,13 +32,20 @@ test('an ordinary task created from a chat takes its turn limit and command time
   const commands = [];
   const localCall = manager.call.bind(manager);
   manager.call = async (method, path, input, timeout) => { if (input?.request?.type === 'workspace_command') commands.push(input.request); return localCall(method, path, input, timeout); };
-  const calls = [];
+  const calls = [], managerCalls = [];
   const model = createServer(async (req, res) => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw);
-    calls.push(body);
     res.setHeader('Content-Type', 'application/json');
+    // The Manager hands the task to dev (#1256); only dev's requests count against dev's budget.
+    if ((body.tools ?? []).some(tool => tool.function.name === 'delegate_role')) {
+      managerCalls.push(body);
+      const message = { role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name: 'delegate_role', arguments: JSON.stringify({ role: 'dev', purpose: 'Report the current branch', refs: [] }) } }] };
+      res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      return;
+    }
+    calls.push(body);
     // First turn runs one command without an explicit timeout, so the executed default is the configured budget. Every later
     // turn only asks for one more harmless observation: never submits, so only the turn limit can end the loop.
     const ran = body.messages.some(m => m.role === 'assistant' && m.tool_calls?.some(c => c.function.name === 'run_command'));
@@ -98,6 +105,7 @@ test('an ordinary task created from a chat takes its turn limit and command time
   assert.ok(error, 'the run stops at the configured turn limit');
   assert.equal(error.code, 'agent_turn_limit');
   assert.match(error.detail, /8 轮/);
+  assert.equal(managerCalls.length, 1, 'the Manager delegated the task to dev once');
   // The command tool's default is the configured 30 seconds, not the entry literal 180.
   const command = calls[0].tools.find(tool => tool.function.name === 'run_command');
   assert.ok(command, 'the running agent offers run_command');
