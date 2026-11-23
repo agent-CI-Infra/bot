@@ -1,8 +1,8 @@
 // A computer's resources, chosen from common sizes inside the manager's bounds; CPU and memory sizes larger than the host
 // are not offered and the current value is always an option. Work computers and assistant computers use the same fields;
-// only an assistant computer has a working directory of its own size (a tmpfs, where a work computer has a volume).
+// only an assistant computer has a working directory size limit of its own (ephemeral disk-backed volume).
 const commonSizes = { cpus: [0.5, 1, 2, 4, 6, 8, 12, 16], memory_mb: [512, 1024, 2048, 4096, 8192, 12288, 16384, 32768, 65536],
-  pids: [256, 512, 1024, 2048, 4096, 8192, 16384], tmp_mb: [256, 512, 1024, 2048, 4096, 8192, 16384] };
+  pids: [256, 512, 1024, 2048, 4096, 8192, 16384], tmp_mb: [256, 512, 1024, 2048, 4096, 8192, 16384, 20480, 32768, 65536] };
 commonSizes.workspace_mb = commonSizes.tmp_mb;
 const megabytes = value => value >= 1024 ? `${Number((value / 1024).toFixed(1))} GB` : `${value} MB`;
 const resourceFields = [['cpus', 'CPU', value => `${value} 核`], ['memory_mb', '内存', megabytes], ['pids', '进程数上限', value => `${value} 个`], ['tmp_mb', '/tmp 大小', megabytes]];

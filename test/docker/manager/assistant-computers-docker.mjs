@@ -115,12 +115,12 @@ try {
   assert.equal(desktopVerify.exit_code, 0, desktopVerify.output);
   assert.match(desktopVerify.output, /1280x720/);
   passed('preinstalled Chromium CDP and X11 virtual desktop persist across commands with keep_background: true', desktopVerify.output.trim());
-  const limits = await run(A, 'ta', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; df -k /tmp /workspace | tail -2 | awk \'{print $2}\'; touch /x 2>&1; cat /proc/self/status | grep -E "^(CapEff|NoNewPrivs)"');
-  assert.match(limits.output, /^2147483648\n0\n512\n100000 100000\n524288\n524288\n.*Read-only file system\nCapEff:\t0000000000000000\nNoNewPrivs:\t1/s);
-  passed('limits are in force: 2 GiB memory without swap, 512 pids, 1 CPU, 512 MiB tmpfs, read-only root, no capabilities', limits.output.trim().split('\n'));
+  const limits = await run(A, 'ta', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; echo "$BOT_TMP_LIMIT_MB"; echo "$BOT_WORKSPACE_LIMIT_MB"; touch /x 2>&1; cat /proc/self/status | grep -E "^(CapEff|NoNewPrivs)"');
+  assert.match(limits.output, /^17179869184\n0\n512\n100000 100000\n20480\n20480\n.*Read-only file system\nCapEff:\t0000000000000000\nNoNewPrivs:\t1/s);
+  passed('limits are in force: 16 GiB memory without swap, 512 pids, 1 CPU, 20 GiB ephemeral disk volumes, read-only root, no capabilities', limits.output.trim().split('\n'));
   const programs = await run(A, 'ta', `for d in /tmp /workspace; do printf '#!/bin/sh\\necho ran from %s\\n' $d > $d/probe.sh && chmod +x $d/probe.sh && $d/probe.sh; done`);
   assert.equal(programs.output, 'ran from /tmp\nran from /workspace\n', programs.output);
-  passed('programs written to /tmp and /workspace run (both tmpfs are mounted exec)', programs.output.trim().split('\n'));
+  passed('programs written to /tmp and /workspace run (both ephemeral volumes allow exec)', programs.output.trim().split('\n'));
   const imageTools = await run(A, 'ta', `python3 -c "from PIL import Image; im=Image.new('RGB',(320,240),(12,34,56)); im.save('/tmp/im.png'); im.resize((80,60)).save('/tmp/im.jpg',quality=80)" && identify /tmp/im.png /tmp/im.jpg && convert /tmp/im.png -resize 40x30 /workspace/im-small.png && identify /workspace/im-small.png && rm -f /tmp/im.png /tmp/im.jpg /workspace/im-small.png`);
   assert.equal(imageTools.exit_code, 0, imageTools.output);
   assert.match(imageTools.output, /320x240[\s\S]*80x60[\s\S]*40x30/);
@@ -170,9 +170,9 @@ try {
   // 6. New resources apply from the owner's next turn: the idle computer is replaced with the new limits, HOME kept.
   await computers.setSettings({ cpus: 0.5, memory_mb: 1024, pids: 256, tmp_mb: 128, workspace_mb: 256 });
   assert.equal((await acquire(A, 'ta5', { fence: other, home_generation: 2 })).reused, false);
-  const resized = await run(A, 'ta5', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; df -k /tmp /workspace | tail -2 | awk \'{print $2}\'; cat ~/kept.txt');
-  assert.equal(resized.output, '1073741824\n0\n256\n50000 100000\n131072\n262144\nkept\n');
-  passed('new resources replace the idle computer at the next turn: 1 GiB without swap, 256 pids, 0.5 CPU, 128/256 MiB tmpfs, HOME kept', resized.output.trim().split('\n'));
+  const resized = await run(A, 'ta5', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; echo "$BOT_TMP_LIMIT_MB"; echo "$BOT_WORKSPACE_LIMIT_MB"; cat ~/kept.txt');
+  assert.equal(resized.output, '1073741824\n0\n256\n50000 100000\n128\n256\nkept\n');
+  passed('new resources replace the idle computer at the next turn: 1 GiB without swap, 256 pids, 0.5 CPU, 128/256 MiB ephemeral volume limits, HOME kept', resized.output.trim().split('\n'));
   await computers.release(A, { turn: 'ta5' });
   // 6b. Turning egress off replaces the idle container with NetworkMode: none.
   await computers.setSettings({ cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: false });

@@ -30,9 +30,10 @@ export function logFailure(what, error) {
 // Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
 // The resource values are the built-in defaults: a super administrator replaces them in the global settings, and every
 // resource a project does not set itself follows the current default.
-const builtin = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
+const builtin = { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 20480 };
+const legacyBuiltin = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
 const defaults = { ...builtin, packages: [], env: {}, setup_script: '' };
-export const resourceBounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384] };
+export const resourceBounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 65536] };
 const bounds = resourceBounds;
 const resourceKeys = Object.keys(bounds), resources = spec => Object.fromEntries(resourceKeys.map(key => [key, spec[key]]));
 const mib = 1024 * 1024;
@@ -157,7 +158,7 @@ export class Projects {
     if (!this.db.prepare("SELECT 1 FROM settings WHERE key='own_resources'").get()) {
       this.db.exec('BEGIN IMMEDIATE');
       for (const row of this.db.prepare('SELECT repository_id,spec FROM projects WHERE spec IS NOT NULL').all()) {
-        const spec = JSON.parse(row.spec); for (const key of resourceKeys) if (spec[key] === builtin[key]) delete spec[key];
+        const spec = JSON.parse(row.spec); for (const key of resourceKeys) if (spec[key] === builtin[key] || spec[key] === legacyBuiltin[key]) delete spec[key];
         this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(spec), row.repository_id);
       }
       this.db.prepare("INSERT INTO settings VALUES('own_resources','1')").run(); this.db.exec('COMMIT');

@@ -16,6 +16,7 @@ import { managementAssistant, serviceRole, serviceRoleModel } from '../service-r
 import { managementFailure, noProjectsReply } from './presentation.js';
 import { ServiceRepositories, serviceRepositoryTools, serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions, ownerId } from '../service-roles/assistant-computers.js';
+import { checkoutRepositoryName, checkoutRepositoryTool, executeCheckoutRepository } from '../service-roles/checkout.js';
 import { revision } from '../identity/authorization.js';
 import { permitsManagement, githubReadScopes, githubWriteAllowed, permitsTool, type RolePermissions } from '../roles/permissions.js';
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
@@ -243,13 +244,14 @@ export class ManagementAgent {
       fence:()=>personFence(this.store,actor.principal_id,tenant),facts:()=>({repositories:accessibleRepositories()}),commands:()=>true,
       eligible:()=>{if(!canUseComputer())fail(403,'capability_forbidden');},
       notify:text=>progress({text})});
-    const repositories=new ServiceRepositories(this.store,new Redactor(),guard,selected=>{
+    const resolveAuthorizedRepository=(selected:unknown):Row=>{
       const project=this.store.all('SELECT * FROM repositories').find(r=>r.id===selected||sameRepositoryName(r.full_name,selected));
       if(project){this.service.scope(actor,project.id);return project;}
       const pendingRepo=this.service.pendingRepository(actor,selected);
       if(pendingRepo)return pendingRepo;
       return fail(404,'repository_not_found');
-    },()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
+    };
+    const repositories=new ServiceRepositories(this.store,new Redactor(),guard,resolveAuthorizedRepository,()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
     let modelImageInput=true;
     const media=this.mediaTurn?.(actor,conversation,input,computer,()=>{assertCurrent(actor);this.conversation(base,conversation);},()=>modelImageInput);
     const schedules=this.conversationSchedules?.(actor,conversation);
@@ -271,7 +273,8 @@ export class ManagementAgent {
     const cardTurn=this.feishuCard?.(actor,conversation,input,value=>publicText(redactor.text(value),configuredRedactor(this.store)));
     const activeSkills=cardTurn?feishuAssistantSkills:undefined;
     const activeReadSkillTool=cardTurn?makeReadSkillTool(feishuAssistantSkills):readSkillTool;
-    const tools=[readToolResult,...managementTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
+    const canCheckout=()=>!!this.service.assistants?.available()&&githubReadScopes(permissions()).includes('contents');
+    const tools=[readToolResult,...managementTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
@@ -303,6 +306,7 @@ export class ManagementAgent {
         if(name==='read_tool_result')result=await resultFiles.read(args);
         else if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
+        else if(name===checkoutRepositoryName){if(!canCheckout())fail(403,'tool_not_allowed');result=await executeCheckoutRepository({store:this.store,redactor,guard,resolveRepository:resolveAuthorizedRepository,scopes:()=>githubReadScopes(permissions()),computer,gitCache:this.service.gitCache,apiUrl:this.service.githubUrl},args);}
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
         else if(name===readSkillName)result=readSkill(args,activeSkills);
         else if(name===feishuCardToolName){if(!cardTurn)return fail(403,'tool_not_allowed');result=cardTurn.execute(args);}
@@ -375,6 +379,11 @@ export class ManagementAgent {
         const context={...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()};
         const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={resultSession:resultFiles,store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
           model,executionSignal:signal,
+          containerOptions:{
+            githubApiUrl:this.service.githubUrl,
+            resolveGithubRepository:selected=>{try{return resolveAuthorizedRepository(selected);}catch(error){if(error instanceof HttpError&&[403,404].includes(error.status))return null;throw error;}},
+            githubReadScopes:()=>githubReadScopes(permissions()),
+          },
           // A stalled or failed model request is retried instead of failing the message; the console drops any text it had streamed.
           onModelRetry:retry=>{this.event(id,'model_retry',{retry:retry.retry,retries:retry.retries,error:retry.code,delay_ms:retry.delay_ms});},
           system,

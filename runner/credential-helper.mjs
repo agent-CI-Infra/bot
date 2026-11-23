@@ -7,29 +7,35 @@ export async function startCredentialHelperServer({ agentDir, runToken, addSecre
   const helperSecret = randomBytes(32).toString('base64url');
   const secretBytes = Buffer.from(helperSecret, 'utf8');
   const exchange = createTokenExchange(agentDir, { token: runToken });
-  const cacheByPurpose = new Map();
-  const inflightByPurpose = new Map();
+  const cacheByKey = new Map();
+  const inflightByKey = new Map();
 
-  const obtainGrant = async purpose => {
-    const cached = cacheByPurpose.get(purpose);
+  const obtainGrant = async (purpose, repository = '') => {
+    const repoNormalized = typeof repository === 'string' ? repository.trim() : '';
+    const cacheKey = `${purpose}:${repoNormalized ? repoNormalized.toLowerCase() : '__default__'}`;
+    const cached = cacheByKey.get(cacheKey);
     if (cached && cached.token && Date.parse(cached.expires_at) - Date.now() >= 10 * 60_000) {
       return cached;
     }
-    let pending = inflightByPurpose.get(purpose);
+    let pending = inflightByKey.get(cacheKey);
     if (!pending) {
       pending = (async () => {
-        const reply = await exchange(signal, { token: runToken, purpose });
+        const reply = await exchange(signal, {
+          token: runToken,
+          purpose,
+          ...(repoNormalized ? { repository: repoNormalized } : {}),
+        });
         if (reply && !reply.error && !reply.structured_only && typeof reply.token === 'string' && reply.token) {
           addSecret(reply.token);
-          cacheByPurpose.set(purpose, reply);
+          cacheByKey.set(cacheKey, reply);
         } else if (cached && Date.parse(cached.expires_at) <= Date.now()) {
-          cacheByPurpose.delete(purpose);
+          cacheByKey.delete(cacheKey);
         }
         return reply;
       })().finally(() => {
-        inflightByPurpose.delete(purpose);
+        inflightByKey.delete(cacheKey);
       });
-      inflightByPurpose.set(purpose, pending);
+      inflightByKey.set(cacheKey, pending);
     }
     return pending;
   };
@@ -50,8 +56,9 @@ export async function startCredentialHelperServer({ agentDir, runToken, addSecre
       return;
     }
     const purpose = url.searchParams.get('purpose') === 'gh' ? 'gh' : 'git';
+    const repository = url.searchParams.get('repository') || '';
     try {
-      const reply = await obtainGrant(purpose);
+      const reply = await obtainGrant(purpose, repository);
       if (!reply || reply.error || reply.structured_only || !reply.token) {
         res.writeHead(403);
         res.end(JSON.stringify({

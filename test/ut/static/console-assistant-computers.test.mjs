@@ -6,9 +6,9 @@ import { loadConsole } from '../../fixtures/console-page.mjs';
 const scripts = ['static/app.js', 'static/views.js', 'static/project.js', 'static/settings.js', 'static/onboarding.js'];
 const settle = () => new Promise(resolve => setTimeout(resolve, 30));
 const gib = 1024 ** 3;
-const defaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true };
+const defaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 16384, pids: 512, tmp_mb: 20480, workspace_mb: 20480, egress: true };
 const computers = { settings: { ...defaults }, defaults,
-  bounds: { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 10080], cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384], workspace_mb: [16, 16384] },
+  bounds: { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 10080], cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 65536], workspace_mb: [16, 65536] },
   host: { cpus: 4, memory_mb: 16384 }, usage: { computers: 2, busy: 1, waiting: 0 } };
 const homes = { settings: { home_limit_gb: 5, retention_days: 30, total_alert_gb: 50 }, defaults: { home_limit_gb: 5, retention_days: 30, total_alert_gb: 50 },
   bounds: { home_limit_gb: [1, 1024], retention_days: [1, 3650], total_alert_gb: [1, 1000000] } };
@@ -49,6 +49,11 @@ test('the assistant computer category saves timers and HOME limits together, eac
   assert.doesNotMatch(text(panel), /运行时/);
   const egressBox = resources.querySelectorAll('input').find(node => node.name === 'egress');
   assert.equal(egressBox.checked, true);
+  assert.equal(select('memory_mb').value, '16384');
+  assert.equal(select('workspace_mb').value, '20480');
+  assert.equal(select('tmp_mb').value, '20480');
+  assert.ok(select('workspace_mb').querySelectorAll('option').some(node => node.value === '20480' && /20 GB（默认）/.test(node.textContent)));
+  assert.ok(select('workspace_mb').querySelectorAll('option').some(node => node.value === '65536'));
   select('memory_mb').value = '4096'; select('workspace_mb').value = '1024'; egressBox.checked = false;
   await resources.querySelector('form').listeners.submit[0]({ preventDefault() {} }); await settle();
   assert.deepEqual(saved, { assistant_computers: { memory_mb: 4096, workspace_mb: 1024, egress: false } });

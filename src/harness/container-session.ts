@@ -4,10 +4,13 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomId } from '../core/security.js';
+import { HttpError } from '../core/security.js';
 import { stop, TaskError } from '../agent/common.js';
 import type { AgentSpec } from '../agent/runtime.js';
 import type { RuntimeModel } from '../agent/model.js';
 import { ReadTokens } from '../agent/read-token.js';
+import type { Row } from '../storage/database.js';
+import { sameRepositoryName } from '../management/repository-name.js';
 import type { Workspace } from '../agent/workspace.js';
 import { useWorkspace } from '../projects/workspace-cleanup.js';
 import { createTaskToolDispatcher, handleMailboxToolRequest, type TaskToolDispatcher } from '../roles/task-tools.js';
@@ -238,12 +241,13 @@ export function computeAllowedGithubScopes<T>(spec: AgentSpec<T>): { initial: st
       scopes = scopes.filter(s => trs.includes(s));
     }
     if(spec.harnessAccess)scopes=scopes.filter(scope=>spec.harnessAccess!.github.scopes.includes(scope));
+    if(spec.containerOptions?.githubReadScopes){const live=spec.containerOptions.githubReadScopes();scopes=scopes.filter(scope=>live.includes(scope));}
     return scopes;
   };
   return { initial: computeLive(), live: computeLive };
 }
 
-function githubHostFromApiUrl(apiUrl?: string): string {
+export function githubHostFromApiUrl(apiUrl?: string): string {
   if (!apiUrl) return 'github.com';
   try {
     const parsed = new URL(apiUrl);
@@ -251,6 +255,118 @@ function githubHostFromApiUrl(apiUrl?: string): string {
     return parsed.host;
   } catch {
     return 'github.com';
+  }
+}
+
+/**
+ * Issues short-lived read-only GitHub installation tokens for container harnesses (`pi`, `claude_code`, `codex`).
+ * Supports both fixed single-repository task sessions and dynamic multi-repository service assistant sessions (#1279):
+ * every request re-checks live session repository scope and GitHub read scopes, redacts every minted token, and revokes
+ * all tokens across all accessed repositories when the session finishes.
+ */
+export class ScopedReadTokens<T> {
+  private readonly byRepository = new Map<string, ReadTokens>();
+  private totalIssued = 0;
+  private readonly defaultRepository?: Row;
+  private readonly scopeInfo: { initial: string[]; live: () => string[] };
+  constructor(
+    private readonly spec: AgentSpec<T>,
+    private readonly maxIssued = 64,
+  ) {
+    this.defaultRepository = spec.task?.repository_id
+      ? spec.store.get('SELECT * FROM repositories WHERE id=?', spec.task.repository_id)
+      : undefined;
+    this.scopeInfo = computeAllowedGithubScopes(spec);
+  }
+  get available(): boolean {
+    return Boolean((this.defaultRepository || this.spec.containerOptions?.resolveGithubRepository) && this.scopeInfo.initial.length);
+  }
+  async issue(purpose: 'git' | 'gh', requestedRepository?: string): Promise<Record<string, unknown>> {
+    const liveScopes = this.scopeInfo.live();
+    if (!liveScopes.length) {
+      this.spec.onDenied?.('github_read_token', 'github_read_token_not_allowed');
+      return { error: 'github_read_token_not_allowed' };
+    }
+    if (purpose === 'git' && !liveScopes.includes('contents')) {
+      this.spec.onDenied?.('github_read_token', 'github_read_token_not_allowed');
+      return { error: 'github_read_token_not_allowed' };
+    }
+
+    const requested = typeof requestedRepository === 'string' && requestedRepository.trim() ? requestedRepository.trim() : undefined;
+    const resolver = this.spec.containerOptions?.resolveGithubRepository;
+    let targetRow: Row | null = null;
+    if (requested) {
+      if (resolver) {
+        try { targetRow = resolver(requested); }
+        catch (error) {
+          if (error instanceof HttpError && [403, 404].includes(error.status)) targetRow = null;
+          else throw error;
+        }
+      } else if (this.defaultRepository && sameRepositoryName(this.defaultRepository.full_name, requested)) {
+        targetRow = this.defaultRepository;
+      }
+      if (!targetRow) {
+        this.spec.onDenied?.('github_read_token', 'repository_out_of_scope');
+        return { error: 'repository_out_of_scope' };
+      }
+    } else if (this.defaultRepository) {
+      if (resolver) {
+        try { targetRow = resolver(String(this.defaultRepository.full_name)); }
+        catch (error) {
+          if (error instanceof HttpError && [403, 404].includes(error.status)) targetRow = null;
+          else throw error;
+        }
+        if (!targetRow) {
+          this.spec.onDenied?.('github_read_token', 'repository_out_of_scope');
+          return { error: 'repository_out_of_scope' };
+        }
+      } else {
+        targetRow = this.defaultRepository;
+      }
+    } else {
+      return {
+        error: 'repository_required',
+        instruction: 'Specify a target repository (for example `git clone https://<host>/<owner>/<repo>.git` or `gh -R <owner>/<repo> ...`).',
+      };
+    }
+
+    if (this.totalIssued >= this.maxIssued) {
+      return { error: 'github_read_token_limit' };
+    }
+
+    const repoId = String(targetRow.id);
+    let tokens = this.byRepository.get(repoId);
+    if (!tokens) {
+      tokens = new ReadTokens(
+        this.spec.store,
+        targetRow,
+        this.spec.redactor,
+        this.spec.guard,
+        this.spec.containerOptions?.githubApiUrl,
+        this.scopeInfo.initial,
+        this.scopeInfo.live,
+        this.maxIssued,
+      );
+      this.byRepository.set(repoId, tokens);
+    }
+
+    try {
+      const reply = purpose === 'git' ? await tokens.issueContents() : await tokens.issue();
+      this.totalIssued++;
+      return reply;
+    } catch (error) {
+      if (error instanceof TaskError && error.code === 'github_app_required') {
+        return {
+          error: 'github_app_required',
+          instruction: 'This repository uses a bot PAT account; use the checkout_repository tool to check out its source code instead of git clone or gh.',
+        };
+      }
+      throw error;
+    }
+  }
+  async revoke(): Promise<void> {
+    await Promise.allSettled([...this.byRepository.values()].map(tokens => tokens.revoke()));
+    this.byRepository.clear();
   }
 }
 
@@ -336,14 +452,9 @@ export async function withContainerHarnessSession<T, R>(
     ...(launch.gatewayTiming ? { timing: launch.gatewayTiming } : {}),
   }) : undefined;
 
-  const repoRow = spec.task?.repository_id
-    ? spec.store.get('SELECT * FROM repositories WHERE id=?', spec.task.repository_id)
-    : undefined;
-  const scopeInfo = computeAllowedGithubScopes(spec);
   const githubApiUrl = spec.containerOptions?.githubApiUrl;
-  const readTokens = repoRow && scopeInfo.initial.length
-    ? new ReadTokens(spec.store, repoRow, spec.redactor, spec.guard, githubApiUrl, scopeInfo.initial, scopeInfo.live, 64)
-    : null;
+  const scopedReadTokens = new ScopedReadTokens(spec, 64);
+  const readTokens = scopedReadTokens.available ? scopedReadTokens : null;
 
   const mcpTools = platformTools.map(t => ({
     name: t.function.name,
@@ -512,23 +623,18 @@ export async function withContainerHarnessSession<T, R>(
     const id = String(tokenRequest?.id ?? '');
     if (!/^[a-f0-9]{48}$/.test(id)) stop('model_request_invalid');
     const purpose = tokenRequest?.purpose === 'gh' ? 'gh' : 'git';
+    const requestedRepo = typeof tokenRequest?.repository === 'string' && tokenRequest.repository.trim()
+      ? tokenRequest.repository.trim()
+      : undefined;
     let reply: Record<string, unknown>;
     try {
       spec.runAccess!.check(tokenRequest?.token, 'github:read_token');
       await spec.guard();
-      const liveScopes = scopeInfo.live();
-      if (!readTokens || !liveScopes.length) {
+      if (!readTokens) {
         spec.onDenied?.('github_read_token', 'github_read_token_not_allowed');
         reply = { error: 'github_read_token_not_allowed' };
-      } else if (purpose === 'git') {
-        if (!liveScopes.includes('contents')) {
-          spec.onDenied?.('github_read_token', 'github_read_token_not_allowed');
-          reply = { error: 'github_read_token_not_allowed' };
-        } else {
-          reply = await readTokens.issueContents();
-        }
       } else {
-        reply = await readTokens.issue();
+        reply = await readTokens.issue(purpose, requestedRepo);
       }
     } catch (error) {
       const code = String((error as any)?.code ?? 'github_read_token_unavailable');

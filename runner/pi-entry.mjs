@@ -2,6 +2,7 @@ import {stageSessionSkills} from './session-resources.mjs';
 import {dirname,join,resolve} from 'node:path';
 import {existsSync} from 'node:fs';
 import {startCredentialHelperServer} from './credential-helper.mjs';
+import {buildGitConfigEnv} from './git-credential-bot.mjs';
 import { localCommandResult, prepareLocalResults } from './tool-results.mjs';
 import {readFile,writeFile,rename,unlink,appendFile,mkdir} from 'node:fs/promises';
 import {createServer} from 'node:http';
@@ -23,6 +24,7 @@ import {Redactor} from './credential-redaction.mjs';
 import {TEXT_REQUEST_LIMIT,IMAGE_REQUEST_LIMIT,MAX_IMAGES_IN_CONTEXT,IMAGE_TOKEN_ESTIMATE,sanitizeImageEvents,analyzeModelPayload,enforceSessionImageBudget,isImageOrPayloadRejection,extractToolContentBlocks} from './image-budget.mjs';
 
 const root=process.argv[2],dir=root+'/agent',legacyCwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
+if(config.run_token){const scrubbed={...config};delete scrubbed.run_token;await writeFile(dir+'/input.json.tmp',JSON.stringify(scrubbed),{mode:0o600});await rename(dir+'/input.json.tmp',dir+'/input.json');}
 const direct=config.model_transport!=='gateway';
 const native=config.native_access;
 const cwd=native&&/^[a-f0-9]{48}$/.test(config.native_workspace_id??'')?join(dirname(root),config.native_workspace_id,'repo'):legacyCwd;
@@ -65,7 +67,7 @@ const modelFacing = result => Array.isArray(result?.content) ? { ...result, cont
   item?.type === 'text' ? { ...item, text: clean(item.text) } : item) } : result;
 const writeEvent=value=>{const line=JSON.stringify(sanitizeImageEvents(clean(value)))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
-const exchange=createTokenExchange(dir),grant=createReadGrant(exchange,token=>secrets.add(token));
+const exchange=createTokenExchange(dir,{token:config.run_token??null}),grant=createReadGrant(exchange,token=>secrets.add(token));
 // Repository exploration, publication and control-plane tools share the per-request tool mailbox with mcp-bridge.mjs.
 const repositoryTool=createRepositoryTool(dir);
 const dispatchTool=createToolDispatch(dir);
@@ -248,7 +250,10 @@ try{
       credentialHelper??=await startCredentialHelperServer({agentDir:dir,runToken:config.run_token,addSecret:token=>secrets.add(token)});
       const bin=nativeDir+'/bin';await mkdir(bin,{recursive:true,mode:0o700});
       await writeFile(bin+'/gh',`#!/bin/sh\nexec "${process.execPath}" "${new URL('./gh-wrapper.mjs',import.meta.url).pathname}" "$@"\n`,{mode:0o700});
-      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:{...ctx.env,HOME:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret}})});
+      const githubHost=typeof config.github_host==='string'&&config.github_host?config.github_host:'github.com';
+      const allowHttpGit=Boolean(local&&config.allow_http_git===true);
+      const gitCredPath=new URL('./git-credential-bot.mjs',import.meta.url).pathname;
+      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:buildGitConfigEnv({...ctx.env,HOME:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret,BOT_GITHUB_HOST:githubHost,...(config.run_token?{BOT_RUN_TOKEN:config.run_token}:{}),...(allowHttpGit?{BOT_ALLOW_HTTP_GIT_CREDENTIAL:'true'}:{}),...(local&&process.env.BOT_REAL_GH_BIN?{BOT_REAL_GH_BIN:process.env.BOT_REAL_GH_BIN}:{})},gitCredPath,allowHttpGit)})});
       tools.push({...bash,label:'bash'});
     }
     const fileAccess=native?.fileTools??native?.workspace;

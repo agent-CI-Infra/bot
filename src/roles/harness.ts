@@ -1,9 +1,8 @@
 import {submissionFeedback} from './submission-feedback.js';
 import {resolveCommandTimeout} from '../agent/command.js';
 import {checkHarnessAccess} from '../harness/access.js';
-import {computeAllowedGithubScopes,persistentCliStateWorkspaceId} from '../harness/container-session.js';
+import {computeAllowedGithubScopes,githubHostFromApiUrl,persistentCliStateWorkspaceId,ScopedReadTokens} from '../harness/container-session.js';
 import {useWorkspace} from '../projects/workspace-cleanup.js';
-import {ReadTokens} from '../agent/read-token.js';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -148,15 +147,22 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  const cmdBudget=resolveCommandTimeout(spec.store,spec.task,spec.roleRun?.role,base?.config?.command_timeout?.default_seconds??null);
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
   command_timeout:{default_seconds:cmdBudget.defaultSeconds,max_seconds:cmdBudget.maxSeconds},
+  ...(spec.runAccess?.token?{run_token:spec.runAccess.token}:{}),
+  github_host:githubHostFromApiUrl(spec.containerOptions?.githubApiUrl),
+  ...(spec.containerOptions?.allowHttpGit?{allow_http_git:true}:{}),
   model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,resources:spec.harnessResources,tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
   ...(bound?{native_session:{id:bound.sessionId,file:bound.transcript}}:{}),...(sessionStore?{session_store:sessionStore}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
  return async(services:AgentServices):Promise<T>=>{
   const nativeUsage=new Map<number,{input:number;output:number;known:boolean}>();
   // Whether this run bound a session (session_bound), which an ending that must not be reopened clears again.
   let binding=false;
-  const repository=spec.task.repository_id?spec.store.get('SELECT * FROM repositories WHERE id=?',spec.task.repository_id):undefined;
-  const scopeInfo=computeAllowedGithubScopes(spec);
-  const reads=repository&&scopeInfo.initial.length?new ReadTokens(spec.store,repository,spec.redactor,spec.guard,spec.containerOptions?.githubApiUrl,scopeInfo.initial,scopeInfo.live,64):undefined;
+  const scopedReads=new ScopedReadTokens(spec,64);
+  const reads=scopedReads.available?scopedReads:undefined;
+  const tokenHandler=base?.token??(reads?async(req?:{purpose?:'git'|'gh';repository?:string;token?:unknown})=>{
+   if(spec.runAccess)spec.runAccess.check(req?.token,'github:read_token');
+   await spec.guard();
+   return reads.issue(req?.purpose==='git'?'git':'gh',req?.repository);
+  }:undefined);
   const dispatcher=createTaskToolDispatcher(spec,{includeSubmissionDetails:true,skipScreen:true});
   const onAbort=()=>dispatcher.halt();
   if(spec.executionSignal){if(spec.executionSignal.aborted)onAbort();else spec.executionSignal.addEventListener('abort',onAbort,{once:true});}
@@ -178,7 +184,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
    }
   }};
   try{
-   return await piAdapter<T>({results:spec.resultSession,store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token??(reads?()=>reads.issue():undefined),createPullRequest:base?.createPullRequest,publication:base?.publication,
+   return await piAdapter<T>({results:spec.resultSession,store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:tokenHandler,createPullRequest:base?.createPullRequest,publication:base?.publication,
     offered:name=>tools.some(t=>t.function.name===name),ensureWorkspace:async()=>(spec.roleWorkspace??env.workspace).ensure?.()??{},resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:spec.harnessAccess?spec.harnessTurnLimit:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,service:env.service,
     // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
     // passes through here, so every forbidden call is recorded whatever the runtime did with it.

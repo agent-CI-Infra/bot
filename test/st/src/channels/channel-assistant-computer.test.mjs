@@ -87,7 +87,7 @@ test('two groups on one role get separate computers and HOMEs; the next turn reu
 test('global settings and the console show and change assistant computers; clearing removes a HOME and its computer', async t => {
   const f = await fixture(t), a = await boundGroup(f, ['101'], 'oc_group'), owner = ownerId({ kind: 'group', subject: a.id, tenant: a.installation_tenant });
   const settings = (await f.admin('/api/settings')).value.settings.assistant_computers;
-  assert.deepEqual(settings.computers.settings, { idle_minutes: 30, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true });
+  assert.deepEqual(settings.computers.settings, { idle_minutes: 30, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 16384, pids: 512, tmp_mb: 20480, workspace_mb: 20480, egress: true });
   assert.deepEqual(settings.homes.settings, { home_limit_gb: 5, retention_days: 30, total_alert_gb: 50 });
   // Whether a harness turn can get a computer, for the console's backend choice (#1254).
   assert.deepEqual([settings.computers.homes, (await f.admin('/api/assistant-computers/status')).value], [true, { available: true }]);

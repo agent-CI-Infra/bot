@@ -43,22 +43,28 @@ test('an assistant computer is a hardened container with isolated egress by defa
   });
   assert.ok(!('Runtime' in host), 'Docker\'s default runtime, never one named by a setting');
   assert.equal(host.Memory, host.MemorySwap, 'no swap beyond the memory limit');
-  // The default resources: 1 CPU, 2048 MiB, 512 processes, 512 MiB each for /tmp and the working directory.
-  assert.deepEqual([host.NanoCpus, host.Memory, host.PidsLimit], [1e9, 2048 * 1024 ** 2, 512]);
-  assert.match(host.Tmpfs['/tmp'], new RegExp(`size=${512 * 1024 ** 2},`));
-  assert.deepEqual(host.Mounts, [{ Type: 'volume', Source: 'fixture-assistant-homes', Target: '/home/assistant', ReadOnly: false, VolumeOptions: { NoCopy: true, Subpath: `${id}/home-1` } }]);
-  assert.deepEqual(Object.keys(host.Tmpfs).sort(), ['/tmp', '/workspace']);
-  assert.match(host.Tmpfs['/workspace'], /size=\d+.*uid=10001/);
-  // Docker mounts a tmpfs noexec unless `exec` is given: programs run from /tmp and /workspace.
-  for (const path of ['/tmp', '/workspace']) assert.match(host.Tmpfs[path], /^rw,exec,/, path);
-  assert.deepEqual(created.Config.Env, ['HOME=/home/assistant', 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant']);
+  // The default resources: 1 CPU, 16384 MiB RAM, 512 processes, 20480 MiB each for /tmp and /workspace ephemeral disk volumes.
+  assert.deepEqual([host.NanoCpus, host.Memory, host.PidsLimit], [1e9, 16384 * 1024 ** 2, 512]);
+  assert.deepEqual(host.Mounts, [
+    { Type: 'volume', Source: 'fixture-assistant-homes', Target: '/home/assistant', ReadOnly: false, VolumeOptions: { NoCopy: true, Subpath: `${id}/home-1` } },
+    { Type: 'volume', Source: f.computers.workspaceVolumeName(id), Target: '/workspace', ReadOnly: false },
+    { Type: 'volume', Source: f.computers.tmpVolumeName(id), Target: '/tmp', ReadOnly: false },
+  ]);
+  assert.equal(host.Tmpfs, undefined, 'assistant /workspace and /tmp use ephemeral disk-backed volumes, not RAM-consuming tmpfs');
+  assert.ok(f.docker.volumes.has(f.computers.workspaceVolumeName(id)));
+  assert.ok(f.docker.volumes.has(f.computers.tmpVolumeName(id)));
+  assert.deepEqual(created.Config.Env, ['HOME=/home/assistant', 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant', 'BOT_WORKSPACE_LIMIT_MB=20480', 'BOT_TMP_LIMIT_MB=20480']);
   assert.equal(created.Image, 'approved');
   assert.deepEqual(created.Config.Labels, { 'department.bot.deployment': 'fixture', 'department.bot.kind': 'assistant', 'department.bot.owner': id });
   assert.ok(!JSON.stringify(created).includes('docker.sock') && !host.Binds);
   assert.equal(f.docker.runs.at(-1).type, 'health');
   // The inspected facts the control plane may check against its own policy.
   const facts = f.computers.facts(await f.computers.inspect(id));
-  assert.deepEqual([facts.network_mode, facts.network_policy, facts.readonly_rootfs, facts.mounts], [networkName, 'internet egress', true, [{ type: 'volume', source: 'fixture-assistant-homes', target: '/home/assistant', read_only: false, subpath: `${id}/home-1` }]]);
+  assert.deepEqual([facts.network_mode, facts.network_policy, facts.readonly_rootfs, facts.mounts], [networkName, 'internet egress', true, [
+    { type: 'volume', source: 'fixture-assistant-homes', target: '/home/assistant', read_only: false, subpath: `${id}/home-1` },
+    { type: 'volume', source: f.computers.workspaceVolumeName(id), target: '/workspace', read_only: false, subpath: null },
+    { type: 'volume', source: f.computers.tmpVolumeName(id), target: '/tmp', read_only: false, subpath: null },
+  ]]);
   // Unexpected network modes never report internet egress.
   assert.equal(f.computers.facts({ HostConfig: { NetworkMode: 'bridge' } }).network_policy, null);
   assert.equal(f.computers.facts({ HostConfig: { NetworkMode: 'none' } }).network_policy, 'none');
@@ -202,6 +208,8 @@ test('reconcile keeps only the computers of turns the control plane still runs; 
   const restarted = new AssistantComputers({ docker: f.docker, db: f.db, deployment: 'fixture', image: 'approved', homes: f.homes });
   assert.equal(await restarted.recover(), 1);
   assert.deepEqual([...f.docker.containers.keys()], ['other-deployment']);
+  assert.equal(f.docker.volumes.has(f.computers.workspaceVolumeName(a)), false, 'recover removes leftover assistant workspace volumes');
+  assert.equal(f.docker.volumes.has(f.computers.tmpVolumeName(a)), false, 'recover removes leftover assistant tmp volumes');
   assert.equal(f.docker.networks.has(f.computers.networkName()), false, 'recover cleans up leftover assistant egress network');
 });
 
@@ -289,7 +297,7 @@ test('settings are bounded and resources apply from the next turn; removal durin
   const view = await f.computers.settingsView();
   assert.deepEqual([view.settings, view.host], [assistantDefaults, { cpus: 8, memory_mb: 32768 }]);
   for (const bad of [{}, { idle_minutes: 0 }, { max_containers: 1.5 }, { max_lifetime_minutes: 5 }, { cpus: 0.1 }, { cpus: 1.234 }, { memory_mb: 100 }, { pids: 10 },
-    { tmp_mb: 1.5 }, { workspace_mb: 20000 }, { egress: 'yes' }, { runtime: 'runc' }, { other: 1 }])
+    { tmp_mb: 1.5 }, { workspace_mb: 70000 }, { egress: 'yes' }, { runtime: 'runc' }, { other: 1 }])
     await assert.rejects(f.computers.setSettings(bad), /invalid_assistant_settings/, JSON.stringify(bad));
   await assert.rejects(f.computers.setSettings({ cpus: 12 }), /cpus_exceed_host/);
   // A runtime saved by an earlier version is dropped: every computer runs on Docker's default runtime.
@@ -301,7 +309,7 @@ test('settings are bounded and resources apply from the next turn; removal durin
   const id = f.owner(), host = () => f.docker.containers.get(f.computers.name(id)).HostConfig;
   await f.acquire(id, 't1');
   await f.computers.setSettings({ cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024, egress: false });
-  assert.deepEqual((await f.acquire(id, 't1')).computer.resources, { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 });
+  assert.deepEqual((await f.acquire(id, 't1')).computer.resources, { cpus: 1, memory_mb: 16384, pids: 512, tmp_mb: 20480, workspace_mb: 20480 });
   assert.equal((await f.acquire(id, 't1')).computer.egress, true);
   await f.computers.release(id, { turn: 't1' });
   const next = await f.acquire(id, 't2');
@@ -309,7 +317,8 @@ test('settings are bounded and resources apply from the next turn; removal durin
   assert.deepEqual([next.reused, next.computer.egress, next.computer.resources], [false, false, { cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 }]);
   assert.deepEqual([host().NanoCpus, host().Memory, host().MemorySwap, host().PidsLimit, host().NetworkMode], [2e9, 1024 * 1024 ** 2, 1024 * 1024 ** 2, 256, 'none']);
   assert.equal(f.docker.networks.has(f.computers.networkName()), false, 'idle egress network is removed once no egress containers remain');
-  assert.match(host().Tmpfs['/tmp'], new RegExp(`size=${256 * 1024 ** 2},`)); assert.match(host().Tmpfs['/workspace'], new RegExp(`size=${1024 * 1024 ** 2},`));
+  const nextEnv = f.docker.containers.get(f.computers.name(id)).Config.Env;
+  assert.ok(nextEnv.includes('BOT_TMP_LIMIT_MB=256') && nextEnv.includes('BOT_WORKSPACE_LIMIT_MB=1024'));
   await f.computers.release(id, { turn: 't2' });
   assert.equal((await f.acquire(id, 't3')).reused, true, 'unchanged resources and egress keep the idle computer');
   await f.computers.release(id, { turn: 't3' });

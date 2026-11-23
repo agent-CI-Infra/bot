@@ -58,10 +58,11 @@ import type { StallMonitor } from './core/stalls.js';
 import { loginBucket } from './core/client-address.js';
 import { invokesHostedMedia, serveHostedMedia } from './github/hosted-pr-media.js';
 import { AssistantComputerService, assistantComputersApi } from './service-roles/assistant-computers.js';
+import type { GitCache } from './agent/git-cache.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
-  publicOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
+  publicOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine; gitCache?: GitCache;
   installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
@@ -147,6 +148,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     } : {}),
   });
   sharedManagement.assistants = assistants;
+  sharedManagement.gitCache = options.gitCache ?? options.engine?.gitCache;
   sharedManagement.reconcileProjects = () => {
     void options.projects?.reconcile().catch(() => {});
     githubLogin.identity?.scheduleMemberSync();
