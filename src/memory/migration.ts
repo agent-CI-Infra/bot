@@ -74,14 +74,26 @@ function formatMigratedMarkdown(row: Row, data: Record<string, any>, redact: (te
   return `<!-- legacy-project-memory: ${String(row.id)} -->\n# ${title}\n\n${meta.join('\n')}\n\n${body}\n`;
 }
 
+const PERMANENT_ROW_ERRORS = new Set([
+  'invalid_note_path',
+  'invalid_note_name',
+  'invalid_note_id',
+  'invalid_note_content',
+  'invalid_note_revision',
+  'invalid_input',
+  'unsupported_note_format',
+  'payload_too_large',
+]);
+
 function isConflictError(error: unknown): boolean {
   const code = String((error as any)?.code ?? (error as any)?.message ?? '');
   return (error as any)?.status === 409 && code === 'note_path_conflict';
 }
 
-function isPermanentClientError(error: unknown): boolean {
+function isPermanentRowError(error: unknown): boolean {
   const status = Number((error as any)?.status);
-  return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 409, 429].includes(status);
+  const code = String((error as any)?.code || (error as any)?.message || '');
+  return (status === 400 || status === 413) && PERMANENT_ROW_ERRORS.has(code);
 }
 
 /**
@@ -210,13 +222,13 @@ export async function migrateLegacyProjectMemories(
       store.audit('system', 'memory.migrated', migratedPath, repoId);
       result.migrated++;
     } catch (error) {
-      if (isPermanentClientError(error)) {
-        // Non-retryable 4xx contract error: record in ledger so one bad entry cannot trigger infinite retries.
+      if (isPermanentRowError(error)) {
+        // Non-retryable per-row path/content validation error: record in ledger so one bad entry cannot trigger infinite retries.
         record(memoryId, repoId, null, 'skipped_invalid');
         result.skipped++;
         continue;
       }
-      // Transient manager error: do not mark migrated so a later run retries cleanly.
+      // Transient or project-wide manager error (e.g. 401/403/404/5xx): keep retryable without writing a terminal ledger row.
       result.failed++;
     }
   }

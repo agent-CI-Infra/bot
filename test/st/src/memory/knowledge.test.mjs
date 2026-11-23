@@ -147,8 +147,21 @@ test('legacy migration byte-bounds long multibyte titles and records permanent 4
   assert.ok(cjkNote.content.includes(`# ${cjkTitle}`));
   assert.ok(cjkNote.content.includes('CJK body preserved'));
 
-  // Permanent 4xx error from manager records skipped_invalid in the ledger so retries stop immediately.
-  s.run("INSERT INTO project_memories VALUES('bad40001','101','perm.bad',1,?,'2026-01-03T00:00:00Z')",
+  // Project-wide 4xx errors (401 unauthorized, 403 resource_ownership_mismatch, 404 not_found) must stay retryable and never write skipped_invalid.
+  s.run("INSERT INTO project_memories VALUES('retry403','101','proj.infra',1,?,'2026-01-03T00:00:00Z')",
+    JSON.stringify({ kind: 'experience', status: 'active', body: 'Should migrate once manager recovers' }));
+  for (const [status, code] of [[401, 'unauthorized'], [403, 'resource_ownership_mismatch'], [404, 'not_found']]) {
+    const infraFail = { call: async () => { throw Object.assign(new Error(code), { status, code }); } };
+    const failedPass = await migrateLegacyProjectMemories(s, infraFail, '101');
+    assert.deepEqual([failedPass.migrated, failedPass.skipped, failedPass.failed], [0, 0, 1], `${status} ${code} must be retryable`);
+    assert.equal(s.get("SELECT status FROM project_memory_migrations WHERE memory_id='retry403'"), undefined);
+  }
+  const recovered = await migrateLegacyProjectMemories(s, manager, '101');
+  assert.deepEqual([recovered.migrated, recovered.skipped, recovered.failed], [1, 0, 0]);
+  assert.equal(s.get("SELECT status FROM project_memory_migrations WHERE memory_id='retry403'").status, 'migrated');
+
+  // Permanent per-row validation error (400 invalid_note_path) records skipped_invalid in the ledger so retries stop immediately.
+  s.run("INSERT INTO project_memories VALUES('bad40001','101','perm.bad',1,?,'2026-01-04T00:00:00Z')",
     JSON.stringify({ kind: 'experience', status: 'active', body: 'Will hit permanent 400' }));
   const badManager = {
     call: async (method, path) => {
