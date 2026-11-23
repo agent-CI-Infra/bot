@@ -143,13 +143,18 @@ export async function privateChat(f, actor = 'ou_alice', principal = f.principal
   f.h.store.run('INSERT OR REPLACE INTO channel_personal_owners VALUES(?,?,?,?)', row.id, principal, actor, 'actor-tenant');
   return row;
 }
-/** A group bound to the repository assistant over the given projects by the platform administrator (who is in the group). */
+/** A group bound over the given projects by the platform administrator (who is in the group). */
 export async function boundGroup(f, projects = ['101'], chat = 'oc_group', client = f.admin) {
   const quiet = inGroup('Group discussion', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.chat_id = chat; await post(f.h, f.id, quiet);
   const row = f.h.store.get('SELECT * FROM channel_chats WHERE chat_id=?', chat);
   const revision = f.h.store.get('SELECT revision FROM channel_service_bindings WHERE chat_id=?', row.id)?.revision ?? 0;
-  const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: projects }, enabled: true, expected_revision: revision,
-    ...(f.groupPermissions ? { permissions: f.groupPermissions } : {}) });
+  const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', {
+    scope: { kind: 'repositories', repositories: projects },
+    ...(f.groupModelId !== undefined ? { model_id: f.groupModelId } : {}),
+    enabled: true,
+    expected_revision: revision,
+    ...(f.groupPermissions ? { permissions: f.groupPermissions } : {}),
+  });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
   return row;
 }
@@ -191,13 +196,10 @@ export async function shareAssistantModel(f) {
   const result = await f.admin('/api/models/' + f.assistantModel.id + '/projects', 'PUT', { repository_ids: f.h.store.all('SELECT id FROM repositories ORDER BY id').map(r => r.id) });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
 }
-/** Give the repository assistant the shared fixture model. What a group may do is its binding's level (#849): items given
- * here are what the next boundGroup grants its group, on top of the read level. */
+/** Authorize the shared fixture model and configure defaults for the next boundGroup (#849, #1249). */
 export async function repositoryAssistant(f, permissions) {
-  const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-  const result = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id });
-  if (result.status !== 200) throw new Error(JSON.stringify(result.value));
   await shareAssistantModel(f);
+  f.groupModelId = f.assistantModel.id;
   f.groupPermissions = permissions;
 }
 /** A channel fixture whose control plane checks GitHub permissions against a local GitHub (#846, #847): `person` signs someone

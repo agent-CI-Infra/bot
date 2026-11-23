@@ -69,7 +69,7 @@ test('a running group answer shows its progress in the console, and its manager 
     const progressMessage = page.getByRole('region', { name: '助手进展消息' });
     await expect(progressMessage).toContainText('正在查阅 admin-fixture-101 的未关闭 PR。');
     await expect(page.getByText('正在回答…', { exact: true })).toBeVisible();
-    await expect(page.locator('.channel-run')).toContainText('仓库问答助手');
+    await expect(page.locator('.channel-run')).toContainText('群聊助手');
     mkdirSync('.tmp/stage-messages', { recursive: true }); await page.screenshot({ path: '.tmp/stage-messages/group-running.png', fullPage: true });
     await page.getByRole('button', { name: '停止回答', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '停止回答', exact: true }).click();

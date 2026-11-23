@@ -18,7 +18,7 @@ const placeholder = '（这条消息是在闲聊午饭，与仓库无关，我�
 async function group(t, participation = 'all') {
   const f = await channelFixture(t); await repositoryAssistant(f); f.chat = await boundGroup(f);
   const binding = f.service.serviceBindings.get(f.chat.id);
-  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind: 'repositories', repositories: ['101'] }, participation, enabled: true, expected_revision: binding.revision })).status, 200);
   return f;
 }

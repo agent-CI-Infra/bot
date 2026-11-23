@@ -17,7 +17,7 @@ const chat = (text, actor = 'ou_alice') => { const e = inGroup(text, actor); e.e
 async function group(t, mode) {
   const f = await channelFixture(t); await repositoryAssistant(f); f.chat = await boundGroup(f);
   const binding = f.service.serviceBindings.get(f.chat.id);
-  if (mode !== 'mentions') assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+  if (mode !== 'mentions') assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind: 'repositories', repositories: ['101'] }, participation: mode, enabled: true, expected_revision: binding.revision })).status, 200);
   return f;
 }

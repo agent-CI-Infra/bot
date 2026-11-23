@@ -23,8 +23,8 @@ const results = body => body.messages.filter(m => m.role === 'tool').map(m => JS
 const delivered = (f, source) => until(() => f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', source), r => r && r.state === 'sent');
 const fileEvent = (key, chat = 'oc_private', name = 'notes.txt') => envelope('', { message: { chat_id: chat, message_type: 'file', content: JSON.stringify({ file_key: key, file_name: name }) } });
 async function group(f) {
-  const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-  await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id }); await shareAssistantModel(f);
+  await shareAssistantModel(f);
+  f.groupModelId = f.assistantModel.id;
   return boundGroup(f);
 }
 function localTurn(f, chat, event) {

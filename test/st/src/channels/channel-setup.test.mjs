@@ -510,7 +510,7 @@ test('deleting a Feishu connector checks management authority and revision, revo
   const disbandedChat = h.store.get("SELECT * FROM channel_chats WHERE connector_id=? AND chat_id='oc_disbanded_group'", id);
   assert.equal(disbandedChat.state, 'archived');
   const bound = await admin('/api/channels/chats/' + groupChat.id + '/service-binding', 'PUT', {
-    service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0,
+    scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0,
   });
   assert.equal(bound.status, 200, JSON.stringify(bound.value));
   const bindingRow = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', groupChat.id);

@@ -6,26 +6,26 @@ import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
 import { permissionItems, fullPermissions, normalizePermissions, type RolePermissions } from '../roles/permissions.js';
 
-// Service roles are the assistants outside project work: the console/personal management assistant and group chat assistants.
-// A group assistant role is only a prompt and a model: what a group may do is the permission level of its binding (#849).
-// Super administrators keep the global templates, which use shared models. A project administrator may also keep roles owned
-// by one project (project_id): they may use that project's own model, and bind only to groups scoped to that project.
-// Usage is billed to the role; a group scoped to one project also counts in that project's costs.
-// The management assistant keeps its fixed items, intersected with the current user's authority.
+// Platform assistant outside project work: the console/personal management assistant (#1249).
+// Group chat assistants now store their model, prompt and harness directly on each group binding (channel_service_bindings);
+// legacy rows in service_roles are preserved read-only so upgraded bindings keep their authorization fence and historical usage.
 // Project work roles (Manager, Dev, QA ...) stay in each project's role configuration.
 export const managementAssistant = 'management-assistant';
 export const repositoryAssistant = 'repository-assistant';
+export const groupAssistant = 'group-assistant';
+export const defaultGroupAssistantPrompt = '查询 GitHub Issue 和 PR、解释代码仓；能否写入和派活由本群的权限配置决定。';
 
 const now = () => new Date().toISOString();
 export const serviceItems = permissionItems;
 /** What the repository assistant granted before #849; bindings migrated from it read as the read level. */
 export const repositoryAssistantPermissions: RolePermissions = normalizePermissions({ github: 'read' });
-const builtins = [
-  { id: managementAssistant, name: '管理助手', permissions: fullPermissions(),
-    responsibility: '控制台管理对话和个人私聊使用的助手。使用统一权限机制，固定允许全部已接入能力，实际操作仍受当前用户有效授权和项目范围约束。' },
-  { id: repositoryAssistant, name: '仓库问答助手', permissions: repositoryAssistantPermissions,
-    responsibility: '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓；能否写入和派活由本群的权限档位决定。' },
-];
+const managementBuiltin = {
+  id: managementAssistant,
+  name: '管理助手',
+  permissions: fullPermissions(),
+  responsibility: '控制台管理对话和个人私聊使用的助手。使用统一权限机制，固定允许全部已接入能力，实际操作仍受当前用户有效授权和项目范围约束。',
+};
+const migratedRepositoryResponsibility = '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓；能否写入和派活由本群的权限档位决定。';
 // The responsibility the repository assistant was seeded with before #849. It reaches the system prompt, so a group at the
 // dispatch level would be told never to delegate; an administrator's own wording is kept.
 const retiredResponsibility = '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓，不给工作角色派活。';
@@ -37,14 +37,13 @@ export function serviceRoleStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS service_harness_sessions(id TEXT PRIMARY KEY,service_role_id TEXT NOT NULL,turn_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT '{}',updated_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS service_harness_turn ON service_harness_sessions(turn_id);CREATE TABLE IF NOT EXISTS service_harness_events(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL REFERENCES service_harness_sessions(id),type TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS service_role_operations(id TEXT PRIMARY KEY,turn_id TEXT NOT NULL,request TEXT NOT NULL,result TEXT,state TEXT NOT NULL);`);
   addColumns(store.db,'service_role_operations',operationRefColumns);
   if(!store.all('PRAGMA table_info(service_roles)').some(c=>c.name==='harness'))store.db.exec("ALTER TABLE service_roles ADD COLUMN harness TEXT NOT NULL DEFAULT 'native'");
-  // Built-in roles are written once and then belong to the administrator; a restart never overwrites their edits.
-  // A deployment that already chose a default shared model in the wizard starts them with it.
-  // The project owning a group assistant role (#849); global templates have none.
+  // The project column is kept for existing pre-#1249 rows.
   if (!store.all('PRAGMA table_info(service_roles)').some(c => c.name === 'project_id')) store.db.exec('ALTER TABLE service_roles ADD COLUMN project_id TEXT');
   const model = defaultSharedModel(store), time = now();
-  for (const role of builtins) store.run(`INSERT OR IGNORE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at)
-    VALUES(?,1,1,?,?,'',?,?,NULL,1,?,?)`, role.id, role.name, role.responsibility, model, role.permissions ? JSON.stringify(role.permissions) : null, time, time);
-  if (store.run('UPDATE service_roles SET responsibility=?,revision=revision+1,updated_at=? WHERE id=? AND responsibility=?', builtins[1]!.responsibility, time, repositoryAssistant, retiredResponsibility).changes)
+  // Built-in management assistant is written once and then belongs to the administrator; a restart never overwrites edits.
+  store.run(`INSERT OR IGNORE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at)
+    VALUES(?,1,1,?,?,'',?,?,NULL,1,?,?)`, managementBuiltin.id, managementBuiltin.name, managementBuiltin.responsibility, model, JSON.stringify(managementBuiltin.permissions), time, time);
+  if (store.run('UPDATE service_roles SET responsibility=?,revision=revision+1,updated_at=? WHERE id=? AND responsibility=?', migratedRepositoryResponsibility, time, repositoryAssistant, retiredResponsibility).changes)
     store.audit('system', 'service_role.responsibility_migrated', repositoryAssistant);
   const old = store.get('SELECT permissions FROM service_roles WHERE id=?',managementAssistant);
   if (old && !old.permissions) {
@@ -52,22 +51,28 @@ export function serviceRoleStorage(store: Store): void {
     store.audit('system','service_role.permissions_migrated',managementAssistant);
   }
 }
-function defaultSharedModel(store: Store): string | null {
+export function defaultSharedModel(store: Store): string | null {
   const id = store.get("SELECT json_extract(value,'$') id FROM settings WHERE key='onboarding.model' AND json_valid(value)")?.id;
   return typeof id === 'string' && store.get('SELECT 1 FROM models WHERE id=? AND repository_id IS NULL', id) ? id : null;
 }
-/** Choosing the wizard's default shared model also gives it to built-in roles that have none yet; a chosen model is kept. */
+/** Choosing the wizard's default shared model also gives it to the management assistant if it has none yet; a chosen model is kept. */
 export function adoptDefaultModel(store: Store, modelId: string, userId: string): void {
-  for (const row of store.all('SELECT id FROM service_roles WHERE builtin=1 AND model_id IS NULL')) {
-    store.run('UPDATE service_roles SET model_id=?,revision=revision+1,updated_at=? WHERE id=? AND model_id IS NULL', modelId, now(), row.id);
-    store.audit(userId, 'service_role.model_adopted', row.id);
+  if (store.run('UPDATE service_roles SET model_id=?,revision=revision+1,updated_at=? WHERE id=? AND model_id IS NULL', modelId, now(), managementAssistant).changes) {
+    store.audit(userId, 'service_role.model_adopted', managementAssistant);
   }
 }
-/** A deleted shared model leaves the roles that used it without a model; they wait for configuration instead of switching. */
+/** A deleted model leaves the management assistant and any group bindings that used it without a model; they wait for configuration instead of switching. */
 export function releaseModel(store: Store, modelId: string, userId: string): void {
   for (const row of store.all('SELECT id FROM service_roles WHERE model_id=?', modelId)) {
     store.run('UPDATE service_roles SET model_id=NULL,revision=revision+1,updated_at=? WHERE id=?', now(), row.id);
     store.audit(userId, 'service_role.model_cleared', row.id);
+  }
+  if (store.hasTable('channel_service_bindings') && store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'model_id')) {
+    const time = Date.now();
+    for (const row of store.all('SELECT id FROM channel_service_bindings WHERE model_id=?', modelId)) {
+      store.run('UPDATE channel_service_bindings SET model_id=NULL,revision=revision+1,updated_at=? WHERE id=?', time, row.id);
+      store.audit(userId, 'channel.service_binding.model_cleared', row.id);
+    }
   }
 }
 
@@ -75,11 +80,6 @@ export function serviceRole(store: Store, id: string): Row | undefined {
   const row=store.get('SELECT * FROM service_roles WHERE id=?', id);
   return row ? {...row,permissions:JSON.stringify(id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true))} : undefined;
 }
-/**
- * Whether a model may serve a project (#849): a project's own model serves only that project; a shared model the projects it
- * is authorized to. A project's model is trusted with that project's code only, so a group reading several projects may only
- * use a model every one of them has.
- */
 /** Whether a model serves a project (see models/sharing.ts): the group model rule reads it for every project in scope. */
 export { modelServes };
 /** The projects (id and full name) among `projects` a model may not serve, in their order. */
@@ -88,23 +88,21 @@ export function modelGaps(store: Store, modelId: string, projects: string[]): { 
   return projects.filter(project => !model || !modelServes(store, model, project))
     .map(id => ({ id, full_name: String(store.get('SELECT full_name FROM repositories WHERE id=?', id)?.full_name ?? id) }));
 }
-/** A group's model for one turn: its role's model, available to every project in the group's scope. When it is not, the
- * turn stops naming the projects; it never switches to another model. */
-export function groupRoleModel(store: Store, id: string, projects: string[]) {
-  const role = serviceRole(store, id);
-  if (!role?.enabled) return stop('service_role_unavailable', 'waiting_configuration', `服务角色 ${id} 不存在或已停用。`);
-  const row = role.model_id ? store.get('SELECT * FROM models WHERE id=?', role.model_id) : undefined;
-  if (!row?.api_key) return stop('service_role_model_not_configured', 'waiting_configuration', `群助手角色「${role.name}」尚未配置可用的模型；不会改用其他模型。`);
+/** A group binding's model for one turn (#1249): the model stored on the binding, available to every project in the group's scope.
+ * When it is not configured or not authorized, the turn stops naming the projects; it never switches to another model. */
+export function groupBindingModel(store: Store, binding: Row, projects: string[]) {
+  const row = binding.model_id ? store.get('SELECT * FROM models WHERE id=?', binding.model_id) : undefined;
+  if (!row?.api_key) return stop('channel_service_model_not_configured', 'waiting_configuration', '本群聊助手尚未配置可用的模型，请维护人在控制台「个人设置 → 飞书绑定」为本群选择模型；不会改用其他模型。');
   const gaps = modelGaps(store, row.id, projects);
   if (gaps.length) return stop('channel_service_model_unavailable', 'waiting_configuration', `模型「${row.model_name}」没有授权给 ${gaps.map(p => p.full_name).join('、')}；不会改用其他模型。`);
   return openModel(store, row);
 }
-/** The role's own shared model, opened for one run. Without one the run stops; it never borrows a project's model. */
+/** The management assistant's own shared model, opened for one run. Without one the run stops; it never borrows a project's model. */
 export function serviceRoleModel(store: Store, id: string) {
   const role = serviceRole(store, id);
-  if (!role?.enabled) return stop('service_role_unavailable', 'waiting_configuration', `服务角色 ${id} 不存在或已停用。`);
+  if (!role?.enabled) return stop('service_role_unavailable', 'waiting_configuration', `管理助手 ${id} 不存在或已停用。`);
   const row = role.model_id ? store.get('SELECT * FROM models WHERE id=? AND repository_id IS NULL', role.model_id) : undefined;
-  if (!row?.api_key) return stop('service_role_model_not_configured', 'waiting_configuration', `服务角色「${role.name}」尚未配置可用的共享模型，请超级管理员在「全局设置 → 服务角色」中选择；不会改用其他模型。`);
+  if (!row?.api_key) return stop('service_role_model_not_configured', 'waiting_configuration', `管理助手「${role.name}」尚未配置可用的共享模型，请超级管理员在「全局设置 → 管理助手」中选择；不会改用其他模型。`);
   return openModel(store, row);
 }
 export function serviceRoleUsage(store: Store, id: string): Json {
@@ -215,10 +213,8 @@ export function deleteServiceRole(store: Store, userId: string, id: string, inpu
     return { ok: true, id };
   });
 }
-/** Roles the caller may see: every role, or (`projects` given) only the roles owned by those projects. */
-export function listServiceRoles(store: Store, projects?: string[]): Json {
-  // Built-in roles first, then global templates, then project roles, each in creation order.
-  const rows = store.all('SELECT * FROM service_roles ORDER BY builtin DESC,CASE id WHEN ? THEN 0 ELSE 1 END,project_id IS NOT NULL,created_at,id', managementAssistant)
-    .filter(row => !projects || row.project_id && projects.includes(row.project_id));
+/** Only the singleton platform management assistant is exposed here (#1249); group assistants live on channel_service_bindings. */
+export function listServiceRoles(store: Store): Json {
+  const rows = store.all('SELECT * FROM service_roles WHERE id=?', managementAssistant);
   return { service_roles: rows.map(row => serviceRoleView(store, row)), permission_items: serviceItems };
 }

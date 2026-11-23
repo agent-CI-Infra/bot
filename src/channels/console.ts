@@ -7,7 +7,7 @@ import type { ChannelEvent } from './types.js';
 import type { ChannelService } from './service.js';
 import { chatProfile } from './profiles.js';
 import { canManageApplication } from './applications.js';
-import { managementAssistant } from '../service-roles/roles.js';
+import { groupAssistant, managementAssistant } from '../service-roles/roles.js';
 import { commands } from '../management/catalog.js';
 import { managementFailure, managementStates } from '../management/presentation.js';
 
@@ -116,7 +116,7 @@ export class ChannelConsole {
     const turns = mode === 'management' ? sessions.length ? store.all(`SELECT * FROM management_messages WHERE conversation_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`, ...sessions, offset) : []
       : store.all(`SELECT * FROM ${binding ? 'channel_service_turns' : 'role_conversation_turns'} WHERE ${binding ? 'chat_id' : 'conversation_id'}=? ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`, chat.id, offset);
     const usageWhere = mode === 'management' ? sessions.length ? `conversation_id IN (${marks}) AND service_role_id=?` : '0'
-      : binding ? 'conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL' : 'conversation_id=?';
+      : binding ? 'conversation_id=? AND service_role_id IS NOT NULL' : 'conversation_id=?';
     const usageArgs = mode === 'management' ? sessions.length ? [...sessions, managementAssistant] : [] : [chat.id];
     const requests = store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
       sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
@@ -136,7 +136,7 @@ export class ChannelConsole {
         state: managementStates[turn.state] ?? turn.state, request: JSON.parse(turn.input).content, messages: this.service.management.stageMessages(turn.id),
         incoming_messages: this.service.turnMessages.list(turn.id, senderName), reply: this.personalReply(turn), role_id: '管理助手' }
         : binding ? { id: turn.id, source_message: turn.source_message, state: turn.state, error: turn.error, ...(turn.error_detail ? { error_detail: turn.error_detail } : {}), created_at: turn.created_at, updated_at: turn.updated_at,
-          role_id: roles.get(turn.service_role_id) ?? turn.service_role_id, can_stop: manageable && turn.state === 'running',
+          role_id: turn.service_role_id === groupAssistant ? '群聊助手' : roles.get(turn.service_role_id) ?? '群聊助手', can_stop: manageable && turn.state === 'running',
           messages: this.service.serviceSessions.messages(turn.id).map(m => ({ sequence: m.sequence, text: m.text, created_at: m.created_at })),
           incoming_messages: this.service.turnMessages.list(turn.id, senderName),
           ...serviceReply(store, turn) }

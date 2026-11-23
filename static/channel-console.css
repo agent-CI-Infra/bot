@@ -33,10 +33,9 @@
 .feishu-summary-row { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); overflow-wrap: anywhere; }
 .feishu-top-bar:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
 .feishu-top-bar > p { margin: 0; }
-.feishu-project-role-links:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-3); background: var(--color-surface-alt); border: 1px solid var(--color-border); border-radius: var(--radius-3); min-width: 0; }
-.feishu-project-role-links > span { font-size: var(--font-size-1); }
-.feishu-project-role-links a.button-link { max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere; }
-.feishu-more-projects > summary { cursor: pointer; font-size: var(--font-size-1); color: var(--color-text-muted); }
+.feishu-assistant-fieldset { display: grid; gap: var(--space-3); margin: var(--space-3) 0; min-width: 0; }
+.feishu-copy-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.feishu-copy-row select { max-width: 100%; min-width: 0; }
 .feishu-history-fold { margin-top: var(--space-4); }
 .feishu-chat-profile-fold > summary { cursor: pointer; font-size: var(--font-size-1); color: var(--color-text-muted); }
 .feishu-page-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-4); }

@@ -4,6 +4,5 @@
  * channels/feishu-page.js
  * channels/schedules.js
  * channels/groups.js
- * channels/assistant-roles.js
  * channels/transfer.js
  */

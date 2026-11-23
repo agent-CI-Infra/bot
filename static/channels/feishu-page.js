@@ -1,7 +1,7 @@
 // Feishu bindings page (#/identity/feishu): two clean stacked cards (personal identity bindings & group chat assistants),
 // plus a dedicated group binding configuration route (#/identity/feishu/groups/new and #/identity/feishu/groups/<chat-id>).
-// Chat schedules live inside Feishu Conversations (#/conversations/<chat-id>?section=schedules), and project-scoped
-// group assistant roles live inside Project Settings -> Roles (#/projects/<id>/roles?view=assistant-roles).
+// Chat schedules live inside Feishu Conversations (#/conversations/<chat-id>?section=schedules). Each group binding
+// configures its own repository scope, permissions, model, prompt and harness directly (#1249).
 async function renderFeishuBindingsPage(panel, current) {
   const request = renderVersion;
   const [hashPath, hashQuery = ''] = location.hash.split('?');
@@ -297,13 +297,9 @@ async function renderFeishuBindingsPage(panel, current) {
   groupSection.id = 'feishu-group-bindings';
   const groupHead = element('div', '', 'feishu-section-head'), groupHeadActions = element('div', '', 'actions');
   groupHeadActions.append(channelLink('#/identity/feishu/groups/new', '创建群绑定', 'button-link quiet'));
-  if (me.role === 'super_admin') groupHeadActions.append(channelLink('#/settings/service-roles', '全局服务角色', 'button-link quiet'));
   groupHead.append(element('h2', '飞书群聊助手'), groupHeadActions);
-  const projectRolesLinksSlot = element('div', '', 'feishu-project-role-links');
-  projectRolesLinksSlot.hidden = true;
   groupSection.append(groupHead,
-    note('为机器人所在的群配置仓库范围、GitHub 权限、项目任务权限、平台能力与助手角色。群内所有成员按本群配置使用助手，点击条目可查看群聊天记录。'),
-    projectRolesLinksSlot);
+    note('为机器人所在的群配置仓库范围、GitHub 权限、项目任务权限、平台能力、模型与提示词。群内所有成员按本群配置使用助手，点击条目可查看群聊天记录。'));
   const groupBody = element('div');
   groupBody.append(consoleState('正在读取群绑定', '个人飞书绑定已就绪，正在读取可查看或管理的群绑定。'));
   groupSection.append(groupBody);
@@ -347,7 +343,6 @@ async function renderFeishuBindingsPage(panel, current) {
         await renderFeishuGroupEditorView(panel, current, null, groupData);
         return;
       }
-      renderProjectRoleLinksBar(projectRolesLinksSlot, groupData.projects || []);
       groupBody.replaceChildren(buildGroupBindingsList(groupData));
       if (querySection === 'groups') groupSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
@@ -358,29 +353,8 @@ async function renderFeishuBindingsPage(panel, current) {
   void loadGroups();
 }
 
-function renderProjectRoleLinksBar(slot, projects) {
-  slot.replaceChildren();
-  if (!projects.length) { slot.hidden = true; return; }
-  slot.hidden = false;
-  slot.append(element('span', '项目群助手角色（在项目设置中维护）：', 'muted'));
-  const shown = projects.slice(0, 4);
-  for (const p of shown) {
-    slot.append(channelLink(`#/projects/${p.id}/roles?view=assistant-roles`, p.full_name, 'button-link quiet'));
-  }
-  if (projects.length > shown.length) {
-    const more = element('details', '', 'feishu-more-projects');
-    more.append(element('summary', `其余 ${projects.length - shown.length} 个项目`));
-    const rest = element('div', '', 'feishu-inline-actions');
-    for (const p of projects.slice(shown.length)) {
-      rest.append(channelLink(`#/projects/${p.id}/roles?view=assistant-roles`, p.full_name, 'button-link quiet'));
-    }
-    more.append(rest);
-    slot.append(more);
-  }
-}
-
 async function renderFeishuGroupEditorView(panel, current, targetChatId, preloaded = null) {
-  if (!preloaded) panel.replaceChildren(consoleState('正在读取群绑定配置', '正在核对可配置的飞书群、仓库范围与助手角色。'));
+  if (!preloaded) panel.replaceChildren(consoleState('正在读取群绑定配置', '正在核对可配置的飞书群、仓库范围与可用模型。'));
   let groupData = preloaded;
   if (!groupData) {
     try { groupData = await api('/api/channels/service-bindings'); }
@@ -406,7 +380,7 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_employee_sync_paused: '群授权或受众待核验，历史同步已暂停。', channel_bot_not_in_chat: '机器人当前不在这个群中。',
   channel_audience_unverified: '平台未提供完整成员范围，暂时无法核验。', channel_history_forbidden: '需要该群助手的负责人，或在其全部项目范围内有配置权限。',
   channel_audience_permission_required: '飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在「全局设置 → 飞书连接」查看缺少的权限，为应用开通 im:chat.members:read 并发布新版本后再保存。',
-  channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '所选服务角色已停用。', service_role_not_bindable: '管理助手不能绑定到群聊。',
+  channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '本群的历史配置已失效，请重新保存群配置。', service_role_not_bindable: '管理助手不能绑定到群聊。',
   channel_service_scope_paused: '配置人在全部所选仓库的权限都已变化，助手暂停。', channel_service_binding_disabled: '群聊助手已停用。',
   schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
   channel_service_binding_forbidden: '只有这个群聊助手的负责人、其项目范围所属组织的管理员或超级管理员可以修改、停用、转交它或停止它的回答。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
@@ -414,6 +388,9 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_service_owner_ineligible: '新负责人需要对当前全部项目范围有配置权限，且账户处于启用状态。',
   channel_service_level_invalid: '请选择一个权限档位。', channel_service_level_conflict: '权限档位和逐项设置只能二选一，请刷新本页后重新保存。',
   channel_service_permission_invalid: '逐项设置里有无效的选项，请刷新本页后重新选择。',
-  channel_service_model_unavailable: '助手角色的模型没有授权给本群范围内的全部项目，本群暂停回答。',
-  service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
+  channel_service_model_unavailable: '所选模型没有授权给本群范围内的全部项目，本群暂停回答。',
+  channel_service_model_not_configured: '本群尚未配置模型，请维护人在本群配置中选择可用模型。',
+  shared_model_required: '绑定整个组织时只能选择部署共享模型。',
+  model_not_found: '所选模型已不存在，请刷新本页重新选择。',
+  service_role_model_not_configured: '管理助手尚未配置模型，请超级管理员在「全局设置 → 管理助手」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);

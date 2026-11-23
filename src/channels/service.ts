@@ -9,7 +9,7 @@ import type { RequestNotice } from '../management/onboarding-requests.js';
 import { managementFailure, managementStates, pausedGroupNotice, serviceFailure } from '../management/presentation.js';
 import { githubProof } from '../identity/github.js';
 import { commands } from '../management/catalog.js';
-import { managementAssistant, serviceRole } from '../service-roles/roles.js';
+import { managementAssistant } from '../service-roles/roles.js';
 import { ChannelBindings, externalSubject } from './binding.js';
 import { FeishuAdapter, type ChannelFetch } from './feishu.js';
 import type { ChannelDelivery, ChannelEvent } from './types.js';
@@ -718,11 +718,11 @@ export class ChannelService {
           if(turn)this.turnMessages.release(turn.id);
           if(this.stopped)return;
           this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?",errorCode(error),row.id);
-          try { this.source(e);this.queue(e,card(serviceFailure(errorCode(error),serviceRole(this.store,binding.service_role_id)?.name??'群助手',error instanceof TaskError?error.detail:undefined)),row.id+':business-error',row.id); } catch {}
+          try { this.source(e);this.queue(e,card(serviceFailure(errorCode(error),'群聊助手',error instanceof TaskError?error.detail:undefined)),row.id+':business-error',row.id); } catch {}
         }).finally(()=>this.business.delete(chat.id));
         this.business.set(chat.id,work);return;
       }
-      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「个人设置 → 飞书绑定」点击「创建群绑定」为本群选择项目范围、权限档位和助手角色；个人绑定请在私聊发送“绑定”。');
+      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「个人设置 → 飞书绑定」点击「创建群绑定」为本群配置项目范围、权限、模型与提示词；个人绑定请在私聊发送“绑定”。');
     }
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
   }

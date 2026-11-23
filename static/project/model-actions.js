@@ -12,7 +12,7 @@ function modelActions(model, result, after = reloadWith) {
     catch (err) { if(live()){result.hidden = false; result.replaceChildren(element('p', readErrorText(err), 'view-error'));} return; }
     if(!live())return;
     if(!Array.isArray(detail.used_by)||!Array.isArray(detail.role_used_by)||typeof detail.onboarding_default!=='boolean'
-      ||detail.role_used_by.some(role=>!['project_role','service_role'].includes(role.type))){
+      ||detail.role_used_by.some(role=>!['project_role','service_role','group_binding'].includes(role.type))){
       result.hidden=false;result.replaceChildren(element('p','暂时无法确认完整引用范围，请重新读取后再删除。','view-error'));return;
     }
     const used = detail.used_by || [], body = [
@@ -20,11 +20,12 @@ function modelActions(model, result, after = reloadWith) {
       '不会删除 GitHub 上的任何东西。已有成本记录保留，仍使用当时记下的模型名和单价。'];
     if (used.length) body.push('以下项目正在使用它。默认选择会改回“不使用模型”；任务专属选择保留为不可用，相关任务进入“配置待补”：', used.map(repo => repo.full_name));
     else body.push('当前没有项目默认或工作类型模型选用它。');
-    const roles=detail.role_used_by,projectRoles=roles.filter(role=>role.type==='project_role'),serviceRoles=roles.filter(role=>role.type==='service_role');
+    const roles=detail.role_used_by,projectRoles=roles.filter(role=>role.type==='project_role'),serviceRoles=roles.filter(role=>role.type==='service_role'),groupBindings=roles.filter(role=>role.type==='group_binding');
     const roleName=role=>`${role.full_name?role.full_name+' · ':''}${role.name}（${role.role_id}）${!role.enabled?' · 已停用':role.configuration_enabled===false?' · 角色配置未启用':''}`;
     if(projectRoles.length)body.push('以下项目角色的显式模型引用会保留为不可用，后续执行等待补充配置，不会换用其他模型：',projectRoles.map(roleName));
-    if(serviceRoles.length)body.push('以下平台服务角色将变为未配置模型，之后的调用等待重新配置：',serviceRoles.map(roleName));
-    if(!roles.length)body.push('当前没有已保存角色显式引用它。');
+    if(serviceRoles.length)body.push('以下平台管理助手将变为未配置模型，之后的调用等待重新配置：',serviceRoles.map(roleName));
+    if(groupBindings.length)body.push('以下飞书群聊助手将变为未配置模型，之后的群对话等待重新选择模型：',groupBindings.map(g=>`${g.name}${!g.enabled?' · 已停用':''}`));
+    if(!roles.length)body.push('当前没有已保存角色或群聊助手显式引用它。');
     if(detail.onboarding_default)body.push('这也是系统初始化的默认模型；删除后需要重新选择接入默认模型。');
     body.push('以上是本次读取的已保存配置引用，不包括历史运行快照。已有运行快照和成本记录不会被改写。');
     if (detail.repository_id === null) body.push('这是部署共享模型，删除后所有项目都不能再选它。');

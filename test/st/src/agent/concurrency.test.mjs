@@ -300,7 +300,7 @@ test('global settings change the wizard settings and shared models without a pro
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
   await page.run('renderSettings(renderVersion)');
-  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['工作电脑', '#/settings/work-computers'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['助手电脑', '#/settings/assistant-computers'], ['Agent CLI 工具卷', '#/settings/agent-tools'], ['存储', '#/settings/storage'], ['系统初始化', '#/settings/onboarding'], ['公网接入', '#/settings/access'], ['外部执行', '#/settings/external'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['飞书连接', '#/settings/feishu'], ['项目管理', '#/settings/projects'], ['用户', '#/settings/users']]);
+  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['工作电脑', '#/settings/work-computers'], ['模型', '#/settings/models'], ['管理助手设置', '#/settings/management-assistant'], ['助手电脑', '#/settings/assistant-computers'], ['Agent CLI 工具卷', '#/settings/agent-tools'], ['存储', '#/settings/storage'], ['系统初始化', '#/settings/onboarding'], ['公网接入', '#/settings/access'], ['外部执行', '#/settings/external'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['飞书连接', '#/settings/feishu'], ['项目管理', '#/settings/projects'], ['用户', '#/settings/users']]);
   assert.deepEqual(cards(), ['同时运行的任务', '默认资源', '当前运行版本']);
   assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '工作电脑');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);

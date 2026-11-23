@@ -8,7 +8,7 @@ const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel �
 // Each group carries its own stable key, so a category that later moves into the dictionary is named by identity, not by
 // matching the Chinese caption it happens to have today.
 const settingsGroups = [
-  ['system', '系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['agent-tools', 'Agent CLI 工具卷'], ['storage', '存储']]],
+  ['system', '系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['management-assistant', '管理助手设置'], ['assistant-computers', '助手电脑'], ['agent-tools', 'Agent CLI 工具卷'], ['storage', '存储']]],
   ['access', '接入与网络', [['onboarding', '系统初始化'], ['access', '公网接入'], ['external', '外部执行']]],
   ['channels', '连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
   ['repository', '仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
@@ -43,6 +43,7 @@ const visibleSettingsSections = () => visibleSettingsGroups().flatMap(([, items]
 function settingsRoute() {
   if (/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return { section: 'onboarding', id: null };
   if (/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return { section: 'feishu', id: null };
+  if (/^#\/settings\/service-roles(?:\/|$)/.test(location.hash)) return { section: 'management-assistant', id: null };
   const match = /^#\/settings\/([a-z-]+)(?:\/(.+))?$/.exec(location.hash), key = match?.[1], sections = visibleSettingsSections();
   // #736: an id that is not valid percent-encoding reads as no id, so the section opens as its list instead of throwing.
   return { section: sections.some(([name]) => name === key) ? key : sections[0][0], id: match?.[2] ? safeDecode(match[2]) : null };

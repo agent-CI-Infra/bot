@@ -15,7 +15,7 @@ test('a turn ended with stay_silent shows its reason in the console and sends no
   try {
     await repositoryAssistant(f); const chat = await boundGroup(f);
     const binding = f.service.serviceBindings.get(chat.id);
-    expect((await f.admin(`/api/channels/chats/${chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+    expect((await f.admin(`/api/channels/chats/${chat.id}/service-binding`, 'PUT', {
       scope: { kind: 'repositories', repositories: ['101'] }, participation: 'all', enabled: true, expected_revision: binding.revision })).status).toBe(200);
     f.modelState.respond = async (_body, res) => {
       res.setHeader('Content-Type', 'application/json');

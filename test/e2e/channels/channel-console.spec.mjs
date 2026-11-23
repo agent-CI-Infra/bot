@@ -84,7 +84,7 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     const receipt = await post(f.h, f.id, inGroup('大家先核对当前的项目范围。', 'ou_bob'));
     expect((await finished(f.h, receipt.value.operation_id)).state).toBe('completed');
     expect((await f.admin('/api/channels/chats/' + group.id + '/service-binding', 'PUT', {
-      service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: 1
+      scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: 1
     })).status).toBe(200);
     await page.setViewportSize({ width, height: 1000 }); await login(page, f, '#/conversations/' + group.id);
     const thread = page.getByRole('region', { name: '当前飞书会话' });
@@ -107,7 +107,7 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
     await expect(page.getByLabel('个人飞书绑定列表')).toContainText('私聊会话已建立');
     await expect(page.getByLabel('飞书群绑定列表')).toContainText('项目讨论群');
-    await expect(page.getByLabel('飞书群绑定列表').getByRole('link', { name: '配置仓库与权限', exact: true })).toBeVisible();
+    await expect(page.getByLabel('飞书群绑定列表').getByRole('link', { name: '配置群聊助手', exact: true })).toBeVisible();
     await page.evaluate(() => { document.activeElement?.blur(); scrollTo(0, 0); });
     await page.screenshot({ path: `.tmp/channel-console/bindings-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/preferences'); await expect(page.getByRole('heading', { name: '身份与权限', exact: true })).toBeVisible();
@@ -314,7 +314,7 @@ for (const type of ['text', 'post']) test(`a mention-only ${type} message remain
     await post(f.h, f.id, question);
     const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
     expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', {
-      service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0
+      model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0
     })).status).toBe(200);
     scriptedModel(f, [(done, input) => {
       expect(input.request).toBe('@LaunchPad-Test');

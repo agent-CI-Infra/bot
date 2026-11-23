@@ -40,11 +40,14 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   const current = task.service_role_id && task.trusted_owner
     ? store.get(`SELECT m.* FROM models m JOIN trusted_organizations o ON o.model_id=m.id JOIN service_roles s ON s.id=? AND s.enabled=1
         WHERE m.id=? AND o.owner_id=? AND m.repository_id IS NULL`, task.service_role_id, model.id, task.trusted_owner)
+    : task.kind === 'channel.service' && task.conversation_id
+    ? store.get(`SELECT m.* FROM models m JOIN channel_service_bindings b ON b.model_id=m.id WHERE m.id=? AND b.chat_id=? AND b.enabled=1 AND ${billedOnly ? 'm.repository_id IS NULL' : project}`,
+      model.id, task.conversation_id, ...(billedOnly ? [] : [task.repository_id, task.repository_id]))
     : task.service_role_id
     ? store.get(`SELECT m.* FROM models m JOIN service_roles s ON s.model_id=m.id WHERE m.id=? AND s.id=? AND s.enabled=1 AND ${billedOnly ? 'm.repository_id IS NULL' : project}`,
       model.id, task.service_role_id, ...(billedOnly ? [] : [task.repository_id, task.repository_id]))
     : store.get(`SELECT m.* FROM models m WHERE m.id=? AND ${project}`, model.id, task.repository_id, task.repository_id);
-  if (!current) return stop('model_not_available', 'waiting_configuration', task.service_role_id ? '服务角色的模型已被更换、删除或不再授权给这个项目。' : '任务模型已被删除或撤销项目访问权限。');
+  if (!current) return stop('model_not_available', 'waiting_configuration', task.kind === 'channel.service' ? '本群聊助手的模型已被更换、删除或不再授权给这个项目。' : task.service_role_id ? '管理助手的模型已被更换、删除或不再授权给这个项目。' : '任务模型已被删除或撤销项目访问权限。');
   if (!current.api_key) return stop('model_not_configured', 'waiting_configuration', '固定模型的凭据已撤销；重新设置 Key 后可以继续。');
   const currentKey = String(store.secrets.open(current.api_key, `model:${current.id}`).value || '');
   if (Number(current.version) !== model.version || String(current.api_url) !== model.url || String(current.model_name) !== model.model)

@@ -66,20 +66,12 @@ test('#551 management.css and views.css no longer hard-code leftover colours, an
   const views = read('static/views.css');
   const rateLimits = read('static/settings/rate-limits.js');
   assert.match(rateLimits, /element\('h3',[^)]*'rate-account'\)/, 'the quota account names keep their own level and class');
-  // #1039: serviceRoleCard is drawn on the settings page (h2 under 全局设置) and inside the Feishu bindings page's own h3
-  // card, so the level is an argument: the settings caller passes h2, the bindings caller keeps the h3 default. Without
-  // this the settings default would leak out and make an h2 → h4 skip on #/identity/feishu.
+  // #1039, #1249: serviceRoleCard renders the singleton management assistant under global settings (h2 under 全局设置).
   const serviceRoles = read('static/settings/service-roles.js');
-  assert.match(serviceRoles, /function serviceRoleCard\(view, initial, level = 'h3'\)/, 'the role card level is the caller\'s');
+  assert.match(serviceRoles, /function serviceRoleCard\(view, initial, level = 'h2'\)/, 'the management assistant card defaults to h2');
   assert.match(serviceRoles, /\}, level\);/, 'the level reaches liveCard');
   assert.match(serviceRoles, /querySelector\(level\)/, 'the saved name is rewritten on the heading of that level');
   assert.match(read('static/settings/page.js'), /serviceRoleCard\(view, role, 'h2'\)/, 'the settings page asks for h2');
-  assert.match(read('static/channels/assistant-roles.js'), /serviceRoleCard\(view, role\)/, 'the Feishu bindings page keeps h3');
-  // A card created in place is a card of the calling page too: the create form passes the level on, so the new card is an
-  // h2 on settings instead of falling back to the h3 default and reading as a child of the card above it.
-  assert.match(serviceRoles, /function serviceRoleCreate\(view, level = 'h3'\)/, 'the create form takes the same level');
-  assert.match(serviceRoles, /section\.before\(serviceRoleCard\(view, created, level\)\)/, 'the created card is drawn at that level');
-  assert.match(read('static/settings/page.js'), /serviceRoleCreate\(view, 'h2'\)/, 'the settings page creates h2 cards');
   assert.equal(views.toLowerCase().includes('#637c89'), false);
   assert.equal(views.toLowerCase().includes('#365564'), false);
   for (const literal of ['#718793', '#536c78']) assert.equal(views.toLowerCase().includes(literal), false, literal);

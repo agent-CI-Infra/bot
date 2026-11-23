@@ -82,7 +82,7 @@ test('global administrator connects an app through the 3-step wizard, manages it
   try {
     await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
     await expect(page.getByRole('heading', { name: '飞书应用连接', exact: true })).toBeVisible();
-    await expect(page.getByRole('link', { name: '管理服务角色', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: '配置管理助手', exact: true })).toBeVisible();
     await page.getByRole('link', { name: '新增飞书应用连接' }).click();
     await expect(page.getByRole('navigation', { name: '飞书连接步骤' })).toBeVisible();
     await expect(page.getByRole('navigation', { name: '飞书连接步骤' }).getByRole('button')).toHaveCount(3);

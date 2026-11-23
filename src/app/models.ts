@@ -63,8 +63,18 @@ function rolesUsingModel(store: Store, user: Actor, id: string): Json[] {
     role_id: row.role_id, name: row.name, enabled: !!row.enabled, configuration_enabled: !!row.configuration_enabled }));
   // A detail read must not bootstrap or migrate platform roles just to describe their existing model references.
   if (user.role === 'super_admin' && store.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_roles'"))
-    for (const role of store.all('SELECT id,name,enabled FROM service_roles WHERE model_id=? ORDER BY id', id))
+    for (const role of store.all("SELECT id,name,enabled FROM service_roles WHERE id='management-assistant' AND model_id=? ORDER BY id", id))
       result.push({ type: 'service_role', repository_id: null, role_id: role.id, name: role.name, enabled: !!role.enabled });
+  if (store.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_service_bindings'")
+    && store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'model_id')) {
+    const modelRow = store.get('SELECT repository_id FROM models WHERE id=?', id);
+    if (user.role === 'super_admin' || modelRow?.repository_id && user.repositories.includes(modelRow.repository_id)) {
+      for (const binding of store.all(`SELECT b.id,b.chat_id,b.enabled,c.display_name,c.chat_id AS feishu_chat_id
+        FROM channel_service_bindings b LEFT JOIN channel_chats c ON c.id=b.chat_id WHERE b.model_id=? ORDER BY b.created_at,b.id`, id))
+        result.push({ type: 'group_binding', repository_id: modelRow?.repository_id ?? null, role_id: binding.chat_id,
+          name: binding.display_name || binding.feishu_chat_id || binding.chat_id, enabled: !!binding.enabled });
+    }
+  }
   return result;
 }
 // Routes are appended to the URL text, so a query or fragment, even an empty "?" or "#", would swallow the route and

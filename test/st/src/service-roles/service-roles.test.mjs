@@ -24,53 +24,43 @@ async function web(f,content,client=f.admin){
   return {conversation,message:history.messages.find(m=>m.id===message.id),events:history.events.filter(e=>e.message_id===message.id)};
 }
 
-test('built-in service roles are seeded once, edited with revisions and audit, and only super administrators maintain them',async t=>{
+test('the singleton management assistant is seeded once, edited with revisions and audit, and only super administrators maintain it (#1249)',async t=>{
   const f=await managementFixture(t),{admin,h}=f,member=await f.member('service-role-member',{repository_ids:['101']});
   const seeded=await roles(admin);
-  assert.deepEqual(seeded.map(r=>[r.id,r.builtin,r.enabled]),[['management-assistant',true,true],['repository-assistant',true,true]]);
-  const assistant=seeded[0],repository=seeded[1];
+  assert.deepEqual(seeded.map(r=>[r.id,r.builtin,r.enabled]),[['management-assistant',true,true]]);
+  const assistant=seeded[0];
   assert.deepEqual(assistant.permissions,fullPermissions());assert.equal(assistant.permissions_fixed,true);assert.equal(assistant.model.model_name,'Management fixture');
-  // A group assistant role is a prompt and a model: what a group may do is its binding's level (#849).
-  assert.equal(Object.hasOwn(repository,'permissions'),false);assert.equal(repository.permissions_fixed,false);
   assert.deepEqual((await admin('/api/service-roles')).value.permission_items.map(i=>[i.id,i.modes]),
     permissionItems.map(i=>[i.id,i.modes]));
-  // Project administrators neither read nor change platform service roles; they only see their own projects' roles (#849).
+  // Non-super administrators never read or mutate the platform management assistant.
   assert.deepEqual((await member.client('/api/service-roles')).value.service_roles,[]);
-  assert.equal((await member.client('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'x'})).status,403);
+  assert.equal((await member.client('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,name:'x'})).status,403);
 
-  const saved=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Committer 助手',budget:{currency:'USD',limit_amount:5}});
+  const saved=await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,name:'平台管理助手',budget:{currency:'USD',limit_amount:5}});
   assert.equal(saved.status,200,JSON.stringify(saved.value));
-  assert.equal(saved.value.service_role.revision,repository.revision+1);
-  assert.deepEqual(JSON.parse(h.store.get("SELECT permissions FROM service_roles WHERE id='repository-assistant'").permissions),repositoryAssistantPermissions,'the pre-#849 items stay for migration only');
-  assert.equal(Object.hasOwn(saved.value.service_role,'budget'),false);assert.equal(h.store.get("SELECT budget FROM service_roles WHERE id='repository-assistant'").budget,null);
-  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.updated' AND resource_id='repository-assistant'"));
-  const stale=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Stale'});
+  assert.equal(saved.value.service_role.revision,assistant.revision+1);
+  assert.equal(Object.hasOwn(saved.value.service_role,'budget'),false);assert.equal(h.store.get("SELECT budget FROM service_roles WHERE id='management-assistant'").budget,null);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.updated' AND resource_id='management-assistant'"));
+  const stale=await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,name:'Stale'});
   assert.deepEqual([stale.status,stale.value.error],[409,'service_role_revision_conflict']);
-  assert.equal((await role(admin,'repository-assistant')).name,'Committer 助手');
+  assert.equal((await role(admin,'management-assistant')).name,'平台管理助手');
 
-  for(const [body,code] of [[{permissions:{computer:'allow'}},'service_role_permissions_moved'],[{permissions:{github:'write'}},'service_role_permissions_moved'],
+  for(const [body,code] of [[{permissions:{github:'read'}},'service_role_permissions_fixed'],
     [{model_id:f.model.id},'shared_model_required'],[{unknown:true},'unknown_field']]){
-    const current=await role(admin,'repository-assistant'),result=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:current.revision,...body});
+    const current=await role(admin,'management-assistant'),result=await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,...body});
     assert.deepEqual([result.status,result.value.error],[400,code],JSON.stringify(body));
   }
-  // The management assistant always uses the current user's own permissions; built-in roles stay enabled and undeletable.
-  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,permissions:{github:'read'}})).value.error,'service_role_permissions_fixed');
-  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,enabled:false})).value.error,'builtin_service_role_required');
-  assert.equal((await admin('/api/service-roles/management-assistant','DELETE',{expected_revision:assistant.revision})).value.error,'builtin_service_role_required');
+  const current=await role(admin,'management-assistant');
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,enabled:false})).value.error,'builtin_service_role_required');
+  assert.equal((await admin('/api/service-roles/management-assistant','DELETE',{expected_revision:current.revision})).value.error,'builtin_service_role_required');
 
-  const created=(await admin('/api/service-roles','POST',{name:'可信 committer 群',responsibility:'可以暂停和取消任务'})).value.service_role;
-  assert.match(created.id,/^custom-/);assert.equal(created.builtin,false);assert.equal(Object.hasOwn(created,'permissions'),false);
-  assert.equal(h.store.get('SELECT permissions FROM service_roles WHERE id=?',created.id).permissions,null,'a new role carries no group items');
-  const disabled=(await admin('/api/service-roles/'+created.id,'PATCH',{expected_revision:created.revision,enabled:false})).value.service_role;
-  assert.deepEqual([disabled.enabled,disabled.permissions_fixed],[false,false]);
-  assert.equal((await admin('/api/service-roles/'+created.id,'DELETE',{expected_revision:created.revision})).value.error,'service_role_revision_conflict');
-  assert.equal((await admin('/api/service-roles/'+created.id,'DELETE',{expected_revision:disabled.revision})).value.ok,true);
-  assert.deepEqual((await roles(admin)).map(r=>r.id),['management-assistant','repository-assistant']);
-  assert.deepEqual(h.store.all("SELECT action FROM audit WHERE resource_id=? ORDER BY created_at,rowid",created.id).map(r=>r.action),['service_role.created','service_role.updated','service_role.deleted']);
+  // Group assistant templates moved onto group bindings (#1249): creating or editing group service roles is refused.
+  assert.deepEqual([(await admin('/api/service-roles','POST',{name:'群助手模板'})).status,(await admin('/api/service-roles','POST',{name:'群助手模板'})).value.error],[400,'service_role_group_moved']);
+  assert.deepEqual([(await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:1,name:'x'})).status,(await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:1,name:'x'})).value.error],[400,'service_role_group_moved']);
 
-  // A restart keeps administrator edits instead of reseeding the built-in roles.
+  // A restart keeps administrator edits instead of reseeding the built-in management assistant.
   await h.stop();await h.start();
-  assert.equal((await role(admin,'repository-assistant')).name,'Committer 助手');
+  assert.equal((await role(admin,'management-assistant')).name,'平台管理助手');
 });
 
 test('the management assistant uses its own model and ledger even when the first project has no model',async t=>{
@@ -95,7 +85,7 @@ test('the management assistant uses its own model and ledger even when the first
   const before=f.requests.length,missing=await web(f,'你好');
   assert.equal(missing.message.state,'failed');assert.equal(f.requests.length,before);
   const failure=missing.events.find(e=>e.type==='error').data;
-  assert.equal(failure.error,'service_role_model_not_configured');assert.match(failure.notice,/全局设置 → 服务角色/);
+  assert.equal(failure.error,'service_role_model_not_configured');assert.match(failure.notice,/全局设置 → 管理助手/);
 });
 
 test('legacy service role monetary budgets never block unpriced, over-limit or differently priced usage',async t=>{
@@ -130,7 +120,7 @@ test('a budgeted assistant retries a failed model request: a request that return
   assert.equal(h.store.get("SELECT cost FROM model_requests WHERE service_role_id='management-assistant' AND state='transport_error' ORDER BY rowid DESC LIMIT 1").cost,null);
 });
 
-test('deleting the shared model clears it from service roles and the wizard default fills built-in roles without one',async t=>{
+test('deleting the shared model clears it from the management assistant and the wizard default fills it when unset',async t=>{
   const f=await managementFixture(t),{admin,h}=f,before=await role(admin,'management-assistant');
   assert.equal((await admin('/api/models/'+f.assistantModel.id,'DELETE',{})).status,200);
   const after=await role(admin,'management-assistant');
@@ -138,10 +128,12 @@ test('deleting the shared model clears it from service roles and the wizard defa
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.model_cleared' AND resource_id='management-assistant'"));
   const replacement=(await admin('/api/models','POST',{model_name:'Wizard default',api_url:'http://127.0.0.1:9/v1',api_key:'fixture-provider-key'})).value.model;
   const kept=(await admin('/api/models','POST',{model_name:'Kept choice',api_url:'http://127.0.0.1:9/v1',api_key:'fixture-provider-key'})).value.model;
-  const repository=await role(admin,'repository-assistant');await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,model_id:kept.id});
   assert.equal((await admin('/api/onboarding/model','POST',{model_id:replacement.id})).status,201);
   assert.equal((await role(admin,'management-assistant')).model_id,replacement.id);
-  assert.equal((await role(admin,'repository-assistant')).model_id,kept.id);
+  const current=await role(admin,'management-assistant');
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,model_id:kept.id})).status,200);
+  assert.equal((await admin('/api/onboarding/model','POST',{model_id:replacement.id})).status,201);
+  assert.equal((await role(admin,'management-assistant')).model_id,kept.id,'an explicit choice is kept when the wizard default changes');
 });
 
 test('an existing ledger is rebuilt once with a nullable repository, keeping every row, column, index and trigger',async t=>{

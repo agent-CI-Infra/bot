@@ -6,11 +6,10 @@ import { TaskEngine } from '../../../dist/agent/engine.js';
 for (const width of [1440, 390]) test(`continuous group assistant and private management conversations open from unified bindings list at ${width}px (protocol/model fixtures)`, async ({ page }) => {
   const f = await channelFixture(undefined, store => ({ engine: new TaskEngine(store, { call: async () => ({ state: 'stopped' }) }) })), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
-    const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-    await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id }); await shareAssistantModel(f);
+    await shareAssistantModel(f);
     const quiet = inGroup('', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.content = JSON.stringify({ text: '未 @ 的共同决定：先核对本地证据' }); await post(f.h, f.id, quiet);
     const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
-    expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 })).status).toBe(200);
+    expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 })).status).toBe(200);
     f.modelState.respond = async (body, res) => {
       const content = body.tools.some(t => t.function.name === 'management_command') ? '你好！可按项目名称管理任务，私信沿用同一会话。' : '本群可用 admin-fixture-101，已按本地记录回答。';
       res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
@@ -44,7 +43,7 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await page.screenshot({ path: `.tmp/channel-conversation-312/group-history-${width}.png` });
     await page.getByText('本轮生成的回答', { exact: true }).click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('本群可用 admin-fixture-101，已按本地记录回答。');
-    await expect(page.getByText(/当前群绑定：仓库问答助手/)).toBeVisible();
+    await expect(page.getByText(/当前群绑定：模型 Management fixture/)).toBeVisible();
     await page.getByRole('link', { name: '返回飞书绑定', exact: true }).click();
     const personal = page.getByLabel('我的飞书账号', { exact: true });
     await expect(personal.getByRole('link', { name: '查看聊天记录', exact: true })).toBeVisible();

@@ -152,7 +152,9 @@ export function withTaskMetrics<T extends Row>(store: Store, tasks: T[], now=Dat
 /** Only visible configured models contribute manual prices; otherwise use an unambiguous official catalog match. */
 export function externalModelPricing(store:Store,task:Row,model:string):Pricing|null {
   const models=task.repository_id?store.all(`SELECT m.id,m.model_name FROM models m WHERE m.repository_id=? OR m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects p WHERE p.model_id=m.id AND p.repository_id=?))`,task.repository_id,task.repository_id)
-    :store.all('SELECT m.id,m.model_name FROM models m JOIN service_roles r ON r.model_id=m.id WHERE r.id=?',task.service_role_id??'');
+    :[...store.all('SELECT m.id,m.model_name FROM models m JOIN service_roles r ON r.model_id=m.id WHERE r.id=?',task.service_role_id??''),
+      ...(task.conversation_id&&store.hasTable('channel_service_bindings')&&store.all('PRAGMA table_info(channel_service_bindings)').some(c=>c.name==='model_id')
+        ?store.all('SELECT m.id,m.model_name FROM models m JOIN channel_service_bindings b ON b.model_id=m.id WHERE b.chat_id=?',task.conversation_id):[])];
   const matching=models.filter(row=>normalizeModelName(row.model_name)===normalizeModelName(model));
   if(!matching.length)return catalogPricing(store,{api_url:'',model_name:model});
   const prices=matching.map(row=>pricingFor(store,row.id)).filter((price):price is Pricing=>!!price);

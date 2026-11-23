@@ -210,7 +210,7 @@ test('whole-chat access keeps historical group replies and steps visible after a
   const old = await f.member('old-scope-viewer', { repository_ids: ['101'] }), next = await f.member('new-scope-viewer', { repository_ids: ['102'] });
   assert.equal((await old.client(`/api/channels/chats/${chat.id}/timeline`)).status, 200);
   const binding = f.service.serviceBindings.get(chat.id);
-  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/service-binding`, 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: binding.revision })).status, 200);
+  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/service-binding`, 'PUT', { scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: binding.revision })).status, 200);
   assert.equal((await old.client(`/api/channels/chats/${chat.id}/timeline`)).status, 403);
   assert.ok(!(await old.client('/api/channels/conversations')).value.conversations.some(c => c.id === chat.id));
   const timeline = await next.client(`/api/channels/chats/${chat.id}/timeline`); assert.equal(timeline.status, 200, JSON.stringify(timeline.value));

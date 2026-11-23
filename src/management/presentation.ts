@@ -17,8 +17,8 @@ export function managementFailure(code:string):string {
   if(code==='channel_resource_permission_required')return '飞书应用缺少图片与文件权限，请管理员在控制台飞书连接设置中导入完整权限，并在飞书发布生效后重试。';
   if(code==='channel_resource_too_large')return '附件超过本次处理的大小限制，请缩小文件后重试；较大的图片可通过项目电脑处理。';
   if(code==='channel_image_model_limit'||code==='channel_image_format_unsupported'||code==='channel_binary_requires_computer')return '此附件需要通过已授权项目的电脑工具处理，当前模型不能直接查看。';
-  if(code==='service_role_model_not_configured')return '管理助手尚未配置模型，请超级管理员在控制台「全局设置 → 服务角色」中为它选择共享模型。';
-  if(/^service_role_/.test(code))return '管理助手当前不可用，请超级管理员在「全局设置 → 服务角色」中检查配置。';
+  if(code==='service_role_model_not_configured')return '管理助手尚未配置模型，请超级管理员在控制台「全局设置 → 管理助手」中为它选择共享模型。';
+  if(/^service_role_/.test(code))return '管理助手当前不可用，请超级管理员在「全局设置 → 管理助手」中检查配置。';
   if(modelFault.test(code))return '管理助手的模型配置或服务暂不可用，请在控制台检查模型设置后重试。';
   if(outputFault.test(code))return '管理助手的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请在控制台查看执行记录。';
   if(contextFault.test(code))return '本次请求需要的上下文超过模型请求上限，请缩小范围（例如指定项目或时间段）后重试。';
@@ -38,14 +38,14 @@ export function managementFailure(code:string):string {
 /** What a group sees when its assistant cannot answer: who can fix it and where, without request data or internal IDs. */
 export function serviceFailure(code:string,role:string,detail?:string):string {
   if(/^channel_(resource|image|binary)/.test(code))return managementFailure(code);
-  if(code==='service_role_model_not_configured')return `群助手「${role}」尚未配置模型，请维护人在控制台为它选择模型（全局角色在「全局设置 → 服务角色」，项目角色在「个人设置 → 飞书绑定」）。`;
-  // #849: the model must serve every project the group reads; detail names the projects it does not. Never another model.
-  if(code==='channel_service_model_unavailable')return `群助手「${role}」的模型不可用：${detail??'它没有授权给本群范围内的全部项目。'}请项目管理员在控制台「个人设置 → 飞书绑定」为本群换一个对范围内每个项目都可用的助手角色，或调整范围。`;
-  if(code==='service_role_unavailable'||code==='service_role_not_bindable')return `群助手「${role}」已停用或不能用于群聊，请维护人在控制台「个人设置 → 飞书绑定」点击本群「配置仓库与权限」重新选择服务角色。`;
-  if(modelFault.test(code))return `群助手「${role}」的模型服务暂不可用，请稍后重试；持续失败时请超级管理员检查模型设置。`;
-  if(outputFault.test(code))return `群助手「${role}」的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请维护人在控制台查看本群助手的会话记录。`;
-  if(contextFault.test(code))return `本次问题需要的上下文超过群助手「${role}」的模型请求上限，请缩小范围（例如指定仓库）后重试。`;
-  if(code==='conversation_stopped')return `群助手「${role}」的本次回答已在控制台停止，不再发送最终回答；已经发出的进展消息保留。`;
+  if(code==='service_role_model_not_configured'||code==='channel_service_model_not_configured')return `${role}尚未配置模型，请维护人在控制台「个人设置 → 飞书绑定」点击本群「配置群聊助手」选择模型。`;
+  // #849, #1249: the model must serve every project the group reads; detail names the projects it does not. Never another model.
+  if(code==='channel_service_model_unavailable')return `${role}的模型不可用：${detail??'它没有授权给本群范围内的全部项目。'}请项目管理员在控制台「个人设置 → 飞书绑定」点击本群「配置群聊助手」更换对范围内每个项目都可用的模型，或调整范围。`;
+  if(code==='service_role_unavailable'||code==='service_role_not_bindable')return `${role}的配置已失效，请维护人在控制台「个人设置 → 飞书绑定」点击本群「配置群聊助手」重新保存。`;
+  if(modelFault.test(code))return `${role}的模型服务暂不可用，请稍后重试；持续失败时请管理员检查模型设置。`;
+  if(outputFault.test(code))return `${role}的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请维护人在控制台查看本群助手的会话记录。`;
+  if(contextFault.test(code))return `本次问题需要的上下文超过${role}的模型请求上限，请缩小范围（例如指定仓库）后重试。`;
+  if(code==='conversation_stopped')return `${role}的本次回答已在控制台停止，不再发送最终回答；已经发出的进展消息保留。`;
   if(/conversation_source_changed|channel_service_binding|channel_sensitive_message|channel_source_message/.test(code))return '本群助手的配置或来源消息刚刚变化，本次回答已停止，请重新发送请求。';
   return `群助手本次未完成（${code}），请稍后重试，或请维护人在控制台检查本群助手的配置。`;
 }

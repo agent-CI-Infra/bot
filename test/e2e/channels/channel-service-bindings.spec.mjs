@@ -21,7 +21,7 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.getByRole('button', { name: '创建个人绑定', exact: true })).toBeVisible();
     await page.getByRole('link', { name: '创建群绑定', exact: true }).click();
     await expect(page).toHaveURL(/#\/identity\/feishu\/groups\/new$/);
-    await expect(page.getByLabel('助手角色', { exact: true })).toHaveValue('repository-assistant');
+    await expect(page.getByLabel('助手模型', { exact: true })).toHaveValue('');
     // A new group starts at decoupled defaults (#1206): GitHub read, tasks none, project_memory read; platform capabilities visible directly.
     const github = page.getByRole('group', { name: 'GitHub 权限', exact: true });
     const tasks = page.getByRole('group', { name: '项目任务权限', exact: true });
@@ -44,13 +44,13 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page).toHaveURL(/#\/identity\/feishu$/);
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中', { exact: true })).toBeVisible();
-    await expect(binding.getByText('仓库问答助手', { exact: true })).toBeVisible();
+    await expect(binding.getByText('未配置模型', { exact: true })).toBeVisible();
     await expect(binding.getByText('项目范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
     await expect(binding).toContainText('GitHub 只读');
     await expect(binding).toContainText('平台 项目共享知识 只读');
     await expect(binding).toContainText('负责人：administrator');
     // Repositories and the decoupled permissions remain one click away via the dedicated configuration route.
-    await binding.getByRole('link', { name: '配置仓库与权限', exact: true }).click();
+    await binding.getByRole('link', { name: '配置群聊助手', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeVisible();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-101', exact: true })).toBeChecked();
     await expect(page.getByRole('checkbox', { name: 'fixture/project-102', exact: true })).toBeChecked();
@@ -72,13 +72,13 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(binding).toContainText('平台 项目共享知识 只读');
     expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'create', github_issues: 'read', github_actions: 'read', github_contents: 'read', project_memory: 'read' });
     // Quick preset for collaborate + dispatch sets GitHub write + tasks create while keeping Contents read.
-    await binding.getByRole('link', { name: '配置仓库与权限', exact: true }).click();
+    await binding.getByRole('link', { name: '配置群聊助手', exact: true }).click();
     await page.getByRole('button', { name: '可协作 + 可派活', exact: true }).click();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding).toContainText('GitHub Issue / PR / Actions 读写');
     expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'create', github_issues: 'write', github_actions: 'write', github_contents: 'read', project_memory: 'read' });
     // Merging from the group (Contents write) is only an individual GitHub item, starting from the GitHub tier chosen before.
-    await binding.getByRole('link', { name: '配置仓库与权限', exact: true }).click();
+    await binding.getByRole('link', { name: '配置群聊助手', exact: true }).click();
     await expect(github.getByLabel('Issue / PR / Actions 读写', { exact: true })).toBeChecked();
     await github.getByLabel('逐项设置', { exact: true }).check();
     await expect(tasks.getByLabel('只读 + 可新增', { exact: true })).toBeChecked();
@@ -92,14 +92,14 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(binding).toContainText('项目任务 完全可读写');
     await expect(binding).toContainText('平台 项目共享知识 读写');
     expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ project_tasks: 'write', github_contents: 'write', project_memory: 'write' });
-    await binding.getByRole('link', { name: '配置仓库与权限', exact: true }).click();
+    await binding.getByRole('link', { name: '配置群聊助手', exact: true }).click();
     await expect(tasks.getByLabel('完全可读写', { exact: true })).toBeChecked();
     await expect(github.getByLabel('逐项设置', { exact: true })).toBeChecked(); await expect(github.getByLabel('Contents', { exact: true })).toHaveValue('write');
     await expect(platform.getByLabel('项目共享知识', { exact: true })).toHaveValue('write');
     await page.locator('#feishu-group-editor').getByRole('link', { name: '← 返回飞书绑定', exact: true }).click();
     await expect(page).toHaveURL(/#\/identity\/feishu$/);
     const row = h.store.get('SELECT * FROM channel_service_bindings');
-    expect(row.service_role_id).toBe('repository-assistant');
+    expect(row.service_role_id).toBe('group-assistant');
     expect(h.store.all('SELECT project_id FROM scoped_grants WHERE principal_id=? ORDER BY project_id', row.principal_id).map(g => g.project_id)).toEqual(['101', '102']);
     expect(h.store.get('SELECT kind FROM principals WHERE id=?', row.principal_id).kind).toBe('service');
     // Chat schedules live inside Feishu Conversations (#1232): clicking 定时任务 opens #/conversations/<id>?section=schedules.
@@ -129,7 +129,7 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await binding.locator('.feishu-row-title strong').click();
     await expect(page).toHaveURL(new RegExp(`#/conversations/${row.chat_id}$`));
     await expect(page.getByLabel('消息与执行时间线')).toContainText('Original local group decision');
-    await expect(page.getByText('当前群绑定：仓库问答助手 · 范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
+    await expect(page.getByText('当前群绑定：模型 未配置 · 范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
     await page.getByText('搜索本地消息记录', { exact: true }).click();
     await page.getByLabel('消息关键词', { exact: true }).fill('absent-local-term');
     await page.getByRole('button', { name: '搜索本地记录', exact: true }).click();
@@ -170,7 +170,7 @@ test('saving explains an app without the member scope, and a gateway page, inste
     await save.click();
     const boundRow = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(boundRow.getByText('生效中', { exact: true })).toBeVisible();
-    await expect(boundRow.getByText('仓库问答助手', { exact: true })).toBeVisible();
+    await expect(boundRow.getByText('未配置模型', { exact: true })).toBeVisible();
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

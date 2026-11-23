@@ -88,7 +88,7 @@ async function channelBindingOverview(data) {
           rowActions.append(channelLink('#/identity/feishu/groups/' + b.chat_id, t('feishu.configure'), 'button-link quiet'));
           row.append(name,
             channelProfileDetails(b.chat, () => { name.textContent = channelChatName(b.chat); }),
-            note(`${( { active: t('feishu.state.active'), paused: t('feishu.state.paused'), disabled: t('feishu.state.disabled') } )[b.state] || b.state} · ${b.service_role.name || t('feishu.role_deleted')} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
+            note(`${( { active: t('feishu.state.active'), paused: t('feishu.state.paused'), disabled: t('feishu.state.disabled') } )[b.state] || b.state} · ${b.model?.model_name || t('feishu.model_unconfigured')} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
             rowActions);
           list.append(row);
         }
@@ -354,7 +354,7 @@ async function renderChannelConsole(request) {
   async function readTasks(more = false) {
     const result = await api(`/api/channels/chats/${selected}/tasks?offset=${more ? taskOffset : 0}`); if (!alive()) return;
     if (!more) tasks.clear(); for (const task of result.tasks) tasks.set(task.id, task); taskOffset = result.next_offset;
-    related.replaceChildren(element('h2', '派生任务'), note('项目任务交给项目团队处理；独立任务由本会话的服务角色处理。'));
+    related.replaceChildren(element('h2', '派生任务'), note('项目任务交给项目团队处理；独立任务由本会话的助手处理。'));
     const projectTasks = element('section'); projectTasks.append(element('h3', '项目任务'));
     for (const task of tasks.values()) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.summary), state(task.status), note(task.project_name), button('查看任务过程', () => openTask(task.id).catch(error), 'quiet')); projectTasks.append(row); }
     if (!tasks.size) projectTasks.append(note('当前授权和来源范围暂无项目任务。'));
@@ -363,7 +363,7 @@ async function renderChannelConsole(request) {
     for (const task of result.own_tasks) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.title), state(task.state));
       if (task.last_conclusion) { const detail = element('details'); detail.append(element('summary', '查看最近结论'), element('p', task.last_conclusion, 'channel-message-body')); row.append(detail); } own.append(row); }
     if (!result.own_tasks.length) own.append(note('当前会话暂无可见独立任务。'));
-    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu/groups/' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围、权限与助手角色'));
+    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu/groups/' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围、权限、模型与提示词'));
   }
   async function update(more) {
     if (pending || !alive()) return; pending = true; refresh.disabled = moreMessages.disabled = moreTurns.disabled = true; clearTimeout(refreshTimer);
@@ -383,9 +383,9 @@ async function renderChannelConsole(request) {
       if (result.conversation.mode === 'service' && result.conversation.binding) {
         const b = result.conversation.binding;
         const scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
-        bindingMeta.textContent = `当前群绑定：${b.service_role.name || '服务角色已删除'} · 范围：${scopeText}`;
+        bindingMeta.textContent = `当前群绑定：模型 ${b.model ? b.model.model_name : '未配置'} · 范围：${scopeText}`;
         bindingMeta.hidden = false;
-        if (result.conversation.can_manage) contextActions.append(channelLink('#/identity/feishu/groups/' + selected, '配置仓库与权限', 'button-link quiet'));
+        if (result.conversation.can_manage) contextActions.append(channelLink('#/identity/feishu/groups/' + selected, '配置群聊助手', 'button-link quiet'));
       } else {
         bindingMeta.hidden = true;
         if (result.conversation.mode === 'management' && result.conversation.can_continue) {
