@@ -218,7 +218,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const progress = element('details', '', 'management-progress'), progressSummary = element('summary', '执行进展'), stepsBody = element('div', '', 'management-steps');
     progress.hidden = true; progress.open = true; progress.append(progressSummary, stepsBody);
     const replies = element('div', '', 'management-replies'); content.append(meta, progress, replies); assistant.append(avatar, content); item.append(assistant); feed.append(item);
-    const value = { item, replies, badge, elapsed, activity, lastActivity: NaN, copy, answers: [], progress, progressSummary, stepsBody, steps: [], provisional: null,
+    const value = { item, replies, badge, elapsed, activity, lastActivity: NaN, copy, answers: [], progress, progressSummary, stepsBody, steps: [], notes: 0, provisional: null,
       state: record?.state ?? 'pending', stage: '正在连接助手', startedAt: record?.created_at ?? new Date().toISOString(), finishedAt: record?.updated_at, notice: null };
     turns.set(id, value); paintTurn(value); return value;
   };
@@ -233,8 +233,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     value.activity.textContent = running ? managementActivity(value.lastActivity, Date.now()) : ''; value.activity.hidden = !value.activity.textContent;
     for (const step of value.steps) if (step.native && step.state === 'running') setStepState(step, 'running');
     const completed = value.steps.filter(step => step.state === 'succeeded' || step.native?.result).length;
-    value.progressSummary.textContent = '执行进展 · ' + completed + '/' + value.steps.length + ' 步完成';
-    value.progress.hidden = !value.steps.length;
+    // Notices of a Pi turn sit in the same panel (#1300): a turn with model steps only still shows them, counted as notices
+    // since there are no steps to count.
+    value.progressSummary.textContent = '执行进展 · ' + (value.steps.length ? completed + '/' + value.steps.length + ' 步完成' : value.notes + ' 条提示');
+    value.progress.hidden = !value.steps.length && !value.notes;
     value.copy.hidden = !value.answers.length;
     value.item.setAttribute('aria-busy', String(running));
   }
@@ -405,7 +407,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     } else if (row.type === 'progress') {
       // Notices of a Pi turn (#1296): compaction, a restart after an edit, steps left out by the rate limit.
       const text = managementProgressNotice(data);
-      if (text) { currentTurn.stepsBody.append(element('p', text, 'management-step-note')); if (data.notice === 'compacting') currentTurn.stage = '正在压缩上下文'; }
+      if (text) { currentTurn.stepsBody.append(element('p', text, 'management-step-note')); currentTurn.notes++; if (data.notice === 'compacting') currentTurn.stage = '正在压缩上下文'; }
     } else if (row.type === 'tool_call') {
       finishAnswer(currentTurn);
       const step = toolStep(currentTurn, data, row.sequence);
