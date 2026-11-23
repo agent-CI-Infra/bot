@@ -17,14 +17,27 @@ function machineSection(globalSettings = false) {
   // A resource left empty follows the global default; own() is the value the project sets.
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
   const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rebuild: '重新预编译镜像', rerun_setup: '重新预编译镜像', egress: '网络', env: '环境变量' };
-  // An entry the field cannot accept must be reported, never read as「empty → follow the global default」: letters typed
-  // into a number input leave .value empty without badInput, and a value the browser discards loses badInput too. The
-  // invalid state is captured while typing, so a later submit cannot mistake it for an explicit clear.
+  // An entry the field cannot accept must be reported, never read as「empty → follow the global default」. The four
+  // resource fields are decimal-input text (#865): a number input silently drops text it cannot parse, so a typo left
+  // .value empty and the save wrote null, clearing the project override. Text keeps what was typed, and the value is
+  // checked here — the same bounds and step the number input enforced natively. The invalid state is still captured
+  // while typing, so a later submit cannot mistake it for an explicit clear.
   const number = (name, step) => {
-    const control = input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
+    const control = input(name, own(name) ?? '', { type: 'text', inputMode: 'decimal', autocomplete: 'off', spellcheck: false,
       placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
     const emptyNote = () => '留空即跟随全局默认';
     const invalidNote = () => '这个字段只能填数字';
+    // '' (an empty field) is not an error: it follows the global default unless it was refused while holding text.
+    const valueError = text => {
+      if (text === '') return '';
+      if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text) || !Number.isFinite(Number(text))) return invalidNote();
+      const value = Number(text), [min, max] = pc.bounds?.[name] ?? [];
+      if (min != null && value < min) return `需不小于 ${min}`;
+      if (max != null && value > max) return `需不大于 ${max}`;
+      const size = Number(step);
+      if (size > 0) { const steps = (value - (min ?? 0)) / size; if (Math.abs(steps - Math.round(steps)) > 1e-9) return `取值步长是 ${step}`; }
+      return '';
+    };
     const error = element('span', '', 'machine-config-error'), follow = element('span', '', 'machine-config-follow');
     error.id = `machine-${name}-error`; error.hidden = true; follow.textContent = emptyNote(); follow.hidden = control.value.trim() !== '';
     control.setAttribute('aria-describedby', error.id);
@@ -34,13 +47,13 @@ function machineSection(globalSettings = false) {
     // empty field fires only a delete, so neither may reset the rejection.
     let rejected = false;
     const render = () => {
-      const accepted = control.value.trim() !== '' && Number.isFinite(Number(control.value.trim()));
+      const text = control.value.trim(), reason = valueError(text), accepted = text !== '' && reason === '';
       control.dataset.invalidNumber = rejected ? '1' : '';
       // A refused entry the field can still accept is released by the submit (#944); until then the message stays, but it
       // must not let the browser reject that submit before readSpec has had the chance to release it.
-      control.setCustomValidity(rejected && !accepted ? invalidNote() : '');
+      control.setCustomValidity(rejected && !accepted ? reason || invalidNote() : '');
       control.setAttribute('aria-invalid', rejected ? 'true' : 'false');
-      error.textContent = rejected ? invalidNote() : '';
+      error.textContent = rejected ? reason || invalidNote() : '';
       error.hidden = !rejected; clear.hidden = !rejected;
       follow.textContent = emptyNote();
       follow.hidden = rejected || control.value.trim() !== '';
@@ -53,11 +66,12 @@ function machineSection(globalSettings = false) {
     // still holds the saved value therefore saves without clearing, and one that holds a new number saves that number.
     control.machineReleaseIfAccepted = () => {
       const text = control.value.trim();
-      if (rejected && text !== '' && Number.isFinite(Number(text))) release();
+      if (rejected && text !== '' && !valueError(text)) release();
     };
     const clear = button('清空并跟随全局默认', () => { release(); control.value = ''; control.dispatchEvent(new Event('input', { bubbles: true })); control.focus(); }, 'quiet');
     clear.hidden = true;
-    // Characters a number input cannot accept never reach .value and fire no input event; beforeinput still reports them.
+    // Letters reach a text field, unlike the number input this replaced; beforeinput still reports a paste of characters
+    // the field cannot mean, so the refusal is raised before the value is read.
     control.addEventListener('beforeinput', event => {
       const data = event.data ?? '';
       if ((event.inputType === 'insertText' || event.inputType === 'insertFromPaste') && data && !/^[0-9.eE+\-]+$/.test(data)) reject();
@@ -66,14 +80,14 @@ function machineSection(globalSettings = false) {
     });
     control.addEventListener('input', () => {
       const text = control.value.trim();
-      // badInput is the browser's own "cannot parse" flag; an entry it discards leaves the value empty but valid.
-      if (control.validity.badInput || (text !== '' && !Number.isFinite(Number(text)))) reject();
-      // Only text the field actually holds releases the refusal. An empty value is not a replacement: a paste over the
-      // saved value drops the selection with the discarded text, so releasing on "changed from the refused value"
-      // would let that empty field pass for an explicit clear (#903 review B1).
+      // Out of range and off-step text is refused like text that is not a number: the browser no longer does it for us.
+      if (valueError(text)) reject();
+      // Only text the field actually holds releases the refusal. An empty value is not a replacement: emptying the field
+      // with Backspace deletes content it held, while an empty value alone is not an explicit clear (#903 review B1).
       else if (rejected && text !== '') release();
       else render();
     });
+    control.machineValueError = valueError;
     control.machineExtras = [error, clear, follow];
     return control;
   };
@@ -137,8 +151,10 @@ function machineSection(globalSettings = false) {
         const control = form.elements[name], text = control.value.trim();
         if (releasing) control.machineReleaseIfAccepted?.();
         // A refused entry is checked first, so it is reported instead of being read as「no change」(review of #903).
-        if (control.dataset.invalidNumber === '1' || (text !== '' && !Number.isFinite(Number(text))))
-          throw new Error(`${names[name]}：这个字段只能填数字`);
+        // The value is validated here too: as text the field no longer has min/max/step for the browser to enforce.
+        const reason = control.machineValueError?.(text) ?? '';
+        if (control.dataset.invalidNumber === '1' || reason)
+          throw new Error(`${names[name]}：${reason || '这个字段只能填数字'}`);
         const value = text === '' ? null : Number(text);
         if (value !== (own(name) ?? null)) spec[name] = value;
       }
