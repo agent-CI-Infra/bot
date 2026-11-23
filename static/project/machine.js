@@ -23,6 +23,14 @@ function machineSection(globalSettings = false) {
   // checked here — the same bounds and step the number input enforced natively. The invalid state is still captured
   // while typing, so a later submit cannot mistake it for an explicit clear.
   const number = (name, step) => {
+    const rawMax = pc.bounds?.[name]?.[1];
+    const effectiveMax = name === 'memory_mb' && pc.host_memory_cap_mb != null
+      ? Math.min(rawMax ?? Infinity, pc.host_memory_cap_mb)
+      : name === 'cpus' && pc.host_cpus != null
+        ? Math.min(rawMax ?? Infinity, pc.host_cpus)
+        : name === 'tmp_mb' && (own('memory_mb') ?? pc.memory_mb) != null
+          ? Math.min(rawMax ?? Infinity, own('memory_mb') ?? pc.memory_mb)
+          : rawMax;
     const control = input(name, own(name) ?? '', { type: 'text', inputMode: 'decimal', autocomplete: 'off', spellcheck: false,
       placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
     const emptyNote = () => '留空即跟随全局默认';
@@ -31,9 +39,9 @@ function machineSection(globalSettings = false) {
     const valueError = text => {
       if (text === '') return '';
       if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text) || !Number.isFinite(Number(text))) return invalidNote();
-      const value = Number(text), [min, max] = pc.bounds?.[name] ?? [];
+      const value = Number(text), [min] = pc.bounds?.[name] ?? [];
       if (min != null && value < min) return `需不小于 ${min}`;
-      if (max != null && value > max) return `需不大于 ${max}`;
+      if (effectiveMax != null && value > effectiveMax) return `需不大于 ${effectiveMax}`;
       const size = Number(step);
       if (size > 0) { const steps = (value - (min ?? 0)) / size; if (Math.abs(steps - Math.round(steps)) > 1e-9) return `取值步长是 ${step}`; }
       return '';
@@ -122,7 +130,12 @@ function machineSection(globalSettings = false) {
   const egressControl = checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）');
   if (!isSuper) egressControl.querySelector('input').disabled = true;
   const fields = element('div', '', 'machine-config-fields');
-  fields.append(group('资源上限', isSuper ? '留空跟随全局默认（全局设置 → 工作电脑）。构建预编译镜像时也按此项目的 CPU 与内存上限执行。' : '资源上限由超级管理员统一管控，留空跟随全局默认；构建预编译镜像时按此处生效上限执行。', resourceGrid),
+  const resourceNote = isSuper
+    ? '留空跟随全局默认（全局设置 → 工作电脑）。构建预编译镜像时也按此项目的 CPU 与内存上限执行。'
+      + (pc.host_memory_cap_mb != null ? ` 当前宿主机单容器内存安全上限为 ${pc.host_memory_cap_mb} MB（预留 25% 给宿主机与控制面）` : '')
+      + (pc.host_clamped ? `，已将原目标 ${pc.configured_memory_mb} MB 自动收紧至 ${pc.memory_mb} MB 生效。` : pc.host_memory_cap_mb != null ? '。' : '')
+    : '资源上限由超级管理员统一管控，留空跟随全局默认；构建预编译镜像时按此处生效上限执行。';
+  fields.append(group('资源上限', resourceNote, resourceGrid),
     group('软件与初始化', pc.build?.toolchain ? '基础镜像已包含：' + pc.build.toolchain + '。本项目填写的软件包与初始化脚本会叠加在全局默认之上自动预编译并缓存；初始化脚本始终以非特权用户（UID 10001）安装到 /opt/preinstalled，不可修改系统目录。' : '本项目软件包与初始化脚本叠加在全局默认之上自动预编译并缓存；初始化脚本始终以非特权用户（UID 10001）运行。',
       globalBaseline,
       configField('额外系统软件包', textarea('packages', packagesText(shown.packages), { rows: 2, spellcheck: false, placeholder: 'Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev（自动叠加在全局包之上）' }), 'packages'),

@@ -358,16 +358,26 @@ export class Projects {
     const effectiveTmpMb = Math.min(spec.tmp_mb, effectiveMemoryMb);
     return { ...spec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
   }
-  allocatedMemoryMb(host = this.lastHost ?? null) {
-    return this.list().filter(p => ['ready', 'busy'].includes(p.state))
-      .reduce((sum, p) => sum + this.effectiveSpec(this.spec(p.repository_id), host).memory_mb, 0);
+  allocatedMemoryMb(host = this.lastHost ?? null, excludeRepo = null) {
+    return this.list().filter(p => p.repository_id !== excludeRepo && ['ready', 'busy'].includes(p.state))
+      .reduce((sum, p) => {
+        const applied = p.applied ? JSON.parse(p.applied) : null;
+        return sum + (typeof applied?.memory_mb === 'number' ? applied.memory_mb : this.effectiveSpec(this.spec(p.repository_id), host).memory_mb);
+      }, 0);
   }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
     const { spec: _saved, build, setup, applied, spec_revision: specRevision, configured_keys: configuredKeys, ...state } = project, rawSpec = this.spec(repo), own = this.own(repo);
-    const spec = this.effectiveSpec(rawSpec);
+    const hostCapMb = this.lastHost?.memory_mb ? hostMemoryCap(this.lastHost.memory_mb) : (this.lastHost?.fallback_cap_mb ?? null);
+    const baseEff = this.effectiveSpec(rawSpec);
+    let effMemoryMb = baseEff.memory_mb;
+    if (hostCapMb !== null && own.memory_mb === undefined) {
+      const remainingMb = Math.floor((hostCapMb - this.allocatedMemoryMb(this.lastHost, repo)) / 256) * 256;
+      if (effMemoryMb > remainingMb && remainingMb >= resourceBounds.memory_mb[0]) effMemoryMb = remainingMb;
+    }
+    const spec = { ...baseEff, memory_mb: effMemoryMb, tmp_mb: Math.min(baseEff.tmp_mb, effMemoryMb) };
     const liveBuild = this.projectBuildJobs.get(repo)?.state;
     const buildInfo = liveBuild ? { ...liveBuild } : (build ? JSON.parse(build) : null);
     const globalDefaults = this.globalDefaults();
@@ -391,6 +401,7 @@ export class Projects {
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
       ...spec, configured_memory_mb: rawSpec.memory_mb, host_clamped: spec.memory_mb !== rawSpec.memory_mb,
+      host_memory_cap_mb: hostCapMb, host_cpus: this.lastHost?.cpus ?? null, host_memory_mb: this.lastHost?.memory_mb ?? null,
       spec_revision: Number(specRevision) || 0, configured_keys: configuredKeys ? JSON.parse(configuredKeys) : null, build: buildInfo, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
       defaults: resources(effectiveDefaults), global_defaults: { ...globalDefaults, ...resources(effectiveDefaults) },
       own: {
@@ -409,11 +420,12 @@ export class Projects {
   async hostInfo() {
     try {
       const info = await this.docker.request('GET', '/info');
-      if (info?.NCPU && info?.MemTotal) {
+      if (info?.NCPU > 0 && info?.MemTotal > 0) {
         this.lastHost = { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) };
         return this.lastHost;
       }
-      return null;
+      // Valid response missing host CPU/memory fields is treated as unavailable (fail closed, never fail open to 16 GiB).
+      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
     } catch {
       return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
     }
@@ -807,9 +819,24 @@ export class Projects {
   async provision(repo, { forceSetup = false, deferBuild = false } = {}) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
     const hostInfo = await this.hostInfo();
-    // Apply the unified host-memory reserve cap and keep project /tmp tmpfs bounded by effective container RAM (#1279).
-    const effectiveSpec = this.effectiveSpec(spec, hostInfo);
-    const effectiveMemoryMb = effectiveSpec.memory_mb, effectiveTmpMb = effectiveSpec.tmp_mb;
+    // Apply the unified 75% host-memory reserve cap and aggregate project budget across running (ready/busy) projects (#1279).
+    const baseSpec = this.effectiveSpec(spec, hostInfo);
+    const hostCapMb = hostInfo?.memory_mb ? hostMemoryCap(hostInfo.memory_mb) : (hostInfo?.fallback_cap_mb ?? null);
+    let effectiveMemoryMb = baseSpec.memory_mb;
+    if (hostCapMb !== null) {
+      const otherAllocatedMb = this.allocatedMemoryMb(hostInfo, repo);
+      const remainingMb = hostCapMb - otherAllocatedMb;
+      if (effectiveMemoryMb > remainingMb) {
+        const hasOwnMemory = this.own(repo).memory_mb !== undefined;
+        const clampedRemaining = Math.floor(remainingMb / 256) * 256;
+        if (hasOwnMemory || clampedRemaining < resourceBounds.memory_mb[0]) {
+          throw new ManagerError('host_memory_exhausted', 507);
+        }
+        effectiveMemoryMb = clampedRemaining;
+      }
+    }
+    const effectiveTmpMb = Math.min(baseSpec.tmp_mb, effectiveMemoryMb);
+    const effectiveSpec = { ...baseSpec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
     // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
     // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
     // memory whether or not the host has swap.

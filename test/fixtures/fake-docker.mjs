@@ -7,6 +7,8 @@ import { deleteCliConfig, inspectCliConfigs, writeCliConfig } from '../../runner
 // as "METHOD path", so a test can tell which resources were removed.
 export class FakeDocker {
   containers = new Map(); volumes = new Map(); networks = new Map(); starts = 0; failNetwork = false;
+  // Default realistic 16-CPU / 64 GiB host; tests simulating small or broken /info override docker.info explicitly.
+  info = { NCPU: 16, MemTotal: 64 * 1024 ** 3 };
   images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; buildCalls = []; runs = [];
   calls = []; onBuild = null;
   // The raw GET /system/df payload (#671): the same answer the manager parses in readDockerUsage(), not a shape of its own.
@@ -24,7 +26,7 @@ export class FakeDocker {
   }
   async request(method, path, body, raw, timeout = 90000) {
     this.calls.push(method + ' ' + path);
-    if (path === '/info') return this.info || {};
+    if (path === '/info') return this.info;
     if (path.startsWith('/system/df')) {
       this.timeouts.push({ path, timeout });
       if (this.dfFailure && path.includes(this.dfFailure)) throw new Error('docker_timeout');

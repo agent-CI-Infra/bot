@@ -140,7 +140,20 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
   assert.equal(desc301.memory_mb, 12288, 'describe() exposes effective clamped memory');
   assert.equal(desc301.configured_memory_mb, 16384);
   assert.equal(desc301.host_clamped, true);
+  assert.equal(desc301.host_memory_cap_mb, 12288);
   assert.equal(desc301.resources_pending, false, 'applied matches effective clamped spec');
+
+  // 1b. Two projects on a 16 GiB host: second project fails closed when 301 consumes the full 12 GiB project budget,
+  // and succeeds (auto-clamped to remaining 6 GiB) once 301 is lowered to 6 GiB (total 12 GiB <= 75% host cap).
+  await assert.rejects(f.projects.register('304'), err => err.message === 'host_memory_exhausted' && err.status === 507);
+  await f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 6144 } });
+  assert.equal(f.host('301').Memory, 6144 * mib);
+  await f.projects.register('305');
+  assert.equal(f.host('305').Memory, 6144 * mib);
+  assert.equal(f.projects.allocatedMemoryMb(), 12288);
+  // Stop both 16 GiB test projects before switching the fixture host to 8 GiB.
+  await f.projects.operate('301', 'stop', { operation_id: id(), generation: 1 });
+  await f.projects.operate('305', 'stop', { operation_id: id(), generation: 1 });
 
   // 2. 8 GiB host: clamps to 6 GiB (6144 MiB), explicit equal-to-host 8192 MiB is rejected on both setDefaults and configure.
   f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
@@ -159,17 +172,22 @@ test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject expl
   await assert.rejects(f.projects.operate('302', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 8192 } }), /memory_exceeds_host/);
   await assert.rejects(f.projects.operate('302', 'configure', { operation_id: id(), generation: 1, request: { tmp_mb: 8192 } }), /tmp_exceeds_memory/);
 
-  // 3. /info failure on cold manager falls back conservatively to 4096 MiB instead of failing open to 16 GiB.
-  const f2 = fixture(t);
-  const origReq = f2.docker.request.bind(f2.docker);
-  f2.docker.request = async (method, path, body, raw, timeout) => {
-    if (path === '/info') throw new Error('docker_socket_unreachable');
-    return origReq(method, path, body, raw, timeout);
-  };
-  const coldView = await f2.projects.defaultsView();
-  assert.equal(coldView.defaults.memory_mb, 4096);
-  assert.equal(coldView.host_memory_cap_mb, 4096);
-  await assert.rejects(f2.projects.setDefaults({ memory_mb: 8192 }), /memory_exceeds_host/);
-  await f2.projects.register('303');
-  assert.equal(f2.host('303').Memory, 4096 * mib);
+  // 3. /info failure (thrown error) OR resolved invalid/empty /info ({}, null) on cold manager both fail closed to 4096 MiB.
+  for (const mode of ['throw', 'empty', 'null']) {
+    const f2 = fixture(t);
+    const origReq = f2.docker.request.bind(f2.docker);
+    f2.docker.request = async (method, path, body, raw, timeout) => {
+      if (path === '/info') {
+        if (mode === 'throw') throw new Error('docker_socket_unreachable');
+        return mode === 'empty' ? {} : null;
+      }
+      return origReq(method, path, body, raw, timeout);
+    };
+    const coldView = await f2.projects.defaultsView();
+    assert.equal(coldView.defaults.memory_mb, 4096, mode);
+    assert.equal(coldView.host_memory_cap_mb, 4096, mode);
+    await assert.rejects(f2.projects.setDefaults({ memory_mb: 8192 }), /memory_exceeds_host/);
+    await f2.projects.register('303');
+    assert.equal(f2.host('303').Memory, 4096 * mib, mode);
+  }
 });
