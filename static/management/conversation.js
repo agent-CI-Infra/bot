@@ -265,7 +265,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const box = element('details', '', 'management-step'), summary = element('summary', '', 'management-step-summary');
     // The assistant's own independent tasks (#312) are named by their title; the inner queries and commands show as their own steps.
     const own = { start_own_task: '独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务' }[data.name];
-    const toolLabel = { start_repository: '仓库启动与申请', start_requests: '处理启动申请', github_read: '读取仓库内容', github_search: '检索仓库内容', read_job_log: '读取 Actions 日志', github_write: '写入 GitHub', run_command: '在助手电脑运行命令', read_file: '读取助手电脑文件', write_file: '写入助手电脑文件', delete_file: '删除助手电脑文件', read_skill: '读取技能', read_tool_result: '读取工具结果' }[data.name];
+    const toolLabel = { start_repository: '仓库启动与申请', start_requests: '处理启动申请', github_read: '读取仓库内容', github_search: '检索仓库内容', read_job_log: '读取 Actions 日志', github_write: '写入 GitHub', run_command: '在助手电脑运行命令', list_files: '列出助手电脑文件', read_file: '读取助手电脑文件', write_file: '写入助手电脑文件', delete_file: '删除助手电脑文件', read_skill: '读取技能', read_tool_result: '读取工具结果' }[data.name];
     const args = data.arguments ?? {}, target = args.target ?? {}, operation = args.operation;
     const caption = own ?? managementOperationLabels[operation] ?? operation ?? toolLabel ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
     const preview = [args.command, args.path, args.file, args.query, args.arguments?.query, args.title, args.job_id, args.task_id, target.task_id, target.workflow_id, args.repository, target.project_id]

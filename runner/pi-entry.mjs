@@ -18,7 +18,7 @@ import {createToolDispatch} from './tool-dispatch.mjs';
 import {createTokenExchange,createReadGrant} from './token-exchange.mjs';
 import {createToolResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
-import {local} from './paths.mjs';
+import {local,assistant,homeDirectory} from './paths.mjs';
 import {noSpace,toolDiskFull} from './disk.mjs';
 import {Redactor} from './credential-redaction.mjs';
 import {TEXT_REQUEST_LIMIT,IMAGE_REQUEST_LIMIT,MAX_IMAGES_IN_CONTEXT,IMAGE_TOKEN_ESTIMATE,sanitizeImageEvents,analyzeModelPayload,enforceSessionImageBudget,isImageOrPayloadRejection,extractToolContentBlocks} from './image-budget.mjs';
@@ -253,7 +253,7 @@ try{
       const githubHost=typeof config.github_host==='string'&&config.github_host?config.github_host:'github.com';
       const allowHttpGit=Boolean(local&&config.allow_http_git===true);
       const gitCredPath=new URL('./git-credential-bot.mjs',import.meta.url).pathname;
-      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:buildGitConfigEnv({...ctx.env,HOME:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret,BOT_GITHUB_HOST:githubHost,...(config.run_token?{BOT_RUN_TOKEN:config.run_token}:{}),...(allowHttpGit?{BOT_ALLOW_HTTP_GIT_CREDENTIAL:'true'}:{}),...(local&&process.env.BOT_REAL_GH_BIN?{BOT_REAL_GH_BIN:process.env.BOT_REAL_GH_BIN}:{})},gitCredPath,allowHttpGit)})});
+      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:buildGitConfigEnv({...ctx.env,HOME:assistant?homeDirectory:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret,BOT_GITHUB_HOST:githubHost,...(config.run_token?{BOT_RUN_TOKEN:config.run_token}:{}),...(allowHttpGit?{BOT_ALLOW_HTTP_GIT_CREDENTIAL:'true'}:{}),...(local&&process.env.BOT_REAL_GH_BIN?{BOT_REAL_GH_BIN:process.env.BOT_REAL_GH_BIN}:{})},gitCredPath,allowHttpGit)})});
       tools.push({...bash,label:'bash'});
     }
     const fileAccess=native?.fileTools??native?.workspace;

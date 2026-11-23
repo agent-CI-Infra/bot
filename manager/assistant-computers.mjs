@@ -41,9 +41,10 @@ export const abandonAfterMs = 120_000;
 const ticketMs = 15_000;
 // Runner operations an assistant computer accepts: a shell command in /workspace, file access below HOME, /workspace and /tmp,
 // and control-plane staged repository archive extraction into /workspace or /tmp.
-const types = ['command', 'assistant_read', 'assistant_write', 'assistant_delete', 'assistant_archive_stage', 'assistant_archive_extract'];
+const types = ['command', 'assistant_list', 'assistant_read', 'assistant_write', 'assistant_delete', 'assistant_archive_stage', 'assistant_archive_extract'];
 const keys = {
   command: ['command', 'timeout_ms', 'keep_background'],
+  assistant_list: ['path', 'recursive'],
   assistant_read: ['path', 'offset', 'limit'],
   assistant_write: ['path', 'base64', 'offset'],
   assistant_delete: ['path'],
@@ -56,7 +57,8 @@ function validateCall(call, harness = false) {
   if (!call || typeof call !== 'object' || !types.includes(call.type) || Object.keys(call).some(k => k !== 'type' && !keys[call.type].includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isSafeInteger(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.keep_background !== undefined && typeof call.keep_background !== 'boolean') throw new ManagerError('invalid_runner_request', 400);
-  if (['assistant_read', 'assistant_write', 'assistant_delete'].includes(call.type) && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
+  if (['assistant_list', 'assistant_read', 'assistant_write', 'assistant_delete'].includes(call.type) && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'assistant_list' && call.recursive !== undefined && typeof call.recursive !== 'boolean') throw new ManagerError('invalid_runner_request', 400);
   if (['assistant_archive_stage', 'assistant_archive_extract'].includes(call.type) && !idPattern.test(call.stage_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'assistant_archive_extract' && (typeof call.destination !== 'string' || !call.destination || call.destination.length > 4096 || call.destination.includes('\0') || (call.overwrite !== undefined && typeof call.overwrite !== 'boolean'))) throw new ManagerError('invalid_runner_request', 400);
 }

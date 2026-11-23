@@ -8,7 +8,6 @@ import { repository } from '../../../fixtures/helpers.mjs';
 import { knowledgeActor } from '../../../fixtures/knowledge-fixture.mjs';
 import { authorize, invalidate, resolvePrincipalActor, revision } from '../../../../dist/identity/authorization.js';
 import { roleApi } from '../../../../dist/roles/api.js';
-import { serviceMemory } from '../../../../dist/service-roles/resources.js';
 import { TaskCommands } from '../../../../dist/tasks/commands.js';
 import { assertManagedExecution } from '../../../../dist/tasks/management.js';
 import { serviceRole } from '../../../../dist/service-roles/roles.js';
@@ -489,13 +488,11 @@ test('a group assistant works a side question in its own task with the same tool
   assert.equal(row.state, 'completed'); assert.equal(row.rounds, 1); assert.ok(!row.history.includes('#7'), 'history is sealed');
   // Billed like the turn itself: main turn requests plus the own task's two.
   assert.ok(roleRequests() >= billed + 4);
-  // Roster changes retain the exact stored owner key, including its pre-existing context revision.
-  const beforeFence=f.service.serviceBindings.fence(f.chat.id),memoryOwner={service_role_id:binding.service_role_id,kind:'channel',owner_id:f.chat.id,principal_id:binding.principal_id,fence:beforeFence};
-  serviceMemory(f.h.store,memoryOwner,'remember_role_memory',{key:'stable',content:'saved before source updates'});
+  // Roster changes retain the exact authorization fence, including its pre-existing context revision.
+  const beforeFence=f.service.serviceBindings.fence(f.chat.id);
   const source=f.service.turnMessages.event(f.h.store.get("SELECT * FROM channel_inbox WHERE chat_ref=? AND dedup_key LIKE 'message:%' LIMIT 1",f.chat.id));
   f.service.ledger.accept({...source,kind:'audience_changed'});
   assert.equal(f.service.serviceBindings.fence(f.chat.id),beforeFence);
-  assert.equal(serviceMemory(f.h.store,{...memoryOwner,fence:f.service.serviceBindings.fence(f.chat.id)},'read_role_memory',{key:'stable'}).content,'saved before source updates');
   // Continue it later: it sees its earlier round; listing shows the latest conclusion.
   main = (body, res, seen) => !seen.length ? call(res, 'list_own_tasks', {}) : seen.length === 1 ? call(res, 'continue_own_task', { task_id: seen[0].own_tasks[0].task_id, instruction: '再看看有没有草稿 PR' })
     : say(res, '补充：' + seen[1].conclusion);
@@ -833,10 +830,8 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
         .map(g => [g.id, revision(h.store, g.grantor_id)]) }));
   };
   const fences = [previousFence(f.chat.id), previousFence(chatB.id)], revisions = h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision);
-  // Seed pre-upgrade private memory and an own task under the legacy service_role_id and fence.
+  // Seed a pre-upgrade own task under the legacy service_role_id and fence.
   const bindingA = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', f.chat.id);
-  const legacyMemOwner = { service_role_id: 'custom-legacy', kind: 'channel', owner_id: f.chat.id, principal_id: bindingA.principal_id, fence: fences[0] };
-  serviceMemory(h.store, legacyMemOwner, 'remember_role_memory', { key: 'release-window', content: '周四晚发布' });
   new OwnTasks(h.store);
   h.store.run(`INSERT INTO service_role_own_tasks(id,service_role_id,owner_kind,owner_id,principal_id,fence,title,state,history,created_at,updated_at)
     VALUES('own-legacy-1','custom-legacy','channel',?,?,?,'升级前分析','completed',?,1,1)`,
@@ -846,8 +841,7 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
   const restarted = new ChannelServiceBindings(h.store, undefined);
   assert.deepEqual([restarted.fence(f.chat.id), restarted.fence(chatB.id)], fences);
   assert.deepEqual(h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision), revisions);
-  // Pre-upgrade private memory and own tasks remain accessible under the preserved fence & legacy service_role_id.
-  assert.equal(serviceMemory(h.store, { ...legacyMemOwner, fence: restarted.fence(f.chat.id) }, 'read_role_memory', { key: 'release-window' }).content, '周四晚发布');
+  // Pre-upgrade own tasks remain accessible under the preserved fence & legacy service_role_id.
   assert.deepEqual(new OwnTasks(h.store).list({ service_role_id: 'custom-legacy', kind: 'channel', owner_id: bindingA.id, principal_id: bindingA.principal_id, fence: restarted.fence(f.chat.id) }).own_tasks.map(r => r.task_id), ['own-legacy-1']);
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.level_migrated'").n, 2);
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.assistant_migrated'").n, 2);
@@ -872,7 +866,7 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
   assert.equal((await done(f, await post(h, f.id, groupMessage('迁移后派个活')))).state, 'completed');
   const [created, paused, mem] = observations(f.requests.at(-1));
   assert.equal(created.state, 'succeeded', JSON.stringify(created)); assert.equal(paused.error, 'operation_not_allowed', 'pausing was never part of the old set');
-  assert.equal(mem.content, '周四晚发布', 'upgraded turn still reads pre-upgrade private memory');
+  assert.equal(mem.error, 'tool_not_allowed', 'retired SQLite role memory tool is no longer offered');
   assert.match(system, /负责协助派活[^]*先说结论/);
   assert.doesNotMatch(system, /已被废弃/);
   // An untouched legacy binding whose legacy service role is disabled (e.g. by project deletion) pauses until re-saved.

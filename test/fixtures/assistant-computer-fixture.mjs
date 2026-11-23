@@ -14,6 +14,7 @@ import { Projects } from '../../manager/projects.mjs';
 import { createManagerServer } from '../../manager/server.mjs';
 import { FakeDocker } from './fake-docker.mjs';
 import { ManagerClient } from '../../dist/projects/service.js';
+import { assistantFile } from '../../runner/assistant-files.mjs';
 
 export async function assistantManager(t) {
   const directory = mkdtempSync(join(tmpdir(), 'assistant-fixture-')), homes = join(directory, 'homes'), containers = join(directory, 'containers');
@@ -27,11 +28,11 @@ export async function assistantManager(t) {
     return request(method, path, body);
   };
   // Where a path of a fake container lives on the host.
-  const place = (name, path) => {
+  const place = (name, path, allowRoot = false) => {
     const host = docker.containers.get(name).HostConfig, home = join(homes, host.Mounts[0].VolumeOptions.Subpath), root = join(containers, name);
     const absolute = resolve('/workspace', path);
-    if (absolute === '/home/assistant' || absolute.startsWith('/home/assistant/')) return { path: join(home, absolute.slice(15)), readOnly: host.Mounts[0].ReadOnly, home };
-    if (absolute.startsWith('/tmp/') || absolute.startsWith('/workspace/')) return { path: join(root, absolute), readOnly: false, home };
+    if (absolute === '/home/assistant' || absolute.startsWith('/home/assistant/')) return { path: join(home, absolute.slice(15)), readOnly: host.Mounts[0].ReadOnly, home, workspaceRoot: join(root, 'workspace'), tmpRoot: join(root, 'tmp') };
+    if ((allowRoot && (absolute === '/tmp' || absolute === '/workspace')) || absolute.startsWith('/tmp/') || absolute.startsWith('/workspace/')) return { path: join(root, absolute), readOnly: false, home, workspaceRoot: join(root, 'workspace'), tmpRoot: join(root, 'tmp') };
     throw new Error('invalid_path');
   };
   docker.runner = async (name, input) => {
@@ -43,6 +44,11 @@ export async function assistantManager(t) {
         const { home } = place(name, '/home/assistant'); commands.push({ container: name, command: input.command, keep_background: input.keep_background === true });
         const run = spawnSync('/bin/sh', ['-c', input.command], { cwd: join(containers, name, 'workspace'), env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8', timeout: input.timeout_ms });
         return { ok: true, result: { exit_code: run.status, output: (run.stdout || '') + (run.stderr || ''), timed_out: false, truncated: false, ...(input.keep_background === true ? { running: true } : {}) } };
+      }
+      if (input.type === 'assistant_list') {
+        const target = place(name, input.path, true);
+        const result = await assistantFile({ ...input, path: target.path }, { workspaceRoot: target.workspaceRoot, tmpRoot: target.tmpRoot, homeRoot: target.home });
+        return { ok: true, result };
       }
       const target = place(name, input.path);
       if (input.type === 'assistant_read') {

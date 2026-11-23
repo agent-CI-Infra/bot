@@ -16,7 +16,6 @@ import { projectCeiling } from '../projects/ceiling.js';
 import { groupBindingModel, modelGaps } from '../service-roles/roles.js';
 import type { ManagementService } from '../management/service.js';
 import { pausedGroupNotice } from '../management/presentation.js';
-import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission, ownerId } from '../service-roles/assistant-computers.js';
 import { checkoutRepositoryName, checkoutRepositoryTool, executeCheckoutRepository } from '../service-roles/checkout.js';
 import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
@@ -65,7 +64,7 @@ export const serviceTools = [readToolResult,
       target: { type: 'object', properties: { type: { type: 'string', enum: ['issue', 'pr', 'branch', 'commit'] }, number: { type: 'integer', minimum: 1 }, ref: { type: 'string', maxLength: 256 } }, required: ['type'], additionalProperties: false },
       intent: { type: 'string', enum: ['report', 'development', 'review', 'test'] },
       writes: { type: 'array', items: { type: 'string', enum: ['pull_request', 'review', 'github', 'actions_rerun'] }, maxItems: 4 } }, ['repository', 'request', 'contract']),
-  ...ownTaskTools, ...serviceMemoryTools, ...assistantComputerTools, checkoutRepositoryTool, ...managementTools, ...mediaTools, sendMessageTool, conversationScheduleTool,
+  ...ownTaskTools, ...assistantComputerTools, checkoutRepositoryTool, ...managementTools, ...mediaTools, sendMessageTool, conversationScheduleTool,
   makeReadSkillTool(feishuGroupSkills), feishuCardTool,
 ];
 // Delegation reaches a project only through its Manager: create a task, find it again, change or cancel it as a whole.
@@ -221,7 +220,6 @@ export class ChannelServiceSessions {
         arguments: operation === 'instructions' ? { instruction: text(args.instruction, 8000) } : operation === 'contract' ? { contract: args.contract } : {},
         expected_revision: text(args.expected_revision, 200), ...source });
     };
-    const owner=()=>({service_role_id:roleId,kind:'channel' as const,owner_id:chat.id,principal_id:binding.principal_id,fence});
     // A progress message (#435): recorded and queued together; the outbox checks the binding and fence again right before sending.
     const progress = (input: unknown) => stageMessage(input, Number(this.store.get('SELECT count(*) n FROM channel_service_turn_messages WHERE turn_id=?', id)!.n), (text, sequence) => {
       this.store.transaction(() => {
@@ -281,7 +279,6 @@ export class ChannelServiceSessions {
             apiUrl: this.githubUrl,
           }, input);
         }
-        if(serviceMemoryTools.some(t=>t.function.name===name))return serviceMemory(this.store,owner(),name,input);
         if (name === 'list_projects') {
           fields(input, []);
           const reach = this.bindings.reach(binding);

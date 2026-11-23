@@ -135,6 +135,9 @@ test('operations need the turn holding the computer and an allowlisted runner ty
   await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'assistant_read', path: '/tmp/a', workspace_id: opId() } }), /invalid_runner_request/);
   await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: 'short', request: { type: 'command', command: 'true' } }), /invalid_operation/);
   assert.equal((await f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'assistant_write', path: 'a.txt', base64: '', offset: 0 } })).ok, true);
+  assert.equal((await f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'assistant_list', path: '/workspace', recursive: true } })).ok, true);
+  await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'assistant_list', path: '/workspace', recursive: 'yes' } }), /invalid_runner_request/);
+  await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'assistant_list', path: '/workspace', extra: 1 } }), /invalid_runner_request/);
   await f.computers.release(id, { turn: 'turn-1' });
   await assert.rejects(f.computers.execute(id, { turn: 'turn-1', operation_id: opId(), request: { type: 'command', command: 'true' } }), /assistant_computer_not_acquired/);
   await assert.rejects(f.computers.execute(hex(16), { turn: 'turn-1', operation_id: opId(), request: { type: 'command', command: 'true' } }), /assistant_computer_released/);
