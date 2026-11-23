@@ -67,7 +67,9 @@ test('six widths handle long paths and text, and failed reads retry without expo
     const name='很长的文件名称用于检查窄屏换行和目录定位.txt';await f.admin('/api/repositories/101/knowledge-files','POST',{name,content:'long-line-'+ 'x'.repeat(4000)+'\n\n完整文本'});
     await f.login();await treeFile(page,name).click();await mkdir('.tmp/knowledge-files-232/screenshots',{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),String(width)).toBe(true);}
-    await exact(page,'← 返回目录').click();await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:503,json:{error:'fixture_unavailable'}}));await exact(page,'刷新文件').click();await expect(page.locator('.knowledge-status')).toContainText('fixture_unavailable');await page.unroute('**/api/repositories/101/knowledge-files?*');await exact(page,'重试读取').click();await expect(treeFile(page,name)).toBeVisible();
+    await exact(page,'← 返回目录').click();await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:503,json:{error:'fixture_unavailable'}}));await exact(page,'刷新文件').click();
+    // An unknown code keeps the raw message; the manager codes covered below get their own explanation while the code stays visible.
+    await expect(page.locator('.knowledge-status')).toContainText('fixture_unavailable');await page.unroute('**/api/repositories/101/knowledge-files?*');await exact(page,'重试读取').click();await expect(treeFile(page,name)).toBeVisible();
     await page.route('**/api/repositories/101/knowledge-files/*',route=>route.fulfill({status:403,json:{error:'capability_forbidden'}}));await treeFile(page,name).click();await expect(page.locator('.knowledge-status')).toContainText('文件访问权限已失效');await expect(page.locator('.knowledge-content')).toHaveCount(0);expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
@@ -172,6 +174,69 @@ test('an uncertain move explains why retries cannot unlock the project knowledge
   await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:409,json:{error:'note_move_uncertain'}}));await f.login();
   await expect(page.locator('.knowledge-status')).toContainText('本项目知识区已暂停读写');await expect(page.locator('.knowledge-status')).toContainText('一致的完整知识卷');await exact(page,'重试读取').click();await expect(page.locator('.knowledge-status')).toContainText('重试不会解除此状态');expect(f.errors).toEqual([]);
  }finally{await f.close();}
+});
+
+test('a first knowledge read that reports manager_unavailable explains the temporary failure and recovers on retry',async({page})=>{
+  const f=await fixture(page);
+  try{
+    await f.admin('/api/repositories/101/knowledge-files','POST',{name:'recovered.txt',content:'read after recovery'});
+    // The route is in place before sign-in, so the very first directory read fails instead of a later refresh (#1278).
+    await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:503,json:{error:'manager_unavailable'}}));
+    await f.login();
+    const status=page.locator('.knowledge-status');
+    // The page states the temporary failure and keeps the code the logs use; it never claims the manager is down or the files are gone.
+    await expect(status).toContainText('暂时无法读取项目知识');
+    await expect(status).toContainText('manager_unavailable');
+    await expect(status).not.toContainText('知识卷');
+    await expect(panel(page)).toContainText('文件列表尚未读取成功。');
+    await expect(exact(page,'重试读取')).toBeVisible();
+    await page.unroute('**/api/repositories/101/knowledge-files?*');
+    await exact(page,'重试读取').click();
+    await expect(treeFile(page,'recovered.txt')).toBeVisible();
+    await expect(status).toBeEmpty();
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('manager_not_ready reads as a service still starting, not as an empty directory',async({page})=>{
+  const f=await fixture(page);
+  try{
+    await f.admin('/api/repositories/101/knowledge-directories','POST',{path:'空目录'});
+    await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:503,json:{error:'manager_not_ready'}}));
+    await f.login();
+    const status=page.locator('.knowledge-status');
+    await expect(status).toContainText('项目知识服务还没有就绪');
+    await expect(status).toContainText('manager_not_ready');
+    await expect(status).not.toContainText('这个目录是空的');
+    await page.unroute('**/api/repositories/101/knowledge-files?*');
+    await exact(page,'重试读取').click();
+    await treeFolder(page,'空目录').click();
+    await expect(panel(page).getByText('这个目录是空的。',{exact:true})).toBeVisible();
+    await expect(status).toBeEmpty();
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('a write that reports manager_unavailable keeps write wording and retries the write, not a read',async({page})=>{
+  const f=await fixture(page);
+  try{
+    const base='/api/repositories/101/knowledge-files',file=(await f.admin(base,'POST',{name:'write-fault.txt',content:'original body'})).value.file,filePath=base+'/'+encodeURIComponent(file.id);
+    let writes=0,reads=0;
+    page.on('request',request=>{const url=new URL(request.url());if(url.pathname===base&&request.method()==='GET')reads++;});
+    await page.route('**'+filePath,route=>{if(route.request().method()!=='PUT')return route.continue();writes++;return route.fulfill({status:503,json:{error:'manager_unavailable'}});});
+    await f.login();await treeFile(page,'write-fault.txt').click();await exact(page,'编辑文件').click();
+    await page.getByLabel('内容',{exact:true}).fill('saved despite the manager fault');await exact(page,'保存文件').click();
+    const status=page.locator('.knowledge-status');
+    // The shared failure view must name the failed operation: a save is not a directory read, and a read retry would rerun the wrong action.
+    await expect(status).toContainText('项目知识操作未完成');await expect(status).toContainText('manager_unavailable');
+    await expect(status).not.toContainText('无法读取');await expect(status).not.toContainText('重试读取');
+    await expect(exact(page,'重试操作')).toBeVisible();
+    const readsBefore=reads;await exact(page,'重试操作').click();await expect.poll(()=>writes).toBe(2);
+    expect(reads).toBe(readsBefore);expect((await f.admin(base+'/'+encodeURIComponent(file.id))).value.file.content).toBe('original body');
+    await page.unroute('**'+filePath);await exact(page,'重试操作').click();
+    await expect(page.locator('.knowledge-editor')).toHaveCount(0);await expect(page.locator('.knowledge-content')).toContainText('saved despite the manager fault');
+    expect((await f.admin(base+'/'+encodeURIComponent(file.id))).value.file.content).toBe('saved despite the manager fault');expect(f.errors).toEqual([]);
+  }finally{await f.close();}
 });
 
 test('a legacy file whose name carries a control character is reported as unreadable instead of disappearing',async({page})=>{

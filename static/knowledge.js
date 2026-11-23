@@ -20,6 +20,21 @@ window.addEventListener('hashchange', event => {
   });
 }, true);
 
+// The knowledge API answers 503 manager_unavailable for a control-plane timeout, a non-JSON reply and a manager-side
+// project error alike, and manager_not_ready while the manager is still initializing. The same code reaches reads and
+// writes, so the wording names the operation that actually failed. The page states only what it knows and points at the
+// logs: a single project's failure is never reported as a lost knowledge volume.
+const knowledgeReadFaults = {
+  manager_unavailable: '暂时无法读取项目知识（manager_unavailable）。原因见控制面与 manager 日志：docker compose -p bot logs bot manager',
+  manager_not_ready: '项目知识服务还没有就绪（manager_not_ready）。原因见控制面与 manager 日志：docker compose -p bot logs bot manager',
+};
+// A save, delete, rename or directory create that hits the same code failed as a write; saying the directory could not be
+// read would misstate what happened and "重试读取" would rerun a read instead of the failed operation.
+const knowledgeWriteFaults = {
+  manager_unavailable: '项目知识操作未完成（manager_unavailable），本次保存、删除、重命名或新建目录可能没有生效；请稍后重试同一操作。原因见控制面与 manager 日志：docker compose -p bot logs bot manager',
+  manager_not_ready: '项目知识服务还没有就绪（manager_not_ready），本次操作未执行；请稍后重试同一操作。原因见控制面与 manager 日志：docker compose -p bot logs bot manager',
+};
+
 function knowledgeSection() {
   const owner = knowledgeIdentity();
   if (knowledgeOwner !== owner) resetKnowledgeFiles(); knowledgeOwner = owner;
@@ -59,14 +74,16 @@ function knowledgeSection() {
     if (tree?.getClientRects().length) state.treeScroll = tree.scrollTop;
   };
   const leave = async () => !knowledgeUnsaved() || await askConfirm({ title: '离开未保存的文件？', body: ['草稿仅在本次登录期间保留。'], action: '离开文件' });
-  const failure = (error, retry, token) => {
+  const failure = (error, retry, token, operation = 'read') => {
     if (!live(token)) return;
     if ([401, 403].includes(error.status) || error.code === 'repository_not_found') {
       ++epoch; knowledgeViews.delete(repo); knowledgeEditor = null; selected = null; versions = null; listing = null; results = null;
       workspace.replaceChildren(); status.replaceChildren(note('文件访问权限已失效。请重新登录或联系管理员。')); return;
     }
-    const message = error.code === 'note_move_uncertain' ? '文件移动的归属无法确认，本项目知识区已暂停读写。请联系部署维护者按「知识文件恢复」说明停写、备份并恢复一致的完整知识卷；重试不会解除此状态。' : readErrorText(error);
-    status.replaceChildren(element('p', message, 'view-error'), button('重试读取', () => void retry(), 'quiet'));
+    const faults = operation === 'write' ? knowledgeWriteFaults : knowledgeReadFaults;
+    const message = error.code === 'note_move_uncertain' ? '文件移动的归属无法确认，本项目知识区已暂停读写。请联系部署维护者按「知识文件恢复」说明停写、备份并恢复一致的完整知识卷；重试不会解除此状态。'
+      : Object.hasOwn(faults, error.code) ? faults[error.code] : readErrorText(error);
+    status.replaceChildren(element('p', message, 'view-error'), button(operation === 'write' ? '重试操作' : '重试读取', () => void retry(), 'quiet'));
   };
   const act = action => async () => { if (busy) return; try { await action(); } catch (error) { failure(error, refresh, epoch); } };
   const actionButton = (label, action, className = 'quiet') => { const b = button(label, act(action), className); b.disabled = busy; return b; };
@@ -122,7 +139,7 @@ function knowledgeSection() {
   async function historyView() {
     if (!await leave()) return; editing = false; knowledgeEditor = null; state.screen = 'history'; routeState(); await loadVersions();
   }
-  async function mutation(method, path, body, after) {
+  async function mutation(method, path, body, after, retry = () => mutation(method, path, body, after)) {
     if (busy) return false; const token = epoch; busy = true; status.replaceChildren(note('正在保存…')); draw();
     try {
       const result = await api(path, method, body); if (!live(token)) return;
@@ -137,7 +154,7 @@ function knowledgeSection() {
           status.replaceChildren(note(`文件已更新到 v${latest.current_revision}。草稿已保留，请先比较最新内容。`));
         } catch (readError) { failure(readError, () => loadFile(state.file), token); }
         if (draft) draw();
-      } else { failure(error, refresh, token); draw(); }
+      } else { failure(error, retry, token, 'write'); draw(); }
           return false;
     } finally { busy = false; }
   }
@@ -321,9 +338,10 @@ function knowledgeSection() {
     form.append(actions); form.addEventListener('submit', event => { event.preventDefault(); void saveDraft(file, draft); }); main.append(form); knowledgeEditor = { root, draft };
   }
   async function saveDraft(file, draft) {
+    // The retry re-reads the current draft so a failure followed by more typing never saves the stale snapshot.
     await mutation('PUT', url(file.id), { content: draft.content === draft.initial ? draft.raw : draft.content, expected_revision: draft.revision }, async () => {
       state.drafts.delete(file.id); editing = false; knowledgeEditor = null; conflict = null; await refresh();
-    });
+    }, () => saveDraft(file, draft));
   }
   function historyPanel() {
     const panel = element('aside', '', 'knowledge-history'); panel.setAttribute('aria-label', '文件历史');
@@ -372,7 +390,8 @@ function knowledgeSection() {
     feedback.setAttribute('role', 'alert'); const submit = element('button', '确认'); submit.type = 'submit'; form.append(element('h2', title), field(title === '新建文件夹' ? '文件夹名称' : '目标路径', control), feedback, submit, button('取消', () => dialog.close(), 'quiet'));
     form.addEventListener('submit', async event => { event.preventDefault(); submit.disabled = true;
       // Path operations use the page's mutation guard and always leave the error in the live workspace.
-      try { const done = await save(control.value); if (done !== false) dialog.close(); else feedback.textContent = status.textContent || '操作未完成，请重试。'; } catch (error) { feedback.textContent = readErrorText(error); } finally { submit.disabled = false; }
+      // Only the message moves into the dialog: the retry control stays in the live workspace, and confirming again reruns this write.
+      try { const done = await save(control.value); if (done !== false) dialog.close(); else feedback.textContent = status.querySelector('.view-error')?.textContent || status.textContent || '操作未完成，请重试。'; } catch (error) { feedback.textContent = readErrorText(error); } finally { submit.disabled = false; }
     }); dialog.append(form); root.append(dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); control.focus();
   }
   function moveDialog() {
@@ -387,11 +406,13 @@ function knowledgeSection() {
     const main = element('div', '', 'knowledge-main'), form = element('form', '', 'knowledge-editor'), name = input('knowledge_filename', draft.name, { required: true, placeholder: '例如 readme.md' }), body = textarea('knowledge_content', draft.content, { rows: 16, spellcheck: false, className: 'code' });
     name.addEventListener('input', () => { draft.name = name.value; }); body.addEventListener('input', () => { draft.content = body.value; });
     const submit = element('button', '保存文件'); submit.type = 'submit'; form.append(element('h2', '新建文件'), field('文件名', name), field('内容', body), submit, actionButton('取消新建', async () => { if (!await leave()) return; state.drafts.delete(key); knowledgeEditor = null; draw(); }));
-    form.addEventListener('submit', async event => { event.preventDefault(); if (busy || !form.reportValidity()) return;
+    async function saveNewFile() {
+      if (busy || !form.reportValidity()) return;
       const path = (state.directory ? state.directory + '/' : '') + name.value, token = epoch; busy = true; submit.disabled = true;
       try { const result = await api(endpoint, 'POST', { path, content: body.value }); if (!live(token)) return; state.drafts.delete(key); knowledgeEditor = null; busy = false; if (!await loadDirectory()) return; await openFile(result.file.id); }
-      catch (error) { failure(error, refresh, token); } finally { busy = false; submit.disabled = false; }
-    }); main.append(crumbs(), form); root.dataset.scene = 'preview'; renderPanes(main); knowledgeEditor = { root, draft }; body.focus();
+      catch (error) { failure(error, saveNewFile, token, 'write'); } finally { busy = false; submit.disabled = false; }
+    }
+    form.addEventListener('submit', event => { event.preventDefault(); void saveNewFile(); }); main.append(crumbs(), form); root.dataset.scene = 'preview'; renderPanes(main); knowledgeEditor = { root, draft }; body.focus();
   }
   draw(); void refresh(); return [root];
 }
