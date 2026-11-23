@@ -58,6 +58,8 @@ function resetTaskRendering() {
   renderedLogs = new Set(); liveCommand = null; snapshotProgress = null;
   const actions = $('task-actions');
   if (actions?.dataset) delete actions.dataset.signature;
+  const fault = $('task-fault-box');
+  if (fault?.dataset) delete fault.dataset.signature;
 }
 
 function computeTaskReturnLabel() {
@@ -445,10 +447,12 @@ function renderTaskHeader(task, detail = null) {
 
   const actions = $('task-actions');
   const url = githubUrl(task), destination = taskConfigurationDestination(task);
+  const blocked = task.status === 'waiting_coordination' ? task.structured?.children?.blocked : null;
+  const neutralBlocked = Boolean(blocked && !blocked.destination);
   const canManage = detail?.can_manage !== false;
   const pausable = canManage && ['running', 'preparing', 'implementing', 'validating', 'publishing', 'queued', 'retry_wait'].includes(task.status);
   const cancellable = canManage && !terminalStates.includes(task.status) && task.status !== 'cancelled';
-  const signature = `${task.id}:${task.status}:${url || ''}:${destination?.section || ''}:${canManage}:${pausable}:${cancellable}`;
+  const signature = `${task.id}:${task.status}:${url || ''}:${destination?.section || ''}:${neutralBlocked}:${canManage}:${pausable}:${cancellable}`;
   if (actions.childElementCount && actions.dataset.signature === signature) return;
   actions.dataset.signature = signature;
   actions.replaceChildren();
@@ -458,6 +462,13 @@ function renderTaskHeader(task, detail = null) {
       if (typeof rememberInboxReturn === 'function') rememberInboxReturn(taskInboxOrigin, task.repository_id);
       leaveTaskDetailPage();
       openProject(task.repository_id, destination.section);
+    }));
+  } else if (neutralBlocked) {
+    // Mixed or unexplained child causes: do not guess a settings page, point at the child entries instead.
+    actions.append(button('查看子任务', () => {
+      const first = $('task-fault-box').querySelector?.('.task-blocked-children button');
+      first?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      first?.focus?.({ preventScroll: true });
     }));
   }
   if (canManage && !terminalStates.includes(task.status)) {
@@ -532,11 +543,39 @@ function renderTaskSummaryBody(task, detail) {
   // 2. Active Fault Callout (visible without opening details)
   const faultBox = $('task-fault-box');
   if (faultBox) {
-    const showFault = !['succeeded', 'pr_opened', 'completed', 'running', 'queued', 'waiting_event'].includes(task.status) && (task.error_code || task.error_detail);
+    const blocked = task.structured?.children?.blocked;
+    const showBlocked = blocked && task.status === 'waiting_coordination';
+    const showFault = showBlocked || (!['succeeded', 'pr_opened', 'completed', 'running', 'queued', 'waiting_event'].includes(task.status) && (task.error_code || task.error_detail));
     if (!showFault) {
       faultBox.hidden = true;
       faultBox.replaceChildren();
+      faultBox.classList.remove('task-blocked-callout');
+      if (faultBox.dataset) delete faultBox.dataset.signature;
+    } else if (showBlocked) {
+      // The callout holds focusable child buttons. The 5 s poll must not replace them while the aggregate is unchanged.
+      const signature = JSON.stringify([blocked.count, blocked.statuses, blocked.error_codes, blocked.label, blocked.action, blocked.destination,
+        (blocked.children || []).map(child => [child.id, child.status, child.error_code, child.recovery])]);
+      if (faultBox.dataset.signature !== signature) {
+        faultBox.dataset.signature = signature;
+        faultBox.classList.add('task-blocked-callout');
+        const children = element('ul', '', 'task-blocked-children');
+        for (const child of blocked.children || []) {
+          const item = element('li', '');
+          item.append(button(`子任务 ${child.id}`, () => openTask(child.id).catch(error), 'quiet linkish'),
+            element('span', ` · ${(states[child.status] || [child.status])[0]} · ${child.error_code || '无错误码'} · ${child.recovery}`));
+          children.append(item);
+        }
+        faultBox.replaceChildren(
+          element('strong', '子任务阻塞原因：'),
+          element('span', `${blocked.label}（${blocked.count} 个子任务）`),
+          children,
+          element('span', '处理建议：' + blocked.action, 'muted'),
+        );
+      }
+      faultBox.hidden = false;
     } else {
+      faultBox.classList.remove('task-blocked-callout');
+      if (faultBox.dataset) delete faultBox.dataset.signature;
       const detailText = task.error_detail || (task.error_code === 'pr_head_pending' ? 'PR 尚未指向刚推送的提交' : ownershipErrors[task.error_code] || taskErrorText(task.error_code));
       const waitingEvent = task.status === 'waiting_event' || task.error_code === 'event_subscription_pending';
       faultBox.replaceChildren(
@@ -712,7 +751,11 @@ function renderTaskSummaryBody(task, detail) {
 }
 
 function taskConfigurationDestination(task) {
-  if (!task.repository_id || !['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'paused'].includes(task.status)) return null;
+  if (!task.repository_id) return null;
+  const blocked = task.status === 'waiting_coordination' ? task.structured?.children?.blocked : null;
+  // The aggregate comes from the children's own failure causes; mixed or unknown causes have no settings page.
+  if (blocked) return blocked.destination || null;
+  if (!['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'paused'].includes(task.status)) return null;
   if (task.error_cause?.cause === 'role_configuration') return { section: 'roles', caption: '打开角色配置' };
   if (task.error_cause?.cause === 'environment') return { section: 'machine', caption: '检查项目电脑' };
   if (['model_not_configured', 'task_models_invalid', 'model_not_available', 'model_configuration_changed', 'model_key_missing', 'model_authentication_failed'].includes(task.error_code))

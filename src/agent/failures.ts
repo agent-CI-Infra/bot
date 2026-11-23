@@ -87,6 +87,10 @@ export function failureCause(code: string, state?: string): FailureCause {
   if (/^(github|model)_http_(408|429|5\d\d)$/.test(code)) return 'external';
   if (/^github_http_\d+$/.test(code)) return 'github_rejected';
   if (/^model_http_\d+$/.test(code)) return 'model';
+  // An unlisted code in waiting_environment still describes an unmet outside condition (for example an integration's
+  // tool-scope denial). Calling it the bot's own fault would also deny the permission cause; keep the wait in the
+  // environment family. Unknown codes in failed tasks remain bot faults.
+  if (state === 'waiting_environment') return 'environment';
   return 'bot';
 }
 
@@ -298,6 +302,12 @@ export function explainFailure(code: string|null|undefined, state = 'failed', de
   if (code === 'unsupported_capability' && detail?.includes('fixed_candidate_read')) return {
     cause: 'bot', label: causes.bot.label, automatic: automatic.has(state), attempt_retry,
     action: '当前运行缺少平台核验的固定候选记录（fixed_candidate_read），运行没有启动；该记录由平台生成，更换角色模型或执行后端无法补齐，请反馈给 bot 维护者。',
+  };
+  // An unclassified environment wait still names its own code: do not present it as a cause we recognise, and do not
+  // hide the code behind the generic "check the computer" advice.
+  if (state === 'waiting_environment' && cause === 'environment' && !byCode.has(code) && code !== 'task_runtime_failure') return {
+    cause, label: '未归类的等待原因', automatic: automatic.has(state), attempt_retry,
+    action: `已保留原始错误码「${code}」；请按任务说明检查所属环境、权限或外部服务，条件恢复后任务会自动继续。`,
   };
   const action = codeActions[code] || (ended.has(state) ? '任务已结束，无需处理。' : causeActions[cause](state));
   return { cause, label: causes[cause].label, action, automatic: automatic.has(state) || state === 'waiting_permission' && resumedWaits.has(code), attempt_retry };

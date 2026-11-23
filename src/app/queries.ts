@@ -188,7 +188,12 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       return { logs, log_page: { has_older: ascending ? false : more, has_newer: ascending && more,
         first_sequence: rows[0]?.sequence ?? null, last_sequence: rows.at(-1)?.sequence ?? null } };
     }
-    const baseTask = {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOriginsForDisplay(store, [row.id], true).get(row.id) ?? null,structured:detailState(store,row.id),error_detail:row.error_detail||null};
+    const state=detailState(store,row.id),base=withTaskMetrics(store,[publicTask(row)])[0]!,blocked=row.status==='waiting_coordination'&&row.error_code==='task_children_pending'?state.children?.blocked:null;
+    // The parent itself waits on task_children_pending. When every unreturned child is blocked on the environment or
+    // configuration, the parent's summary comes from the aggregate each child's own failure cause produced; the callout
+    // carries the aggregate action, so the progress sentence keeps only the short label.
+    const baseTask = {...base,origin:taskOriginsForDisplay(store, [row.id], true).get(row.id) ?? null,structured:state,error_detail:row.error_detail||null,
+      ...(blocked?{error_cause:{...(base.error_cause||{}),cause:blocked.cause??base.error_cause?.cause??null,label:blocked.label,action:''}}:{})};
     const taskWithLinks = attachExternalLinks(store, [baseTask])[0]!;
     const roleTrace = taskRoleTrace(store, taskWithLinks, user.context ? { actor: user.context } : undefined);
     const canManage = (() => { try { if (user.context) authorize(user.context, 'tasks.write', { project_id: row.repository_id }); return true; } catch { return false; } })();

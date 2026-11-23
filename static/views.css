@@ -645,6 +645,20 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   font-size: var(--font-size-label);
   overflow-wrap: anywhere;
 }
+/* All unreturned children waiting on an outside condition is a wait, not a fault: keep the callout informative. */
+.task-fault-box.task-blocked-callout {
+  background: var(--color-info-bg);
+  border-color: var(--color-info-border);
+  color: var(--color-info);
+}
+.task-blocked-children {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0;
+  padding-left: 18px;
+}
+.task-blocked-children li { line-height: 1.55; overflow-wrap: anywhere; }
+.task-blocked-children button { margin-right: 2px; }
 
 /* External Associations Bar (Issue, PR, GitHub Actions, Delivery) */
 .task-external-bar {
