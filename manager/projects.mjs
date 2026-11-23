@@ -37,13 +37,22 @@ export const resourceBounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids:
 const bounds = resourceBounds;
 const resourceKeys = Object.keys(bounds), resources = spec => Object.fromEntries(resourceKeys.map(key => [key, spec[key]]));
 const mib = 1024 * 1024;
-// Clamp an inherited/default memory target when the manager runs on a host with less RAM than the target (#1279),
-// keeping headroom for the host and control plane instead of creating a container larger than physical memory.
-export function clampMemoryToHost(memoryMb, hostMemoryMb) {
-  if (!(typeof hostMemoryMb === 'number' && Number.isFinite(hostMemoryMb) && hostMemoryMb > 0)) return memoryMb;
-  if (memoryMb <= hostMemoryMb) return memoryMb;
+// Unified single-container memory cap: reserve 25% of host RAM for the host OS, Docker, manager, and control plane
+// (rounded down to 256 MiB). Applies uniformly to both inherited defaults (including 16 GiB on a 16 GiB host) and
+// explicit saves (#1279). When Docker /info transiently errors and no cached host info exists, fall back conservatively.
+export const CONSERVATIVE_FALLBACK_MEMORY_MB = 4096;
+export function hostMemoryCap(hostMemoryMb) {
+  if (!(typeof hostMemoryMb === 'number' && Number.isFinite(hostMemoryMb) && hostMemoryMb > 0)) return null;
   const reserveSafe = Math.floor((hostMemoryMb * 0.75) / 256) * 256;
   return Math.min(hostMemoryMb, Math.max(resourceBounds.memory_mb[0], reserveSafe || Math.floor(hostMemoryMb)));
+}
+export function clampMemoryToHost(memoryMb, hostOrMb) {
+  if (hostOrMb && typeof hostOrMb === 'object') {
+    const cap = hostOrMb.memory_mb ? hostMemoryCap(hostOrMb.memory_mb) : (hostOrMb.fallback_cap_mb ?? null);
+    return cap !== null && memoryMb > cap ? cap : memoryMb;
+  }
+  const cap = hostMemoryCap(hostOrMb);
+  return cap !== null && memoryMb > cap ? cap : memoryMb;
 }
 // CPUs in steps of 0.01, the other resources whole numbers, all inside their bounds (assistant computers pass their own).
 export function validResource(key, value, limits = bounds) {
@@ -344,11 +353,21 @@ export class Projects {
       setup_script: own.setup_script || '',
     };
   }
+  effectiveSpec(spec, host = this.lastHost ?? null) {
+    const effectiveMemoryMb = clampMemoryToHost(spec.memory_mb, host);
+    const effectiveTmpMb = Math.min(spec.tmp_mb, effectiveMemoryMb);
+    return { ...spec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
+  }
+  allocatedMemoryMb(host = this.lastHost ?? null) {
+    return this.list().filter(p => ['ready', 'busy'].includes(p.state))
+      .reduce((sum, p) => sum + this.effectiveSpec(this.spec(p.repository_id), host).memory_mb, 0);
+  }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
-    const { spec: _saved, build, setup, applied, spec_revision: specRevision, configured_keys: configuredKeys, ...state } = project, spec = this.spec(repo), own = this.own(repo);
+    const { spec: _saved, build, setup, applied, spec_revision: specRevision, configured_keys: configuredKeys, ...state } = project, rawSpec = this.spec(repo), own = this.own(repo);
+    const spec = this.effectiveSpec(rawSpec);
     const liveBuild = this.projectBuildJobs.get(repo)?.state;
     const buildInfo = liveBuild ? { ...liveBuild } : (build ? JSON.parse(build) : null);
     const globalDefaults = this.globalDefaults();
@@ -367,11 +386,13 @@ export class Projects {
       (isDeferredBuild && ['failed', 'cancelled'].includes(String(buildInfo?.state || '')))
       || (!!this.approvedImageId && resource?.image === this.approvedImageId)
     );
+    const effectiveDefaults = this.effectiveSpec(this.resourceDefaults());
     // inherited: the resources that follow the default; resources_pending: the container still has other resources.
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
-      ...spec, spec_revision: Number(specRevision) || 0, configured_keys: configuredKeys ? JSON.parse(configuredKeys) : null, build: buildInfo, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
-      defaults: this.resourceDefaults(), global_defaults: globalDefaults,
+      ...spec, configured_memory_mb: rawSpec.memory_mb, host_clamped: spec.memory_mb !== rawSpec.memory_mb,
+      spec_revision: Number(specRevision) || 0, configured_keys: configuredKeys ? JSON.parse(configuredKeys) : null, build: buildInfo, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
+      defaults: resources(effectiveDefaults), global_defaults: { ...globalDefaults, ...resources(effectiveDefaults) },
       own: {
         ...Object.fromEntries(resourceKeys.filter(k => own[k] !== undefined).map(k => [k, own[k]])),
         ...(own.egress !== undefined ? { egress: own.egress } : {}),
@@ -386,28 +407,40 @@ export class Projects {
       toolchain_missing: toolchainMissing } };
   }
   async hostInfo() {
-    const info = await this.docker.request('GET', '/info').catch(() => null);
-    return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null;
+    try {
+      const info = await this.docker.request('GET', '/info');
+      if (info?.NCPU && info?.MemTotal) {
+        this.lastHost = { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) };
+        return this.lastHost;
+      }
+      return null;
+    } catch {
+      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
+    }
   }
   // The unified global defaults with their bounds, host capacity, allocated resources and global precompiled image state.
   async defaultsView() {
     const host = await this.hostInfo();
+    const publicHost = host?.cpus ? { cpus: host.cpus, memory_mb: host.memory_mb } : null;
+    const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
     const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`).catch(() => null);
-    const running = this.list().filter(p => ['ready', 'busy'].includes(p.state)).map(p => this.spec(p.repository_id));
+    const running = this.list().filter(p => ['ready', 'busy'].includes(p.state)).map(p => this.effectiveSpec(this.spec(p.repository_id), host));
     const configured = this.resourceDefaults();
-    const effectiveMemoryMb = clampMemoryToHost(configured.memory_mb, host?.memory_mb);
-    const effectiveTmpMb = Math.min(configured.tmp_mb, effectiveMemoryMb);
-    const effective = { ...configured, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
-    const hostClamped = effectiveMemoryMb !== configured.memory_mb || effectiveTmpMb !== configured.tmp_mb
-      ? { memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb } : null;
+    const effective = this.effectiveSpec(configured, host);
+    const hostClamped = effective.memory_mb !== configured.memory_mb
+      ? { memory_mb: effective.memory_mb, host_cap_mb: hostCapMb } : null;
+    const tmpClamped = effective.tmp_mb !== configured.tmp_mb
+      ? { tmp_mb: effective.tmp_mb } : null;
     return {
-      defaults: effective,
+      defaults: resources(effective),
       configured_defaults: configured,
       host_clamped: hostClamped,
+      tmp_clamped: tmpClamped,
+      host_memory_cap_mb: hostCapMb,
       builtin,
       bounds,
-      host,
-      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + clampMemoryToHost(s.memory_mb, host?.memory_mb), 0) },
+      host: publicHost,
+      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + s.memory_mb, 0) },
       environment: this.globalEnvironmentDefaults(),
       environment_builtin: { egress: this.egress, packages: [], setup_script: '', env: {} },
       build: this.globalBuildView(),
@@ -424,11 +457,13 @@ export class Projects {
     for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key])) throw new ManagerError('invalid_defaults', 400);
     for (const key of ['egress', 'rebuild']) if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new ManagerError('invalid_defaults', 400);
     validateSoftwareFields(input);
-    // Docker refuses to create a container with more CPUs than the host has, and memory/tmpfs must not exceed host RAM.
+    // Docker refuses to create a container with more CPUs than the host has, and memory must stay within the host's
+    // 75% safety cap (reserving 25% for host OS, manager and control plane); project /tmp tmpfs must fit in RAM.
     const host = await this.hostInfo();
+    const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
     if (host?.cpus && input.cpus !== undefined && input.cpus > host.cpus) throw new ManagerError('cpus_exceed_host', 400);
-    if (host?.memory_mb && input.memory_mb !== undefined && input.memory_mb > host.memory_mb) throw new ManagerError('memory_exceeds_host', 400);
-    const nextMemoryMb = clampMemoryToHost(input.memory_mb ?? this.resourceDefaults().memory_mb, host?.memory_mb);
+    if (hostCapMb !== null && input.memory_mb !== undefined && input.memory_mb > hostCapMb) throw new ManagerError('memory_exceeds_host', 400);
+    const nextMemoryMb = clampMemoryToHost(input.memory_mb ?? this.resourceDefaults().memory_mb, host);
     if (input.tmp_mb !== undefined && input.tmp_mb > nextMemoryMb) throw new ManagerError('tmp_exceeds_memory', 400);
 
     const resUpdates = Object.fromEntries(resourceKeys.filter(k => input[k] !== undefined).map(k => [k, input[k]]));
@@ -486,7 +521,7 @@ export class Projects {
     }
     const host = await this.hostInfo();
     const rawDefaults = this.resourceDefaults();
-    const buildResources = { ...rawDefaults, memory_mb: clampMemoryToHost(rawDefaults.memory_mb, host?.memory_mb) };
+    const buildResources = { ...rawDefaults, memory_mb: clampMemoryToHost(rawDefaults.memory_mb, host) };
     const job = { handle: null, state: null, superseded: false, promise: null };
     const handle = this.images.startLayered({
       approvedImage: approved,
@@ -772,11 +807,9 @@ export class Projects {
   async provision(repo, { forceSetup = false, deferBuild = false } = {}) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
     const hostInfo = await this.hostInfo();
-    const effectiveMemoryMb = clampMemoryToHost(spec.memory_mb, hostInfo?.memory_mb);
-    // Project /tmp is a RAM-backed tmpfs charged to the container memory cgroup (MemorySwap = Memory, no swap),
-    // so bound its size to the effective container memory limit as well (#1279).
-    const effectiveTmpMb = Math.min(spec.tmp_mb, effectiveMemoryMb);
-    const effectiveSpec = { ...spec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
+    // Apply the unified host-memory reserve cap and keep project /tmp tmpfs bounded by effective container RAM (#1279).
+    const effectiveSpec = this.effectiveSpec(spec, hostInfo);
+    const effectiveMemoryMb = effectiveSpec.memory_mb, effectiveTmpMb = effectiveSpec.tmp_mb;
     // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
     // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
     // memory whether or not the host has swap.
@@ -827,7 +860,7 @@ export class Projects {
           Mounts: mounts } });
       container = await this.inspect(repo, generation, 'container');
     }
-    this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(spec)), repo);
+    this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), repo);
     if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
     // Readiness is a protocol and journal check, not a Docker running flag.
     const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
@@ -1253,13 +1286,14 @@ export class Projects {
             setup_script: own.setup_script || '',
           };
           const hostInfoForConfigure = await this.hostInfo();
+          const hostCapForConfigure = hostInfoForConfigure?.memory_mb ? hostMemoryCap(hostInfoForConfigure.memory_mb) : (hostInfoForConfigure?.fallback_cap_mb ?? null);
           if (requested.cpus != null || requested.memory_mb != null || requested.tmp_mb != null) {
             if (hostInfoForConfigure?.cpus && requested.cpus != null && requested.cpus > hostInfoForConfigure.cpus) throw Object.assign(new ManagerError('cpus_exceed_host', 400), { untouched: true });
-            if (hostInfoForConfigure?.memory_mb && requested.memory_mb != null && requested.memory_mb > hostInfoForConfigure.memory_mb) throw Object.assign(new ManagerError('memory_exceeds_host', 400), { untouched: true });
-            const effectiveNextMemory = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure?.memory_mb);
+            if (hostCapForConfigure !== null && requested.memory_mb != null && requested.memory_mb > hostCapForConfigure) throw Object.assign(new ManagerError('memory_exceeds_host', 400), { untouched: true });
+            const effectiveNextMemory = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure);
             if (requested.tmp_mb != null && requested.tmp_mb > effectiveNextMemory) throw Object.assign(new ManagerError('tmp_exceeds_memory', 400), { untouched: true });
           }
-          nextSpec.memory_mb = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure?.memory_mb);
+          nextSpec.memory_mb = clampMemoryToHost(nextSpec.memory_mb, hostInfoForConfigure);
           nextSpec.tmp_mb = Math.min(nextSpec.tmp_mb, nextSpec.memory_mb);
           const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
           if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);

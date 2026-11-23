@@ -1,5 +1,6 @@
-import { open, mkdir, realpath, lstat, readdir, readlink, rename, rm, unlink } from 'node:fs/promises';
+import { open, mkdir, realpath, lstat, readdir, readlink, readFile, writeFile, rename, rm, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname, sep } from 'node:path';
@@ -16,9 +17,10 @@ const STAGE_ID_RE = /^[a-f0-9]{48}$/;
 export const MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES = 256 * 1024 * 1024;
 const MAX_ASSISTANT_ARCHIVE_FILES = 200_000;
 const MAX_ASSISTANT_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024;
+const USAGE_CACHE_TTL_MS = 15_000;
 
 function isReservedSegment(segment) {
-  return segment === '.runner-journal' || segment === '.bot-bg' || segment.startsWith('.bot-archive-') || segment.startsWith('.bot-unpack-');
+  return segment === '.runner-journal' || segment === '.bot-bg' || segment.startsWith('.bot-archive-') || segment.startsWith('.bot-unpack-') || segment.startsWith('.bot-usage-');
 }
 
 function resolveRoots(options = {}) {
@@ -47,6 +49,41 @@ async function target(value, create = false, { workspaceRoot, allowedRoots }) {
 function archiveStagePath(stageId, tmpRoot) {
   if (!STAGE_ID_RE.test(stageId || '')) throw new Error('invalid_stage_id');
   return resolve(tmpRoot, `.bot-archive-${stageId}.tar.gz`);
+}
+
+function usageCachePath(rootDir, tmpRoot) {
+  const key = createHash('sha256').update(rootDir).digest('hex').slice(0, 16);
+  return resolve(tmpRoot, `.bot-usage-${key}.json`);
+}
+
+async function readCachedUsage(rootDir, tmpRoot, ttlMs = USAGE_CACHE_TTL_MS) {
+  try {
+    const raw = JSON.parse(await readFile(usageCachePath(rootDir, tmpRoot), 'utf8'));
+    if (typeof raw?.bytes === 'number' && Number.isFinite(raw.bytes) && raw.bytes >= 0 && typeof raw?.at === 'number' && Date.now() - raw.at < ttlMs) {
+      return raw.bytes;
+    }
+  } catch {}
+  return null;
+}
+
+async function writeCachedUsage(rootDir, tmpRoot, bytes) {
+  try {
+    await writeFile(usageCachePath(rootDir, tmpRoot), JSON.stringify({ bytes: Math.max(0, Math.floor(bytes)), at: Date.now() }), { mode: 0o600 });
+  } catch {}
+}
+
+async function invalidateCachedUsage(rootDir, tmpRoot) {
+  await rm(usageCachePath(rootDir, tmpRoot), { force: true }).catch(() => {});
+}
+
+async function getRootUsageBytes(rootDir, tmpRoot, { fresh = false, measure = directoryBytes } = {}) {
+  if (!fresh) {
+    const cached = await readCachedUsage(rootDir, tmpRoot);
+    if (cached !== null) return cached;
+  }
+  const bytes = await measure(rootDir);
+  await writeCachedUsage(rootDir, tmpRoot, bytes);
+  return bytes;
 }
 
 function configuredLimitBytes(root, workspaceRoot, env = process.env) {
@@ -151,11 +188,18 @@ export async function assistantFile(input, options = {}) {
     const located = await target(input.path, true, { workspaceRoot, allowedRoots: allRoots });
     const volumeState = (options.volume || readVolume)(located.root);
     if (volumeState?.full) throw new Error('ENOSPC: volume free space is below the safety reserve');
+    const existingInfo = await lstat(located.path).catch(() => null);
+    if (existingInfo && !existingInfo.isFile()) throw new Error('regular_file_required');
+    const currentTargetSize = existingInfo ? existingInfo.size : 0;
+    const nextTargetSize = input.offset === 0 ? data.length : Math.max(currentTargetSize, input.offset + data.length);
+    const deltaBytes = nextTargetSize - currentTargetSize;
+    let projectedRootBytes = null;
     if (allowedCheckoutRoots.includes(located.root)) {
       const limitBytes = configuredLimitBytes(located.root, workspaceRoot, env);
       if (limitBytes !== null) {
-        const existingBytes = await directoryBytes(located.root, input.offset === 0 ? located.path : null);
-        if (existingBytes + input.offset + data.length > limitBytes) {
+        const cachedRootBytes = await getRootUsageBytes(located.root, tmpRoot, { measure: options.measureUsage || directoryBytes });
+        projectedRootBytes = Math.max(0, cachedRootBytes + deltaBytes);
+        if (projectedRootBytes > limitBytes) {
           throw new Error(`ENOSPC: write exceeds configured ${located.root} soft limit (${limitBytes} bytes)`);
         }
       }
@@ -167,13 +211,22 @@ export async function assistantFile(input, options = {}) {
       if (info.size !== input.offset) throw new Error('offset_mismatch');
       await handle.write(data, 0, data.length, input.offset);
     } finally { await handle.close(); }
+    if (projectedRootBytes !== null) await writeCachedUsage(located.root, tmpRoot, projectedRootBytes);
     return { written: true, size: input.offset + data.length };
   }
   if (input.type === 'assistant_delete') {
-    const { path } = await target(input.path, false, { workspaceRoot, allowedRoots: allRoots }), info = await lstat(path).catch(() => null);
+    const { path, root } = await target(input.path, false, { workspaceRoot, allowedRoots: allRoots }), info = await lstat(path).catch(() => null);
     if (!info) return { deleted: false };
     // A symlink is removed itself; a directory with everything below it (rm never follows links).
     if (info.isDirectory()) await rm(path, { recursive: true, force: true }); else await unlink(path);
+    if (allowedCheckoutRoots.includes(root)) {
+      if (info.isFile()) {
+        const cached = await readCachedUsage(root, tmpRoot);
+        if (cached !== null) await writeCachedUsage(root, tmpRoot, Math.max(0, cached - info.size));
+      } else if (info.isDirectory()) {
+        await invalidateCachedUsage(root, tmpRoot);
+      }
+    }
     return { deleted: true, directory: info.isDirectory() };
   }
   if (input.type === 'assistant_archive_stage') {
@@ -205,16 +258,21 @@ export async function assistantFile(input, options = {}) {
       if (existing && !overwrite) throw new Error('destination_exists');
       const { files, bytes } = await inspectTarArchive(stagePath);
       const volumeState = (options.volume || readVolume)(root);
+      // During extraction, the staging tree coexists with any existing destination until atomic swap, so check peak space.
       if (volumeState && (volumeState.full || bytes > Math.max(0, volumeState.free_bytes - fullBytes(volumeState.total_bytes)))) {
         throw new Error(`ENOSPC: archive size (${bytes} bytes) exceeds available disk space below safety reserve`);
       }
+      const measureFn = options.measureUsage || directoryBytes;
       const limitBytes = configuredLimitBytes(root, workspaceRoot, env);
-      if (limitBytes !== null) {
-        const existingBytes = await directoryBytes(root, overwrite ? dest : null);
-        if (existingBytes + bytes > limitBytes) {
-          throw new Error(`ENOSPC: archive size (${bytes} bytes, plus ${existingBytes} bytes already in ${root}) exceeds configured ${root} soft limit (${limitBytes} bytes)`);
+      const currentTotalBytes = limitBytes !== null ? await getRootUsageBytes(root, tmpRoot, { fresh: true, measure: measureFn }) : null;
+      if (limitBytes !== null && currentTotalBytes !== null) {
+        // Account for peak usage (existing files including any overwritten destination + newly extracted stage tree).
+        const peakBytes = currentTotalBytes + bytes;
+        if (peakBytes > limitBytes) {
+          throw new Error(`ENOSPC: peak usage (${peakBytes} bytes = ${currentTotalBytes} existing + ${bytes} extracted) exceeds configured ${root} soft limit (${limitBytes} bytes)`);
         }
       }
+      const replacedBytes = existing ? (existing.isDirectory() ? await directoryBytes(dest) : existing.isFile() ? existing.size : 0) : 0;
       stageDir = resolve(dirname(dest), `.bot-unpack-${input.stage_id}`);
       await rm(stageDir, { recursive: true, force: true }).catch(() => {});
       await mkdir(stageDir, { recursive: true, mode: 0o700 });
@@ -226,6 +284,11 @@ export async function assistantFile(input, options = {}) {
       }
       await rename(stageDir, dest);
       stageDir = null;
+      if (currentTotalBytes !== null) {
+        await writeCachedUsage(root, tmpRoot, Math.max(0, currentTotalBytes - replacedBytes + bytes));
+      } else {
+        await invalidateCachedUsage(root, tmpRoot);
+      }
       return { path: dest, files, bytes };
     } finally {
       await rm(stagePath, { force: true }).catch(() => {});

@@ -121,22 +121,55 @@ test('global settings change the defaults through the manager, and an idle compu
   assert.equal((await member('/api/settings', 'PATCH', { computer_defaults: { cpus: 1 } })).status, 403);
 });
 
-test('small hosts clamp the 16 GB project default and reject explicit memory/tmp oversubscription (#1279)', async t => {
+test('small and 16 GiB boundary hosts clamp defaults to 75% reserve, reject explicit equal-to-host saves, and fail closed on /info errors (#1279)', async t => {
   const f = fixture(t);
-  // Simulate an 8 GiB manager host.
+  // 1. 16 GiB boundary host: 16 GiB default clamps to 12 GiB (75% reserve), explicit 16 GiB is rejected.
+  f.docker.info = { NCPU: 4, MemTotal: 16384 * mib };
+  let view = await f.projects.defaultsView();
+  assert.equal(view.defaults.memory_mb, 12288, '16 GiB built-in default clamps to 75% (12 GiB) on a 16 GiB host');
+  assert.equal(view.defaults.tmp_mb, 4096);
+  assert.deepEqual(view.host_clamped, { memory_mb: 12288, host_cap_mb: 12288 });
+  assert.equal(view.tmp_clamped, null);
+  await assert.rejects(f.projects.setDefaults({ memory_mb: 16384 }), /memory_exceeds_host/);
+
+  await f.projects.register('301');
+  let hostCfg = f.host('301');
+  assert.equal(hostCfg.Memory, 12288 * mib);
+  assert.equal(hostCfg.MemorySwap, 12288 * mib);
+  const desc301 = f.projects.describe('301').computer;
+  assert.equal(desc301.memory_mb, 12288, 'describe() exposes effective clamped memory');
+  assert.equal(desc301.configured_memory_mb, 16384);
+  assert.equal(desc301.host_clamped, true);
+  assert.equal(desc301.resources_pending, false, 'applied matches effective clamped spec');
+
+  // 2. 8 GiB host: clamps to 6 GiB (6144 MiB), explicit equal-to-host 8192 MiB is rejected on both setDefaults and configure.
   f.docker.info = { NCPU: 4, MemTotal: 8192 * mib };
-  const view = await f.projects.defaultsView();
-  assert.equal(view.defaults.memory_mb, 6144, '16 GiB built-in default clamps to 75% of 8 GiB host');
-  assert.equal(view.defaults.tmp_mb, 4096, '4 GiB tmpfs default stays inside 6 GiB effective RAM');
-  assert.deepEqual(view.host_clamped, { memory_mb: 6144, tmp_mb: 4096 });
+  view = await f.projects.defaultsView();
+  assert.equal(view.defaults.memory_mb, 6144);
+  assert.equal(view.defaults.tmp_mb, 4096);
+  assert.deepEqual(view.host_clamped, { memory_mb: 6144, host_cap_mb: 6144 });
+  await assert.rejects(f.projects.setDefaults({ memory_mb: 8192 }), /memory_exceeds_host/);
   await assert.rejects(f.projects.setDefaults({ memory_mb: 16384 }), /memory_exceeds_host/);
   await assert.rejects(f.projects.setDefaults({ tmp_mb: 8192 }), /tmp_exceeds_memory/);
 
-  await f.projects.register('301');
-  const hostCfg = f.host('301');
+  await f.projects.register('302');
+  hostCfg = f.host('302');
   assert.equal(hostCfg.Memory, 6144 * mib);
-  assert.equal(hostCfg.MemorySwap, 6144 * mib);
   assert.equal(hostCfg.Tmpfs['/tmp'], `rw,exec,nosuid,nodev,size=${4096 * mib},mode=1777`);
-  await assert.rejects(f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 12288 } }), /memory_exceeds_host/);
-  await assert.rejects(f.projects.operate('301', 'configure', { operation_id: id(), generation: 1, request: { tmp_mb: 8192 } }), /tmp_exceeds_memory/);
+  await assert.rejects(f.projects.operate('302', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 8192 } }), /memory_exceeds_host/);
+  await assert.rejects(f.projects.operate('302', 'configure', { operation_id: id(), generation: 1, request: { tmp_mb: 8192 } }), /tmp_exceeds_memory/);
+
+  // 3. /info failure on cold manager falls back conservatively to 4096 MiB instead of failing open to 16 GiB.
+  const f2 = fixture(t);
+  const origReq = f2.docker.request.bind(f2.docker);
+  f2.docker.request = async (method, path, body, raw, timeout) => {
+    if (path === '/info') throw new Error('docker_socket_unreachable');
+    return origReq(method, path, body, raw, timeout);
+  };
+  const coldView = await f2.projects.defaultsView();
+  assert.equal(coldView.defaults.memory_mb, 4096);
+  assert.equal(coldView.host_memory_cap_mb, 4096);
+  await assert.rejects(f2.projects.setDefaults({ memory_mb: 8192 }), /memory_exceeds_host/);
+  await f2.projects.register('303');
+  assert.equal(f2.host('303').Memory, 4096 * mib);
 });
