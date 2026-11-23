@@ -25,6 +25,8 @@ flowchart LR
 | `runner` | `runner/` | 预装在项目/助手电脑镜像内的一次性固定执行入口，经 `docker exec` 接收校验后的命令/文件/Git/Harness 请求并维护本地 journal。 |
 | `webhook`、`tunnel` | `webhook/`、`tunnel/` | 边界转发网关与可选 Cloudflare Tunnel；`tunnel` 仅位于 `edge` 网络，只能经 `webhook` 到达 `bot:8791`，无法触及 `manager`。 |
 
+> 四个核心常驻服务（`bot`、`manager`、`webhook`、`tunnel`）在 `docker/compose.yaml` 中统一启用 `init: true`，且各进程在收到 `SIGTERM`/`SIGINT` 后立即关闭空闲 HTTP keep-alive 连接、经有限排空后主动收口并在 `stop_grace_period` 之前自主退出，避免升级重建时因连接滞留触发 Docker `SIGKILL`。
+
 ## 2. 核心设计原则
 
 1. **控制面是唯一权威与凭据边界**：

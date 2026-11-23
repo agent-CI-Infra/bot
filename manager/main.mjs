@@ -23,10 +23,28 @@ const assistants = new AssistantComputers({ docker: projects.docker, db: project
   globalEnvironment: process.env.BOT_ASSISTANT_IMAGE ? null : () => projects.assistantGlobalEnvironment() });
 const { server, recovered } = createManagerServer({ projects, token, assistants });
 server.listen(8793, '0.0.0.0');
+// Bound HTTP draining and teardown below compose.yaml stop_grace_period (100s) so deployments never hit Docker SIGKILL.
+const shutdownDrainMs = 5_000, shutdownLimitMs = 80_000;
 let timer, assistantTimer, stopping = false, checking = false, checkingAssistants = false;
-for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => {
-  stopping = true; clearInterval(timer); clearInterval(assistantTimer);
-  server.close(async () => { await recovered; await assistants.shutdown(); await projects.shutdown(); process.exit(0); });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+  if (stopping) return; stopping = true;
+  clearInterval(timer); clearInterval(assistantTimer);
+  const forceExit = setTimeout(() => { console.error('[manager] shutdown timed out before stop_grace_period, exiting'); process.exit(1); }, shutdownLimitMs);
+  forceExit.unref?.();
+  const forceConnections = setTimeout(() => server.closeAllConnections?.(), shutdownDrainMs);
+  forceConnections.unref?.();
+  server.close(async () => {
+    clearTimeout(forceConnections);
+    try {
+      await recovered; await assistants.shutdown(); await projects.shutdown();
+      clearTimeout(forceExit);
+      process.exit(0);
+    } catch (error) {
+      console.error('[manager] shutdown failed:', error);
+      process.exit(1);
+    }
+  });
+  server.closeIdleConnections?.();
 });
 await recovered;
 // Background work once the manager is ready: close trajectory files a stopped process left open, then move the bodies of
