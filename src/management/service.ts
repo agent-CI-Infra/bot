@@ -16,6 +16,7 @@ import { taskTrace, traceClean } from '../tasks/trace.js';
 import { queries as taskQueries, redactEgress } from '../app/queries.js';
 import { updatePolicy } from '../app/management.js';
 import { autoMergePolicy } from '../github/merge-policy.js';
+import { projectCeiling } from '../projects/ceiling.js';
 import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
 import { installationExecutionDenied } from '../installations/archive.js';
@@ -228,7 +229,7 @@ export class ManagementService {
     if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!confinedTenant(actor)||s.scope!=='platform')&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
     if(operation==='list_projects')return {projects:ids.slice(offset,offset+limit).map(id=>{
       const project=this.scope(actor,id),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!;
-      return {id,tenant_id:this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',id)?.tenant_id,full_name:project.full_name,enabled:!!project.enabled,configuration_gaps:[...(!policy.model_id?['model_not_configured']:[]),...(installationExecutionDenied(this.store,project.account_id,id)?['installation_unavailable']:[])],url:'#/projects/'+id+'/basic'};
+      return {id,tenant_id:this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',id)?.tenant_id,full_name:project.full_name,enabled:!!project.enabled,capability_ceiling:projectCeiling(this.store,id,policy),configuration_gaps:[...(!policy.model_id?['model_not_configured']:[]),...(installationExecutionDenied(this.store,project.account_id,id)?['installation_unavailable']:[])],url:'#/projects/'+id+'/basic'};
     }),total:ids.length,next_offset:offset+limit<ids.length?offset+limit:null,
       ...(!target.project_id&&offset===0?{pending_repositories:this.pendingRepositories(actor).map(r=>({id:r.id,full_name:r.full_name,started:false,self_start:r.self_start,tenant_id:'github.com:'+r.owner_id}))}:{})};
     if(operation==='get_effective_config'){if(!target.project_id)fail(400,'project_target_required');return this.effective(actor,target.project_id);}
