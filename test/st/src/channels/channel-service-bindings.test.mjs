@@ -1079,6 +1079,15 @@ test('decoupled group permissions default project_memory to read, preserve store
   assert.equal(row.state, 'completed', row.error);
   assert.ok(offered.includes('create_project_task') && offered.includes('management_query') && offered.includes('conversation_schedules'));
   assert.ok(!offered.includes('github_write'));
+  const groupSystem = f.requests.at(-1).messages[0].content;
+  const groupSeed = JSON.parse(f.requests.at(-1).messages[1].content);
+  assert.match(groupSystem, /same launchpad bot platform/);
+  assert.match(groupSystem, /never contrast yourself with "the bot"/);
+  assert.match(groupSystem, /never expose internal permission keys/);
+  assert.doesNotMatch(groupSystem, /unless asked/);
+  assert.match(groupSystem, /only for repositories whose capability_ceiling is "develop"/);
+  assert.doesNotMatch(groupSystem, /open a bot PR/);
+  assert.equal(groupSeed.context.scope.repository_ceilings[repo(101)], 'read');
   const [knowledgeRes, createdRes, writeRes] = observations(f.requests.at(-1));
   assert.ok(!knowledgeRes.error, JSON.stringify(knowledgeRes));
   assert.equal(createdRes.state, 'succeeded', JSON.stringify(createdRes));
@@ -1136,4 +1145,21 @@ test('upgrading to #1206 preserves the exact authorization fence of pre-#1206 bi
   const savedRaw = JSON.parse(bindingRow().permissions);
   assert.equal(Object.hasOwn(savedRaw, 'computer'), false);
   assert.equal(Object.hasOwn(savedRaw, 'browser'), false);
+});
+
+test('group list_projects and turn seed expose each repository capability_ceiling across mixed ceilings (#1270)', async t => {
+  const f = await fixture(t), { h } = f;
+  h.store.run("UPDATE policies SET capability_ceiling='comment',review_enabled=1,development_enabled=0 WHERE repository_id='101'");
+  h.store.run("UPDATE policies SET capability_ceiling='develop',review_enabled=1,development_enabled=1 WHERE repository_id='102'");
+  assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101', '102'] }, level: 'dispatch' })).status, 200);
+  let seed, projects;
+  f.modelState.respond = async (body, res) => {
+    const seen = observations(body);
+    if (!seen.length) { seed = JSON.parse(body.messages[1].content); return call(res, 'list_projects', {}); }
+    projects = seen[0].projects;
+    return say(res, '已查看仓库上限。');
+  };
+  assert.equal((await done(f, await post(h, f.id, groupMessage('哪些仓库可以开 PR？')))).state, 'completed');
+  assert.deepEqual(seed.context.scope.repository_ceilings, { [repo(101)]: 'comment', [repo(102)]: 'develop' });
+  assert.deepEqual(projects.map(p => [p.repository, p.capability_ceiling]), [[repo(101), 'comment'], [repo(102), 'develop']]);
 });

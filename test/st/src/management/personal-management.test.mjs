@@ -23,6 +23,11 @@ test('multi-project greetings use the shared management agent and private histor
       ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','attach_message_resource','create_reply_file']:[]),'send_message']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);
+    assert.match(body.messages[0].content,/same launchpad bot platform/);
+    assert.match(body.messages[0].content,/never contrast yourself with "the bot"/);
+    assert.match(body.messages[0].content,/never expose internal permission keys/);
+    assert.doesNotMatch(body.messages[0].content,/unless asked/);
+    assert.match(body.messages[0].content,/only repositories whose capability_ceiling is "develop"/);
     // #1170: no fixed merge ban; merging follows each project's auto-merge policy, read from its effective configuration.
     assert.match(body.messages[0].content,/Merging follows the project's auto-merge policy \(auto_merge_policy in get_effective_config\): disallow: never merge/);
     assert.doesNotMatch(body.messages[0].content,/never merge a pull request, the bot's own included, or push/);
@@ -67,6 +72,7 @@ test('authorized names, ambiguous project clarification, continuation and switch
   const other=await f.member('other-private-reader',{repository_ids:['101']});
   assert.equal((await other.client('/api/management/conversations/'+selected.row.conversation_id)).status,404);
   const projects=(await query(member.client,'list_projects')).value.projects;assert.deepEqual(projects.map(p=>p.full_name),['alpha/bot','beta/bot']);
+  assert.ok(projects.every(p=>['read','comment','develop'].includes(p.capability_ceiling)),JSON.stringify(projects));
 });
 
 test('Web and personal natural-language writes share audit, receipts and replay protection and execute without approval',async t=>{
