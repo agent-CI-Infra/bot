@@ -101,7 +101,7 @@ function storeFixture(t) {
 }
 // A task using a workspace, in a given state.
 function owned(store, repo, workspace, task, status, kind = 'review.issue', number = 1) {
-  store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES(?,?,?,?,?,?)', task, repo, kind, status, 'fixture', number);
+  store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,workspace_id) VALUES(?,?,?,?,?,?,?)', task, repo, kind, status, 'fixture', number, workspace);
   store.run("INSERT INTO task_workspaces(repository_id,workspace_id,task_id,task_kind,object_number,kind,created_at) VALUES(?,?,?,?,?,'task',?)", repo, workspace, task, kind, number, new Date().toISOString());
 }
 

@@ -84,3 +84,34 @@ test('the console API serves the storage view to signed-in users only', async t 
   const response = await admin('/api/storage');
   assert.equal(response.status, 200); assert.ok(Array.isArray(response.value.projects)); assert.ok(response.value.totals.control.database.bytes > 0);
 });
+
+test('#1268 storage report exposes unfinished task workspace counts computed in refresh without extra view queries', async t => {
+  const { store, report } = fixture(t);
+  const ws1 = 'a'.repeat(48), ws2 = 'b'.repeat(48), ws3 = 'c'.repeat(48);
+  store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,attempt,created_at,updated_at,workspace_id)
+    VALUES('t-run','101','development.issue','running','run',7,3,'2026-01-01','2026-01-01',?)`, ws1);
+  for (const ws of [ws1, ws2, ws3]) {
+    store.run(`INSERT INTO task_workspaces(repository_id,workspace_id,task_id,task_kind,object_number,kind,created_at)
+      VALUES('101',?,'t-run','development.issue',7,'task','2026-01-01')`, ws);
+  }
+  await report.refresh();
+  const seen = [], all = store.all.bind(store), get = store.get.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  const view = await report.api(superAdmin, 'GET', '/api/storage');
+  store.all = all; store.get = get;
+  for (const sql of seen) assert.match(sql, /FROM (repositories|trajectory_usage)\b/, sql);
+  const p101 = view.projects.find(row => row.repository_id === '101');
+  assert.equal(p101.unfinished_workspaces.length, 1);
+  assert.deepEqual(p101.unfinished_workspaces[0], {
+    task_id: 't-run',
+    kind: 'development.issue',
+    status: 'running',
+    object_number: 7,
+    attempt: 3,
+    directories: 3,
+    active: 1,
+    releasable: 2,
+    bytes: null,
+  });
+});

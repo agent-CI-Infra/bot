@@ -175,7 +175,27 @@ const settingsCards = {
         size((c.other_bytes ?? 0) + (c.tmp_bytes ?? 0)) + (top(c.other_entries) ? `（${top(c.other_entries)}）` : ''), time(c.scanned_at)]);
     }
     computers.append(scanned.length ? volumes.wrap : note('还没有项目电脑的扫描结果：电脑运行后会在后台扫描。'));
-    computers.append(note('任务工作区按保留规则分类：运行中（任务未结束或有后续任务）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束，到期后由后台清理删除）。「其他」含 /workspace/tmp 和卷根目录下的其他文件；项目笔记是单独的卷，不计入。'));
+    const heldTasks = view.projects
+      .flatMap(project => (Array.isArray(project.unfinished_workspaces) ? project.unfinished_workspaces : []).map(item => ({ project: project.name || project.repository_id, ...item })))
+      .sort((a, b) => (b.directories ?? 0) - (a.directories ?? 0) || (b.bytes ?? 0) - (a.bytes ?? 0));
+    if (heldTasks.length) {
+      const heldTable = costTable(['项目', '未结束任务', '状态', '尝试次数', '持有目录', '已测大小']);
+      heldTable.wrap.classList.add('storage-projects');
+      for (const item of heldTasks) {
+        const tr = document.createElement('tr');
+        const taskCell = document.createElement('td');
+        const link = element('a', (item.object_number != null ? `#${item.object_number} · ` : '') + String(item.task_id || '').slice(0, 10));
+        const href = '#/tasks/' + encodeURIComponent(item.task_id);
+        link.href = href;
+        link.setAttribute('href', href);
+        taskCell.append(link);
+        const dirs = `${count(item.directories)} 个` + (item.releasable > 0 ? `（${count(item.active)} 个在用，${count(item.releasable)} 个待清理）` : '');
+        tr.append(element('td', item.project), taskCell, element('td', item.status || '—'), element('td', count(item.attempt ?? 1)), element('td', dirs), element('td', item.bytes == null ? '—' : size(item.bytes)));
+        heldTable.body.append(tr);
+      }
+      computers.append(element('h3', '未结束任务持有的工作区目录'), heldTable.wrap);
+    }
+    computers.append(note('任务工作区按保留规则分类：运行中（仅保留未结束任务当前仍在用的目录及 30 分钟内活跃目录，旧尝试与已发布旧轮次的目录归入待删除）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束或已被新尝试/新轮次取代，到期后由后台清理删除）。「其他」含 /workspace/tmp 和卷根目录下的其他文件；项目笔记是单独的卷，不计入。'));
     cards.push(computers);
     if (view.overview) {
       const details = element('details', '', 'storage-diagnostics');

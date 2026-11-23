@@ -14,8 +14,11 @@ import { worktreesRemoved } from './worktrees.js';
  * runner (names and last activity only), decides from these records and the tasks' current state which ones go, and
  * removes them through the runner a few at a time. The directory a task no longer needs is kept:
  *
- * - while any task using it is not finished (running, queued, preparing, retry_wait, waiting_*, paused, needs_*…), or
- *   is the parent of such a follow-up task, which restores its parent's result from it;
+ * - for an unfinished task (running, queued, preparing, retry_wait, waiting_*, paused, needs_*…), only the directories it
+ *   can still use stay: its current workspace_id, open worktree bindings, resumable role-instance / CLI-state workspaces,
+ *   pending retry/recovery/integration restore sources, undecided candidate checkouts, and anything active in the last
+ *   half hour; directories from earlier attempts or published review rounds go at the next sweep (#1268);
+ * - for a finished task that is the parent of an unfinished follow-up task, its directory stays until the follow-up ends;
  * - while the pull request a development task opened or revises is open; once it is closed or merged, at the next sweep.
  *   A review of a pull request that is closed goes at the next sweep too;
  * - otherwise for a day after the task's last update (succeeded, cancelled, superseded), a week when it failed.
@@ -140,15 +143,190 @@ export function workspaceClasses(store: Store, repo: string, entries: { name: st
   return classes;
 }
 
+// For each unfinished task in `unfinishedIds`, compute the exact set of workspace/worktree directories it can still use
+// (#1268): current workspace_id, open worktree bindings, resumable role-instance / CLI-state workspaces, pending
+// recovery/integration restore sources, development candidate source workspace, and undecided candidate checkouts.
+interface UnfinishedState {
+  keep: Map<string, Set<string>>;
+  bindingTracked: Map<string, Set<string>>;
+  roundCutoff: Map<string, string | null>;
+}
+const addId = (map: Map<string, Set<string>>, taskId: string, ws: unknown) => {
+  const value = String(ws || '');
+  if (!workspaceId.test(value)) return;
+  let set = map.get(taskId);
+  if (!set) map.set(taskId, set = new Set());
+  set.add(value);
+};
+
+function unfinishedWorkspacesState(store: Store, repo: string, unfinishedIds: string[]): UnfinishedState {
+  const keep = new Map<string, Set<string>>(), bindingTracked = new Map<string, Set<string>>(), roundCutoff = new Map<string, string | null>();
+  if (!unfinishedIds.length) return { keep, bindingTracked, roundCutoff };
+  const idList = JSON.stringify(unfinishedIds);
+  const envGen = store.hasTable('project_environments')
+    ? store.get('SELECT generation FROM project_environments WHERE repository_id=?', repo)?.generation ?? null
+    : null;
+  const taskInfo = new Map<string, { generation: number | null; phase: string | null }>();
+  for (const row of store.all(
+    `SELECT id,workspace_id,generation,phase,
+       CASE WHEN json_valid(input) THEN json_extract(input,'$.recovery.source_workspace_id') END AS recovery_ws,
+       CASE WHEN json_valid(input) THEN json_extract(input,'$.integration.source_workspace_id') END AS integration_ws,
+       CASE WHEN json_valid(input) THEN json_extract(input,'$.round') END AS round_num,
+       CASE WHEN json_valid(input) THEN json_extract(input,'$.previous_result.finished_at') END AS prev_finished_at
+     FROM tasks WHERE id IN (SELECT value FROM json_each(?))`,
+    idList,
+  )) {
+    const id = String(row.id);
+    taskInfo.set(id, { generation: row.generation == null ? null : Number(row.generation), phase: row.phase ? String(row.phase) : null });
+    addId(keep, id, row.workspace_id);
+    addId(keep, id, row.recovery_ws);
+    addId(keep, id, row.integration_ws);
+    roundCutoff.set(id, Number(row.round_num) > 1 && typeof row.prev_finished_at === 'string' && row.prev_finished_at ? row.prev_finished_at : null);
+  }
+  if (store.hasTable('worktree_bindings')) {
+    for (const row of store.all(
+      'SELECT task_id,worktree_id,workspace_id,released_at FROM worktree_bindings WHERE task_id IN (SELECT value FROM json_each(?))',
+      idList,
+    )) {
+      const id = String(row.task_id);
+      addId(bindingTracked, id, row.worktree_id);
+      if (row.released_at == null) {
+        addId(keep, id, row.worktree_id);
+        addId(keep, id, row.workspace_id);
+      }
+    }
+  }
+  if (store.hasTable('role_instances')) {
+    for (const row of store.all(
+      'SELECT task_id,runtime,harness_state FROM role_instances WHERE task_id IN (SELECT value FROM json_each(?))',
+      idList,
+    )) {
+      const id = String(row.task_id);
+      const currentGen = taskInfo.get(id)?.generation ?? (envGen == null ? null : Number(envGen));
+      try {
+        const runtime = row.runtime ? JSON.parse(String(row.runtime)) : null;
+        if (runtime && !runtime.guidance_retired && (currentGen == null || runtime.generation == null || Number(runtime.generation) === currentGen)) {
+          addId(keep, id, runtime.workspace_id);
+        }
+      } catch {}
+      try {
+        const state = row.harness_state ? JSON.parse(String(row.harness_state)) : null;
+        if (state?.stateWorkspaceId) addId(keep, id, state.stateWorkspaceId);
+      } catch {}
+    }
+  }
+  if (store.hasTable('development_candidates')) {
+    for (const row of store.all(
+      `SELECT task_id,json_extract(data,'$.source_workspace_id') AS source_ws FROM development_candidates WHERE task_id IN (SELECT value FROM json_each(?))`,
+      idList,
+    )) addId(keep, String(row.task_id), row.source_ws);
+  }
+  const decidedTasks = new Set<string>();
+  if (store.hasTable('task_records')) {
+    for (const row of store.all(
+      'SELECT task_id,candidate,acceptance,pending FROM task_records WHERE task_id IN (SELECT value FROM json_each(?))',
+      idList,
+    )) {
+      const id = String(row.task_id), phase = taskInfo.get(id)?.phase;
+      let candidate: any = null, acceptance: any = null, pending: any = null;
+      try { candidate = row.candidate ? JSON.parse(String(row.candidate)) : null; } catch {}
+      try { acceptance = row.acceptance ? JSON.parse(String(row.acceptance)) : null; } catch {}
+      try { pending = row.pending ? JSON.parse(String(row.pending)) : null; } catch {}
+      const undecided = Boolean(
+        pending != null || phase === 'acceptance' || phase === 'publish'
+        || (candidate?.id && acceptance?.candidate_id !== candidate.id),
+      );
+      if (undecided && Array.isArray(candidate?.artifacts)) {
+        for (const art of candidate.artifacts) {
+          addId(keep, id, art?.content?.source_workspace_id);
+          const m = /^workspace:([a-f0-9]{48})$/.exec(String(art?.reference || ''));
+          if (m) addId(keep, id, m[1]);
+        }
+      }
+      if (!undecided && candidate != null) decidedTasks.add(id);
+    }
+  }
+  if (store.hasTable('task_history')) {
+    for (const id of unfinishedIds) {
+      if (decidedTasks.has(id)) continue;
+      const cutoff = roundCutoff.get(id);
+      const rows = store.all(
+        `SELECT json_extract(data,'$.role') AS role,
+           json_extract(data,'$.workspace_id') AS ws,
+           json_extract(data,'$.worktree_id') AS wt,
+           created_at
+         FROM task_history WHERE task_id=? AND type='role_candidate' ORDER BY id DESC`,
+        id,
+      );
+      const seenRoles = new Set<string>();
+      for (const row of rows) {
+        const roleKey = String(row.role ?? '');
+        if (seenRoles.has(roleKey)) continue;
+        seenRoles.add(roleKey);
+        if (!cutoff || !row.created_at || String(row.created_at) > cutoff) {
+          addId(keep, id, row.ws);
+          addId(keep, id, row.wt);
+        }
+      }
+    }
+  }
+  return { keep, bindingTracked, roundCutoff };
+}
+
+/**
+ * Unfinished tasks holding unreleased workspace directories in a project (#1268), sorted by directory count descending
+ * so runaway tasks are immediately visible on the storage page.
+ */
+export function unfinishedTaskWorkspaces(
+  store: Store,
+  repo: string,
+  entries?: { name: string; bytes: number }[],
+  limit = 50,
+): { task_id: string; kind: string; status: string; object_number: number | null; attempt: number; directories: number; active: number; releasable: number; bytes: number | null }[] {
+  const rows = store.all(
+    `SELECT tw.task_id,tw.workspace_id,tw.kind AS ws_kind,tw.created_at,t.kind,t.status,t.object_number,t.attempt
+     FROM task_workspaces tw JOIN tasks t ON t.id=tw.task_id
+     WHERE tw.repository_id=? AND tw.released_at IS NULL AND tw.task_id<>'' AND t.status NOT IN ${ended}`,
+    repo,
+  );
+  if (!rows.length) return [];
+  const unfinishedIds = [...new Set(rows.map(row => String(row.task_id)))];
+  const state = unfinishedWorkspacesState(store, repo, unfinishedIds);
+  const sizes = entries ? new Map(entries.map(entry => [entry.name, Math.max(0, Number(entry.bytes) || 0)])) : null;
+  const byTask = new Map<string, { task_id: string; kind: string; status: string; object_number: number | null; attempt: number; seen: Set<string>; active: number; releasable: number; bytes: number | null }>();
+  for (const row of rows) {
+    const id = String(row.task_id), ws = String(row.workspace_id);
+    let item = byTask.get(id);
+    if (!item) {
+      byTask.set(id, item = {
+        task_id: id, kind: String(row.kind || ''), status: String(row.status || ''),
+        object_number: row.object_number == null ? null : Number(row.object_number),
+        attempt: Number(row.attempt || 1), seen: new Set(), active: 0, releasable: 0, bytes: sizes ? 0 : null,
+      });
+    }
+    if (item.seen.has(ws)) continue;
+    item.seen.add(ws);
+    const kept = Boolean(state.keep.get(id)?.has(ws) || (row.ws_kind === 'worktree' && !state.bindingTracked.get(id)?.has(ws)));
+    if (kept) item.active++; else item.releasable++;
+    if (sizes && sizes.has(ws)) item.bytes = (item.bytes ?? 0) + sizes.get(ws)!;
+  }
+  return [...byTask.values()]
+    .map(({ seen, ...item }) => ({ ...item, directories: seen.size }))
+    .sort((a, b) => b.directories - a.directories || (b.bytes ?? 0) - (a.bytes ?? 0) || a.task_id.localeCompare(b.task_id))
+    .slice(0, limit);
+}
+
 // For the named directories: until when the tasks that use them need them, and why (Infinity keeps it; 'unowned' for a
 // directory no record names, whose time comes from its own activity).
 function retention(store: Store, repo: string, list: string[], prs: PullRequests): (name: string, activeAt: number) => [number, string] {
   const names = JSON.stringify(list), { finishedMs, failedMs, unownedMs } = retentionMs(store);
-  const rows = store.all(`SELECT workspace_id,task_id,task_kind,object_number FROM task_workspaces WHERE repository_id=? AND task_id<>''
+  const rows = store.all(`SELECT workspace_id,task_id,task_kind,object_number,kind,created_at FROM task_workspaces WHERE repository_id=? AND task_id<>''
     AND workspace_id IN (SELECT value FROM json_each(?))`, repo, names);
   const owners = JSON.stringify([...new Set(rows.map(row => row.task_id))]);
   // status precedes the task input in a tasks row, so this reads no more than the row's first page.
   const status = new Map(store.all('SELECT id,status FROM tasks WHERE id IN (SELECT value FROM json_each(?))', owners).map(row => [row.id, String(row.status)]));
+  const unfinishedIds = [...status.entries()].filter(([, s]) => ![...finished, 'failed'].includes(s)).map(([id]) => String(id));
+  const unfinished = unfinishedWorkspacesState(store, repo, unfinishedIds);
   const requestOwners = JSON.stringify([...new Set(rows.filter(row => row.task_kind === 'task.request' && Number(row.object_number) > 0).map(row => row.task_id))]);
   const requestMeta = new Map(
     store.all(
@@ -173,7 +351,14 @@ function retention(store: Store, repo: string, list: string[], prs: PullRequests
   // When a task stops needing the directory, and why: Infinity keeps it.
   const until = (row: Row, activeAt: number): [number, string] => {
     const state = status.get(row.task_id)!, number = Number(row.object_number), req = requestMeta.get(String(row.task_id));
-    if (![...finished, 'failed'].includes(state)) return [Infinity, 'active'];
+    if (![...finished, 'failed'].includes(state)) {
+      const taskId = String(row.task_id), ws = String(row.workspace_id);
+      if (unfinished.keep.get(taskId)?.has(ws)) return [Infinity, 'active'];
+      if (row.kind === 'worktree' && !unfinished.bindingTracked.get(taskId)?.has(ws)) return [Infinity, 'active'];
+      const cutoff = unfinished.roundCutoff.get(taskId);
+      if (cutoff && row.created_at && String(row.created_at) <= cutoff) return [0, 'superseded_round'];
+      return [0, 'superseded_attempt'];
+    }
     if (parents.has(row.task_id)) return [Infinity, 'followup'];
     const isPrDev = row.task_kind === 'development.pr' || (row.task_kind === 'task.request' && req?.targetType === 'pr' && req.hasPrWrite);
     const isIssueDev = row.task_kind === 'development.issue' || (row.task_kind === 'task.request' && req?.targetType === 'issue' && req.hasPrWrite);
@@ -271,26 +456,31 @@ export class WorkspaceCleanup {
     if (!environment || !['ready', 'busy'].includes(environment.state)) return;
     const prs = pullRequests(this.store, repo), tasks = await this.pass(repo, environment.generation, prs, false), worktrees = await this.pass(repo, environment.generation, prs, true);
     const removed = tasks.removed + worktrees.removed, bytes = tasks.bytes + worktrees.bytes, skipped = tasks.skipped + worktrees.skipped;
-    if (removed || skipped) console.log(`[workspaces] project ${repo}: removed ${tasks.removed} task directories and ${worktrees.removed} worktrees (${Math.round(bytes / 1024 / 1024)} MiB), ${skipped} skipped; ${tasks.total} and ${worktrees.total} were there`);
+    const reasons: Record<string, number> = {};
+    for (const map of [tasks.reasons, worktrees.reasons]) for (const [reason, n] of Object.entries(map)) reasons[reason] = (reasons[reason] ?? 0) + n;
+    const reasonSummary = Object.entries(reasons).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([r, n]) => `${r}=${n}`).join(', ');
+    if (removed || skipped || reasonSummary) console.log(`[workspaces] project ${repo}: removed ${tasks.removed} task directories and ${worktrees.removed} worktrees (${Math.round(bytes / 1024 / 1024)} MiB), ${skipped} skipped${reasonSummary ? ` (${reasonSummary})` : ''}; ${tasks.total} and ${worktrees.total} were there`);
     // What this sweep freed, for the storage page (#671).
     const swept = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}');
-    swept[repo] = { at: new Date().toISOString(), removed, bytes, skipped };
+    swept[repo] = { at: new Date().toISOString(), removed, bytes, skipped, reasons };
     this.store.run("INSERT INTO settings VALUES('workspace_cleanup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(swept));
     return { removed, bytes };
   }
   // One kind of directory on the computer: the task directories, or the shared worktrees (#769), each listed and removed
   // through its own runner calls. A worktree's rows (kind 'worktree') come from its bindings; the same retention applies.
-  private async pass(repo: string, generation: number, prs: PullRequests, worktrees: boolean): Promise<{ removed: number; bytes: number; skipped: number; total: number }> {
+  private async pass(repo: string, generation: number, prs: PullRequests, worktrees: boolean): Promise<{ removed: number; bytes: number; skipped: number; total: number; reasons: Record<string, number> }> {
     const listing = await this.runner(repo, generation, { type: worktrees ? 'worktrees_list' : 'tasks_list' }, 10 * 60_000);
     const entries: Listed[] = (Array.isArray(listing?.entries) ? listing.entries : [])
       .filter((entry: any) => workspaceId.test(String(entry?.name)) && Number.isSafeInteger(entry.active_at));
+    const reasonCounts: Record<string, number> = {};
+    const countReason = (reason: string) => { reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1; };
     // With the whole directory listed, recorded workspaces it lacks are gone (removed by hand, or a reset started a new
     // work volume). A record younger than an hour may be one whose directory the runner is creating right now.
     if (listing?.total === entries.length) {
       const present = new Set(entries.map(entry => entry.name)), before = new Date(Date.now() - hour).toISOString();
       const gone = this.store.all(`SELECT DISTINCT workspace_id FROM task_workspaces WHERE repository_id=? AND released_at IS NULL AND created_at<? AND kind${worktrees ? '=' : '<>'}'worktree'`, repo, before)
         .filter(row => !present.has(row.workspace_id)).map(row => ({ name: String(row.workspace_id), bytes: null, reason: 'missing' }));
-      if (gone.length) this.release(repo, gone, worktrees);
+      if (gone.length) { this.release(repo, gone, worktrees); for (const item of gone) countReason(item.reason); }
     }
     const planned = removableWorkspaces(this.store, repo, entries, Date.now(), prs);
     let removed = 0, bytes = 0, skipped = 0;
@@ -305,15 +495,16 @@ export class WorkspaceCleanup {
       finally { for (const key of keys) removing.delete(key); }
       const reasons = new Map(batch.map(entry => [entry.name, entry])), done: { name: string; bytes: number | null; reason: string; active_at?: number }[] = [];
       for (const item of Array.isArray(result?.removed) ? result.removed : []) if (reasons.has(item.name)) {
-        done.push({ name: item.name, bytes: Number.isSafeInteger(item.bytes) ? item.bytes : null, reason: reasons.get(item.name)!.reason, active_at: reasons.get(item.name)!.active_at });
-        removed++; bytes += Number.isSafeInteger(item.bytes) ? item.bytes : 0;
+        const reason = reasons.get(item.name)!.reason;
+        done.push({ name: item.name, bytes: Number.isSafeInteger(item.bytes) ? item.bytes : null, reason, active_at: reasons.get(item.name)!.active_at });
+        removed++; bytes += Number.isSafeInteger(item.bytes) ? item.bytes : 0; countReason(reason);
       }
       for (const item of Array.isArray(result?.skipped) ? result.skipped : []) {
-        if (item?.reason === 'missing' && reasons.has(item.name)) done.push({ name: item.name, bytes: null, reason: 'missing', active_at: reasons.get(item.name)!.active_at });
+        if (item?.reason === 'missing' && reasons.has(item.name)) { done.push({ name: item.name, bytes: null, reason: 'missing', active_at: reasons.get(item.name)!.active_at }); countReason('missing'); }
         else skipped++;
       }
       if (done.length) this.release(repo, done, worktrees);
     }
-    return { removed, bytes, skipped, total: Number(listing?.total ?? entries.length) };
+    return { removed, bytes, skipped, total: Number(listing?.total ?? entries.length), reasons: reasonCounts };
   }
 }

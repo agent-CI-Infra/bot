@@ -60,3 +60,34 @@ test('a super administrator still sees the platform category bar, and the storag
   assert.match(textOf(pageWithHost.$('settings-panel')), /飞书附件存储 channel-resources/);
   assert.match(textOf(pageWithHost.$('settings-panel')), /飞书交互卡片 channel-cards/);
 });
+
+test('#1268 storage page shows unfinished tasks holding workspace directories', async () => {
+  const page = loadConsole(scripts, (method, path) => {
+    if (method === 'GET' && path === '/api/storage') return [200, {
+      refreshed_at: '2026-11-15T08:00:00.000Z',
+      alerts: [],
+      projects: [{
+        repository_id: '101',
+        name: 'fixture/project-101',
+        files: { count: 1, bytes: 10 },
+        records: {},
+        blobs: { count: 0, bytes: 0 },
+        open: { count: 0, bytes: 0 },
+        manager: null,
+        computer: { total_bytes: 100, complete: true, scanned_at: '2026-11-15T08:00:00.000Z' },
+        unfinished_workspaces: [
+          { task_id: '179251c2abcd1234', kind: 'development.issue', status: 'retry_wait', object_number: 42, attempt: 9, directories: 14, active: 2, releasable: 12, bytes: 10 * 1024 * 1024 },
+        ],
+      }],
+    }];
+    throw new Error('Unexpected request: ' + method + ' ' + path);
+  });
+  page.run("me = { role: 'project_admin', repositories: ['101'], csrf_token: 'csrf' }; location.hash = '#/settings/storage';");
+  await page.run('renderSettings(renderVersion)');
+  const panel = page.$('settings-panel'), shown = textOf(panel);
+  assert.match(shown, /未结束任务持有的工作区目录/);
+  assert.match(shown, /179251c2/);
+  assert.match(shown, /14 个（2 个在用，12 个待清理）/);
+  const links = byTag(panel, 'a').map(a => a.getAttribute('href'));
+  assert.ok(links.includes('#/tasks/179251c2abcd1234'), 'task link points to task detail page');
+});

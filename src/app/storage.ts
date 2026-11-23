@@ -11,7 +11,7 @@ import { diskState } from '../storage/disk.js';
 import { storageFootprint, type Footprint, type Category } from '../../manager/storage-footprint.mjs';
 import { machineSample, storageOverview, type MachineSample } from '../storage/overview.js';
 import { ManualReclaim } from '../storage/reclaim.js';
-import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.js';
+import { noteTaskUsage, unfinishedTaskWorkspaces, workspaceClasses } from '../projects/workspace-cleanup.js';
 
 // The storage page (#436, #671): every kind of storage the bot uses. Per project, what its trajectory files, records and
 // blobs take on the control plane, its runner-call files in the manager, and its project computer's work volume (task
@@ -32,7 +32,7 @@ interface Measured { bytes: number | null; measured_at: string }
 // manager_error: why the last refresh could not read the manager (null once a read succeeds); manager_read_at: when the
 // numbers in `manager` and `computers` were read, kept as they are across a failed refresh (#793).
 interface Snapshot { refreshed_at: string; control: Json; manager: Json | null; open: Record<string, Usage>; computers: Record<string, Json>; cleanup: Record<string, Json>;
-  manager_error: string | null; manager_read_at: string | null }
+  unfinished: Record<string, Json>; manager_error: string | null; manager_read_at: string | null }
 
 const hour = 3600_000;
 const run = (command: string, args: string[], timeout: number) => new Promise<{ error: Error | null; stdout: string }>(resolve =>
@@ -54,6 +54,7 @@ export class StorageReport {
   // The directories measured with du (at most hourly), and each computer's classification by the scan it came from.
   private directories: { at: number; values: Record<string, Measured> } = { at: 0, values: {} };
   private readonly classified = new Map<string, { scanned_at: string; value: Json | null }>();
+  private readonly unfinishedCache = new Map<string, { scanKey: string; at: number; value: Json | null }>();
   private readonly machineDirectory?: string;
   private readonly extra: string[];
   private readonly paths: Record<string, string>;
@@ -64,6 +65,7 @@ export class StorageReport {
     this.reclaim = new ManualReclaim(store, retention, manager, workspaces, async () => {
       await this.refreshing;
       this.directories.at = 0;
+      this.unfinishedCache.clear();
       await this.refresh();
     });
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
@@ -122,11 +124,32 @@ export class StorageReport {
         }
         // A failed read keeps the computers of the last one; only a read that answered replaces them.
         const computers: Record<string, Json> = managerError ? { ...(previous?.computers ?? {}) } : {};
-        if (!managerError) for (const row of (Array.isArray(manager?.computers) ? manager!.computers : []) as Record<string, any>[]) computers[String(row.repository_id)] = this.computer(row);
+        const scannedTasks = new Map<string, { scanned_at: string; tasks?: { name: string; bytes: number }[] }>();
+        if (!managerError) for (const row of (Array.isArray(manager?.computers) ? manager!.computers : []) as Record<string, any>[]) {
+          computers[String(row.repository_id)] = this.computer(row);
+          scannedTasks.set(String(row.repository_id), {
+            scanned_at: String(row.scanned_at || ''),
+            tasks: Array.isArray(row.result?.tasks) ? row.result.tasks : undefined,
+          });
+        }
+        const unfinished: Record<string, Json> = {};
+        const nowMs = Date.now();
+        for (const repoRow of this.store.all('SELECT id FROM repositories')) {
+          const repoId = String(repoRow.id);
+          const scan = scannedTasks.get(repoId);
+          const scanKey = scan?.scanned_at ?? '';
+          let cached = this.unfinishedCache.get(repoId);
+          if (!cached || cached.scanKey !== scanKey || nowMs - cached.at >= 60_000) {
+            const held = unfinishedTaskWorkspaces(this.store, repoId, scan?.tasks);
+            cached = { scanKey, at: nowMs, value: held.length ? (held as unknown as Json) : null };
+            this.unfinishedCache.set(repoId, cached);
+          }
+          if (cached.value) unfinished[repoId] = cached.value;
+        }
         let cleanup: Record<string, Json> = {}, compaction: Json | null = null;
         try { cleanup = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}'); } catch {}
         try { compaction = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='compaction'")?.value ?? 'null'); } catch {}
-        this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup, manager_error: managerError, manager_read_at: managerReadAt,
+        this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup, unfinished, manager_error: managerError, manager_read_at: managerReadAt,
           control: { database: databaseSize(this.store.db), disk: this.disk(), migration: migrationProgress(this.store), directories: this.directories.values,
             // The compaction at the last start and the incremental vacuum since (#671).
             compaction, vacuum: (this.vacuum?.state() ?? null) as Json | null } };
@@ -210,6 +233,7 @@ export class StorageReport {
       let entry = projects.get(id);
       if (!entry) projects.set(id, entry = { repository_id: id || null, name: name ?? (id ? id : '不属于项目的会话'), files: { count: 0, bytes: 0 }, records: {}, blobs: { count: 0, bytes: 0 },
         open: snapshot?.open[id] ?? { count: 0, bytes: 0 }, manager: null,
+        unfinished_workspaces: snapshot?.unfinished[id] ?? [],
         computer: snapshot?.computers[id] ? { ...snapshot.computers[id] as object, cleanup: snapshot.cleanup[id] ?? null } : null });
       return entry;
     };
