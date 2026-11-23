@@ -528,6 +528,29 @@ test('the project computer accepts conflict import and merge check calls through
   assert.equal(f.projects.get('101').state, 'ready');
 });
 
+test('a Pi session may hold its poll up to 3 s, name what it already handles and start with its last configuration piece', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
+  const known = { known_tool_ids: [id()], known_token_ids: [id()], known_model_ids: [id()], known_boundary_ids: [id()] };
+  await execute({ type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: 3000, ...known });
+  assert.deepEqual([f.docker.runs.at(-1).wait_ms, f.docker.runs.at(-1).known_boundary_ids], [3000, known.known_boundary_ids]);
+  const config = { type: 'workspace_agent_config', workspace_id, base64: 'e30=', offset: 0, final: true };
+  await execute({ ...config, start: true, runtime_version: '1.4.0' });
+  assert.deepEqual([f.docker.runs.at(-1).start, f.docker.runs.at(-1).runtime_version], [true, '1.4.0']);
+  const count = f.docker.runs.length;
+  for (const bad of [
+    { type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: 3001 },
+    { type: 'workspace_harness_poll', workspace_id, offset: 0, wait_ms: 1001 },
+    { type: 'workspace_agent_poll', workspace_id, offset: 0, known_boundary_ids: ['x'] },
+    { ...config, final: false, start: true },
+    { ...config, start: false },
+    { type: 'workspace_agent_start', workspace_id, start: true },
+    { ...config, runtime_version: '1.4.0' },
+    { ...config, start: true, runtime_version: '' },
+  ]) await assert.rejects(execute(bad), /invalid_runner_request/, JSON.stringify(bad));
+  assert.equal(f.docker.runs.length, count);
+});
+
 test('the project computer rejects the retired workspace_browser runner call type', async t => {
   const f = fixture(t); await f.projects.register('101');
   const count = f.docker.runs.length;

@@ -1,7 +1,7 @@
 import { ManagerError } from './docker.mjs';
 
 const runnerTypes = ['command','read','write','workspace_init','workspace_source','workspace_tree','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','workspace_import_commits','workspace_verify_merge','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_request','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_agent_result','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','conflict_base_sha','pr_head_sha','base_sha','head_sha','head_tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','known_boundary_ids','start','runtime_version','snapshot','sha','tree_sha','conflict_base_sha','pr_head_sha','base_sha','head_sha','head_tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
 
 // The control plane's workspace cleanup: list the task directories or shared worktrees, remove a few of them per call
 // (runner/task-dirs.mjs).
@@ -44,10 +44,14 @@ export function validateCall(call) {
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.grace_ms != null && !(Number.isSafeInteger(call.grace_ms) && call.grace_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.instance_id !== undefined && !/^[a-f0-9]{48}$/.test(call.instance_id)) throw new ManagerError('invalid_runner_request', 400);
-  if (call.wait_ms !== undefined && !(Number.isSafeInteger(call.wait_ms) && call.wait_ms >= 0 && call.wait_ms <= 1000)) throw new ManagerError('invalid_runner_request', 400);
-  for (const key of ['known_tool_ids', 'known_token_ids', 'known_model_ids']) {
+  // A Pi session's long poll may wait up to 3 s (runner/agent.mjs, #1277); other harness polls up to 1 s.
+  if (call.wait_ms !== undefined && !(Number.isSafeInteger(call.wait_ms) && call.wait_ms >= 0 && call.wait_ms <= (call.type === 'workspace_agent_poll' ? 3000 : 1000))) throw new ManagerError('invalid_runner_request', 400);
+  for (const key of ['known_tool_ids', 'known_token_ids', 'known_model_ids', 'known_boundary_ids']) {
     if (call[key] !== undefined && !validIdArray(call[key])) throw new ManagerError('invalid_runner_request', 400);
   }
+  // The last piece of a Pi session's configuration may start it, naming the Pi version it must run (#1277).
+  if (call.start !== undefined && (call.start !== true || call.type !== 'workspace_agent_config' || call.final !== true)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.runtime_version !== undefined && (call.start !== true || typeof call.runtime_version !== 'string' || !call.runtime_version || call.runtime_version.length > 64)) throw new ManagerError('invalid_runner_request', 400);
   // A cleanup call names task directories only by their ids, at most 20 at a time, and carries nothing else.
   if (isCleanupCall(call.type) ? Object.keys(call).some(k => !['type', 'entries'].includes(k)) || (call.type.endsWith('_list') ? call.entries !== undefined
     : !Array.isArray(call.entries) || !call.entries.length || call.entries.length > 20 || call.entries.some(entry => !entry || typeof entry !== 'object'

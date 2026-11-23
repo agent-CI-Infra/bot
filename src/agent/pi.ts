@@ -12,6 +12,8 @@ import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
+/** How long the runner may hold a poll of a Pi session (#1277); runner/agent.mjs and the manager allow the same 3 s. */
+const pollWait = 3000;
 
 /**
  * A review's conversation with its Pi session. The session itself lives in Pi's session files (#1040); the control plane
@@ -117,32 +119,62 @@ export function piAdapter<T>(session: PiSession<T>) {
       stop('role_budget_exhausted','waiting_configuration','剩余请求不足以保留至少一轮工作和收尾，Pi 会话尚未启动。');
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;
-    if (session.runtime) {
-      const runtime = await deliver(key + ':runtime', { type: 'workspace_agent_runtime' });
+    const checkRuntime = (runtime: any) => {
       if (runtime.error === 'runner_operation_failed') stop('execution_interrupted', 'waiting_environment', '查询 Pi 运行时信息时中断。');
       if (runtime.error || runtime.agent !== 'pi') stop('pi_runtime_unavailable', 'waiting_environment', '项目电脑的 runner 不支持 Pi 运行时查询，请升级项目电脑镜像。');
-      session.runtime.report(runtime);
-      if (runtime.version !== session.runtime.version) stop('harness_version_mismatch', 'waiting_configuration', `项目电脑的 Pi 版本是 ${runtime.version}，角色配置固定的是 ${session.runtime.version}；不会换用其他版本。`);
-    }
+      session.runtime!.report(runtime);
+      if (runtime.version !== session.runtime!.version) stop('harness_version_mismatch', 'waiting_configuration', `项目电脑的 Pi 版本是 ${runtime.version}，角色配置固定的是 ${session.runtime!.version}；不会换用其他版本。`);
+    };
+    const fresh = !conversation?.resume && !session.resume;
+    // A continued or reattached session has no configuration to carry the check: the runtime is asked first, as before.
+    if (session.runtime && !fresh) checkRuntime(await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
     // Messages that arrived before the session starts join right after its prompt, as they would before a first native request.
     if (service) { config.service_turn = true; config.steer = service.steer(); }
     // The private runner bootstrap carries a native provider credential, never a tool result or prompt.
     const wireConfig=redactor.clean(config);if(config.model_transport==='direct')wireConfig.native_model=config.native_model;
     const bytes = Buffer.from(JSON.stringify(wireConfig)); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
-    if (!conversation?.resume && !session.resume) {
+    // The last piece of a new session's configuration also starts it (#1277), checking the pinned Pi version before the
+    // process runs. A runner older than that ignores start: its answer has no runtime, and the runtime query and the start
+    // call follow as before. Pieces stay 30000 bytes, what those runners accept.
+    let launched: any = null;
+    if (fresh) {
       for (let offset = 0; offset < bytes.length; offset += 30000) {
-        const saved = await workspace.call(key + ':config:' + offset, { type: 'workspace_agent_config', base64: bytes.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= bytes.length });
+        const final = offset + 30000 >= bytes.length;
+        const saved = await workspace.call(key + ':config:' + offset, { type: 'workspace_agent_config', base64: bytes.subarray(offset, offset + 30000).toString('base64'), offset, final,
+          ...(final ? { start: true, ...(session.runtime ? { runtime_version: session.runtime.version } : {}) } : {}) });
         if (saved.error) stop('execution_interrupted', 'waiting_environment', `写入执行配置时中断，offset=${offset}。`);
+        if (final && saved.runtime && typeof saved.runtime === 'object') launched = saved;
       }
     }
+    if (session.runtime && fresh) checkRuntime(launched ? launched.runtime : await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
     // A stored started receipt is not evidence that its PID still exists. Ask the runner again on every entry;
-    // it checks the saved process before returning started, including after a control-plane restart.
-    const started = await workspace.call(key + ':' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' });
-    if (started.error) stop('execution_interrupted', 'waiting_environment', '启动任务执行进程时中断。');
+    // it checks the saved process before returning started, including after a control-plane restart. A start that rode
+    // with the configuration can be such a receipt too: the first poll checks the saved process the same way.
+    const started = launched ?? await workspace.call(key + ':' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' });
+    if (started.error || launched && started.started !== true) stop('execution_interrupted', 'waiting_environment', '启动任务执行进程时中断。');
 
     let offset = conversation?.offset || 0, publication: any, requests = 0, finalizing = false;
     const answered = new Set<string>(), inFlight = new Map<string, Promise<void>>();
-    let backgroundError: unknown = null, wakePoll: (() => void) | null = null, wakePending = false;
+    let backgroundError: unknown = null, wakePoll: (() => void) | null = null, wakePending = false, pollFailed: ((error: unknown) => void) | null = null;
+    // What the last poll showed that this loop already handles, so a long poll waits past it (#1277): tool and token
+    // requests answered or still running in the background, the model request and turn boundary already answered (Pi
+    // removes them a moment after reading the reply). A boundary nobody here answers counts as seen, never as news.
+    let last: any = null;
+    const handled = (list: unknown, prefix: string) => (Array.isArray(list) ? list : []).map(item => String(item?.id ?? ''))
+      .filter(id => /^[a-f0-9]{48}$/.test(id) && (answered.has(prefix + id) || inFlight.has(prefix + id))).slice(0, 512);
+    const seenIds = () => {
+      const request = String(last?.request?.id ?? ''), boundary = String(last?.boundary?.id ?? ''), ids: Record<string, string[]> = {
+        known_tool_ids: handled(last?.tool_requests, 'tool:'), known_token_ids: handled(last?.token_requests, 'token:'),
+        known_model_ids: /^[a-f0-9]{48}$/.test(request) && answered.has(request) ? [request] : [],
+        known_boundary_ids: /^[a-f0-9]{48}$/.test(boundary) && (answered.has('boundary:' + boundary) || !(conversation || service)) ? [boundary] : [] };
+      return Object.fromEntries(Object.entries(ids).filter(([, value]) => value.length));
+    };
+    // A long poll ends early when the session is cancelled or background work fails; its answer is then dropped.
+    const polled = <V>(work: Promise<V>) => abortable(new Promise<V>((resolve, reject) => {
+      pollFailed = reject;
+      work.then(resolve, reject).finally(() => { if (pollFailed === reject) pollFailed = null; });
+      if (backgroundError !== null) reject(backgroundError);
+    }));
     const notifyWake = () => {
       if (wakePoll) { const fn = wakePoll; wakePoll = null; fn(); }
       else wakePending = true;
@@ -157,7 +189,7 @@ export function piAdapter<T>(session: PiSession<T>) {
     };
     const startBackground = (idKey: string, work: () => Promise<void>) => {
       if (answered.has(idKey) || inFlight.has(idKey)) return;
-      const run = work().then(() => { answered.add(idKey); }, error => { backgroundError ??= error; })
+      const run = work().then(() => { answered.add(idKey); }, error => { backgroundError ??= error; pollFailed?.(backgroundError); })
         .finally(() => { inFlight.delete(idKey); notifyWake(); });
       inFlight.set(idKey, run);
     };
@@ -168,7 +200,9 @@ export function piAdapter<T>(session: PiSession<T>) {
         await guard();
         wakePending = false;
         // Read-only liveness/event polls are safe to repeat; deliver() avoids flooding task_tools and task_history (#1266).
-        const state = await deliver(`${key}:poll:${randomId()}`, { type: 'workspace_agent_poll', offset });
+        // The runner holds the poll up to pollWait until something new appears (#1277).
+        const state = await polled(deliver(`${key}:poll:${randomId()}`, { type: 'workspace_agent_poll', offset, wait_ms: pollWait, ...seenIds() }));
+        last = state;
         await guard();
         if (backgroundError !== null) throw backgroundError;
         for (const event of state.events || []) {
@@ -407,7 +441,9 @@ export function piAdapter<T>(session: PiSession<T>) {
           await sendModelReply(status, contentType, responseBody);
           continue;
         }
-        await waitNextPoll(500);
+        // A runner that held the poll already waited; one that answered at once (an older image, a test double) gets the
+        // 500 ms pause it always had.
+        if (state.long_poll !== true) await waitNextPoll(500);
       }
     } finally {
       if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
