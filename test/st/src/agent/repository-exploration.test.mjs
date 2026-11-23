@@ -114,12 +114,16 @@ test('review and development Pi adapters execute the same repository tools throu
     { name: 'github_read', arguments: { path: '/pulls/9/files' } }
   ];
   let authorized = false, index = 0, reply = [];
-  const workspace = { log() {}, async call(_key, input) {
-    if (input.type !== 'workspace_agent_poll') return { written: true, started: true };
+  const poll = () => {
     if (!authorized) return { state: 'running', token_requests: [{ id: 'a'.repeat(48) }] };
     if (index < requests.length) return { state: 'running', tool_requests: [{ id: String(index).padStart(48, 'b'), kind: 'repository', ...requests[index] }] };
     return { state: 'completed', result: { summary: 'Read related evidence.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } };
+  };
+  const workspace = { log() {}, async call(_key, input) {
+    if (input.type !== 'workspace_agent_poll') return { written: true, started: true };
+    return poll();
   }, async deliver(input) {
+    if (input.type === 'workspace_agent_poll') return poll();
     if (input.type === 'workspace_agent_token') authorized = true;
     if (input.type === 'workspace_agent_tool') { reply.push(Buffer.from(input.base64, 'base64')); if (input.final) { replies.push(JSON.parse(Buffer.concat(reply))); reply = []; index++; } }
     return { written: true };
