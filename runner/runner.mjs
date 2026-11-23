@@ -153,7 +153,12 @@ if (request.type === 'journal_clear' && assistant) {
       : request.type === 'worktrees_list' ? await listTaskDirectories(worktreesDirectory) : request.type === 'worktrees_remove' ? await removeTaskDirectories(request.entries, worktreesDirectory)
       : request.type === 'reap_operation' ? await reapOperation(request.target_operation_id)
       : request.type === 'cli_config_status' ? await inspectCliConfigs(workspace)
-      : request.type === 'cli_config_write' ? await writeCliConfig(workspace, request.cli, request.file, request.content)
+      : request.type === 'cli_config_write' ? await (async () => {
+        const b64 = process.env.BOT_CLI_CONFIG_B64;
+        delete process.env.BOT_CLI_CONFIG_B64;
+        const content = b64 !== undefined ? Buffer.from(b64, 'base64').toString('utf8') : request.content;
+        return writeCliConfig(workspace, request.cli, request.file, content);
+      })()
       : request.type === 'cli_config_delete' ? await deleteCliConfig(workspace, request.cli, request.file)
       : request.type === 'workspace_harness_poll' ? await execute(request) : await reap(request) };
   }

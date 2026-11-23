@@ -118,12 +118,10 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await expect(page.getByTestId('local-config-notice')).toBeVisible();
     await expect(page.getByTestId('local-config-notice')).toContainText('模型由项目电脑内的配置决定');
     await expect(page.getByRole('combobox', { name: 'reviewer 模型', exact: true })).toBeDisabled();
-    mkdirSync('.tmp/agent-backends', { recursive: true });
     for (const [w, hgt] of [[1440, 1000], [390, 844]]) {
       await page.setViewportSize({ width: w, height: hgt });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.getByTestId('local-config-notice').scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/agent-backends/local-config-${w}.png` });
+      await expect(page.getByTestId('local-config-notice')).toBeVisible();
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'dev' });

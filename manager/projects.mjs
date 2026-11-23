@@ -16,6 +16,7 @@ import { DiskGuard } from './disk.mjs';
 import { IncrementalVacuum } from './compaction.mjs';
 import { isCleanupCall, validateCall } from './project-runner-calls.mjs';
 import { sanitizeAgentPollTrajectory } from '../runner/image-budget.mjs';
+import { MAX_CLI_CONFIG_BYTES } from '../runner/cli-config.mjs';
 import { PrecompiledImageBuilder, reservedEnv, normalizePackages, normalizeScript, computeImageKey } from './precompiled-images.mjs';
 
 export { validateCall };
@@ -1566,7 +1567,18 @@ export class Projects {
           typeof input.cli !== 'string' || typeof input.file !== 'string' || typeof input.content !== 'string') {
         throw new ManagerError('invalid_input', 400);
       }
-      const answer = await this.docker.runner(container, { operation_id: randomId(), type: 'cli_config_write', cli: input.cli, file: input.file, content: input.content }, 15_000);
+      if (!input.content.trim() || input.content.includes('\0') || Buffer.byteLength(input.content, 'utf8') > MAX_CLI_CONFIG_BYTES) {
+        throw new ManagerError('invalid_cli_config_content', 400);
+      }
+      // Pass config content via exec Env (base64) instead of Cmd argv so credentials never appear in container process
+      // cmdlines and JSON escaping cannot blow past the 64 KiB runner request limit (#1260).
+      const contentB64 = Buffer.from(input.content, 'utf8').toString('base64');
+      const answer = await this.docker.runner(
+        container,
+        { operation_id: randomId(), type: 'cli_config_write', cli: input.cli, file: input.file },
+        15_000,
+        [`BOT_CLI_CONFIG_B64=${contentB64}`],
+      );
       if (!answer?.ok) throw new ManagerError(answer?.error || 'cli_config_failed', answer?.error?.startsWith('invalid_') ? 400 : 409);
       return answer.result;
     }

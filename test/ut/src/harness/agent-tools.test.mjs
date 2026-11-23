@@ -1186,4 +1186,76 @@ test('#1260 /api/environments/:id/cli-config proxies to manager without storing 
   assert.equal(deleted.exists, false);
   const afterDelete = await service.api(admin, 'GET', new URL('http://local/api/environments/101/cli-config'), {});
   assert.equal(afterDelete.clis.claude_code.configured, false);
+
+  // Oversized content is rejected cleanly with 400 invalid_cli_config_content before hitting Docker/runner limits.
+  await assert.rejects(
+    () => service.api(admin, 'PUT', new URL('http://local/api/environments/101/cli-config'), {
+      cli: 'claude_code',
+      file: 'settings.json',
+      content: JSON.stringify({ pad: 'x'.repeat(40 * 1024) }),
+    }),
+    err => err?.status === 400 && err?.message === 'invalid_cli_config_content',
+  );
+});
+
+test('#1260 deleteCliConfig rejects symlinked parent directory and manager forwards content via env not argv', async t => {
+  const { chmodSync, symlinkSync, writeFileSync } = await import('node:fs');
+  const { writeCliConfig, deleteCliConfig, MAX_CLI_CONFIG_BYTES } = await import('../../../../runner/cli-config.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'cli-config-sec-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'cli-config-outside-'));
+  t.after(() => {
+    try { chmodSync(join(dir, 'home', '.codex'), 0o700); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  // Symlink parent attack: project agent replaces /workspace/home/.claude with symlink to outside directory.
+  const victim = join(outsideDir, 'settings.json');
+  writeFileSync(victim, '{"keep":true}', 'utf8');
+  mkdirSync(join(dir, 'home'), { recursive: true });
+  symlinkSync(outsideDir, join(dir, 'home', '.claude'));
+  await assert.rejects(
+    () => deleteCliConfig(dir, 'claude_code', 'settings.json'),
+    /unsafe_cli_config_path/,
+  );
+  assert.equal(existsSync(victim), true, 'symlink target outside /workspace/home must never be unlinked');
+
+  // Failed unlink surfaces an error instead of returning exists: false (chmod 0500 only restricts non-root users).
+  await writeCliConfig(dir, 'codex', 'config.toml', 'model = "gpt-5.4"\n');
+  if (process.getuid?.() !== 0) {
+    chmodSync(join(dir, 'home', '.codex'), 0o500);
+    await assert.rejects(() => deleteCliConfig(dir, 'codex', 'config.toml'));
+    chmodSync(join(dir, 'home', '.codex'), 0o700);
+  }
+  const removed = await deleteCliConfig(dir, 'codex', 'config.toml');
+  assert.equal(removed.exists, false);
+
+  // Manager forwards PUT content via BOT_CLI_CONFIG_B64 env (never in Cmd argv) and enforces MAX_CLI_CONFIG_BYTES.
+  const mgrDir = mkdtempSync(join(tmpdir(), 'mgr-cli-cfg-'));
+  t.after(() => rmSync(mgrDir, { recursive: true, force: true }));
+  const docker = new FakeDocker();
+  docker.cliConfigRoot = join(mgrDir, 'ws');
+  const projects = new Projects({ database: join(mgrDir, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
+  t.after(() => projects.db.close());
+  await projects.register('101');
+  await projects.operate('101', 'start', { operation_id: randomBytes(24).toString('hex'), generation: 1 });
+
+  const secret = 'sk-env-not-argv-1260';
+  const putRes = await projects.cliConfig('101', 'PUT', {
+    cli: 'claude_code',
+    file: 'settings.json',
+    content: JSON.stringify({ env: { ANTHROPIC_API_KEY: secret } }),
+  });
+  assert.equal(putRes.exists, true);
+  const writeCall = docker.runs.find(r => r.type === 'cli_config_write');
+  assert.ok(writeCall, 'manager invoked cli_config_write');
+  assert.equal(writeCall.content, undefined, 'config content must not be in runner argv JSON');
+  assert.ok(
+    Array.isArray(writeCall.extraEnv) && writeCall.extraEnv.some(e => e.startsWith('BOT_CLI_CONFIG_B64=')),
+    'config content is forwarded via BOT_CLI_CONFIG_B64 env',
+  );
+  await assert.rejects(
+    () => projects.cliConfig('101', 'PUT', { cli: 'codex', file: 'config.toml', content: 'x'.repeat(MAX_CLI_CONFIG_BYTES + 1) }),
+    err => err?.status === 400 && err?.message === 'invalid_cli_config_content',
+  );
 });

@@ -1,4 +1,7 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { ManagerError } from '../../manager/docker.mjs';
+import { deleteCliConfig, inspectCliConfigs, writeCliConfig } from '../../runner/cli-config.mjs';
 
 // A Docker stand-in for the manager: containers, volumes and networks in memory. Every request is recorded in `calls`
 // as "METHOD path", so a test can tell which resources were removed.
@@ -92,5 +95,23 @@ export class FakeDocker {
     this.images.set(tag, { Id: 'sha256:' + tag.split(':')[1], Size: 1024 * 1024 });
     return 'built';
   }
-  async runner(container, input, wait) { this.runs.push({ ...input, wait }); return { ok: true, result: { ready: true, exit_code: 0, output: 'setup output' } }; }
+  async runner(container, input, wait, extraEnv = []) {
+    this.runs.push({ ...input, wait, ...(extraEnv?.length ? { extraEnv } : {}) });
+    if (this.cliConfigRoot && ['cli_config_status', 'cli_config_write', 'cli_config_delete'].includes(input?.type)) {
+      const workspaceRoot = join(this.cliConfigRoot, container.replace(/[^a-zA-Z0-9._-]/g, '_'));
+      await mkdir(workspaceRoot, { recursive: true });
+      try {
+        if (input.type === 'cli_config_status') return { ok: true, result: await inspectCliConfigs(workspaceRoot) };
+        if (input.type === 'cli_config_write') {
+          const envEntry = Array.isArray(extraEnv) ? extraEnv.find(e => typeof e === 'string' && e.startsWith('BOT_CLI_CONFIG_B64=')) : undefined;
+          const content = envEntry !== undefined ? Buffer.from(envEntry.slice('BOT_CLI_CONFIG_B64='.length), 'base64').toString('utf8') : input.content;
+          return { ok: true, result: await writeCliConfig(workspaceRoot, input.cli, input.file, content) };
+        }
+        return { ok: true, result: await deleteCliConfig(workspaceRoot, input.cli, input.file) };
+      } catch (err) {
+        return { ok: false, error: String(err?.message || 'cli_config_failed') };
+      }
+    }
+    return { ok: true, result: { ready: true, exit_code: 0, output: 'setup output' } };
+  }
 }
