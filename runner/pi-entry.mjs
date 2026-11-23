@@ -28,10 +28,11 @@ if(config.run_token){const scrubbed={...config};delete scrubbed.run_token;await 
 const direct=config.model_transport!=='gateway';
 const native=config.native_access;
 const cwd=native&&/^[a-f0-9]{48}$/.test(config.native_workspace_id??'')?join(dirname(root),config.native_workspace_id,'repo'):legacyCwd;
-// Pi keeps its session files and its own state (settings, staged skills, the HOME of its shell) in the task directory the
-// control plane names for one task and role instance (session_store). That directory is no checkout, so a later round or a
-// retry in another workspace or worktree finds the session again (#1040); it is removed with the task's other directories.
-// Without one, the state stays next to the checkout.
+// Pi keeps its session files and its own state (settings, staged skills, and for project computers the HOME of its shell)
+// in the task directory the control plane names for one task and role instance (session_store); inside assistant computers,
+// the bash tool uses persistent /home/assistant as HOME so ~ aligns with ~/memory/ and other HOME paths. That directory is
+// no checkout, so a later round or a retry in another workspace or worktree finds the session again (#1040); it is removed
+// with the task's other directories. Without one, the state stays next to the checkout.
 const sessionStore=/^[a-f0-9]{48}$/.test(config.session_store??'')?join(dirname(root),config.session_store):dirname(cwd);
 const nativeDir=join(sessionStore,'cli-state','pi',String(config.session_key??'session').replace(/[^a-zA-Z0-9_-]/g,''));
 const sessionDir=join(nativeDir,'sessions');

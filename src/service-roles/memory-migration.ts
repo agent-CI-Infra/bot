@@ -1,5 +1,5 @@
 import type { Store } from '../storage/database.js';
-import { digest } from '../core/security.js';
+import { digest, HttpError } from '../core/security.js';
 import { resolvePrincipalActor, revision, type ActorContext } from '../identity/authorization.js';
 import type { ManagementService } from '../management/service.js';
 import type { ChannelServiceBindings } from '../channels/service-bindings.js';
@@ -123,7 +123,19 @@ export async function migrateServiceRoleMemory(
         skippedStale++;
         continue;
       }
-      const repositories = [...new Set([...management.projects(actor), ...management.pendingRepositories(actor).map(r => r.id)])];
+      const projects = management.projects(actor);
+      const pendingRepositories = management.pendingRepositories(actor);
+      const eligible = management.user(actor).role === 'super_admin'
+        || pendingRepositories.length > 0
+        || projects.some(project => {
+          try { management.scope(actor, project, 'tasks.write'); return true; }
+          catch (error) { if (error instanceof HttpError && error.status === 403) return false; throw error; }
+        });
+      if (!eligible) {
+        skippedStale++;
+        continue;
+      }
+      const repositories = [...new Set([...projects, ...pendingRepositories.map(r => r.id)])];
       computerOwner = { kind: 'person', subject: owner.principal_id, tenant };
       facts = { repositories };
     } else if (owner.kind === 'channel') {

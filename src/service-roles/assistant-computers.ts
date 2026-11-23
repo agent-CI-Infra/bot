@@ -162,56 +162,81 @@ export class AssistantHomes {
       return { data: data.subarray(0, bytesRead), size };
     } finally { await handle.close(); }
   }
-  /** Lists a HOME directory without starting a container, checking every path segment and descriptor against symlink escape. */
+  /** Lists a HOME directory without starting a container, holding open directory fds so concurrent symlink swaps cannot escape. */
   async list(directory: string, rel: string | null, recursive = false, maxEntries = 200): Promise<{ exists: boolean; entries: Json[]; truncated: boolean }> {
     const base = await realpath(directory).catch(() => fail(400, 'file_not_found'));
-    let targetDir = base;
-    if (rel) {
-      for (const part of rel.split('/')) {
-        const candidate = `${targetDir}/${part}`;
-        const info = await lstat(candidate).catch(error => (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? null : fail(400, 'file_not_readable'));
-        if (!info) return { exists: false, entries: [], truncated: false };
-        if (info.isSymbolicLink()) fail(400, 'invalid_path');
-        if (!info.isDirectory()) fail(400, 'not_a_directory');
-        targetDir = candidate;
-      }
-    }
-    const handle = await open(targetDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW).catch(error =>
-      fail(400, error.code === 'ELOOP' ? 'invalid_path' : error.code === 'ENOTDIR' ? 'not_a_directory' : error.code === 'ENOENT' ? 'file_not_found' : 'file_not_readable'));
-    try {
-      const actual = await readlink(`/proc/self/fd/${handle.fd}`);
-      if (actual !== base && !actual.startsWith(base + '/')) fail(400, 'invalid_path');
-    } finally {
-      await handle.close();
-    }
-    const entries: Json[] = [];
-    let truncated = false;
-    const maxDepth = 16;
-    const walk = async (dir: string, prefix: string, depth: number): Promise<void> => {
-      const dirents = (await readdir(dir, { withFileTypes: true }).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name));
-      for (const dirent of dirents) {
-        if (entries.length >= maxEntries) { truncated = true; return; }
-        const fullPath = `${dir}/${dirent.name}`;
-        const info = await lstat(fullPath).catch(() => null);
-        if (!info) continue;
-        const entryPath = prefix ? `${prefix}/${dirent.name}` : dirent.name;
-        if (info.isSymbolicLink()) {
-          entries.push({ path: entryPath, type: 'symlink' });
-          continue;
+    const openDir = async (dirPath: string, allowMissing: boolean): Promise<Awaited<ReturnType<typeof open>> | null> => {
+      const handle = await open(dirPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW).catch(async error => {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' && allowMissing) return null;
+        if (code === 'ENOTDIR') {
+          const info = await lstat(dirPath).catch(() => null);
+          if (info?.isSymbolicLink()) fail(400, 'invalid_path');
+          fail(400, 'not_a_directory');
         }
-        if (info.isDirectory()) {
-          entries.push({ path: entryPath, type: 'directory' });
-          if (recursive && depth < maxDepth) {
-            const realSub = await realpath(fullPath).catch(() => null);
-            if (realSub && realSub.startsWith(base + '/')) await walk(fullPath, entryPath, depth + 1);
-          }
-        } else if (info.isFile()) {
-          entries.push({ path: entryPath, type: 'file', size: info.size, modified_at: new Date(info.mtimeMs).toISOString() });
-        }
+        return fail(400, code === 'ELOOP' ? 'invalid_path' : code === 'ENOENT' ? 'file_not_found' : 'file_not_readable');
+      });
+      if (!handle) return null;
+      const actual = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => '');
+      if (actual !== base && !actual.startsWith(base + '/')) {
+        await handle.close();
+        fail(400, 'invalid_path');
       }
+      return handle;
     };
-    await walk(targetDir, '', 0);
-    return { exists: true, entries, truncated };
+
+    const initialHandle = await openDir(base, false);
+    if (!initialHandle) return fail(400, 'file_not_found');
+    let targetHandle = initialHandle;
+    try {
+      if (rel) {
+        for (const part of rel.split('/')) {
+          const nextHandle = await openDir(`/proc/self/fd/${targetHandle.fd}/${part}`, true);
+          if (!nextHandle) return { exists: false, entries: [], truncated: false };
+          const prev = targetHandle;
+          targetHandle = nextHandle;
+          await prev.close();
+        }
+      }
+      const entries: Json[] = [];
+      let truncated = false;
+      const maxDepth = 16;
+      const walk = async (dirHandle: Awaited<ReturnType<typeof open>>, prefix: string, depth: number): Promise<void> => {
+        const fdDir = `/proc/self/fd/${dirHandle.fd}`;
+        const dirents = (await readdir(fdDir, { withFileTypes: true }).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name));
+        for (const dirent of dirents) {
+          if (entries.length >= maxEntries) { truncated = true; return; }
+          const childPath = `${fdDir}/${dirent.name}`;
+          const info = await lstat(childPath).catch(() => null);
+          if (!info) continue;
+          const entryPath = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+          if (info.isSymbolicLink()) {
+            entries.push({ path: entryPath, type: 'symlink' });
+            continue;
+          }
+          if (info.isDirectory()) {
+            entries.push({ path: entryPath, type: 'directory' });
+            if (recursive && depth < maxDepth) {
+              const childHandle = await open(childPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW).catch(() => null);
+              if (childHandle) {
+                try {
+                  const actual = await readlink(`/proc/self/fd/${childHandle.fd}`).catch(() => '');
+                  if (actual.startsWith(base + '/')) await walk(childHandle, entryPath, depth + 1);
+                } finally {
+                  await childHandle.close();
+                }
+              }
+            }
+          } else if (info.isFile()) {
+            entries.push({ path: entryPath, type: 'file', size: info.size, modified_at: new Date(info.mtimeMs).toISOString() });
+          }
+        }
+      };
+      await walk(targetHandle, '', 0);
+      return { exists: true, entries, truncated };
+    } finally {
+      await targetHandle.close();
+    }
   }
   async write(directory: string, rel: string | null, data: Buffer): Promise<void> {
     if (!rel) return fail(400, 'regular_file_required');

@@ -108,13 +108,13 @@ docker compose up -d
 | `bot-keys` | AES-256-GCM 加密主密钥（**丢了主密钥将无法解密任何已存凭据**） |
 | `internal-keys` | 控制面与 manager 内部认证材料及部署 ID 种子 |
 | `manager-data` | `manager.sqlite`、manager 轨迹与项目笔记卷元数据 |
-| `assistant-homes` | 群聊与管理助手电脑的持久 HOME（可按需备份） |
+| `assistant-homes` | 群聊与管理助手电脑的持久 HOME，承载助手私有长期记忆（`~/memory/`）与跨轮个人/群文件（须纳入一致备份） |
 | `agent-tools` | 受信任的第三方容器 Agent 统一工具卷（Claude Code、Codex、iCode、WorkSwarm 及其受管 Node / `uv` 运行时与版本清单；内置 Pi 不在此卷）。各版本可并存 |
 | `tunnel-keys` | Cloudflare Tunnel token 文件 |
 
 ### 备份与恢复要点
 
-- **停写一致备份**：备份前先停止 `bot` 和 `manager`，保持 `control.sqlite`、`trajectories/`、`channel-resources/`、`bot-keys`、`internal-keys` 与 `manager-data` 来自同一次停写。
+- **停写一致备份**：备份前先停止 `bot` 和 `manager`，保持 `control.sqlite`、`trajectories/`、`channel-resources/`、`bot-keys`、`internal-keys`、`manager-data` 与 `assistant-homes` 来自同一次停写。
 - **知识卷恢复（`note_move_uncertain`）**：若项目知识文件因异常移动进入 `note_move_uncertain` 只读保护，切勿手工删除 `.write-history` 里的 pending journal、改 file ID 或直接降级镜像。标准恢复步骤：① 停止该项目的任务派发、项目电脑与访问该卷的 manager 操作；② 对当前整个笔记卷（含 `.write-history`、历史索引与 blob）做只读备份；③ 选取移动前停写状态下生成的整卷备份，在同版 manager/runner 隔离环境中验证目录、正文与历史可读；④ 在停写状态下用验证过的完整备份替换原卷（备份后的新增改动对照第 ② 步通过正常保存接口补录）；⑤ 恢复同版服务并验证读正常后再开放写入。
 - **全局存储与按天数清理（「全局设置 → 存储」）**：超级管理员可查看整机/Launchpad/项目空间占比，配置轨迹文件、manager 重复正文（默认 2 天）、已完成/失败任务工作区（默认 1 天 / 7 天）和 Webhook 正文的保留天数，并按需触发「立即回收」；项目电脑区域同步列出各未结束任务当前持有的工作区目录数（区分在用与待清理目录），便于定位长时间循环的任务；飞书群聊与私聊记录的保留天数及手工清理在「飞书会话」页（`#/conversations`）按会话配置（仅超管），存储页做汇总展示。
 - **Agent CLI 工具卷（「全局设置 → Agent CLI 工具卷」）**：仅超管可用，统一管理除内置 Pi 外的所有第三方容器 Agent（`Claude Code`、`Codex`、`iCode`、`WorkSwarm`；通用 `container_acp` 仅做只读说明展示）：
