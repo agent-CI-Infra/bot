@@ -185,6 +185,32 @@ test('a delivery call the task no longer holds is refused with its reason, nothi
   assert.equal(h.store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n, 0);
 });
 
+// #1250: create_task tells the Task Manager that omitting executor_role, or naming itself, gives the work to its team.
+// The created task's first run must be that team (delegate_role, nominate_delivery, finish_coordination), not the
+// Manager alone; a task naming dev still runs dev alone.
+test('a task the Task Manager creates for its team runs as the team on its first run; one naming dev runs dev alone (#1250)', { timeout: 240000 }, async t => {
+  const h = await engineFixture(t, {
+    // The team is offered; this turn ends without delivery so only the entry is checked.
+    manager: () => call('finish_coordination', { action: 'needs_help', reason: 'Fixture stops after the first coordination turn', help_from: 'operator', resume_condition: 'An operator retries the task' }),
+    dev: () => call('submit_report', { summary: 'Fixture report', artifacts: [], evidence: [], unknowns: [] })
+  });
+  const manager = roleTaskCaller(h.store, '101', 'manager', { conversation_id: 'chat-1250', source_message: 'message-1250', guard() {} });
+  const create = (request, extra = {}) => { const result = h.commands.tool(manager, 'create_task', { request, criteria: ['add(2, 3) returns 5'], ...extra }); assert.ifError(result.error); return result.id; };
+  for (const [request, extra] of [['Fix add', {}], ['Fix add again', { executor_role: 'manager' }]]) {
+    const id = create(request, extra), before = { manager: h.seen.manager.length, dev: h.seen.dev.length };
+    await h.run(id);
+    assert.equal(h.seen.dev.length, before.dev, `${request}: no single-role run`);
+    const tools = h.seen.manager[before.manager];
+    assert.ok(tools, `${request}: the first run is the Task Manager's team`);
+    for (const name of ['delegate_role', 'nominate_delivery', 'finish_coordination']) assert.ok(tools.includes(name), `${request}: ${name}`);
+  }
+  const before = { manager: h.seen.manager.length, dev: h.seen.dev.length };
+  await h.run(create('Fix a typo in the README', { executor_role: 'dev' }));
+  assert.equal(h.seen.manager.length, before.manager, 'dev alone has no coordination turn');
+  assert.equal(h.seen.dev.length, before.dev + 1);
+  assert.ok(!h.seen.dev.at(-1).includes('delegate_role'));
+});
+
 test('a project that turns off the QA gate publishes a tested candidate without independent QA; failing tests still block it', { timeout: 240000 }, async t => {
   // Role sessions continue across attempts, so the script follows the task's attempt rather than the conversation.
   const attempt = store => store.get("SELECT attempt FROM tasks WHERE kind='task.request'").attempt;

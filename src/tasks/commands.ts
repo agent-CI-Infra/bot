@@ -214,7 +214,9 @@ export class TaskCommands {
       const autoExecutor = defaultRole && roleConfig.roles.some(r => r.role_id === defaultRole && r.enabled)
         && (!caller || caller.kind !== 'role' || caller.role === controller || caller.role === defaultRole)
         ? defaultRole : undefined;
-      const requestedExecutor = (input.executor_role as string | undefined) ?? autoExecutor;
+      // A person or the Task Manager naming the Task Manager asks for its team (#1250), as omitting executor_role does.
+      const teamNamed = input.executor_role === controller && (!caller || caller.kind === 'operator' || caller.role === controller);
+      const requestedExecutor = teamNamed ? undefined : (input.executor_role as string | undefined) ?? autoExecutor;
       const team=!!caller&&caller.role===controller&&requestedExecutor===undefined;
       if(team){const definition=roleConfig.roles.find(r=>r.role_id===caller!.role);
         if(caller!.permissions?.delegation!=='allow'||definition?.permissions.delegation!=='allow')fail(403,'task_delegation_forbidden');}
@@ -246,7 +248,8 @@ export class TaskCommands {
       if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
       const objectNumber = taskTarget && (taskTarget.type === 'issue' || taskTarget.type === 'pr') ? taskTarget.number ?? null : null;
       this.store.transaction(()=>{createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),requestedExecutor,executor=>{
-        const saved={generic:true,delivery:null,...(taskTarget?{target:taskTarget}:{}),...(executor?{executor_role:executor}:{}),...(workflowChanges?{workflow_changes:workflowChanges}:{})};
+        // A team task stores no executor, as its origin below: runRequest reads input.executor_role as a single-role run.
+        const saved={generic:true,delivery:null,...(taskTarget?{target:taskTarget}:{}),...(executor&&!team?{executor_role:executor}:{}),...(workflowChanges?{workflow_changes:workflowChanges}:{})};
         this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,unique_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",id,input.repository_id as string,kind,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),objectNumber,JSON.stringify({request:input.request,contract,...saved}),key,now,now);
         try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
         // Persist the authoritative validated contract for executor recovery.

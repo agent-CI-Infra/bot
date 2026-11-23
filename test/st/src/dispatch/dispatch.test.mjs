@@ -195,11 +195,41 @@ test('a person\'s development label always reaches the Manager: it answers with 
   assert.equal(label('label-2'), 1); await f.run();
   const refusal = f.requests.at(-1).messages.find(m => m.role === 'tool');
   assert.match(refusal.content, /dispatch_brief_required/);
-  const development = tasks(f.h).find(task => task.kind === 'task.request' && JSON.parse(task.input).executor_role === 'dev'), input = JSON.parse(development.input);
+  const development = tasks(f.h).find(isDevTask), input = JSON.parse(development.input);
   assert.equal(input.manager.brief.goal, 'Keep the last CRLF line.');
+  // #1250: developing an Issue opens a pull request, so the shorthand goes to the Task Manager's team, not dev alone.
+  assert.equal(input.executor_role, undefined);
+  assert.equal(f.h.store.get('SELECT executor_role FROM task_origins WHERE task_id=?', development.id).executor_role, null);
   assert.ok(development.unique_key.startsWith('101:dispatch:101:issue.labeled:5:update:' + events(f.h).at(-1).delivery_id));
   // The label is the basis, as the control plane read it when it wrote the event (#815).
   assert.deepEqual(JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail), { kind: 'label', label: 'bot-develop', labeled_by: 'maintainer' });
+});
+
+test('code changes that open a pull request go to the Task Manager\'s team by default, and naming the Manager means its team (#1250)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { development_enabled: true });
+  const labeled = { ...issue, labels: [{ name: 'bot-develop' }], assignees: [] }, label = delivery => queueWebhook(f.h.store, '101', 'issues', { action: 'labeled', label: { name: 'bot-develop' }, issue: labeled, sender: { ...alice, login: 'maintainer' } }, delivery);
+  const brief = { goal: 'Keep the last CRLF line.', criteria: ['A test with a CRLF file'] };
+  let role = 'manager';
+  f.state.message = () => toolCall('create_task', { role, writes: ['pull_request'], basis: { kind: 'label' }, reason: '维护者加了开发标签', brief }, 'c1');
+  assert.equal(label('team-1'), 1); await f.run();
+  // The guidance the Manager decided with: its role prompt and the create_task tool both default code changes to the team.
+  const [request] = f.requests, system = request.messages[0].content.replace(/\s+/g, ' ');
+  assert.ok(system.includes('Verified development that changes repository code and opens a pull request goes to the team by default: omit the role, and the Task Manager runs dev with an independent reviewer (plus test when behaviour changes) before QA. Give dev alone only a trivial change such as wording, comments or docs.'));
+  assert.ok(system.includes('New development goes to the team: `create_task` without `role`'));
+  const create = request.tools.find(tool => tool.function.name === 'create_task').function;
+  assert.match(create.description, /Omit role for work that changes repository code and opens a pull request: the Task Manager runs the team, dev with an independent reviewer \(plus test when behaviour changes\) before QA, because the platform does not review the bot's pull request after it opens; dev alone fits only a trivial change such as wording, comments or docs\./);
+  assert.match(create.parameters.properties.role.description, /Omit for the Task Manager's team, the default for code changes that open a pull request\./);
+  // role: "manager" is the team, as omitting it is, never the Manager developing alone.
+  const [team] = tasks(f.h);
+  assert.equal(JSON.parse(team.input).executor_role, undefined);
+  assert.equal(f.h.store.get('SELECT executor_role FROM task_origins WHERE task_id=?', team.id).executor_role, null);
+  assert.ok(taskPermissions(f.h.store, team).writes.includes('pull_request'));
+  // The Manager still decides: an explicit dev runs alone.
+  f.h.store.run("UPDATE tasks SET status='cancelled' WHERE id=?", team.id);
+  role = 'dev'; assert.equal(label('team-2'), 1); await f.run();
+  const alone = tasks(f.h).find(task => task.id !== team.id);
+  assert.equal(JSON.parse(alone.input).executor_role, 'dev');
 });
 
 // #815: development on a maintainer's request or a rule of the Manager prompt, each checked when the task is created.
@@ -226,7 +256,8 @@ async function basisFixture(t) {
   return { ...f, github, comment, run: async () => { dispatcher.tick(); await dispatcher.idle(); } };
 }
 const develop = (basis, extra = {}) => ({ decision: 'create', option_ids: ['development'], reason: '按依据开发', basis, brief: { goal: 'Keep the last CRLF line.', criteria: ['A CRLF test'] }, ...extra });
-const isDevTask = task => task.kind === 'task.request' && JSON.parse(task.input).executor_role === 'dev';
+// A development task holds the pull_request write; who executes it is the Manager's choice (#1250).
+const isDevTask = task => task.kind === 'task.request' && (JSON.parse(task.input).manager?.writes ?? []).includes('pull_request');
 
 test('a maintainer\'s request in a comment starts development with the comment and permission recorded; an outsider\'s comment cannot', async t => {
   const f = await basisFixture(t);
@@ -370,11 +401,13 @@ test('a member\'s comment on the bot\'s pull request reaches the Manager as a re
   assert.match(system, /The bot's own pull requests and its own pushes do not come here/);
   assert.match(system, /On the bot's own pull request \(`facts\.bot_pull_request`\), judge what a comment or review asks: for actionable changes, dispatch `dev` \(`writes: \["pull_request"\]`\)/);
   assert.match(system, /`facts\.revisions` says how often the pull request was already revised for comments \(`for_requests`\) and for this author \(`for_this_author`\); when another review bot keeps asking after the bot already revised for it and no person joined, answer it instead of revising again/);
-  assert.match(system, /Issue review published: start `dev` \(`writes: \["pull_request"\]`\) when the review concludes `ready_for_development`/);
+  assert.match(system, /Issue review published: start development \(`writes: \["pull_request"\]`\) when the review concludes `ready_for_development`/);
   assert.deepEqual(seen.event.facts.revisions, { for_requests: 0, for_this_author: 0 });
   assert.equal(seen.work.create.find(o => o.id === 'development')?.work, 'development.pr'); assert.ok(seen.work.create.some(o => o.id === 'review'));
   const revision = tasks(f.h).find(isDevTask);
   assert.ok(revision, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
+  // The same shorthand on the bot's pull request is its revision, which dev still makes alone.
+  assert.equal(JSON.parse(revision.input).executor_role, 'dev');
   assert.deepEqual(JSON.parse(revision.input).revision.requests.map(r => [r.type, r.id, r.author, r.author_type, r.body]),
     [['comment', '301', 'alice', 'User', 'Please name the SKU in the error.']]);
   assert.equal(f.h.store.get("SELECT state,task_id FROM bot_pr_requests WHERE source_id='301'").task_id, revision.id);

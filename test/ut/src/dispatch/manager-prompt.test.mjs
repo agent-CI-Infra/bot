@@ -47,3 +47,15 @@ test('the regrouped prompt keeps the rules other code and older tasks rely on', 
     'respect `file_issues` on scheduled checks',
   ]) assert.ok(flat.includes(rule), rule);
 });
+
+test('new development goes to the team with an independent review; only trivial changes go to dev alone (#1250)', () => {
+  const flat = text.replace(/\s+/g, ' ');
+  assert.ok(flat.includes("New development goes to the team: `create_task` without `role`, and the Task Manager runs `dev`, an independent `reviewer` and, when behaviour changes, `test` before QA, since nobody reviews the bot's pull request after it opens; only a trivial change such as wording, comments or docs goes to `role: \"dev\"` alone."));
+  assert.ok(flat.includes("nobody reviews them once they open, so their development reviews them first (scenario 4)."));
+  assert.ok(flat.includes('(`role` omitted: the Task Manager runs the team)'));
+  // The flowchart draws the same split in one box (a separate branch would no longer fit a tablet column), and a
+  // revision of the opened pull request still goes to dev alone.
+  const flow = chapters.find(chapter => chapter.title.startsWith('4.')).blocks[0];
+  assert.match(flow, /basis -->\|是\| team\["团队开发：dev、<br>独立 reviewer，<br>行为改动加 test<br>（小改只派 dev）"\]/);
+  assert.match(flow, /talk -->\|派 dev 修订或重跑\| pr/);
+});
