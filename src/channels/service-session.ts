@@ -1,4 +1,4 @@
-import {serviceHarnessTurn} from '../harness/service-session.js';
+import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
@@ -391,7 +391,18 @@ export class ChannelServiceSessions {
               }
             }, execute, check,
             redact: value => redactor.text(value), clean: value => redactor.clean(value) };
-          if(binding.harness&&binding.harness!=='native'){const harnessRole={id:roleId,harness:binding.harness,revision:binding.revision,permissions:JSON.stringify(granted)};ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,harnessRole,computers,chat.id+':'+fence+':'+input.scope,media);reply=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,harnessRole,computers,chat.id+':'+fence,media);return;}
+          const harness = binding.harness && binding.harness !== 'native' ? String(binding.harness) : null;
+          const harnessRole = { id: roleId, harness, revision: binding.revision, permissions: JSON.stringify(granted) };
+          // A harness runs the tools itself; each call is still a step of this turn, as in the loop below.
+          const harnessTurn = (spec: Partial<import('../agent/runtime.js').AgentSpec<unknown>>, control?: ServiceTurnControl) => {
+            if (harness) ownHost!.run = async input => serviceHarnessTurn({ ...turnSpec, system: input.system, prompt: input.prompt, tools: input.tools, guard: input.check, execute: async (name, args) => input.execute(name, args, 'harness:' + randomId()) } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence + ':' + input.scope, media);
+            return serviceHarnessTurn({ ...turnSpec, ...spec, execute: async (name: string, args: unknown) => {
+              event('tool_call', name);
+              try { const result = await execute(name, args, 'harness:' + randomId()) as Json; event(result?.error ? 'tool_error' : 'tool_result', name); return result; }
+              catch (error) { event('tool_error', name); throw error; }
+            } } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence, media, control);
+          };
+          if (harness && harness !== 'pi') { reply = await harnessTurn({}); return; }
           // Model context is bounded: older local messages are folded into a rolling summary; originals stay searchable.
           // Folding waits for a batch, so a busy group does not pay a summary request before every answer, and it is only
           // an aid: a summary the model cannot produce keeps the earlier one and never fails the answer.
@@ -424,14 +435,47 @@ export class ChannelServiceSessions {
           // failed, the model learns how many are missing and reads them through search_conversation_history.
           const unsummarized = earlier.length < foldBatch ? { earlier_messages: earlier.map(m => excerpt(named(m), 3000)) }
             : { unsummarized_earlier_messages: earlier.length, notice: 'Messages between the summary and recent_messages are not summarized yet; search_conversation_history reads them.' };
-          const messages: any[] = [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ conversation_id: chat.id, request: turn.request,
+          const seed = JSON.stringify({ conversation_id: chat.id, request: turn.request,
             context: { bot_identity: botIdentity,
               current_message: turn.event ? { message_id: turn.event.message_id, sender_id: turn.event.actor_id,
                 ...(requester ? { sender_name: requester } : {}), is_direct_mention: directMention(turn.event), mentions: turn.event.mentions ?? [] } : null,
               ...(earlier.length ? unsummarized : {}), recent_messages: recent.map(m => excerpt(named(m), 3000)), history: this.ledger.diagnostics(chat.id),
               scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length,
                 ...(reach.paused.length ? { paused_notice: pausedGroupNotice(this.store, reach.paused) } : {}) },
-              permissions: granted }, summary: saved, source_updates: this.ledger.sourceUpdates(chat.id,scope,fence), recent_tool_results: resultFiles.recent() }) }];
+              permissions: granted }, summary: saved, source_updates: this.ledger.sourceUpdates(chat.id,scope,fence), recent_tool_results: resultFiles.recent() });
+          // The context again after its source changed (an edited or recalled message), with what this turn already wrote.
+          const rebuilt = (): string => {
+            const value = JSON.parse(seed), current = this.ledger.recent(chat.id,40,scope,fence,true);
+            value.context.recent_messages = current.map(m => excerpt(named(m),3000));
+            delete value.context.earlier_messages;
+            delete value.context.unsummarized_earlier_messages;
+            value.recent_tool_results = resultFiles.recent();
+            value.summary = this.summary(chat.id,fence);
+            value.source_updates = this.ledger.sourceUpdates(chat.id,scope,fence);
+            value.write_receipts = {
+              management: this.store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',chat.id,'feishu:'+turn.source_message),
+              github: this.store.hasTable('github_writes') ? this.store.all('SELECT key,method,path,state,status,html_url FROM github_writes WHERE scope=?',`channel:${chat.id}:${turn.source_message}`) : [] };
+            return JSON.stringify(value);
+          };
+          const quiet = (args: unknown): Json => {
+            event('tool_call', staySilentName);
+            try {
+              // Handled here, not in execute: it ends the turn, and own tasks (which reach execute) never offer it.
+              check();
+              const silent = turn.allowSilence ? staySilent(args, mustReply) : { error: 'tool_not_allowed' };
+              if (!silent.error) { silence = String(silent.reason); this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id); }
+              event(silent.error ? 'tool_error' : 'tool_result', staySilentName); return silent;
+            } catch (error) { event('tool_error', staySilentName); throw error; }
+          };
+          if (harness === 'pi') {
+            // Pi gets the context the loop below starts from, and works the turn the same way (#1253).
+            reply = redactor.text(await harnessTurn({ prompt: seed }, { incoming, merged: batch => { mustReply ||= batch.direct; },
+              source: { version: () => this.ledger.sourceVersion(chat.id), prompt: rebuilt, seen: sourceVersion }, ...(turn.allowSilence ? { silence: quiet } : {}) }));
+            check(); incoming?.finish();
+            if (silence === undefined && !reply.trim() && !media?.attachments.length && !cardTurn.staged && mustReply) return fail(502, 'conversation_reply_invalid');
+            return;
+          }
+          const messages: any[] = [{ role: 'system', content: system }, { role: 'user', content: seed }];
           // Results share a budget per batch and older ones fold away, so many parallel calls stay within the model's context.
           const transcript = new ToolTranscript(messages, chatContextBytes, resultFiles.preserve);
           // No step limit (#435): the turn ends with an answer without tool calls, when it is stopped (console, recalled source,
@@ -440,17 +484,7 @@ export class ChannelServiceSessions {
             check();
             if (this.ledger.sourceVersion(chat.id) !== sourceVersion) {
               sourceVersion = this.ledger.sourceVersion(chat.id);
-              const seed = JSON.parse(messages[1].content), current = this.ledger.recent(chat.id,40,scope,fence,true);
-              seed.context.recent_messages = current.map(m => excerpt(named(m),3000));
-              delete seed.context.earlier_messages;
-              delete seed.context.unsummarized_earlier_messages;
-              seed.recent_tool_results = resultFiles.recent();
-              seed.summary = this.summary(chat.id,fence);
-              seed.source_updates = this.ledger.sourceUpdates(chat.id,scope,fence);
-              seed.write_receipts = {
-                management: this.store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',chat.id,'feishu:'+turn.source_message),
-                github: this.store.hasTable('github_writes') ? this.store.all('SELECT key,method,path,state,status,html_url FROM github_writes WHERE scope=?',`channel:${chat.id}:${turn.source_message}`) : [] };
-              messages.splice(1,messages.length-1,{role:'user',content:JSON.stringify(seed)});
+              messages.splice(1,messages.length-1,{role:'user',content:rebuilt()});
               incoming?.refresh?.();
             }
             media?.addImages(messages);
@@ -494,16 +528,10 @@ export class ChannelServiceSessions {
             const results: unknown[] = [];
             // Unparsable arguments reach execute as null and come back to the model as invalid_arguments.
             for (const call of calls) {
+              if (call.function.name === staySilentName) { results.push(quiet(toolArguments(call))); continue; }
               event('tool_call', call.function.name);
               try {
-                let result: unknown;
-                if (call.function.name === staySilentName) {
-                  // Handled here, not in execute: it ends this loop, and own tasks (which reach execute) never offer it.
-                  check();
-                  const silent = turn.allowSilence ? staySilent(toolArguments(call), mustReply) : { error: 'tool_not_allowed' };
-                  if (!silent.error) { silence = String(silent.reason); this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id); }
-                  result = silent;
-                } else result = redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id));
+                const result = redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id));
                 results.push(result); event((result as Json)?.error ? 'tool_error' : 'tool_result', call.function.name);
               } catch (error) { event('tool_error', call.function.name); throw error; }
             }

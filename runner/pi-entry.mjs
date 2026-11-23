@@ -78,6 +78,13 @@ const finishNudges=3;
 // Tools the control plane runs itself (a project controller's task-record queries and delegation). The call waits
 // without a deadline: a delegation lasts as long as the delegated role runs.
 const controlTools=new Set(config.control_tools||[]);
+// A service assistant's turn (#1253) does on Pi what the native loop does between model requests: messages that arrive
+// while it works join as steering, before the first request (config.steer) and after each tool batch (the turn boundary).
+// With a direct provider connection only this process sees the answer being written, so it reports the text as it
+// streams, and Pi's own retries, to the control plane; through the gateway the control plane streams it itself.
+const serviceTurn=config.service_turn===true&&!config.review_session,streamText=serviceTurn&&direct;
+let pendingText='',textTimer;
+const flushText=()=>{clearTimeout(textTimer);textTimer=undefined;if(!pendingText)return events;const text=pendingText;pendingText='';return writeEvent({type:'text_delta',text});};
 // The SDK version that actually runs, from its installed manifest; reported with every state and session event.
 const sdk={agent:'pi',package:'@earendil-works/pi-coding-agent',version:await readFile(new URL('../package.json',import.meta.resolve('@earendil-works/pi-coding-agent')),'utf8').then(text=>JSON.parse(text).version).catch(()=>'unknown'),node:process.version};
 // A task gets its worktree when it first needs one (#769). A file tool or command that finds none asks the control plane to
@@ -282,6 +289,12 @@ try{
     };
     let own=0;
     created.subscribe(event=>{
+      // Streamed text is batched for a fifth of a second; the batch is written before the model event that ends it.
+      if(streamText&&!agent){
+        if(event.type==='message_update'&&event.assistantMessageEvent?.type==='text_delta'){pendingText+=event.assistantMessageEvent.delta;textTimer??=setTimeout(()=>void flushText(),200);}
+        if(event.type==='message_end'&&event.message.role==='assistant')void flushText();
+        if(event.type==='auto_retry_start')void writeEvent({type:'model_retry',retry:event.attempt,retries:event.maxAttempts,delay_ms:event.delayMs,error:String(event.errorMessage??'').slice(0,300)});
+      }
       if(native&&['tool_execution_start','tool_execution_end'].includes(event.type))void writeEvent({type:'tool',phase:event.type==='tool_execution_start'?'started':'completed',name:event.toolName,call_id:event.toolCallId,...(event.args?{arguments:event.args}:{}),...(event.result?{result:event.result}:{}),isError:event.isError});
       // Pi recovers from a request over the context window itself: it compacts once and retries. The session is over the
       // limit (agent_context_too_large) when the retry still does not fit, or when the compaction's own summary request
@@ -321,6 +334,17 @@ try{
       const previous=await previousFinish?.(turn,signal);
       return finished?{action:'end'}:previous;
     };
+  }else if(serviceTurn){
+    session.setSteeringMode('all');
+    const previousFinish=session.agent.finishTurn;
+    session.agent.finishTurn=async(turn,signal)=>{
+      // Only between tool batches: a final answer, or a turn its finishing tool ended, takes no further message in.
+      if(!finished&&!requestFailure&&turn.toolResults.length){const reply=await boundary('turn');for(const message of reply.messages||[])await session.steer(message);}
+      const previous=await previousFinish?.(turn,signal);
+      return finished?{action:'end'}:previous;
+    };
+    // Queued before the prompt, they follow it as their own user messages in the first request.
+    for(const message of config.steer||[])await session.steer(message);
   }
   // Compaction is Pi's: it compacts the reopened session when a request needs it, never an empty one up front.
   let prompt=config.prompt;

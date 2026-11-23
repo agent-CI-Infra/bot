@@ -43,6 +43,16 @@
 - **容器内短期 Git/`gh` 只读凭证**：`claude_code`、`codex`、`icode` 和 `container_acp` 使用运行级身份，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
 
+### 服务助手回合（`src/harness/service-session.ts`）
+
+管理助手和群聊助手选用非 Native 后端时，整轮由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`。Pi 后端按 Native 循环的语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它）：
+
+- **回答文字**：Pi 用普通文字作答，不提供 `finish` 工具。经网关时，控制面模型请求的逐 token 回调转出文字；直连时，runner 把流式文字（约 200 ms 一批的 `text_delta`）和 Pi 自身的重试（`model_retry`）写入事件流，控制面转给会话，`text_delta` 不进会话日志。
+- **回合中的新消息**：会话启动前取到的消息随配置（`steer`）在提示词之后作为单独的用户消息发出；此后在每批工具调用结束的回合边界（runner 的 `finishTurn` → `boundary('turn')`）取新消息并 `session.steer()`。最终回答之后不再并入。模型输出文字时暂停并入，带工具调用的响应结束后恢复。
+- **编辑后重启**：回合边界、每次工具调用和会话结束时比较来源版本。版本变了就结束当前会话：旧版本下的工具调用不执行，答复不采用；清空会话绑定，用重建的上下文开新会话，已并入的消息重新提供。跨轮续接的会话在来源版本变化后也不再续接。
+- **保持安静**：允许安静的轮次里，`stay_silent` 是会话的结束工具；被拒绝（例如 `reply_required`）时作为观察返回模型，回合继续。
+- **邮箱清理**：新会话写入配置时，runner 清除上一进程没答复的工具、令牌和模型请求，新会话不会把它们当成自己的请求。
+
 ### 容器内 ACP
 
 `container_acp` 声明工作区执行、`writer` / `observer` 角色类型，以及模型中转支持的 Chat Completions、Responses 和 Anthropic Messages 格式。配置中原有的 `acp` 标识继续按退役规则迁移。ACP 客户端由项目电脑里的 runner 启动，产品以 JSON-RPC 帧写 stdout，诊断写 stderr。客户端握手时仅声明平台实际提供的能力，文件访问和命令由产品在任务工作区执行。
