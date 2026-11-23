@@ -753,10 +753,12 @@ export class InvalidDecision extends Error { constructor(readonly code: string, 
 
 const allowedGenericWrites = new Set(['pull_request', 'review', 'github', 'actions_rerun']);
 
-function mapShorthandWork(shorthand: string): { role: string; writes: string[] } | null {
+/** A null role is the Task Manager's team. Developing an Issue opens a pull request, so it defaults to the team (#1250). */
+function mapShorthandWork(shorthand: string): { role: string | null; writes: string[] } | null {
   if (shorthand === 'review' || shorthand === 'review.issue' || shorthand === 'review.pr') return { role: 'reviewer', writes: ['review'] };
   if (shorthand === 'reply' || shorthand === 'workflow.issue' || shorthand === 'workflow.pr') return { role: 'reviewer', writes: ['github'] };
-  if (shorthand === 'development' || shorthand === 'development.issue' || shorthand === 'development.pr') return { role: 'dev', writes: ['pull_request'] };
+  if (shorthand === 'development' || shorthand === 'development.issue') return { role: null, writes: ['pull_request'] };
+  if (shorthand === 'development.pr') return { role: 'dev', writes: ['pull_request'] };
   if (shorthand === 'test') return { role: 'test', writes: [] };
   if (shorthand === 'report' || shorthand === 'task.request') return { role: 'reviewer', writes: [] };
   return null;
@@ -897,29 +899,28 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   if (ids.length > 0) {
     // Support legacy `work` shorthand array (`['review']`, `['reply']`, `['development']`, or role names)
     const combinedWrites = new Set<string>(writes ?? []);
+    // The first shorthand that names an executor decides it, the team (null) included; an explicit role always wins.
+    let executorSet = role !== null;
+    const assign = (value: string | null) => { if (!executorSet) { role = value; executorSet = true; } };
     for (const id of ids) {
       if (actionsEvent && (id === 'analysis' || id === 'actions.failures')) {
-        role ??= 'dev';
+        assign('dev');
         continue;
       }
-      const mapped = mapShorthandWork(id);
+      // The offered option says what a shorthand means on this event: `development` is an Issue's development or the
+      // revision of the bot's pull request.
+      const matchingOption = allEventOptions.find((o: CreateOption | UnavailableWork) => o.id === id || o.work === id);
+      const mapped = (matchingOption ? mapShorthandWork(matchingOption.work) : null)
+        ?? mapShorthandWork(id === 'development' && context.event.object_type === 'pr' ? 'development.pr' : id)
+        ?? (matchingOption ? mapShorthandWork(matchingOption.id) : null);
       if (mapped) {
-        role ??= mapped.role;
+        assign(mapped.role);
         if (writes === null) for (const w of mapped.writes) combinedWrites.add(w);
         continue;
       }
-      const matchingOption = allEventOptions.find((o: CreateOption | UnavailableWork) => o.id === id || o.work === id);
-      if (matchingOption) {
-        const optMapped = mapShorthandWork(matchingOption.work) ?? mapShorthandWork(matchingOption.id);
-        if (optMapped) {
-          role ??= optMapped.role;
-          if (writes === null) for (const w of optMapped.writes) combinedWrites.add(w);
-          continue;
-        }
-      }
       const roleMatch = roleConfiguration(store, String(context.event.repository_id)).roles.find(r => r.role_id === id && r.enabled && r.kind !== 'evaluator');
       if (roleMatch) {
-        role ??= roleMatch.role_id;
+        assign(roleMatch.role_id);
         continue;
       }
       failDecision('dispatch_decision_invalid', `Unknown work or role "${id}". Pass role (e.g. reviewer, dev, test) and writes.`);
@@ -929,6 +930,11 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
     writes ??= role === 'reviewer' ? ['review'] : [];
   }
 
+  // The Task Manager as executor means its team (#1250): the same as omitting the role, never the Manager working alone.
+  // This covers only the generic `task.request` created here. A single domain option returned above keeps its own
+  // executor: a scheduled check never takes the decision's role, and a release observation or notes task runs its event
+  // agent, where the role only selects whose permissions cap its effects. Neither becomes a development team.
+  if (role !== null && role === roleConfiguration(store, String(context.event.repository_id)).controller.role) role = null;
   if (role !== null) {
     const configRoles = roleConfiguration(store, String(context.event.repository_id)).roles;
     const found = configRoles.find(r => r.role_id === role);

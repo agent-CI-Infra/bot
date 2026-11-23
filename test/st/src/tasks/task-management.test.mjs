@@ -343,3 +343,26 @@ test('task facts separate recorded acceptance, a changed workspace checkpoint, p
   assert.equal(facts.acceptance.candidate_id,candidate.id);assert.equal(facts.workspace_checkpoint.tree_sha,'v2');assert.equal(facts.publication.pr_number,7);assert.equal(facts.recent_failures[0].code,'test_failure');
   assert.equal(facts.history.tool,'read_task_history');assert.ok(!JSON.stringify(context).includes('large-body-must-stay-out'));assert.ok(!JSON.stringify(facts).includes('full-observation-not-in-brief'));
 });
+
+test('a Task Manager naming itself as executor gets its team, as omitting executor_role does; the description says when (#1250)', t => {
+  const { s, commands, caller, save, create } = fixture(t);
+  const description = taskManagementTools.find(tool => tool.function.name === 'create_task').function.description;
+  assert.match(description, /Omit executor_role for work that changes repository code and opens a pull request: the Task Manager runs it with the team \(dev, an independent reviewer, test when behaviour changes, then QA\), since the platform does not review the bot's pull request after it opens\./);
+  assert.match(description, /Name one executor_role for work that opens no pull request, or for a trivial code change such as wording, comments or docs\./);
+  const manager = roleTaskCaller(s, 'r', 'manager', { conversation_id: 'chat-m', source_message: 'message-m', guard() {} });
+  const named = create(manager, 'Fix the parser', { executor_role: 'manager' }), omitted = create(manager, 'Fix the formatter');
+  // Both the origin and the saved input leave the executor empty: runRequest runs the team only when neither names one.
+  for (const task of [named, omitted]) {
+    assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', task.id).executor_role, null);
+    assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?', task.id).input).executor_role, undefined);
+  }
+  const dev = create(manager, 'Fix a typo', { executor_role: 'dev' });
+  assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', dev.id).executor_role, 'dev');
+  assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?', dev.id).input).executor_role, 'dev');
+  // Another role that may delegate still gets exactly the executor it names.
+  save('reviewer', { delegation: 'allow' });
+  const other = create(caller(), 'Coordinate elsewhere', { executor_role: 'manager' });
+  assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', other.id).executor_role, 'manager');
+  assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?', other.id).input).executor_role, 'manager');
+  void commands;
+});

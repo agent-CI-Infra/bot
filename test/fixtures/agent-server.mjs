@@ -38,7 +38,8 @@ function dispatch(context){
   if(!option||event.type==='review.published'&&event.object.type==='issue'&&(!event.facts.development?.label||event.facts.development?.assignees?.length||event.facts.development?.bot_pull_request))
     return {decision:'ignore',option_ids:[],reason:'没有符合本场景的待办工作。'};
   return {decision:'create',option_ids:[option.id],reason:event.type==='review.published'?'按已发布的检视启动开发。':'检视这次对象事件。',
-    ...(work==='development.issue'?{basis:{kind:'label'},brief:{goal:'Fix addition and document numeric behavior',criteria:['add(2, 3) returns 5']}}:{})};
+    // This scripted model answers as one developer, so it names dev: an Issue's development defaults to the team (#1250).
+    ...(work==='development.issue'?{role:'dev',basis:{kind:'label'},brief:{goal:'Fix addition and document numeric behavior',criteria:['add(2, 3) returns 5']}}:{})};
 }
 function model(input){
   const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw);
@@ -46,7 +47,7 @@ function model(input){
   // The Manager decides with create_task, continue_task or ignore_event (#815).
   if(input.tools?.some(tool=>tool.function?.name==='create_task')&&context.work){
     const decision=dispatch(context);stats.dispatches.push({event:context.event,options:{create:context.work.create,continue:context.work.continue.map(task=>({...task,id:'continue:'+task.task_id}))},decision,model:input.model});
-    return decision.decision==='create'?call('create_task',{work:decision.option_ids,reason:decision.reason,...(decision.basis?{basis:decision.basis,brief:decision.brief}:{})},'dispatch')
+    return decision.decision==='create'?call('create_task',{work:decision.option_ids,reason:decision.reason,...(decision.role?{role:decision.role}:{}),...(decision.basis?{basis:decision.basis,brief:decision.brief}:{})},'dispatch')
       :decision.decision==='continue'?call('continue_task',{task_id:decision.option_ids[0].replace(/^continue:/,''),reason:decision.reason},'dispatch'):call('ignore_event',{reason:decision.reason},'dispatch');
   }
   // Independent acceptance inspects the fixed candidate, not the executor's repository/object prompt.

@@ -279,3 +279,12 @@ test('QA receives compact related indexes rather than repeated repository manife
  const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{},false);
  assert.equal(result.outcome,'pass');
 });
+test('QA sees which roles produced results for the candidate and the Manager\'s note, as facts beside its checklist (#1250)',async t=>{
+ const {traceEvent}=await import('../../../../dist/tasks/trace.js');
+ const seen=[];const f=await fixture(t,body=>{seen.push(JSON.parse(body.messages[1].content));return {role:'assistant',content:JSON.stringify(pass)};});
+ const dev=traceEvent(f.h.store,'delivery','role_result',{role:'dev',result:{summary:'implemented'}});
+ traceEvent(f.h.store,'delivery','delivery_nominated',{result_ref:dev,candidate_participation:{candidate_ref:dev,dev_results:1,inspected_by:[],earlier_candidates_only:[],summary:'dev only: no independent role inspected this candidate'},checks_note:'Wording-only change.'});
+ await evaluateDelivery(f.h.store,f.task,{call:async()=>({content:'Actual observed artifact'})},new Redactor(),async()=>{},false);
+ assert.deepEqual(seen[0].candidate_participation,{candidate_ref:dev,dev_results:1,inspected_by:[],earlier_candidates_only:[],summary:'dev only: no independent role inspected this candidate',checks_note:'Wording-only change.'});
+ assert.equal(seen[0].checklist.length,3,'the facts add no checklist item');
+});

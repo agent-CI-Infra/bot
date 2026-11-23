@@ -15,6 +15,7 @@ import { randomId } from '../core/security.js';
 
 export { acceptanceInstructions as acceptanceSystem } from '../roles/pool.js';
 import { acceptanceInstructions as acceptanceSystem } from '../roles/pool.js';
+import { acceptanceParticipation } from '../roles/participation.js';
 
 const tool = (name: string, description: string, properties: any, required: string[]) => ({
   type: 'function',
@@ -292,6 +293,8 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
           project: record.project,
           candidate: boundedCandidate(candidate),
           previous_verification_evidence: previousVerificationEvidence(store, task.id, candidate),
+          // Who produced results for this candidate (#1250): the facts the Manager nominated with, not a checklist item.
+          candidate_participation: acceptanceParticipation(store, task.id),
           related_deliveries: relatedIndex.deliveries,
           related_deliveries_page: { ...relatedIndex, deliveries: undefined },
           context_files: [...new Set(contextFiles)],

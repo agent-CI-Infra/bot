@@ -176,3 +176,28 @@ test('Native reviewer on a fixed candidate may create unignored build output wit
   assert.deepEqual(finalized, ['dev']); assert.match(git(['status', '--porcelain']), /\?\? build.out/);
   assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='reviewer' ORDER BY rowid DESC LIMIT 1").status, 'succeeded');
 });
+test('the Task Manager sees who produced results for the candidate where it nominates, and the nomination keeps it with its note (#1250)',async t=>{
+ let step=0,devRef;const answers=[],inputs=[];
+ const f=await fixture(t,body=>{const system=body.messages[0].content,last=body.messages.at(-1);
+  if(system.includes('Coordinate only.')){
+   inputs.push(body.messages.filter(m=>m.role==='user').map(m=>{try{return JSON.parse(m.content);}catch{return null;}}).filter(v=>v?.task_ref).at(-1));
+   if(last.role==='tool')answers.push(JSON.parse(last.content));
+   const actions=[()=>call('delegate_role',{role:'dev',purpose:'Implement',refs:[]}),
+    ()=>{devRef=answers.at(-1).result_ref;return call('delegate_role',{role:'reviewer',purpose:'Review the candidate',refs:[devRef]});},
+    ()=>call('nominate_delivery',{result_ref:devRef,checks_note:'Reviewed; the change has no behaviour to test separately.'}),
+    ()=>call('nominate_delivery',{result_ref:devRef})];
+   return actions[step++]();}
+  if(system.includes('Inspect the fixed candidate independently'))return call('submit_role_result',{summary:'No defects',findings:[],inspected_scope:['fixture'],unknowns:[]});
+  return call('finish',{summary:'the developer text'});});
+ const result=await runTeam({...f.spec,execute:async()=>({ok:true})},{prepare:async()=>{}});
+ assert.equal(inputs[0].candidate_participation,undefined,'nothing has run yet');
+ assert.deepEqual([answers[0].candidate_participation.candidate_ref,answers[0].candidate_participation.summary],[devRef,'dev only: no independent role inspected this candidate']);
+ assert.deepEqual(answers[1].candidate_participation.inspected_by.map(r=>r.role),['reviewer']);
+ const nominated=JSON.parse(f.s.get("SELECT data FROM task_history WHERE type='delivery_nominated'").data);
+ assert.deepEqual([nominated.candidate_participation.summary,nominated.checks_note],['dev, then reviewer on this candidate','Reviewed; the change has no behaviour to test separately.']);
+ // The note is the Manager's record, never part of what the developer's result publishes.
+ assert.deepEqual(result,{summary:'the developer text'});
+ // A later coordination turn starts from the same facts.
+ await runTeam({...f.spec,execute:async()=>({ok:true})},{prepare:async()=>{}});
+ assert.equal(inputs.at(-1).candidate_participation.summary,'dev, then reviewer on this candidate');
+});

@@ -40,7 +40,8 @@ export const findingsSchema = { type: 'object', properties: { summary: { type: '
 export const nominationSchema = { type: 'object', properties: { result_ref: { type: 'string' }, supporting_refs:{type:'array',maxItems:20,items:{type:'string'}},
   summary:{type:'string',description:'Optional. Leave it out to publish the summary of the result you nominate exactly as the developer wrote it; that is the default. delegate_role returns each Dev result\'s summary; the latest one from earlier runs is latest_dev_result in your input. '
     +'Write one only when that text states something wrong or leaves out something a reader needs; then start from it and keep its language and structure, since yours replaces it whole. Preserve any Markdown references to media selected by the developer. For a development it is the public pull request description on GitHub: '+pullRequestSummaryRules},
-  change_title:{type:'string',description:'Optional. Omit it to keep the change_title of the result you nominate (for a development, the commit subject and pull request title).'} }, required: ['result_ref'], additionalProperties: false };
+  change_title:{type:'string',description:'Optional. Omit it to keep the change_title of the result you nominate (for a development, the commit subject and pull request title).'},
+  checks_note:{type:'string',maxLength:2000,description:'Optional, not published. When no independent reviewer (or test, where behaviour changed) inspected this code candidate, say why that is enough, for example a wording-only change. Recorded with the nomination; QA sees it.'} }, required: ['result_ref'], additionalProperties: false };
 const schemas = [
   { id: 'delivery-nomination', kinds: ['controller'], tool: 'nominate_delivery', schema: nominationSchema },
   { id: 'entry-delivery', kinds: ['writer'], tool: null, schema: null, description: 'The entry point\'s own submission: submit_delivery, finish_review or the event workflow finish tool.' },
