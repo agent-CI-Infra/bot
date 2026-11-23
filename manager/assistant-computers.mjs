@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { ManagerError } from './docker.mjs';
-import { clampMemoryToHost, logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
+import { CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
 
 /**
  * Assistant computers (#457): one short-lived container per conversation owner (a group, or a person's private chats and
@@ -60,24 +60,33 @@ function validateCall(call, harness = false) {
   if (['assistant_archive_stage', 'assistant_archive_extract'].includes(call.type) && !idPattern.test(call.stage_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'assistant_archive_extract' && (typeof call.destination !== 'string' || !call.destination || call.destination.length > 4096 || call.destination.includes('\0') || (call.overwrite !== undefined && typeof call.overwrite !== 'boolean'))) throw new ManagerError('invalid_runner_request', 400);
 }
+// Aggregate busy-container burst-limit overcommit multiplier relative to the host's 75% safe memory cap
+// (2x of 75% = 1.5x physical host RAM across concurrently busy assistant containers, minus running project computers).
+// Linux cgroup Memory is a burst ceiling rather than pre-allocated RAM; this prevents max_containers=20 from OOM-killing
+// the host/control plane while keeping multi-user concurrency on 16-32 GiB hosts (#1279).
+export const AGGREGATE_MEMORY_OVERCOMMIT = 2;
+
 export function validateAssistantSettings(input, host = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.keys(input).some(k => !Object.hasOwn(assistantDefaults, k))) throw new ManagerError('invalid_assistant_settings', 400);
   for (const [key, [min, max]] of Object.entries(timerBounds)) if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || input[key] < min || input[key] > max)) throw new ManagerError('invalid_assistant_settings', 400);
   for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key], sizeBounds)) throw new ManagerError('invalid_assistant_settings', 400);
   if (input.egress !== undefined && typeof input.egress !== 'boolean') throw new ManagerError('invalid_assistant_settings', 400);
-  // Docker refuses to create a container that is given more CPUs or memory than the host has.
+  // Docker refuses to create a container that is given more CPUs than the host has, and memory must stay within the
+  // unified 75% host reserve cap (reserving 25% for the host OS, manager and control plane).
   const hostCpus = typeof host === 'number' ? host : host?.cpus ?? null;
-  const hostMemoryMb = typeof host === 'object' && host ? host.memory_mb ?? null : null;
+  const hostCapMb = typeof host === 'object' && host
+    ? (host.memory_mb ? hostMemoryCap(host.memory_mb) : (host.fallback_cap_mb ?? null))
+    : null;
   if (hostCpus && input.cpus !== undefined && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
-  if (hostMemoryMb && input.memory_mb !== undefined && input.memory_mb > hostMemoryMb) throw new ManagerError('memory_exceeds_host', 400);
+  if (hostCapMb !== null && input.memory_mb !== undefined && input.memory_mb > hostCapMb) throw new ManagerError('memory_exceeds_host', 400);
   return input;
 }
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount, globalEnvironment = null, disk = null }) {
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
     this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.resultMount=resultMount;
-    this.globalEnvironment = globalEnvironment; this.disk = disk;
+    this.globalEnvironment = globalEnvironment; this.disk = disk; this.allocatedMemoryMb = allocatedMemoryMb; this.lastHost = null;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
@@ -130,16 +139,31 @@ export class AssistantComputers {
     const base = shared ? { ...assistantDefaults, ...shared } : assistantDefaults;
     return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, values[key] ?? value]));
   }
-  // The host's CPUs and memory, for the console to offer only sizes the host has; null when Docker cannot be read.
-  async host() { const info = await this.docker.request('GET', '/info').catch(() => null); return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null; }
+  // The host's CPUs and memory, for the console to offer only sizes the host has.
+  // Caches the last valid reading; if Docker /info transiently errors without a prior reading, returns a conservative
+  // fallback memory cap instead of failing open to 16 GiB (#1279).
+  async host() {
+    try {
+      const info = await this.docker.request('GET', '/info');
+      if (info?.NCPU && info?.MemTotal) {
+        this.lastHost = { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) };
+        return this.lastHost;
+      }
+      return null;
+    } catch {
+      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
+    }
+  }
   async settingsView() {
     // homes: whether this manager has the HOME volume, without which no computer can be created (#1254).
     const host = await this.host();
+    const publicHost = host?.cpus ? { cpus: host.cpus, memory_mb: host.memory_mb } : null;
+    const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
     const configured = this.settings();
-    const effectiveMemoryMb = clampMemoryToHost(configured.memory_mb, host?.memory_mb);
+    const effectiveMemoryMb = clampMemoryToHost(configured.memory_mb, host);
     const effective = { ...configured, memory_mb: effectiveMemoryMb };
-    const hostClamped = effectiveMemoryMb !== configured.memory_mb ? { memory_mb: effectiveMemoryMb } : null;
-    return { settings: effective, configured_settings: configured, host_clamped: hostClamped, defaults: assistantDefaults, bounds, host, homes: await this.volume().then(() => true, () => false),
+    const hostClamped = effectiveMemoryMb !== configured.memory_mb ? { memory_mb: effectiveMemoryMb, host_cap_mb: hostCapMb } : null;
+    return { settings: effective, configured_settings: configured, host_clamped: hostClamped, host_memory_cap_mb: hostCapMb, defaults: assistantDefaults, bounds, host: publicHost, homes: await this.volume().then(() => true, () => false),
       usage: { computers: this.leases.size, busy: [...this.leases.values()].filter(l => l.state === 'busy').length, waiting: this.waiting.length } };
   }
   /**
@@ -279,7 +303,7 @@ export class AssistantComputers {
     return this.lock(owner, async () => {
       const now = Date.now(), settings = this.settings(), globalEnv = this.effectiveGlobal();
       const host = await this.host();
-      const effectiveResources = { ...resourcesOf(settings), memory_mb: clampMemoryToHost(settings.memory_mb, host?.memory_mb) };
+      const effectiveResources = { ...resourcesOf(settings), memory_mb: clampMemoryToHost(settings.memory_mb, host) };
       let targetImage = globalEnv.image;
       // Validate BOTH the live approved base image digest AND the stored image ID (not only the tag):
       // if the approved base image changed before the next 5s reconcile timer or the stored ID was pruned,
@@ -349,12 +373,15 @@ export class AssistantComputers {
         }
       }
       // Aggregate memory admission on known hosts (#1279): cgroup Memory is a burst ceiling rather than reserved RAM,
-      // so allow up to 2x host RAM across concurrently busy assistant computers (preventing max_containers=20 from
-      // OOM-killing the manager/control plane while keeping normal multi-user concurrency on 16-32 GiB hosts).
-      if (host?.memory_mb) {
+      // so cap concurrently busy assistant containers at 2x the host's 75% safe memory cap (= 1.5x host RAM) minus
+      // memory already allocated to running project computers (always permitting at least one busy assistant).
+      const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
+      if (hostCapMb !== null) {
         const busyLeases = [...this.leases.values()].filter(l => l.owner !== owner && (l.state === 'busy' || l.state === 'creating'));
         const busyMemoryMb = busyLeases.reduce((sum, l) => sum + (l.resources?.memory_mb || 0), 0);
-        if (busyLeases.length > 0 && busyMemoryMb + effectiveResources.memory_mb > host.memory_mb * 2) {
+        const projectAllocatedMb = Math.max(0, Number(this.allocatedMemoryMb?.()) || 0);
+        const aggregateBudgetMb = Math.max(effectiveResources.memory_mb, hostCapMb * AGGREGATE_MEMORY_OVERCOMMIT - projectAllocatedMb);
+        if (busyLeases.length > 0 && busyMemoryMb + effectiveResources.memory_mb > aggregateBudgetMb) {
           const position = this.ticket(owner, turn);
           return { state: 'queued', reason: 'capacity', position };
         }

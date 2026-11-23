@@ -550,13 +550,57 @@ test('runner assistant_archive_stage and assistant_archive_extract unpack safely
     /invalid_stage_id/,
   );
 
-  // 7. assistant_write enforces soft limit and volume.full safety floor.
+  // 7. assistant_write enforces soft limit via cached usage (no per-chunk tree walk) and does not double-count multi-chunk appends.
+  const writeRoot = join(sandbox, 'write-ws');
+  const writeTmp = join(sandbox, 'write-tmp');
+  mkdirSync(writeRoot, { recursive: true });
+  mkdirSync(writeTmp, { recursive: true });
+  let measureCalls = 0;
+  const writeOpts = {
+    workspaceRoot: writeRoot,
+    tmpRoot: writeTmp,
+    homeRoot,
+    env: { BOT_WORKSPACE_LIMIT_MB: '0.5' }, // 512 KiB soft limit
+    measureUsage: async () => { measureCalls++; return 0; },
+  };
+  const chunk40k = Buffer.alloc(40 * 1024, 0x61);
+  // Append 10 chunks = 400 KiB (< 512 KiB). Must succeed without double-counting and scan only once.
+  for (let i = 0; i < 10; i++) {
+    const res = await assistantFile({
+      type: 'assistant_write',
+      path: join(writeRoot, 'stream.bin'),
+      base64: chunk40k.toString('base64'),
+      offset: i * chunk40k.length,
+    }, writeOpts);
+    assert.equal(res.size, (i + 1) * chunk40k.length);
+  }
+  assert.equal(measureCalls, 1, 'cached usage avoids walking the volume on every 40 KiB chunk');
+  assert.equal(readFileSync(join(writeRoot, 'stream.bin')).length, 400 * 1024);
+  // Appending 4 more chunks pushes past 512 KiB -> refused cleanly at chunk 13 (520 KiB > 512 KiB).
+  await assistantFile({ type: 'assistant_write', path: join(writeRoot, 'stream.bin'), base64: chunk40k.toString('base64'), offset: 10 * chunk40k.length }, writeOpts);
+  await assistantFile({ type: 'assistant_write', path: join(writeRoot, 'stream.bin'), base64: chunk40k.toString('base64'), offset: 11 * chunk40k.length }, writeOpts);
   await assert.rejects(
-    assistantFile({ type: 'assistant_write', path: join(workspaceRoot, 'oversize.txt'), base64: Buffer.alloc(1024, 0x61).toString('base64'), offset: 0 }, {
-      workspaceRoot, tmpRoot, homeRoot, env: { BOT_WORKSPACE_LIMIT_MB: '0.0005' },
-    }),
+    assistantFile({ type: 'assistant_write', path: join(writeRoot, 'stream.bin'), base64: chunk40k.toString('base64'), offset: 12 * chunk40k.length }, writeOpts),
     /ENOSPC/,
   );
+  assert.equal(measureCalls, 1, 'subsequent chunks continue using cached incremental accounting');
+
+  // 8. Overwrite extraction accounts for peak usage (existing destination + staging tree) and preserves old destination on ENOSPC.
+  const peakRoot = join(sandbox, 'peak-ws');
+  const peakTmp = join(sandbox, 'peak-tmp');
+  mkdirSync(join(peakRoot, 'repo'), { recursive: true });
+  mkdirSync(peakTmp, { recursive: true });
+  writeFileSync(join(peakRoot, 'repo', 'old.bin'), Buffer.alloc(2 * 1024 * 1024, 0x42));
+  await assert.rejects(
+    stageAndExtract(readFileSync(bigTarPath), join(peakRoot, 'repo'), {
+      overwrite: true,
+      opts: { workspaceRoot: peakRoot, tmpRoot: peakTmp, homeRoot, env: { BOT_WORKSPACE_LIMIT_MB: '3', BOT_TMP_LIMIT_MB: '10' } },
+    }),
+    /ENOSPC.*peak usage/,
+  );
+  assert.equal(readFileSync(join(peakRoot, 'repo', 'old.bin')).length, 2 * 1024 * 1024, 'failed peak overwrite preserves existing destination');
+
+  // 9. assistant_write refuses when volume.full is reported.
   await assert.rejects(
     assistantFile({ type: 'assistant_write', path: join(workspaceRoot, 'full.txt'), base64: Buffer.from('x').toString('base64'), offset: 0 }, {
       workspaceRoot, tmpRoot, homeRoot, volume: () => ({ free_bytes: 0, total_bytes: 100 * 1024 ** 3, full: true, low: true }),
@@ -603,13 +647,22 @@ test('assistant computers enforce small-host memory clamping, aggregate admissio
   assert.equal(raw.tmp_mb, 20480);
   assert.equal(raw.workspace_mb, 20480);
 
-  // 2. Small host (8 GiB) clamps effective memory_mb to 6144 MiB and rejects explicit saves > host memory.
+  // 2. Small host (8 GiB) clamps effective memory_mb to 6144 MiB (75% reserve) and rejects explicit equal-to-host (8192) and 16384.
   const view = await assistants.settingsView();
   assert.equal(view.settings.memory_mb, 6144);
-  assert.deepEqual(view.host_clamped, { memory_mb: 6144 });
+  assert.deepEqual(view.host_clamped, { memory_mb: 6144, host_cap_mb: 6144 });
+  await assert.rejects(assistants.setSettings({ memory_mb: 8192 }), /memory_exceeds_host/);
   await assert.rejects(assistants.setSettings({ memory_mb: 16384 }), /memory_exceeds_host/);
 
-  // 3. Container receives clamped 6144 MiB; aggregate busy memory admission allows up to 2x host RAM (12 <= 16 GiB) and queues the 3rd (18 > 16 GiB).
+  // 2b. 16 GiB boundary host also clamps 16 GiB default to 12 GiB (75% reserve) and rejects explicit 16384.
+  docker.info = { NCPU: 4, MemTotal: 16384 * 1024 * 1024 };
+  const boundaryView = await assistants.settingsView();
+  assert.equal(boundaryView.settings.memory_mb, 12288);
+  assert.deepEqual(boundaryView.host_clamped, { memory_mb: 12288, host_cap_mb: 12288 });
+  await assert.rejects(assistants.setSettings({ memory_mb: 16384 }), /memory_exceeds_host/);
+  docker.info = { NCPU: 4, MemTotal: 8192 * 1024 * 1024 };
+
+  // 3. Container receives clamped 6144 MiB; aggregate busy memory admission allows up to 2x 75% safe cap (= 12288 MiB) and queues the 3rd (18432 > 12288).
   const ownerA = 'a'.repeat(32), ownerB = 'b'.repeat(32), ownerC = 'c'.repeat(32);
   mkdirSync(join(homes, ownerA, 'home-1'), { recursive: true });
   mkdirSync(join(homes, ownerB, 'home-1'), { recursive: true });
@@ -624,6 +677,19 @@ test('assistant computers enforce small-host memory clamping, aggregate admissio
   assert.deepEqual(queuedC, { state: 'queued', reason: 'capacity', position: 1 });
   await assistants.release(ownerB, { turn: 't-b' });
   await assistants.remove(ownerB);
+
+  // 3b. /info error on a cold manager falls back conservatively to 4096 MiB instead of failing open to 16 GiB.
+  const coldDocker = new FakeDocker();
+  coldDocker.homesMount = homes;
+  const origColdReq = coldDocker.request.bind(coldDocker);
+  coldDocker.request = async (method, path, body, raw, timeout) => {
+    if (path === '/info') throw new Error('docker_socket_unreachable');
+    return origColdReq(method, path, body, raw, timeout);
+  };
+  const coldAssistants = new AssistantComputers({ docker: coldDocker, db: projects.db, deployment: 'cold', image: 'approved', homes });
+  const coldView = await coldAssistants.settingsView();
+  assert.equal(coldView.settings.memory_mb, 4096);
+  await assert.rejects(coldAssistants.setSettings({ memory_mb: 8192 }), /memory_exceeds_host/);
 
   // 4. Archive extraction passes 180s timeout to docker.runner (matching control-plane timeout).
   await assistants.execute(ownerA, {

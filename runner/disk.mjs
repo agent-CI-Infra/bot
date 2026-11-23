@@ -21,6 +21,17 @@ export function volume(path = workspaceRoot) {
   } catch { return null; }
 }
 
+/** Checks both /workspace and /tmp (returns the tighter free-space state), so /tmp writes are also caught (#1279). */
+export function watchedVolume(paths = [workspaceRoot, '/tmp']) {
+  let worst = null;
+  for (const p of paths) {
+    const s = volume(p);
+    if (!s) continue;
+    if (!worst || (s.full && !worst.full) || (s.low && !worst.low && !worst.full) || s.free_bytes < worst.free_bytes) worst = s;
+  }
+  return worst;
+}
+
 // How file systems and the tools on top of them report a full disk or an exceeded quota.
 const noSpaceText = /no space left on device|disk quota exceeded|\bENOSPC\b|\bEDQUOT\b/i;
 /** An error that means the disk is full. */
