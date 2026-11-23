@@ -324,6 +324,9 @@ export class ChannelServiceSessions {
     const resultFiles=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>assistantResultOwner(ownerId({kind:'group',subject:chat.id,tenant:String(chat.installation_tenant??'')})),check,redactor.values,()=>computing&&permitsTool(permissions(),'run_command'));
     const execute=(name:string,args:unknown,key:string)=>resultFiles.execute(name,args,()=>executeRaw(name,args,key),false);
     try {
+      // A harness turn runs on the group's computer: start taking it now, while names, history and the summary are read
+      // (#1254). Inside the try, so the finally below gives it back whatever ends the turn.
+      if (binding.harness && binding.harness !== 'native') computers?.warm();
       let sourceVersion = this.ledger.sourceVersion(chat.id);
       const history = true;
       const recent = history ? this.ledger.recent(chat.id, 40, scope, fence, true) : [];

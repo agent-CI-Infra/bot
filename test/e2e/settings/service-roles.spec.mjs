@@ -27,7 +27,9 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     const captureBackend = async state => { for (const width of [1440, 390]) { await page.setViewportSize({ width, height: 900 }); await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);  } await page.setViewportSize({ width: 1440, height: 1000 }); };
     await captureBackend('before-save');
     await assistant.getByRole('combobox', { name: 'Agent 后端', exact: true }).selectOption('pi');
-    await expect(assistant.locator('.endpoint-warning')).toContainText('不会改用其他模型');
+    await expect(assistant.locator('.endpoint-warning').filter({ hasText: '不会改用其他模型' })).toHaveCount(1);
+    // This harness has no assistant computers: choosing Pi says that each of its turns would fail (#1254).
+    await expect(assistant.getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toContainText('Pi、Codex 和 Claude Code 的每一轮都要在助手电脑上运行');
     await expect(assistant.getByRole('button', { name: '删除角色' })).toHaveCount(0);
 
     // Choose the shared model and save.

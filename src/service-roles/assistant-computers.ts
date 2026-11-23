@@ -242,6 +242,12 @@ export class AssistantHomes {
 }
 
 type FenceResolver = (row: Row) => string | null;
+/** The assistants configured with a harness other than native: the management assistant and enabled group bindings. */
+export function harnessAssistants(store: Store): string[] {
+  const management = store.hasTable('service_roles') ? store.get("SELECT harness FROM service_roles WHERE id='management-assistant' AND enabled=1 AND harness<>'native'") : undefined;
+  const groups = store.hasTable('channel_service_bindings') ? Number(store.get("SELECT count(*) n FROM channel_service_bindings WHERE enabled=1 AND harness<>'native'")!.n) : 0;
+  return [...(management ? [`the management assistant (${management.harness})`] : []), ...(groups ? [`${groups} group assistant binding${groups > 1 ? 's' : ''}`] : [])];
+}
 /** The control plane's side of assistant computers: the manager calls, the background sweeps and the console view. */
 export class AssistantComputerService {
   readonly homes?: AssistantHomes;
@@ -257,6 +263,28 @@ export class AssistantComputerService {
     if (root) this.homes = new AssistantHomes(store, root);
   }
   available(): boolean { return !!this.manager && !!this.homes; }
+  /**
+   * Whether a harness turn can get a computer now (#1254), and if not, why: no manager, no HOME volume in the control
+   * plane, a manager that does not answer, or a manager without the HOME volume. Read without creating a computer.
+   */
+  async status(): Promise<{ available: boolean; reason?: string }> {
+    if (!this.manager) return { available: false, reason: 'manager_not_configured' };
+    if (!this.homes) return { available: false, reason: 'assistant_homes_missing' };
+    const view = await this.manager.call('GET', '/v1/assistant-computers/settings').catch(() => null) as Json | null;
+    if (!view) return { available: false, reason: 'manager_unavailable' };
+    if (view.homes === false) return { available: false, reason: 'assistant_homes_unavailable' };
+    return { available: true };
+  }
+  /**
+   * The start-up warning (#1254): an assistant that runs on a harness (Pi, Codex, Claude Code) needs a computer for every
+   * turn, so a deployment without one says so when it starts, not when the first turn fails.
+   */
+  async warnIfRequired(log: (line: string) => void = line => console.warn(line)): Promise<string | null> {
+    const users = harnessAssistants(this.store); if (!users.length) return null;
+    const status = await this.status(); if (status.available) return null;
+    const line = `[assistant-computers] ${users.join(' and ')} run on a harness that needs an assistant computer for every turn, but assistant computers are unavailable (${status.reason}): those turns fail until the manager and the assistant-homes volume are available.`;
+    log(line); return line;
+  }
   /** How a kind of owner computes its fence now; null means its computer must go (disabled binding, inactive person). */
   resolve(kind: ComputerOwner['kind'], fence: FenceResolver): void { this.fences.set(kind, fence); }
   turn(options: TurnOptions): AssistantComputer { return new AssistantComputer(this, options); }
@@ -363,12 +391,24 @@ export class AssistantComputer {
   private heartbeat?: ReturnType<typeof setInterval>;
   egress = true;
   constructor(readonly service: AssistantComputerService, readonly options: TurnOptions) {}
+  // An early start (warm) and the first use share one HOME preparation and one acquisition of the container.
+  private preparing?: Promise<NonNullable<AssistantComputer['home']>>;
+  private acquiring?: Promise<string>;
+  // Set when the turn ended: an acquisition still under way then gives its container back instead of keeping it.
+  private closed = false;
   private async prepare(runtime=false) {
     if (!this.service.available()) fail(409, 'computer_not_configured');
     await this.options.check(); if(!runtime)this.options.eligible();
-    if (!this.home) this.home = await this.service.homes!.prepare(this.options.owner, this.options.facts());
+    // A failed preparation is not kept: the next use tries again, as before the early start.
+    if (!this.home) this.home = await (this.preparing ??= this.service.homes!.prepare(this.options.owner, this.options.facts()).catch(error => { this.preparing = undefined; throw error; }));
     return this.home;
   }
+  /**
+   * Starts taking the owner's computer for a harness turn before its first use (#1254), the way that use takes it (the
+   * harness runtime: no command permission needed), so creating or reusing the container overlaps the turn's other
+   * preparation. A failure here changes nothing: the first use meets it again and reports it.
+   */
+  warm(): void { if (this.service.available() && !this.held && !this.closed) void this.computer(true).catch(() => {}); }
   private notice(): Json { return this.home?.mode === 'ro' ? { home_read_only: true, notice: 'HOME 已超过容量上限，本回合只读：先用 delete_file 删除不再需要的文件，或请管理员在控制台清空；下一回合按清理后的大小恢复可写。' } : {}; }
   /** The owner's container, held by this turn: created or reused, waiting in line while capacity is full. */
   private async computer(runtime=false): Promise<string> {
@@ -376,8 +416,12 @@ export class AssistantComputer {
     this.service.store.trajectories.results.directory(assistantResultOwner(home.id));
     if (this.held) return home.id;
     if (!runtime&&!this.options.commands()) fail(400, 'assistant_computer_requires_commands');
+    return this.acquiring ??= this.acquire(home, runtime).finally(() => { this.acquiring = undefined; });
+  }
+  private async acquire(home: NonNullable<AssistantComputer['home']>, runtime: boolean): Promise<string> {
     let told = false, retried = false;
     for (;;) {
+      if (this.closed) fail(409, 'assistant_computer_released');
       await this.options.check();
       const result = await this.service.manager!.call('PUT', '/v1/assistant-computers/' + home.id,
         { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode,...(runtime?{harness:true}:{}) }, 120_000).catch(error => {
@@ -400,6 +444,11 @@ export class AssistantComputer {
         await this.options.notify(result?.reason === 'owner_busy' ? '电脑正在被你的另一个会话使用，等它结束后继续。' : `助手电脑繁忙，正在排队（第 ${result?.position ?? 1} 位），轮到后继续。`);
       }
       await sleep(2000);
+    }
+    // The turn ended while its computer was being taken (an early start the turn never used): give it back at once.
+    if (this.closed) {
+      await this.service.manager!.call('POST', `/v1/assistant-computers/${home.id}/release`, { turn: this.options.turn, remove: false }).catch(() => {});
+      fail(409, 'assistant_computer_released');
     }
     this.held = true; this.service.active.set(this.options.turn, this);
     // Model thinking and other tools keep the computer: the manager counts a turn as gone only when renewals stop.
@@ -516,7 +565,7 @@ export class AssistantComputer {
   /** The turn ended: its processes end and the idle timer starts, or with remove (a changed fence) the computer goes. */
   async close(remove = false): Promise<void> {
     const id = ownerId(this.options.owner), held = this.held;
-    this.drop(); this.service.homes?.touch(id);
+    this.closed = true; this.drop(); this.service.homes?.touch(id);
     if (held) await this.service.manager!.call('POST', `/v1/assistant-computers/${id}/release`, { turn: this.options.turn, remove }).catch(() => {});
     if (this.home) void this.service.homes!.measure(id).catch(() => {});
   }
@@ -525,6 +574,8 @@ export class AssistantComputer {
 /** Console: every HOME with its use and the clear action, for super administrators (global settings). */
 export async function assistantComputersApi(service: AssistantComputerService, user: Actor, method: string, path: string): Promise<Json | undefined> {
   if (path !== '/api/assistant-computers' && !path.startsWith('/api/assistant-computers/')) return undefined;
+  // Whether assistant computers work in this deployment (#1254): the console warns whoever picks a harness that needs them.
+  if (method === 'GET' && path === '/api/assistant-computers/status') return service.status();
   superAdmin(user);
   if (method === 'GET' && path === '/api/assistant-computers') return service.overview();
   const clear = /^\/api\/assistant-computers\/([a-f0-9]{32})\/clear$/.exec(path);

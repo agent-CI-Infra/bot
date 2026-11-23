@@ -35,11 +35,14 @@ const settled = (f, conversation, message) => until(async () => (await f.admin('
 function gate(t) { let release; const wait = new Promise(r => { release = r; }); t.after(() => release()); return { wait, release }; }
 
 // Each conversation owner's computer is a workspace of a local project computer running this checkout's runner and Pi SDK.
+// f.computerCalls records when a turn starts taking its computer early (#1254) and when its Pi session takes it.
 function piComputers(t, f) {
   const root = mkdtempSync(join(tmpdir(), 'bot-pi-assistants-')), manager = new LocalManager('101', root), store = f.h.store;
   t.after(async () => { await manager.recover(); rmSync(root, { recursive: true, force: true }); });
-  const computer = () => ({ egress: true, async close() {}, async execute() { return { error: 'computer_not_configured' }; },
+  f.computerCalls = [];
+  const computer = () => ({ egress: true, async close() {}, async execute() { return { error: 'computer_not_configured' }; }, warm() { f.computerCalls.push('warm'); },
     async sessionWorkspace(task, workspaceId, redactor, log) {
+      f.computerCalls.push('session');
       const workspace = new Workspace(store, manager, { ...task, repository_id: '101', workspace_id: workspaceId, generation: 1 }, redactor, async () => {}, log, 'service_role_operations');
       await workspace.call('init', { type: 'workspace_init' }); return workspace;
     } });
@@ -79,6 +82,8 @@ test('the console shows a Pi management turn\'s answer as it is written, after i
   assert.equal(deltas.map(e => e.data.delta).join(''), '任务在等待项目电脑。');
   assert.ok(types.indexOf('tool_result') < types.indexOf('text') && types.lastIndexOf('text') < types.indexOf('reply'));
   assert.equal(events.find(e => e.type === 'reply').data.text, '任务在等待项目电脑。');
+  // The computer is taken as the turn starts, before the request is put together and the session needs it (#1254).
+  assert.deepEqual(f.computerCalls, ['warm', 'session']);
 });
 
 test('a Pi group turn starts from the native context and ends silently through stay_silent (#1253, #489)', { skip: piSkip, timeout: 120000 }, async t => {
@@ -96,6 +101,7 @@ test('a Pi group turn starts from the native context and ends silently through s
     [['tool_call', 'stay_silent'], ['tool_result', 'stay_silent']]);
   const view = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value.conversation.turns[0];
   assert.equal(view.reply, ''); assert.equal(view.silent, true); assert.equal(view.silent_reason, '群友在闲聊午饭');
+  assert.deepEqual(f.computerCalls, ['warm', 'session'], 'the group computer is taken as the turn starts (#1254)');
 });
 
 test('a mention merged into a Pi group turn joins after the tool batch, refuses stay_silent and is answered (#1253, #458)', { skip: piSkip, timeout: 120000 }, async t => {

@@ -354,6 +354,8 @@ export class ManagementAgent {
           this.event(id,'reply',{text:noProjectsReply(this.store,actor.principal_id),authority:'current authorization'});
           await guard();this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});return;
         }
+        // A harness turn runs on the person's computer: start taking it now, while the request is put together (#1254).
+        if(role?.harness&&role.harness!=='native')computer?.warm();
         // The management assistant is a service role: its own shared model, budget and usage ledger, never a project's.
         // Its explicit full role policy still intersects the operator's current resource grants.
         const model=serviceRoleModel(this.store,managementAssistant);

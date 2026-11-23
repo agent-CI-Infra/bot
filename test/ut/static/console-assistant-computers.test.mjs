@@ -80,3 +80,39 @@ test('without assistant computers the category says so instead of a form', async
   assert.equal(panel.querySelectorAll('form').length, 0);
   assert.match(text(panel), /助手电脑不可用/);
 });
+
+test('a manager without the HOME volume is an alert on the category (#1254)', async () => {
+  const page = loadConsole(scripts, (_method, path) => {
+    if (path === '/api/settings') return [200, { settings: { task_concurrency: 1, task_concurrency_bounds: [1, 32], computer_defaults: null, assistant_computers: { computers: { ...computers, homes: false }, homes } } }];
+    if (path === '/api/assistant-computers') return [200, overview(false)];
+    throw new Error('Unexpected request: ' + path);
+  });
+  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; location.hash = '#/settings/assistant-computers';");
+  await page.run('renderSettings(renderVersion)');
+  const alert = page.$('settings-panel').querySelectorAll('[role=alert]').find(node => /assistant-homes/.test(node.textContent));
+  assert.match(alert.textContent, /manager 没有挂载 assistant-homes 卷，建不了助手电脑/);
+});
+
+test('next to an Agent backend choice other than Native, a deployment without assistant computers is said once, with the reason (#1254)', async () => {
+  let reads = 0, status = { available: false, reason: 'assistant_homes_unavailable' };
+  const page = loadConsole(scripts, (_method, path) => {
+    if (path === '/api/assistant-computers/status') { reads++; return [200, status]; }
+    throw new Error('Unexpected request: ' + path);
+  });
+  page.run("var select = document.createElement('select'); select.value = 'native'; var warning = harnessComputerWarning(select);");
+  await settle();
+  // Native needs no computer: nothing is read or shown.
+  assert.deepEqual([reads, page.run('warning.hidden')], [0, true]);
+  page.run("select.value = 'pi'; select.listeners.change[0]();"); await settle();
+  assert.equal(page.run('warning.hidden'), false);
+  assert.match(page.run('warning.textContent'), /助手电脑现在不可用（manager 没有挂载 assistant-homes 卷）。Pi、Codex 和 Claude Code 的每一轮都要在助手电脑上运行/);
+  // An editor that sets the choice itself refreshes it; the status is read once.
+  page.run("select.value = 'native'; warning.refresh();");
+  assert.equal(page.run('warning.hidden'), true);
+  page.run("select.value = 'codex'; warning.refresh();");
+  assert.deepEqual([reads, page.run('warning.hidden')], [1, false]);
+  // Available: nothing to say.
+  status = { available: true };
+  page.run("var other = document.createElement('select'); other.value = 'claude_code'; var quiet = harnessComputerWarning(other);"); await settle();
+  assert.deepEqual([reads, page.run('quiet.hidden')], [2, true]);
+});

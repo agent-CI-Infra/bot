@@ -11,9 +11,14 @@ function assistantSettingsBody(view, redraw) {
     controls[key] = input(key, String(source.settings[key]), { type: 'number', min, max, step: 1, required: true });
     grid.append(field(caption, controls[key]));
   }
-  const { usage } = computers;
-  return [facts([['当前电脑', `${usage.computers} 台（使用中 ${usage.busy} 台，排队 ${usage.waiting} 个）`]]),
-    note('群按群、私信按人各有一台电脑，回合第一次用到时创建；最终回复交出后开始空闲计时，到时删除，/tmp 和工作目录随之清空。HOME 持久保存：超过上限后下一回合只读，不活跃满保留期后删除；所有 HOME 合计没有硬上限，超过告警值时这里和日志提示。'),
+  const { usage } = computers, nodes = [];
+  // The manager answers but cannot create a computer (#1254): every turn of a Pi, Codex or Claude Code assistant would fail.
+  if (computers.homes === false) {
+    const missing = element('p', 'manager 没有挂载 assistant-homes 卷，建不了助手电脑：电脑工具不可用，用 Pi、Codex 或 Claude Code 的服务助手每一轮都会失败。请给 manager 挂上这个卷（docker/compose.yaml 默认已挂载）后重启 manager。', 'view-error');
+    missing.setAttribute('role', 'alert'); nodes.push(missing);
+  }
+  return [...nodes, facts([['当前电脑', `${usage.computers} 台（使用中 ${usage.busy} 台，排队 ${usage.waiting} 个）`]]),
+    note('群按群、私信按人各有一台电脑，回合第一次用到时创建（Pi、Codex、Claude Code 后端的回合一开始就创建）；最终回复交出后开始空闲计时，到时删除，/tmp 和工作目录随之清空。HOME 持久保存：超过上限后下一回合只读，不活跃满保留期后删除；所有 HOME 合计没有硬上限，超过告警值时这里和日志提示。'),
     actionForm([grid], '保存', async () => {
       const changes = {};
       for (const [key, , part] of assistantFields) { const value = Number(controls[key].value); if (!Number.isInteger(value)) throw new Error('请填写整数'); if (value !== (part === 'computers' ? computers : homes).settings[key]) changes[key] = value; }

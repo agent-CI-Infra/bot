@@ -57,6 +57,8 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await page.getByLabel('助手模型', { exact: true }).selectOption(sharedModel.id);
     await page.getByText('高级设置：Agent 后端', { exact: true }).click();
     await page.getByLabel('Agent 后端', { exact: true }).selectOption('pi');
+    // No assistant computers in this deployment: Pi's turns would all fail, and the editor says why (#1254).
+    await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toContainText('控制面没有挂载 assistant-homes 卷');
     await save.click();
     await expect(page.getByRole('article', { name: '群聊助手绑定' })).toHaveCount(2);
     await expect(page.getByRole('article', { name: '群聊助手绑定' }).last()).toContainText('Shared team model');

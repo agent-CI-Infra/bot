@@ -27,7 +27,9 @@ const mib = 1024 * 1024, ownerPattern = /^[a-f0-9]{32}$/, idPattern = /^[a-f0-9]
 export const assistantHome = '/home/assistant';
 // Timers and capacity, then each computer's resources and egress: the project computers' resources in the same bounds,
 // plus the size of the tmpfs working directory. tmpfs contents (/tmp and /workspace) count against the memory limit.
-export const assistantDefaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true };
+// An idle computer stays half an hour (#1254): a harness turn (Pi, Codex, Claude Code) needs one every turn, and an idle
+// container costs a few MiB; when capacity is full the one used longest ago still gives way.
+export const assistantDefaults = { idle_minutes: 30, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true };
 const timerBounds = { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 7 * 24 * 60] };
 const sizeBounds = { ...resourceBounds, workspace_mb: resourceBounds.tmp_mb }, resourceKeys = Object.keys(sizeBounds);
 const bounds = { ...timerBounds, ...sizeBounds };
@@ -65,6 +67,16 @@ export class AssistantComputers {
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+    // Saving used to store every key, defaults included, so a saved idle time of 5 minutes is the old default rather than a
+    // choice: once, it follows the new default (#1254). A value saved from now on is kept as given.
+    // The marker keeps what was replaced, and the log says so.
+    if (!this.db.prepare("SELECT 1 FROM settings WHERE key='assistant_idle_default'").get()) {
+      const saved = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(), values = saved ? JSON.parse(saved.value) : null;
+      const replaced = values?.idle_minutes === 5;
+      if (replaced) { delete values.idle_minutes; this.db.prepare("UPDATE settings SET value=? WHERE key='assistant_computers'").run(JSON.stringify(values)); }
+      this.db.prepare("INSERT INTO settings VALUES('assistant_idle_default',?)").run(JSON.stringify({ default: assistantDefaults.idle_minutes, replaced: replaced ? 5 : null, at: new Date().toISOString() }));
+      if (replaced) console.log(`[manager] assistant computers: the stored idle time of 5 minutes (the old default) now follows the default of ${assistantDefaults.idle_minutes} minutes`);
+    }
   }
   effectiveGlobal() {
     const g = this.globalEnvironment?.();
@@ -91,7 +103,8 @@ export class AssistantComputers {
   // The host's CPUs and memory, for the console to offer only sizes the host has; null when Docker cannot be read.
   async host() { const info = await this.docker.request('GET', '/info').catch(() => null); return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null; }
   async settingsView() {
-    return { settings: this.settings(), defaults: assistantDefaults, bounds, host: await this.host(),
+    // homes: whether this manager has the HOME volume, without which no computer can be created (#1254).
+    return { settings: this.settings(), defaults: assistantDefaults, bounds, host: await this.host(), homes: await this.volume().then(() => true, () => false),
       usage: { computers: this.leases.size, busy: [...this.leases.values()].filter(l => l.state === 'busy').length, waiting: this.waiting.length } };
   }
   /**
@@ -100,7 +113,11 @@ export class AssistantComputers {
    */
   async setSettings(input) {
     validateAssistantSettings(input, input?.cpus !== undefined ? (await this.host())?.cpus : null);
-    this.db.prepare("INSERT INTO settings VALUES('assistant_computers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ ...this.settings(), ...input }));
+    // Only the values someone set, of the current keys: the others keep following their defaults, and a key an earlier
+    // version saved is forgotten.
+    const row = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(), saved = row ? JSON.parse(row.value) : {};
+    const kept = Object.fromEntries(Object.entries(saved).filter(([key]) => key in assistantDefaults));
+    this.db.prepare("INSERT INTO settings VALUES('assistant_computers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ ...kept, ...input }));
     if (input.egress === false && !this.removing.size && ![...this.leases.values()].some(l => l.egress)) await this.removeNetwork();
     return this.settingsView();
   }
