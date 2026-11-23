@@ -40,7 +40,7 @@ test('each machine field names its own source and target, and the same groups re
     await login(page, f);
     await expect(configField(page, 'CPU（核）')).toContainText('已保存来源：项目控制台');
     await expect(configField(page, '内存（MB）')).toContainText('已保存来源：全局默认');
-    await expect(configField(page, '内存（MB）')).toContainText('配置目标 4096 · 电脑报告 4096');
+    await expect(configField(page, '内存（MB）')).toContainText('配置目标 16384 · 电脑报告 16384');
     await expect(configField(page, '进程数上限')).toContainText('已保存来源：全局默认');
     await expect(page.locator('.machine-config-impact')).toContainText('工作卷、笔记和代次保留');
     await expect(page.locator('.machine-config-card')).toContainText('仓库里的 .bot/computer.yaml 不再读取');
