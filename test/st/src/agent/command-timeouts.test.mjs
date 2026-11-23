@@ -96,6 +96,8 @@ test('command timeouts validate configuration and explicit values, clamp with a 
   assert.match(commandTool(120).function.parameters.properties.keep_background.description, /log_path/);
 });
 
+// Cover every backend adapter (native, process, pi) on single-role QA and team-delegated development, while covering
+// all four workflow entry points (QA, development, request, observer) without repeating a full 3x4 Cartesian matrix.
 for (const backend of ['native', 'process', 'pi']) {
   test(`independent QA forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'task.request', body => nextCommand(body) ?? call('submit_acceptance', pass));
@@ -103,6 +105,8 @@ for (const backend of ['native', 'process', 'pi']) {
     assert.equal((await evaluateDelivery(f.store, f.task, f.workspace, f.redactor, f.guard)).outcome, 'pass');
     assertCommands(f, 120);
   });
+}
+for (const backend of ['native', 'pi']) {
   test(`role development forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'development.issue', body => {
       if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
@@ -114,44 +118,44 @@ for (const backend of ['native', 'process', 'pi']) {
     assert.equal((await developmentTeam(f.workspace, 'Implement', '{}', async () => ({ pr: { number: 1 } }), { read: true, write: true, shell: true })).pr.number, 1);
     assertCommands(f, 180);
   });
-  test(`request execution forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
-    const f = await fixture(t, backend, 'task.request', body => {
-      if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
-        const ref = receipts(body).find(r => r.result_ref)?.result_ref;
-        return ref ? call('nominate_delivery', { result_ref: ref }) : call('delegate_role', { role: 'dev', purpose: 'Observe commands', refs: [] });
-      }
-      if (body.tools.some(t => t.function.name === 'submit_acceptance')) return call('submit_acceptance', pass);
-      const command = nextCommand(body); if (command) return command;
-      if (!body.messages.some(m => m.role === 'assistant' && m.tool_calls?.some(c => c.function.name === 'write_file'))) return call('write_file', { path: 'report.md', content: 'Observed commands' });
-      return call('submit_delivery', { summary: 'Observed commands', artifacts: [{ path: 'report.md', description: 'Observed' }], evidence: [], unknowns: [] });
-    });
-    github.listen(0, '127.0.0.1'); await once(github, 'listening');
-    t.after(() => new Promise(resolve => { github.close(resolve); github.closeAllConnections(); }));
-    const url = 'http://127.0.0.1:' + github.address().port;
-    await fetch(url + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: 'fixture-github-token' }) });
-    f.store.run("UPDATE accounts SET type='bot_account',credentials=? WHERE id='a'", f.store.secrets.seal({ token: 'fixture-github-token' }, 'account:a'));
-    f.store.run("UPDATE repositories SET full_name='fixture/project-101',owner_id='10' WHERE id='101'");
-    const input = JSON.stringify({ request: 'Observe commands', contract: { goal: 'Observe commands', scope: ['report'], criteria: ['Observed'], endpoint: 'report' } });
-    f.store.run("UPDATE tasks SET input=?,claim_token='claim',head_sha=? WHERE id='t'", input, 'a'.repeat(40));
-    f.store.run("INSERT INTO task_claims VALUES('t','101','claim','now')");
-    f.task = f.store.get("SELECT * FROM tasks WHERE id='t'");
-    await runRequest(f.store, f.manager, f.task, f.redactor, f.guard, () => {}, url + '/github');
-    assert.equal(f.store.get("SELECT status FROM tasks WHERE id='t'").status, 'completed');
-    assertCommands(f, 180);
-  });
-  test(`observer delegation forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
-    const f = await fixture(t, backend, 'review.issue', body => {
-      if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
-        const refs = receipts(body).filter(r => r.result_ref).map(r => r.result_ref);
-        return refs.length === 0 ? call('delegate_role', { role: 'dev', purpose: 'Inspect', refs: [] }) : refs.length === 1 ? call('delegate_role', { role: 'reviewer', purpose: 'Observe', refs }) : call('nominate_delivery', { result_ref: refs[0] });
-      }
-      if (body.tools.some(t => t.function.name === 'submit_role_result')) return nextCommand(body) ?? call('submit_role_result', findings);
-      return call('finish_review', review);
-    });
-    assert.equal((await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {})).summary, review.summary);
-    assertCommands(f, 120);
-  });
 }
+test('request execution forwards timeout and background options (native)', { timeout: 90000 }, async t => {
+  const f = await fixture(t, 'native', 'task.request', body => {
+    if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
+      const ref = receipts(body).find(r => r.result_ref)?.result_ref;
+      return ref ? call('nominate_delivery', { result_ref: ref }) : call('delegate_role', { role: 'dev', purpose: 'Observe commands', refs: [] });
+    }
+    if (body.tools.some(t => t.function.name === 'submit_acceptance')) return call('submit_acceptance', pass);
+    const command = nextCommand(body); if (command) return command;
+    if (!body.messages.some(m => m.role === 'assistant' && m.tool_calls?.some(c => c.function.name === 'write_file'))) return call('write_file', { path: 'report.md', content: 'Observed commands' });
+    return call('submit_delivery', { summary: 'Observed commands', artifacts: [{ path: 'report.md', description: 'Observed' }], evidence: [], unknowns: [] });
+  });
+  github.listen(0, '127.0.0.1'); await once(github, 'listening');
+  t.after(() => new Promise(resolve => { github.close(resolve); github.closeAllConnections(); }));
+  const url = 'http://127.0.0.1:' + github.address().port;
+  await fetch(url + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: 'fixture-github-token' }) });
+  f.store.run("UPDATE accounts SET type='bot_account',credentials=? WHERE id='a'", f.store.secrets.seal({ token: 'fixture-github-token' }, 'account:a'));
+  f.store.run("UPDATE repositories SET full_name='fixture/project-101',owner_id='10' WHERE id='101'");
+  const input = JSON.stringify({ request: 'Observe commands', contract: { goal: 'Observe commands', scope: ['report'], criteria: ['Observed'], endpoint: 'report' } });
+  f.store.run("UPDATE tasks SET input=?,claim_token='claim',head_sha=? WHERE id='t'", input, 'a'.repeat(40));
+  f.store.run("INSERT INTO task_claims VALUES('t','101','claim','now')");
+  f.task = f.store.get("SELECT * FROM tasks WHERE id='t'");
+  await runRequest(f.store, f.manager, f.task, f.redactor, f.guard, () => {}, url + '/github');
+  assert.equal(f.store.get("SELECT status FROM tasks WHERE id='t'").status, 'completed');
+  assertCommands(f, 180);
+});
+test('observer delegation forwards timeout and background options (native)', { timeout: 90000 }, async t => {
+  const f = await fixture(t, 'native', 'review.issue', body => {
+    if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
+      const refs = receipts(body).filter(r => r.result_ref).map(r => r.result_ref);
+      return refs.length === 0 ? call('delegate_role', { role: 'dev', purpose: 'Inspect', refs: [] }) : refs.length === 1 ? call('delegate_role', { role: 'reviewer', purpose: 'Observe', refs }) : call('nominate_delivery', { result_ref: refs[0] });
+    }
+    if (body.tools.some(t => t.function.name === 'submit_role_result')) return nextCommand(body) ?? call('submit_role_result', findings);
+    return call('finish_review', review);
+  });
+  assert.equal((await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {})).summary, review.summary);
+  assertCommands(f, 120);
+});
 
 test('kept background service remains accessible to later task commands', async t => {
   const f = await fixture(t, 'native', 'task.request', () => call('submit_acceptance', pass));

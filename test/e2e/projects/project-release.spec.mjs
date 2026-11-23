@@ -10,6 +10,7 @@ async function login(page, address, username, password) {
 test('项目页完整 beta 发版：确认 SHA、Release lane、草稿编辑和人工正式发布', async ({ page }) => {
   const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) }), errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  await page.clock.install();
   try {
     await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
     await login(page, f.h.admin, 'administrator', f.password);
@@ -28,11 +29,12 @@ test('项目页完整 beta 发版：确认 SHA、Release lane、草稿编辑和�
     f.state.runs = [run({ head_branch: 'v1.2.3-beta.1' })];
     f.state.jobs = [{ id: 1, run_id: 800, run_attempt: 1, name: 'release', status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/actions/runs/800/job/1' }];
     for (let i = 0; i < 3; i++) await f.service.worker.process(record.id);
+    await page.clock.runFor(5200);
     const editor = page.getByLabel('发行说明草稿'); await expect(editor).toBeVisible({ timeout: 10000 });
     expect(f.state.releases[0].draft).toBe(true); expect(writes(f.state).some(r => r.body?.draft === false)).toBe(false);
     await editor.fill('Maintainer reviewed beta notes'); await page.getByRole('button', { name: '保存草稿正文', exact: true }).click();
     await expect.poll(() => f.state.releases[0].body).toBe('Maintainer reviewed beta notes');
-    await editor.fill('Unsaved local text'); await page.waitForTimeout(5200); await expect(editor).toHaveValue('Unsaved local text');
+    await editor.fill('Unsaved local text'); await page.clock.runFor(5200); await expect(editor).toHaveValue('Unsaved local text');
     await page.getByRole('button', { name: '正式发布', exact: true }).click(); await expect(page.getByRole('dialog')).not.toBeVisible();
     expect(f.state.releases[0].draft).toBe(true);
     await page.getByRole('button', { name: '丢弃本地编辑并刷新正文' }).click();

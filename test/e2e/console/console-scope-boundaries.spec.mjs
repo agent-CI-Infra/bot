@@ -55,7 +55,15 @@ test('empty and inverted cost dates survive a scope change without sending a def
 
 test('an authorized project outside the first management directory page opens by target',async({page})=>{
  test.setTimeout(60000);const {h,admin,password,a}=await fixture();try{
-  for(let id=1000;id<1100;id++)await repository(admin,a.id,String(id));
+  const now=new Date().toISOString();
+  h.store.transaction(()=>{
+   for(let id=1000;id<1100;id++){
+    const sid=String(id),name=`fixture/project-${sid}`;
+    h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at) VALUES(?,?,?,?,?,0,1,?) ON CONFLICT DO NOTHING`,a.id,sid,name,'10','fixture',now);
+    h.store.run(`INSERT INTO repositories VALUES(?,?,?,?)`,sid,name,'10',a.id);
+    h.store.run(`INSERT INTO policies(repository_id,enabled,review_enabled,development_enabled,capability_ceiling) VALUES(?,1,0,0,'comment')`,sid);
+   }
+  });
   const first=(await admin('/api/management/query','POST',{operation:'list_projects',target:{},arguments:{limit:100}})).value;
   const target=['101','202',...Array.from({length:100},(_,i)=>String(i+1000))].find(id=>!first.projects.some(p=>p.id===id));expect(first.projects).toHaveLength(100);expect(target).toBeTruthy();
   const seen=[];page.on('request',r=>{if(r.url().endsWith('/api/management/query')&&r.postDataJSON()?.operation==='list_projects')seen.push(r.postDataJSON().target);});
