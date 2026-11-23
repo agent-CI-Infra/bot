@@ -1,7 +1,7 @@
 import { managerFixture } from '../../../fixtures/project-manager-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile, rm, symlink, utimes } from 'node:fs/promises';
+import { mkdir, mkdtemp, chmod, stat, readFile, writeFile, rm, symlink, utimes } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
@@ -54,6 +54,17 @@ test('notes are shared by task workspaces, commands keep their checkout cwd, and
     await run(task, { type: 'workspace_context', path: 'nested/object.json', base64: 'eA==', offset: 0 });
     assert.equal((await run(task, { type: 'workspace_read', path: '../context/nested/object.json' })).content, 'x');
     assert.equal((await run(task, { type: 'workspace_read', path: '../context/../notes/repository.md' })).content, mode);
+    // #1278: absolute paths through the workspace notes symlink must route through Notes (0o660 + catalog/history),
+    // never falling through to outsideRepo's 0o600 open.
+    const symlinkNotePath = join(tasks, task, 'notes', '2317-verification.md');
+    await run(task, { type: 'workspace_write', path: symlinkNotePath, base64: Buffer.from('via-symlink-' + mode).toString('base64'), offset: 0, final: true, mode: '100644' });
+    assert.equal((await run(other, { type: 'workspace_read', path: symlinkNotePath })).content, 'via-symlink-' + mode);
+    assert.equal((await stat(join(notes, '2317-verification.md'))).mode & 0o660, 0o660);
+    const symlinkNestedPath = join(tasks, task, 'notes', 'sub-' + mode, 'report.md');
+    await run(task, { type: 'workspace_write', path: symlinkNestedPath, base64: Buffer.from('nested-' + mode).toString('base64'), offset: 0, final: true, mode: '100644' });
+    assert.equal((await stat(join(notes, 'sub-' + mode))).mode & 0o770, 0o770);
+    assert.equal((await stat(join(notes, 'sub-' + mode, 'report.md'))).mode & 0o660, 0o660);
+    assert.equal((await new Notes(notes).read(`sub-${mode}/report.md`)).content, 'nested-' + mode);
     await assert.rejects(run(task, { type: 'workspace_read', path: '../../../../etc/passwd' }), /invalid_path/);
   }
 });
@@ -258,4 +269,25 @@ test('model responses preserve known credentials in note writes while other outp
   const reply=JSON.parse(Buffer.concat(replies));assert.ok(!('rejected_note_calls' in reply));
   assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,key);
   assert.ok(!JSON.stringify(logs).includes(key));
+});
+
+test('#1278 manager file-tree quarantines unreadable files on list and returns 503 note_permission_denied on direct read', async t => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+  const f = await managerFixture(t);
+  await f.projects.fileTree('101', 'POST', undefined, undefined, { path: 'healthy.md', content: 'ok' });
+  const locked = await f.projects.fileTree('101', 'POST', undefined, undefined, { path: 'locked.md', content: 'secret' });
+  const lockedPath = join(f.projects.notesRoot, '101', 'locked.md');
+  await chmod(lockedPath, 0o000);
+  try {
+    const listed = await f.projects.fileTree('101', 'GET', undefined, undefined, {}, { directory: '', recursive: '1' });
+    assert.deepEqual(listed.files.map(file => file.path), ['healthy.md']);
+    assert.deepEqual(listed.quarantined.map(q => ({ path: q.path, reason: q.reason })), [{ path: 'locked.md', reason: 'permission_denied' }]);
+
+    await assert.rejects(
+      f.projects.fileTree('101', 'GET', locked.id, undefined, {}, {}),
+      error => error.message === 'note_permission_denied' && error.status === 503,
+    );
+  } finally {
+    await chmod(lockedPath, 0o600).catch(() => {});
+  }
 });

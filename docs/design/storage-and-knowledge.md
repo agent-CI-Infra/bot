@@ -41,7 +41,10 @@ flowchart LR
 
 ## 4. 项目知识自由文件与版本引擎（`src/memory/`、`manager/file-tree.mjs`）
 
-- **单源物理存储**：每个仓库独立的持久笔记卷挂在项目电脑 `/workspace/project-notes`（`../notes/`），由 `manager` 直接提供文件操作，项目电脑未启动或重置代次时仍完整可用。
+- **单源物理存储与共享组权限契约**：每个仓库独立的持久笔记卷挂在项目电脑 `/workspace/project-notes`（`../notes/`），由 `manager` 直接提供文件操作，项目电脑未启动或重置代次时仍完整可用。`manager`（`0:10001`，`cap_drop: [ALL]` 无 `CAP_DAC_OVERRIDE`）与项目电脑（`10001:10001`）通过共享组 `10001` 协作：
+  - `runner/workspace.mjs` 对经任务软链（如 `/workspace/tasks/<ws>/notes/...`）或绝对路径落入知识卷的读写统一解析软链后路由至 `Notes` 协议（`0o660` 原子写入 + 历史/目录索引），禁止 `outsideRepo` 绕过以 `0o600` 裸写知识卷；
+  - `runner/note-path.mjs` 与 `manager/file-tree.mjs` 在知识卷创建目录后显式 `chmod 0o770`（抵消 `manager` 的 `umask 0077`），并在属主访问时自愈缺失的组读写位；
+  - 若卷内存在历史遗留的不可读条目（`EACCES`/`EPERM`），目录扫描跳过该条目并在 `quarantined` 中以 `reason: 'permission_denied'` 报告而不阻断其余健康文件；单文件读取遇权限错误返回 `503 note_permission_denied` 而非模糊的 `manager_unavailable`。
 - **稳定 ID 与崩溃可恢复移动**：卷内 `.write-history/file-tree.json` 在文件锁内维护不可变文件 ID、内容寻址历史版本 blob 与移动 pending journal（崩溃重启按 inode 对账续完；若源/目标变成非普通文件导致归属不可确认，进入 `note_move_uncertain` 拒绝读写以防数据损坏；运维恢复必须停写、整卷备份并恢复经隔离验证的移动前整卷快照，严禁手工删除 pending journal，步骤见[部署、升级与运维](../features/deployment-and-operations.md#4-数据卷备份与存储维护)）。
 - **与 `ProjectMemory` 兼容和授权隔离**：
   - 统一对外暴露自由文件 API（`knowledge-files`）与兼容记忆 API（`memories`），支持 `expected_revision` 并发保护、角色受众隔离（`project` vs `role:<id>`）、历史版本只读与仓库权威文档只读校验（按默认分支可达合并提交与真实 blob SHA 晋升，篡改或变更返回 `source_changed`）。

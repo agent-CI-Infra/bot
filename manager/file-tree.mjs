@@ -1,4 +1,4 @@
-import { mkdir, rmdir } from 'node:fs/promises';
+import { mkdir, chmod, rmdir } from 'node:fs/promises';
 import { Notes, withNotesLock } from '../runner/notes.mjs';
 import { validNoteId } from '../runner/note-catalog.mjs';
 import { notePath, withNoteDirectory, withNoteParent } from '../runner/note-path.mjs';
@@ -14,8 +14,8 @@ export class FileTree {
   async run(operation){
     const root=new Notes(this.root);await root.directory();
     return withNotesLock(this.root,check=>this.notes('',check,notes=>notes.withLock(async(_check,catalog)=>{
-      const entries=await notes.entries(),{files}=await notes.files(true);
-      return operation({notes,catalog,check,directories:entries.directories,files});
+      const entries=await notes.entries(),{files,unreadable}=await notes.files(true,entries);
+      return operation({notes,catalog,check,directories:entries.directories,files,unreadable});
     })));
   }
   row(ctx,id){if(!validNoteId(id))fail('invalid_note_id');const row=ctx.catalog.refs.get(id);if(!row)fail('note_not_found',404);return row;}
@@ -29,9 +29,12 @@ export class FileTree {
         if(file.deleted&&!includeDeleted)return false;
         return match?file.path.toLowerCase().includes(match):recursive||file.directory===directory;
       });
-      // A file saved under a name the current contract refuses stays on disk and in the catalog, but it is reported
-      // here instead of posing as a readable entry: the listing says what was left out rather than hiding it.
-      const quarantined=ctx.catalog.quarantined.map(row=>({id:row.id,path:row.path,reason:'unsupported_name'}));
+      // A file saved under a name the current contract refuses, or one the manager lacks permission to open (#1278),
+      // stays on disk and is reported here instead of failing the whole listing or posing as a readable entry.
+      const quarantinedByPath=new Map();
+      for(const row of ctx.catalog.quarantined)quarantinedByPath.set(row.path,{id:row.id,path:row.path,reason:'unsupported_name'});
+      for(const row of ctx.unreadable||[])if(!quarantinedByPath.has(row.path))quarantinedByPath.set(row.path,row);
+      const quarantined=[...quarantinedByPath.values()].sort((a,b)=>a.path.localeCompare(b.path));
       return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),quarantined,revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':query||recursive?'all_directories':'directory'};
     });
   }
@@ -39,7 +42,7 @@ export class FileTree {
     notePath(path);
     return this.run(async ctx=>{
       if(ctx.catalog.paths.has(path))fail('note_path_conflict',409);
-      try{await withNoteParent(this.root,path,async(target,parent)=>{await ctx.check();await mkdir(target,{mode:0o770});await parent.sync();});}
+      try{await withNoteParent(this.root,path,async(target,parent)=>{await ctx.check();await mkdir(target,{mode:0o770});await chmod(target,0o770);await parent.sync();});}
       catch(error){if(error.code==='EEXIST')fail('note_path_conflict',409);if(error.code==='ENOENT')fail('directory_not_found',404);throw error;}
       await ctx.catalog.save(ctx.check);return {directory:path,revision:ctx.catalog.value.revision};
     });

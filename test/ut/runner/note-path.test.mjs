@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rename, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, stat, writeFile, readFile, rename, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { noteComponent, notePath, withNoteDirectory, withNoteParent } from '../../../runner/note-path.mjs';
@@ -94,4 +94,21 @@ test('a name carrying a control character is refused at the component and the pa
   for (const value of names.map(name => 'folder/' + name)) assert.throws(() => notePath(value), /invalid_note_path/, JSON.stringify(value));
   // A name without a control character is still accepted, including the separator characters a name may legitimately carry.
   for (const value of ['自由 文件.txt', 'a b.txt', 'dash-and_underscore.txt', 'emoji 🚀.txt']) assert.equal(noteComponent(value), value);
+});
+
+test('#1278 withNoteDirectory creates 0o770 directories even under umask 0o077 and repairs existing 0o700 dirs', async t => {
+  const { root } = await fixture(t);
+  await mkdir(join(root, '.write-history'), { mode: 0o700 });
+  await chmod(join(root, '.write-history'), 0o700);
+  const previousUmask = process.umask(0o077);
+  try {
+    await withNoteDirectory(root, '.write-history/blobs', () => {}, { create: true, internal: true });
+    await withNoteDirectory(root, 'nested/sub', () => {}, { create: true });
+  } finally {
+    process.umask(previousUmask);
+  }
+  for (const rel of ['.write-history', '.write-history/blobs', 'nested', 'nested/sub']) {
+    const mode = (await stat(join(root, rel))).mode & 0o777;
+    assert.equal(mode, 0o770, `${rel} must be 0o770, got 0o${mode.toString(8)}`);
+  }
 });
