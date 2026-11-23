@@ -110,7 +110,8 @@ test('long execution progress scrolls independently and previews command and fil
     const command = 'git status --short\ngit diff -- docs/features/README.md CONTRIBUTING.md';
     const tools = [
       { name: 'run_command', arguments: { command } },
-      ...Array.from({ length: 12 }, (_, i) => ({ name: 'read_file', arguments: { path: 'docs/onboarding/section-' + (i + 1) + '.md' } })),
+      { name: 'list_files', arguments: { path: '~/memory' } },
+      ...Array.from({ length: 11 }, (_, i) => ({ name: 'read_file', arguments: { path: 'docs/onboarding/section-' + (i + 1) + '.md' } })),
     ];
     const recorded = new Date().toISOString();
     const add = (type, data) => f.h.store.run('INSERT INTO management_events(message_id,type,data,created_at) VALUES(?,?,?,?)', run.id, type, JSON.stringify(data), recorded);
@@ -126,7 +127,10 @@ test('long execution progress scrolls independently and previews command and fil
     const commandStep = progress.locator('.management-step').nth(1);
     await expect(commandStep.locator('summary').first()).toContainText('在助手电脑运行命令');
     await expect(commandStep.locator('.management-step-preview')).toHaveText('git status --short git diff -- docs/features/README.md CONTRIBUTING.md');
-    await expect(progress.locator('.management-step-preview').nth(2)).toHaveText('docs/onboarding/section-1.md');
+    const listStep = progress.locator('.management-step').nth(2);
+    await expect(listStep.locator('summary').first()).toContainText('列出助手电脑文件');
+    await expect(listStep.locator('.management-step-preview')).toHaveText('~/memory');
+    await expect(progress.locator('.management-step-preview').nth(3)).toHaveText('docs/onboarding/section-1.md');
     expect(await steps.evaluate(node => node.scrollHeight > node.clientHeight && node.clientHeight <= 260)).toBe(true);
     await steps.hover();
     await commandStep.locator('summary').first().click();

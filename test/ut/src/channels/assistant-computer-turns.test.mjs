@@ -44,6 +44,66 @@ test('HOME is served without a computer when a turn may not run commands, and a 
   assert.equal(created(f), 0);
 });
 
+test('list_files lists ~/memory without starting a computer, enforces symlink boundaries, and works symmetrically in /workspace and /tmp', async t => {
+  const f = await fixture(t), turn = f.turn('turn-list', { commands: () => false });
+  // Fresh HOME: listing a missing directory returns exists: false without error or container startup.
+  assert.deepEqual(await turn.execute('list_files', { path: '~/memory' }), { path: '~/memory', exists: false, entries: [], truncated: false });
+  assert.equal(created(f), 0);
+  // Write nested Markdown memory files and list flat and recursively.
+  assert.deepEqual(await turn.execute('write_file', { path: '~/memory/preferences.md', content: '# Preferences\nPrefer concise replies.' }), { path: '~/memory/preferences.md', written: true });
+  assert.deepEqual(await turn.execute('write_file', { path: '~/memory/topics/release.md', content: '# Release\nThursday night window.' }), { path: '~/memory/topics/release.md', written: true });
+  const rootList = await turn.execute('list_files', {});
+  assert.equal(rootList.path, '~/');
+  assert.equal(rootList.exists, true);
+  assert.deepEqual(rootList.entries.map(e => [e.path, e.type]), [['memory', 'directory']]);
+  const flat = await turn.execute('list_files', { path: '~/memory' });
+  assert.equal(flat.exists, true);
+  assert.equal(flat.truncated, false);
+  assert.deepEqual(flat.entries.map(e => [e.path, e.type]), [['preferences.md', 'file'], ['topics', 'directory']]);
+  const rec = await turn.execute('list_files', { path: '/home/assistant/memory', recursive: true });
+  assert.equal(rec.path, '~/memory');
+  assert.deepEqual(rec.entries.map(e => [e.path, e.type]), [['preferences.md', 'file'], ['topics', 'directory'], ['topics/release.md', 'file']]);
+  // Listing a regular file fails clearly.
+  await assert.rejects(turn.execute('list_files', { path: '~/memory/preferences.md' }), { code: 'not_a_directory' });
+  // Symlinks placed inside HOME cannot be listed or descended into.
+  const home = join(f.homes, f.owner, 'home-1');
+  const other = join(f.homes, 'c'.repeat(32), 'home-1');
+  mkdirSync(other, { recursive: true });
+  writeFileSync(join(other, 'secret.md'), 'other owner secret');
+  symlinkSync(other, join(home, 'memory', 'escape'));
+  await assert.rejects(turn.execute('list_files', { path: '~/memory/escape' }), { code: 'invalid_path' });
+  await assert.rejects(turn.execute('list_files', { path: '~/memory/escape/missing' }), { code: 'invalid_path' });
+  const withLink = await turn.execute('list_files', { path: '~/memory', recursive: true });
+  assert.ok(withLink.entries.some(e => e.path === 'escape' && e.type === 'symlink'));
+  assert.ok(!withLink.entries.some(e => e.path.includes('secret.md')));
+  assert.equal(created(f), 0, 'all HOME memory list/read/write calls start no container');
+  // Exact truncation boundary: 200 entries -> truncated: false; 201 entries -> 200 entries + truncated: true.
+  const manyDir = join(home, 'many');
+  mkdirSync(manyDir);
+  for (let i = 0; i < 200; i++) writeFileSync(join(manyDir, `f-${String(i).padStart(3, '0')}.md`), 'x');
+  const exact = await turn.execute('list_files', { path: '~/many' });
+  assert.deepEqual([exact.entries.length, exact.truncated], [200, false]);
+  writeFileSync(join(manyDir, 'f-200.md'), 'x');
+  const over = await turn.execute('list_files', { path: '~/many' });
+  assert.deepEqual([over.entries.length, over.truncated], [200, true]);
+  await assert.rejects(turn.execute('list_files', { path: '/tmp' }), { code: 'assistant_computer_requires_commands' });
+  await turn.close();
+  // Container path: list_files on /workspace and /tmp runs through runner assistant_list symmetrically.
+  const cmdTurn = f.turn('turn-list-container');
+  assert.equal((await cmdTurn.execute('write_file', { path: '/tmp/work/a.md', content: 'tmp-a' })).written, true);
+  assert.equal((await cmdTurn.execute('write_file', { path: 'sub/b.md', content: 'ws-b' })).written, true);
+  const tmpListed = await cmdTurn.execute('list_files', { path: '/tmp', recursive: true });
+  assert.equal(tmpListed.exists, true);
+  assert.deepEqual(tmpListed.entries.map(e => [e.path, e.type]), [['work', 'directory'], ['work/a.md', 'file']]);
+  const wsListed = await cmdTurn.execute('list_files', { path: '/workspace', recursive: true });
+  assert.equal(wsListed.exists, true);
+  assert.deepEqual(wsListed.entries.map(e => [e.path, e.type]), [['sub', 'directory'], ['sub/b.md', 'file']]);
+  assert.deepEqual(await cmdTurn.execute('list_files', { path: '/tmp/missing-dir' }), { path: '/tmp/missing-dir', exists: false, entries: [], truncated: false });
+  assert.equal((await cmdTurn.execute('list_files', { path: '/tmp/work/a.md' })).error, 'not_a_directory');
+  assert.equal((await cmdTurn.execute('list_files', { path: '/etc' })).error, 'invalid_path');
+  await cmdTurn.close();
+});
+
 test('commands run on the owner\'s computer, created at first use and reused by the next turn; a changed fence removes it', async t => {
   const f = await fixture(t), first = f.turn('turn-1');
   await first.execute('write_file', { path: '~/keep.txt', content: 'kept' });

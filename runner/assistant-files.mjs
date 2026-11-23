@@ -171,6 +171,58 @@ async function verifyExtractedTree(stageDir) {
 export async function assistantFile(input, options = {}) {
   const { workspaceRoot, tmpRoot, allRoots, checkoutRoots: allowedCheckoutRoots } = resolveRoots(options);
   const env = options.env || process.env;
+  if (input.type === 'assistant_list') {
+    if (typeof input.path !== 'string' || !input.path || input.path.length > 4096 || input.path.includes('\0')) throw new Error('invalid_path');
+    if (input.recursive !== undefined && typeof input.recursive !== 'boolean') throw new Error('invalid_arguments');
+    const resolvedPath = resolve(workspaceRoot, input.path);
+    const root = allRoots.find(r => resolvedPath === r || resolvedPath.startsWith(r + '/'));
+    if (!root) throw new Error('invalid_path');
+    const relParts = resolvedPath === root ? [] : resolvedPath.slice(root.length + 1).split('/');
+    if (relParts.some(isReservedSegment)) throw new Error('invalid_path');
+    const realRoot = await realpath(root);
+    let current = realRoot;
+    for (const part of relParts) {
+      const candidate = resolve(current, part);
+      const info = await lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+      if (!info) return { exists: false, entries: [], truncated: false };
+      if (info.isSymbolicLink()) throw new Error('invalid_path');
+      if (!info.isDirectory()) throw new Error('not_a_directory');
+      current = candidate;
+    }
+    const realTarget = await realpath(current);
+    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) throw new Error('invalid_path');
+    const entries = [];
+    const maxEntries = 200;
+    const maxDepth = 16;
+    const recursive = input.recursive === true;
+    let truncated = false;
+    const walk = async (dir, prefix, depth) => {
+      const dirents = (await readdir(dir, { withFileTypes: true }).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name));
+      for (const dirent of dirents) {
+        if (isReservedSegment(dirent.name)) continue;
+        if (entries.length >= maxEntries) { truncated = true; return; }
+        const fullPath = resolve(dir, dirent.name);
+        const info = await lstat(fullPath).catch(() => null);
+        if (!info) continue;
+        const entryPath = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+        if (info.isSymbolicLink()) {
+          entries.push({ path: entryPath, type: 'symlink' });
+          continue;
+        }
+        if (info.isDirectory()) {
+          entries.push({ path: entryPath, type: 'directory' });
+          if (recursive && depth < maxDepth) {
+            const realSub = await realpath(fullPath).catch(() => null);
+            if (realSub && realSub.startsWith(realRoot + sep)) await walk(fullPath, entryPath, depth + 1);
+          }
+        } else if (info.isFile()) {
+          entries.push({ path: entryPath, type: 'file', size: info.size, modified_at: new Date(info.mtimeMs).toISOString() });
+        }
+      }
+    };
+    await walk(realTarget, '', 0);
+    return { exists: true, entries, truncated };
+  }
   if (input.type === 'assistant_read') {
     const offset = input.offset ?? 0, limit = input.limit ?? chunk;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > chunk) throw new Error('invalid_range');

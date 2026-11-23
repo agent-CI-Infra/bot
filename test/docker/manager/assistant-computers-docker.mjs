@@ -135,6 +135,12 @@ try {
   await run(A, 'ta', 'ln -s ~/a-home.txt /tmp/to-home && ln -s /tmp work-link && echo w > relative.txt');
   assert.equal(Buffer.from((await file({ type: 'assistant_read', path: 'relative.txt' })).result.base64, 'base64').toString(), 'w\n');
   assert.equal(Buffer.from((await file({ type: 'assistant_read', path: '/home/assistant/a-home.txt' })).result.base64, 'base64').toString(), 'a-secret\n');
+  const listed = await file({ type: 'assistant_list', path: '/tmp', recursive: true });
+  assert.equal(listed.ok, true, JSON.stringify(listed));
+  assert.ok(listed.result.entries.some(e => e.path === 'in/data.bin' && e.type === 'file'));
+  assert.ok(listed.result.entries.some(e => e.path === 'to-home' && e.type === 'symlink'));
+  for (const path of ['/tmp/to-home', '/home/assistant/link-to-b', '/home/assistant/dots', '/etc', '../etc', '.runner-journal', '/workspace/.runner-journal', 'work-link'])
+    assert.equal((await file({ type: 'assistant_list', path })).ok, false, 'list ' + path);
   for (const path of ['/tmp/to-home', '/home/assistant/link-to-b', '/home/assistant/dots', '/home/assistant', '/etc/passwd', '../etc/passwd', '.runner-journal/x', '/workspace/.runner-journal', 'work-link/in/data.bin', '/tmp', '/home/node/x'])
     assert.equal((await file({ type: 'assistant_read', path })).ok, false, path);
   assert.equal((await file({ type: 'assistant_delete', path: '/tmp/to-home' })).result.deleted, true);

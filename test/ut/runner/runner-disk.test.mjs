@@ -28,7 +28,7 @@ test('a call that would write is refused on a full volume; reads and answers to 
   assert.equal(refused.ok, false); assert.equal(refused.error, 'disk_full');
   assert.match(refused.detail, /^workspace_command: refused, nothing was run; the work volume has 200 MiB free of 1024000 MiB$/);
   for (const type of ['command', 'workspace_checkout', 'workspace_init', 'git_import', 'workspace_write', 'workspace_agent_start']) assert.equal(refuseFull({ type }, full)?.error, 'disk_full', type);
-  for (const type of ['workspace_read', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_reply', 'workspace_agent_tool']) assert.equal(refuseFull({ type }, full), null, type);
+  for (const type of ['workspace_read', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_reply', 'workspace_agent_tool', 'assistant_list', 'assistant_read', 'assistant_delete']) assert.equal(refuseFull({ type }, full), null, type);
   // The last configuration piece that starts the session (#1277) is a start; the other pieces only store configuration.
   const piece = { type: 'workspace_agent_config', base64: 'e30=', offset: 0, final: true };
   for (const input of [{ ...piece, start: true, runtime_version: '1.4.0' }, { ...piece, start: true }]) assert.equal(refuseFull(input, full)?.error, 'disk_full', JSON.stringify(input));

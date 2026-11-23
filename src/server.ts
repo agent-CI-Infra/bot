@@ -30,6 +30,7 @@ import { AgentToolManager, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tool
 import { activeCliVersions } from './roles/role-run.js';
 import { StorageReport } from './app/storage.js';
 import { serviceRolesApi } from './service-roles/api.js';
+import { migrateServiceRoleMemory } from './service-roles/memory-migration.js';
 import { trustedOrganizationsApi } from './app/trusted-organizations.js';
 import { ProjectRemoval } from './projects/removal.js';
 import { listNotesOrphans, NotesReclaimer, notesOrphanIntents, orphanTrajectoryDirectories, type ReclaimReport } from './projects/reclaim.js';
@@ -514,6 +515,12 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   let connectionTimer: ReturnType<typeof setInterval>;
   server.once('listening', () => {
     channels.start(); assistants.start(); void assistants.warnIfRequired().catch(() => {});
+    assistants.runMaintenance(async () => {
+      const migrated = await migrateServiceRoleMemory(store, sharedManagement, channels.serviceBindings, assistants.homes);
+      if (migrated.status === 'migrated' && (migrated.migrated || migrated.skipped_stale || migrated.skipped_invalid)) {
+        console.log(`[assistant-memory] migrated legacy service_role_memory to ~/memory/ (migrated=${migrated.migrated}, stale=${migrated.skipped_stale}, invalid=${migrated.skipped_invalid})`);
+      }
+    });
     if (options.schedules?.automatic !== false) scheduler.start();
     if (options.channels?.longConnections !== false) {
       channelConnections.reconcile();

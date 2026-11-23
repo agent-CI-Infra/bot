@@ -50,7 +50,7 @@ export const describeVolume = state => state ? `${Math.floor(state.free_bytes / 
 // (#1279), so their write/command calls are guarded by the same free-space floor.
 const reads = new Set(['read', 'workspace_read', 'workspace_source', 'workspace_integration_check', 'workspace_blob', 'workspace_export',
   'git_have', 'git_export', 'workspace_agent_poll', 'workspace_agent_live', 'workspace_agent_runtime', 'workspace_harness_poll',
-  'assistant_read', 'assistant_delete', 'reap', 'journal_clear', 'health', 'tail']);
+  'assistant_list', 'assistant_read', 'assistant_delete', 'reap', 'journal_clear', 'health', 'tail']);
 const guarded = type => !reads.has(type);
 const answer = (input, reason, state) => ({ ok: false, error: 'disk_full', detail: `${input.type}${input.path ? ' ' + input.path : ''}: ${String(reason).slice(0, 2000)}; the work volume has ${describeVolume(state)}` });
 // A Pi session starts with workspace_agent_start or continue, or with the last configuration piece that carries start

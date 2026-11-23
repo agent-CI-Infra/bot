@@ -40,7 +40,7 @@ export const basicTools = ['read_file','read_version_file','compare_versions','w
   'read_tool_result','read_child_tasks','wait_for_children','read_ci_evidence','read_recovery_source','read_version_context','read_publication_context','search_project_tasks','read_task_record','read_task_history','read_evidence','record_progress','record_scope_difference',
   'search_conversation_history','read_conversation_message','read_conversation_summary',
   'read_managed_task','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task',
-  'search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
+  'search_role_memory','remember_role_memory','read_skill','read_related_artifact',
   'start_agent','dispatch',
   'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
   'finish_analysis','finish_observation','finish_release_notes','submit_acceptance',

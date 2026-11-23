@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { Store } from '../../../../dist/storage/database.js';
 import { normalizePermissions, permissionItems, permissionTools, permitsManagement, permitsTool, resourceAllowed, updatePermissions, fullPermissions, defaultPermissions, githubWriteAllowed, narrowPermissions } from '../../../../dist/roles/permissions.js';
 import { OwnTasks } from '../../../../dist/service-roles/own-tasks.js';
-import { serviceMemory } from '../../../../dist/service-roles/resources.js';
 import { roleConfiguration, resetBuiltinRolePermissions, actionsWriteFollowsIssues } from '../../../../dist/roles/definition.js';
 import { assertTaskExternalEffect, taskReadScopes, withTaskPermissions } from '../../../../dist/tasks/management.js';
 
@@ -112,16 +111,15 @@ test('saved roles that write Issues and read Actions take Actions write once; th
   assert.equal(roleConfiguration(s,'r').roles.find(r=>r.role_id==='manager').permissions.github_actions,'read');
 });
 
-test('private memory and own-task controls are isolated by conversation, principal and authorization fence',async t=>{
+test('own-task controls are isolated by conversation, principal and authorization fence; retired read_role_memory is not permitted',async t=>{
   const s=new Store(':memory:',Buffer.alloc(32,2));t.after(()=>s.close());
   const tasks=new OwnTasks(s),owner={service_role_id:'repository-assistant',kind:'channel',owner_id:'chat-a',principal_id:'binding-a',fence:'v1'};
-  serviceMemory(s,owner,'remember_role_memory',{key:'decision',content:'Private decision'});
+  assert.equal(permitsTool(fullPermissions(),'read_role_memory'),false);
   const host={owner,system:'Scope',tools:()=>[],check(){},redact:v=>v,clean:v=>v,execute(){throw Error('Unexpected tool');},request:async()=>({value:{choices:[{message:{content:'Verified conclusion'}}]}})};
   const own=await tasks.invoke('start_own_task',{title:'Own question',instruction:'Think it through'},host);
   assert.equal((await tasks.invoke('read_own_task',{task_id:own.task_id},host)).history[0].conclusion,'Verified conclusion');
   for(const changed of [{owner_id:'chat-b'},{principal_id:'binding-b'},{fence:'v2'}]){
     const other={...owner,...changed};
-    assert.deepEqual(serviceMemory(s,other,'read_role_memory',{key:'decision'}),{error:'memory_not_found'});
     assert.equal((await tasks.invoke('manage_own_task',{task_id:own.task_id,operation:'cancel'},{...host,owner:other})).error,'own_task_not_found');
   }
   assert.equal((await tasks.invoke('manage_own_task',{task_id:own.task_id,operation:'pause'},host)).state,'paused');
