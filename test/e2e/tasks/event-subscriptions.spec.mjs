@@ -82,11 +82,6 @@ test('task detail displays waiting event subscription state, hints, note, timeou
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await card.scrollIntoViewIfNeeded();
       expect(await card.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      if (shots) {
-        await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
-        await page.evaluate(() => window.scrollTo(0, 0));
-        await card.scrollIntoViewIfNeeded();
-      }
     }
 
     // Verify cancel control is horizontal (not single-character vertically collapsed) and unoccluded on short mobile viewport (390x640)
