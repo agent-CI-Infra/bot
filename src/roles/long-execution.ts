@@ -35,8 +35,8 @@ export function observeLongExecution(s:Store,task:Row,runId:string,now=Date.now(
  });
 }
 const processing=new WeakMap<Store,Set<string>>();
-// Each piece of evidence offered to the decision is cut at this many characters of its JSON; the report names at most 12
-// tool records, so the whole prompt stays far below the gateway's request limit.
+// Each piece of evidence offered to the decision is cut at this many characters of its JSON. The report itself names
+// records by ref only (at most 12 tool records), so the evidence adds at most 15 such pieces to the task context.
 const evidenceChars=6000;
 const decisionName='submit_long_execution_decision';
 /** A narrow control decision of the Task Manager while its normal turn awaits the worker. It does not bind/take over the
