@@ -326,8 +326,13 @@ export async function runRequest(
   if (software() && (!generic || ['acceptance', 'publish'].includes(String(task.phase)))) assertRequestPullRequest(store, task);
 
   // Single-role execution (`reviewer`, `test`, `dev`) runs directly without a redundant Task Manager hop (#1122).
+  // Record the fixed checkout snapshot (`role_candidate`) before starting the role run, matching `runTeam`,
+  // so observer roles satisfy `fixed_candidate_read` admission on both initial runs and QA-returned rework (#1261).
   const executeAgent: <T>(spec: AgentSpec<T>, validateOwnNomination: (result: T) => Promise<void>) => Promise<T> = ownRole
-    ? async spec => spaces.withRole(ownRole, async () => (await runRole(spec, ownRole, undefined, undefined, { prepare: spaces.worker })).result)
+    ? async spec => spaces.withRole(ownRole, async () => {
+        await spaces.prepare(ownRole);
+        return (await runRole(spec, ownRole, undefined, undefined, { prepare: spaces.worker })).result;
+      })
     : controlled(store, task, entry)
       ? async (spec, validateOwnNomination) => runTeam(spec, { ...spaces, entry, workspace, validateOwnNomination })
       : runAgent;
@@ -383,12 +388,14 @@ export async function runRequest(
     if (Number(changed.changes) !== 1) stop('task_claim_revoked', 'cancelled', '任务执行权已变化。');
     Object.assign(task, values);
   };
+  let consumedMoveToSha: string | null = null;
   const syncConcurrentInput = () => {
     const liveRow = store.get('SELECT input FROM tasks WHERE id=?', task.id);
     if (!liveRow?.input) return;
     try {
       const live = JSON.parse(String(liveRow.input));
       for (const key of ['revision', 'revision_requests', 'merged_updates', 'wake_events', 'conflict_base_sha', 'conflict_base_ref', 'move_to_sha'] as const) {
+        if (key === 'move_to_sha' && consumedMoveToSha !== null && live[key] === consumedMoveToSha) continue;
         if (live[key] !== undefined) input[key] = live[key];
       }
       if (live.target?.ref && input.target && typeof input.target === 'object') {
@@ -464,6 +471,7 @@ export async function runRequest(
         baseRefSha = /^[a-f0-9]{40}$/i.test(String(pr.base?.sha || '')) ? String(pr.base.sha).toLowerCase() : undefined;
         targetSha = input.move_to_sha || (Number(input.round) > 1 ? pr.head?.sha : undefined) || (targetSpec.ref && /^[a-f0-9]{40}$/i.test(targetSpec.ref) ? targetSpec.ref : pr.head?.sha);
         if (input.move_to_sha) {
+          consumedMoveToSha = String(input.move_to_sha);
           const prevHeads = Array.isArray(input.reviewed_heads) ? input.reviewed_heads : [];
           if (task.head_sha && !prevHeads.includes(task.head_sha)) prevHeads.push(task.head_sha);
           input.reviewed_heads = prevHeads;
@@ -694,6 +702,7 @@ export async function runRequest(
         ...(targetSummaryMeta ? { target_meta: targetSummaryMeta } : {}),
       });
       update({ head_sha: targetSha, error_code: null, input: storedInput(store, input, task.repository_id) });
+      consumedMoveToSha = null;
     } else if (targetSpec?.type === 'pr' && Number.isSafeInteger(targetSpec.number)) {
       prDiffFiles = await github.pages(github.path(`/pulls/${targetSpec.number}/files`)).catch(() => undefined);
     }
