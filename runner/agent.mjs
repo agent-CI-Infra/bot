@@ -190,6 +190,92 @@ export async function waitingAgent(root,processes){
   return null;
 }
 
+// The Pi SDK this runner would start, read from its installed package rather than assumed from the image tag.
+async function piRuntime(){
+  const manifest=await readFile(runnerRoot+'/node_modules/@earendil-works/pi-coding-agent/package.json','utf8').then(JSON.parse).catch(()=>null);
+  return manifest?{agent:'pi',package:manifest.name,version:manifest.version,node:process.version}:{error:'pi_runtime_missing'};
+}
+// Starts the Pi process on the configuration in input.json; a session that already has a state answers instead.
+async function startAgent(dir,root,boot,workspaceId){
+  const old=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
+  if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
+  JSON.parse(await readFile(dir+'/input.json','utf8'));
+  const out=await open(dir+'/process.log','a',0o600);
+  // A task gets its worktree when it first needs one (#769): until then the session starts in the task directory.
+  const cwd=await stat(root+'/repo').then(()=>root+'/repo',()=>root);
+  try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd,env:{...environment,...workspaceTag(workspaceId)},detached:true,stdio:['ignore',out.fd,out.fd]});
+    await writeFile(dir+'/state.json',JSON.stringify({state:'running',pid:child.pid,boot}),{mode:0o600});child.unref();}
+  finally{await out.close();}return {started:true};
+}
+
+// A Pi long poll (#1277) waits at most this long: short enough that the control plane checks the task (a user's stop,
+// changed permissions) every few seconds, far below the manager's 90 s exec timeout. It looks every agentPollCheck ms.
+export const agentPollWaitLimit=3000,agentPollCheck=50,agentEventInterval=200;
+const knownIds=value=>new Set(Array.isArray(value)?value.filter(id=>typeof id==='string'&&/^[a-f0-9]{48}$/.test(id)):[]);
+// Session states the control plane only waits through; any other state (ended, ready for publication, missing) is news.
+const activeAgentStates=['running','review_resuming'];
+async function agentState(dir,boot){
+  const state=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
+  if(['running','review_ready','review_resuming'].includes(state.state)&&state.pid)try{if(state.boot!==undefined&&state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
+  return state;
+}
+// The id of the model request waiting in request.json, as the poll would report it.
+async function pendingRequestId(dir){
+  const info=await stat(dir+'/request.json').catch(()=>null);
+  if(!info?.isFile()||info.size>24*1024*1024)return null;
+  return readRequestId(dir+'/request.json');
+}
+const unseenRequestFile=async(subdir,known)=>(await readdir(subdir).catch(()=>[])).some(name=>/^[a-f0-9]{48}\.json$/.test(name)&&!known.has(name.slice(0,48)));
+/**
+ * What the session has that the control plane has not seen, judged against what it says it knows (its event offset and
+ * the ids it already handles), not against the start of the wait: 'urgent' for a state it must act on, a turn boundary,
+ * a model request or a new tool or token request, or a page of events beyond this one; 'events' for new events only;
+ * null for nothing. model_requests (the other harnesses' relay) are not the Pi session's and do not count. The events
+ * file is read again only when its size changed.
+ */
+async function unseenAgentWork(dir,boot,offset,known,watch){
+  if(!activeAgentStates.includes((await agentState(dir,boot)).state))return 'urgent';
+  const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
+  if(boundary?.id&&!known.boundaries.has(boundary.id))return 'urgent';
+  const request=await pendingRequestId(dir);
+  if(request&&!known.requests.has(request))return 'urgent';
+  if(await unseenRequestFile(dir+'/tool-requests',known.tools)||await unseenRequestFile(dir+'/token-requests',known.tokens))return 'urgent';
+  const size=(await stat(dir+'/events.jsonl').catch(()=>null))?.size??0;
+  if(size!==watch.eventsSize){
+    watch.eventsSize=size;
+    const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').slice(0,-1).filter(Boolean).length;
+    if(lines>offset+20)return 'urgent';
+    watch.events=lines>offset;
+  }
+  return watch.events?'events':null;
+}
+// One answer of workspace_agent_poll. Tool and token requests the control plane already handles come back as stubs.
+async function readAgentPoll(dir,boot,offset,known){
+  const state=await agentState(dir,boot);
+  // An agent that ended without saving why, while the work volume is full, ran out of space (#671): its last state could
+  // not be written either.
+  if(state.state==='interrupted'&&!state.error&&volume()?.full)state.error='disk_full';
+  const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
+  let request=null;
+  const reqStat=await stat(dir+'/request.json').catch(()=>null);
+  if(reqStat&&reqStat.isFile()){
+    if(reqStat.size<=256*1024){
+      request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
+    }else if(reqStat.size<=24*1024*1024){
+      const id=await readRequestId(dir+'/request.json');
+      if(id)request={id,size:reqStat.size,chunked:true};
+    }
+  }
+  const token_requests=await readRequestDirectory(dir+'/token-requests',{knownIds:known.tokens});
+  const tool_requests=await readRequestDirectory(dir+'/tool-requests',{knownIds:known.tools});
+  const model_requests=await readModelRequestsForPoll(dir);
+  // An append can still be in progress, especially for large tool arguments. Only consume
+  // newline-terminated records so the next poll retries the unfinished tail at the same offset.
+  const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').slice(0,-1).filter(Boolean);
+  const events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
+  return {...state,boundary,request,token_requests,tool_requests,model_requests,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
+}
+
 // The project has no path to the control network. A task-owned mailbox transports model data, never provider keys.
 export async function agentOperation(input,root){
   const dir=root+'/agent';
@@ -231,6 +317,12 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_agent_config'){
     if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_config');
+    // The last piece may also start the session (#1277), saving the runtime query and the start call. A runtime that is
+    // not the one the control plane pinned stops it before anything is written, as that query did; the answer always
+    // carries the runtime, which tells the control plane this runner started the session itself.
+    const launch=input.final===true&&input.start===true;
+    const runtime=launch?await piRuntime():null;
+    if(launch&&input.runtime_version!==undefined&&runtime.version!==input.runtime_version)return {written:false,started:false,runtime};
     if(input.offset===0){
       const previous=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
       if(previous?.state==='running'){try{process.kill(previous.pid,0);throw new Error('agent_session_busy');}catch(error){if(error.message==='agent_session_busy')throw error;}}
@@ -244,44 +336,26 @@ export async function agentOperation(input,root){
     }
     const path=dir+'/input.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
-    if(input.final)await rename(path,dir+'/input.json');return {written:true};
+    if(input.final)await rename(path,dir+'/input.json');
+    return launch?{written:true,...await startAgent(dir,root,boot,input.workspace_id),runtime}:{written:true};
   }
-  if(input.type==='workspace_agent_start'){
-    const old=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
-    if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
-    JSON.parse(await readFile(dir+'/input.json','utf8'));
-    const out=await open(dir+'/process.log','a',0o600);
-    // A task gets its worktree when it first needs one (#769): until then the session starts in the task directory.
-    const cwd=await stat(root+'/repo').then(()=>root+'/repo',()=>root);
-    try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd,env:{...environment,...workspaceTag(input.workspace_id)},detached:true,stdio:['ignore',out.fd,out.fd]});
-      await writeFile(dir+'/state.json',JSON.stringify({state:'running',pid:child.pid,boot}),{mode:0o600});child.unref();}
-    finally{await out.close();}return {started:true};
-  }
+  if(input.type==='workspace_agent_start')return startAgent(dir,root,boot,input.workspace_id);
   if(input.type==='workspace_agent_poll'){
-    const state=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
-    if(['running','review_ready','review_resuming'].includes(state.state)&&state.pid)try{if(state.boot!==undefined&&state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
-    // An agent that ended without saving why, while the work volume is full, ran out of space (#671): its last state could
-    // not be written either.
-    if(state.state==='interrupted'&&!state.error&&volume()?.full)state.error='disk_full';
-    const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
-    let request=null;
-    const reqStat=await stat(dir+'/request.json').catch(()=>null);
-    if(reqStat&&reqStat.isFile()){
-      if(reqStat.size<=256*1024){
-        request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
-      }else if(reqStat.size<=24*1024*1024){
-        const id=await readRequestId(dir+'/request.json');
-        if(id)request={id,size:reqStat.size,chunked:true};
-      }
+    const offset=Number(input.offset)||0;
+    const known={tools:knownIds(input.known_tool_ids),tokens:knownIds(input.known_token_ids),requests:knownIds(input.known_model_ids),boundaries:knownIds(input.known_boundary_ids)};
+    const waitMs=Number.isSafeInteger(input.wait_ms)&&input.wait_ms>0?Math.min(input.wait_ms,agentPollWaitLimit):0;
+    // Without wait_ms (an older control plane, a probe) the poll answers at once, as before.
+    if(!waitMs)return readAgentPoll(dir,boot,offset,known);
+    // A long poll (#1277) holds until the session has something the control plane has not seen, checking every 50 ms, or
+    // until wait_ms runs out. New events alone answer no sooner than 200 ms after the poll began, so streamed text (written
+    // every 200 ms) does not cost a call each time. long_poll tells the control plane not to wait before the next poll.
+    const began=Date.now(),deadline=began+waitMs,watch={eventsSize:-1,events:false};
+    for(;;){
+      const seen=await unseenAgentWork(dir,boot,offset,known,watch);
+      if(seen==='urgent'||Date.now()>=deadline||seen==='events'&&Date.now()-began>=agentEventInterval)break;
+      await delay(Math.max(1,Math.min(agentPollCheck,deadline-Date.now(),seen==='events'?began+agentEventInterval-Date.now():Infinity)));
     }
-    const token_requests=await readRequestDirectory(dir+'/token-requests');
-    const tool_requests=await readRequestDirectory(dir+'/tool-requests');
-    const model_requests=await readModelRequestsForPoll(dir);
-    // An append can still be in progress, especially for large tool arguments. Only consume
-    // newline-terminated records so the next poll retries the unfinished tail at the same offset.
-    const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').slice(0,-1).filter(Boolean);
-    const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,boundary,request,token_requests,tool_requests,model_requests,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
+    return {...await readAgentPoll(dir,boot,offset,known),long_poll:true};
   }
   // The answer to a github_read_token request in token-requests/<id>.json: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
@@ -306,11 +380,7 @@ export async function agentOperation(input,root){
     const path=dir+'/progress-'+input.request_id;
     await writeFile(path+'.tmp',JSON.stringify({sequence:input.sequence}),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
-  // The Pi SDK this runner would start, read from its installed package rather than assumed from the image tag.
-  if(input.type==='workspace_agent_runtime'){
-    const manifest=await readFile(runnerRoot+'/node_modules/@earendil-works/pi-coding-agent/package.json','utf8').then(JSON.parse).catch(()=>null);
-    return manifest?{agent:'pi',package:manifest.name,version:manifest.version,node:process.version}:{error:'pi_runtime_missing'};
-  }
+  if(input.type==='workspace_agent_runtime')return piRuntime();
   if(input.type==='workspace_agent_tool'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_agent_reply');
     const reqPath=dir+'/tool-requests/'+input.request_id+'.json';

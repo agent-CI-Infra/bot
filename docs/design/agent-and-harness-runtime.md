@@ -48,6 +48,14 @@
   - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志；写入内容在控制面、manager 与 runner 三处统一限制上限为 32 KiB（超限返回 `400 invalid_cli_config_content`），由 manager 经 Docker exec 环境变量 `BOT_CLI_CONFIG_B64` 传入（不进入命令行 `argv`，runner 读取后立即清除环境变量）。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
 
+### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
+
+控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱通信，每次调用都由 manager 在容器里执行一次 runner（`docker exec`）。
+
+- **启动**：配置按 30000 字节分块写入，最后一块同时带 `start` 和角色固定的 Pi 版本。runner 先核对版本，不符时什么也不写、不启动，控制面报 `harness_version_mismatch`；版本相符时清理上一进程的邮箱、写入配置并启动，答复里带上实际运行时。旧 runner 不认识 `start`，答复里没有运行时，控制面按原流程再查运行时、再启动。续接（`workspace_agent_continue`）和重新附着的会话没有配置可带，仍先单独查运行时。
+- **长轮询**：控制面每次轮询带 `wait_ms`（3 s）、事件 offset，以及已在处理的请求 id：后台运行中或已答复的工具和令牌请求、已答复的模型请求和回合边界。runner 每 50 ms 检查一次，出现控制面没见过的东西就立即返回，包括会话离开运行状态、新的回合边界、模型请求（`request.json`）、工具或令牌请求，以及超过一页的事件。只有新事件时，最早在等待开始 200 ms 后返回，和流式文字 200 ms 一批对齐；什么都没有就等满 3 s。已在处理的工具和令牌请求只返回 id。`model_requests` 属于其他后端的模型中转，不算 Pi 会话的变化。
+- **轮询节奏**：答复带 `long_poll: true` 时控制面立即发下一次轮询。旧 runner 或测试替身会立即答复、不带这个标记，控制面仍隔 500 ms 再轮询。等待期间会话被取消或后台工作失败，控制面立即结束等待并丢弃这次答复。每次轮询前控制面都检查任务状态（用户停止、权限变化），间隔不超过约 3 s，远低于 manager 的 90 s 执行超时。
+
 ### 服务助手回合（`src/harness/service-session.ts`）
 
 管理助手和群聊助手选用非 Native 后端时，整轮由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`。Pi 后端按 Native 循环的语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它）：

@@ -794,7 +794,10 @@ test('Pi task agent native read tool sends workspace image when image_input=true
   assert.ok(!readAllEventsJsonl(root).includes(diagramBase64), 'events.jsonl must not contain base64 from native read tool');
   assert.ok(!JSON.stringify(logs).includes(diagramBase64), 'workspace.log must not contain base64 from native read tool');
   const taskToolRows = store.all('SELECT * FROM task_tools');
-  assert.ok(taskToolRows.some(row => String(row.request).includes('workspace_agent_start')), 'expected effectful agent start row recorded in task_tools');
+  // The session starts with the last piece of its configuration (#1277); that effectful call is recorded, its bytes are not.
+  const startRow = taskToolRows.map(row => JSON.parse(row.request)).find(request => request.request?.type === 'workspace_agent_config' && request.request.start === true);
+  assert.ok(startRow, 'expected effectful agent start row recorded in task_tools');
+  assert.equal(startRow.request.base64, '[redacted]');
   assert.ok(!taskToolRows.some(row => String(row.request).includes('workspace_agent_poll')), 'runner polls must not be recorded in task_tools (#1266)');
   assert.ok(!JSON.stringify(taskToolRows).includes(diagramBase64), 'task_tools must not contain base64 from native read tool');
 });
