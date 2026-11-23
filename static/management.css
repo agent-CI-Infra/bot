@@ -53,7 +53,11 @@ body.management-page-mode { overflow: hidden; }
 .management-turn-state[data-state=running]::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #41877b; animation: management-pulse 1.5s ease-in-out infinite; }
 .management-turn-state[data-state=failed], .management-step[data-state=failed] .management-step-status { color: #ab4941; }
 .management-turn-state:is([data-state=interrupted],[data-state=unknown]), .management-step:is([data-state=unknown],[data-state=interrupted]) .management-step-status { color: #8c691f; }
-.management-elapsed { color: var(--color-text-muted); font-size: var(--font-size-1); }
+.management-elapsed, .management-activity { color: var(--color-text-muted); font-size: var(--font-size-1); }
+.management-activity:not([hidden])::before { content: '· '; }
+.management-native-step .management-step-preview { font-family: ui-monospace, monospace; }
+.management-step-target { margin: 0 0 4px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.management-step-note { margin: 6px 2px; color: var(--color-text-muted); font-size: var(--font-size-1); }
 .management-progress { margin-bottom: 16px; border: 1px solid #e2e9e9; border-radius: 10px; background: #f7f9f9; font-size: var(--font-size-1); }
 .management-progress > summary { padding: 10px 12px; color: #607980; cursor: pointer; }
 .management-steps { max-height: min(260px, 32dvh); overflow-y: auto; scrollbar-width: thin; padding: 0 10px 6px; }

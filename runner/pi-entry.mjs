@@ -301,7 +301,13 @@ try{
         if(event.type==='message_end'&&event.message.role==='assistant')void flushText();
         if(event.type==='auto_retry_start')void writeEvent({type:'model_retry',retry:event.attempt,retries:event.maxAttempts,delay_ms:event.delayMs,error:String(event.errorMessage??'').slice(0,300)});
       }
-      if(native&&['tool_execution_start','tool_execution_end'].includes(event.type))void writeEvent({type:'tool',phase:event.type==='tool_execution_start'?'started':'completed',name:event.toolName,call_id:event.toolCallId,...(event.args?{arguments:event.args}:{}),...(event.result?{result:event.result}:{}),isError:event.isError});
+      if(native&&['tool_execution_start','tool_execution_end'].includes(event.type))void writeEvent({type:'tool',phase:event.type==='tool_execution_start'?'started':'completed',name:event.toolName,call_id:event.toolCallId,...(event.args?{arguments:event.args}:{}),...(event.result?{result:event.result}:{}),isError:event.isError,...(Number.isFinite(event.durationMs)?{duration_ms:event.durationMs}:{})});
+      // A service turn's conversation shows its progress (#1296): each model step as it starts, and Pi's own compaction.
+      if(serviceTurn&&!agent){
+        if(event.type==='turn_start')void writeEvent({type:'model_start',step:steps+1});
+        if(event.type==='compaction_start')void writeEvent({type:'compaction',phase:'started',reason:event.reason});
+        if(event.type==='compaction_end')void writeEvent({type:'compaction',phase:'completed',reason:event.reason,aborted:!!event.aborted,failed:!!event.errorMessage});
+      }
       // Pi recovers from a request over the context window itself: it compacts once and retries. The session is over the
       // limit (agent_context_too_large) when the retry still does not fit, or when the compaction's own summary request
       // does not fit either; reopening it would fail the same way. A compaction that failed otherwise (its summary request

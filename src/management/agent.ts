@@ -1,4 +1,5 @@
 import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
+import {ProgressBudget,type ServiceProgress} from '../harness/service-progress.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
@@ -164,6 +165,35 @@ export class ManagementAgent {
   private fence(_row:Row,actor:ActorContext):[string,number[]]{return [' AND m.authorization_revision=?',[actor.authorization_revision]];}
   event(message:string,type:string,data:unknown):void{
     this.store.run('INSERT INTO management_events(message_id,type,data,created_at) VALUES(?,?,?,?)',message,type,JSON.stringify(traceClean(data)),now());
+  }
+  /**
+   * A Pi turn's own work in its conversation (#1296): native tool calls as steps marked `native`, beside the platform
+   * tools' own, each model step as model_start, and compaction or restart notices. Rate-limited per turn, and recorded only
+   * while the message runs: nothing is written after the turn ended or was stopped.
+   */
+  private piSteps(message:string):{record:(progress:ServiceProgress)=>void;close:()=>void}{
+    const budget=new ProgressBudget(),calls=new Map<string,string>();let open=true;
+    const running=()=>open&&this.store.get('SELECT state FROM management_messages WHERE id=?',message)?.state==='running';
+    // Tool calls the budget held back are counted where they were left out.
+    const skipped=()=>{const count=budget.skipped();if(count)this.event(message,'progress',{notice:'skipped',count});};
+    return {
+      record:progress=>{
+        if(!running()||!budget.admit(progress))return;
+        if(progress.kind==='model_step')this.event(message,'model_start',{turn:progress.step-1,harness:'pi'});
+        else if(progress.kind==='notice')this.event(message,'progress',{notice:progress.notice});
+        else if(progress.kind==='tool_started'){
+          skipped();
+          // Pi may reuse a call id in a later step; the conversation needs one unique to this invocation.
+          const call=randomId();calls.set(progress.call_id,call);
+          this.event(message,'tool_call',{name:progress.name,call_id:call,native:true,...(progress.preview?{preview:progress.preview}:{})});
+        }else{
+          const call=calls.get(progress.call_id);calls.delete(progress.call_id);
+          const {kind:_kind,call_id:_call,name,...result}=progress;
+          this.event(message,'tool_result',{name,call_id:call,native:true,result});
+        }
+      },
+      close:()=>{if(!open)return;try{if(running())skipped();}finally{open=false;}},
+    };
   }
   /** The progress messages a turn sent (#435), oldest first. */
   stageMessages(message:string):string[]{
@@ -407,9 +437,14 @@ export class ManagementAgent {
               ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope,media);
               // On Pi the turn behaves like the native loop below (#1253): streamed text, merged messages, a restart after an
               // edit and stay_silent for a timer; the other harnesses ignore this.
+              // Not the progress messages above (#435): what the Pi session itself does, as steps of this turn (#1296).
+              const piSteps=this.piSteps(id);
               const control:ServiceTurnControl={text:async delta=>{await guard();this.event(id,'text',{delta:redactor.text(delta),provisional:true});},
-                incoming,merged:batch=>{mustReply||=batch.direct;},source:{version:()=>this.sourceVersion?.(conversation),prompt:currentContext,seen:contextVersion},...(timer?{silence:quiet}:{})};
-              const message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence,media,control);
+                incoming,merged:batch=>{mustReply||=batch.direct;},source:{version:()=>this.sourceVersion?.(conversation),prompt:currentContext,seen:contextVersion},...(timer?{silence:quiet}:{}),
+                progress:piSteps.record};
+              let message:string;
+              try{message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence,media,control);}
+              finally{piSteps.close();}
               await guard();incoming?.finish();
               if(silence!==undefined){this.event(id,'reply',{text:'',silent:true,...silence?{reason:redactor.text(silence)}:{},authority:'advisory; see tool receipts'});return;}
               if(role.harness==='pi'&&mustReply&&!message.trim()&&!media?.attachments.length&&!cardTurn?.staged)fail(502,'management_model_invalid');

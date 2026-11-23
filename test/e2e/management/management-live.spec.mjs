@@ -4,13 +4,14 @@ import { rmSync } from 'node:fs';
 import { managementFixture, settled } from '../../fixtures/management-fixture.mjs';
 
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
-async function login(page, f) {
+// While a turn runs, sending stays disabled: `idle` is false for a page opened on a running turn.
+async function login(page, f, idle = true) {
   await page.goto(f.h.admin + '/#/management');
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await switchConsoleProject(page, '101');
-  await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
+  if (idle) await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
 }
 // A reloaded project address reopens the same durable conversation.
 async function reopenScope(page) {
@@ -145,6 +146,48 @@ test('long execution progress scrolls independently and previews command and fil
     await progress.evaluate(node => node.scrollIntoView({ block: 'start' }));
     await expect(commandStep.locator('.management-step-preview')).toHaveCSS('white-space', 'nowrap');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+// A Pi turn's own commands on the computer (#1296) appear live as steps, and a running turn shows when it last did something.
+test('native steps of a Pi turn appear live with their command, then duration and exit code; the turn shows its last activity', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    const conversation = (await f.admin('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
+    const run = (await f.admin('/api/management/conversations/' + conversation + '/messages', 'POST', { source_message: 'pi-native-steps', content: '看看设备连接' })).value;
+    await settled(f.admin, conversation, run.id);
+    // The same turn, still running on Pi: its model step and the command it has just started.
+    f.h.store.run("DELETE FROM management_events WHERE message_id=? AND type NOT IN ('running')", run.id);
+    f.h.store.run("UPDATE management_messages SET state='running' WHERE id=?", run.id);
+    const add = (type, data, at = new Date()) => f.h.store.run('INSERT INTO management_events(message_id,type,data,created_at) VALUES(?,?,?,?)', run.id, type, JSON.stringify(data), at.toISOString());
+    const earlier = new Date(Date.now() - 8000);
+    add('model_start', { turn: 0, harness: 'pi' }, earlier);
+    add('tool_call', { name: 'bash', call_id: 'native-1', native: true, preview: 'hdc list targets' }, earlier);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, f, false);
+    const feed = page.getByRole('log', { name: '管理会话记录' }), step = feed.locator('.management-native-step');
+    await expect(step.locator('.management-step-caption')).toHaveText('正在电脑上执行');
+    await expect(step.locator('.management-step-preview')).toHaveText('hdc list targets');
+    await expect(step.locator('.management-step-status')).toContainText('执行中');
+    await expect(feed.locator('.management-activity')).toHaveText(/^最近活动 \d+ 秒前$/);
+    // The command ends while the page is open: the step says how it ended and how long it took.
+    add('tool_result', { name: 'bash', call_id: 'native-1', native: true, result: { state: 'failed', exit_code: 1, duration_ms: 2300, tail: 'error: no device\n\nCommand exited with code 1' } });
+    add('progress', { notice: 'compacting' });
+    await expect(step.locator('.management-step-caption')).toHaveText('在电脑上执行');
+    await expect(step.locator('.management-step-status')).toHaveText('退出码 1 · 2.3 秒');
+    await expect(feed.locator('.management-activity')).toHaveText('刚刚有活动');
+    await expect(feed.locator('.management-step-note')).toHaveText('会话内容较长，正在压缩上下文');
+    await step.locator('summary').first().click();
+    await step.getByText('输出末尾', { exact: true }).click();
+    await expect(step.locator('pre')).toHaveText('error: no device\n\nCommand exited with code 1');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(step.locator('.management-step-preview')).toHaveCSS('white-space', 'nowrap');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    // A command that exited non-zero is something the assistant looked at, not a failed operation of the turn.
+    add('reply', { text: '没有连接的设备。', authority: 'advisory; see tool receipts' }); add('done', { state: 'completed' });
+    f.h.store.run("UPDATE management_messages SET state='completed' WHERE id=?", run.id);
+    await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
+    await expect(feed.locator('.management-activity')).toBeHidden();
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
