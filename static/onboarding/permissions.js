@@ -5,6 +5,22 @@
 // the catalog the project list uses, so a new feature or event keeps its word instead of showing a raw key.
 function githubLinkElement(text,href){const link=element('a',text);link.href=href;link.target='_blank';link.rel='noopener';return link;}
 function translatedOr(key,fallback){const text=t(key);return text===key?fallback:text;}
+// #527: the check's failure line is built from the dictionary, never by interpolating readErrorText() — that helper
+// answers in the console's own prose, so an English console read "Check failed: 网络连接失败，请稍后重试". Each kind
+// the widget can name has its own sentence; anything else keeps the status and — only when it is a short ASCII
+// identifier — the service's code, never the service's prose.
+function permissionCheckError(err){
+  const name=err&&err.name,message=err?.message||'';
+  if(name==='AbortError')return t('permissions.check_failed_cancelled');
+  if(err instanceof TypeError||name==='TypeError'||/failed to fetch|networkerror|network error|load failed|network request failed/i.test(message))return t('permissions.check_failed_network');
+  // A body the console could not parse is the gateway's page when the status says the request failed, and unreadable
+  // content when it claimed success; neither carries a code, so the status is what tells the two apart.
+  if(err&&err.code==='response_not_json')return t(err.status>=200&&err.status<300?'permissions.check_failed_unreadable':'permissions.check_failed_gateway',{status:err.status});
+  if(err&&err.code==='authorization_changed')return t('permissions.check_failed_authorization_changed');
+  const safeCode=typeof err?.code==='string'&&/^[A-Za-z0-9._:-]{1,64}$/.test(err.code)?err.code:'—';
+  if(err&&err.status)return t('permissions.check_failed_status',{status:err.status,code:safeCode});
+  return t('permissions.check_failed_unknown');
+}
 function permissionReport(report){
   const rows=[],name=item=>permissionNames[item.permission]||item.permission,
     joined=list=>list.join(t('permissions.list_separator')),
@@ -38,7 +54,7 @@ function appPermissionCheck(account){
   const check=button(t('permissions.check_button'),async()=>{
     check.disabled=true;result.replaceChildren(element('p',t('permissions.checking'),'muted'));
     try{result.replaceChildren(...permissionReport(await api(`/api/accounts/${encodeURIComponent(account.id)}/permissions`)));check.textContent=t('permissions.check_again');}
-    catch(err){result.replaceChildren(element('p',t('permissions.check_failed',{message:readErrorText(err)}),'view-error'));}
+    catch(err){result.replaceChildren(element('p',permissionCheckError(err),'view-error'));}
     finally{check.disabled=false;}
   });
   box.append(check,result);return box;

@@ -578,7 +578,15 @@ const i18nMessages = {
     'permissions.check_button': '检查权限和事件订阅',
     'permissions.checking': '正在检查…',
     'permissions.check_again': '重新检查',
-    'permissions.check_failed': '检查失败：{message}',
+    // The widget's failure line is a whole sentence per error kind, so an English console never interpolates the
+    // console's own Chinese prose (readErrorText) into it (#527).
+    'permissions.check_failed_cancelled': '检查失败：请求已取消',
+    'permissions.check_failed_network': '检查失败：网络连接失败，请稍后重试',
+    'permissions.check_failed_gateway': '检查失败：{status} · 入口网关返回了错误页面，没有带回具体原因。请稍后重试；持续出现时请管理员查看服务日志。',
+    'permissions.check_failed_unreadable': '检查失败：{status} · 服务返回了无法识别的内容，请刷新页面后重试。',
+    'permissions.check_failed_authorization_changed': '检查失败：权限已变化，请刷新页面后按当前权限重试。',
+    'permissions.check_failed_status': '检查失败：{status} · {code}',
+    'permissions.check_failed_unknown': '检查失败：请求失败',
     'permissions.open_settings': '打开 App 的 Permissions & events',
     'permissions.all_complete': 'App 权限和事件订阅齐全，覆盖全部功能。',
     'permissions.missing_intro': 'App 所有者打开 Permissions & events，把下列各项改好，然后点一次「Save changes」。',
@@ -1179,7 +1187,15 @@ const i18nMessages = {
     'permissions.check_button': 'Check permissions and events',
     'permissions.checking': 'Checking…',
     'permissions.check_again': 'Check again',
-    'permissions.check_failed': 'Check failed: {message}',
+    // The widget's failure line is a whole sentence per error kind, so an English console never interpolates the
+    // console's own Chinese prose (readErrorText) into it (#527).
+    'permissions.check_failed_cancelled': 'Check failed: the request was cancelled',
+    'permissions.check_failed_network': 'Check failed: the network request failed, try again shortly',
+    'permissions.check_failed_gateway': 'Check failed: the gateway answered {status} · an error page with no reason; try again shortly, and ask an administrator to check the service log if it keeps happening',
+    'permissions.check_failed_unreadable': 'Check failed: the service answered {status} · content the console could not read; refresh the page and try again',
+    'permissions.check_failed_authorization_changed': 'Check failed: your permissions changed; refresh the page and retry with your current permissions',
+    'permissions.check_failed_status': 'Check failed: {status} · {code}',
+    'permissions.check_failed_unknown': 'Check failed: the request failed',
     'permissions.open_settings': "Open the App's Permissions & events",
     'permissions.all_complete': "The App's permissions and event subscriptions are complete and cover every feature.",
     'permissions.missing_intro': 'The App owner opens Permissions & events, fixes the items below, then clicks "Save changes" once.',

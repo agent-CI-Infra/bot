@@ -190,6 +190,70 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `horizontal overflow in the wizard with the report open at ${width}px`).toBe(true);
       expect(cjkWords(await wizardResult.innerText()), `Chinese text left in the wizard report at ${width}px`).toEqual([]);
     }
+    // #527: the check's failure branch was the last place the widget interpolated readErrorText(), so an English
+    // console read one English sentence with a Chinese clause inside it. Each kind the widget can name is a dictionary
+    // sentence now; the captures are taken before the assertions so a red run still writes the before images.
+    const englishFailures = [
+      { name: 'network', fulfil: route => route.abort('connectionrefused'),
+        sentence: 'Check failed: the network request failed, try again shortly' },
+      { name: 'gateway-500', fulfil: route => route.fulfill({ status: 500, contentType: 'text/html', body: '<html><body>502 Bad Gateway</body></html>' }),
+        sentence: 'Check failed: the gateway answered 500 · an error page with no reason; try again shortly, and ask an administrator to check the service log if it keeps happening' },
+      { name: 'authorization-changed', fulfil: route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":"authorization_changed"}' }),
+        sentence: 'Check failed: your permissions changed; refresh the page and retry with your current permissions' },
+    ];
+    await page.goto(h.admin + '/#/settings/accounts');
+    await page.locator('.row .permission-check').first().waitFor();
+    const checkRow = page.locator('.row', { hasText: 'Department App' });
+    const failures = [];
+    for (const failure of englishFailures) {
+      await page.route('**/api/accounts/*/permissions', failure.fulfil);
+      await checkRow.locator('.permission-check button').first().click();
+      const box = checkRow.locator('.permission-result');
+      await expect(box.locator('p.view-error')).toBeVisible();
+      failures.push({ failure, text: await box.innerText() });
+      for (const [width, height] of [[1440, 900], [768, 1024], [390, 844]]) {
+        await page.setViewportSize({ width, height }); await box.scrollIntoViewIfNeeded();
+        await page.screenshot({ path: `.tmp/app-permissions/failure-${failure.name}-${width}.png`, fullPage: true });
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `horizontal overflow in the ${failure.name} strip at ${width}px`).toBe(true);
+      }
+      await page.unroute('**/api/accounts/*/permissions', failure.fulfil);
+    }
+    for (const { failure, text } of failures) {
+      expect(text, `the English failure sentence for ${failure.name}`).toBe(failure.sentence);
+      expect(cjkWords(text), `Chinese text left in the English failure sentence for ${failure.name}`).toEqual([]);
+      expect(text, `a raw i18n key left in the ${failure.name} sentence`).not.toContain('permissions.check_failed');
+    }
     expect(errors).toEqual([]);
   } finally { await h.stop(); await new Promise(resolve => github.close(resolve)); }
+});
+
+// #527: moving the failure line into the dictionary must not reword the Chinese console. Each sentence below is the
+// string the old code produced by concatenating 检查失败： with what readErrorText() or api() answered.
+test('中文界面的权限检查失败句逐字不变', async ({ page }) => {
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    await account(admin, { name: 'Department App', type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+    await page.goto(h.admin);
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByRole('link', { name: '全局设置', exact: true }).click();
+    await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
+    const row = page.locator('.row', { hasText: 'Department App' });
+    const zhFailures = [
+      { name: 'network', fulfil: route => route.abort('connectionrefused'),
+        sentence: '检查失败：网络连接失败，请稍后重试' },
+      { name: 'gateway-500', fulfil: route => route.fulfill({ status: 500, contentType: 'text/html', body: '<html><body>502 Bad Gateway</body></html>' }),
+        sentence: '检查失败：500 · 入口网关返回了错误页面，没有带回具体原因。请稍后重试；持续出现时请管理员查看服务日志。' },
+      { name: 'authorization-changed', fulfil: route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":"authorization_changed"}' }),
+        sentence: '检查失败：权限已变化，请刷新页面后按当前权限重试。' },
+    ];
+    for (const failure of zhFailures) {
+      await page.route('**/api/accounts/*/permissions', failure.fulfil);
+      await row.locator('.permission-check button').first().click();
+      await expect(row.locator('.permission-result'), `the Chinese failure sentence for ${failure.name}`).toHaveText(failure.sentence);
+      await page.unroute('**/api/accounts/*/permissions', failure.fulfil);
+    }
+  } finally { await h.stop(); }
 });
