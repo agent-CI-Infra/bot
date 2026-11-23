@@ -17,7 +17,7 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { configureDispatch, Dispatcher, ruleDecider } from '../../../../dist/dispatch/worker.js';
 import { managerDecision } from '../../../../dist/dispatch/manager.js';
 import { queueWebhook } from '../../../../dist/review/queue.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 
 const gitObjHash = (type, data) => createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');
@@ -437,7 +437,7 @@ test('#1122 GitHub PR webhook & Feishu review/test requests run unified task.req
     api_key: testPassword(),
   })).value.model;
   await admin('/api/installations/101/activate', 'POST', { model_id: model.id, capability_ceiling: 'develop' });
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
 
   const runTaskToCompletion = async taskId => {
     h.store.run("UPDATE tasks SET status='running',claim_token='claim-1122',next_run_at=0 WHERE id=?", taskId);
@@ -590,7 +590,7 @@ test('#1122 persistent Object Manager thread links follow-up PR comments & Issue
   })).value.model;
   const policyRes = await admin('/api/repositories/101/policy', 'PATCH', { model_id: m.id, capability_ceiling: 'develop' });
   assert.equal(policyRes.status, 200, JSON.stringify(policyRes.value));
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
   const mgrInit = (await admin('/api/repositories/101/manager')).value.manager;
   await admin('/api/repositories/101/manager', 'PUT', {
     expected_revision: mgrInit.prompt.revision,
@@ -760,7 +760,7 @@ test('#1122 Issue-targeted dev revision reads existing open bot PR head under st
     api_key: testPassword(),
   })).value.model;
   await admin('/api/installations/101/activate', 'POST', { model_id: model.id, capability_ceiling: 'develop' });
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
 
   // Seed initial Issue #42 task + open bot PR #88
   h.store.run(
@@ -841,7 +841,7 @@ test('#1122 bot PR comment continues active Issue development (blocking duplicat
   const mIssue = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'm-issue-rev', api_url: 'http://127.0.0.1:9/v1', api_key: testPassword() })).value.model;
   const mAct = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'm-actions-dev', api_url: 'http://127.0.0.1:9/v1', api_key: testPassword() })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: m1.id, capability_ceiling: 'develop' });
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
   const mgrInit = (await admin('/api/repositories/101/manager')).value.manager;
   await admin('/api/repositories/101/manager', 'PUT', {
     expected_revision: mgrInit.prompt.revision,
@@ -1020,7 +1020,7 @@ test('#1261 single-role observer records role_candidate and completes rework aft
     api_key: testPassword(),
   })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, capability_ceiling: 'comment' });
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
 
   const runClaimed = async (taskId, claim) => {
     h.store.run("UPDATE tasks SET status='running',claim_token=?,next_run_at=0 WHERE id=?", claim, taskId);

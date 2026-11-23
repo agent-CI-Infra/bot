@@ -24,7 +24,7 @@ import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { configureDispatch, Dispatcher, ruleDecider } from '../../../../dist/dispatch/worker.js';
 import { managerDecision } from '../../../../dist/dispatch/manager.js';
 import { recordEvent } from '../../../../dist/dispatch/store.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { setGrant } from '../../../../dist/tasks/grants.js';
 
@@ -617,7 +617,7 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
   const { admin } = await setup(h);
   const acc = await account(admin, { type: 'github_app', token: undefined, app_id: '77', private_key: ghFixture.privateKey });
   await repository(admin, acc.id, '101');
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
   const model = (await admin('/api/models', 'POST', {
     repository_id: '101',
     api_url: `http://127.0.0.1:${modelServer.address().port}/v1`,

@@ -7,7 +7,7 @@ import {Store} from '../../../../dist/storage/database.js';
 import {TaskRecords} from '../../../../dist/tasks/service.js';
 import {runRole} from '../../../../dist/roles/run.js';
 import {Redactor} from '../../../../dist/agent/common.js';
-import {nativeRoles} from '../../../fixtures/native-roles.mjs';
+import {scriptedRoles} from '../../../fixtures/scripted-roles.mjs';
 
 // #1136, #1269: a development targeting `.github/workflows/` or CI gates runs its Dev with the layered CI gate skill
 // pinned in the role snapshot, read through read_skill like any bound skill; an ordinary non-CI task's Dev has no skill.
@@ -26,7 +26,7 @@ async function fixture(t,input,summary='implement feature'){
  server.listen(0,'127.0.0.1');await once(server,'listening');
  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','r','http://127.0.0.1:'+server.address().port+'/v1','fixture',s.secrets.seal({value:'fixture-key'},'model:m'),'now');
  s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('r','m',1,1)");
- nativeRoles(s,'r');
+ scriptedRoles(s,'r');
  t.after(()=>new Promise(resolve=>{s.close();server.close(resolve);server.closeAllConnections();}));
  const task=s.get("SELECT * FROM tasks WHERE id='t'");
  return {s,requests,spec:{store:s,task,redactor:new Redactor(),guard:async()=>{},system:'Task execution',prompt:'{}',tools:[tool('finish')],finish:{name:'finish',validate:v=>v},maxTurns:4}};

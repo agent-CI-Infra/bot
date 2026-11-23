@@ -19,7 +19,7 @@ import { setBotWakeRecheckDelaysForTest, carryUnconsumedTaskUpdates } from '../.
 import { appEvents, appPermissions } from '../../../../dist/github/client.js';
 import { accessGaps } from '../../../../dist/app/access.js';
 import { setGrant } from '../../../../dist/tasks/grants.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 const gitObjHash = (type, data) => createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');
 
@@ -395,7 +395,7 @@ async function createBotPrWakeFixture(t, { accountType = 'github_app', installat
     test_command: 'node --test calc.test.mjs',
   });
   h.store.run("UPDATE policies SET automation=? WHERE repository_id='101'", JSON.stringify({ pull_request_qa_gate: false }));
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
   await localManager.call('PUT', '/v1/projects/101');
 
   const now = '2026-11-20T08:00:00.000Z';

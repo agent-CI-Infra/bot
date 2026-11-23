@@ -9,10 +9,10 @@ import {assertRequestPullRequest} from '../../../../dist/tasks/pull-request.js';
 import {taskPermissions} from '../../../../dist/tasks/configuration.js';
 import {TaskError} from '../../../../dist/agent/common.js';
 import {roleConfiguration} from '../../../../dist/roles/definition.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 function fixture(t){
  const s=new Store(':memory:',Buffer.alloc(32,7));t.after(()=>s.close());
- s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/r','1','a')");nativeRoles(s,'r');
+ s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/r','1','a')");scriptedRoles(s,'r');
  s.run("INSERT INTO policies(repository_id,enabled,development_enabled) VALUES('r',1,1)");
  const cfg=roleConfiguration(s,'r');cfg.enabled=true;s.run("UPDATE settings SET value=? WHERE key='roles:r'",JSON.stringify(cfg));
  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('parent','r','development.issue','running','Full roadmap','{}')");

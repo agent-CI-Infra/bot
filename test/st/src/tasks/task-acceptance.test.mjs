@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { evaluateDelivery, acceptanceContextFiles, shouldRunQa } from '../../../../dist/tasks/acceptance.js';
 import { Redactor } from '../../../../dist/agent/common.js';
@@ -15,7 +15,7 @@ async function fixture(t,respond){
  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections();}));
  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
  // These cases drive QA in process against stub checkouts; the default Pi backend has its own coverage.
- nativeRoles(h.store,'101');
+ scriptedRoles(h.store,'101');
  const m=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,model_name:'fixture',api_key:'fixture-model-credential'})).value.model;
  await admin('/api/repositories/101/policy','PATCH',{model_id:m.id});
  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,messages) VALUES('delivery','101','review.issue','running','Report actual observations',?)",JSON.stringify([{role:'assistant',content:'PRIVATE_EXECUTOR_CONVERSATION_SENTINEL'}]));

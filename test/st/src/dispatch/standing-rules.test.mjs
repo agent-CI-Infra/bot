@@ -7,7 +7,7 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { configureDispatch, Dispatcher } from '../../../../dist/dispatch/worker.js';
 import { queueWebhook } from '../../../../dist/review/queue.js';
 import { builtinRules } from '../../../../dist/dispatch/rules.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles, scriptedHarnesses } from '../../../fixtures/scripted-roles.mjs';
 
 configureDispatch(null);
 
@@ -19,7 +19,7 @@ const call = (name, args, id) => ({ role: 'assistant', content: null, tool_calls
 async function fixture(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   // The Manager decides in process here; on the default Pi backend it needs a project computer (#1068).
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
   const requests = [], state = { message: null };
   const provider = createServer(async (req, res) => {
@@ -36,6 +36,19 @@ async function fixture(t) {
   const manager = async () => (await admin('/api/repositories/101/manager')).value.manager;
   return { h, admin, requests, state, run, last, manager };
 }
+
+// #1256: where an event Manager turn runs follows its backend. The in-process driver decides without a project runtime;
+// a backend that runs in the project computer waits for one, and no model is called meanwhile.
+test('an event Manager on a project-computer backend waits for the project runtime; an in-process backend needs none', async t => {
+  const f = await fixture(t);
+  const mention = id => queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', issue, sender: { ...alice, login: 'maria', id: 9 }, comment: { id, body: '@bot please look', author_association: 'MEMBER' } }, 'mention-' + id);
+  mention(41); await f.run();
+  assert.deepEqual([f.last().decision, f.last().model, f.requests.length], ['ignore', 'Manager fixture', 1]);
+  f.h.store.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify({ enabled: false, harnesses: { ...scriptedHarnesses(), manager: 'pi' } }), 'roles:101');
+  mention(42); await f.run();
+  const event = f.last();
+  assert.deepEqual([event.state, JSON.parse(event.error).code, f.requests.length], ['pending', 'harness_environment_required', 1]);
+});
 
 test('with the built-in rules routine Issue and PR events are dispatched without a model call; the others reach the Manager', async t => {
   const f = await fixture(t);

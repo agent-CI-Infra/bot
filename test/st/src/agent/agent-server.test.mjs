@@ -6,7 +6,7 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { configureDispatch, Dispatcher } from '../../../../dist/dispatch/worker.js';
 import { queueWebhook } from '../../../../dist/review/queue.js';
 import { recordEvent } from '../../../../dist/dispatch/store.js';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 
 configureDispatch(null);
 
@@ -17,7 +17,7 @@ test('the Docker model fixture serves checked Manager decisions and preserves ta
   await fetch(base + '/fixture/config', { method: 'POST', body: JSON.stringify({ model_key: 'dispatch-fixture-key' }) });
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   // The Manager decides in process here; on the default Pi backend it needs a project computer (#1068).
-  nativeRoles(h.store, '101');
+  scriptedRoles(h.store, '101');
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: base + '/model', api_key: 'dispatch-fixture-key', model_name: 'manager-model' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, review_enabled: true, development_enabled: true });
   // The fixture's Manager decides every event here: no standing rules (#815).

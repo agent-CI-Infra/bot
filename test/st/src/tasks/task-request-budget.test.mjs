@@ -18,7 +18,7 @@ import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { runRequest } from '../../../../dist/tasks/request.js';
 import { pinLegacyTaskConfiguration } from '../../../fixtures/helpers.mjs';
-import { nativeRoles } from '../../../fixtures/native-roles.mjs';
+import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { server as github } from '../../../fixtures/agent-server.mjs';
 
 const contract = { goal: 'Report the current branch', scope: ['Read the working tree'], criteria: ['Report the observed branch'], endpoint: 'report', source: 'request', completeness: 'explicit' };
@@ -72,7 +72,7 @@ test('an ordinary task created from a chat takes its turn limit and command time
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
   // The historical in-process configuration: controller off, every role in process. The project's only configured budget
   // is the dev role's: 8 turns and a 30-second default command timeout.
-  nativeRoles(store, '101');
+  scriptedRoles(store, '101');
   const environment = await manager.call('PUT', '/v1/projects/101');
   store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id,claim_token,head_sha) VALUES(?,?,?,?,?,?,?,?,?,?,?)', 't', '101', 'task.request', 'running', 'Report the current branch',
     JSON.stringify({ request: 'Report the current branch of this checkout.', contract }), 1, environment.generation, randomBytes(24).toString('hex'), 'claim', 'a'.repeat(40));
@@ -176,7 +176,7 @@ test('a delegated entry-default observer keeps the entry turn and command defaul
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', `http://127.0.0.1:${model.address().port}/v1`, 'fixture', store.secrets.seal({ value: 'fixture-model-key' }, 'model:m'), 'now');
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
-  nativeRoles(store, '101');
+  scriptedRoles(store, '101');
   const environment = await manager.call('PUT', '/v1/projects/101');
   store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id,claim_token,head_sha) VALUES(?,?,?,?,?,?,?,?,?,?,?)', 't', '101', 'task.request', 'running', 'Report the current branch',
     JSON.stringify({ request: 'Report the current branch of this checkout.', contract }), 1, environment.generation, randomBytes(24).toString('hex'), 'claim', 'a'.repeat(40));
