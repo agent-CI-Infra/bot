@@ -128,9 +128,9 @@ test('an unparseable number is refused with a field error instead of clearing th
     page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
     const cpu = page.getByLabel('CPU（核）', { exact: true }), error = configField(page, 'CPU（核）').locator('.machine-config-error');
     await expect(cpu).toHaveValue('3');
-    // Letters typed into a number input never reach .value, so the field looks empty although the user typed something.
+    // A resource field keeps what was typed (#865): the typo is visible in the field, not silently dropped by the browser.
     await cpu.fill(''); await page.keyboard.type('abc');
-    await expect(cpu).toHaveValue('');
+    await expect(cpu).toHaveValue('abc');
     await consoleSave(page).click();
     await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
     await expect(cpu).toHaveAttribute('aria-invalid', 'true');
@@ -173,6 +173,8 @@ test('a rejected entry can be cleared explicitly, and that clear follows the glo
     });
     const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）');
     await cpu.fill(''); await page.keyboard.type('abc');
+    // The refused text stays on screen until the clear button replaces it (#865).
+    await expect(cpu).toHaveValue('abc');
     await expect(field.locator('.machine-config-error')).toBeVisible();
     await expect(field.locator('.machine-config-follow')).toBeHidden();
     await field.getByRole('button', { name: '清空并跟随全局默认', exact: true }).click();
@@ -247,10 +249,10 @@ test('Backspace in a refused empty field keeps the refusal, sends no configure a
     const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
     await cpu.fill(''); await page.keyboard.type('abc');
     await expect(error).toBeVisible();
-    // The field is already empty, so this Backspace removes nothing: it must not pass for an explicit clear.
+    // The field now holds the refused text, and this Backspace removes one letter of it: the refusal stays (#865).
     await page.keyboard.press('Backspace');
     await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
-    await expect(cpu).toHaveValue('');
+    await expect(cpu).toHaveValue('ab');
     await expect(cpu).toHaveAttribute('aria-invalid', 'true');
     await consoleSave(page).click();
     expect(configures).toBe(0);
@@ -276,8 +278,8 @@ test('a non-number pasted over the saved value keeps the refusal, sends no confi
     await page.evaluate(() => navigator.clipboard.writeText('abc'));
     await cpu.click(); await page.keyboard.press('Control+a');
     await page.keyboard.press('Control+v');
-    // Chromium discards the paste and with it the selection, so the value is empty — yet nothing was explicitly cleared.
-    await expect(cpu).toHaveValue('');
+    // The paste replaces the selection with its own text, and that text stays visible — nothing was explicitly cleared.
+    await expect(cpu).toHaveValue('abc');
     await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
     await expect(cpu).toHaveAttribute('aria-invalid', 'true');
     await expect(field.locator('.machine-config-follow')).toBeHidden();
@@ -294,10 +296,9 @@ test('a non-number pasted over the saved value keeps the refusal, sends no confi
   } finally { await f.close(); }
 });
 
-// #944: a field that holds a value can still be refused — the browser discards the entry, leaves the value in place and
-// fires no input event, so the refusal has no non-destructive exit. Saving must release a refusal whose text the field
-// accepts and submit that text, instead of only offering "clear and follow the global default".
-test('a refused field that holds an accepted number saves that number instead of blocking the group', async ({ page }) => {
+// #944/#865: a text field keeps the refused letter visible, so the save refuses it and the override stays as saved;
+// deleting that letter returns the field to the accepted number without clearing anything.
+test('a refused field refuses the save, and deleting the offending letter saves the number', async ({ page }) => {
   const f = await fixture();
   try {
     await login(page, f);
@@ -306,13 +307,18 @@ test('a refused field that holds an accepted number saves that number instead of
     const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
     await cpu.fill('4');
     await expect(consoleSave(page)).toBeVisible();
-    // A letter typed into a filled number input is discarded and fires no input event, so the refusal stays while the
-    // field holds the accepted 4 until the save itself releases it.
     await cpu.focus(); await page.keyboard.press('End'); await page.keyboard.type('a');
-    await expect(cpu).toHaveValue('4');
+    await expect(cpu).toHaveValue('4a');
     await expect(error).toBeVisible();
     await expect(error).toHaveText('这个字段只能填数字');
     await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    await consoleSave(page).click();
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    // Deleting the refused letter leaves the accepted number, and that number then saves normally.
+    await page.keyboard.press('Backspace');
+    await expect(cpu).toHaveValue('4');
+    await expect(error).toBeHidden();
     await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     expect(configures).toBe(1);
@@ -321,7 +327,7 @@ test('a refused field that holds an accepted number saves that number instead of
   } finally { await f.close(); }
 });
 
-test('a refused field that still holds the saved number can be saved without clearing the override', async ({ page }) => {
+test('a refused field keeps the saved number when the offending letter is deleted, without clearing the override', async ({ page }) => {
   const f = await fixture();
   try {
     await login(page, f);
@@ -330,14 +336,14 @@ test('a refused field that still holds the saved number can be saved without cle
     const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
     await expect(cpu).toHaveValue('3');
     await cpu.focus(); await page.keyboard.press('End'); await page.keyboard.type('a');
-    await expect(cpu).toHaveValue('3');
+    await expect(cpu).toHaveValue('3a');
     await expect(error).toBeVisible();
-    // The refused entry is unsaved state, so the group can be saved; saving keeps the saved 3 rather than forcing a clear.
-    await expect(consoleSave(page)).toBeVisible();
-    await consoleSave(page).click();
+    // The refused entry is unsaved state; deleting it returns the field to the saved 3, which needs no new configure.
+    await page.keyboard.press('Backspace');
+    await expect(cpu).toHaveValue('3');
+    await expect(error).toBeHidden();
     await expect(page.locator('.machine-config-draft')).toHaveText('已保存');
     expect(configures).toBe(0);
     expect(f.manager.projects.own('101').cpus).toBe(3);
-    await expect(error).toBeHidden();
   } finally { await f.close(); }
 });
