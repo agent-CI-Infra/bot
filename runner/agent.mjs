@@ -237,6 +237,10 @@ export async function agentOperation(input,root){
       // Pi's session files live in its session store; only the completed process's mailbox is reset, with the history
       // files that runners before #1040 left behind.
       for(const name of ['state.json','events.jsonl','boundary.json','continue.json','restore.json','history.json'])await unlink(dir+'/'+name).catch(error=>{if(error.code!=='ENOENT')throw error;});
+      // So are the requests it left unanswered (a session ended during a tool call or model request, #1253): the next
+      // session's control plane would otherwise see them as its own and run them.
+      await Promise.all(['tool-requests','tool-replies','token-requests','token-replies'].map(name=>rm(dir+'/'+name,{recursive:true,force:true})));
+      for(const name of await readdir(dir).catch(()=>[]))if(/^(?:request\.(?:json|tmp)|(?:boundary-)?reply-[a-f0-9]{48}\.(?:json|tmp))$/.test(name))await unlink(dir+'/'+name).catch(()=>{});
     }
     const path=dir+'/input.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}

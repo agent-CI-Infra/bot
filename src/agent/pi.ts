@@ -20,6 +20,20 @@ export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agen
  */
 export interface PiConversation { resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string, recovery?: string): Promise<{prompt?: string, messages?: string[]}> }
 /**
+ * A service assistant's turn (#1253): the control plane's side of what the native loop does around each model request.
+ * `steer` gives the messages to send after the prompt, read just before the session starts; `boundary` answers each turn
+ * boundary between tool batches with more of them. `text` hears the answer as it is written (from the gateway's stream, or
+ * from the runner with a direct connection), `responded` each model response ending, with or without tool calls, and
+ * `retry` each retry Pi makes itself over a direct connection.
+ */
+export interface PiServiceTurn {
+  steer(): string[];
+  boundary(): Promise<{ messages?: string[] }>;
+  text(delta: string): Promise<void>;
+  responded(toolCalls: boolean): void;
+  retry(retry: { retry: number; retries: number; delay_ms: number; error: string }): Promise<void>;
+}
+/**
  * One Pi session in a task workspace, driven through the runner mailbox. The control plane keeps the provider boundary
  * for explicit gateway mode, the tool allowlist and every platform write; direct mode lets the native SDK connect to its provider. The runner process runs
  * the Pi SDK loop with the tools named in config.
@@ -69,10 +83,12 @@ export interface PiSession<T> {
   runtime?: { version: string; report: (runtime: any) => void };
   /** The managed session's cancellation: an abort ends the control plane's wait with harness_cancelled. */
   signal?: AbortSignal;
+  /** Runs the session as one service assistant turn (#1253). */
+  service?: PiServiceTurn;
 }
 
 export function piAdapter<T>(session: PiSession<T>) {
-  const { store, taskId, guard, workspace, redactor, config, conversation, signal } = session, key = session.key ?? 'pi';
+  const { store, taskId, guard, workspace, redactor, config, conversation, signal, service } = session, key = session.key ?? 'pi';
   const task=store.get('SELECT * FROM tasks WHERE id=?',taskId)??{id:taskId};
   const resultFiles=session.results??new ResultSession(store,resultScope(store,task),()=>projectResultOwner(task.repository_id),guard,redactor.values,()=>true);
   // Every wait of the control plane ends as soon as the session is cancelled. A cancelled session is never reported as a
@@ -104,6 +120,8 @@ export function piAdapter<T>(session: PiSession<T>) {
       session.runtime.report(runtime);
       if (runtime.version !== session.runtime.version) stop('harness_version_mismatch', 'waiting_configuration', `项目电脑的 Pi 版本是 ${runtime.version}，角色配置固定的是 ${session.runtime.version}；不会换用其他版本。`);
     }
+    // Messages that arrived before the session starts join right after its prompt, as they would before a first native request.
+    if (service) { config.service_turn = true; config.steer = service.steer(); }
     // The private runner bootstrap carries a native provider credential, never a tool result or prompt.
     const wireConfig=redactor.clean(config);if(config.model_transport==='direct')wireConfig.native_model=config.native_model;
     const bytes = Buffer.from(JSON.stringify(wireConfig)); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
@@ -149,7 +167,13 @@ export function piAdapter<T>(session: PiSession<T>) {
           : await workspace.call(key + ':poll:' + randomId(), { type: 'workspace_agent_poll', offset });
         if (conversation) await guard();
         if (backgroundError !== null) throw backgroundError;
-        for (const event of state.events || []) workspace.log(redactor.clean(Object.fromEntries(Object.entries(event).filter(([name]) => !/^(reasoning.*|thinking.*|analysis)$/i.test(name)))));
+        for (const event of state.events || []) {
+          // A service turn's streamed text goes to its conversation, not the log: the model event that ends it has it all.
+          if (service && event.type === 'text_delta') { if (event.text) await service.text(redactor.text(String(event.text))); continue; }
+          if (service && event.type === 'model_retry') await service.retry({ retry: Number(event.retry) || 1, retries: Number(event.retries) || 1, delay_ms: Number(event.delay_ms) || 0, error: redactor.text(String(event.error ?? '')) });
+          if (service && event.type === 'model' && !event.agent) service.responded(Array.isArray(event.tool_calls) && event.tool_calls.length > 0);
+          workspace.log(redactor.clean(Object.fromEntries(Object.entries(event).filter(([name]) => !/^(reasoning.*|thinking.*|analysis)$/i.test(name)))));
+        }
         offset = state.offset || offset;
         if (conversation) conversation.offset = offset;
         // A finished agent can leave more than one page of events; retain the tail before exiting.
@@ -158,11 +182,11 @@ export function piAdapter<T>(session: PiSession<T>) {
           // The continue command can be visible before the runner leaves its ready state.
           await pause(50); continue;
         }
-        if (state.boundary && conversation && !answered.has('boundary:' + state.boundary.id)) {
+        if (state.boundary && (conversation || service) && !answered.has('boundary:' + state.boundary.id)) {
           const id = String(state.boundary.id);
           if (!/^[a-f0-9]{48}$/.test(id)) stop('model_request_invalid');
           const recovery = typeof state.boundary.recovery === 'string' ? state.boundary.recovery : undefined;
-          const reply = Buffer.from(JSON.stringify(redactor.clean(await conversation.boundary(state.boundary.stage, recovery))));
+          const reply = Buffer.from(JSON.stringify(redactor.clean(conversation ? await conversation.boundary(state.boundary.stage, recovery) : await service!.boundary())));
           if (reply.length > 32 * 1024 * 1024) stop('agent_context_too_large');
           for (let at = 0; at < reply.length; at += 30000) {
             const sent = await workspace.call(`${key}:boundary:${id}:${at}`, { type: 'workspace_agent_boundary', request_id: id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
@@ -343,7 +367,8 @@ export function piAdapter<T>(session: PiSession<T>) {
           const onRetry = async () => { await ping(); heartbeat ??= setInterval(() => { void ping().catch(() => {}); }, 30000); };
           let modelResult: Awaited<ReturnType<typeof request>>;
           try {
-            modelResult = await abortable(request(body, String(state.request.id), async () => {
+            modelResult = await abortable(request(body, String(state.request.id), async delta => {
+              if (service && typeof delta?.content === 'string' && delta.content) await service.text(redactor.text(delta.content));
               if (Date.now() - lastProgress < 1000) return;
               lastProgress = Date.now();
               await ping();
@@ -394,4 +419,5 @@ export interface PiRoleEnvironment {
   resume?: boolean;
   key?: string;
   runtime?: PiSession<any>['runtime'];
+  service?: PiServiceTurn;
 }

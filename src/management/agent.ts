@@ -1,4 +1,4 @@
-import {serviceHarnessTurn} from '../harness/service-session.js';
+import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
@@ -276,6 +276,14 @@ export class ManagementAgent {
     const tools=[readToolResult,...managementTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
+    // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
+    let mustReply=false;
+    const quiet=async(args:unknown)=>{
+      await guard();const callId=randomId();this.event(id,'tool_call',{name:staySilentName,call_id:callId,arguments:args});
+      const result=staySilent(args,mustReply);if(!result.error)silence=String(result.reason);
+      this.event(id,result.error?'tool_error':'tool_result',{name:staySilentName,call_id:callId,...result.error?result:{result}});
+      return result;
+    };
     let ownHost:OwnTaskHost|undefined;
     // A progress message (#435) is its own event, not an execution step: queued to the source transport and recorded together.
     const progress=async(args:unknown)=>{
@@ -366,6 +374,8 @@ export class ManagementAgent {
           +(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. If an image is unsupported in format or rejected for size/resolution/context limits, use import_message_resource and your assistant computer (Python Pillow or ImageMagick) to resize, compress, crop or convert it, then call view_workspace_image to inspect the processed image. Other binary inputs also need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs or claim unsupported or omitted inputs were inspected; selecting an attachment is not delivery.':'')
           +(cardTurn?'\n'+feishuCardInstructions:'')
           +administrator;
+        // The source version this context reflects; an edit after it starts a Pi turn again (the native loop compares at each step).
+        const contextVersion=this.sourceVersion?.(conversation);
         const context={...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()};
         const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={resultSession:resultFiles,store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
           model,executionSignal:signal,
@@ -386,13 +396,25 @@ export class ManagementAgent {
                   return await request(body, label + ':image-recovery');
                 }
               },execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
-            if(role?.harness&&role.harness!=='native'){ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope,media);const message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence,media);await guard();const finalText=redactor.text(message).trim()?redactor.text(message):(cardTurn?.staged?.fallback_text??redactor.text(message));this.event(id,'reply',{text:finalText,authority:'advisory; see tool receipts'});return;}
+            // The request context, rebuilt after its source changed (an edited message).
+            const currentContext=()=>JSON.stringify({...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()});
+            if(role?.harness&&role.harness!=='native'){
+              ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope,media);
+              // On Pi the turn behaves like the native loop below (#1253): streamed text, merged messages, a restart after an
+              // edit and stay_silent for a timer; the other harnesses ignore this.
+              const control:ServiceTurnControl={text:async delta=>{await guard();this.event(id,'text',{delta:redactor.text(delta),provisional:true});},
+                incoming,merged:batch=>{mustReply||=batch.direct;},source:{version:()=>this.sourceVersion?.(conversation),prompt:currentContext,seen:contextVersion},...(timer?{silence:quiet}:{})};
+              const message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence,media,control);
+              await guard();incoming?.finish();
+              if(silence!==undefined){this.event(id,'reply',{text:'',silent:true,...silence?{reason:redactor.text(silence)}:{},authority:'advisory; see tool receipts'});return;}
+              if(role.harness==='pi'&&mustReply&&!message.trim()&&!media?.attachments.length&&!cardTurn?.staged)fail(502,'management_model_invalid');
+              const finalText=redactor.text(message).trim()?redactor.text(message):(cardTurn?.staged?.fallback_text??redactor.text(message));this.event(id,'reply',{text:finalText,authority:'advisory; see tool receipts'});return;
+            }
             const messages:any[]=[{role:'system',content:system},{role:'user',content:JSON.stringify({...context,recent_tool_results:resultFiles.recent()})}];
             // One query per project across many projects is normal (#333): results share a budget per batch and older ones
             // fold away, so the conversation stays within the model's context however many calls the model makes.
             const transcript=new ToolTranscript(messages,chatContextBytes,resultFiles.preserve);
             let sourceVersion=this.sourceVersion?.(conversation);
-            let mustReply=false;
             // No step limit (#435): the turn ends with an answer without tool calls, when it is stopped (by the user, a changed
             // authorization or source) or when the assistant's service role budget runs out before a model request.
             for(let turn=0;;turn++){
@@ -400,7 +422,7 @@ export class ManagementAgent {
               const currentVersion=this.sourceVersion?.(conversation);
               if(currentVersion!==sourceVersion){
                 sourceVersion=currentVersion;
-                messages.splice(1,messages.length-1,{role:'user',content:JSON.stringify({...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()})});
+                messages.splice(1,messages.length-1,{role:'user',content:currentContext()});
                 incoming?.refresh?.();
               }
               media?.addImages(messages);
@@ -445,11 +467,7 @@ export class ManagementAgent {
                 const args=toolArguments(call);let result:any;
                 if(!turnTools.some(t=>t.function.name===call.function.name))result={error:'tool_not_allowed'};
                 else if(args===null||typeof args!=='object'||Array.isArray(args))result={error:'invalid_arguments',detail:'Tool arguments must be a JSON object.'};
-                else if(call.function.name===staySilentName){
-                  await guard();const callId=randomId();this.event(id,'tool_call',{name:staySilentName,call_id:callId,arguments:args});
-                  result=staySilent(args,mustReply);if(!result.error)silence=String(result.reason);
-                  this.event(id,result.error?'tool_error':'tool_result',{name:staySilentName,call_id:callId,...result.error?result:{result}});
-                }
+                else if(call.function.name===staySilentName)result=await quiet(args);
                 else try{result=await execute(call.function.name,args,call.id);}catch(error){
                   if(!recoverableToolStatus(error))throw error;
                   const failure=error as HttpError;
