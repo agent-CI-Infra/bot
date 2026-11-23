@@ -167,10 +167,13 @@ export async function migrateServiceRoleMemory(
       continue;
     }
 
-    const prepared = await homes.prepare(computerOwner, facts);
+    const prepared = await homes.prepare(computerOwner, facts, { touch: true });
     const rel = memoryFilename(rawOwner, key);
     const markdown = formatMigratedMarkdown(key, content, row.updated_at);
-    await homes.write(prepared.directory, rel, Buffer.from(markdown, 'utf8'));
+    await homes.exclusive(prepared.id, async () => {
+      await homes.write(prepared.directory, rel, Buffer.from(markdown, 'utf8'));
+      homes.touch(prepared.id);
+    });
     touchedOwners.add(prepared.id);
     migrated++;
   }

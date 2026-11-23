@@ -395,3 +395,39 @@ test('startup migration exports active legacy service_role_memory rows to ~/memo
   assert.deepEqual(await migrateServiceRoleMemory(f.h.store, f.h.channels.management.service, f.h.channels.serviceBindings, f.service.homes),
     { status: 'noop', migrated: 0, skipped_stale: 0, skipped_invalid: 0, table_dropped: false });
 });
+
+test('startup migration refreshes active_at for dormant pre-existing HOMEs so retention does not delete migrated memory', async t => {
+  const f = await fixture(t);
+  await f.service.close();
+  const chat = await boundGroup(f, ['101'], 'oc_dormant_group');
+  const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  const groupFence = f.h.channels.serviceBindings.fence(chat.id);
+  const groupOwner = ownerId({ kind: 'group', subject: chat.id, tenant: chat.installation_tenant });
+  // Pre-create a HOME row whose active_at is 31 days old (past the 30-day retention window).
+  const prepared = await f.service.homes.prepare(
+    { kind: 'group', subject: chat.id, tenant: chat.installation_tenant },
+    { binding: binding.id, role: binding.service_role_id, repositories: ['101'] },
+  );
+  const staleActiveAt = Date.now() - 31 * 86400_000;
+  f.h.store.run('UPDATE assistant_homes SET active_at=? WHERE owner=?', staleActiveAt, prepared.id);
+  assert.equal(f.h.store.get('SELECT active_at FROM assistant_homes WHERE owner=?', groupOwner).active_at, staleActiveAt);
+
+  f.h.store.db.exec(`CREATE TABLE IF NOT EXISTS service_role_memory(owner TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(owner,key))`);
+  const scope = JSON.stringify({ service_role_id: binding.service_role_id, kind: 'channel', owner_id: chat.id, principal_id: binding.principal_id, fence: groupFence });
+  f.h.store.run('INSERT INTO service_role_memory VALUES(?,?,?,?)', scope, 'dormant-note', f.h.store.secrets.seal({ content: '长期保留的重要群记忆' }, 'service-memory:' + scope + ':dormant-note'), 1700000000000);
+
+  const startedAt = Date.now();
+  const migrated = await migrateServiceRoleMemory(f.h.store, f.h.channels.management.service, f.h.channels.serviceBindings, f.service.homes);
+  assert.deepEqual(migrated, { status: 'migrated', migrated: 1, skipped_stale: 0, skipped_invalid: 0, table_dropped: true });
+
+  // Running retention immediately after migration must keep both the HOME row (with refreshed active_at) and the migrated file.
+  await f.service.retain(Date.now());
+  const rowAfter = f.h.store.get('SELECT active_at, generation FROM assistant_homes WHERE owner=?', groupOwner);
+  assert.ok(rowAfter, 'dormant HOME row must survive retention after migration');
+  assert.ok(rowAfter.active_at >= startedAt, `expected refreshed active_at >= ${startedAt}, got ${rowAfter.active_at}`);
+  const listed = await f.service.homes.list(f.service.homes.directory(groupOwner, rowAfter.generation), 'memory/migrated', false);
+  assert.equal(listed.exists, true);
+  assert.equal(listed.entries.length, 1);
+  const content = (await f.service.homes.read(f.service.homes.directory(groupOwner, rowAfter.generation), 'memory/migrated/' + listed.entries[0].path, 65536)).data.toString('utf8');
+  assert.match(content, /长期保留的重要群记忆/);
+});

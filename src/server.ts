@@ -513,12 +513,19 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   }));
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
   let connectionTimer: ReturnType<typeof setInterval>;
+  let closing = false;
   server.once('listening', () => {
-    channels.start(); assistants.start(); void assistants.warnIfRequired().catch(() => {});
+    channels.start(); void assistants.warnIfRequired().catch(() => {});
+    // Run legacy service_role_memory migration to completion before assistants.start() schedules retention so dormant
+    // owners' HOMEs cannot be swept before or while their migrated memory is written and touched.
     assistants.runMaintenance(async () => {
-      const migrated = await migrateServiceRoleMemory(store, sharedManagement, channels.serviceBindings, assistants.homes);
-      if (migrated.status === 'migrated' && (migrated.migrated || migrated.skipped_stale || migrated.skipped_invalid)) {
-        console.log(`[assistant-memory] migrated legacy service_role_memory to ~/memory/ (migrated=${migrated.migrated}, stale=${migrated.skipped_stale}, invalid=${migrated.skipped_invalid})`);
+      try {
+        const migrated = await migrateServiceRoleMemory(store, sharedManagement, channels.serviceBindings, assistants.homes);
+        if (migrated.status === 'migrated' && (migrated.migrated || migrated.skipped_stale || migrated.skipped_invalid)) {
+          console.log(`[assistant-memory] migrated legacy service_role_memory to ~/memory/ (migrated=${migrated.migrated}, stale=${migrated.skipped_stale}, invalid=${migrated.skipped_invalid})`);
+        }
+      } finally {
+        if (!closing) assistants.start();
       }
     });
     if (options.schedules?.automatic !== false) scheduler.start();
@@ -528,7 +535,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     }
   });
   let drained:Promise<unknown>=Promise.resolve();
-  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),scheduler.close(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
+  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),scheduler.close(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
   const close=server.close.bind(server);
   // The caller may close SQLite after this callback; every background consumer must have finished first.
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;
