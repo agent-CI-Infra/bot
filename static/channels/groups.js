@@ -334,7 +334,8 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   for (const [id, label] of groupHarnessOptions) { const opt = element('option', label); opt.value = id; harnessSelect.append(opt); }
   harnessSelect.value = 'native';
   const harnessDetails = element('details', '', 'fold feishu-guide-details');
-  harnessDetails.append(element('summary', '高级设置：Agent 后端'), field('Agent 后端', harnessSelect));
+  const computerWarning = harnessComputerWarning(harnessSelect);
+  harnessDetails.append(element('summary', '高级设置：Agent 后端'), field('Agent 后端', harnessSelect), computerWarning);
 
   const assistantPresetBar = element('div', '', 'feishu-preset-bar');
   const copySourceSelect = document.createElement('select'); copySourceSelect.setAttribute('aria-label', '选择要复制配置的已有群');
@@ -344,6 +345,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     promptInput.value = source.prompt || '';
     harnessSelect.value = source.harness || 'native';
     if (harnessSelect.value !== 'native') harnessDetails.open = true;
+    computerWarning.refresh();
     preferredModelId = source.model_id || '';
     updateModelOptions();
   }, 'quiet');
@@ -405,7 +407,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     participation.value = current?.participation || 'mentions';
     promptInput.value = current ? (current.prompt || '') : '';
     harnessSelect.value = current?.harness || 'native';
-    harnessDetails.open = harnessSelect.value !== 'native';
+    harnessDetails.open = harnessSelect.value !== 'native'; computerWarning.refresh();
     preferredModelId = current ? (current.model_id || '') : '';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;

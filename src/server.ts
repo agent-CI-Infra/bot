@@ -499,7 +499,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
   let connectionTimer: ReturnType<typeof setInterval>;
   server.once('listening', () => {
-    channels.start(); assistants.start();
+    channels.start(); assistants.start(); void assistants.warnIfRequired().catch(() => {});
     if (options.schedules?.automatic !== false) scheduler.start();
     if (options.channels?.longConnections !== false) {
       channelConnections.reconcile();

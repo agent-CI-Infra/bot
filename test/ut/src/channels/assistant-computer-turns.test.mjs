@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { AssistantComputerService, ownerId } from '../../../../dist/service-roles/assistant-computers.js';
+import { serviceRoleStorage } from '../../../../dist/service-roles/roles.js';
 import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
 
 const gib = 1024 ** 3;
@@ -144,6 +145,71 @@ test('the first sweep after a start does not end a turn whose computer is still 
   };
   await assert.rejects(f.turn('turn-2').execute('run_command', { command: 'echo again' }), { code: 'assistant_computer_released' });
   assert.equal(creates, 2);
+});
+
+test('a harness turn takes its computer early: the first use shares that take, and a turn that ends meanwhile gives it back (#1254)', async t => {
+  const f = await fixture(t), request = f.docker.request, until = async test => { for (let i = 0; i < 200 && !test(); i++) await new Promise(r => setTimeout(r, 10)); assert.ok(test()); };
+  let puts = 0;
+  const call = f.manager.call.bind(f.manager);
+  f.manager.call = (method, path, ...rest) => { if (method === 'PUT' && path.startsWith('/v1/assistant-computers/') && path !== '/v1/assistant-computers/settings') puts++; return call(method, path, ...rest); };
+  // Without a command permission, like a group whose role lacks run_command: the harness runtime needs none.
+  const first = f.turn('turn-1', { commands: () => false });
+  first.warm();
+  await until(() => f.computers.leases.get(f.owner)?.state === 'busy');
+  assert.deepEqual([created(f), f.computers.leases.get(f.owner).turn, f.computers.leases.get(f.owner).harness], [1, 'turn-1', true]);
+  first.warm(); await first.close();
+  assert.deepEqual([puts, f.computers.leases.get(f.owner).state], [1, 'idle']);
+  // A first use while the early take is under way shares it: one request, the idle container reused.
+  const next = f.turn('turn-1b'); next.warm();
+  assert.equal((await next.execute('run_command', { command: 'echo shared' })).output, 'shared\n');
+  assert.deepEqual([puts, created(f)], [2, 1]);
+  await next.close();
+  // The turn ends while the computer is still being taken (an early start the turn never used): it is given back, idle,
+  // and never held by the ended turn.
+  let resume; const paused = new Promise(resolve => { resume = resolve; }); let reached; const atStart = new Promise(resolve => { reached = resolve; });
+  f.docker.request = async (method, path, body) => {
+    if (method === 'POST' && /^\/containers\/[^/]+\/start/.test(path) && resume) { reached(); await paused; }
+    return request(method, path, body);
+  };
+  f.setFence('b'.repeat(64));
+  const second = f.turn('turn-2'); second.warm();
+  await atStart; await second.close();
+  resume(); resume = null;
+  await until(() => f.computers.leases.get(f.owner)?.state === 'idle');
+  assert.ok(!f.service.active.has('turn-2'));
+  const third = f.turn('turn-3');
+  assert.equal((await third.execute('run_command', { command: 'echo next' })).output, 'next\n');
+  assert.equal(created(f), 2, 'the computer created for the ended turn is reused');
+  await third.close();
+  // A failed early take changes nothing: the first use meets the same failure and reports it.
+  f.docker.failCreate = true; f.setFence('c'.repeat(64));
+  const failing = f.turn('turn-4'); failing.warm();
+  await assert.rejects(failing.execute('run_command', { command: 'true' }), { code: 'assistant_computer_unavailable' });
+  await failing.close();
+  // Without assistant computers in the deployment an early start does nothing.
+  const none = new AssistantComputerService(f.store).turn({ owner: { kind: 'group', subject: 'chat-b', tenant: 't' }, turn: 'turn-5', fence: () => 'a'.repeat(64), check: () => {},
+    facts: () => ({}), commands: () => true, eligible: () => {} });
+  none.warm(); await none.close();
+});
+
+test('the status of assistant computers and the start-up warning for assistants on a harness (#1254)', async t => {
+  const f = await fixture(t), lines = [];
+  const log = line => lines.push(line);
+  assert.deepEqual(await f.service.status(), { available: true });
+  assert.deepEqual(await new AssistantComputerService(f.store).status(), { available: false, reason: 'manager_not_configured' });
+  assert.deepEqual(await new AssistantComputerService(f.store, f.manager).status(), { available: false, reason: 'assistant_homes_missing' });
+  const down = new AssistantComputerService(f.store, { call: async () => { throw new Error('connect ECONNREFUSED'); } }, f.homes);
+  assert.deepEqual(await down.status(), { available: false, reason: 'manager_unavailable' });
+  // Nobody runs on a harness: nothing to warn about.
+  serviceRoleStorage(f.store);
+  assert.equal(await down.warnIfRequired(log), null);
+  f.store.run("UPDATE service_roles SET harness='pi' WHERE id='management-assistant'");
+  assert.equal(await f.service.warnIfRequired(log), null, 'available: no warning');
+  assert.match(await down.warnIfRequired(log), /the management assistant \(pi\) run on a harness that needs an assistant computer for every turn, but assistant computers are unavailable \(manager_unavailable\)/);
+  // The manager without the HOME volume.
+  f.docker.homesMount = '/elsewhere'; f.computers.volumeName = undefined;
+  assert.deepEqual(await f.service.status(), { available: false, reason: 'assistant_homes_unavailable' });
+  assert.equal(lines.length, 1);
 });
 
 test('retention removes inactive HOMEs and sealed generations; the sweep removes computers whose fence changed', async t => {

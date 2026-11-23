@@ -141,7 +141,7 @@ test('idle, lifetime and abandoned computers are removed; a busy one is never cu
   for (const [id, turn] of [[idle, 'a'], [busy, 'b'], [running, 'c']]) await f.acquire(id, turn);
   await f.computers.release(idle, { turn: 'a' });
   assert.equal(await f.computers.check(), 0);
-  // Five idle minutes end it; a turn that keeps renewing (model thinking) keeps it for as long as it runs.
+  // The idle time ends it; a turn that keeps renewing (model thinking) keeps it for as long as it runs.
   f.computers.leases.get(idle).used -= assistantDefaults.idle_minutes * 60_000;
   f.computers.leases.get(busy).created -= 24 * 3600_000;
   f.computers.renew(busy, { turn: 'b' });
@@ -244,6 +244,44 @@ test('creation fails clearly and leaves nothing behind', async t => {
   assert.deepEqual([f.computers.leases.size, f.docker.containers.size], [0, 0]);
   const noVolume = fixture(t); noVolume.docker.homesMount = '/elsewhere';
   await assert.rejects(noVolume.acquire(noVolume.owner(), 't'), /assistant_homes_unavailable/);
+});
+
+test('an idle computer stays half an hour; a stored old default follows the new one, a chosen value stays (#1254)', async t => {
+  const f = fixture(t), id = f.owner();
+  assert.equal(assistantDefaults.idle_minutes, 30);
+  await f.acquire(id, 'a'); await f.computers.release(id, { turn: 'a' });
+  // Twenty idle minutes, past the old five-minute default: the next turn still reuses the container.
+  f.computers.leases.get(id).used -= 20 * 60_000;
+  assert.equal(await f.computers.check(), 0);
+  const created = f.docker.created;
+  assert.deepEqual([(await f.acquire(id, 'b')).reused, f.docker.created], [true, created]);
+  await f.computers.release(id, { turn: 'b' });
+  f.computers.leases.get(id).used -= 30 * 60_000;
+  assert.equal(await f.computers.check(), 1);
+  // Earlier versions stored every value on any save, defaults included: their idle 5 minutes was no choice and follows the
+  // new default once; the other stored values stay.
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  db.exec('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+  db.prepare("INSERT INTO settings VALUES('assistant_computers',?)").run(JSON.stringify({ ...assistantDefaults, idle_minutes: 5, memory_mb: 1024 }));
+  const start = () => new AssistantComputers({ docker: f.docker, db, deployment: 'fixture', image: 'approved', homes: f.homes });
+  assert.deepEqual([start().settings().idle_minutes, start().settings().memory_mb], [30, 1024]);
+  assert.equal(JSON.parse(db.prepare("SELECT value FROM settings WHERE key='assistant_idle_default'").get().value).replaced, 5, 'the replaced value is kept');
+  // A value saved from now on is kept across restarts, five minutes included, and only the values someone set are stored.
+  await start().setSettings({ idle_minutes: 5 });
+  assert.equal(start().settings().idle_minutes, 5);
+  assert.deepEqual(JSON.parse(db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get().value), { ...assistantDefaults, idle_minutes: 5, memory_mb: 1024 });
+  const fresh = fixture(t);
+  await fresh.computers.setSettings({ max_containers: 30 });
+  assert.deepEqual(JSON.parse(fresh.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get().value), { max_containers: 30 });
+  // A stored value other than the old default was a choice.
+  const chosen = new DatabaseSync(':memory:'); t.after(() => chosen.close());
+  chosen.exec('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+  chosen.prepare("INSERT INTO settings VALUES('assistant_computers',?)").run(JSON.stringify({ idle_minutes: 7 }));
+  assert.equal(new AssistantComputers({ docker: f.docker, db: chosen, deployment: 'fixture', image: 'approved', homes: f.homes }).settings().idle_minutes, 7);
+  // The settings view tells whether this manager has the HOME volume, without which no computer can be created.
+  assert.equal((await f.computers.settingsView()).homes, true);
+  const noVolume = fixture(t); noVolume.docker.homesMount = '/elsewhere';
+  assert.equal((await noVolume.computers.settingsView()).homes, false);
 });
 
 test('settings are bounded and resources apply from the next turn; removal during creation removes the new container', async t => {
