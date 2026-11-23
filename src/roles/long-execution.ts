@@ -1,5 +1,6 @@
 import type {Store,Row} from '../storage/database.js';
 import {runAgent,type AgentSpec} from '../agent/runtime.js';
+import {toolArguments} from '../agent/tool-context.js';
 import {TaskRecords} from '../tasks/service.js';
 import {traceEvent,traceSource} from '../tasks/trace.js';
 import {visibleMemorySnapshot,taskTraceAccess} from '../memory/access.js';
@@ -34,8 +35,16 @@ export function observeLongExecution(s:Store,task:Row,runId:string,now=Date.now(
  });
 }
 const processing=new WeakMap<Store,Set<string>>();
-/** A narrow control turn of the Task Manager while its normal turn awaits the worker. It does not bind/take over the
- * Manager role instance, session or lease. Its inputs/results remain in that task's durable history. No new role. */
+// Each piece of evidence offered to the decision is cut at this many characters of its JSON; the report names at most 12
+// tool records, so the whole prompt stays far below the gateway's request limit.
+const evidenceChars=6000;
+const decisionName='submit_long_execution_decision';
+/** A narrow control decision of the Task Manager while its normal turn awaits the worker. It does not bind/take over the
+ * Manager role instance, session or lease. Its inputs/results remain in that task's durable history. No new role.
+ *
+ * Continue or stop is one judgement, so it is one structured model request, not an agent loop (#1256): the evidence the
+ * report names is read here under the Manager's knowledge ACL and offered in the prompt, and the request's only tool is
+ * the decision, which it must call. No other tool exists, so the turn cannot accept, publish, merge or change criteria. */
 export async function decideLongExecution(spec:AgentSpec<any>,report:Row,isCurrent:()=>boolean,stopRun:(reason:string)=>void){
  const s=spec.store,task=spec.task;let active=processing.get(s);if(!active){active=new Set();processing.set(s,active);}if(active.has(task.id))return;
  if(!isCurrent()||!s.get("SELECT id FROM task_runs WHERE id=? AND status='running'",report.run_id))return;
@@ -44,8 +53,9 @@ export async function decideLongExecution(spec:AgentSpec<any>,report:Row,isCurre
  const guard=async()=>{await spec.guard();assertTaskRole(s,task,controller);if(!isCurrent())throw new Error('long_execution_already_ended');};
  // Manager may read the explicitly offered computer observations, not another role's transcript, model context
  // or private memory tools. Keep the canonical observation in place and apply the Manager's knowledge ACL.
+ const reportData=JSON.parse(s.get("SELECT data FROM task_history WHERE task_id=? AND 'task_history:'||id=?",task.id,report.report_ref)?.data||'{}');
  const readControlEvidence=(source:string)=>{
-  const match=/^task_history:(\d+)$/.exec(source),reportData=JSON.parse(s.get("SELECT data FROM task_history WHERE task_id=? AND 'task_history:'||id=?",task.id,report.report_ref)?.data||'{}');
+  const match=/^task_history:(\d+)$/.exec(source);
   if(match&&reportData.recent_tool_refs?.some((r:any)=>r.ref===source)){
    const row=s.get("SELECT type,data FROM task_history WHERE task_id=? AND id=?",task.id,Number(match[1]));
    const data=row&&JSON.parse(row.data);
@@ -53,14 +63,28 @@ export async function decideLongExecution(spec:AgentSpec<any>,report:Row,isCurre
   }
   return traceSource(s,task.id,source,taskTraceAccess(s,{...task,active_role:controller}));
  };
- const tool=(name:string,description:string,properties:any,required:string[]=[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
+ // One piece of evidence as the request offers it: cut to a bounded size, or the reason it cannot be read.
+ const offer=(ref:unknown)=>{
+  if(typeof ref!=='string'||!ref)return null;
+  let raw:string;try{raw=JSON.stringify(readControlEvidence(ref));}catch(error){return {ref,error:String((error as any).code??'evidence_unavailable')};}
+  return raw.length>evidenceChars?{ref,content:raw.slice(0,evidenceChars),truncated:true,chars:raw.length}:{ref,content:raw};
+ };
+ const decision={type:'function',function:{name:decisionName,description:'Continue or explicitly stop this exact execution. Not a task completion decision.',
+  parameters:{type:'object',properties:{action:{type:'string',enum:['continue','stop']},reason:{type:'string'},instructions:{type:'string'}},required:['action','reason'],additionalProperties:false}}};
+ const valid=(value:any):value is {action:'continue'|'stop';reason:string;instructions?:string}=>['continue','stop'].includes(value?.action)&&typeof value.reason==='string'&&!!value.reason.trim()&&(value.instructions===undefined||typeof value.instructions==='string');
  try{
-  const result=await runAgent({store:s,task:{...task,active_role:controller},onRun:id=>{s.run("UPDATE task_runs SET kind='manager_control' WHERE id=?",id);},redactor:spec.redactor,guard,system:roleExecutionSystem(s,task,controller)+'\nLong execution control turn. The normal Manager coordination is waiting for this running role. Inspect progress and choose continue or stop for this exact run. Time is a reporting threshold, not a failure. You cannot accept, publish, merge or change task criteria. If the work needs adjustment, record concrete instructions for the normal Manager to apply at its next checkpoint.',
-   model:roleExecutionModel(s,task,controller),requestPrefix:'manager:long-execution:'+report.run_id+':'+report.threshold_ms,
-   prompt:JSON.stringify({report_ref:report.report_ref,report:readControlEvidence(report.report_ref),task:new TaskRecords(s).context(task.id),previous_decisions:s.all('SELECT threshold_ms,state,decision_ref FROM long_execution_reports WHERE run_id=? ORDER BY threshold_ms',report.run_id)}),maxTurns:8,modelAttempts:1,
-   tools:[tool('read_task_record','Read original task evidence by durable ref.',{ref:{type:'string'},offset:{type:'integer',minimum:0}},['ref']),tool('submit_long_execution_decision','Continue or explicitly stop this exact execution. Not a task completion decision.',{action:{type:'string',enum:['continue','stop']},reason:{type:'string'},instructions:{type:'string'}},['action','reason'])],
-   execute:async(name,args)=>{if(name!=='read_task_record')return {error:'tool_not_allowed'};if(!Number.isSafeInteger(args.offset??0)||(args.offset??0)<0)return {error:'invalid_offset'};let value;try{value=readControlEvidence(args.ref);}catch(error){return {error:String((error as any).code??'evidence_unavailable')};}const raw=JSON.stringify(value),offset=args.offset??0;return {ref:args.ref,content:raw.slice(offset,offset+16000),next_offset:offset+16000<raw.length?offset+16000:null};},
-   finish:{name:'submit_long_execution_decision',validate:value=>{if(!['continue','stop'].includes(value?.action)||typeof value.reason!=='string'||!value.reason.trim()||value.instructions!==undefined&&typeof value.instructions!=='string')throw new Error('invalid_long_execution_decision');return value;}}});
+  const system=roleExecutionSystem(s,task,controller)+'\nLong execution control decision. The normal Manager coordination is waiting for this running role. Inspect the progress evidence in the request and call '+decisionName+' with continue or stop for this exact run. Time is a reporting threshold, not a failure. An evidence piece may be cut (truncated: true) or unreadable (error). You cannot accept, publish, merge or change task criteria. If the work needs adjustment, give concrete instructions for the normal Manager to apply at its next checkpoint.';
+  const prompt=JSON.stringify({report_ref:report.report_ref,report:readControlEvidence(report.report_ref),task:new TaskRecords(s).context(task.id),
+   evidence:{worker_configuration:offer('task_runs:'+report.run_id+':config'),assignment:offer(reportData.assignment_ref),checkpoint:offer(reportData.checkpoint_ref),recent_tools:(reportData.recent_tool_refs??[]).map((r:any)=>offer(r?.ref))},
+   previous_decisions:s.all('SELECT threshold_ms,state,decision_ref FROM long_execution_reports WHERE run_id=? ORDER BY threshold_ms',report.run_id)});
+  const result=await runAgent({store:s,task:{...task,active_role:controller},onRun:id=>{s.run("UPDATE task_runs SET kind='manager_control' WHERE id=?",id);},redactor:spec.redactor,guard,system,prompt,
+   model:roleExecutionModel(s,task,controller),requestPrefix:'manager:long-execution:'+report.run_id+':'+report.threshold_ms,modelAttempts:1,tools:[decision],
+   adapter:async services=>{
+    const {value}=await services.request({messages:[{role:'system',content:system},{role:'user',content:prompt}],tools:[decision],tool_choice:{type:'function',function:{name:decisionName}}},'decision');
+    const call=value?.choices?.[0]?.message?.tool_calls?.[0],args=call?.function?.name===decisionName?toolArguments(call):null;
+    if(!valid(args))throw new Error('invalid_long_execution_decision');
+    return args;
+   }});
   const applicable=isCurrent()&&!!s.get("SELECT id FROM task_runs WHERE id=? AND status='running'",report.run_id);
   const ref=traceEvent(s,task.id,'long_execution_decision',{run_id:report.run_id,report_ref:report.report_ref,...result,applied:applicable},task.trace_run_id,'role:'+controller,[report.report_ref]);
   s.run("UPDATE long_execution_reports SET state=?,decision_ref=?,error=NULL WHERE run_id=? AND threshold_ms=?",applicable?'decided':'ended',ref,report.run_id,report.threshold_ms);

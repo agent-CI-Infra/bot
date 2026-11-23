@@ -53,7 +53,8 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
   }
   if(body.tools?.some(t=>t.function.name==='submit_followup_plan')){const context=JSON.parse(messages[1].content);return send(call('submit_followup_plan',{items:context.qa.residuals.map(r=>({key:r.key,priority:'P3',reason:'Independent optional report extension; core report verified',evidence_refs:[r.evidence],action:'new',needs:[]}))},'followup-plan'));}
   executionCalls++;
-  const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple');
+  // The latest task prompt: a dev role continuing its session gets each new attempt's prompt appended (#1256).
+  const context=JSON.parse(messages.filter(m=>m.role==='user'&&m.content.startsWith('{')).at(-1).content),multi=context.request.includes('multiple');
   if(multi&&!names.includes('search_project_memory'))return send(call('search_project_memory',{query:'memory'},'memory-search'));
   if(multi&&!names.includes('read_project_memory'))return send(call('read_project_memory',{id:memorySeed.id,revision:memorySeed.revision},'memory-read'));
   if(context.task.contract.source?.parent_task&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'inherited-read'));
@@ -76,7 +77,8 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
   assert.ok(!/playbook_catalog|playbook_request|select_playbooks/.test(JSON.stringify(messages.slice(0,2))));
   const writes=calls.filter(c=>c.function.name==='write_file');
   if(!writes.length)return send(call('write_file',{path:'/etc/forbidden-report.md',content:'bad target'},'invalid-path'));
-  if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.contract.source?.residual==='follow-report'?' SIBLING_ACCEPTED_EXTENSION':'')+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
+  const recovering=context.task.acceptance?.gaps?.length&&!writes.some(c=>c.function.arguments.includes('Recovered observation'));
+  if(writes.length===1||recovering){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.contract.source?.residual==='follow-report'?' SIBLING_ACCEPTED_EXTENSION':'')+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
   if(context.request.includes('write-outage')&&writeOutage<6){writeOutage++;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Outage after saving artifact, before progress'}}));return;}
   if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
   return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
@@ -119,6 +121,8 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
   assert.ok(!JSON.stringify(result.candidate.evidence).includes('STALE_EVIDENCE_SENTINEL'));
   assert.equal(new Set(result.candidate.evidence.map(e=>e.result.execution)).size,1);
   assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='artifact_checkpoint'",id));
+  // #1256: a task frozen with the Manager switch off runs as the single dev role, never as a bare tool loop.
+  assert.deepEqual([...new Set(store.all("SELECT role FROM task_runs WHERE task_id=? AND kind='execution'",id).map(r=>r.role))],['dev']);
  }
  assert.equal(store.get('SELECT count(*) n FROM task_followups').n,2);
  // The explicit post-QA Manager plan, not QA alone, creates these children.
