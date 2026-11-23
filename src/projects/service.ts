@@ -10,6 +10,7 @@ import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { consoleComputer, ownComputer, rememberConsoleComputer, saveConsoleComputer, syncConsoleComputer } from '../rules/service.js';
+import { MAX_CLI_CONFIG_BYTES } from '../../runner/cli-config.mjs';
 
 // Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
 export const superAdminComputerFields = new Set(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress']);
@@ -411,16 +412,16 @@ export class ProjectService {
       requireProjectConfigWrite(user, id);
       if (method === 'PUT') {
         fields(input, ['cli', 'file', 'content']);
-        if (typeof input.cli !== 'string' || typeof input.file !== 'string' || typeof input.content !== 'string') {
-          fail(400, 'invalid_cli_config');
+        const cli = input.cli, file = input.file, content = input.content;
+        if (typeof cli !== 'string' || typeof file !== 'string' || typeof content !== 'string') {
+          return fail(400, 'invalid_cli_config');
+        }
+        if (!content.trim() || content.includes('\0') || Buffer.byteLength(content, 'utf8') > MAX_CLI_CONFIG_BYTES) {
+          return fail(400, 'invalid_cli_config_content');
         }
         // Forward directly to manager → runner; control plane never stores or logs config file contents (#1260).
-        const written = await this.manager.call('PUT', `/v1/projects/${id}/cli-config`, {
-          cli: input.cli,
-          file: input.file,
-          content: input.content,
-        }, 15_000);
-        this.store.audit(user.id, 'environment.cli_config_written', `${input.cli}:${input.file}`, id);
+        const written = await this.manager.call('PUT', `/v1/projects/${id}/cli-config`, { cli, file, content }, 15_000);
+        this.store.audit(user.id, 'environment.cli_config_written', `${cli}:${file}`, id);
         return written;
       }
       if (method === 'DELETE') {

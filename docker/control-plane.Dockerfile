@@ -5,7 +5,7 @@ COPY public-board/dashboard/package.json ./public-board/dashboard/package.json
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-COPY runner/agent-products.mjs runner/agent-products.d.mts runner/acp-products.mjs runner/acp-products.d.mts runner/acp-install-worker.mjs runner/acp-install-worker.d.mts runner/cli-config.mjs runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/image-budget.mjs runner/image-budget.d.mts runner/result-owner.mjs runner/result-owner.d.mts runner/credential-redaction.mjs runner/credential-redaction.d.mts runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/artifact-zip.d.mts ./runner/
+COPY runner/agent-products.mjs runner/agent-products.d.mts runner/acp-products.mjs runner/acp-products.d.mts runner/acp-install-worker.mjs runner/acp-install-worker.d.mts runner/cli-config.mjs runner/cli-config.d.mts runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/image-budget.mjs runner/image-budget.d.mts runner/result-owner.mjs runner/result-owner.d.mts runner/credential-redaction.mjs runner/credential-redaction.d.mts runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/artifact-zip.d.mts ./runner/
 COPY manager/compaction.mjs manager/compaction.d.mts manager/storage-footprint.mjs manager/storage-footprint.d.mts ./manager/
 COPY public-board ./public-board
 RUN npm run build

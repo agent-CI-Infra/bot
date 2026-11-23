@@ -2,7 +2,7 @@ import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink, writeFil
 import { constants } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 
-export const MAX_CLI_CONFIG_BYTES = 48 * 1024;
+export const MAX_CLI_CONFIG_BYTES = 32 * 1024;
 
 export const CLI_CONFIG_FILES = Object.freeze({
   claude_code: Object.freeze([
@@ -113,10 +113,23 @@ export async function deleteCliConfig(workspaceRoot, cli, file) {
   const entry = findEntry(cli, file);
   const realHome = await resolveHomeRoot(workspaceRoot);
   const fullPath = resolve(realHome, entry.relPath);
-  const existing = await lstat(fullPath).catch(() => null);
+  const dirPath = dirname(fullPath);
+  const dirStat = await lstat(dirPath).catch(err => (err?.code === 'ENOENT' ? null : Promise.reject(err)));
+  if (dirStat) {
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error('unsafe_cli_config_path');
+    const realDir = await realpath(dirPath);
+    if (!realDir.startsWith(realHome + sep)) throw new Error('unsafe_cli_config_path');
+  }
+  const existing = await lstat(fullPath).catch(err => (err?.code === 'ENOENT' ? null : Promise.reject(err)));
   if (existing) {
     if (existing.isSymbolicLink() || !existing.isFile()) throw new Error('unsafe_cli_config_path');
-    await unlink(fullPath).catch(() => {});
+    const realFile = await realpath(fullPath);
+    if (!realFile.startsWith(realHome + sep)) throw new Error('unsafe_cli_config_path');
+    try {
+      await unlink(fullPath);
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
   }
   return { cli, file: entry.name, path: `/workspace/home/${entry.relPath}`, exists: false, bytes: null, updated_at: null };
 }

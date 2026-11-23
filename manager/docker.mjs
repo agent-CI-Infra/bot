@@ -136,10 +136,10 @@ export class Docker {
       net_rx_bytes: sum(networks, 'rx_bytes'), net_tx_bytes: sum(networks, 'tx_bytes'),
       block_read_bytes: io.filter(r => /read/i.test(r.op)).reduce((t, r) => t + r.value, 0), block_write_bytes: io.filter(r => /write/i.test(r.op)).reduce((t, r) => t + r.value, 0) };
   }
-  async runner(container, input, timeout = 90000) {
+  async runner(container, input, timeout = 90000, extraEnv = []) {
     if (Buffer.byteLength(JSON.stringify(input)) > 64 * 1024) throw new ManagerError('runner_request_too_large', 413);
     const exec = await this.request('POST', `/containers/${encodeURIComponent(container)}/exec`, { AttachStdout: true, AttachStderr: true,
-      User: '10001:10001', WorkingDir: '/workspace', Env: [`BOT_OPERATION_ID=${input.operation_id}`],
+      User: '10001:10001', WorkingDir: '/workspace', Env: [`BOT_OPERATION_ID=${input.operation_id}`, ...(Array.isArray(extraEnv) ? extraEnv : [])],
       Cmd: ['node', '/opt/runner/runner.mjs', Buffer.from(JSON.stringify(input)).toString('base64url')] });
     if (!exec) throw new ManagerError('container_missing');
     const raw = await this.request('POST', `/exec/${exec.Id}/start`, { Detach: false, Tty: false }, true, timeout);

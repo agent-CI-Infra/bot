@@ -10,7 +10,7 @@ import { defaultPermissions, migratePermissions, normalizePermissions, githubRea
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
 import { cachedRuleFiles, maxSkillFiles, skillFilePath, trustedCachedRuleFiles } from '../rules/service.js';
-import { assertHarnessModelSourceImplemented, isHarnessModelSource, normalizeHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
+import { assertHarnessModelSourceImplemented, isHarnessModelSource, LOCAL_CONFIG_CAPABLE_HARNESSES, normalizeHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
 import {roleSkills} from './skill-defaults.js';
 
 /**
@@ -561,7 +561,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     if (harnessInput.version !== undefined && harnessInput.version !== harness!.version) invalid('harness_version_unavailable', `${field}.harness_ref.version`);
     if (harnessInput.model_source !== undefined && !isHarnessModelSource(harnessInput.model_source)) invalid('invalid_role_reference', `${field}.harness_ref.model_source`);
     const modelSource: HarnessModelSource = normalizeHarnessModelSource(harnessInput.model_source) ?? (!current.legacy && previous?.harness_ref?.id === harness!.id ? normalizeHarnessModelSource(previous.harness_ref.model_source) : null) ?? 'gateway';
-    if (modelSource === 'local_config' && !['claude_code', 'codex'].includes(harness!.id)) invalid('subscription_mode_not_implemented', `${field}.harness_ref.model_source`);
+    if (modelSource === 'local_config' && !LOCAL_CONFIG_CAPABLE_HARNESSES.has(harness!.id)) invalid('subscription_mode_not_implemented', `${field}.harness_ref.model_source`);
     let model: ModelProfileRef | null = null;
     if (given.model_profile_ref !== undefined && given.model_profile_ref !== null) {
       const ref = given.model_profile_ref, mfield = `${field}.model_profile_ref`;

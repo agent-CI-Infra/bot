@@ -235,12 +235,14 @@ function cliConfigCard(canConfigure) {
     ],
   };
 
+  let setEditorAvailability = () => {};
   const live = () => current === target && (typeof renderToken !== 'number' || renderToken === token) && section.isConnected;
   const loadStatus = async () => {
     try {
       const data = await api(`/api/environments/${id}/cli-config`);
       if (!live()) return;
       statusHost.replaceChildren();
+      setEditorAvailability(Boolean(data?.available));
       if (!data?.available) {
         statusHost.append(note(`项目电脑当前未运行或暂不可访问（${data?.reason || 'unavailable'}），启动项目电脑后可检查与写入配置文件。`));
         return;
@@ -289,6 +291,7 @@ function cliConfigCard(canConfigure) {
       statusHost.append(table);
     } catch (err) {
       if (!live()) return;
+      setEditorAvailability(false);
       statusHost.replaceChildren(note('暂时无法检查 CLI 配置文件状态：' + readErrorText(err)));
     }
   };
@@ -332,6 +335,8 @@ function cliConfigCard(canConfigure) {
     });
     const editor = element('div', '', 'cli-config-editor');
     editor.append(field('CLI', cliSelect), field('目标文件', fileSelect), field('文件内容（只写不回显）', contentBox), writeBtn);
+    setEditorAvailability = available => { writeBtn.disabled = !available; contentBox.disabled = !available; };
+    setEditorAvailability(false);
     section.append(editor);
   }
   void loadStatus();

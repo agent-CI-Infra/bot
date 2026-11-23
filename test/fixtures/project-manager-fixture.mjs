@@ -7,6 +7,7 @@ import { FakeDocker } from './fake-docker.mjs';
 
 export async function managerFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'project-files-')), docker = new FakeDocker();
+  docker.cliConfigRoot = join(root, 'cli-config-workspaces');
   const options = { database: join(root, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
   let projects = new Projects(options);
   // #385: the notes volume can still be receiving a write when teardown starts, so the recursive rmdir
@@ -27,6 +28,7 @@ export async function managerFixture(t) {
     if (action === 'file-tree') return await projects.fileTree(repo,method,name,operation,input,Object.fromEntries(url.searchParams));
     if (action === 'files') return await projects.files(repo,method,name,operation,input,Object.fromEntries(url.searchParams));
     if (action === 'notes') return await projects.notes(repo,method,name,input);
+    if (action === 'cli-config') return await projects.cliConfig(repo,method,input);
     if (method === 'GET') return projects.describe(repo);
     if (method === 'PUT') return await projects.register(repo);
     return await projects.operate(repo,action,input);
