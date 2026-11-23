@@ -21,6 +21,7 @@
 | 存储与知识 | [存储架构、轨迹文件、工作区与项目知识引擎](storage-and-knowledge.md) | SQLite + JSONL 哈希链轨迹 + Blob 架构、工具结果卷、启动压缩与按天回收、剩余空间保护、共享 Git Worktree 工作区、项目知识自由文件与版本历史。 |
 | 前端与 API | [控制台前端架构与管理 API 总览](console-and-api.md) | 控制台壳层与路由架构、单源设计令牌与安全 Markdown/Mermaid 渲染、管理 API 鉴权与主要端点总览。 |
 | 外部与看板 | [外部执行端凭据代理与公开看板托管](external-and-public-board.md) | 非对称 JWT / OIDC 凭据 Broker、受控内网转发与事件轮询、公开看板增量采集与静态托管。 |
+| 测试架构 | [测试分层、并行分片与防腐化设计](testing-architecture.md) | UT/ST/E2E/Docker/Live 分层职责、`test-sets.mjs` 并行隔离与回环网络守卫、CI 双分片权重均衡与防测试架构腐化红线。 |
 
 ## 延伸入口
 

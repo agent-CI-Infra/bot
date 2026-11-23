@@ -38,7 +38,11 @@ launchpad 是一个基于 **Node.js 22.13+ / TypeScript** 的多账号 GitHub �
    - **Docker COPY 清单**：新增跨目录导入、脚本或静态资产时，核对 `docker/*.Dockerfile` 的多阶段 `COPY`。
 5. **仓库内容卫生**：
    - 只提交产品代码、长期测试和稳定文档。严禁将单次验收报告、对比截图（如 `docs/verification/`）或一次性取证脚本提交到分支历史中。
-6. **语言约定**：
+6. **测试分层与防腐化约束**（详见 `docs/design/testing-architecture.md` 与 `CONTRIBUTING.md`）：
+   - `test/e2e/` 聚焦用户视角的完整主流程与真实浏览器布局/交互，不得把已在 `test/ut/static/` 覆盖的纯文案/错误码/格式矩阵重复塞进 E2E，也不按 Issue 堆砌单用例碎片 E2E 文件。
+   - 长期提交的 E2E 用例严禁保留无断言的 `page.screenshot(...)` 或 `.tmp/.../evidence.json` 写盘；轮询等待优先使用 Playwright `page.clock`，批量造数走单事务 SQLite，多后端测试用覆盖矩阵而非无收益笛卡尔积。
+   - 新增或大幅调整重型 UT/ST 集导致分片失衡时，同步维护 `test/framework/test-set-weights.json`。
+7. **语言约定**：
    - 面向人的控制台界面与 `docs/` 使用简体中文；代码内置给模型读取的提示词、工具/参数描述保持英文契约一致，避免在同一模型请求中混杂中英文指令。
 
 ## 文档双维度维护规则
@@ -95,4 +99,5 @@ npm run test:e2e
   - 存储、轨迹与知识引擎：[`docs/design/storage-and-knowledge.md`](docs/design/storage-and-knowledge.md)
   - 控制台架构与管理 API：[`docs/design/console-and-api.md`](docs/design/console-and-api.md)
   - 外部执行端与公开看板：[`docs/design/external-and-public-board.md`](docs/design/external-and-public-board.md)
+  - 测试分层与防腐化设计：[`docs/design/testing-architecture.md`](docs/design/testing-architecture.md)
 - 运行时协议与内置提示词：[`docs/prompts/README.md`](docs/prompts/README.md)、[`docs/external-token-api.md`](docs/external-token-api.md)
