@@ -6,7 +6,7 @@ import {followupDecision,followupTarget,followupRefusal,recordFollowupRelation,c
 import {setTaskPriority,taskRelations} from './priority.js';
 import {coordinationContext} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
-import { taskControllerReads, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
+import type { MemoryAccess } from '../memory/access.js';
 import { stop } from '../agent/common.js';
 import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
@@ -161,7 +161,8 @@ export class TaskRecords {
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,run_id,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       const readRow=(row:Record<string,any>)=>{try{return JSON.parse(historyData(this.store,row));}catch(error){return unreadable(error);}};
-      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(taskControllerReads(this.store,id,access)?traceClean(readRow(row)):visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,readRow(row),access))}))};
+      void access;
+      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(traceClean(readRow(row)))}))};
     }
     if(name==='record_progress'){if(!Array.isArray(args?.completed)||args.completed.some((x:unknown)=>typeof x!=='string')||typeof args?.next_action!=='string')return {error:'invalid_task_progress'};this.progress(id,args.completed,args.next_action);return {ok:true};}
     return {error:'tool_not_allowed'};

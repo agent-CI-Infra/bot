@@ -6,6 +6,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
 import { authorize } from '../identity/authorization.js';
 import { fail, fields, randomId, HttpError, type Json } from '../core/security.js';
+import { configuredRedactor } from '../core/redaction.js';
 import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
@@ -308,7 +309,7 @@ export class ProjectService {
       const content = input.content;
       if (typeof content !== 'string') return fail(400, 'invalid_note_content');
     }
-    const result = await this.manager.call(method, `/v1/projects/${id}/notes${name === undefined ? '' : '/' + encodeURIComponent(name)}`, method === 'PUT' ? { content: input.content } : undefined);
+    const result = await this.manager.call(method, `/v1/projects/${id}/notes${name === undefined ? '' : '/' + encodeURIComponent(name)}`, method === 'PUT' ? { content: configuredRedactor(this.store).text(String(input.content)) } : undefined);
     if (method !== 'GET') this.store.audit(user.id, method === 'PUT' ? 'notes.written' : 'notes.deleted', name!, id);
     return result;
   }

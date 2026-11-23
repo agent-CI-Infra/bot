@@ -373,8 +373,8 @@ async function runTurn(turnId, prompt) {
     const search = await tool('search_project_memory', { query: 'socket reset' });
     const itemEntry = search.items?.[0];
     const read = await tool('read_project_memory', { id: itemEntry?.id, revision: itemEntry?.revision });
-    const note = await tool('remember_project_memory', { key: 'external.candidate', kind: 'experience', body: 'Observed fixture transport behavior' });
-    await tool('finish', { summary: 'knowledge fixture', read_revision: read.revision, note_verification: note.verification, write_error: note.error, read_error: read.error });
+    const note = await tool('remember_project_memory', { key: 'external.candidate', body: 'Observed fixture transport behavior' });
+    await tool('finish', { summary: 'knowledge fixture', read_revision: read.revision, search_preview: itemEntry?.preview ?? null, note_id: note.id ?? null, note_path: note.path ?? null, write_error: note.error, read_error: read.error });
     finish(turnId, 'completed');
     return;
   }

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { channelFixture, envelope, inGroup, post, until, bindFixture, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
+import { managerFixture } from '../../../fixtures/project-manager-fixture.mjs';
 import { repository } from '../../../fixtures/helpers.mjs';
 import { knowledgeActor } from '../../../fixtures/knowledge-fixture.mjs';
 import { authorize, invalidate, resolvePrincipalActor, revision } from '../../../../dist/identity/authorization.js';
@@ -53,8 +54,8 @@ const observations = body => body.messages.filter(m => m.role === 'tool').map(m 
 const done = (f, receipt) => until(() => f.h.store.get('SELECT * FROM channel_inbox WHERE id=?', receipt.value.operation_id), r => r && ['completed', 'failed'].includes(r.state));
 const repo = id => 'agent-test-zone/admin-fixture-' + id;
 function groupMessage(text, actor = 'ou_bob', chat = 'oc_group') { const e = inGroup(text, actor); e.event.message.chat_id = chat; return e; }
-async function fixture(t) {
-  const gh = await github(t), f = await channelFixture(t, { githubUrl: gh.url }), { h } = f;
+async function fixture(t, manager = undefined) {
+  const gh = await github(t), f = await channelFixture(t, { githubUrl: gh.url }, manager), { h } = f;
   // Read tokens are minted only for a GitHub App installation.
   const account = h.store.get('SELECT * FROM accounts WHERE id=?', f.a.id), secrets = h.store.secrets.open(account.credentials, 'account:' + account.id);
   h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?", h.store.secrets.seal({ ...secrets, token: undefined, private_key: key }, 'account:' + account.id), account.id);
@@ -1036,7 +1037,9 @@ test('removing a project clears group bindings referencing that project\'s own m
 });
 
 test('decoupled group permissions default project_memory to read, preserve stored none, allow orthogonal read+dispatch, and always permit computer/browser (#1206)', async t => {
-  const f = await fixture(t), { h } = f;
+  const mgr = await managerFixture(t);
+  const f = await fixture(t, mgr.manager), { h } = f;
+  await f.admin('/api/repositories/101/knowledge-files', 'POST', { name: 'bot-notes.md', content: 'Project bot runtime guidance.' });
   const bound = await f.bind();
   assert.equal(bound.status, 200, JSON.stringify(bound.value));
   assert.deepEqual([bound.value.github_level, bound.value.task_mode, bound.value.permissions.project_memory, bound.value.permissions.project_configuration, bound.value.permissions.schedules],

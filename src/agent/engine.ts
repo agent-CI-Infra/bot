@@ -17,7 +17,6 @@ import { controlled,roleConfig,roleExecutionModel } from '../roles/run.js';
 import { pinRepositorySkillEntries, type PinnedRepositorySkills } from '../roles/skill-defaults.js';
 import { mergeApi } from '../roles/merge.js';
 import { roleApi, roleProbeApi } from '../roles/api.js';
-import { memoryApi } from '../memory/api.js';
 import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
 import { restoreCheckpoint,checkpoint } from '../tasks/checkpoint.js';
@@ -1115,7 +1114,6 @@ export class TaskEngine {
       cliConfig = await this.manager.call('GET', `/v1/projects/${roleGet[1]}/cli-config`, undefined, 2000).catch(() => null);
     }
     const roles=roleApi(this.store,user,method,url,input,cliConfig);if(roles!==undefined)return roles;
-    const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
     const live=/^\/api\/tasks\/([^/]+)\/live$/.exec(url.pathname);
     if(live&&method==='GET')return this.live(user,live[1]!,url);
     return new TaskCommands(this.store,{active:id=>this.active.has(id),tick:()=>this.tick()}).api(user,method,url,input);

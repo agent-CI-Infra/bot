@@ -158,7 +158,7 @@ test('pending commands stop on project, installation, credentials or authorizati
     mutation();await assert.rejects(()=>svc.submit(actor,{...input,idempotency_key:'deny-'+Math.random()}));
     h.store.run("UPDATE policies SET enabled=1 WHERE repository_id='101'");h.store.run("UPDATE installed_repositories SET installed=1 WHERE repository_id='101'");
   }
-  assert.equal((await command(admin,'knowledge.revise',project,{id:'entry',revision:1,body:'Updated'})).value.result.error,'memory_not_found');
+  assert.equal((await command(admin,'knowledge.revise',project,{id:'entry',revision:1,body:'Updated'})).value.result.error,'manager_unavailable');
 });
 
 test('persistent conversations execute actual model tools, replay messages and survive reconnect without a second write',async t=>{

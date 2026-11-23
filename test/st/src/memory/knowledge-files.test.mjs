@@ -15,6 +15,11 @@ import { knowledgeFilesApi } from '../../../../dist/projects/knowledge-files.js'
 import { invalidate } from '../../../../dist/identity/authorization.js';
 
 async function directory(t) { const root=await mkdtemp(join(tmpdir(),'knowledge-files-'));t.after(()=>rm(root,{recursive:true,force:true}));return root; }
+function seedLegacyMemory(store, id, repo, key, data, updatedAt = '2026-01-01T00:00:00Z') {
+  store.db.exec('CREATE TABLE IF NOT EXISTS project_memories(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,fact_key TEXT NOT NULL,revision INTEGER NOT NULL,data TEXT NOT NULL,updated_at TEXT NOT NULL)');
+  store.run('INSERT INTO project_memories VALUES(?,?,?,?,?,?)', id, repo, key, 1, JSON.stringify(data), updatedAt);
+}
+
 test('free files retain exact revisions across workspace writes, external edits, conflicts, deletion and restore', async t=>{
  const root=await directory(t),notes=new Notes(join(root,'notes'));await notes.directory();
  const name='自由文件 #?%.txt',original='{\n  "original": true\n}\n';await writeFile(join(notes.root,name),original);
@@ -37,41 +42,43 @@ test('history refuses symlinked storage instead of reading or writing another di
  assert.equal(await readFile(join(other,'sentinel'),'utf8'),'unchanged');
 });
 
-test('one files API preserves old notes and knowledge, allows unrestricted text and protects versions and private entries',async t=>{
+test('single-source files API migrates legacy SQLite rows, redacts registered secrets, enforces auth and retires /memories',async t=>{
  const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
  const base='/api/repositories/101/knowledge-files';
- await admin('/api/repositories/101/notes/'+encodeURIComponent('旧文件.txt'),'PUT',{content:'old note'});
- const old=await admin('/api/repositories/101/memories','POST',{key:'existing',expected_revision:0,kind:'experience',body:'existing knowledge',sources:[{reference:'original source'}],reason:'initial',catalog:{audience:'role:dev'}});
- assert.equal(old.status,201);const memory=old.value.memory;
- let list=await admin(base);assert.equal(list.status,200);assert.equal(list.value.files.length,2);
- const inherited=list.value.files.find(f=>f.id==='m:'+memory.id);assert.ok(inherited.name.endsWith('.md'));
+ h.store.run('UPDATE accounts SET credentials=? WHERE id=?',h.store.secrets.seal({token:'registered-api-secret-77'},'account:'+a.id),a.id);
+ // Legacy /memories HTTP API is retired with 410.
+ assert.equal((await admin('/api/repositories/101/memories','POST',{key:'x',body:'y'})).status,410);
+ // PUT /notes/:name redacts registered secrets while preserving ordinary text.
+ await admin('/api/repositories/101/notes/'+encodeURIComponent('旧文件.txt'),'PUT',{content:'old note registered-api-secret-77'});
+ assert.equal((await admin('/api/repositories/101/notes/'+encodeURIComponent('旧文件.txt'))).value.content,'old note [REDACTED]');
+ // Legacy SQLite project_memories row is lazily migrated to physical Markdown on first GET /knowledge-files.
+ seedLegacyMemory(h.store,'legacy01','101','existing',{kind:'experience',status:'active',body:'existing knowledge registered-api-secret-77'});
+ let list=await admin(base+'?recursive=1');assert.equal(list.status,200);assert.equal(list.value.files.length,2);
+ const migrated=list.value.files.find(entry=>entry.path.startsWith('migrated-memories/'));assert.ok(migrated&&migrated.id.startsWith('f:'));
+ const migratedRead=await admin(base+'/'+encodeURIComponent(migrated.id));
+ assert.ok(migratedRead.value.file.content.includes('existing knowledge [REDACTED]'));
+ assert.ok(!migratedRead.value.file.content.includes('registered-api-secret-77'));
+ // Creating and updating files via knowledge-files allows unrestricted text and redacts registered secrets.
  const large='  {\n  "raw": "'+ '界'.repeat(12000)+'"\n}\n';
  const create=await admin(base,'POST',{name:'任意格式 #?%.data',content:large});assert.equal(create.status,201,JSON.stringify(create.value));const file=create.value.file;
  assert.equal(file.content,large);assert.equal(file.revision,1);
+ const secretCreate=await admin(base,'POST',{name:'redact-check.md',content:'ordinary sk-'+'1'.repeat(28)+' and registered-api-secret-77'});
+ assert.equal(secretCreate.value.file.content,'ordinary sk-'+'1'.repeat(28)+' and [REDACTED]');
  const endpoint=base+'/'+encodeURIComponent(file.id);
- assert.equal((await admin(endpoint,'PUT',{content:'',expected_revision:1})).value.file.revision,2);
+ assert.equal((await admin(endpoint,'PUT',{content:'edit registered-api-secret-77',expected_revision:1})).value.file.content,'edit [REDACTED]');
+ assert.equal((await admin(endpoint,'PUT',{content:'',expected_revision:2})).value.file.revision,3);
  assert.equal((await admin(endpoint,'PUT',{content:'stale',expected_revision:1})).status,409);
- assert.equal((await admin(endpoint+'/restore','POST',{revision:1,expected_revision:2})).value.file.content,large);
- assert.equal((await admin(endpoint,'DELETE',{expected_revision:3})).value.file.deleted,true);
- assert.equal((await admin(endpoint+'/restore','POST',{revision:1,expected_revision:4})).value.file.revision,5);
- assert.equal((await admin(endpoint+'/versions')).value.versions.length,5);
- assert.equal((await admin(base+'/m:'+memory.id,'PUT',{content:large,expected_revision:1})).value.file.content,large);
- assert.equal((await admin(base+'/m:'+memory.id,'PUT',{content:large,expected_revision:2})).value.file.revision,2);
- assert.equal((await admin(base+'/m:'+memory.id,'DELETE',{expected_revision:2})).value.file.deleted,true);
- const revived=await admin(base+'/m:'+memory.id,'PUT',{content:'',expected_revision:3});assert.equal(revived.value.file.deleted,false);assert.equal(revived.value.file.content,'');
- assert.equal((await admin('/api/repositories/101/memories/'+memory.id+'?revision=1')).value.memory.body,'existing knowledge');
- assert.equal((await admin('/api/repositories/101/memories/'+memory.id)).value.memory.catalog.audience,'role:dev');
+ assert.equal((await admin(endpoint+'/restore','POST',{revision:1,expected_revision:3})).value.file.content,large);
+ assert.equal((await admin(endpoint,'DELETE',{expected_revision:4})).value.file.deleted,true);
+ assert.equal((await admin(endpoint+'/restore','POST',{revision:1,expected_revision:5})).value.file.revision,6);
+ assert.equal((await admin(endpoint+'/versions')).value.versions.length,6);
  const actor=knowledgeActor(h.store,'reader','101',['tasks.read','knowledge.read']),user={id:actor.principal_id,role:'project_admin',repositories:['101'],context:actor};
- const visible=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base),{});
- assert.ok(!visible.files.some(f=>f.id==='m:'+memory.id));
- await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base+'/m:'+memory.id),{}),/memory_not_found/);
- await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'PUT',new URL('http://local'+endpoint),{content:'no',expected_revision:5}),/capability_forbidden/);
+ await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'PUT',new URL('http://local'+endpoint),{content:'no',expected_revision:6}),/capability_forbidden/);
  const manager={async call(){invalidate(h.store,actor.principal_id,'fixture revoke');return {content:'must not escape'};}};
  await assert.rejects(knowledgeFilesApi(h.store,manager,user,'GET',new URL('http://local'+endpoint),{}),/authorization_changed/);
  const stranger=h.client();const login=await admin('/api/users','POST',{username:'other-project',password:'fixture-password-12345',repository_ids:[]});assert.equal(login.status,201);
  await stranger('/api/auth/login','POST',{username:'other-project',password:'fixture-password-12345'});assert.equal((await stranger(base)).status,403);
 });
-
 
 test('the manager HTTP file protocol preserves revisions and returns a real conflict response',async t=>{
  const f=await managerFixture(t),token=randomBytes(32),{server,recovered}=createManagerServer({projects:f.projects,token});await recovered;
@@ -83,7 +90,6 @@ test('the manager HTTP file protocol preserves revisions and returns a real conf
  await client.call('DELETE',path,{expected_revision:1});const restored=await client.call('POST',path+'/restore',{expected_revision:2,revision:1});assert.equal(restored.revision,3);assert.equal(restored.content,'raw\ncontent');
 });
 
-
 test('a complete file written before a stopped history commit is recovered without losing prior versions',async t=>{
  const root=await directory(t),notes=new Notes(join(root,'notes'));await notes.saveFile('recovered.txt','before',0,'user:a');
  const atomic=notes.atomic.bind(notes);notes.atomic=async(path,content,check)=>{if(path.endsWith('.json'))throw Object.assign(new Error('interrupted history'),{code:'EIO'});return atomic(path,content,check);};
@@ -91,43 +97,48 @@ test('a complete file written before a stopped history commit is recovered witho
  const reopened=new Notes(notes.root),file=await reopened.file('recovered.txt');assert.equal(file.content,'after');assert.equal(file.revision,2);assert.equal((await reopened.file('recovered.txt',1)).content,'before');
 });
 
-test('directory HTTP API keeps stable ids, legacy aliases, exact history and empty folders through move and restore',async t=>{
+test('directory HTTP API keeps stable ids, body search previews, exact history and empty folders through move and restore',async t=>{
  const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
  const base='/api/repositories/101/knowledge-files',dirs='/api/repositories/101/knowledge-directories';
- await admin('/api/repositories/101/notes/old.txt','PUT',{content:'old bytes\n'});
+ await admin('/api/repositories/101/notes/old.txt','PUT',{content:'old bytes with body keyword alpha beta\n'});
  const original=(await admin(base)).value.files[0],endpoint=base+'/'+encodeURIComponent(original.id);assert.match(original.id,/^n:/);
  assert.equal((await admin(dirs,'POST',{path:'docs'})).status,201);assert.equal((await admin(dirs,'POST',{path:'docs/empty'})).status,201);
  const empty=await admin(base+'?directory=docs%2Fempty');assert.deepEqual(empty.value.files,[]);assert.ok(empty.value.directories.includes('docs/empty'));assert.equal(empty.value.can_write,true);
  const moved=await admin(endpoint+'/move','POST',{path:'docs/renamed.txt',expected_revision:1});assert.equal(moved.status,201,JSON.stringify(moved.value));assert.equal(moved.value.file.id,original.id);assert.equal(moved.value.file.revision,2);
- assert.equal((await admin(endpoint+'?revision=1')).value.file.content,'old bytes\n');assert.equal((await admin(endpoint)).value.file.path,'docs/renamed.txt');
- const newFile=await admin(base,'POST',{path:'old.txt',content:'new identity'});assert.equal(newFile.status,201);assert.notEqual(newFile.value.file.id,original.id);assert.equal((await admin(endpoint)).value.file.content,'old bytes\n');
+ assert.equal((await admin(endpoint+'?revision=1')).value.file.content,'old bytes with body keyword alpha beta\n');assert.equal((await admin(endpoint)).value.file.path,'docs/renamed.txt');
+ const newFile=await admin(base,'POST',{path:'old.txt',content:'new identity'});assert.equal(newFile.status,201);assert.notEqual(newFile.value.file.id,original.id);assert.equal((await admin(endpoint)).value.file.content,'old bytes with body keyword alpha beta\n');
+ // Binary file is skipped during body search without failing the listing.
+ await writeFile(join(f.projects.notesRoot,'101','bin.dat'),Buffer.from([0,255,65,66,0]));
  const nested=await admin(base+'?directory=docs');assert.deepEqual(nested.value.files.map(file=>file.id),[original.id]);
- const recursive=await admin(base+'?recursive=1');assert.deepEqual(recursive.value.files.map(file=>file.path),['docs/renamed.txt','old.txt']);
+ const recursive=await admin(base+'?recursive=1');assert.deepEqual(recursive.value.files.map(file=>file.path),['bin.dat','docs/renamed.txt','old.txt']);
  assert.ok(recursive.value.files.every(file=>!Object.hasOwn(file,'content')));
- assert.equal((await admin(base+'?query=renamed')).value.files[0].path,'docs/renamed.txt');
+ // Name/path search and full-text multi-word body search both return previews.
+ const pathHit=(await admin(base+'?query=renamed')).value.files;
+ assert.equal(pathHit[0].path,'docs/renamed.txt');assert.equal(pathHit[0].match_in,'path');
+ const bodyHit=(await admin(base+'?query='+encodeURIComponent('keyword beta'))).value.files;
+ assert.equal(bodyHit.length,1);assert.equal(bodyHit[0].path,'docs/renamed.txt');assert.equal(bodyHit[0].match_in,'content');assert.ok(bodyHit[0].preview.includes('keyword alpha beta'));
  assert.equal((await admin(endpoint+'/move','POST',{path:'old.txt',expected_revision:2})).status,409);
  assert.equal((await admin(endpoint,'PUT',{content:'stale',expected_revision:1})).status,409);
  assert.equal((await admin(endpoint,'DELETE',{expected_revision:2})).value.file.revision,3);
- assert.deepEqual((await admin(base+'?recursive=1')).value.files.map(file=>file.path),['old.txt']);
+ assert.deepEqual((await admin(base+'?recursive=1')).value.files.map(file=>file.path),['bin.dat','old.txt']);
  assert.equal((await admin(dirs,'DELETE',{path:'docs/empty'})).status,200);assert.equal((await admin(dirs,'DELETE',{path:'docs'})).status,200);
  assert.equal((await admin(base+'?deleted_only=1')).value.files[0].id,original.id);
- const restored=await admin(endpoint+'/restore','POST',{revision:1,expected_revision:3});assert.equal(restored.value.file.revision,4);assert.equal(restored.value.file.content,'old bytes\n');
+ const restored=await admin(endpoint+'/restore','POST',{revision:1,expected_revision:3});assert.equal(restored.value.file.revision,4);assert.equal(restored.value.file.content,'old bytes with body keyword alpha beta\n');
  assert.ok((await admin(base)).value.directories.includes('docs'));
  assert.equal((await admin(endpoint+'/versions')).value.versions.length,4);
  for(const path of ['../escape','/absolute','C:/absolute','docs//bad','docs/../escape','docs/\\bad','.git/entry','.write-history/file-tree.json'])assert.equal((await admin(dirs,'POST',{path})).status,400,path);
  assert.equal((await admin(dirs,'DELETE',{path:''})).status,400);
  const actor=knowledgeActor(h.store,'tree-reader','101',['tasks.read','knowledge.read']),user={id:actor.principal_id,role:'project_admin',repositories:['101'],context:actor};
- const result=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base+'?recursive=1'),{});assert.equal(result.can_write,false);assert.equal(result.files[0].path,'docs/renamed.txt');assert.equal(result.files[0].readonly,true);assert.equal(result.files[0].can_move,false);
+ const result=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base+'?recursive=1'),{});assert.equal(result.can_write,false);assert.equal(result.files.find(x=>x.path==='docs/renamed.txt').readonly,true);assert.equal(result.files.find(x=>x.path==='docs/renamed.txt').can_move,false);
  await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'POST',new URL('http://local'+dirs),{path:'forbidden'}),/capability_forbidden/);
  await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local/api/repositories/202/knowledge-files'),{}),/repository_forbidden/);
 });
 
-test('new manager HTTP routes accept encoded stable ids and serialize real conflict errors',async t=>{
+test('new manager HTTP routes accept encoded stable ids, create_parents and serialize real conflict errors',async t=>{
  const f=await managerFixture(t),token=randomBytes(32),{server,recovered}=createManagerServer({projects:f.projects,token});await recovered;
  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
  const client=new ManagerClient('http://127.0.0.1:'+server.address().port,token),base='/v1/projects/101/file-tree';
- await client.call('POST',base+'/directories',{path:'目录 #?%'});
- const one=await client.call('POST',base,{path:'目录 #?%/文件.txt',content:'raw\ncontent',actor:'user:http'}),path=base+'/'+encodeURIComponent(one.id);assert.match(one.id,/^f:/);
+ const one=await client.call('POST',base,{path:'目录 #?%/文件.txt',content:'raw\ncontent',actor:'user:http',create_parents:true}),path=base+'/'+encodeURIComponent(one.id);assert.match(one.id,/^f:/);
  assert.equal((await client.call('GET',base+'?directory='+encodeURIComponent('目录 #?%'))).files[0].id,one.id);
  assert.equal((await client.call('POST',path+'/move',{path:'renamed.txt',expected_revision:1})).revision,2);
  await assert.rejects(client.call('PUT',path,{content:'stale',expected_revision:1}),e=>e.status===409&&e.code==='note_revision_changed');
@@ -135,21 +146,18 @@ test('new manager HTTP routes accept encoded stable ids and serialize real confl
  await assert.rejects(client.call('POST',base+'/directories',{path:'/absolute'}),e=>e.status===400&&e.code==='invalid_note_path');
 });
 
-test('repository-backed legacy files cannot be edited, moved, deleted or restored through the file adapter',async t=>{
- const {ProjectMemory}=await import('../../../../dist/memory/project.js');const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
- const actor=knowledgeActor(h.store,'repo-owner','101'),user={id:actor.principal_id,role:'project_admin',repositories:['101'],context:actor},memory=new ProjectMemory(h.store,{actor});
- const file=memory.save('101','repo-file',{kind:'experience',body:'original',sources:[{reference:'source'}]},0,'user:repo-owner','seed');
- const doc={path:'docs/source.md',commit:'a'.repeat(40),blob_sha:'b'.repeat(40),pr_number:1,merged:true,default_base:true};memory.linkDocument('101',file.id,1,doc,'user:repo-owner');
- const base='http://local/api/repositories/101/knowledge-files',id='m:'+file.id,list=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL(base),{}),summary=list.files.find(row=>row.id===id);
- assert.equal(summary.source,'repository');assert.equal(summary.readonly,true);assert.equal(summary.can_edit,false);assert.equal(summary.can_move,false);
- for(const [method,suffix,input] of [['PUT','',{content:'overwrite',expected_revision:2}],['DELETE','',{expected_revision:2}],['POST','/restore',{revision:1,expected_revision:2}],['POST','/move',{path:'moved.md',expected_revision:2}]])await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,method,new URL(base+'/'+id+suffix),input),/memory_repository_authority/);
- assert.equal(memory.get('101',file.id).revision,2);assert.equal(memory.get('101',file.id).authority,'repository');assert.notEqual(memory.get('101',file.id).status,'archived');
+test('repository-authority legacy SQLite entries are skipped during migration instead of duplicating repository docs',async t=>{
+ const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ seedLegacyMemory(h.store,'repo0001','101','repo-file',{kind:'experience',authority:'repository',status:'active',body:null,document:{path:'docs/source.md'}});
+ const list=await admin('/api/repositories/101/knowledge-files?recursive=1');
+ assert.equal(list.status,200);
+ assert.deepEqual(list.value.files,[]);
+ assert.equal(h.store.get("SELECT status FROM project_memory_migrations WHERE memory_id='repo0001'").status,'skipped_repository');
 });
 
 test('a file name or a moved path carrying a control character is refused by the files API',async t=>{
  const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
  const base='/api/repositories/101/knowledge-files',dirs='/api/repositories/101/knowledge-directories';
- // A name is one component, so it reports the name's own code; the console can then say the name is wrong.
  for(const name of ['ctl\u0001name.txt','tab\tname.txt','new\nline.txt','del\x7fname.txt','line\u2028sep.txt']){
    const created=await admin(base,'POST',{name,content:'x'});assert.deepEqual([created.status,created.value.error],[400,'invalid_note_name'],JSON.stringify(name)); }
  const ok=(await admin(base,'POST',{name:'ok.txt',content:'one'})).value.file;
@@ -159,29 +167,24 @@ test('a file name or a moved path carrying a control character is refused by the
  assert.deepEqual([badDir.status,badList.status],[400,400]);
  assert.equal((await admin(base+'/'+encodeURIComponent(ok.id))).value.file.content,'one');
 });
-test('a legacy knowledge title with a control character is folded into a usable file name',async t=>{
- // A title is data rather than a name its author chose here, so the migration folds the character instead of failing.
+
+test('a legacy knowledge title with a control character is folded into a usable migrated file name',async t=>{
  const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
- const created=await admin('/api/repositories/101/memories','POST',{key:'control-title',expected_revision:0,kind:'experience',body:'body',sources:[{reference:'source'}],reason:'initial',catalog:{audience:'role:dev',title:'bad\u0001title'}});
- assert.equal(created.status,201,JSON.stringify(created.value));const id=created.value.memory.id;
- const list=await admin('/api/repositories/101/knowledge-files');assert.equal(list.status,200);
- const file=list.value.files.find(entry=>entry.id==='m:'+id);
- assert.equal(file.name,'bad-title--'+id.slice(0,8)+'.md');assert.equal(file.path,file.name);
+ seedLegacyMemory(h.store,'ctrl12345678','101','control-title',{kind:'experience',status:'active',body:'body',catalog:{title:'bad\u0001title'}});
+ const list=await admin('/api/repositories/101/knowledge-files?recursive=1');assert.equal(list.status,200);
+ const file=list.value.files.find(entry=>entry.path.startsWith('migrated-memories/'));
+ assert.equal(file.name,'bad-title--ctrl1234.md');assert.equal(file.path,'migrated-memories/bad-title--ctrl1234.md');
 });
 
 test('a legacy id that decodes to an internal name is an unknown file, not a forwarded name',async t=>{
  const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
  const base='/api/repositories/101/knowledge-files',id=name=>'n:'+Buffer.from(name).toString('base64url');
- // `.`, `..`, `.git` and the `.write-*`/`.expired-*` names are the manager's internal names. This route does not forward
- // a name it already knows the manager refuses: the id is simply unknown here, so it reads 404 `note_not_found` like any
- // other unknown id instead of surfacing the manager's 400 `invalid_note_id` for a name the caller never sent.
  for(const name of ['.','..','.git','.GIT','.write-history','.expired-row']){
   const read=await admin(base+'/'+encodeURIComponent(id(name)));
   assert.deepEqual([read.status,read.value.error],[404,'note_not_found'],JSON.stringify(name));
  }
  const write=await admin(base+'/'+encodeURIComponent(id('.git')),'PUT',{content:'x',expected_revision:1});
  assert.deepEqual([write.status,write.value.error],[404,'note_not_found']);
- // An ordinary name is still forwarded: the manager's own answer is what the caller reads.
  const ordinary=await admin(base+'/'+encodeURIComponent(id('missing.txt')));
  assert.deepEqual([ordinary.status,ordinary.value.error],[404,'note_not_found']);
 });

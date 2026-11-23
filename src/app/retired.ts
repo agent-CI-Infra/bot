@@ -14,6 +14,9 @@ const retired: { pattern: RegExp; code: string; detail: string }[] = [
   // Rule-table automation (#1122): routine events use Manager standing rules and custom logic runs as generic tasks.
   { pattern: /^\/api\/automation(?:\/.*)?$/, code: 'automation_removed',
     detail: '规则表自动化（/api/automation）已退役（#1122）。例行事件请使用项目 Manager 的常设规则（standing_rules），其它协作逻辑请通过 Manager 提示词或通用任务（POST /api/tasks）处理。' },
+  // Legacy SQLite project memory API: unified into physical project knowledge files (/api/repositories/:id/knowledge-files).
+  { pattern: /^\/api\/(?:repositories|projects)\/[^/]+\/(?:memories|knowledge)(?:\/.*)?$/, code: 'project_memory_api_removed',
+    detail: '旧版 SQLite 项目记忆接口（/memories、/knowledge）已退役。项目共享知识已统一收口到物理文件接口 /api/repositories/<id>/knowledge-files（对应项目电脑 ../notes/ 目录）。' },
 ];
 
 export function retiredApi(url: URL): undefined {

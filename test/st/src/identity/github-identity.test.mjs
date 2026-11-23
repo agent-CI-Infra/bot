@@ -219,6 +219,7 @@ test('identity migration is repeatable, retains live task, role, memory and lega
   const user = (await admin('/api/users', 'POST', { username: 'legacy', password: testPassword(), repository_ids: ['101'], organization_ids: ['10'] })).value.user;
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('existing-task','101','task.request','running','keep')");
   h.store.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('existing-role','existing-task','developer','{}','process','original')");
+  h.store.db.exec('CREATE TABLE IF NOT EXISTS project_memories(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,fact_key TEXT NOT NULL,revision INTEGER NOT NULL,data TEXT NOT NULL,updated_at TEXT NOT NULL)');
   h.store.run("INSERT INTO project_memories VALUES('existing-memory','101','original',1,'{}','original')");
   h.store.run("UPDATE repositories SET owner_id='unknown' WHERE id='201'");
   identityStorage(h.store); const first = JSON.stringify(h.store.all('SELECT * FROM scoped_grants ORDER BY id'));

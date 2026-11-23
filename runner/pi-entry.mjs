@@ -186,7 +186,7 @@ try{
       else if(name==='read_file')result=await workspace({type:'workspace_read',workspace_id:cfg.workspace_id,path:args.path},signal);
       else if(name==='write_file'){
         const note=typeof args.path==='string'&&args.path.startsWith('../notes/');
-        try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:cfg.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'},signal);}
+        try{const text=note?secrets.text(String(args.content)):args.content;const data=Buffer.from(text);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:cfg.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'},signal);}
         catch(error){result={error:String(error.message)};}
       }else if(name==='run_command'){
         const policy=cfg.command_timeout??{default_seconds:null,max_seconds:600};

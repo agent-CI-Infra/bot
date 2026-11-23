@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
+import { FileTree } from '../../../../manager/file-tree.mjs';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { runRole, roleRuns } from '../../../../dist/roles/run.js';
 import { roleApi } from '../../../../dist/roles/api.js';
@@ -12,7 +16,6 @@ import { registerRoleHarness } from '../../../../dist/roles/harness.js';
 import { taskToolServer } from '../../../../dist/roles/task-tools.js';
 import { TaskToolGateway } from '../../../../dist/roles/gateway.js';
 import { traceEvent, beginRun } from '../../../../dist/tasks/trace.js';
-import { ProjectMemory } from '../../../../dist/memory/project.js';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../../../../dist/roles/protocol.js';
 import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, instanceUsage, recordCheckpoint } from '../../../../dist/roles/role-run.js';
@@ -155,17 +158,41 @@ test('capability tokens are bound to tenant, project, task, run and epoch; reuse
   f.s.run("UPDATE tasks SET claim_token='claim-3' WHERE id='t'"); assert.equal(leaseCurrent(f.s, d.id, lease.epoch), false);
 });
 
-test('the gateway fences other tasks and guessed ids while sharing same-task role observations and memories (#1121)', async t => {
+test('the gateway fences other tasks and guessed ids while sharing same-task role observations and physical notes (#1121)', async t => {
   const f = await fixture(t, () => call('finish', {}));
-  const memory = new ProjectMemory(f.s, { actor: authorizeKnowledgeTask(f.s) });
-  memory.save('r', 'role.reviewer.shared-note', { body: 'REVIEWER_SHARED_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: { role: 'reviewer' } }, 0, 'user:owner', 'fixture');
-  const shared = memory.save('r', 'shared-note', { body: 'SHARED_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: {} }, 0, 'user:owner', 'fixture');
+  authorizeKnowledgeTask(f.s);
+  const notesDir = mkdtempSync(join(tmpdir(), 'bot-gateway-notes-'));
+  t.after(() => rmSync(notesDir, { recursive: true, force: true }));
+  const tree = new FileTree(notesDir);
+  const manager = {
+    async call(method, rawPath, input = {}) {
+      const parsed = new URL(rawPath, 'http://local');
+      const m = /^\/v1\/projects\/[^/]+\/file-tree(?:\/(.*))?$/.exec(parsed.pathname);
+      const rest = m?.[1] ?? '';
+      if (!rest && method === 'GET') return tree.list({ directory: parsed.searchParams.get('directory') ?? '', query: parsed.searchParams.get('query') ?? '', includeDeleted: parsed.searchParams.get('include_deleted') === '1', deletedOnly: parsed.searchParams.get('deleted_only') === '1', recursive: parsed.searchParams.get('recursive') === '1', preview: parsed.searchParams.get('preview') === '1' });
+      if (!rest && method === 'POST') return tree.create(input.path, input.content, input.actor, { createParents: input.create_parents === true });
+      if (rest === 'directories' && method === 'POST') return tree.createDirectory(input.path);
+      const id = decodeURIComponent(rest.split('/')[0]);
+      if (method === 'GET') return tree.read(id, parsed.searchParams.get('revision') ? Number(parsed.searchParams.get('revision')) : undefined);
+      if (method === 'PUT') return tree.save(id, input.content, input.expected_revision, input.actor);
+      throw new Error('unsupported:' + method + ':' + rawPath);
+    },
+  };
+  const reviewerNote = await manager.call('POST', '/v1/projects/r/file-tree', { path: 'guides/reviewer.md', content: 'REVIEWER_SHARED_NOTE', actor: 'user:owner', create_parents: true });
+  const shared = await manager.call('POST', '/v1/projects/r/file-tree', { path: 'guides/shared.md', content: 'SHARED_NOTE body phrase', actor: 'user:owner', create_parents: true });
+  // Seed a historical SQLite project_memories row to verify read-only trace replay authorization + cross-project fencing.
+  f.s.db.exec(`CREATE TABLE IF NOT EXISTS project_memories(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,fact_key TEXT NOT NULL,revision INTEGER NOT NULL,data TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS project_memory_versions(memory_id TEXT NOT NULL,revision INTEGER NOT NULL,data TEXT NOT NULL,actor TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(memory_id,revision));`);
+  f.s.run("INSERT INTO project_memories VALUES('hist-1','r','hist',1,?,'now')", JSON.stringify({ body: 'HISTORICAL_TRACE_NOTE', status: 'active' }));
+  f.s.run("INSERT INTO project_memory_versions VALUES('hist-1',1,?,'user:owner','hist','now')", JSON.stringify({ body: 'HISTORICAL_TRACE_NOTE', status: 'active' }));
+  f.s.run("INSERT INTO project_memories VALUES('hist-foreign','other','hist',1,?,'now')", JSON.stringify({ body: 'FOREIGN_TRACE_NOTE', status: 'active' }));
+  f.s.run("INSERT INTO project_memory_versions VALUES('hist-foreign',1,?,'user:owner','hist','now')", JSON.stringify({ body: 'FOREIGN_TRACE_NOTE', status: 'active' }));
   f.s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('dev-i','t','dev','{}','native','now'),('rev-i','t','reviewer','{}','native','now')");
   const dev = bound(f.s, { instance: 'dev-i' }), reviewer = bound(f.s, { role: 'reviewer', scope: 'assign-r', instance: 'rev-i' });
   f.s.run("INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)", hash('9'), 'r', 'dev', 1, 1, JSON.stringify({ schema: 2, legacy: true, role_id: 'dev', kind: 'writer', capability: { id: 'writer', version: 'x', tools: null } }), 'now');
   f.s.run('UPDATE task_runs SET role_snapshot=? WHERE id IN (?,?)', hash('9'), dev.run.id, reviewer.run.id);
   const token = issueRunToken(f.s, dev.binding, ['gateway:read_task_record', 'gateway:list_task_records', 'gateway:read_knowledge', 'gateway:search_knowledge', 'gateway:propose_experience'], 60_000).token;
-  const g = new TaskToolGateway(f.s), read = ref => g.call(token, { tool: 'read_task_record', arguments: { ref } });
+  const g = new TaskToolGateway(f.s, { manager }), read = ref => g.call(token, { tool: 'read_task_record', arguments: { ref } });
   const otherTask = traceEvent(f.s, 'o', 'role_result', { result: 'OTHER_PROJECT_RESULT' });
   const reviewerInput = traceEvent(f.s, 't', 'role_input', { instance_id: 'rev-i', input: 'REVIEWER_PROMPT' }, reviewer.run.id);
   const ownFinding = traceEvent(f.s, 't', 'role_result', { role: 'reviewer', result: 'FINDING_FOR_DEV' }, reviewer.run.id);
@@ -177,26 +204,26 @@ test('the gateway fences other tasks and guessed ids while sharing same-task rol
   assert.equal((await read(reviewerInput)).content.includes('REVIEWER_PROMPT'), true, 'same-task sibling role observations are readable');
   assert.equal((await read('model_requests:mr-rev:request')).content.includes('REVIEWER_EXCHANGE'), true);
   assert.equal((await read(`task_runs:${reviewer.run.id}:context`)).error, undefined);
-  for (const ref of [otherTask, 'model_requests:mr-other:request', 'task_history:999999', 'task_runs:foreign-run:context', 'contract:revision:7'])
+  for (const ref of [otherTask, 'model_requests:mr-other:request', 'task_history:999999', 'task_runs:foreign-run:context', 'contract:revision:7', 'project_memories:hist-foreign:1'])
     assert.equal((await read(ref)).error, 'task_record_not_found', ref);
+  assert.ok((await read('project_memories:hist-1:1')).content.includes('HISTORICAL_TRACE_NOTE'));
   const list = await g.call(token, { tool: 'list_task_records', arguments: { limit: 50 } });
   assert.ok(list.records.some(r => r.ref === ownFinding)); assert.ok(list.records.some(r => r.ref === reviewerInput));
-  const reviewerMemory = f.s.get("SELECT id FROM project_memories WHERE fact_key='role.reviewer.shared-note'").id;
-  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: reviewerMemory } })).body, 'REVIEWER_SHARED_NOTE');
-  assert.ok((await read(`project_memories:${shared.id}:1`)).content.includes('SHARED_NOTE'));
-  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: shared.id, revision: 1 } })).body, 'SHARED_NOTE');
-  memory.save('r', shared.key, { catalog: { audience: 'role:reviewer' } }, 1, 'user:owner', 'withdraw Dev view');
-  assert.equal((await read(`project_memories:${shared.id}:1`)).error, 'task_record_not_found');
-  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: shared.id, revision: 1 } })).error, 'knowledge_not_found');
-  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'withdrawn', body: 'not retained', evidence: [`project_memories:${shared.id}:1`] } })).error, 'experience_evidence_invalid');
+  const search = await g.call(token, { tool: 'search_knowledge', arguments: { query: 'body phrase' } });
+  assert.equal(search.items[0].id, shared.id);
+  assert.ok(search.items[0].preview?.includes('body phrase'));
+  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: reviewerNote.id } })).body, 'REVIEWER_SHARED_NOTE');
+  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: shared.id, revision: 1 } })).body, 'SHARED_NOTE body phrase');
+  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: 'f:' + '0'.repeat(32), revision: 1 } })).error, 'knowledge_not_found');
   // Tools that are not the gateway's (publication, merge, configuration, SQL, shell) do not exist here.
   for (const name of ['create_pull_request', 'merge_pull_request', 'update_role_configuration', 'sql', 'run_command'])
     assert.equal((await g.call(token, { tool: name, arguments: {} })).error, 'tool_not_allowed', name);
-  // An experience candidate needs evidence the role can see, is unverified, and is not written twice for one request id.
+  // An experience candidate needs evidence the role can see, writes to physical ../notes/, and is not written twice for one request id.
   assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: [otherTask] } })).error, 'experience_evidence_invalid');
-  const first = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding] } });
-  const again = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding] } });
-  assert.equal(first.receipt.verification === 'unverified' || first.receipt.verification?.state === 'unverified' || !!first.receipt.id, true);
+  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'k', body: 'b', evidence: ['project_memories:hist-foreign:1'] } })).error, 'experience_evidence_invalid');
+  const first = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding, `notes:${shared.id}:1`] } });
+  const again = await g.call(token, { tool: 'propose_experience', request_id: 'req-1', arguments: { key: 'lesson', body: 'Run the focused tests first.', evidence: [ownFinding, `notes:${shared.id}:1`] } });
+  assert.ok(first.receipt?.id && first.receipt.path === 'lesson.md');
   assert.deepEqual(again, { receipt: first.receipt, reused: true });
   assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='memory_recorded'").n, 1);
   // Stale epoch and a run that ended are refused, and refusals are in the trace as capability_denied.
@@ -206,7 +233,7 @@ test('the gateway fences other tasks and guessed ids while sharing same-task rol
   const denied = f.s.all("SELECT data FROM task_history WHERE type='capability_denied'").map(r => JSON.parse(r.data));
   assert.ok(denied.some(d => d.transport === 'gateway' && d.reason === 'tool_not_allowed'));
   const trace = JSON.stringify(f.s.all("SELECT data FROM task_history WHERE type IN ('gateway_call','role_record_read')"));
-  assert.ok(!trace.includes('OTHER_PROJECT_RESULT') && !trace.includes('REVIEWER_CONVERSATION'));
+  assert.ok(!trace.includes('OTHER_PROJECT_RESULT') && !trace.includes('FOREIGN_TRACE_NOTE'));
 });
 
 test('events detect duplicates, reordering, gaps, conflicts, stale epochs and late arrivals; a cursor continues the same run', async t => {

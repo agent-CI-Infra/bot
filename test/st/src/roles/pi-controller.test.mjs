@@ -12,7 +12,6 @@ import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { runTeam } from '../../../../dist/roles/team.js';
-import { ProjectMemory } from '../../../../dist/memory/project.js';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { developmentTeam } from '../../../../dist/roles/development.js';
 import { roleApi } from '../../../../dist/roles/api.js';
@@ -256,25 +255,27 @@ test('real Pi schedules parallel observers from durable task facts, without a ta
 });
 
 test('configured code flow checks out the collected commit for both observers and retains it for QA submission', { skip, timeout:180000 }, async t => {
-  const root=mkdtempSync(join(tmpdir(),'bot-code-stages-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let step=0,devRef,readers=0,release,privateMemoryId;const workerBodies=[];
+  const root=mkdtempSync(join(tmpdir(),'bot-code-stages-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let step=0,devRef,readers=0,release,sharedNoteId;const workerBodies=[];
   const barrier=new Promise(r=>release=r);t.after(async()=>{await manager.recover();store.close();rmSync(root,{recursive:true,force:true});});
   const model=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw),tools=body.tools.map(t=>t.function.name);let message;
     if(tools.includes('nominate_delivery')){devRef??=results(body.messages).find(r=>r.result_ref)?.result_ref;message=[()=>call('delegate_role',{role:'dev',purpose:'Implement',refs:[]}),()=>call('delegate_roles',{assignments:[{role:'reviewer',purpose:'Inspect',refs:[devRef]},{role:'test',purpose:'Test',refs:[devRef]}]}),()=>call('nominate_delivery',{result_ref:devRef})][step++]();}
-    else if(tools.includes('submit_role_result')){workerBodies.push(body);const receipts=results(body.messages);if(!receipts.length){if(++readers===2)release();await barrier;message=call('read_project_memory',{id:privateMemoryId,revision:1});}else if(!receipts.some(r=>r.content==='delivered\n'))message=call('read_file',{path:'result.txt'});else message=call('submit_role_result',{summary:'Read exact delivered files',findings:[],unknowns:[],inspected_scope:['result.txt']});}
+    else if(tools.includes('submit_role_result')){workerBodies.push(body);const receipts=results(body.messages);if(!receipts.length){if(++readers===2)release();await barrier;message=call('read_project_memory',{id:'f:'+'0'.repeat(32),revision:1});}else if(!receipts.some(r=>r.body==='SHARED_PROJECT_NOTE'))message=call('read_project_memory',{id:sharedNoteId,revision:1});else if(!receipts.some(r=>r.content==='delivered\n'))message=call('read_file',{path:'result.txt'});else message=call('submit_role_result',{summary:'Read exact delivered files',findings:[],unknowns:[],inspected_scope:['result.txt']});}
     else message=body.messages.at(-1).role==='tool'?call('submit_delivery',{summary:'implemented',test_command:'fixture check'}):call('write_file',{path:'result.txt',content:'delivered\n'});
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));
   });model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
   store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");store.run("INSERT INTO repositories VALUES('101','fixture/pi','o','a')");store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101',`http://127.0.0.1:${model.address().port}/v1`,'fixture',store.secrets.seal({value:'pi-code-fixture'},'model:m'),'now');store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
   const environment=await manager.call('PUT','/v1/projects/101');store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES('t','101','development.issue','running','code','{}',1,?,?)",environment.generation,randomBytes(24).toString('hex'));
   const records=new TaskRecords(store);records.contract('t',{goal:'Deliver code',scope:['result.txt'],criteria:['Inspected and tested'],endpoint:'code'});
-  const actor=authorizeKnowledgeTask(store);privateMemoryId=new ProjectMemory(store,{actor}).save('101','manager-only',{body:'MANAGER_ONLY_PRIVATE',kind:'experience',sources:[{reference:'fixture'}],catalog:{audience:'role:manager'}},0,'user:owner','private controller context').id;
+  authorizeKnowledgeTask(store);
+  sharedNoteId=(await manager.call('POST','/v1/projects/101/file-tree',{path:'guides/check.md',content:'SHARED_PROJECT_NOTE',actor:'user:owner',create_parents:true})).id;
   roleApi(store,{id:'owner',role:'project_admin',repositories:['101']},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:true,roles:[]});
   const task=store.get("SELECT * FROM tasks WHERE id='t'"),redactor=new Redactor(),guard=async()=>{},workspace=new Workspace(store,manager,task,redactor,guard,()=>{});
   await workspace.call('seed-init',{type:'workspace_init'});await workspace.write('seed-write','result.txt',Buffer.from('baseline\n'));
   const seed=await workspace.call('seed-commit',{type:'workspace_command',command:'git init -q && git add result.txt && git -c user.name=Fixture -c user.email=fixture@example.test commit -qm baseline',timeout_ms:10000});assert.equal(seed.exit_code,0);
   const result=await developmentTeam(workspace,'Implement code','{}',async()=>({pr:{number:1}}),{read:true,write:true,shell:true});
   assert.equal(result.summary,'implemented');assert.equal(readers,2);
-  assert.ok(workerBodies.flatMap(b=>results(b.messages)).filter(r=>r.error==='memory_not_found').length>=2);assert.ok(!JSON.stringify(workerBodies).includes('MANAGER_ONLY_PRIVATE'));
+  assert.ok(workerBodies.flatMap(b=>results(b.messages)).filter(r=>r.error==='note_not_found').length>=2);
+  assert.ok(workerBodies.flatMap(b=>results(b.messages)).filter(r=>r.body==='SHARED_PROJECT_NOTE').length>=2);
   const candidateEvents=store.all("SELECT data FROM task_history WHERE type='role_candidate'").map(r=>JSON.parse(r.data));
   const observerEvents=candidateEvents.filter(e=>e.role==='reviewer'||e.role==='test');
   assert.equal(observerEvents.length,2);

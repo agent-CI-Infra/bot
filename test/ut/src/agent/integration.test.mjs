@@ -78,13 +78,16 @@ test('integration and explicit merge intent survive SQLite reopen; candidate cha
 });
 
 test('memory and execution provenance bind the integrated baseline separately from the owned PR head',async t=>{
- const {executionBaseline}=await import('../../../../dist/agent/common.js'),{ProjectMemory,memoryTool}=await import('../../../../dist/memory/project.js');
+ const {executionBaseline}=await import('../../../../dist/agent/common.js'),{memoryTool,readProjectNote}=await import('../../../../dist/memory/project.js');
+ const root=mkdtempSync(join(tmpdir(),'bot-integration-mem-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const manager=new LocalManager('101',root);
  const s=new Store(':memory:',randomBytes(32));t.after(()=>s.close());s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','')");s.run("INSERT INTO repositories VALUES('101','fixture/project','1','a')");
  const ownedHead='1'.repeat(40),baseline='2'.repeat(40),input={snapshot_sha:baseline,integration:{state:'applied'}};
  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,head_sha) VALUES('t','101','development.issue','running','integration',?,?)",JSON.stringify(input),ownedHead);
- const actor=authorizeKnowledgeTask(s);const task=s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(executionBaseline(task),baseline);
- const result=await memoryTool(s,task,'remember_project_memory',{key:'integration-observation',kind:'experience',body:'Observed on integrated checkout'});
- const memory=new ProjectMemory(s,{actor}).get('101',result.id);assert.equal(memory.scope.commit,baseline);assert.equal(memory.sources[0].source_sha,baseline);
+ authorizeKnowledgeTask(s);const task=s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(executionBaseline(task),baseline);
+ const result=await memoryTool(s,task,'remember_project_memory',{key:'integration-observation',body:'Observed on integrated checkout'},{manager});
+ assert.equal(result.path,'integration-observation.md');
+ const note=await readProjectNote(manager,'101',result.id);assert.equal(note.content,'Observed on integrated checkout');
  assert.equal(task.head_sha,ownedHead,'ownership fence must still refer to the original PR head');
 });
 

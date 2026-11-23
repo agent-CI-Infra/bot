@@ -101,7 +101,7 @@ test('#1121 dev -> test -> reviewer -> qa share one task workspace, read precedi
         assert.ok(toolNames.includes('remember_project_memory'), 'reviewer must receive remember_project_memory');
         const historyObs = results.find(r => Array.isArray(r.observations));
         const ghObs = results.find(r => r.number === 1 || r.title || r.full_name || r.items || r.repository);
-        const memObs = results.find(r => Array.isArray(r.items) && r.items.some(i => i.key === 'arch-note'));
+        const memObs = results.find(r => Array.isArray(r.items) && r.items.some(i => i.path === 'arch-note.md'));
         const wroteMem = results.find(r => r.revision === 2);
         if (!historyObs) {
           message = call('read_task_history', { offset: 0, limit: 20 });
@@ -113,7 +113,7 @@ test('#1121 dev -> test -> reviewer -> qa share one task workspace, read precedi
           message = call('search_project_memory', { query: 'arch-note' });
         } else if (!wroteMem) {
           reviewerReadSharedMemory = true;
-          message = call('remember_project_memory', { key: 'arch-note', body: 'Updated by reviewer with review context', kind: 'experience' });
+          message = call('remember_project_memory', { key: 'arch-note', body: 'Updated by reviewer with review context' });
         } else {
           message = call('submit_role_result', {
             summary: 'Reviewed candidate with full dev trace, GitHub read and shared memory access',
@@ -136,7 +136,7 @@ test('#1121 dev -> test -> reviewer -> qa share one task workspace, read precedi
           : !wroteNote
             ? call('write_file', { path: '../notes/handoff.md', content: 'Shared workspace handoff note\n' })
             : !savedMem
-              ? call('remember_project_memory', { key: 'arch-note', body: 'Initial dev architecture note', kind: 'experience' })
+              ? call('remember_project_memory', { key: 'arch-note', body: 'Initial dev architecture note' })
               : !builtCache
                 ? call('run_command', { command: 'mkdir -p node_modules/.cache && printf CACHED_BUILD_OK > node_modules/.cache/dev-build.stamp' })
                 : call('submit_delivery', { summary: 'Implemented feature', test_command: 'node -e "process.exit(0)"', change_title: 'feat: implement feature' });

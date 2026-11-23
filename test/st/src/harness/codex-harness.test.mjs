@@ -16,8 +16,7 @@ import { LineRpc, codexAppServer, enabledFeatures, deniedFeatures } from '../../
 import { codexConfiguration } from '../../../../dist/harness/codex.js';
 import { instanceUsage } from '../../../../dist/roles/role-run.js';
 import { roleHarness } from '../../../../dist/roles/harness.js';
-import { knowledgeActor, authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
-import { ProjectMemory } from '../../../../dist/memory/project.js';
+import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
@@ -234,20 +233,17 @@ test('Codex resume continues the own thread, counts usage once and rebuilds expl
   assert.ok(f.events().some(e => e.recovery === 'native_resume_failed' && e.previousSessionId === thread));
 });
 
-test('Codex keeps its native thread when a new memory becomes readable', async t => {
+test('Codex keeps its native thread across runs without legacy SQLite memory view invalidation', async t => {
   const f = fixture(t);
   authorizeKnowledgeTask(f.s);
   await runRole(f.spec, 'dev', undefined, 'codex');
   const thread = f.state().sessionId;
-  const memory = new ProjectMemory(f.s, { actor: knowledgeActor(f.s) });
-  const item = memory.save('r', 'new-codex-memory', { body: 'new source', kind: 'experience', sources: [{ reference: 'fixture observation' }], catalog: { title: 'New guidance' } }, 0, 'user:owner', 'new source');
   await runRole(f.spec, 'dev');
   assert.equal(f.state().sessionId, thread);
   assert.equal(f.state().recoveryMode, 'native_resume');
   assert.ok(f.lines('requests.jsonl').some(r => r.method === 'thread/resume'));
   const input = f.lines('prompts.jsonl').at(-1).prompt;
-  assert.ok(input.includes('new_readable_memories'));
-  assert.ok(input.includes(item.id));
+  assert.ok(!input.includes('new_readable_memories'));
   assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed'").n, 0);
 });
 

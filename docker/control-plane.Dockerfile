@@ -5,8 +5,8 @@ COPY public-board/dashboard/package.json ./public-board/dashboard/package.json
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-COPY runner/agent-products.mjs runner/agent-products.d.mts runner/acp-products.mjs runner/acp-products.d.mts runner/acp-install-worker.mjs runner/acp-install-worker.d.mts runner/cli-config.mjs runner/cli-config.d.mts runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/image-budget.mjs runner/image-budget.d.mts runner/result-owner.mjs runner/result-owner.d.mts runner/credential-redaction.mjs runner/credential-redaction.d.mts runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/artifact-zip.d.mts ./runner/
-COPY manager/compaction.mjs manager/compaction.d.mts manager/storage-footprint.mjs manager/storage-footprint.d.mts ./manager/
+COPY runner/agent-products.mjs runner/agent-products.d.mts runner/acp-products.mjs runner/acp-products.d.mts runner/acp-install-worker.mjs runner/acp-install-worker.d.mts runner/cli-config.mjs runner/cli-config.d.mts runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/image-budget.mjs runner/image-budget.d.mts runner/result-owner.mjs runner/result-owner.d.mts runner/credential-redaction.mjs runner/credential-redaction.d.mts runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/artifact-zip.d.mts runner/notes.mjs runner/note-catalog.mjs runner/note-path.mjs ./runner/
+COPY manager/compaction.mjs manager/compaction.d.mts manager/storage-footprint.mjs manager/storage-footprint.d.mts manager/file-tree.mjs manager/file-tree.d.mts ./manager/
 COPY public-board ./public-board
 RUN npm run build
 
@@ -37,10 +37,10 @@ COPY docs/prompts ./docs/prompts
 COPY skills ./skills
 # Process Harness executes this worker in the control-plane container.
 COPY runner/role-worker.mjs ./runner/role-worker.mjs
-COPY runner/agent-products.mjs runner/acp-products.mjs runner/acp-install-worker.mjs runner/cli-config.mjs runner/command-policy.mjs runner/command-output.mjs runner/image-budget.mjs runner/result-owner.mjs runner/filesystem-id.mjs runner/credential-redaction.mjs runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs ./runner/
+COPY runner/agent-products.mjs runner/acp-products.mjs runner/acp-install-worker.mjs runner/cli-config.mjs runner/command-policy.mjs runner/command-output.mjs runner/image-budget.mjs runner/result-owner.mjs runner/filesystem-id.mjs runner/credential-redaction.mjs runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/notes.mjs runner/note-catalog.mjs runner/note-path.mjs ./runner/
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
-COPY manager/compaction.mjs manager/storage-footprint.mjs ./manager/
-RUN node --input-type=module -e "await import('./dist/app/storage.js'); await import('./dist/agent/workspace.js'); await import('./manager/compaction.mjs');"
+COPY manager/compaction.mjs manager/storage-footprint.mjs manager/file-tree.mjs ./manager/
+RUN node --input-type=module -e "await import('./dist/app/storage.js'); await import('./dist/agent/workspace.js'); await import('./dist/projects/local-manager.js'); await import('./manager/compaction.mjs');"
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
 # The entry gateway service runs from this image too (node webhook/main.mjs), as its own container.
 COPY webhook/main.mjs ./webhook/main.mjs

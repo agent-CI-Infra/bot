@@ -2,8 +2,8 @@ import type {Store,Row} from '../storage/database.js';
 import {runAgent,type AgentSpec} from '../agent/runtime.js';
 import {toolArguments} from '../agent/tool-context.js';
 import {TaskRecords} from '../tasks/service.js';
-import {traceEvent,traceSource} from '../tasks/trace.js';
-import {visibleMemorySnapshot,taskTraceAccess} from '../memory/access.js';
+import {traceEvent,traceSource,traceClean} from '../tasks/trace.js';
+import {taskTraceAccess} from '../memory/access.js';
 import {taskConfiguration} from '../tasks/configuration.js';
 import {roleExecutionSystem,roleExecutionModel} from './run.js';
 import {roleConfiguration} from './definition.js';
@@ -59,7 +59,7 @@ export async function decideLongExecution(spec:AgentSpec<any>,report:Row,isCurre
   if(match&&reportData.recent_tool_refs?.some((r:any)=>r.ref===source)){
    const row=s.get("SELECT type,data FROM task_history WHERE task_id=? AND id=?",task.id,Number(match[1]));
    const data=row&&JSON.parse(row.data);
-   if(row&&['tool_started','tool_observation'].includes(row.type)&&['run_command','read_file','write_file'].includes(data?.name))return visibleMemorySnapshot(s,task.repository_id,data,taskTraceAccess(s,{...task,active_role:controller}));
+   if(row&&['tool_started','tool_observation'].includes(row.type)&&['run_command','read_file','write_file'].includes(data?.name))return traceClean(data);
   }
   return traceSource(s,task.id,source,taskTraceAccess(s,{...task,active_role:controller}));
  };

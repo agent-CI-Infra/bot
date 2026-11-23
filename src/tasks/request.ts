@@ -32,7 +32,7 @@ import { scheduledIssueWrite } from './schedule-write.js';
 import { githubWriteTool, grantedGithubWriteTool, withMergePolicy } from '../github/write.js';
 import { autoMergePolicy, mergeBoundary } from '../github/merge-policy.js';
 import { githubWriteAllowed } from '../roles/permissions.js';
-import { ProjectMemory, memoryTools, memoryTool } from '../memory/project.js';
+import { memoryTools, memoryTool } from '../memory/project.js';
 import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
 import { relatedDeliveryIndex, relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { observation, boundedCandidate } from './evidence.js';
@@ -980,7 +980,6 @@ export async function runRequest(
             ...(input.integration ? { integration: { ...input.integration, instruction: 'This checkout retains the previous candidate on the new base. Preserve both sets of changes; verify the combined tree. Do not restore an old whole tree over it.' } } : {}),
             task: records.context(task.id),
             source_sha: task.head_sha,
-            project_memory: new ProjectMemory(store).context(task),
             context_files: Object.keys(contextFiles).map(p => '../context/' + p),
           }),
           tools: ([
@@ -1113,19 +1112,8 @@ export async function runRequest(
             }
             const actorTask = { ...task, active_role: spaces.role, trace_run_id: spaces.runId };
             if (memoryTools.some(t => t.function.name === name)) {
-              const observed = await memoryTool(
-                store,
-                actorTask,
-                name,
-                redactor.clean(args),
-                async doc => {
-                  const raw = await spaces.current.call('memory:' + randomId(), { type: 'workspace_read', path: doc.path });
-                  if (raw.error || typeof raw.content !== 'string') throw new Error('memory_source_unavailable');
-                  return { content: raw.content, sha: blobSha(Buffer.from(raw.content)) };
-                },
-                spaces.current,
-              );
-              records.history(task.id, 'execution_evidence', { execution, name, version: observed.revision ? `memory:${observed.id}:${observed.revision}` : sha(JSON.stringify(observed)), arguments: redactor.clean(args), result: redactor.clean(observed) }, spaces.runId);
+              const observed = await memoryTool(store, actorTask, name, redactor.clean(args), spaces.current);
+              records.history(task.id, 'execution_evidence', { execution, name, version: observed.revision ? `notes:${observed.id}:${observed.revision}` : sha(JSON.stringify(observed)), arguments: redactor.clean(args), result: redactor.clean(observed) }, spaces.runId);
               return redactor.clean(observed);
             }
             if (name === 'read_related_artifact') {

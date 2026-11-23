@@ -25,7 +25,7 @@
 - **能力准入（`admitRun`）与累计预算**：
   - 启动前对照驱动能力矩阵校验（`cancel`、`version_binding`、`output_validation`、`raw_evidence`、`fixed_candidate_read`、`fresh_context`），缺失即 `waiting_configuration`，不静默降级后端。
   - `metered` 预算按角色实例跨重试/恢复持续累计（token、请求数、工具数、墙钟时间），耗尽立即中断并撤销令牌；连续长耗时运行满 60 分钟及之后每 20 分钟向 Manager 发送 `long_execution_report` 而非粗暴强杀。Manager 对每份报告只做一次结构化模型请求：报告点名的证据（最近工具记录、检查点、交接输入、该次运行的配置）按 Manager 的知识权限预先附在请求里并限长，唯一的工具是必须调用的 `submit_long_execution_decision`，只能对这次运行选择继续或停止，不能验收、发布或改验收标准。
-- **`TaskToolGateway`**：角色读取任务历史、项目知识与提交经验统一经网关鉴权（复核 `rrt_…`、epoch、发起人实时权限与角色策略），屏蔽跨任务/跨项目引用；支持同一任务多角色在共享工作区协作、按需为并发开发任务分配独立 `git worktree`。
+- **`TaskToolGateway`**：角色读取任务历史、直连项目物理知识卷（`../notes/` / `manager/file-tree`）与保存共享经验笔记统一经网关鉴权（复核 `rrt_…`、epoch、发起人实时权限与角色策略），屏蔽跨任务/跨项目引用；支持同一任务多角色在共享工作区协作、按需为并发开发任务分配独立 `git worktree`。
 
 ## 3. 多后端 Harness 抽象（`src/harness/`、`runner/`）
 

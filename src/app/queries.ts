@@ -1,7 +1,6 @@
 import { taskOriginsForDisplay } from '../tasks/origin-display.js';
 import {taskRelations} from '../tasks/priority.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
-import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskDispatch } from '../dispatch/store.js';
 import { taskWritesDetail } from '../tasks/grants.js';
 import { taskBasis } from '../dispatch/basis.js';
@@ -173,7 +172,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       // A large log's text is in its run's trajectory file; one that fails verification says so instead.
       const logs = rows.map(log => { const { content_ref, ...rest } = log; let text: string; try { text = logContent(store, log); } catch (error) { text = JSON.stringify({ type: 'log_unreadable', ...unreadable(error) }); } return { ...rest, content: text }; })
         .map(faultCause).map(log => {
-        let content = visibleMemorySnapshot(store, row.repository_id, log.content, user.context ? { actor: user.context } : undefined);
+        let content = log.content;
         // Historical legacy model logs may contain private fields. Tool/file contents remain literal public evidence.
         try {
           const value = JSON.parse(content);

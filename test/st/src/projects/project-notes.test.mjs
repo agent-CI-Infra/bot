@@ -134,7 +134,7 @@ test('page edits work before boot; stop, disable, rebuild, manager restart and r
   assert.ok(f.docker.volumes.has(name),'deleting only the computer retains notes');
 });
 
-test('project administrators can store credentials verbatim in notes but cannot access another project', async t => {
+test('project notes redact registered credentials on HTTP write and enforce project boundaries', async t => {
   const f = await managerFixture(t), h = await harness(t,f.manager), { admin } = await setup(h), a = await account(admin);
   await repository(admin,a.id,'101'); await repository(admin,a.id,'202');
   await h.projects.reconcile();
@@ -151,7 +151,7 @@ test('project administrators can store credentials verbatim in notes but cannot 
   }
   const content = '任务流水与一次性输出：secret: '+a.token;
   assert.equal((await member(path+'/repository.md','PUT',{ content })).status,200);
-  assert.equal((await admin(path+'/repository.md')).value.content,content);
+  assert.equal((await admin(path+'/repository.md')).value.content,'任务流水与一次性输出：secret: [REDACTED]');
   const redactor = new Redactor(); redactor.add(a.token); const logs=[];
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('secret','101','review.issue','running','fixture')");
   const task = {...h.store.get("SELECT * FROM tasks WHERE id='secret'"),workspace_id:id(),generation:1,attempt:1};
@@ -174,14 +174,14 @@ test('project-page HTTP APIs accept Unicode names and large contents through bot
   t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
   const manager=new ManagerClient(`http://127.0.0.1:${server.address().port}`,token);
   const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  const path='/api/repositories/101/notes',content='任务流水：'+a.token+'\n'+'中文输出🙂'.repeat(131072);
+  const path='/api/repositories/101/notes',content='任务流水：'+a.token+'\n'+'中文输出🙂'.repeat(131072),expected=content.replaceAll(a.token,'[REDACTED]');
   assert.ok(Buffer.byteLength(content)>1500000,'exercises both existing generic JSON body limits');
   for(let i=0;i<33;i++)assert.equal((await admin(path+'/'+i,'PUT',{content:'entry '+i})).status,200);
   for(const name of ['仓库经验','x'.repeat(100),'-commands.txt','.hidden','name #?% with spaces']){
     const endpoint=path+'/'+encodeURIComponent(name);
     assert.equal((await admin(endpoint,'PUT',{content})).status,200);
-    assert.equal((await admin(endpoint)).value.content,content);
-    assert.equal((await new Notes(join(f.projects.notesRoot,'101')).read(name)).content,content);
+    assert.equal((await admin(endpoint)).value.content,expected);
+    assert.equal((await new Notes(join(f.projects.notesRoot,'101')).read(name)).content,expected);
   }
   const listing=(await admin(path)).value;
   assert.equal(listing.files.length,38);assert.ok(!('limits' in listing));
@@ -249,7 +249,7 @@ test('review and development system prompts require useful maintained notes even
   }
 });
 
-test('model responses preserve known credentials in note writes while other output remains redacted',async t=>{
+test('model responses redact known credentials in note writes as well as other output',async t=>{
   const key='model-credential-must-not-be-saved',callId='secret-call';
   const server=createServer(async(req,res)=>{for await(const _ of req);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',tool_calls:[{id:callId,type:'function',function:{name:'write_file',arguments:JSON.stringify({path:'../notes/secret.md',content:key})}}]}}]}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -267,7 +267,7 @@ test('model responses preserve known credentials in note writes while other outp
   pinLegacyTaskConfiguration(h.store, 'model-secret');
   await agentLoop(h.store,{id:'model-secret',repository_id:'101',kind:'review.pr',workspace_id:id()},work,new Redactor(),async()=>{},{});
   const reply=JSON.parse(Buffer.concat(replies));assert.ok(!('rejected_note_calls' in reply));
-  assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,key);
+  assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,'[REDACTED]');
   assert.ok(!JSON.stringify(logs).includes(key));
 });
 

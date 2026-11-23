@@ -2,7 +2,6 @@ import { configuredRedactor } from '../core/redaction.js';
 import { authorizeComputerSpec, sanitizeComputerForActor, type Manager } from '../projects/service.js';
 import { superAdmin, type Actor } from '../app/auth.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
-import { visibleMemorySnapshot } from '../memory/access.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
@@ -248,7 +247,7 @@ export class ManagementService {
       if(section==='logs'){
         const rows=this.store.all('SELECT id,content,content_ref,created_at FROM task_logs WHERE task_id=? ORDER BY rowid LIMIT ? OFFSET ?',target.task_id!,limit+1,offset),more=rows.length>limit;rows.splice(limit);
         const text=(r:Record<string,any>)=>{try{return logContent(this.store,r);}catch(error){return JSON.stringify({type:'log_unreadable',...unreadable(error)});}};
-        return traceClean({logs:rows.map(({content_ref,...r})=>({...r,source_ref:'task_logs:'+r.id,content:String(visibleMemorySnapshot(this.store,target.project_id!,text({...r,content_ref}),{actor})).slice(0,24000)})),next_offset:more?offset+limit:null});
+        return traceClean({logs:rows.map(({content_ref,...r})=>({...r,source_ref:'task_logs:'+r.id,content:String(text({...r,content_ref})).slice(0,24000)})),next_offset:more?offset+limit:null});
       }
       if(section==='roles')return traceClean(roleApi(this.store,this.user(actor),'GET',new URL('http://local'+base+'/roles?after='+offset+'&limit='+limit),{})!);
       if(section!=='detail'){

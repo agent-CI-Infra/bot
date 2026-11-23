@@ -727,9 +727,10 @@ export class Projects {
     this.validate(repo);
     const directories=id==='directories';
     if(id!==undefined&&!directories&&!validNoteId(id))throw new ManagerError('invalid_note_id',400);
-    const allowed=directories?['path']:id===undefined?['path','content','actor']:action==='move'?['path','expected_revision','actor']:action==='restore'?['revision','expected_revision','actor']:method==='DELETE'?['expected_revision','actor']:['content','expected_revision','actor'];
+    const allowed=directories?['path']:id===undefined?['path','content','actor','create_parents']:action==='move'?['path','expected_revision','actor']:action==='restore'?['revision','expected_revision','actor']:method==='DELETE'?['expected_revision','actor']:['content','expected_revision','actor'];
     if(Object.keys(input).some(key=>!allowed.includes(key)))throw new ManagerError('invalid_input',400);
     if(input.actor!==undefined&&(typeof input.actor!=='string'||input.actor.length>240))throw new ManagerError('invalid_input',400);
+    if(input.create_parents!==undefined&&typeof input.create_parents!=='boolean')throw new ManagerError('invalid_input',400);
     if(id!==undefined&&!directories&&method!=='GET'&&(!Number.isSafeInteger(input.expected_revision)||input.expected_revision<1))throw new ManagerError('invalid_note_revision',400);
     if(action==='restore'&&(!Number.isSafeInteger(input.revision)||input.revision<1))throw new ManagerError('invalid_note_revision',400);
     return this.lock(repo,async()=>{
@@ -739,8 +740,8 @@ export class Projects {
       try{
         if(directories&&method==='POST')return await tree.createDirectory(input.path);
         if(directories&&method==='DELETE')return await tree.deleteDirectory(input.path);
-        if(id===undefined&&method==='GET')return await tree.list({directory:query.directory??'',query:query.query??'',includeDeleted:query.include_deleted==='1',deletedOnly:query.deleted_only==='1',recursive:query.recursive==='1'});
-        if(id===undefined&&method==='POST')return await tree.create(input.path,input.content,actor);
+        if(id===undefined&&method==='GET')return await tree.list({directory:query.directory??'',query:query.query??'',includeDeleted:query.include_deleted==='1',deletedOnly:query.deleted_only==='1',recursive:query.recursive==='1',preview:query.preview==='1'});
+        if(id===undefined&&method==='POST')return await tree.create(input.path,input.content,actor,{createParents:input.create_parents===true});
         if(method==='GET'&&action==='versions')return await tree.versions(id);
         if(method==='GET'&&!action)return await tree.read(id,query.revision===undefined?undefined:Number(query.revision));
         if(method==='PUT'&&!action)return await tree.save(id,input.content,input.expected_revision,actor);

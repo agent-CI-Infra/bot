@@ -27,6 +27,7 @@ import { commandTimeoutLimit } from './agent/command.js';
 import { AgentToolManager, AgentToolsAutoInstaller, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tools.js';
 import { agentToolsRetainCount } from './app/agent-tools.js';
 import { activeCliVersions } from './roles/role-run.js';
+import { migrateLegacyProjectMemories } from './memory/migration.js';
 
 process.umask(0o077);
 commandTimeoutLimit();
@@ -155,6 +156,11 @@ server.listen(8791, '0.0.0.0', () => {
   // payloads written before #436 out of their rows, slice by slice.
   const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
   void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
+  const runLegacyMemoryMigration = () => migrateLegacyProjectMemories(store, manager).then(res => {
+    if (res.migrated || res.failed) console.log(`[memory] legacy migration: migrated=${res.migrated} skipped=${res.skipped} failed=${res.failed}`);
+    if (res.failed && !stopping) setTimeout(() => { if (!stopping) void runLegacyMemoryMigration(); }, 30_000).unref();
+  }).catch(error => console.error('[memory] legacy migration failed:', error));
+  void runLegacyMemoryMigration();
   storage.start();modelCatalog(store).start();vacuum.start();retention.start();agentToolsAuto.start();
 });
 let stopping = false;

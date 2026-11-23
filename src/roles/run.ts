@@ -20,9 +20,7 @@ import { githubReadScopes } from './permissions.js';
 import { randomId } from '../core/security.js';
 import { traceEvent,endRun,withRunTraceScope } from '../tasks/trace.js';
 import { roleHarness } from './harness.js';
-import { memoryTools } from '../memory/project.js';
-import { taskTraceAccess, visibleMemorySnapshot, memoryViewSnapshot, taskMemoryAccess } from '../memory/access.js';
-import { ProjectMemory } from '../memory/project.js';
+import type { NotesBridge } from '../memory/project.js';
 import { TaskError,stop } from '../agent/common.js';
 import { finalizationReserve } from '../agent/tool-context.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,entryEnabled,type Entry,type RoleConfiguration } from './definition.js';
@@ -158,7 +156,7 @@ export interface PreparedRun<T> {
 }
 export interface RoleRunHandle<T> { readonly operation_id:string; readonly run_id:string|null; readonly lease_epoch:number|null; readonly context:RunContext|null; readonly settled:boolean }
 interface Handle<T> extends RoleRunHandle<T> { prepared:PreparedRun<T>; controller:AbortController; done:Promise<T>; settled:boolean; cancelled:string|null }
-const handles=new Map<string,Handle<any>>(),gateway=(s:Store)=>new TaskToolGateway(s);
+const handles=new Map<string,Handle<any>>(),gateway=(s:Store,notes?:NotesBridge)=>new TaskToolGateway(s,notes);
 const tokenTtl=15*60_000;
 // Explicit turn/output limits replace entry defaults; metered also counts cumulative usage of the role instance.
 const perRunBudget=(snapshot:Resolved['snapshot'])=>snapshot.budget.id==='bounded'||snapshot.budget.id==='metered';
@@ -172,7 +170,7 @@ function assignmentScope(s:Store,task:Row,instance:Row,assignment?:string){
 }
 const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={session_bound:['session_bound','progress'],message:['message','progress'],tool:['tool_call','observation'],artifact:['artifact','artifact'],permission:['permission','denied'],configuration:['configuration','progress'],turn:['turn','progress'],usage:['usage','budget']};
 
-async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
+async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined}):Promise<PreparedRun<T>>{
  const s=spec.store,task=spec.task,workflow=String(task.kind??'task.request'),{resolved,continuation}=state;let instance=state.instance;
  const sourceFence=taskAuthorizationFence(s,task,role);
  let resultMounted=false;
@@ -181,18 +179,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
   s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
  }
- const memoryView=memoryViewSnapshot(s,{...task,active_role:role}),visibleIds=new Set(memoryView.entries.map(item=>item.id));
- const knowledgeFence=JSON.stringify({scope:memoryView.scope,ids:[...visibleIds]});
- let previousView:{scope:string;ids:string[]}|null=null;
- try{const saved=JSON.parse(instance.knowledge_fence??'null');if(typeof saved?.scope==='string'&&Array.isArray(saved.ids)&&saved.ids.every((id:unknown)=>typeof id==='string'))previousView=saved;}catch{}
- // Old hash-only checkpoints cannot prove which memories were retained, so rebuild them once on upgrade.
- const withdrawn=previousView?.scope!==memoryView.scope||previousView.ids.some(id=>!visibleIds.has(id));
- const previousIds=new Set(previousView?.ids??[]),newMemories=!withdrawn&&instance.sequence>0?memoryView.entries.filter(item=>!previousIds.has(item.id)):[];
- if(instance.knowledge_fence!==knowledgeFence){
-  if(withdrawn&&instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'role_memory_view_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_task_records'},task.trace_run_id);}
-  s.run('UPDATE role_instances SET knowledge_fence=? WHERE id=?',knowledgeFence,instance.id);instance.knowledge_fence=knowledgeFence;
- }
- const scopedInput=()=>visibleMemorySnapshot(s,task.repository_id,(()=>{try{return taskRecordContext(JSON.parse(shared.sourceInput));}catch{return {input:shared.sourceInput};}})(),taskTraceAccess(s,{...task,active_role:role}));
+ const scopedInput=()=>{try{return taskRecordContext(JSON.parse(shared.sourceInput));}catch{return {input:shared.sourceInput};}};
  const definition=JSON.parse(instance.definition),harness=instance.harness,snapshot=resolved.snapshot,driver=roleHarness(harness),persistence=driver.session;
  // The role's explicit model wins; otherwise the caller's pinned execution model, which follows the workflow/project order.
  // A driver with its own model or local project-computer config gets no project model at all.
@@ -203,7 +190,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
  try{
   // rebuildContext: the caller supplies the durable facts, so no stored conversation is restored (as for QA).
   const rebuild=options.rebuildContext;
-  const stored=visibleMemorySnapshot(s,task.repository_id,cleanRoleMessages(JSON.parse(instance.session)),taskTraceAccess(s,{...task,active_role:role})),messages=rebuild||role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
+  const stored=cleanRoleMessages(JSON.parse(instance.session)),messages=rebuild||role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
   // A crash can leave an assistant tool batch partially answered. Mark absent receipts as
   // interrupted, never fabricate their observations; the role must query durable task facts.
   for(let i=0;i<messages.length;i++){const msg=messages[i];if(msg.role!=='assistant'||!msg.tool_calls?.length)continue;const replies=new Set<string>();let end=i+1;while(messages[end]?.role==='tool'){replies.add(messages[end].tool_call_id);end++;}const missing=msg.tool_calls.filter((c:any)=>!replies.has(c.id)).map((c:any)=>({role:'tool',tool_call_id:c.id,content:JSON.stringify({error:'interrupted_observation',instruction:'Inspect task records before repeating any action.'})}));messages.splice(end,0,...missing);i=end+missing.length-1;}
@@ -236,10 +223,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const authority=(tool?:string)=>{assertTaskRole(s,task,role);const reason=roleAuthority(s,task.repository_id,snapshot,governed(tool)?undefined:tool,direct);if(reason){denied(tool??null,reason);stop('role_authority_revoked','waiting_configuration',`${role}：${reason}`);}if(tool&&!governed(tool)&&!taskToolAllowed(s,task,role,tool)){denied(tool,'source_permission_ceiling');stop('role_authority_revoked','waiting_permission','源请求不允许此能力。');}};
   // Flat permissions filter every offered tool, including the submission tool.
   const allowedTools=snapshot.capability.tools;
-  const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
   // grant_writes (#814) is a task-management tool of the project's controller only.
   const managedTools=snapshot.kind==='evaluator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
-  const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
+  const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...(snapshot.skills?[skillTool]:[])].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   const cmdConfigured=configuredCommandTimeout(s,task,role),cmdBudget=cmdConfigured!==null?resolveCommandTimeout(s,task,role,cmdConfigured):null;
   const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
@@ -296,12 +282,15 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
       }
      }
      if(taskManagementTools.some(t=>t.function.name===name)){try{return new TaskCommands(s).tool(caller(),name,args);}catch(error){const code=String((error as any).code??'');if(['unknown_field','invalid_action','invalid_input','task_not_retryable','task_not_owned','task_not_found','task_management_forbidden','task_executor_forbidden','task_scope_forbidden'].includes(code))return {error:code,instruction:'This action was refused. Continue with the offered task records or arrange authorized work; the refusal does not authorize broader access.'};throw error;}}
-     // Task facts are expanded through the gateway with this run's token: the same server-side checks for every adapter.
-     if(b&&gatewayToolNames.includes(name))return gateway(s).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch,role});
+     // Task facts and project notes are expanded through the gateway with this run's token: the same server-side checks for every adapter.
+     const notesWorkspace=env.roleWorkspace??spec.roleWorkspace??env.pi?.workspace??spec.pi?.workspace;
+     const notesManager=notesWorkspace?.manager??env.containerOptions?.manager??spec.containerOptions?.manager;
+     const notesBridge:NotesBridge|undefined=notesWorkspace?{call:notesWorkspace.call.bind(notesWorkspace),manager:notesManager}:notesManager?{manager:notesManager}:undefined;
+     if(b&&gatewayToolNames.includes(name))return gateway(s,notesBridge).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch,role});
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},summaries:skillSummariesFromFiles(files),files:files.map(({content,...f})=>f)};
       const file=resolveSkillBundleFile(files,args?.path);if(!file)return {error:'skill_file_not_found',files:files.map(f=>f.path)};
       traceEvent(s,task.id,'skill_read',{role,instance_id:instance.id,bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},path:file.path,sha256:file.sha256},task.trace_run_id,'role:'+role);return {path:file.path,sha256:file.sha256,content:file.content};}
-     if(memoryAliases.some(t=>t.function.name===name))return spec.execute?.(name.replace('_role_','_project_'),{...args,role_scope:role});return spec.execute?.(name,args);})();
+     return spec.execute?.(name,args);})();
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},
    harnessResources:snapshot.skills?skillFiles(s,task.repository_id,snapshot.skills).map(({path,content})=>({path,content})):[],
@@ -312,10 +301,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
    prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,...(snapshot.kind!=='evaluator'&&s.get('SELECT 1 FROM tasks WHERE id=?',task.id)?{task_facts:new TaskRecords(s).facts(task.id)}:{}),assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
-    new_readable_memories:newMemories.length?{items:newMemories,instruction:'These memories became readable since your previous run. Read relevant bodies with the offered knowledge tools; this notice contains titles only.'}:undefined,
     skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,summaries:skillSummariesFromFiles(skillFiles(s,task.repository_id,snapshot.skills)),files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,
-    prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:visibleMemorySnapshot(s,task.repository_id,shared.memory,taskTraceAccess(s,{...task,active_role:role}))}}),
+    prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null}}),
    requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,harness_version:driver.version,assignment_id:assignment,recovery_mode:recover,snapshot_id:resolved.id},
    session:{messages:messages.length&&messages[0]?.role==='system'?[{role:'system',content:definition.prompt},...messages.slice(1)]:messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
   resultMounted=!!(wrapped.roleWorkspace||wrapped.pi?.workspace||wrapped.containerOptions?.manager)&&!!wrapped.harnessAccess?.commands;
@@ -523,12 +511,11 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  if(instance.snapshot_id!==resolved.id&&(!(resolved.snapshot.legacy&&!instance.snapshot_id)||legacyGuidanceSession(instance)))instance=rebind(s,task,instance,resolved,'delegation').instance;
  const sourceInput=spec.prompt;
  const priorRun=s.get("SELECT id,stop_reason,assignment_id FROM task_runs WHERE role_instance_id=? ORDER BY rowid DESC LIMIT 1",instance.id),priorSubmission=priorRun?.stop_reason==='role_result_invalid'?s.get("SELECT id FROM task_history WHERE run_id=? AND type='tool_started' AND json_extract(data,'$.name')=? ORDER BY id DESC LIMIT 1",priorRun.id,spec.finish?.name??''):null;
- let memory:any;try{memory={availability:'available',...new ProjectMemory(s,taskMemoryAccess(s,{...task,active_role:role})).search(task.repository_id,'',{limit:5,baseline:executionBaseline(task)})};}catch{memory={availability:'unavailable',instruction:'Project memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
  const previousRole=task.active_role;task.active_role=role;
  try{
  return await withRunTraceScope(String(task.id??''),typeof task.trace_run_id==='string'?task.trace_run_id:null,role,async()=>{
  for(;;){
-  const prepared=await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance,continuation},{sourceInput,priorRun,priorSubmission,memory});
+  const prepared=await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance,continuation},{sourceInput,priorRun,priorSubmission});
   const handle=await startRoleRun(prepared);
   try{const collected=await collectRoleRun(handle);return collected;}
   catch(error){
@@ -553,7 +540,7 @@ export const roleRuns={
   const s=spec.store,task=spec.task,instance=roleInstance(s,task,role,harnessOverride,options.entryExecutor),resolved=taskRole(s,task,role,harnessOverride,false,undefined,spec.model,options.entryExecutor);
   const bound=instance.snapshot_id!==resolved.id&&(!(resolved.snapshot.legacy&&!instance.snapshot_id)||legacyGuidanceSession(instance))?rebind(s,task,instance,resolved,'delegation').instance:instance;
   const previousRole=task.active_role;task.active_role=role;
-  try{return await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance:bound,continuation:null},{sourceInput:spec.prompt,priorRun:undefined,priorSubmission:null,memory:{availability:'not_loaded'}});}finally{task.active_role=previousRole;}
+  try{return await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance:bound,continuation:null},{sourceInput:spec.prompt,priorRun:undefined,priorSubmission:null});}finally{task.active_role=previousRole;}
  },
  start:startRoleRun,events:roleRunEvents,checkpoint:checkpointRoleRun,cancel:cancelRoleRun,collect:collectRoleRun,
  async recover<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,previousRunId:string,checkpointRef?:string|null,harnessOverride?:string){

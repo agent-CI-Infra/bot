@@ -8,7 +8,7 @@ import { developmentTeam } from '../roles/development.js';
 import { controlled } from '../roles/run.js';
 import { runTeam } from '../roles/team.js';
 import { roleWorkspaces, executorWorkspace } from '../roles/workspace.js';
-import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
+import { memoryTools, memoryTool } from '../memory/project.js';
 import { checkpoint } from '../tasks/checkpoint.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTools, taskRecordInstructions } from '../tasks/record-tools.js';
@@ -17,7 +17,7 @@ import { type Workspace } from './workspace.js';
 import { workspaceProfile, roleAssignmentContext } from './profiles.js';
 import { autoMergePolicy } from '../github/merge-policy.js';
 import { runAgent, type AgentSpec } from './runtime.js';
-import { type Redactor, stop, blobSha, TaskError } from './common.js';
+import { type Redactor, stop, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
 import { validateReview, validateReply } from '../review/findings.js';
 import { reviewUpdateCursor } from '../review/sessions.js';
@@ -72,7 +72,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       return executeTaskSubscriptionTool(store, task, tool.function.name, redactor.clean(args), { log: entry => workspace.log(entry) });
     };
   }
-  for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},workspace);};}
+  for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),workspace);};}
   // An Issue's development reports its milestones on the Issue's status comment (#1047): the engine offers the handler.
   if (platform[milestoneToolName]) profile.tools.push(milestoneTool as any);
   // Legacy review and Actions analysis under the project controller, and development under its team, run through runTeam below.
@@ -83,7 +83,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   if (choosing) profile.tools.push(...workspaceTools as any);
   const system = profile.system + '\n' + taskRecordInstructions + (choosing ? '\n' + workspaceInstructions : '');
   const subscriptionCtx = store.get('SELECT 1 FROM tasks WHERE id=?', task.id) ? taskEventSubscriptionContext(store, String(task.id)) : undefined;
-  context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null,...(subscriptionCtx?{event_subscriptions:subscriptionCtx}:{})};
+  context={...context,structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null,...(subscriptionCtx?{event_subscriptions:subscriptionCtx}:{})};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
   if(!profile.tools.some(t=>t.function.name==='read_tool_result'))profile.tools.push(readToolResult);
   const entryBudget = resolveCommandTimeout(store, task, 'dev', null);
@@ -150,7 +150,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         if (note ? !profile.capabilities.workspace.notes : !profile.capabilities.workspace.write)
           return { error: note ? 'notes_write_not_allowed' : 'review_repository_write_forbidden' };
         if (note) return workspace.call(key, { type: 'workspace_write', path: args.path,
-          base64: Buffer.from(args?.content ?? '').toString('base64'), offset: 0, final: true, mode: '100644' });
+          base64: Buffer.from(redactor.text(String(args?.content ?? ''))).toString('base64'), offset: 0, final: true, mode: '100644' });
         await workspace.write(key, args?.path, Buffer.from(args?.content ?? '')); return { written: true };
       }
       if (name === 'run_command') return runCommand(workspace, key, args, null, spaces.role);
