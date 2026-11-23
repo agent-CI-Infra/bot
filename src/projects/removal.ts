@@ -44,8 +44,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ["DELETE FROM settings WHERE key IN ('roles:'||?,'rules:trusted_sha:'||?)", 2],
     ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM manager_dispatch_prompts WHERE repository_id=?', 1], ['DELETE FROM manager_revisions WHERE repository_id=?', 1], ['DELETE FROM manager_rules WHERE repository_id=?', 1], ['DELETE FROM manager_migrations WHERE repository_id=?', 1], ['DELETE FROM dispatch_threads WHERE repository_id=?', 1], ['DELETE FROM dispatch_events WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1], ['DELETE FROM project_labels WHERE repository_id=?', 1], ['DELETE FROM rule_imports WHERE repository_id=?', 1],
     // Models only this repository may use, with their prices and grants; a shared model only loses its grant to this repository.
-    // Any group binding or legacy service role pointing at this project's own model loses that model reference so it stops cleanly.
-    [`UPDATE channel_service_bindings SET model_id=NULL WHERE model_id IN (${models})`, 1],
+    // Any legacy service role pointing at this project's own model loses that model reference so it stops cleanly.
     [`UPDATE service_roles SET model_id=NULL WHERE model_id IN (${models})`, 1],
     ['DELETE FROM service_roles WHERE project_id=? AND id NOT IN (SELECT service_role_id FROM channel_service_bindings)', 1], ['UPDATE service_roles SET enabled=0 WHERE project_id=?', 1],
     [`UPDATE policies SET model_id=NULL WHERE model_id IN (${models})`, 1], [`DELETE FROM model_pricing WHERE model_id IN (${models})`, 1],
@@ -56,6 +55,17 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ['DELETE FROM project_admin_assignments WHERE repository_id=?', 1], ['DELETE FROM repo_integrations WHERE repository_id=?', 1],
     ['DELETE FROM github_repository_collaborators WHERE repository_id=?', 1], ['DELETE FROM github_repository_assignees WHERE repository_id=?', 1], ['DELETE FROM github_repository_member_cache WHERE repository_id=?', 1],
     ['DELETE FROM public_board_settings WHERE repository_id=?', 1], ['DELETE FROM public_board_consents WHERE repository_id=?', 1], ['DELETE FROM public_board_jobs WHERE repository_id=?', 1], ['DELETE FROM installed_repositories WHERE repository_id=?', 1], ['DELETE FROM repositories WHERE id=?', 1]];
+  // Clear group bindings pointing at this project's own models before deleting models, bumping revision and auditing just like releaseModel().
+  if (store.hasTable('channel_service_bindings') && store.hasTable('models') && store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'model_id')) {
+    const affected = store.all(`SELECT id FROM channel_service_bindings WHERE model_id IN (${models})`, id);
+    if (affected.length) {
+      const time = Date.now();
+      for (const row of affected) {
+        store.run('UPDATE channel_service_bindings SET model_id=NULL,revision=revision+1,updated_at=? WHERE id=?', time, row.id);
+        store.audit('system', 'channel.service_binding.model_cleared', row.id);
+      }
+    }
+  }
   for (const [sql, count] of statements) {
     const table = /^(?:DELETE FROM|UPDATE) (\w+)/.exec(sql)![1]!;
     if (store.hasTable(table)) store.run(sql, ...Array<string>(count).fill(id));

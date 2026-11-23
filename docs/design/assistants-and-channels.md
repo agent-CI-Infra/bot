@@ -19,10 +19,10 @@
 
 - **管理助手单例与群绑定内联配置**：
   - `service_roles` 仅向控制台暴露全局唯一的内置 `management-assistant`（固定全目录权限，与当前用户实时权限取交集，在「全局设置 → 管理助手设置」`#/settings/management-assistant` 维护，旧路由 `#/settings/service-roles` 兼容跳转）。
-  - 群聊助手不再依赖独立服务角色模板，而是将 `model_id`、`prompt` 与 `harness` 直接内联存储在 `channel_service_bindings` 上，与仓库范围、三维权限和发言方式一页配置；启动迁移将存量群绑定所引用角色的模型、后端与职责/提示词无损回填，并保持未修改绑定的 `service_role_id` 与授权围栏不变。
+  - 群聊助手不再依赖独立服务角色模板，而是将 `model_id`、`prompt`（上限 35,000 字符，完整容纳旧职责 2,000 + 提示词 32,000 合并值）与 `harness` 直接内联存储在 `channel_service_bindings` 上，与仓库范围、三维权限和发言方式一页配置；启动迁移将存量群绑定所引用角色的模型、后端与职责/提示词无损回填，并保持未修改绑定的 `service_role_id` 与授权围栏不变；存量绑定首次重存切换到 `'group-assistant'` 时，在同一事务中同步迁移 `assistant_homes.service_role_id` 以保留持久 `~/` 文件（仓库范围缩小时仍按 `scope_narrowed` 封存旧代次）。
 - **独立子任务（`service_role_own_tasks`）**：管理助手与群聊助手均可调用 `start_own_task` / `continue_own_task` 在隔离上下文中深度分析并只带回结论；独立任务沿用当前会话权限与授权围栏，不进入业务 `tasks` 表。
 - **阶段消息与静默结束**：管理助手与群聊助手默认配备 `send_message`（单轮上限 10 条，每并入新消息 +1）用于长任务进度播报；在非 `@` 群消息或会话定时任务中额外提供 `stay_silent`，显式区分「保持安静」与「需要回复」。
-- **模型隔离与计费**：管理助手请求记入 `model_requests.service_role_id = 'management-assistant'`；群聊请求记入 `service_role_id`（新建/更新为 `'group-assistant'`）与 `conversation_id = chat.id`，单仓库群同时关联 `repository_id` 计入项目成本，跨项目群按群会话统计不强行拆分。群绑定强制校验所选模型对范围内全部仓库均已授权，每轮请求前实时复核，删除模型或项目时同步清理对应群绑定的 `model_id` 引用并在删除确认中提示受影响群。
+- **模型隔离与计费**：管理助手请求记入 `model_requests.service_role_id = 'management-assistant'`；群聊请求记入 `service_role_id`（新建/更新为 `'group-assistant'`）与 `conversation_id = chat.id`，单仓库群同时关联 `repository_id` 计入项目成本，跨项目群按群会话统计不强行拆分。群绑定强制校验所选模型对范围内全部仓库均已授权，每轮请求前实时复核（组织范围若使用受限共享模型，新增未授权仓库时按 `modelGaps` 失败关闭暂停，空组织拒绝受限共享模型）；删除模型或项目时同步清空对应群绑定的 `model_id` 引用、递增 `revision` 并记 `channel.service_binding.model_cleared` 审计，且在删除确认中提示受影响群。
 
 ## 3. 飞书渠道架构与本地消息账本（`src/channels/`）
 

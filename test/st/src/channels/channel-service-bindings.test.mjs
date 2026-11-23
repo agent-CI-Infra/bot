@@ -16,6 +16,7 @@ import { digest } from '../../../../dist/core/security.js';
 import { ChannelServiceBindings } from '../../../../dist/channels/service-bindings.js';
 import { serviceRolesApi } from '../../../../dist/service-roles/api.js';
 import { deleteProjectRecords } from '../../../../dist/projects/removal.js';
+import { OwnTasks } from '../../../../dist/service-roles/own-tasks.js';
 
 // Groups bind one service role and one project scope (#312). All GitHub and Feishu traffic goes to local protocol fixtures.
 const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -828,11 +829,22 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
         .map(g => [g.id, revision(h.store, g.grantor_id)]) }));
   };
   const fences = [previousFence(f.chat.id), previousFence(chatB.id)], revisions = h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision);
+  // Seed pre-upgrade private memory and an own task under the legacy service_role_id and fence.
+  const bindingA = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', f.chat.id);
+  const legacyMemOwner = { service_role_id: 'custom-legacy', kind: 'channel', owner_id: f.chat.id, principal_id: bindingA.principal_id, fence: fences[0] };
+  serviceMemory(h.store, legacyMemOwner, 'remember_role_memory', { key: 'release-window', content: '周四晚发布' });
+  new OwnTasks(h.store);
+  h.store.run(`INSERT INTO service_role_own_tasks(id,service_role_id,owner_kind,owner_id,principal_id,fence,title,state,history,created_at,updated_at)
+    VALUES('own-legacy-1','custom-legacy','channel',?,?,?,'升级前分析','completed',?,1,1)`,
+    bindingA.id, bindingA.principal_id, fences[0], h.store.secrets.seal({ rounds: [{ instruction: '核对', conclusion: '正常', at: 1 }] }, 'own-task:own-legacy-1'));
   await h.stop(); await h.start();
   // The restarted store has migrated permissions + inline assistant fields without incrementing revision or rotating fences.
   const restarted = new ChannelServiceBindings(h.store, undefined);
   assert.deepEqual([restarted.fence(f.chat.id), restarted.fence(chatB.id)], fences);
   assert.deepEqual(h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision), revisions);
+  // Pre-upgrade private memory and own tasks remain accessible under the preserved fence & legacy service_role_id.
+  assert.equal(serviceMemory(h.store, { ...legacyMemOwner, fence: restarted.fence(f.chat.id) }, 'read_role_memory', { key: 'release-window' }).content, '周四晚发布');
+  assert.deepEqual(new OwnTasks(h.store).list({ service_role_id: 'custom-legacy', kind: 'channel', owner_id: bindingA.id, principal_id: bindingA.principal_id, fence: restarted.fence(f.chat.id) }).own_tasks.map(r => r.task_id), ['own-legacy-1']);
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.level_migrated'").n, 2);
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.assistant_migrated'").n, 2);
   const views = (await f.admin('/api/channels/service-bindings')).value.bindings, view = chat => views.find(b => b.chat_id === chat);
@@ -850,13 +862,86 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
     system = body.messages[0].content; const seen = observations(body);
     if (!seen.length) return call(res, 'create_project_task', { repository: repo(101), request: '迁移后仍可派活', contract });
     if (seen.length === 1) return call(res, 'manage_project_task', { repository: repo(101), task_id: seen[0].result.id, operation: 'pause', expected_revision: 'x' });
+    if (seen.length === 2) return call(res, 'read_role_memory', { key: 'release-window' });
     return say(res, '已派活。');
   };
   assert.equal((await done(f, await post(h, f.id, groupMessage('迁移后派个活')))).state, 'completed');
-  const [created, paused] = observations(f.requests.at(-1));
+  const [created, paused, mem] = observations(f.requests.at(-1));
   assert.equal(created.state, 'succeeded', JSON.stringify(created)); assert.equal(paused.error, 'operation_not_allowed', 'pausing was never part of the old set');
+  assert.equal(mem.content, '周四晚发布', 'upgraded turn still reads pre-upgrade private memory');
   assert.match(system, /负责协助派活[^]*先说结论/);
   assert.doesNotMatch(system, /已被废弃/);
+  // An untouched legacy binding whose legacy service role is disabled (e.g. by project deletion) pauses until re-saved.
+  h.store.run("UPDATE service_roles SET enabled=0 WHERE id='custom-legacy'");
+  const disabledView = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === f.chat.id);
+  assert.deepEqual([disabledView.state, disabledView.error], ['paused', 'service_role_unavailable']);
+  const recovered = await f.bind({ scope: { kind: 'repositories', repositories: ['101'] }, model_id: f.assistantModel.id, prompt: '恢复后的提示', expected_revision: disabledView.revision });
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.value));
+  assert.deepEqual([recovered.value.state, recovered.value.error], ['active', null]);
+  assert.equal(h.store.get('SELECT service_role_id FROM channel_service_bindings WHERE chat_id=?', f.chat.id).service_role_id, 'group-assistant');
+});
+
+test('max-length legacy responsibility (2000) + prompt (32000) migrates losslessly and stays editable up to 35000 chars (#1249)', async t => {
+  const f = await fixture(t), { h } = f;
+  const now = new Date().toISOString();
+  const maxResp = 'r'.repeat(2000), maxPrompt = 'p'.repeat(32000);
+  h.store.run(`INSERT INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,harness)
+    VALUES('max-legacy',0,1,'超长角色',?,?,?,?,NULL,1,?,?,'native')`,
+    maxResp, maxPrompt, f.assistantModel.id, JSON.stringify({ github: 'read' }), now, now);
+  assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
+  h.store.run("UPDATE channel_service_bindings SET service_role_id='max-legacy',prompt=NULL,model_id=NULL WHERE chat_id=?", f.chat.id);
+  await h.stop(); await h.start();
+  const migrated = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === f.chat.id);
+  assert.equal(migrated.prompt.length, 34002);
+  assert.equal(migrated.prompt, `${maxResp}\n\n${maxPrompt}`);
+  // Re-saving with the full 34002-char migrated prompt (and up to 35000 chars) succeeds; 35001 chars is rejected.
+  const keep = await f.bind({ scope: { kind: 'repositories', repositories: ['101'] }, model_id: f.assistantModel.id, prompt: migrated.prompt, expected_revision: migrated.revision });
+  assert.equal(keep.status, 200, JSON.stringify(keep.value));
+  assert.equal(keep.value.prompt.length, 34002);
+  const atCap = await f.bind({ scope: { kind: 'repositories', repositories: ['101'] }, model_id: f.assistantModel.id, prompt: 'x'.repeat(35000), expected_revision: keep.value.revision });
+  assert.equal(atCap.status, 200, JSON.stringify(atCap.value));
+  const overCap = await f.bind({ scope: { kind: 'repositories', repositories: ['101'] }, model_id: f.assistantModel.id, prompt: 'x'.repeat(35001), expected_revision: atCap.value.revision });
+  assert.deepEqual([overCap.status, overCap.value.error], [400, 'invalid_field']);
+});
+
+test('organization scope refuses restricted shared models when empty and pauses fail-closed if a new unauthorized repo joins (#1249)', async t => {
+  const f = await fixture(t), { h } = f, bindings = f.service.serviceBindings;
+  const tenant = h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
+  // Create a restricted shared model covering current org repos 101 & 102 only.
+  const restricted = (await f.admin('/api/models', 'POST', { model_name: 'Org-restricted shared', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  await f.admin('/api/models/' + restricted.id + '/projects', 'PUT', { repository_ids: ['101', '102'] });
+  // Empty organization refuses a restricted shared model.
+  h.store.run("INSERT OR IGNORE INTO tenants(id,github_host,github_account_id,display_name) VALUES('github.com:99','github.com','99','empty-org')");
+  const emptyRefused = await f.bind({ scope: { kind: 'organization', organization: 'github.com:99' }, model_id: restricted.id });
+  assert.deepEqual([emptyRefused.status, emptyRefused.value.error], [409, 'channel_service_model_unavailable']);
+  // Organization scope with 101 & 102 accepts the restricted shared model because every current repo is authorized.
+  const bound = await f.bind({ scope: { kind: 'organization', organization: tenant }, model_id: restricted.id });
+  assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  assert.equal(bound.value.state, 'active');
+  // A new repository 103 joins the organization without authorizing the restricted model -> binding pauses fail-closed.
+  const accountId = h.store.get("SELECT account_id FROM repositories WHERE id='101'").account_id;
+  await repository(f.admin, accountId, '103');
+  h.store.run('INSERT OR REPLACE INTO identity_projects(project_id,tenant_id) VALUES(?,?)', '103', tenant);
+  const pausedView = bindings.view(bindings.get(f.chat.id));
+  assert.deepEqual([pausedView.state, pausedView.error, pausedView.model_gaps], ['paused', 'channel_service_model_unavailable', ['fixture/project-103']]);
+  const callsBefore = f.requests.length;
+  f.modelState.respond = async (_body, res) => say(res, '不应回答');
+  const failedTurn = await done(f, await post(h, f.id, groupMessage('新仓库加入后提问')));
+  assert.deepEqual([failedTurn.state, failedTurn.error], ['failed', 'channel_service_model_unavailable']);
+  assert.equal(f.requests.length, callsBefore, 'group fails closed without calling the model when a new org repo lacks model grant');
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('模型不可用') && JSON.stringify(s.content).includes('fixture/project-103')));
+});
+
+test('deleteProjectRecords clears group binding model_id, bumps revision and writes model_cleared audit (#1249)', async t => {
+  const f = await fixture(t), { h } = f;
+  const own = (await f.admin('/api/models', 'POST', { repository_id: '101', model_name: 'Project 101 own', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ['101'] }, model_id: own.id });
+  assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  assert.deepEqual([bound.value.model_id, bound.value.revision], [own.id, 1]);
+  deleteProjectRecords(h.store, '101');
+  const after = h.store.get('SELECT id,model_id,revision FROM channel_service_bindings WHERE chat_id=?', f.chat.id);
+  assert.deepEqual([after.model_id, after.revision], [null, 2]);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='channel.service_binding.model_cleared' AND resource_id=?", after.id));
 });
 
 /** A project administrator as the console sees one: a platform account with config.write on the given projects. */

@@ -150,3 +150,50 @@ test('a default read-only group and a legacy computer=deny binding both use the 
   assert.equal(seen[1].running, true);
   assert.equal(f.assistant.commands.at(-1).keep_background, true);
 });
+
+test('re-saving a pre-#1249 legacy binding keeps its assistant HOME generation and ~/ files while scope narrowing still seals it (#1249)', async t => {
+  const f = await fixture(t);
+  const chat = await boundGroup(f, ['101', '102'], 'oc_group_legacy');
+  const owner = ownerId({ kind: 'group', subject: chat.id, tenant: chat.installation_tenant });
+  // Simulate a pre-#1249 binding referencing legacy repository-assistant.
+  const now = new Date().toISOString();
+  f.h.store.run(`INSERT OR REPLACE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,harness)
+    VALUES('repository-assistant',1,1,'仓库问答助手','legacy','',?,?,NULL,1,?,?,'native')`,
+    f.assistantModel.id, JSON.stringify({ github: 'read' }), now, now);
+  f.h.store.run("UPDATE channel_service_bindings SET service_role_id='repository-assistant' WHERE chat_id=?", chat.id);
+  // First turn creates HOME generation 1 under legacy service_role_id='repository-assistant'.
+  script(f, { [chat.id]: [['write_file', { path: '~/legacy-keep.txt', content: 'still here' }]] });
+  assert.equal((await ask(f, 'oc_group_legacy'))[0]?.written, true);
+  assert.deepEqual({ ...f.h.store.get('SELECT generation,service_role_id FROM assistant_homes WHERE owner=?', owner) }, { generation: 1, service_role_id: 'repository-assistant' });
+  assert.equal(readFileSync(join(f.assistant.homes, owner, 'home-1', 'legacy-keep.txt'), 'utf8'), 'still here');
+  // Re-saving the binding to update only its prompt migrates service_role_id to group-assistant without sealing HOME.
+  const before = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  const resaved = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', {
+    scope: { kind: 'repositories', repositories: ['101', '102'] },
+    model_id: f.assistantModel.id,
+    prompt: '更新后的群聊提示词。',
+    enabled: true,
+    expected_revision: before.revision,
+  });
+  assert.equal(resaved.status, 200, JSON.stringify(resaved.value));
+  assert.equal(f.h.store.get('SELECT service_role_id FROM channel_service_bindings WHERE chat_id=?', chat.id).service_role_id, 'group-assistant');
+  assert.deepEqual({ ...f.h.store.get('SELECT generation,service_role_id FROM assistant_homes WHERE owner=?', owner) }, { generation: 1, service_role_id: 'group-assistant' });
+  assert.deepEqual(f.h.store.all('SELECT * FROM assistant_home_sealed WHERE owner=?', owner), []);
+  // Next turn reads ~/legacy-keep.txt intact on the same generation 1.
+  script(f, { [chat.id]: [['read_file', { path: '~/legacy-keep.txt' }]] });
+  assert.equal((await ask(f, 'oc_group_legacy'))[0]?.content, 'still here');
+  assert.equal(f.h.store.get('SELECT generation FROM assistant_homes WHERE owner=?', owner).generation, 1);
+  // Narrowing scope from [101, 102] to [101] still seals generation 1 with reason 'scope_narrowed'.
+  const narrowed = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', {
+    scope: { kind: 'repositories', repositories: ['101'] },
+    model_id: f.assistantModel.id,
+    prompt: '更新后的群聊提示词。',
+    enabled: true,
+    expected_revision: resaved.value.revision,
+  });
+  assert.equal(narrowed.status, 200, JSON.stringify(narrowed.value));
+  script(f, { [chat.id]: [['read_file', { path: '~/legacy-keep.txt' }]] });
+  assert.equal((await ask(f, 'oc_group_legacy'))[0]?.error, 'file_not_found');
+  assert.equal(f.h.store.get('SELECT generation FROM assistant_homes WHERE owner=?', owner).generation, 2);
+  assert.deepEqual(f.h.store.all('SELECT generation,reason FROM assistant_home_sealed WHERE owner=?', owner).map(r => ({ ...r })), [{ generation: 1, reason: 'scope_narrowed' }]);
+});
