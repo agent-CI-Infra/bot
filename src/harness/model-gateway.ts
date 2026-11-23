@@ -363,6 +363,13 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
   };
 
   const visibleModelRows = (): Row[] => {
+    if (task.kind === 'channel.service' && task.conversation_id) {
+      return store.all(
+        `SELECT m.* FROM models m JOIN channel_service_bindings b ON b.model_id=m.id WHERE b.chat_id=? AND b.enabled=1 AND ${task.repository_id ? '(m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))))' : 'm.repository_id IS NULL'}`,
+        task.conversation_id,
+        ...(task.repository_id ? [task.repository_id, task.repository_id] : []),
+      );
+    }
     if (task.service_role_id && !task.repository_id) {
       return store.all('SELECT m.* FROM models m JOIN service_roles s ON s.model_id=m.id WHERE m.repository_id IS NULL AND s.id=? AND s.enabled=1', task.service_role_id);
     }

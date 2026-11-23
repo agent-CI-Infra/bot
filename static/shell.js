@@ -503,7 +503,7 @@ function consoleIconName(href) {
   if (/machine|work-computers|assistant-computers/.test(path)) return 'monitor';
   if (/schedules/.test(path)) return 'calendar';
   if (/\/members(\/|$)/.test(path) || /\/users(\/|$)/.test(path)) return 'users';
-  if (/\/basic(\/|$)/.test(path) || /service-roles/.test(path)) return 'sliders';
+  if (/\/basic(\/|$)/.test(path) || /management-assistant|service-roles/.test(path)) return 'sliders';
   if (/onboarding/.test(path)) return 'map';
   if (/\/accounts(\/|$)/.test(path)) return 'bot';
   if (/installations/.test(path)) return 'download';

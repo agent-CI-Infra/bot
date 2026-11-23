@@ -183,7 +183,7 @@ test('a group destination follows its binding: a queued event notification stops
   assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'pending');
   // The maintainer narrows the group to another repository: project 101 is out of its scope now.
   const revision = f.h.store.get('SELECT revision FROM channel_service_bindings').revision;
-  assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: revision })).status, 200);
+  assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: revision })).status, 200);
   const before = f.wire.sent.length;
   const preview = await f.admin('/api/management/query', 'POST', { operation: 'preview_subscription', target, arguments: { subscription } });
   assert.equal(preview.status, 403); assert.equal(preview.value.error, 'channel_service_scope_paused');

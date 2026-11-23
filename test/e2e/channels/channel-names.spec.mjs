@@ -35,7 +35,7 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
     f.wire.state.chatCode = 99991672;
     await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
     await expect(binding).toContainText('保留上次读取的名称'); await expect(binding).toContainText(f.wire.state.chatName);
-    await binding.getByRole('link', { name: '配置仓库与权限', exact: true }).click();
+    await binding.getByRole('link', { name: '配置群聊助手', exact: true }).click();
     await expect(page.getByLabel('助手所在群')).toContainText(`${f.wire.state.chatName} · 示例企业 · 研发助手`);
     await page.goto(f.h.admin + '/#/identity/feishu/conversations');
     const conversations = page.getByLabel('可查看的飞书会话');

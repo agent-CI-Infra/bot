@@ -72,7 +72,7 @@ test('a text preamble followed by a tool call resumes admission and incorporates
 test('an empty model answer closes admission at its finish marker before delayed usage or platform work (#458)', async t => {
   const f = await group(t), finished = gate(t), trailer = gate(t); let calls = 0;
   const binding = f.service.serviceBindings.get(f.chat.id);
-  await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+  await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind:'repositories', repositories:['101'] }, participation:'all', enabled:true, expected_revision:binding.revision });
   observeOutput(f,finished);
   f.modelState.respond = async (_body,res) => {
@@ -91,7 +91,7 @@ test('an empty model answer closes admission at its finish marker before delayed
 test('verified self mentions stay distinct from ambient participation and same-name other targets (#458, #460)', async t => {
   const f = await group(t), held = gate(t); let executing = false, calls = 0;
   const binding = f.service.serviceBindings.get(f.chat.id);
-  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind: 'repositories', repositories: ['101'] }, participation: 'all', enabled: true, expected_revision: binding.revision })).status, 200);
   f.service.serviceSessions.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '核对完成' }; };
   f.modelState.respond = async (body, res) => {
@@ -414,7 +414,7 @@ test('a fence change after completion but before delivery returns undelivered me
 
 async function participation(f, mode) {
   const binding = f.service.serviceBindings.get(f.chat.id);
-  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind: 'repositories', repositories: ['101'] }, participation: mode, enabled: true, expected_revision: binding.revision })).status, 200);
 }
 const toPeer = text => { const e = inGroup(text, 'ou_carol'); e.event.message.mentions = [{ key: '@_user_1', id: { open_id: 'ou_peer' }, name: 'Bob' }]; return e; };

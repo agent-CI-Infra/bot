@@ -84,7 +84,7 @@ test('a group destination of an event subscription stops at preview and before d
     f.h.store.run("INSERT INTO schedule_events(event_key,project_id,type,incident,payload,created_at) VALUES('browser-group-failure','101','task.failed','task:browser-group-failure',?,?)", JSON.stringify({ task_id: 'browser-group-failure', status: 'failed' }), f.now());
     f.worker.fanout(); expect(f.h.store.get('SELECT state FROM notification_outbox').state).toBe('pending');
     const binding = f.h.store.get('SELECT revision FROM channel_service_bindings');
-    expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: binding.revision })).status).toBe(200);
+    expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: binding.revision })).status).toBe(200);
     await editor.getByRole('article', { name: '群里的失败通知', exact: true }).getByRole('button', { name: '编辑订阅', exact: true }).click();
     await page.getByRole('button', { name: '预览事件订阅时间', exact: true }).click();
     await expect(editor.getByRole('alert')).toContainText('目的地或受众需要重新核验');

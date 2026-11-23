@@ -19,8 +19,8 @@ async function fixture(t) {
   const manager = { call: (method, path, input, timeout) => path.startsWith('/v1/assistant-computers') ? assistant.manager.call(method, path, input, timeout)
     : Promise.resolve(method === 'GET' ? { generation: 1, state: 'ready' } : { ok: true, result: {} }) };
   const f = await channelFixture(t, store => ({ engine: new TaskEngine(store, manager), assistantHomes: assistant.homes }));
-  const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-  assert.equal((await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id })).status, 200); await shareAssistantModel(f);
+  await shareAssistantModel(f);
+  f.groupModelId = f.assistantModel.id;
   // Every group bound below may use its assistant computer (#849: an item of the binding's level).
   f.groupPermissions = { computer: 'allow' };
   const service = f.service.management.service.assistants;

@@ -13,13 +13,12 @@ const respond=(res,name,args)=>answer(res,{role:'assistant',content:null,tool_ca
 const say=(res,content)=>answer(res,{role:'assistant',content});
 async function fixture(t,participation='mentions'){
   const f=await channelFixture(t),{h}=f;
-  const role=(await f.admin('/api/service-roles')).value.service_roles.find(r=>r.id==='repository-assistant');
-  await f.admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:role.revision,model_id:f.assistantModel.id});await shareAssistantModel(f);
+  await shareAssistantModel(f);
   roleApi(h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:false,
     roles:[{role_id:'reviewer',harness_ref:{id:'native'},permissions:{task_management:'write',delegation:'deny',commands:'deny',conversation_history:'read'}}]});
   const discovery=inGroup('Discover this group','ou_alice');discovery.event.message.mentions=[];await post(h,f.id,discovery);
   const chat=h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
-  const bound=await f.admin('/api/channels/chats/'+chat.id+'/service-binding','PUT',{service_role_id:'repository-assistant',scope:{kind:'repositories',repositories:['101']},participation,enabled:true,expected_revision:0});
+  const bound=await f.admin('/api/channels/chats/'+chat.id+'/service-binding','PUT',{model_id:f.assistantModel.id,scope:{kind:'repositories',repositories:['101']},participation,enabled:true,expected_revision:0});
   assert.equal(bound.status,200,JSON.stringify(bound.value));
   f.modelState.respond=async(body,res)=>say(res,'Recorded local answer');
   return {...f,chat};
@@ -114,7 +113,7 @@ test('unbound participants and threads share one logical conversation; quiet mes
   assert.equal(f.h.store.get('SELECT count(*) n FROM tasks').n,baseline);
   assert.equal(f.h.store.get("SELECT count(*) n FROM external_identities WHERE external_actor='ou_bob'").n,0);
   // A group scoped to one repository bills the role and that project (#849); it never becomes a task.
-  assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?',f.chat.id).every(r=>r.task_id===null&&r.repository_id==='101'&&r.service_role_id==='repository-assistant'&&r.source_message));
+  assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?',f.chat.id).every(r=>r.task_id===null&&r.repository_id==='101'&&r.service_role_id==='group-assistant'&&r.source_message));
 });
 
 test('other bots are recorded without replies and their messages reach the next human mention',async t=>{

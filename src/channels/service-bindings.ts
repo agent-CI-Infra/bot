@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
-import { managementAssistant, modelGaps, repositoryAssistant, serviceRole } from '../service-roles/roles.js';
+import { defaultGroupAssistantPrompt, defaultSharedModel, groupAssistant, managementAssistant, modelGaps, modelServes, repositoryAssistant, serviceRole } from '../service-roles/roles.js';
 import { githubResources, groupPermissionItems, groupTaskModes, normalizePermissions, permissionItems, permitsManagement, retiredPermissionItems, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
@@ -9,11 +9,11 @@ import type { ChannelEvent } from './types.js';
 import { tenantName } from './applications.js';
 import { chatProfile } from './profiles.js';
 
-// A group binds one service role, one project scope (a whole organization or chosen repositories) and the group's own
-// permission level (#849). The scope is held as scoped_grants of a principal owned by the binding; each grant names the
-// maintainer who granted it. At run time a group can use a project only while the binding's level and that grantor's own
-// current authority both still allow it; GitHub writes are further limited by what the App installation grants. The role
-// supplies the prompt and the model only. Speakers are not checked: the console configuration alone decides what the
+// A group binding owns one project scope (a whole organization or chosen repositories), the group's own permission level,
+// and its assistant configuration: model, prompt and Agent harness (#849, #1206, #1249). The scope is held as scoped_grants
+// of a principal owned by the binding; each grant names the maintainer who granted it. At run time a group can use a project
+// only while the binding's level and that grantor's own current authority both still allow it; GitHub writes are further
+// limited by what the App installation grants. Speakers are not checked: the console configuration alone decides what the
 // group may do, for every member alike.
 // The first configurer owns the binding (owner_id); configured_by is whoever changed it last. Only the owner, organization
 // admins of every tenant in its scope and platform administrators change or disable it (#424).
@@ -21,7 +21,12 @@ import { chatProfile } from './profiles.js';
 /** Bot replies of a binding are scoped to it in the local ledger, so another binding or project never reads them back. */
 export const bindingScope = (id: string) => 'binding:' + id;
 const participations = ['mentions', 'questions', 'all'];
+const harnesses = ['native', 'pi', 'codex', 'claude_code'] as const;
 const terminal = (error: unknown) => error instanceof HttpError && error.status < 500;
+function optionalText(value: unknown, max: number, field: string): string {
+  if (typeof value !== 'string' || value.length > max || value.includes('\0')) return fail(400, 'invalid_field', field);
+  return value.trim();
+}
 
 /**
  * The three permission levels a binding offers (#849), as items of the shared permission catalog. Each level adds to the
@@ -120,10 +125,34 @@ export function serviceBindingStorage(store: Store): void {
   if (!store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'owner_id'))
     store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''");
   store.run("UPDATE channel_service_bindings SET owner_id=configured_by WHERE owner_id=''");
+  // Group assistant configuration lives directly on each group binding (#1249).
+  const bindingCols = store.all('PRAGMA table_info(channel_service_bindings)').map(c => c.name);
+  if (!bindingCols.includes('model_id')) store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN model_id TEXT');
+  if (!bindingCols.includes('prompt')) store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN prompt TEXT');
+  if (!bindingCols.includes('harness')) store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN harness TEXT NOT NULL DEFAULT 'native'");
   migrateEmployees(store);
   migrateLevels(store);
   migrateActionsWrite(store);
+  migrateInlineAssistant(store);
   migrateModelGrants(store);
+}
+/** Once per binding (#1249): copy the referenced service role's model, harness and responsibility+prompt onto the binding
+ * itself. Keeps service_role_id and revision untouched so upgraded bindings keep their authorization fence, chat summaries,
+ * assistant computers, own tasks and private memory without disruption. */
+function migrateInlineAssistant(store: Store): void {
+  const pending = store.all('SELECT id,service_role_id FROM channel_service_bindings WHERE prompt IS NULL ORDER BY created_at,id');
+  if (!pending.length) return;
+  store.transaction(() => {
+    for (const binding of pending) {
+      const role = store.hasTable('service_roles') ? store.get('SELECT * FROM service_roles WHERE id=?', binding.service_role_id) : undefined;
+      const prompt = [String(role?.responsibility ?? '').trim(), String(role?.prompt ?? '').trim()].filter(Boolean).join('\n\n');
+      const modelId = role?.model_id ?? null;
+      const harness = role?.harness && (harnesses as readonly string[]).includes(String(role.harness)) ? String(role.harness) : 'native';
+      store.run('UPDATE channel_service_bindings SET model_id=?,prompt=?,harness=? WHERE id=? AND prompt IS NULL',
+        modelId, prompt, harness, binding.id);
+      store.audit('system', 'channel.service_binding.assistant_migrated', binding.id);
+    }
+  });
 }
 /** Once (#1072): comment and dispatch gained Actions write. A binding that writes Issues and reads Actions takes it too, so
  * it keeps reading as its level; like project roles, Actions write follows Issues write. Nothing narrows, so the revision
@@ -148,22 +177,14 @@ export function scopeProjects(store: Store, principal: string): string[] {
   return store.all(`SELECT DISTINCT r.id FROM scoped_grants g JOIN identity_projects ip ON ip.tenant_id=g.tenant_id AND (g.scope='tenant' OR ip.project_id=g.project_id)
     JOIN repositories r ON r.id=ip.project_id WHERE g.principal_id=? AND g.policy='channel_service_binding' AND g.revoked_at IS NULL ORDER BY r.full_name`, principal).map(r => String(r.id));
 }
-/** A role's new model must still serve every project of each enabled group bound to it; otherwise the change is refused,
- * naming those projects, instead of the groups stopping later. */
-export function roleModelCheck(store: Store, role: Row, model: string): void {
-  const gaps = new Map<string, string>();
-  for (const binding of store.all('SELECT principal_id FROM channel_service_bindings WHERE service_role_id=? AND enabled=1', role.id))
-    for (const gap of modelGaps(store, model, scopeProjects(store, binding.principal_id))) gaps.set(gap.id, gap.full_name);
-  if (gaps.size) fail(409, 'channel_service_model_unavailable', 'model_id', { projects: [...gaps.values()] });
-}
 /** Once (#849): before the model rule, a group's shared model read every project in its scope without being authorized to
  * them. Each enabled binding's model is authorized to the projects it already served, so no group stops on upgrade; the
  * trust this records was already given when the group was bound. */
 function migrateModelGrants(store: Store): void {
   if (store.get("SELECT 1 FROM settings WHERE key='channel_service_binding_models_migrated'")) return;
   store.transaction(() => {
-    for (const binding of store.all(`SELECT b.principal_id,m.id model FROM channel_service_bindings b JOIN service_roles r ON r.id=b.service_role_id
-      JOIN models m ON m.id=r.model_id AND m.repository_id IS NULL WHERE b.enabled=1`))
+    for (const binding of store.all(`SELECT b.principal_id,m.id model FROM channel_service_bindings b
+      JOIN models m ON m.id=b.model_id AND m.repository_id IS NULL WHERE b.enabled=1`))
       for (const gap of modelGaps(store, binding.model, scopeProjects(store, binding.principal_id))) {
         store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', binding.model, gap.id);
         store.audit('system', 'model.sharing_migrated', binding.model, gap.id);
@@ -198,10 +219,11 @@ function migrateEmployees(store: Store): void {
         WHERE g.chat_id=? AND g.enabled=1 AND p.tenant_id IS NOT NULL ORDER BY g.created_at,g.id`, chat_id);
       if (!grants.length) continue;
       const id = randomId(), principal = randomId(), time = Date.now(), modes = new Set(grants.map(g => g.participation));
+      const migratedModel = (store.hasTable('service_roles') ? store.get('SELECT model_id FROM service_roles WHERE id=?', repositoryAssistant)?.model_id : null) ?? defaultSharedModel(store);
       store.run("INSERT INTO principals(id,kind,maintenance) VALUES(?,'service',?)", principal, 'channel-binding:' + chat_id);
-      store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,enabled,revision,migrated_from,created_at,updated_at)
-        VALUES(?,?,?,'repositories',?,?,?,?,1,1,'channel_employee',?,?)`, id, chat_id, repositoryAssistant, principal, grants[0]!.maintainer_id, grants[0]!.maintainer_id,
-        modes.size === 1 ? grants[0]!.participation : 'mentions', time, time);
+      store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,enabled,revision,migrated_from,model_id,prompt,harness,created_at,updated_at)
+        VALUES(?,?,?,'repositories',?,?,?,?,1,1,'channel_employee',?,?,?, ?,?)`, id, chat_id, groupAssistant, principal, grants[0]!.maintainer_id, grants[0]!.maintainer_id,
+        modes.size === 1 ? grants[0]!.participation : 'mentions', migratedModel, defaultGroupAssistantPrompt, 'native', time, time);
       for (const g of grants) grant(store, principal, chat_id, g.tenant_id, g.project_id, g.maintainer_id, time, levelPermissions('read'));
       store.audit(grants[0]!.maintainer_id, 'channel.service_binding.migrated', id);
     }
@@ -230,24 +252,25 @@ export class ChannelServiceBindings {
   }
   /** What the group may do: its binding's level. Every change of it is a new binding revision. */
   permissions(binding: Row): RolePermissions { return bindingPermissions(binding); }
-  /** The binding is still the chat's current, enabled binding and its role can serve a group. */
+  /** The binding is still the chat's current, enabled binding. Untouched pre-#1249 bindings also respect any disabled legacy role until resaved. */
   assertUsable(binding: Row): Row {
     const current = this.get(binding.chat_id);
     if (!current || current.id !== binding.id || current.revision !== binding.revision) return fail(409, 'conversation_source_changed');
     if (!current.enabled || !revision(this.store, current.principal_id)) return fail(403, 'channel_service_binding_disabled');
     this.employees.chat(current.chat_id);
-    const role = serviceRole(this.store, current.service_role_id);
-    if (!role?.enabled) return fail(403, 'service_role_unavailable');
-    if (role.id === managementAssistant) return fail(403, 'service_role_not_bindable');
+    if (current.service_role_id !== groupAssistant) {
+      const role = serviceRole(this.store, current.service_role_id);
+      if (!role?.enabled) return fail(403, 'service_role_unavailable');
+      if (role.id === managementAssistant) return fail(403, 'service_role_not_bindable');
+    }
     return current;
   }
-  /** Changes whenever what the group may see changes: chat sources, binding (its level included), role or any grantor's
-   * authority. The level sits where the role's items used to, so a binding migrated with its role's items keeps its fence.
-   * Starting workflows (#1072) changes nothing the group may read, so Actions write enters the fence as Actions read: the
-   * upgrade that added it to comment and dispatch keeps every group's fence, and with it the group's history, computer and
-   * queued replies. A person who changes the items still changes the fence, through the binding revision. */
+  /** Changes whenever what the group may see changes: chat sources, binding (its level, model, prompt or harness included),
+   * or any grantor's authority. Untouched pre-#1249 bindings keep their legacy service_role_id slot so upgrading preserves
+   * their exact authorization fence, chat summaries, assistant computers, own tasks and private memory without disruption. */
   fence(chat: string): string {
-    const binding = this.get(chat), role = binding && serviceRole(this.store, binding.service_role_id);
+    const binding = this.get(chat);
+    const role = binding ? (binding.service_role_id === groupAssistant ? { id: groupAssistant, enabled: 1 } : serviceRole(this.store, binding.service_role_id)) : undefined;
     return digest(JSON.stringify({ context: this.store.get('SELECT context_revision FROM channel_chats WHERE id=?', chat)?.context_revision,
       binding: binding ? [binding.id, binding.revision, binding.enabled, revision(this.store, binding.principal_id)] : null,
       role: role ? [role.id, role.enabled, fencePermissions(binding!)] : null,
@@ -407,19 +430,24 @@ export class ChannelServiceBindings {
       return this.view(this.get(id)!);
     });
   }
-  /**
-   * The role must fit the scope (#849): a project's role binds only to groups scoped to that project, and the role's model must
-   * serve every project the scope covers. A refusal names the projects that do not fit.
-   */
-  private roleScope(role: Row, scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): void {
-    const projects = scope.rows.flatMap(row => row.project_id ? [row.project_id] : this.store.all(`SELECT r.id FROM repositories r JOIN identity_projects ip ON ip.project_id=r.id
+  /** Projects covered by a parsed scope input. */
+  private scopeProjectIds(scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): string[] {
+    return scope.rows.flatMap(row => row.project_id ? [row.project_id] : this.store.all(`SELECT r.id FROM repositories r JOIN identity_projects ip ON ip.project_id=r.id
       WHERE ip.tenant_id=? ORDER BY r.full_name`, row.tenant_id).map(r => String(r.id)));
-    const name = (id: string) => String(this.store.get('SELECT full_name FROM repositories WHERE id=?', id)?.full_name ?? id);
-    if (role.project_id && (scope.kind !== 'repositories' || projects.some(id => id !== role.project_id)))
-      fail(400, 'service_role_project_scope', 'scope', { project: name(role.project_id), projects: projects.filter(id => id !== role.project_id).map(name) });
-    if (!role.model_id) return;
-    const gaps = modelGaps(this.store, role.model_id, projects);
-    if (gaps.length) fail(409, 'channel_service_model_unavailable', 'service_role_id', { projects: gaps.map(p => p.full_name) });
+  }
+  /**
+   * The binding's model must serve every project the scope covers (#849, #1249): a project's own model serves only a
+   * single-repository scope of that project; a shared model serves every project it is authorized to.
+   */
+  private modelScope(modelId: string | null, scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): void {
+    if (!modelId) return;
+    const model = this.store.get('SELECT * FROM models WHERE id=?', modelId);
+    if (!model) return fail(404, 'model_not_found', 'model_id');
+    if (scope.kind === 'organization' && model.repository_id !== null) fail(400, 'shared_model_required', 'model_id');
+    const projects = this.scopeProjectIds(scope);
+    if (scope.kind === 'organization' && model.restricted && !projects.length) fail(409, 'channel_service_model_unavailable', 'model_id', { projects: [] });
+    const gaps = modelGaps(this.store, modelId, projects);
+    if (gaps.length) fail(409, 'channel_service_model_unavailable', 'model_id', { projects: gaps.map(p => p.full_name) });
   }
   private scopeInput(actor: ActorContext, value: unknown, chat: Row): { kind: string; rows: { tenant_id: string; project_id: string | null }[] } {
     const scope = object(value);
@@ -477,7 +505,7 @@ export class ChannelServiceBindings {
    * Changing an existing binding needs its owner or someone who governs it, who may do so from outside the group.
    */
   async configure(actor: ActorContext, id: string, input: Json): Promise<Json> {
-    fields(input, ['service_role_id', 'scope', 'participation', 'level', 'permissions', 'enabled', 'expected_revision']);
+    fields(input, ['scope', 'participation', 'level', 'permissions', 'model_id', 'prompt', 'harness', 'enabled', 'expected_revision']);
     assertCurrent(actor);
     if (!Number.isSafeInteger(input.expected_revision)) fail(400, 'expected_revision_required', 'expected_revision');
     if (typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
@@ -487,21 +515,32 @@ export class ChannelServiceBindings {
     if (!input.enabled) return this.disable(actor, previous, input.expected_revision as number);
     const chat = this.employees.chat(id);
     if (chat.chat_type !== 'group') fail(400, 'channel_service_binding_group_required');
-    const role = serviceRole(this.store, text(input.service_role_id, 64));
-    if (!role) return fail(404, 'service_role_not_found', 'service_role_id');
-    if (!role.enabled) fail(409, 'service_role_unavailable', 'service_role_id');
-    if (role.id === managementAssistant) fail(400, 'service_role_not_bindable', 'service_role_id');
     const participation = input.participation ?? previous?.participation ?? 'mentions';
     if (!participations.includes(String(participation))) fail(400, 'channel_participation_invalid', 'participation');
+    const prompt = input.prompt !== undefined ? optionalText(input.prompt, 32000, 'prompt') : String(previous?.prompt ?? '');
+    const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'native');
+    if (!(harnesses as readonly string[]).includes(harness)) fail(400, 'unknown_role_harness', 'harness');
     const permissions = this.levelInput(input, previous);
-    this.roleScope(role, this.scopeInput(actor, input.scope, chat));
+    const previewScope = this.scopeInput(actor, input.scope, chat);
+    const resolveModel = (scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): string | null => {
+      if (input.model_id !== undefined) return input.model_id === null ? null : text(input.model_id, 128);
+      if (previous) return previous.model_id ?? null;
+      const fallback = defaultSharedModel(this.store);
+      if (!fallback) return null;
+      const projects = this.scopeProjectIds(scope);
+      if (scope.kind === 'organization' && !projects.length && this.store.get('SELECT restricted FROM models WHERE id=?', fallback)?.restricted) return null;
+      return !modelGaps(this.store, fallback, projects).length ? fallback : null;
+    };
+    const modelId = resolveModel(previewScope);
+    this.modelScope(modelId, previewScope);
     const identity = !previous || !this.governs(actor, previous) ? this.employees.feishuIdentity(chat, actor.principal_id) : undefined;
     // The audience lookup is a network call; the decision below reads the snapshot it stored, inside the transaction.
     if (identity) await this.employees.verify(id, true);
     return this.store.transaction(() => {
       assertCurrent(actor);
       const current = this.employees.chat(id), scope = this.scopeInput(actor, input.scope, current);
-      this.roleScope(role, scope);
+      const nextModel = resolveModel(scope);
+      this.modelScope(nextModel, scope);
       if (identity) this.employees.assertMember(current, identity.external_actor, identity.external_tenant);
       const locked = this.get(id);
       if ((locked?.revision ?? 0) !== input.expected_revision) fail(409, 'channel_revision_conflict', 'expected_revision');
@@ -514,10 +553,10 @@ export class ChannelServiceBindings {
       // The revision check above makes `previous` the binding as it is now, so an advanced edit never builds on a stale copy.
       const items = permissions;
       for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time, items);
-      if (locked) this.store.run('UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,enabled=1,revision=?,updated_at=? WHERE id=?',
-        role.id, scope.kind, actor.principal_id, participation, stored(items), next, time, binding);
-      else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,enabled,revision,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, role.id, scope.kind, principal, actor.principal_id, actor.principal_id, participation, stored(items), next, time, time);
+      if (locked) this.store.run(`UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,model_id=?,prompt=?,harness=?,enabled=1,revision=?,updated_at=? WHERE id=?`,
+        groupAssistant, scope.kind, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, binding);
+      else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,model_id,prompt,harness,enabled,revision,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, groupAssistant, scope.kind, principal, actor.principal_id, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, time);
       invalidateIfLost(this.store, principal, before, 'channel_service_binding_configured');
       // Summaries and replies derived under the previous scope must not return into the new one.
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
@@ -538,20 +577,33 @@ export class ChannelServiceBindings {
       return this.view(this.get(binding.chat_id)!);
     });
   }
+  private usage(chatId: string): Json {
+    const total = this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,sum(cached_input_tokens) cached_input_tokens,
+      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
+      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests,max(requested_at) last_requested_at FROM model_requests WHERE conversation_id=? AND service_role_id IS NOT NULL`, chatId)!;
+    const costs = this.store.all('SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND service_role_id IS NOT NULL AND cost IS NOT NULL GROUP BY currency ORDER BY currency', chatId);
+    return { requests: total.requests, input_tokens: total.input_tokens, output_tokens: total.output_tokens, cached_input_tokens: total.cached_input_tokens,
+      usage_missing_requests: total.usage_missing_requests ?? 0, unpriced_requests: total.unpriced_requests ?? 0, last_requested_at: total.last_requested_at, costs };
+  }
   view(binding: Row): Json {
-    const role = serviceRole(this.store, binding.service_role_id), grants = this.grants(binding);
+    const grants = this.grants(binding);
     let state = binding.enabled ? 'active' : 'disabled', error: string | null = null;
     if (binding.enabled) try { this.assertUsable(binding); } catch (e) { if (!terminal(e)) throw e; state = 'paused'; error = (e as HttpError).code; }
     const permissions = this.permissions(binding);
     const reach = binding.enabled ? this.reach(binding) : { projects: [], paused: [] };
     if (state === 'active' && !reach.projects.length) { state = 'paused'; error = 'channel_service_scope_paused'; }
+    const modelRow = binding.model_id ? this.store.get('SELECT id,model_name,api_url,api_key,repository_id FROM models WHERE id=?', binding.model_id) : undefined;
     // A model no longer authorized to a project in scope stops the group's answers until someone changes the model or scope.
-    const gaps = binding.enabled && role?.model_id ? modelGaps(this.store, role.model_id, scopeProjects(this.store, binding.principal_id)).map(p => p.full_name) : [];
+    const gaps = binding.enabled && binding.model_id ? modelGaps(this.store, binding.model_id, scopeProjects(this.store, binding.principal_id)).map(p => p.full_name) : [];
     if (state === 'active' && gaps.length) { state = 'paused'; error = 'channel_service_model_unavailable'; }
     const organization = grants.find(g => g.scope === 'tenant'), chat = this.store.get('SELECT h.chat_id,c.app_name,c.owner_tenant FROM channel_chats h LEFT JOIN channel_connectors c ON c.id=h.connector_id WHERE h.id=?', binding.chat_id);
     const username = (principal: string) => this.store.get('SELECT username FROM users WHERE id=?', principal)?.username ?? null;
     return { id: binding.id, chat_id: binding.chat_id, chat: { id: binding.chat_id, chat_id: chat?.chat_id ?? null, organization: chat?.owner_tenant || null, ...chatProfile(this.store, binding.chat_id) },
-      service_role: role ? { id: role.id, name: role.name, enabled: !!role.enabled, project_id: role.project_id ?? null } : { id: binding.service_role_id, name: null, enabled: false, project_id: null },
+      model_id: binding.model_id ?? null,
+      model: modelRow ? { id: modelRow.id, model_name: modelRow.model_name, api_url: modelRow.api_url, key_configured: !!modelRow.api_key, project_id: modelRow.repository_id ?? null } : null,
+      prompt: String(binding.prompt ?? ''),
+      harness: String(binding.harness ?? 'native'),
+      usage: this.usage(binding.chat_id),
       model_gaps: gaps,
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,
         repositories: grants.filter(g => g.scope === 'project').map(g => ({ id: g.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id })) },
@@ -567,22 +619,34 @@ export class ChannelServiceBindings {
     const bindings = this.store.all('SELECT * FROM channel_service_bindings ORDER BY created_at,id').filter(b => platform || chats.some(c => c.id === b.chat_id) ||
       b.owner_id === actor.principal_id || b.configured_by === actor.principal_id || this.grants(b).some(g => g.grantor_id === actor.principal_id) || this.governs(actor, b));
     const projects = listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure), configurable = new Set(projects.map(p => String(p.id)));
+    const organizations = this.store.all('SELECT * FROM tenants ORDER BY display_name').filter(t => {
+      try { authorize(actor, 'config.write', { tenant_id: t.id }); return true; } catch (error) { if (!terminal(error)) throw error; return false; }
+    }).map(t => ({ id: t.id, name: tenantName(this.store, t.id) }));
+    // Models visible to this caller for group binding configuration (#1249): project-owned models of their configurable
+    // repositories, plus shared models serving at least one of those repositories (or any shared model for platform/org admins).
+    const models = this.store.all('SELECT * FROM models ORDER BY repository_id IS NOT NULL,updated_at,id')
+      .filter(m => {
+        if (m.repository_id !== null) return configurable.has(m.repository_id);
+        if (platform || (organizations.length > 0 && !m.restricted)) return true;
+        return projects.some(p => modelServes(this.store, m, String(p.id)));
+      })
+      .map(m => {
+        const authorized = m.repository_id !== null ? [String(m.repository_id)]
+          : m.restricted ? this.store.all('SELECT repository_id FROM model_projects WHERE model_id=?', m.id).map(r => String(r.repository_id)).filter(id => configurable.has(id))
+            : null;
+        return { id: m.id, model_name: m.model_name, api_url: m.api_url, key_configured: m.api_key !== null,
+          project_id: m.repository_id ?? null, all_projects: m.repository_id === null && !m.restricted, authorized_projects: authorized };
+      });
+    const fallbackModel = defaultSharedModel(this.store);
+    const defaultModelId = fallbackModel && models.some(m => m.id === fallbackModel) ? fallbackModel : null;
     return { bindings: bindings.map(b => { const governs = this.governs(actor, b);
       return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_view: platform || !!this.canView(actor, b.chat_id),
         can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
-      // Global templates, and the roles of projects the caller configures (#849), with what limits where they fit.
-      service_roles: this.store.all('SELECT * FROM service_roles WHERE enabled=1 AND id<>? ORDER BY builtin DESC,project_id IS NOT NULL,created_at,id',managementAssistant)
-        .filter(r => !r.project_id || configurable.has(r.project_id))
-        .map(r => { const model = r.model_id ? this.store.get('SELECT id,model_name,repository_id FROM models WHERE id=?', r.model_id) : undefined;
-          return { id: r.id, name: r.name, responsibility: r.responsibility, builtin: !!r.builtin, recommended: r.id === repositoryAssistant,
-            project: r.project_id ? { id: r.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', r.project_id)?.full_name ?? r.project_id } : null,
-            model: model ? { id: model.id, model_name: model.model_name, project_id: model.repository_id ?? null } : null }; }),
+      models, default_model_id: defaultModelId, default_prompt: defaultGroupAssistantPrompt, harnesses: [...harnesses],
       levels: bindingLevels.map(level => ({ id: level, permissions: levelPermissions(level) })),
       github_levels: bindingGithubLevels.map(level => ({ id: level, permissions: githubLevelPermissions(level) })),
       default_permissions: levelPermissions('read'),
-      organizations: this.store.all('SELECT * FROM tenants ORDER BY display_name').filter(t => {
-        try { authorize(actor, 'config.write', { tenant_id: t.id }); return true; } catch (error) { if (!terminal(error)) throw error; return false; }
-      }).map(t => ({ id: t.id, name: tenantName(this.store, t.id) })),
+      organizations,
       projects: projects
         .map(p => ({ id: p.id, full_name: p.full_name, organization: this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', p.id)?.tenant_id ?? null })),
       permission_items: groupPermissionItems.map(item => ({ id: item.id, name: item.name, modes: item.modes, group: item.group, detail: item.detail })), legacy_employees: this.employees.legacy(actor) };

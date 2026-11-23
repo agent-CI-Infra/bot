@@ -1,5 +1,7 @@
 const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @、提问或求助的文字'], ['all', '读取每条新文字后判断是否发言']];
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
+const groupHarnessOptions = [['native', 'Native（兼容）'], ['pi', 'Pi'], ['codex', 'Codex'], ['claude_code', 'Claude Code']];
+const groupHarnessName = id => groupHarnessOptions.find(([key]) => key === id)?.[1] || id;
 // Group binding permissions are split into three orthogonal dimensions (#1206): GitHub, project tasks, and platform capabilities.
 const githubLevelOptions = [
   ['read', '只读', '读取范围内仓库的 Issue、PR、代码、Actions 和检查状态；不写 GitHub。'],
@@ -49,11 +51,11 @@ function bindingGroupItemsEditor(permissions, items, group) {
   }
   return wrap;
 }
-// A refused save in words, naming the projects that do not fit the chosen role (#849).
+// A refused save in words, naming the projects that do not fit the chosen model (#849, #1249).
 function bindingSaveError(err) {
   const projects = (err.detail?.projects || []).join('、');
-  if (err.code === 'service_role_project_scope') return `「${err.detail?.project || '所选项目'}」的专属助手角色只能用于范围只有这个项目的群${projects ? `；${projects} 不属于它` : ''}。请改选全局角色，或把范围缩小到这个项目。`;
-  if (err.code === 'channel_service_model_unavailable') return `所选助手角色的模型没有授权给 ${projects || '范围内的部分项目'}。群助手只能用对范围内每个项目都可用的模型：请换一个角色，或请超级管理员把共享模型授权给这些项目。`;
+  if (err.code === 'channel_service_model_unavailable') return `所选模型没有授权给 ${projects || '范围内的部分项目'}。群助手只能用对范围内每个项目都可用的模型：请换一个模型，或请超级管理员把共享模型授权给这些项目。`;
+  if (err.code === 'shared_model_required') return '绑定整个组织时只能选择部署共享模型，不能选择单个项目的专属模型。';
   return employeeError(readErrorText(err));
 }
 function bindingGithubSummary(b, items) {
@@ -84,7 +86,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   titleWrap.append(editorTitle);
   head.append(titleWrap, channelLink('#/identity/feishu', '← 返回飞书绑定', 'button-link quiet'));
   section.append(head,
-    note('第一个配置的维护人成为该群助手负责人（需已绑定个人飞书、在该群中，并对所选仓库或组织有配置权限）；之后负责人、所属组织管理员和超级管理员均可在此修改仓库范围、权限与助手角色。'));
+    note('第一个配置的维护人成为该群助手负责人（需已绑定个人飞书、在该群中，并对所选仓库或组织有配置权限）；之后负责人、所属组织管理员和超级管理员均可在此修改仓库范围、权限、模型与提示词。'));
 
   const chatOrganization = new Map([...data.chats.map(c => [c.id, c.organization || null]), ...data.bindings.map(b => [b.chat_id, b.chat.organization || null])]);
   const profiles = new Map([...data.chats.map(c => [c.id, c]), ...data.bindings.map(b => [b.chat_id, b.chat])]);
@@ -126,12 +128,12 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   }));
   const projectOrganization = new Map(data.projects.map(p => [p.id, p.organization]));
 
-  let updateRoleLinks = () => {};
+  let updateModelOptions = () => {};
   const updateRepoCounter = () => {
     const allowed = [...boxes.values()].filter(control => control.closest('label').dataset.orgHidden !== '1');
     const checked = allowed.filter(control => control.checked);
     repoCounter.textContent = allowed.length ? `已勾选 ${checked.length} / ${allowed.length} 个你有配置权限的仓库` : '当前群所属组织下暂无可配置仓库';
-    updateRoleLinks();
+    updateModelOptions();
   };
   const applyRepoVisibility = () => {
     const keyword = repoFilter ? repoFilter.value.trim().toLocaleLowerCase() : '';
@@ -164,6 +166,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   const updateOrgNote = () => {
     const orgId = organization.value, count = data.projects.filter(p => p.organization === orgId).length;
     orgScopeNote.textContent = orgId ? `当前按整个组织授权（覆盖你在该组织下可配置的 ${count} 个仓库）。如需仅开放部分仓库，请切换上方「选择仓库」逐个勾选。` : '';
+    updateModelOptions();
   };
   organization.addEventListener('change', updateOrgNote);
   scope.append(repositoriesLabel, repositoriesWrap, organizationLabel, organizationField, orgScopeNote,
@@ -239,31 +242,125 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   form.append(presetBar, githubFieldset, taskModes, platformFieldset,
     element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按以上权限配置使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
 
-  // The assistant role: its prompt and model only. Direct links jump to project settings -> roles?view=assistant-roles.
-  const role = channelSelect(form, '助手角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.project ? `（${r.project.full_name} 专属）` : '') + (r.recommended ? '（推荐）' : '')]));
-  const roleNote = note('');
-  const roleLinks = element('div', '', 'feishu-project-role-links');
-  updateRoleLinks = () => {
-    roleLinks.replaceChildren();
-    const checkedIds = repositoriesKind.checked
-      ? [...boxes].filter(([, control]) => control.checked && control.closest('label').dataset.orgHidden !== '1').map(([id]) => id)
-      : [];
-    const linkedProjects = checkedIds.length === 1 && projectById.has(checkedIds[0])
-      ? [projectById.get(checkedIds[0])]
-      : data.projects.slice(0, 3);
-    if (linkedProjects.length) {
-      roleLinks.append(element('span', '在项目设置中维护专属群助手角色：', 'muted'));
-      for (const p of linkedProjects) {
-        roleLinks.append(channelLink(`#/projects/${p.id}/roles?view=assistant-roles`, `${p.full_name} 群助手角色`, 'button-link quiet'));
+  // Inline group assistant configuration (#1249): model (filtered to the selected scope), prompt/responsibility, and Agent harness.
+  const assistantFieldset = element('fieldset', '', 'feishu-assistant-fieldset');
+  assistantFieldset.append(element('legend', '助手模型与提示词'));
+  const modelList = Array.isArray(data.models) ? data.models : [];
+  const modelById = new Map(modelList.map(m => [m.id, m]));
+  for (const b of data.bindings || []) {
+    if (b.model && !modelById.has(b.model.id)) {
+      modelById.set(b.model.id, { ...b.model, all_projects: false, authorized_projects: [] });
+    }
+  }
+  const modelSelect = document.createElement('select'); modelSelect.name = 'binding_model'; modelSelect.setAttribute('aria-label', '助手模型');
+  const modelWarning = element('p', '', 'endpoint-warning feishu-model-warning'); modelWarning.hidden = true;
+  const modelHint = note('');
+  const modelCaption = m => `${m.model_name} · ${hostOf(m.api_url)}${m.project_id ? '（项目专属）' : '（共享）'}${m.key_configured ? '' : '（Key 已撤销）'}`;
+  const selectedScopeProjects = () => {
+    if (organizationKind.checked) return data.projects.filter(p => p.organization === organization.value);
+    return [...boxes].filter(([, control]) => control.checked && control.closest('label').dataset.orgHidden !== '1')
+      .map(([id]) => projectById.get(id)).filter(Boolean);
+  };
+  const modelServesProject = (m, projectId) => m.project_id !== null
+    ? m.project_id === projectId
+    : m.all_projects || (Array.isArray(m.authorized_projects) && m.authorized_projects.includes(projectId));
+  const modelGapsForScope = m => {
+    if (organizationKind.checked && m.project_id !== null) return ['整个组织只能使用部署共享模型'];
+    return selectedScopeProjects().filter(p => !modelServesProject(m, p.id)).map(p => p.full_name);
+  };
+  let preferredModelId = '';
+  const updateModelFeedback = () => {
+    const selected = modelById.get(modelSelect.value);
+    if (!selected) {
+      modelWarning.textContent = ''; modelWarning.hidden = true;
+      modelHint.textContent = modelList.length
+        ? '未选择模型时，群内消息会提示先为本群选择模型，不会改用其他模型。'
+        : '当前范围还没有可用模型，请先在项目「模型」页或全局「模型」页配置。';
+      return;
+    }
+    const gaps = modelGapsForScope(selected);
+    if (gaps.length) {
+      modelWarning.textContent = organizationKind.checked && selected.project_id !== null
+        ? '所选模型是单个项目的专属模型，绑定整个组织时只能选择部署共享模型。请更换模型或改按单个仓库勾选。'
+        : `所选模型尚未覆盖当前范围内的：${gaps.join('、')}。请更换对全部范围都可用的模型，或调整所选仓库。`;
+      modelWarning.hidden = false;
+    } else if (!selected.key_configured) {
+      modelWarning.textContent = '所选模型的 API Key 已撤销，保存后本群无法回答，请更换模型或先补回 Key。';
+      modelWarning.hidden = false;
+    } else {
+      modelWarning.textContent = ''; modelWarning.hidden = true;
+    }
+    modelHint.textContent = selected.project_id
+      ? '项目专属模型仅可用于范围只包含该项目的群，用量同时计入该项目成本。'
+      : '部署共享模型可用于所有已获授权的仓库；单仓库群同时计入该项目成本。';
+  };
+  updateModelOptions = ({ autoSelectDefault = false } = {}) => {
+    const previous = preferredModelId || modelSelect.value;
+    const eligible = modelList.filter(m => modelGapsForScope(m).length === 0);
+    modelSelect.replaceChildren();
+    const noneOption = element('option', '暂不选择模型'); noneOption.value = ''; modelSelect.append(noneOption);
+    for (const m of eligible) {
+      const opt = element('option', modelCaption(m)); opt.value = m.id; modelSelect.append(opt);
+    }
+    if (previous && !eligible.some(m => m.id === previous)) {
+      const stale = modelById.get(previous);
+      if (stale) {
+        const opt = element('option', modelCaption(stale) + '（未覆盖当前全部范围）'); opt.value = stale.id; modelSelect.append(opt);
       }
     }
-    if (me.role === 'super_admin') roleLinks.append(channelLink('#/settings/service-roles', '管理全局服务角色', 'button-link quiet'));
-    roleLinks.hidden = !roleLinks.childElementCount;
+    if (previous && [...modelSelect.options].some(o => o.value === previous)) {
+      modelSelect.value = previous;
+    } else if (autoSelectDefault && data.default_model_id && eligible.some(m => m.id === data.default_model_id)) {
+      modelSelect.value = data.default_model_id;
+    } else {
+      modelSelect.value = '';
+    }
+    preferredModelId = modelSelect.value;
+    updateModelFeedback();
   };
-  form.append(roleNote, note('助手角色只决定提示词和模型，不决定群能做什么。'), roleLinks);
+  modelSelect.addEventListener('change', () => { preferredModelId = modelSelect.value; updateModelFeedback(); });
+
+  const promptInput = textarea('binding_prompt', '', {
+    maxLength: 32000,
+    rows: 4,
+    placeholder: '选填：补充本群助手的职责、回答风格或协作要求（附加在内置安全提示之后，不能扩大工具或权限）',
+  });
+  promptInput.setAttribute('aria-label', '提示词与职责说明');
+  const harnessSelect = document.createElement('select'); harnessSelect.name = 'binding_harness'; harnessSelect.setAttribute('aria-label', 'Agent 后端');
+  for (const [id, label] of groupHarnessOptions) { const opt = element('option', label); opt.value = id; harnessSelect.append(opt); }
+  harnessSelect.value = 'native';
+  const harnessDetails = element('details', '', 'fold feishu-guide-details');
+  harnessDetails.append(element('summary', '高级设置：Agent 后端'), field('Agent 后端', harnessSelect));
+
+  const assistantPresetBar = element('div', '', 'feishu-preset-bar');
+  const copySourceSelect = document.createElement('select'); copySourceSelect.setAttribute('aria-label', '选择要复制配置的已有群');
+  const copyBtn = button('复制模型与提示词', () => {
+    const source = data.bindings.find(b => b.chat_id === copySourceSelect.value);
+    if (!source) return;
+    promptInput.value = source.prompt || '';
+    harnessSelect.value = source.harness || 'native';
+    if (harnessSelect.value !== 'native') harnessDetails.open = true;
+    preferredModelId = source.model_id || '';
+    updateModelOptions();
+  }, 'quiet');
+  const copyRow = element('div', '', 'feishu-copy-row');
+  copyRow.append(copySourceSelect, copyBtn);
+  const refreshCopySources = () => {
+    const others = data.bindings.filter(b => b.chat_id !== chat.value && (b.model_id || b.prompt || (b.harness && b.harness !== 'native')));
+    copySourceSelect.replaceChildren();
+    for (const b of others) copySourceSelect.add(new Option(`${channelChatName(b.chat)}${b.model ? ' · ' + b.model.model_name : ''}`, b.chat_id));
+    copyRow.hidden = !others.length;
+  };
+  assistantPresetBar.append(
+    element('span', '快捷填充：'),
+    button('填入默认问答提示', () => { promptInput.value = data.default_prompt || ''; }, 'quiet'),
+    copyRow,
+  );
+  assistantFieldset.append(field('助手模型', modelSelect), modelWarning, modelHint, assistantPresetBar, field('提示词与职责说明', promptInput), harnessDetails);
+  form.append(assistantFieldset);
 
   const participation = channelSelect(form, '助手发言范围', 'binding_participation', participationOptions);
-  form.append(note('注意：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。所有获准消息都会存入本地；扩大发言范围会增加模型用量，用量记在服务角色上，不计入项目。'));
+  form.append(note('注意：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。所有获准消息都会存入本地；扩大发言范围会增加模型用量（单仓库群同时计入该项目成本）。'));
   const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
   const ownership = note(''); ownership.setAttribute('role', 'status');
   const save = element('button', '保存群聊助手'); save.type = 'submit';
@@ -272,25 +369,18 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   form.append(ownership, status, submitActions);
 
   let expected = 0;
-  const unavailable = !chats.size || !data.service_roles.length || !data.projects.length && !data.organizations.length;
-  const roleById = new Map(data.service_roles.map(r => [r.id, r]));
-  const describeRole = () => {
-    const r = roleById.get(role.value);
-    if (!r) { roleNote.textContent = ''; return; }
-    const model = r.model ? `模型：${r.model.model_name}${r.model.project_id ? '（项目专属）' : '（共享）'}` : '尚未配置模型';
-    roleNote.textContent = [r.responsibility || '自定义服务角色', model, r.project ? `只能用于范围只有 ${r.project.full_name} 的群` : ''].filter(Boolean).join('；') + '。';
-  };
+  const unavailable = !chats.size || !data.projects.length && !data.organizations.length;
   const showScope = () => {
     repositoriesWrap.hidden = !repositoriesKind.checked;
     organizationField.hidden = !organizationKind.checked;
     orgScopeNote.hidden = !organizationKind.checked;
     updateOrgNote();
-    updateRoleLinks();
+    updateModelOptions();
   };
   const fill = () => {
     const current = data.bindings.find(b => b.chat_id === chat.value), organizationOnly = chatOrganization.get(chat.value) || null;
     expected = current?.revision || 0;
-    editorTitle.textContent = current ? `配置仓库与权限 · ${channelChatName(current.chat)}` : '创建群绑定';
+    editorTitle.textContent = current ? `配置群聊助手 · ${channelChatName(current.chat)}` : '创建群绑定';
     for (const [id, control] of boxes) {
       const hidden = !!organizationOnly && projectOrganization.get(id) !== organizationOnly;
       control.closest('label').dataset.orgHidden = hidden ? '1' : '0';
@@ -302,7 +392,6 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     const locked = !!current && !current.can_manage;
     ownership.textContent = locked ? `这个群的助手由 ${current.owner || '原负责人'} 负责；只有负责人、所属组织的管理员和超级管理员可以修改。` : current?.owner ? '负责人：' + current.owner : '';
     save.disabled = unavailable || locked;
-    role.value = current?.enabled && data.service_roles.some(r => r.id === current.service_role.id) ? current.service_role.id : (data.service_roles.find(r => r.recommended) || data.service_roles[0])?.id || '';
     const initial = current?.permissions ? { ...current.permissions } : defaultPermissions();
     const ghLevel = current?.github_level || 'read';
     for (const [id, control] of githubControls) control.checked = id === ghLevel;
@@ -310,14 +399,20 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     fillTaskMode(current?.task_mode || 'none');
     renderPlatformItems(initial);
     participation.value = current?.participation || 'mentions';
+    promptInput.value = current ? (current.prompt || '') : '';
+    harnessSelect.value = current?.harness || 'native';
+    harnessDetails.open = harnessSelect.value !== 'native';
+    preferredModelId = current ? (current.model_id || '') : '';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;
     if (org) organization.value = org.id;
     for (const [id, control] of boxes) control.checked = !!current?.enabled && current.scope.repositories.some(r => r.id === id);
-    showProfile(); applyRepoVisibility(); describeRole(); showScope();
+    refreshCopySources();
+    showProfile(); applyRepoVisibility(); showScope();
+    updateModelOptions({ autoSelectDefault: !current });
   };
   for (const control of [repositoriesKind, organizationKind]) control.addEventListener('change', showScope);
-  role.addEventListener('change', describeRole); chat.addEventListener('change', fill);
+  chat.addEventListener('change', fill);
   save.disabled = unavailable;
   form.addEventListener('submit', async event => {
     event.preventDefault(); save.disabled = true; status.textContent = '正在核验你的飞书绑定、群成员身份和所选范围的配置权限…';
@@ -326,8 +421,16 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
       const ghLevel = chosenGithubLevel(), taskMode = selectedTaskMode();
       const permissions = { ...(ghLevel === 'custom' ? githubEdited : githubPresetOf(ghLevel)), ...platformEdited };
       if (taskMode !== 'custom') permissions.project_tasks = taskMode;
-      await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', { service_role_id: role.value, scope: selected, participation: participation.value,
-        permissions, enabled: true, expected_revision: expected });
+      await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', {
+        scope: selected,
+        participation: participation.value,
+        permissions,
+        model_id: modelSelect.value || null,
+        prompt: promptInput.value,
+        harness: harnessSelect.value,
+        enabled: true,
+        expected_revision: expected,
+      });
       history.replaceState(null, '', '#/identity/feishu');
       await start();
     } catch (err) { status.textContent = bindingSaveError(err); save.disabled = false; }
@@ -335,7 +438,6 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
 
   if (!chats.size) section.append(note('尚无可选择的群。请先完成个人绑定，在机器人已加入的目标群发一条消息，再刷新本页。'));
   if (!data.projects.length && !data.organizations.length) section.append(note('当前没有可配置的仓库。个人绑定不会增加项目权限。'));
-  if (!data.service_roles.length) section.append(note('当前没有可用于群聊的服务角色，请联系超级管理员。'));
   section.append(form);
 
   if (targetChatId && [...chat.options].some(o => o.value === targetChatId)) chat.value = targetChatId;
@@ -344,7 +446,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     if (unbound && [...chat.options].some(o => o.value === unbound.id)) chat.value = unbound.id;
   }
   if (chats.size) fill();
-  else updateRoleLinks();
+  else updateModelOptions({ autoSelectDefault: true });
 
   return section;
 }
@@ -368,12 +470,15 @@ function buildGroupBindingsList(data) {
     const mainRow = element('div', '', 'feishu-row-main'), info = element('div', '', 'feishu-row-info'), actions = element('div', '', 'actions feishu-row-actions');
     const titleWrap = element('div', '', 'feishu-row-title'), groupName = element('strong', channelChatName(b.chat));
     const stateBadge = element('span', bindingStates[b.state] || b.state, bindingStateBadgeClass(b.state));
-    const roleBadge = element('span', b.service_role.name || '服务角色已删除', 'feishu-binding-badge');
-    titleWrap.append(groupName, stateBadge, roleBadge);
+    const modelLabel = b.model ? `${b.model.model_name}${b.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置模型';
+    const modelBadge = element('span', modelLabel, b.model?.key_configured ? 'feishu-binding-badge' : 'feishu-binding-badge feishu-binding-badge-warning');
+    titleWrap.append(groupName, stateBadge, modelBadge);
+    if (b.harness && b.harness !== 'native') titleWrap.append(element('span', groupHarnessName(b.harness), 'feishu-binding-badge feishu-binding-badge-info'));
 
     const participationLabel = participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation;
     const permSummary = `GitHub ${bindingGithubSummary(b, data.permission_items)} · 项目任务 ${groupTaskShort(b)} · 平台 ${bindingPlatformSummary(b, data.permission_items)}`;
     const ownerLine = `发言范围：${participationLabel} · 负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '（最近修改：' + b.configured_by + '）' : ''}`;
+    const promptPreview = b.prompt ? (b.prompt.length > 80 ? b.prompt.slice(0, 80) + '…' : b.prompt) : '';
     const profileDetails = element('details', '', 'feishu-chat-profile-fold');
     profileDetails.append(element('summary', '群与应用信息'), channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); }));
 
@@ -381,11 +486,13 @@ function buildGroupBindingsList(data) {
       titleWrap,
       note('项目范围：' + scopeText + (b.scope.organization && b.enabled ? `（可达 ${b.reachable.length} 个仓库）` : '')),
       note('权限：' + permSummary),
+      ...(promptPreview ? [note('提示词：' + promptPreview)] : []),
+      ...(b.usage?.requests && typeof serviceUsageText === 'function' ? [note('累计用量：' + serviceUsageText(b.usage))] : []),
       note(ownerLine),
       profileDetails,
       ...(b.paused.length ? [note('暂停的仓库（配置人权限已变化）：' + b.paused.join('、'))] : []),
-      ...(b.model_gaps?.length ? [note('助手角色的模型没有授权给：' + b.model_gaps.join('、') + '。本群暂停回答，直到换一个对范围内每个项目都可用的角色或调整范围。')] : []),
-      ...(b.migrated ? [note('由旧群员工自动迁移为仓库问答助手。')] : []),
+      ...(b.model_gaps?.length ? [note('所选模型没有授权给：' + b.model_gaps.join('、') + '。本群暂停回答，请点击「配置群聊助手」换一个对范围内每个项目都可用的模型或调整范围。')] : []),
+      ...(b.migrated ? [note('由旧群员工自动迁移。')] : []),
       ...(b.error ? [note(employeeError(b.error))] : []),
       ...(!canViewChat ? [note('需要该群负责人或拥有全部绑定范围的配置权限才能查看聊天记录。')] : []),
     );
@@ -393,7 +500,7 @@ function buildGroupBindingsList(data) {
     const transferDrawer = element('div', '', 'feishu-row-drawer'); transferDrawer.hidden = true;
 
     if (canViewChat) actions.append(channelLink('#/conversations/' + b.chat_id, '查看聊天记录', 'button-link quiet'));
-    if (b.can_manage) actions.append(channelLink('#/identity/feishu/groups/' + b.chat_id, b.enabled ? '配置仓库与权限' : '重新启用并配置', 'button-link quiet'));
+    if (b.can_manage) actions.append(channelLink('#/identity/feishu/groups/' + b.chat_id, b.enabled ? '配置群聊助手' : '重新启用并配置', 'button-link quiet'));
     if (b.enabled && b.can_manage) actions.append(channelLink(`#/conversations/${b.chat_id}?section=schedules`, '定时任务', 'button-link quiet'));
     if (b.can_transfer) {
       transferDrawer.append(channelOwnerTransfer(b));
@@ -422,7 +529,7 @@ function buildGroupBindingsList(data) {
   if (!activeOrPaused.length) {
     list.append(element('p', disabledBindings.length
       ? '当前没有生效中的飞书群绑定，可在下方展开已停用记录重新启用，或点击「创建群绑定」。'
-      : '当前尚无已绑定的飞书群。点击「创建群绑定」可为机器人所在群配置仓库范围、权限与助手角色。', 'muted'));
+      : '当前尚无已绑定的飞书群。点击「创建群绑定」可为机器人所在群配置仓库范围、权限、模型与提示词。', 'muted'));
   }
   for (const b of activeOrPaused) list.append(buildRow(b));
   root.append(list);

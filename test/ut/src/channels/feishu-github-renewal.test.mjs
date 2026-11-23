@@ -91,7 +91,7 @@ test('a group binding disabled while its grantor is checked gets no paused-scope
   const requests = f.requests.length, receipt = await post(f.h, f.id, inGroup('本群能看哪些仓库？'));
   await arrived;
   const revision = f.h.store.get('SELECT revision FROM channel_service_bindings WHERE chat_id=?', chat.id).revision;
-  const disabled = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: false, expected_revision: revision });
+  const disabled = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { scope: { kind: 'repositories', repositories: ['101'] }, enabled: false, expected_revision: revision });
   assert.equal(disabled.status, 200, JSON.stringify(disabled.value));
   f.github.state.failure = 401; f.github.state.apiGate = undefined; release();
   const row = await finished(f.h, receipt.value.operation_id);

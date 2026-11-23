@@ -86,12 +86,12 @@ test('a group timer runs the bound service role within the group scope and its t
   assert.match(card, /本群范围：agent-test-zone\/admin-fixture-101；任务工具：tool_not_allowed/);
   assert.match(request, /检查本群仓库今天新开的 bug/);
   const turn = f.h.store.get('SELECT * FROM channel_service_turns WHERE id=?', run.turn_id);
-  assert.equal(turn.source_message, 'schedule:' + run.id); assert.equal(turn.service_role_id, 'repository-assistant'); assert.equal(turn.state, 'completed');
+  assert.equal(turn.source_message, 'schedule:' + run.id); assert.equal(turn.service_role_id, 'group-assistant'); assert.equal(turn.state, 'completed');
   const system = f.requests.at(-1).messages[0].content;
   // Only the timer branch is appended, never the one for a group message without an @ (both turns allow silence).
   assert.match(system, /started by one of this group's timers/); assert.doesNotMatch(system, /This message did not mention you\./);
-  // Billed to the role; the group is scoped to one repository, so its usage also counts in that project (#849).
-  assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?', group.id).every(r => r.repository_id === '101' && r.service_role_id === 'repository-assistant'));
+  // Billed to group-assistant; the group is scoped to one repository, so its usage also counts in that project (#849, #1249).
+  assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?', group.id).every(r => r.repository_id === '101' && r.service_role_id === 'group-assistant'));
   // The report joins the group's own context under the binding, like the assistant's answers.
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
   await until(() => f.h.store.get('SELECT 1 FROM channel_message_scopes WHERE chat_id=? AND project_id=?', group.id, 'binding:' + binding.id));
@@ -132,7 +132,7 @@ test('any member of an active bound group manages its own timers through the ass
   const f = await channelFixture(t); await repositoryAssistant(f);
   const group = await boundGroup(f, ['101']), binding = () => f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
   const level = async value => assert.equal((await f.admin('/api/channels/chats/' + group.id + '/service-binding', 'PUT',
-    { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: value, expected_revision: binding().revision })).status, 200);
+    { scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: value, expected_revision: binding().revision })).status, 200);
   const ask = { action: 'create', name: '群巡检', prompt: '每天早 8 点统计昨天的 PR 和 Issue 情况并在群里汇报。', cron: '0 8 * * *' };
   // #1206: every active bound group may manage its own conversation timers, even at GitHub read-only with project schedules off.
   await level('read');
@@ -196,7 +196,7 @@ test('two groups each run their own timers by their own assistant and answer in 
   assert.deepEqual([turns(first.id).length, turns(second.id).length], [1, 1]);
   // In the second group a member asks to move "this timer" to 10:00: the assistant sees only this group's.
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', second.id);
-  assert.equal((await f.admin('/api/channels/chats/' + second.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant',
+  assert.equal((await f.admin('/api/channels/chats/' + second.id + '/service-binding', 'PUT', {
     scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: 'comment', expected_revision: binding.revision })).status, 200);
   scriptedModel(f, [['conversation_schedules', { action: 'list' }], done => ['conversation_schedules', { action: 'update', id: done[0].schedules[0].id, cron: '0 10 * * 1-5' }],
     done => `已改到 10:00，下次运行 ${new Date(done[1].schedule.next_at).toISOString()}`]);

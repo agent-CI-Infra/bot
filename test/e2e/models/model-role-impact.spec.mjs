@@ -49,14 +49,16 @@ test('role-only references remain clear before cancelling deletion on desktop an
   } finally { await h.stop(); }
 });
 
-test('shared deletion names service roles and onboarding without changing them on cancellation', async ({ page }) => {
+test('shared deletion names management assistant, group bindings and onboarding without changing them on cancellation', async ({ page }) => {
   const { h, admin, model } = await prepared(page, true);
   try {
+    h.store.run("INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,display_name,created_at,last_received_at) VALUES('chat-impact','feishu','cli_1','t1','oc_impact','group','conn-1','研发值班群',0,0)");
+    h.store.run("INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,enabled,revision,model_id,prompt,harness,created_at,updated_at) VALUES('bind-impact','chat-impact','group-assistant','repositories','p-impact','admin','admin',1,1,?,'','native',0,0)", model.id);
     const roles = h.store.all('SELECT * FROM service_roles');
-    await expect(page.getByText('部署共享模型可供项目和平台服务角色选用。', { exact: false })).toContainText('项目角色的显式引用保留为不可用');
+    await expect(page.getByText('部署共享模型可供项目、管理助手和飞书群聊助手选用。', { exact: false })).toContainText('项目角色的显式引用保留为不可用');
     await row(page).getByRole('button', { name: '删除', exact: true }).click();
     await expect(dialog(page)).toContainText('管理助手（management-assistant）');
-    await expect(dialog(page)).toContainText('仓库问答助手（repository-assistant）');
+    await expect(dialog(page)).toContainText('研发值班群');
     await expect(dialog(page)).toContainText('系统初始化的默认模型');
     await page.setViewportSize({ width: 390, height: 568 });
     await dialog(page).getByRole('button', { name: '取消', exact: true }).click();

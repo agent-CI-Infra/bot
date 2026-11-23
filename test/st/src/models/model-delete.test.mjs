@@ -135,19 +135,21 @@ test('model detail counts saved role-only references, including disabled roles, 
   assert.deepEqual((await admin(`/api/models/${model.id}`)).value.model.role_used_by, []);
 });
 
-test('shared model deletion preview includes service and project roles only for its administrator, and deletion preserves explicit project references', async t => {
+test('shared model deletion preview includes management assistant, group bindings and project roles only for its administrator, and deletion clears binding models (#1249)', async t => {
   const { h, admin, member, create } = await fixture(t, true), shared = await create(admin, null), fallback = await create(member, '101');
   await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101', '202'] });
   const revision = await saveRole(member, '101', shared.id);
   await saveRole(admin, '202', shared.id, { name: 'Other project private role' });
   await member('/api/repositories/101/policy', 'PATCH', { model_id: fallback.id });
-  const service = (await admin('/api/service-roles')).value.service_roles.find(role => role.id === 'repository-assistant');
-  assert.equal((await admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: service.revision, model_id: shared.id })).status, 200);
   assert.equal((await admin('/api/onboarding/model', 'POST', { model_id: shared.id })).status, 201);
+  // Seed a group binding referencing this shared model directly (#1249).
+  h.store.run("INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,display_name,created_at,last_received_at) VALUES('chat-1','feishu','cli_1','t1','oc_1','group','conn-1','研发值班群',0,0)");
+  h.store.run("INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,enabled,revision,model_id,prompt,harness,created_at,updated_at) VALUES('bind-1','chat-1','group-assistant','repositories','p-bind-1','admin','admin',1,1,?,'','native',0,0)", shared.id);
   const detail = (await admin(`/api/models/${shared.id}`)).value.model;
   assert.deepEqual(detail.used_by, []); assert.equal(detail.onboarding_default, true);
-  assert.deepEqual(detail.role_used_by.map(role => [role.type, role.repository_id, role.role_id]), [
-    ['project_role', '101', 'reviewer'], ['project_role', '202', 'reviewer'], ['service_role', null, 'management-assistant'], ['service_role', null, 'repository-assistant']]);
+  assert.deepEqual(detail.role_used_by.map(role => [role.type, role.repository_id, role.role_id, role.name]), [
+    ['project_role', '101', 'reviewer', 'Role-only reviewer'], ['project_role', '202', 'reviewer', 'Other project private role'],
+    ['service_role', null, 'management-assistant', '管理助手'], ['group_binding', null, 'chat-1', '研发值班群']]);
   const restricted = (await member(`/api/models/${shared.id}`)).value.model;
   for (const field of ['used_by', 'role_used_by', 'onboarding_default']) assert.ok(!(field in restricted));
   assert.ok(!JSON.stringify(restricted).includes('Other project private role'));
@@ -157,7 +159,9 @@ test('shared model deletion preview includes service and project roles only for 
   const resolved = await member('/api/repositories/101/roles/resolve', 'POST', { role: 'reviewer', workflow: 'development.issue', expected_revision: revision });
   assert.equal(resolved.status, 409); assert.equal(resolved.value.error, 'role_model_not_available');
   assert.equal((await member('/api/repositories/101/policy')).value.policy.model_id, fallback.id);
-  assert.equal(h.store.get("SELECT model_id FROM service_roles WHERE id='repository-assistant'").model_id, null);
+  assert.equal(h.store.get("SELECT model_id FROM service_roles WHERE id='management-assistant'").model_id, null);
+  assert.deepEqual({ ...h.store.get("SELECT model_id,revision FROM channel_service_bindings WHERE id='bind-1'") }, { model_id: null, revision: 2 });
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='channel.service_binding.model_cleared' AND resource_id='bind-1'"));
   assert.equal((await admin('/api/onboarding')).value.model_id, null);
 });
 
@@ -223,11 +227,12 @@ test('a model detail failure stays on the row through a status refresh without s
 test('role-only and onboarding impacts remain visible before cancelling a shared model deletion', async () => {
   const { page, view, click, cancel } = consoleFixture(() => [200, { model: { model_name: 'fixture', repository_id: null, used_by: [], onboarding_default: true,
     role_used_by: [{ type: 'project_role', full_name: 'fixture/one', role_id: 'reviewer', name: 'Saved reviewer', enabled: false },
-      { type: 'service_role', role_id: 'assistant', name: 'Saved assistant', enabled: true }] } }], true);
+      { type: 'service_role', role_id: 'management-assistant', name: '管理助手', enabled: true },
+      { type: 'group_binding', role_id: 'chat-1', name: '研发值班群', enabled: true }] } }], true);
   const opening = click(); await settle();
-  assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one · Saved reviewer（reviewer） · 已停用', 'Saved assistant（assistant）']);
+  assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one · Saved reviewer（reviewer） · 已停用', '管理助手（management-assistant）', '研发值班群']);
   const body = view.querySelectorAll('p').map(node => node.textContent).join('\n');
-  assert.match(body, /显式模型引用会保留为不可用/); assert.match(body, /平台服务角色将变为未配置模型/); assert.match(body, /系统初始化的默认模型/); assert.match(body, /不包括历史运行快照/);
+  assert.match(body, /显式模型引用会保留为不可用/); assert.match(body, /平台管理助手将变为未配置模型/); assert.match(body, /飞书群聊助手将变为未配置模型/); assert.match(body, /系统初始化的默认模型/); assert.match(body, /不包括历史运行快照/);
   cancel(); await opening; assert.deepEqual(page.requests, ['GET /api/models/m']);
 });
 

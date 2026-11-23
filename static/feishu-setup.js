@@ -175,7 +175,7 @@ function renderFeishuList(panel, data, request) {
   const overview = settingsCard('飞书应用连接'), setupLinks = element('div', '', 'actions');
   if (data.platform || data.organizations.length) setupLinks.append(channelLink(feishuWizardAddress('new', 0), '新增飞书应用连接', 'button-link'));
   setupLinks.append(channelLink('#/identity/feishu', '管理个人与群绑定', 'button-link quiet'));
-  if (data.platform) setupLinks.append(channelLink('#/settings/service-roles', '管理服务角色', 'button-link quiet'));
+  if (data.platform) setupLinks.append(channelLink('#/settings/management-assistant', '配置管理助手', 'button-link quiet'));
   overview.append(note(data.platform
     ? '超级管理员可以连接全平台共用的应用，也可以为某个组织连接应用。组织管理员和组织内仓库的管理员可以在「个人设置 → 组织飞书应用」为本组织连接企业自建应用。每位用户在「个人设置 → 飞书绑定」中绑定本人身份或配置飞书群的仓库与权限。'
     : '你可以为下列组织连接企业自建的飞书应用（SDK 长连接）。组织的应用只有该组织内有授权的人能看到和绑定；它所在的群只能选择本组织的仓库，经它绑定的飞书身份也只能使用本组织内的权限。应用由创建人、组织管理员和超级管理员管理。'),
@@ -660,7 +660,7 @@ async function renderFeishuWizard(panel, data, id, step, request) {
     feishuList([
       '让每位使用者在「个人设置 → 飞书绑定」点击「创建个人绑定」生成绑定串并在机器人私聊发送（旧私聊 /bind 链接仍保留兼容）。',
       '绑定后直接在私聊发送“你好”或“我能管理哪些项目”，确认收到助手回复后即完成接入。绑定本身不增加仓库权限。',
-      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「个人设置 → 飞书绑定」点击「创建群绑定」，配置仓库范围、权限与助手角色。',
+      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「个人设置 → 飞书绑定」点击「创建群绑定」，配置仓库范围、权限、模型与提示词。',
       '日常启停、更新密钥、查看权限状态、收发诊断与历史维护，请随时进入该应用的管理详情页。',
     ]),
   );

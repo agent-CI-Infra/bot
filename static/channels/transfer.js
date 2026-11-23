@@ -107,7 +107,7 @@ async function channelDiagnostics(c, panel) {
   actions.append(channelLink('#/conversations?connector=' + encodeURIComponent(c.id), '查看该应用的飞书会话', 'button-link quiet'));
   view.append(facts([['启用状态', c.enabled ? '已启用' : '已停用'], ['活跃状态', transportLabel],
     ['最后收到事件', c.health.last_received_at ? timestamp(c.health.last_received_at) : '尚未收到'], ['诊断', c.health.last_error || '无'], ['待处理', c.health.queued], ['发送失败', c.health.failed]]),
-    note('应用鉴权成功或长连接已连接，都不能证明消息已经送达。请完成发布并在飞书中实测。群聊的项目范围与服务角色在「个人设置 → 飞书绑定」中为每个群单独设置；本地消息搜索、历史重同步与保留清理请在「飞书会话」中按会话操作。'),
+    note('应用鉴权成功或长连接已连接，都不能证明消息已经送达。请完成发布并在飞书中实测。群聊的项目范围、权限、模型与提示词在「个人设置 → 飞书绑定」中为每个群单独设置；本地消息搜索、历史重同步与保留清理请在「飞书会话」中按会话操作。'),
     actions);
   if (!operations.length && !deliveries.length) view.append(note('暂无收发记录。'));
   for (const op of operations.slice(0, 10)) view.append(note(`渠道操作 ${op.operation_id} · ${op.state}${op.error ? ' · ' + op.error : ''}${op.conversation_id ? ' · 会话 ' + op.conversation_id : ''}`));

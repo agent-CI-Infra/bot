@@ -10,7 +10,7 @@ test('binding a group, changing its level or its repositories posts nothing into
   const chat = await boundGroup(f, ['101']);
   for (const change of [{ level: 'dispatch' }, { level: 'dispatch', scope: { kind: 'repositories', repositories: ['101', '102'] } }, { level: 'read', participation: 'questions' }]) {
     const binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
-    const result = await admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: binding.revision, ...change });
+    const result = await admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: binding.revision, ...change });
     assert.equal(result.status, 200, JSON.stringify(result.value));
   }
   await f.service.drain();

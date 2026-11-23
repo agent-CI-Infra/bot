@@ -338,7 +338,7 @@ test('ACP role kinds are declared in project configuration and refused for servi
         assert.throws(() => resolveRole(store, '1', role, 'development.issue', { harness: backend }), error => error.code === 'harness_role_unsupported');
       }
       assert.deepEqual(metadata.supported_model_sources, ['gateway']);
-      assert.throws(() => serviceRolesApi(store, actor, 'POST', '/api/service-roles', { name: 'fixture', harness: backend }), /unknown_role_harness/);
+      assert.throws(() => serviceRolesApi(store, actor, 'PATCH', '/api/service-roles/management-assistant', { expected_revision: 1, harness: backend }), /unknown_role_harness/);
     }
     assert.equal(backends.find(item => item.id === id).runtime_status.source, 'declaration');
     assert.equal(backends.find(item => item.id === 'icode').runtime_status.source, 'tool_volume');

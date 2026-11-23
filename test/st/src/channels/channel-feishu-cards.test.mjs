@@ -237,7 +237,7 @@ test('interactive card handles view switch, paginated_list filter/page, followup
   // 5) Authorization fence: disabling group binding invalidates old interactive card
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
   const disable = await f.admin(`/api/channels/chats/${group.id}/service-binding`, 'PUT', {
-    service_role_id: binding.service_role_id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: false, expected_revision: binding.revision,
+    scope: { kind: 'repositories', repositories: ['101'] }, enabled: false, expected_revision: binding.revision,
   });
   assert.equal(disable.status, 200);
   const blocked = await post(f.h, f.id, interactiveClick(cardRow.id, 'v:items', { message: 'remote-1', chat: 'oc_group_interactive' }));
