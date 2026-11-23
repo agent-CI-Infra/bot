@@ -12,7 +12,10 @@ import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
-/** How long the runner may hold a poll of a Pi session (#1277); runner/agent.mjs and the manager allow the same 3 s. */
+/**
+ * How long the runner may hold a poll of a Pi session (#1277). runner/agent.mjs (agentPollWaitLimit) and
+ * manager/project-runner-calls.mjs allow the same 3 s; their tests pin the three together.
+ */
 const pollWait = 3000;
 
 /**

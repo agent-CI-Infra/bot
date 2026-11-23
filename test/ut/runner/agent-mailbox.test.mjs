@@ -4,13 +4,17 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import childProcess from 'node:child_process';
+import childProcess, { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { syncBuiltinESMExports } from 'node:module';
 import { agentOperation } from '../../../runner/agent.mjs';
 import { randomWorkspaceId } from '../../fixtures/helpers.mjs';
 
 // The Pi session mailbox of the real runner (runner/agent.mjs): the long poll (#1277) and the start that rides with the
 // last piece of the configuration. A live session is this test process (state.json without a boot id).
+const execFileAsync = promisify(execFile);
 const A = 'a'.repeat(48), B = 'b'.repeat(48), C = 'c'.repeat(48), D = 'd'.repeat(48);
 async function session(t, state = { state: 'running', pid: process.pid }) {
   const base = await mkdtemp(join(tmpdir(), 'agent-mailbox-')), root = join(base, randomWorkspaceId()), dir = join(root, 'agent');
@@ -119,4 +123,44 @@ test('the last configuration piece starts the session after the same cleanup and
   // A session still running refuses a new one before anything is written.
   await writeFile(join(dir, 'state.json'), JSON.stringify({ state: 'running', pid: process.pid }));
   await assert.rejects(piece({}), /agent_session_busy/); assert.equal(spawned.length, 1);
+});
+
+// The runner refuses a call on a full work volume before it reaches the mailbox (runner/runner.mjs, runner/disk.mjs, #671).
+// The real entry runs here as a child process with the volume read (statfs) stubbed and spawn recorded instead of run.
+const runnerEntry = fileURLToPath(new URL('../../../runner/runner.mjs', import.meta.url));
+const volumeStub = free => 'data:text/javascript,' + encodeURIComponent(`
+  import fs from 'node:fs'; import cp from 'node:child_process'; import { syncBuiltinESMExports } from 'node:module';
+  fs.statfsSync = () => ({ bavail: ${free}, bsize: 1, blocks: 1e12 });
+  cp.spawn = (...args) => { fs.appendFileSync(process.env.SPAWN_LOG, JSON.stringify(args.slice(0, 2)) + '\\n'); return { pid: process.pid, unref() {} }; };
+  syncBuiltinESMExports();`);
+async function runOnVolume(base, free, request) {
+  const { stdout } = await execFileAsync(process.execPath, ['--import', volumeStub(free), runnerEntry, Buffer.from(JSON.stringify({ operation_id: randomId(), ...request })).toString('base64url')],
+    { env: { ...process.env, BOT_LOCAL_EXECUTION: 'true', BOT_LOCAL_WORKSPACE: base, SPAWN_LOG: join(base, 'spawned.log') } });
+  return JSON.parse(stdout);
+}
+const randomId = () => randomBytes(24).toString('hex');
+
+test('on a full work volume the runner refuses the piece that would start the session: nothing is written and nothing starts', async t => {
+  const base = await mkdtemp(join(tmpdir(), 'agent-mailbox-full-')); t.after(() => rm(base, { recursive: true, force: true }));
+  const workspace_id = randomWorkspaceId(), dir = join(base, 'tasks', workspace_id, 'agent'), spawned = join(base, 'spawned.log');
+  await mkdir(dir, { recursive: true });
+  await request(dir, 'tool-requests', A, { kind: 'control', name: 'left-over', arguments: {} });
+  const piece = { type: 'workspace_agent_config', workspace_id, base64: Buffer.from('{"prompt":"hello"}').toString('base64'), offset: 0, final: true };
+
+  const refused = await runOnVolume(base, 0, { ...piece, start: true, runtime_version: '0.0.0-unchecked' });
+  assert.equal(refused.ok, false); assert.equal(refused.error, 'disk_full');
+  assert.match(refused.detail, /^workspace_agent_config: refused, nothing was run; the work volume has 0 MiB free/);
+  // Not even the earlier session's leftovers are cleared, and the version is not checked: the call never ran.
+  for (const name of ['input.json', 'input.tmp', 'state.json']) assert.ok(!existsSync(join(dir, name)), name);
+  assert.ok(existsSync(join(dir, 'tool-requests', A + '.json'))); assert.ok(!existsSync(spawned));
+
+  // A piece that only stores configuration still runs on the full volume, as before #1277.
+  assert.deepEqual(await runOnVolume(base, 0, piece), { ok: true, result: { written: true } });
+  assert.ok(existsSync(join(dir, 'input.json'))); assert.ok(!existsSync(spawned));
+
+  // With room the same starting piece clears the leftovers and starts the session.
+  const started = await runOnVolume(base, 5e11, { ...piece, start: true });
+  assert.deepEqual([started.ok, started.result.written, started.result.started], [true, true, true]);
+  assert.ok(!existsSync(join(dir, 'tool-requests', A + '.json')));
+  assert.equal((await readFile(spawned, 'utf8')).trim().split('\n').length, 1);
 });

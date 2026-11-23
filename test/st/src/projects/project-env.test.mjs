@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Projects } from '../../../../manager/projects.mjs';
 import { ManagerError } from '../../../../manager/docker.mjs';
+import { agentPollWaitLimit } from '../../../../runner/agent.mjs';
 import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 import { harness, setup, account, repository, testPassword } from '../../../fixtures/helpers.mjs';
 import { createServer } from 'node:http';
@@ -532,14 +533,15 @@ test('a Pi session may hold its poll up to 3 s, name what it already handles and
   const f = fixture(t); await f.projects.register('101');
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
   const known = { known_tool_ids: [id()], known_token_ids: [id()], known_model_ids: [id()], known_boundary_ids: [id()] };
-  await execute({ type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: 3000, ...known });
-  assert.deepEqual([f.docker.runs.at(-1).wait_ms, f.docker.runs.at(-1).known_boundary_ids], [3000, known.known_boundary_ids]);
+  // The manager passes on the runner's own limit (runner/agent.mjs) and nothing longer.
+  await execute({ type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: agentPollWaitLimit, ...known });
+  assert.deepEqual([f.docker.runs.at(-1).wait_ms, f.docker.runs.at(-1).known_boundary_ids], [agentPollWaitLimit, known.known_boundary_ids]);
   const config = { type: 'workspace_agent_config', workspace_id, base64: 'e30=', offset: 0, final: true };
   await execute({ ...config, start: true, runtime_version: '1.4.0' });
   assert.deepEqual([f.docker.runs.at(-1).start, f.docker.runs.at(-1).runtime_version], [true, '1.4.0']);
   const count = f.docker.runs.length;
   for (const bad of [
-    { type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: 3001 },
+    { type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: agentPollWaitLimit + 1 },
     { type: 'workspace_harness_poll', workspace_id, offset: 0, wait_ms: 1001 },
     { type: 'workspace_agent_poll', workspace_id, offset: 0, known_boundary_ids: ['x'] },
     { ...config, final: false, start: true },

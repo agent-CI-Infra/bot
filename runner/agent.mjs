@@ -210,6 +210,8 @@ async function startAgent(dir,root,boot,workspaceId){
 
 // A Pi long poll (#1277) waits at most this long: short enough that the control plane checks the task (a user's stop,
 // changed permissions) every few seconds, far below the manager's 90 s exec timeout. It looks every agentPollCheck ms.
+// The same 3 s is declared as pollWait in src/agent/pi.ts (what it asks for) and in manager/project-runner-calls.mjs
+// (the largest wait_ms it passes on); the tests of both compare theirs with agentPollWaitLimit.
 export const agentPollWaitLimit=3000,agentPollCheck=50,agentEventInterval=200;
 const knownIds=value=>new Set(Array.isArray(value)?value.filter(id=>typeof id==='string'&&/^[a-f0-9]{48}$/.test(id)):[]);
 // Session states the control plane only waits through; any other state (ended, ready for publication, missing) is news.
