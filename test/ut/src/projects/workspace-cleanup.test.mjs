@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Store } from '../../../../dist/storage/database.js';
-import { WorkspaceCleanup, useWorkspace, workspaceRemoving } from '../../../../dist/projects/workspace-cleanup.js';
+import { WorkspaceCleanup, useWorkspace, workspaceRemoving, unfinishedTaskWorkspaces } from '../../../../dist/projects/workspace-cleanup.js';
 import { reviewObjectState } from '../../../../dist/review/sessions.js';
 import { listTaskDirectories, removeTaskDirectories } from '../../../../runner/task-dirs.mjs';
 import { Workspace } from '../../../../dist/agent/workspace.js';
@@ -221,4 +221,151 @@ test('the sweep starts after startup, removes ten directories per runner call an
   assert.deepEqual(removals.map(call => call.entries.length), [10, 10, 3]);
   assert.deepEqual(removals.flatMap(call => call.entries.map(entry => entry.name)).sort(), names.sort());
   cleanup.close(); const before = f.calls.length; await cleanup.run(); assert.equal(f.calls.length, before);
+});
+
+test('#1268 unfinished task with multiple attempts keeps only active/resumable/open-binding workspaces and releases superseded attempts', async t => {
+  const f = fixture(t), oldAge = 3 * hour;
+  const currentWs = f.directory(oldAge);
+  const oldAttempt1 = f.directory(oldAge);
+  const oldAttempt2 = f.directory(oldAge);
+  const recentSuperseded = f.directory(5 * 60_000); // within 30m quietMs guard -> stays
+  const activeRoleWs = f.directory(oldAge);
+  const retiredRoleWs = f.directory(oldAge);
+  const cliStateWs = f.directory(oldAge);
+  const openWt = f.worktree(oldAge);
+  const closedWt = f.worktree(oldAge);
+
+  const running = f.task('running', { age: oldAge, workspace: currentWs });
+  f.store.run('UPDATE tasks SET generation=1, attempt=4 WHERE id=?', running.id);
+  for (const ws of [oldAttempt1, oldAttempt2, activeRoleWs, retiredRoleWs, cliStateWs]) {
+    useWorkspace(f.store, { id: running.id, repository_id: '101', kind: 'review.issue', object_number: 1, workspace_id: ws }, 'task', Date.now() - oldAge);
+  }
+  useWorkspace(f.store, { id: running.id, repository_id: '101', kind: 'review.issue', object_number: 1, workspace_id: recentSuperseded }, 'task', Date.now() - 5 * 60_000);
+  // Worktree records + bindings: openWt is still bound, closedWt has released_at set.
+  for (const wt of [openWt, closedWt]) {
+    f.store.run(`INSERT INTO worktrees(repository_id,id,generation,head_sha,tree_sha,mode,state,created_by,created_at,used_at) VALUES('101',?,1,?,?,'read','ready','t',?,?)`,
+      wt, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge), iso(Date.now() - oldAge));
+    useWorkspace(f.store, { id: running.id, repository_id: '101', kind: 'review.issue', object_number: 1, workspace_id: wt }, 'worktree', Date.now() - oldAge);
+  }
+  f.store.run(`INSERT INTO worktree_bindings(repository_id,worktree_id,task_id,workspace_id,mode,head_sha,tree_sha,bound_at,released_at) VALUES('101',?,?,?,'read',?,?,?,NULL)`,
+    openWt, running.id, currentWs, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge));
+  f.store.run(`INSERT INTO worktree_bindings(repository_id,worktree_id,task_id,workspace_id,mode,head_sha,tree_sha,bound_at,released_at) VALUES('101',?,?,?,'read',?,?,?,?)`,
+    closedWt, running.id, oldAttempt1, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge), iso(Date.now() - 2 * hour));
+  // Role instances: one active in gen 1 with persistent CLI state, one retired whose workspace should be freed.
+  f.store.run(`INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,runtime,harness_state) VALUES('ri-dev',?,'developer','{}','pi',?,?,?)`,
+    running.id, iso(Date.now() - oldAge), JSON.stringify({ generation: 1, workspace_id: activeRoleWs, guidance_retired: false }), JSON.stringify({ stateWorkspaceId: cliStateWs }));
+  f.store.run(`INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,runtime,harness_state) VALUES('ri-rev',?,'reviewer','{}','pi',?,?,'{}')`,
+    running.id, iso(Date.now() - oldAge), JSON.stringify({ generation: 1, workspace_id: retiredRoleWs, guidance_retired: true }));
+
+  // Before sweep, unfinishedTaskWorkspaces shows total held vs active vs releasable directories.
+  const beforeReport = unfinishedTaskWorkspaces(f.store, '101', [
+    { name: currentWs, bytes: 1000 }, { name: oldAttempt1, bytes: 2000 }, { name: oldAttempt2, bytes: 2000 },
+  ]);
+  assert.equal(beforeReport.length, 1);
+  assert.equal(beforeReport[0].task_id, running.id);
+  assert.equal(beforeReport[0].directories, 9);
+  assert.equal(beforeReport[0].active, 4); // currentWs, openWt, activeRoleWs, cliStateWs
+  assert.equal(beforeReport[0].releasable, 5); // oldAttempt1, oldAttempt2, recentSuperseded, retiredRoleWs, closedWt
+  assert.equal(beforeReport[0].bytes, 5000);
+
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...args) => logs.push(args.join(' '));
+  try { await f.sweep(); } finally { console.log = origLog; }
+
+  assert.deepEqual(f.left(), sorted(currentWs, activeRoleWs, cliStateWs, recentSuperseded));
+  assert.deepEqual(f.worktrees(), [openWt]);
+  for (const gone of [oldAttempt1, oldAttempt2, retiredRoleWs, closedWt]) {
+    assert.deepEqual(f.released(gone).map(row => row.release_reason), ['superseded_attempt'], `${gone} released as superseded_attempt`);
+  }
+  assert.ok(logs.some(line => line.includes('[workspaces] project 101:') && line.includes('superseded_attempt=4')), `expected per-reason log, got: ${logs.join('\n')}`);
+});
+
+test('#1268 pending retry/recovery/integration and undecided role_candidate keep their source workspaces until resolved', async t => {
+  const f = fixture(t), oldAge = 3 * hour;
+  const ownWs = f.directory(oldAge);
+  const recoveryWs = f.directory(oldAge);
+  const integrationWs = f.directory(oldAge);
+  const devCandWs = f.directory(oldAge);
+  const roleCandWs = f.directory(oldAge);
+  const staleWs = f.directory(oldAge);
+  const waiting = f.task('retry_wait', {
+    age: oldAge,
+    kind: 'development.issue',
+    workspace: ownWs,
+    input: JSON.stringify({ recovery: { source_workspace_id: recoveryWs }, integration: { source_workspace_id: integrationWs } }),
+  });
+  for (const ws of [recoveryWs, integrationWs, devCandWs, roleCandWs, staleWs]) {
+    useWorkspace(f.store, { id: waiting.id, repository_id: '101', kind: 'development.issue', object_number: 1, workspace_id: ws }, 'task', Date.now() - oldAge);
+  }
+  f.store.run(`INSERT INTO development_candidates(task_id,data) VALUES(?,?)`,
+    waiting.id, JSON.stringify({ source_workspace_id: devCandWs }));
+  f.store.run(`INSERT INTO task_history(task_id,type,data,created_at) VALUES(?,'role_candidate',?,?)`,
+    waiting.id, JSON.stringify({ role: 'developer', workspace_id: roleCandWs }), iso(Date.now() - oldAge));
+
+  await f.sweep();
+  assert.deepEqual(f.left(), sorted(ownWs, recoveryWs, integrationWs, devCandWs, roleCandWs));
+  assert.deepEqual(f.released(staleWs).map(row => row.release_reason), ['superseded_attempt']);
+
+  // Once acceptance decides the candidate, roleCandWs is no longer needed on the next sweep.
+  f.store.run(`UPDATE task_records SET candidate=?,acceptance=? WHERE task_id=?`,
+    JSON.stringify({ id: 'cand-1', artifacts: [] }), JSON.stringify({ candidate_id: 'cand-1', verdict: 'return' }), waiting.id);
+  await f.sweep();
+  assert.deepEqual(f.left(), sorted(ownWs, recoveryWs, integrationWs, devCandWs));
+  assert.deepEqual(f.released(roleCandWs).map(row => row.release_reason), ['superseded_attempt']);
+});
+
+test('#1268 multi-round review in round 2 releases round 1 workspace as superseded_round', async t => {
+  const f = fixture(t), round1Age = 5 * hour, round2Age = 2 * hour;
+  const round1Ws = f.directory(round1Age);
+  const round2Ws = f.directory(round2Age);
+  const prevFinishedAt = iso(Date.now() - 4 * hour);
+  const task = f.task('running', {
+    age: round2Age,
+    kind: 'review.pr',
+    number: 42,
+    workspace: round2Ws,
+    input: JSON.stringify({ round: 2, previous_result: { finished_at: prevFinishedAt } }),
+  });
+  // Round 1 workspace was recorded before previous_result.finished_at; round 1 also had a role_candidate.
+  f.store.run(`INSERT INTO task_workspaces(repository_id,workspace_id,task_id,task_kind,object_number,kind,created_at) VALUES('101',?,?,'review.pr',42,'task',?)`,
+    round1Ws, task.id, iso(Date.now() - round1Age));
+  f.store.run(`INSERT INTO task_history(task_id,type,data,created_at) VALUES(?,'role_candidate',?,?)`,
+    task.id, JSON.stringify({ role: 'reviewer', workspace_id: round1Ws }), iso(Date.now() - round1Age));
+
+  await f.sweep();
+  assert.deepEqual(f.left(), [round2Ws]);
+  assert.deepEqual(f.released(round1Ws).map(row => row.release_reason), ['superseded_round']);
+});
+
+test('#1268 looping unfinished task with dozens of prior attempt dirs and closed worktrees shrinks on next sweep', async t => {
+  const f = fixture(t), oldAge = 3 * hour;
+  const currentWs = f.directory(oldAge);
+  const currentWt = f.worktree(oldAge);
+  const looping = f.task('retry_wait', { age: oldAge, kind: 'development.pr', number: 99, workspace: currentWs });
+  f.store.run('UPDATE tasks SET attempt=15 WHERE id=?', looping.id);
+  f.store.run(`INSERT INTO worktrees(repository_id,id,generation,head_sha,tree_sha,mode,state,created_by,created_at,used_at) VALUES('101',?,1,?,?,'write','ready','t',?,?)`,
+    currentWt, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge), iso(Date.now() - oldAge));
+  useWorkspace(f.store, { id: looping.id, repository_id: '101', kind: 'development.pr', object_number: 99, workspace_id: currentWt }, 'worktree', Date.now() - oldAge);
+  f.store.run(`INSERT INTO worktree_bindings(repository_id,worktree_id,task_id,workspace_id,mode,head_sha,tree_sha,bound_at,released_at) VALUES('101',?,?,?,'write',?,?,?,NULL)`,
+    currentWt, looping.id, currentWs, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge));
+
+  const staleDirs = [], staleWts = [];
+  for (let i = 0; i < 12; i++) {
+    const dir = f.directory(oldAge), wt = f.worktree(oldAge);
+    staleDirs.push(dir); staleWts.push(wt);
+    useWorkspace(f.store, { id: looping.id, repository_id: '101', kind: 'development.pr', object_number: 99, workspace_id: dir }, 'task', Date.now() - oldAge);
+    f.store.run(`INSERT INTO worktrees(repository_id,id,generation,head_sha,tree_sha,mode,state,created_by,created_at,used_at) VALUES('101',?,1,?,?,'write','ready','t',?,?)`,
+      wt, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge), iso(Date.now() - oldAge));
+    useWorkspace(f.store, { id: looping.id, repository_id: '101', kind: 'development.pr', object_number: 99, workspace_id: wt }, 'worktree', Date.now() - oldAge);
+    f.store.run(`INSERT INTO worktree_bindings(repository_id,worktree_id,task_id,workspace_id,mode,head_sha,tree_sha,bound_at,released_at) VALUES('101',?,?,?,'write',?,?,?,?)`,
+      wt, looping.id, dir, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - oldAge), iso(Date.now() - 2 * hour));
+  }
+
+  await f.sweep();
+  assert.deepEqual(f.left(), [currentWs]);
+  assert.deepEqual(f.worktrees(), [currentWt]);
+  for (const name of [...staleDirs, ...staleWts]) {
+    assert.deepEqual(f.released(name).map(row => row.release_reason), ['superseded_attempt']);
+  }
 });
