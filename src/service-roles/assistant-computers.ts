@@ -8,6 +8,7 @@ import type { Manager } from '../projects/service.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { superAdmin, type Actor } from '../app/auth.js';
 import { commandTimeoutLimit } from '../agent/command.js';
+import { readFileChunks } from './checkout.js';
 
 /**
  * Assistant computers (#457): group assistants and the management assistant get a computer of their conversation owner, a
@@ -50,7 +51,7 @@ export function assistantCommandTimeout(value: unknown, limit = commandSecondsLi
   return seconds;
 }
 /** Prompt text shared by the assistants that offer the computer tools. */
-export const computerInstructions = (shared: string) => ` Your computer (read_file, write_file, delete_file, run_command when offered) has Chromium ($BOT_BROWSER_EXECUTABLE / bot-chromium) and X11 virtual desktop tools (bot-desktop, xvfb-run, Xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg) preinstalled for direct CLI, CDP, screenshot, recording and desktop-level operation; outbound internet access follows the assistant computer egress setting (isolated from the control plane network). HOME (~) persists across turns and ${shared}; temporary files go to /tmp or the working directory, which are cleared a few minutes after a turn ends, and only data worth reusing later belongs in HOME (package caches already go to /tmp). HOME has a size limit: when a tool reports it read-only, delete what is no longer needed with delete_file or ask an administrator to clear it in the console.`;
+export const computerInstructions = (shared: string) => ` Your computer (read_file, write_file, delete_file, run_command, and checkout_repository when offered) has Chromium ($BOT_BROWSER_EXECUTABLE / bot-chromium) and X11 virtual desktop tools (bot-desktop, xvfb-run, Xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg) preinstalled for direct CLI, CDP, screenshot, recording and desktop-level operation; outbound internet access follows the assistant computer egress setting (isolated from the control plane network). HOME (~) persists across turns and ${shared}; /workspace and /tmp are ephemeral disk-backed directories (default 20 GB each, separate from the 16 GB RAM limit) that are cleared when the computer is reclaimed or recreated. Only small reusable personal/group data belongs in HOME (package caches already go to /tmp). To fetch full source code of an authorized repository for inspection, building, or testing, prefer checkout_repository (which uses the control-plane cache into /workspace/<dir> or /tmp/<dir> without exposing credentials, and works for both GitHub App and PAT accounts) or run \`git clone https://<host>/<owner>/<repo>.git /workspace/<dir>\` directly when in a container harness with Git credentials configured; never use anonymous curl against GitHub /tarball or codeload URLs for private repositories, and never clone repositories or put build outputs/dependencies inside persistent HOME (~). HOME has a size limit: when a tool reports it read-only, delete what is no longer needed with delete_file or ask an administrator to clear it in the console.`;
 
 export interface ComputerOwner { kind: 'group' | 'person'; subject: string; tenant: string }
 /** What decides the HOME generation: a new binding or service role, or a narrower repository scope, starts a new one. */
@@ -472,7 +473,14 @@ export class AssistantComputer {
     if (!result?.ok) {
       // A failed file operation or runner call is an observation for the model, never the end of the turn.
       const detail = String(result?.detail ?? '');
-      throw new Refusal({ error: /ENOENT/.test(detail) ? 'file_not_found' : /EROFS/.test(detail) ? 'assistant_home_read_only' : /ENOSPC/.test(detail) ? 'assistant_computer_disk_full'
+      throw new Refusal({ error: /destination_exists/.test(detail) ? 'destination_exists'
+        : /unsafe_archive_symlink/.test(detail) ? 'unsafe_archive_symlink'
+        : /unsafe_archive_path/.test(detail) ? 'unsafe_archive_path'
+        : /unsafe_archive_entry_type/.test(detail) ? 'unsafe_archive_entry_type'
+        : /archive_too_large/.test(detail) ? 'archive_too_large'
+        : /archive_too_many_files/.test(detail) ? 'archive_too_many_files'
+        : /archive_missing/.test(detail) ? 'archive_missing'
+        : /ENOENT/.test(detail) ? 'file_not_found' : /EROFS/.test(detail) ? 'assistant_home_read_only' : /ENOSPC/.test(detail) ? 'assistant_computer_disk_full'
         : /regular_file_required|EISDIR/.test(detail) ? 'regular_file_required' : /invalid_path|ENOTDIR|ELOOP/.test(detail) ? 'invalid_path' : 'assistant_computer_operation_failed',
         ...(detail ? { detail: detail.slice(0, 2000) } : {}) });
     }
@@ -561,6 +569,33 @@ export class AssistantComputer {
       .catch(error => { if (error instanceof Refusal) fail(400, String(error.result.error)); throw error; });
     if (!file.size || file.size > maxBytes || file.data.length !== file.size) fail(413, 'channel_resource_too_large');
     return { data: file.data, name: where.display.split('/').filter(Boolean).at(-1)! };
+  }
+  /** Stages and safely extracts a control-plane tar.gz archive into /workspace or /tmp (checkout_repository, #1279). */
+  async extractArchive(archive: Buffer | { file: string; size: number }, destination: string, options: { overwrite?: boolean } = {}): Promise<Json> {
+    const stageId = randomId();
+    try {
+      if (Buffer.isBuffer(archive)) {
+        for (let offset = 0; offset < archive.length || offset === 0; offset += chunk) {
+          const slice = archive.subarray(offset, offset + chunk);
+          await this.run({ type: 'assistant_archive_stage', stage_id: stageId, base64: slice.toString('base64'), offset });
+          if (archive.length === 0) break;
+        }
+      } else {
+        await readFileChunks(archive.file, archive.size, chunk, async (slice, offset) => {
+          await this.run({ type: 'assistant_archive_stage', stage_id: stageId, base64: slice.toString('base64'), offset });
+        });
+      }
+      const extracted = await this.run({
+        type: 'assistant_archive_extract',
+        stage_id: stageId,
+        destination,
+        overwrite: options.overwrite === true,
+      }, 180_000);
+      return { ...extracted, ...this.notice() };
+    } catch (error) {
+      if (error instanceof Refusal) return { ...error.result, ...this.notice() };
+      throw error;
+    }
   }
   /** The turn ended: its processes end and the idle timer starts, or with remove (a changed fence) the computer goes. */
   async close(remove = false): Promise<void> {

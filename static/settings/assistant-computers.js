@@ -37,7 +37,7 @@ function assistantResourcesBody(view, redraw) {
   const egress = checkbox('egress', egressEnabled, '允许访问外网（自由使用预装浏览器访问网页、安装依赖；与控制面内网隔离）');
   const egressInput = egress.querySelector('input');
   return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'], ['网络', egressEnabled ? '可访问外网（独立隔离网络）' : '无外网']]),
-    note('/tmp 和工作目录放在内存里，写进去的文件计入内存上限；写满时命令收到“磁盘已满”，不影响别的电脑。助手电脑自动共用「工作电脑 → 虚拟电脑默认环境」中的全局预装软件包、预编译镜像与全局环境变量；未单独覆盖的资源项也跟随全局默认。'),
+    note('/workspace 工作目录与 /tmp 临时目录使用随容器生命周期自动创建与销毁的临时磁盘卷，不计入容器内存上限（默认 20 GB 空间、16 GB 内存，互不挤占）；容器空闲回收或重建时自动清空并删除临时卷，不影响持久化 HOME。助手电脑自动共用「工作电脑 → 虚拟电脑默认环境」中的全局预装软件包、预编译镜像与全局环境变量；未单独覆盖的资源项也跟随全局默认。'),
     actionForm([grid, egress, note('保存后新建的电脑立即使用新值；已有的电脑在它的下一个回合开始时按新值重建，HOME 保留，/tmp 和工作目录清空，进行中的回合不受影响。')], '保存', async () => {
       const changes = changed();
       if (egressInput.checked !== egressEnabled) changes.egress = egressInput.checked;

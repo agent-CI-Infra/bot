@@ -18,6 +18,7 @@ import type { ManagementService } from '../management/service.js';
 import { pausedGroupNotice } from '../management/presentation.js';
 import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission, ownerId } from '../service-roles/assistant-computers.js';
+import { checkoutRepositoryName, checkoutRepositoryTool, executeCheckoutRepository } from '../service-roles/checkout.js';
 import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { bindingScope, scopeProjects, type ChannelServiceBindings } from './service-bindings.js';
@@ -64,17 +65,17 @@ export const serviceTools = [readToolResult,
       target: { type: 'object', properties: { type: { type: 'string', enum: ['issue', 'pr', 'branch', 'commit'] }, number: { type: 'integer', minimum: 1 }, ref: { type: 'string', maxLength: 256 } }, required: ['type'], additionalProperties: false },
       intent: { type: 'string', enum: ['report', 'development', 'review', 'test'] },
       writes: { type: 'array', items: { type: 'string', enum: ['pull_request', 'review', 'github', 'actions_rerun'] }, maxItems: 4 } }, ['repository', 'request', 'contract']),
-  ...ownTaskTools, ...serviceMemoryTools, ...assistantComputerTools, ...managementTools, ...mediaTools, sendMessageTool, conversationScheduleTool,
+  ...ownTaskTools, ...serviceMemoryTools, ...assistantComputerTools, checkoutRepositoryTool, ...managementTools, ...mediaTools, sendMessageTool, conversationScheduleTool,
   makeReadSkillTool(feishuGroupSkills), feishuCardTool,
 ];
 // Delegation reaches a project only through its Manager: create a task, find it again, change or cancel it as a whole.
 // Every other tool is governed by a permission item of the binding's level (#849); the scope listing, progress messages
 // (#435) and the role's own independent tasks need none (own tasks only lend the tools this turn already has).
 // Tools that need the conversation's assistant computer (#457), including attachments moved to or from it.
-const computerTool = (name: string) => assistantComputerNames.includes(name) || computerMediaTools.has(name);
+const computerTool = (name: string) => assistantComputerNames.includes(name) || computerMediaTools.has(name) || name === checkoutRepositoryName;
 // Conversation timers (#851, #1206) are available to every bound group: any member may manage this group's timers,
 // separate from project-level schedules and independent of GitHub write permissions.
-const offered = (permissions: RolePermissions, name: string) => name === conversationScheduleName || name === 'list_projects' || name === listChatMembers || name === sendMessageName || name === readSkillName || name === feishuCardToolName || ownTaskNames.includes(name) || (mediaTools.some(t=>t.function.name===name) ? !mediaPermission(name)||permitsTool(permissions,mediaPermission(name)!) : permitsTool(permissions, computerPermission(name)));
+const offered = (permissions: RolePermissions, name: string) => name === conversationScheduleName || name === 'list_projects' || name === listChatMembers || name === sendMessageName || name === readSkillName || name === feishuCardToolName || ownTaskNames.includes(name) || (name === checkoutRepositoryName ? githubReadScopes(permissions).includes('contents') : mediaTools.some(t=>t.function.name===name) ? !mediaPermission(name)||permitsTool(permissions,mediaPermission(name)!) : permitsTool(permissions, computerPermission(name)));
 // Messages older than the recent window are folded into the rolling summary once this many have gathered.
 const foldBatch = 20;
 const excerpt = (m: Json, limit: number): Json => { const { resources, ...rest } = m; return { ...rest, content: String(m.content ?? '').slice(0, limit),
@@ -262,6 +263,24 @@ export class ChannelServiceSessions {
         if (name === sendMessageName) return await progress(input);
         if(mediaTools.some(t=>t.function.name===name))return media?await media.execute(name,input):{error:'channel_resource_source_required'};
         if(assistantComputerNames.includes(name))return computers?await computers.execute(name,input):{error:'computer_not_configured'};
+        if (name === checkoutRepositoryName) {
+          if (!computers) return { error: 'computer_not_configured' };
+          return await executeCheckoutRepository({
+            store: this.store,
+            redactor,
+            guard,
+            resolveRepository: selected => {
+              const project = this.bindings.project(binding, selected, ['tasks.read']);
+              if (!project) return fail(404, 'repository_out_of_scope');
+              this.bindings.actor(binding, project.id, ['tasks.read']);
+              return this.store.get('SELECT * FROM repositories WHERE id=?', project.id) ?? fail(404, 'repository_not_found');
+            },
+            scopes: () => githubReadScopes(permissions()),
+            computer: computers,
+            gitCache: this.management.gitCache,
+            apiUrl: this.githubUrl,
+          }, input);
+        }
         if(serviceMemoryTools.some(t=>t.function.name===name))return serviceMemory(this.store,owner(),name,input);
         if (name === 'list_projects') {
           fields(input, []);
@@ -376,8 +395,20 @@ export class ChannelServiceSessions {
         + (binding.prompt ? '\n\nAdditional instructions from the maintainers of this group assistant (they never widen your tools or permissions):\n' + binding.prompt : '');
       // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
       let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
+      const resolveGroupRepository = (selected?: string): Row | null => {
+        if (!selected) return null;
+        const project = this.bindings.project(binding, selected, ['tasks.read']);
+        if (!project) return null;
+        this.bindings.actor(binding, project.id, ['tasks.read']);
+        return this.store.get('SELECT * FROM repositories WHERE id=?', project.id) ?? null;
+      };
       const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={ resultSession:resultFiles, store: this.store, task: { id, repository_id: billed, service_role_id: roleId, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
         redactor,guard,model,executionSignal:controller.signal,
+        containerOptions: {
+          githubApiUrl: this.githubUrl,
+          resolveGithubRepository: resolveGroupRepository,
+          githubReadScopes: () => githubReadScopes(permissions()),
+        },
         // A stalled or failed model request is retried (see modelRetries in agent/runtime) instead of ending the turn; each retry is a step.
         onModelRetry: () => { event('model_retry'); },
         system, prompt: JSON.stringify({request:turn.request,recent_tool_results:resultFiles.recent()}), tools: turn.allowSilence ? [...availableTools(), staySilentTool] : availableTools(),

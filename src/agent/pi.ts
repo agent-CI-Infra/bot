@@ -60,8 +60,8 @@ export interface PiSession<T> {
   platform?: Record<string, (id: string, args: any) => Promise<any>>;
   /** Repository exploration through the control plane (github_read, github_search, read_job_log). */
   repository?: (name: string, args: any) => Promise<any>;
-  /** The answer to github_read_token: a short-lived read token, or the reason there is none. */
-  token?: () => Promise<any>;
+  /** The answer to github_read_token or container git/gh credential helpers: a short-lived read token, or the reason there is none. */
+  token?: (request?: { purpose?: 'git' | 'gh'; repository?: string; token?: unknown }) => Promise<any>;
   createPullRequest?: (id: string, args: any) => Promise<any>;
   /** capabilities.github.publication: only 'pull_request' may answer create_pull_request. */
   publication?: string;
@@ -133,8 +133,8 @@ export function piAdapter<T>(session: PiSession<T>) {
     if (session.runtime && !fresh) checkRuntime(await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
     // Messages that arrived before the session starts join right after its prompt, as they would before a first native request.
     if (service) { config.service_turn = true; config.steer = service.steer(); }
-    // The private runner bootstrap carries a native provider credential, never a tool result or prompt.
-    const wireConfig=redactor.clean(config);if(config.model_transport==='direct')wireConfig.native_model=config.native_model;
+    // The private runner bootstrap carries a native provider credential and run token, never a tool result or prompt.
+    const wireConfig=redactor.clean(config);if(config.model_transport==='direct')wireConfig.native_model=config.native_model;if(config.run_token)wireConfig.run_token=config.run_token;
     const bytes = Buffer.from(JSON.stringify(wireConfig)); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
     // The last piece of a new session's configuration also starts it (#1277), checking the pinned Pi version before the
     // process runs. A runner older than that ignores start: its answer has no runtime, and the runtime query and the start
@@ -261,7 +261,9 @@ export function piAdapter<T>(session: PiSession<T>) {
             let reply: any;
             try {
               if (!session.token) stop('github_read_token_unavailable', undefined, '当前任务未配置 GitHub 只读令牌服务。');
-              reply = await session.token!();
+              const purpose = tokenRequest?.purpose === 'git' ? 'git' : tokenRequest?.purpose === 'gh' ? 'gh' : undefined;
+              const repository = typeof tokenRequest?.repository === 'string' && tokenRequest.repository.trim() ? tokenRequest.repository.trim() : undefined;
+              reply = await session.token!({ ...(purpose ? { purpose } : {}), ...(repository ? { repository } : {}), ...(tokenRequest?.token !== undefined ? { token: tokenRequest.token } : {}) });
             } catch (error) {
               await guard();
               reply = { error: error instanceof TaskError ? error.code : 'github_read_token_unavailable' };

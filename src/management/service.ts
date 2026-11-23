@@ -23,6 +23,7 @@ import { installationExecutionDenied } from '../installations/archive.js';
 import { commands, commandSchema, querySchema, queries as queryNames, schedulingQueries, validate } from './catalog.js';
 import { configurationPrRemoved } from './configuration-pr.js';
 import type { AssistantComputerService } from '../service-roles/assistant-computers.js';
+import type { GitCache } from '../agent/git-cache.js';
 import { schedulingCommands } from '../schedules/schema.js';
 import { sameRepositoryName } from './repository-name.js';
 
@@ -52,6 +53,8 @@ export class ManagementService {
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
   /** The conversation owners' computers (#457) used by the management assistant and group assistants. */
   assistants?: AssistantComputerService;
+  /** Shared control-plane bare mirror cache for checkout_repository (#1279). */
+  gitCache?: GitCache;
   /** Reconciles project environments after starting a repository through the management assistant or start requests. */
   reconcileProjects?: () => void;
   constructor(readonly store: Store, readonly rules: RuleService, readonly tasks: TaskCommands, readonly computer?:Manager, readonly githubUrl?:string) {}

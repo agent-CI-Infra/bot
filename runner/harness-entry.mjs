@@ -1,5 +1,6 @@
 import {stageSessionSkills} from './session-resources.mjs';
 import {startCredentialHelperServer} from './credential-helper.mjs';
+import {buildGitConfigEnv} from './git-credential-bot.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
@@ -93,24 +94,6 @@ function buildCodexConfigToml({ model, relayUrl, egress, nodeExec, mcpBridgePath
   ].join('\n');
 }
 
-
-function buildGitConfigEnv(existingEnv, gitCredentialScript, allowHttp) {
-  const entries = [
-    ['core.hooksPath', '/dev/null'],
-    ['core.fsmonitor', 'false'],
-    ['commit.gpgsign', 'false'],
-    ['gc.auto', '0'],
-    ['credential.useHttpPath', 'false'],
-    ['credential.helper', `!${process.execPath} ${gitCredentialScript}`],
-  ];
-  if (allowHttp) entries.push(['http.extraHeader', '']);
-  const out = { ...existingEnv, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: String(entries.length) };
-  entries.forEach(([k, v], i) => {
-    out[`GIT_CONFIG_KEY_${i}`] = k;
-    out[`GIT_CONFIG_VALUE_${i}`] = v;
-  });
-  return out;
-}
 
 const root = resolve(process.argv[2] || '');
 const workspaceId = root.split('/').pop() || '';

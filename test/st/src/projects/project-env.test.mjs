@@ -118,7 +118,7 @@ test('environment observation distinguishes an unreachable or absent manager rec
 test('the project computer spec is validated by the manager, survives restarts and is applied by recreating the container', async t => {
   const f = fixture(t); await f.projects.register('101');
   const name = f.projects.names('101', 1).container, created = f.docker.created;
-  assert.deepEqual(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'network_policy'].map(k => f.projects.describe('101').computer[k]), [2, 4096, 1024, 1024, 'internet egress']);
+  assert.deepEqual(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'network_policy'].map(k => f.projects.describe('101').computer[k]), [2, 16384, 1024, 20480, 'internet egress']);
   assert.equal(f.projects.describe('101').computer.max_command_minutes, undefined); assert.equal(f.projects.describe('101').computer.bounds.max_command_minutes, undefined);
   for (const spec of [{ memory_mb: 100000 }, { cpus: 0.1 }, { pids: 100.5 }, { egress: 'yes' }, { image: 'other' }, null])
     await assert.rejects(f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: spec }), /invalid_spec/);
@@ -140,7 +140,7 @@ test('a computer created with a noexec /tmp or with swap is replaced at the next
   for (const [key, value] of [['Tmpfs', { '/tmp': `rw,nosuid,nodev,noexec,size=${gib},mode=1777` }], ['MemorySwap', 8 * gib]]) {
     const f = fixture(t); await f.projects.register('101');
     const name = f.projects.names('101', 1).container, volumes = f.docker.volumes.size, created = f.docker.created, host = f.docker.containers.get(name).HostConfig;
-    assert.deepEqual([host.Memory, host.MemorySwap, host.Tmpfs['/tmp']], [4 * gib, 4 * gib, `rw,exec,nosuid,nodev,size=${gib},mode=1777`]);
+    assert.deepEqual([host.Memory, host.MemorySwap, host.Tmpfs['/tmp']], [16 * gib, 16 * gib, `rw,exec,nosuid,nodev,size=${20 * gib},mode=1777`]);
     host[key] = value;
     f.restart(); await f.projects.provision('101');
     const replaced = f.docker.containers.get(name).HostConfig;

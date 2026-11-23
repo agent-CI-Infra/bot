@@ -22,8 +22,9 @@ export function createTokenExchange(dir, options = {}) {
     const reqBase = `${requestsDir}/${id}`, replyBase = `${repliesDir}/${id}`;
     const token = callOptions.token !== undefined ? callOptions.token : defaultToken;
     const purpose = typeof callOptions.purpose === 'string' ? callOptions.purpose : undefined;
+    const repository = typeof callOptions.repository === 'string' && callOptions.repository ? callOptions.repository : undefined;
     try {
-      await writeFile(reqBase + '.tmp', JSON.stringify({ id, ...(token ? { token } : {}), ...(purpose ? { purpose } : {}) }), { mode: 0o600 });
+      await writeFile(reqBase + '.tmp', JSON.stringify({ id, ...(token ? { token } : {}), ...(purpose ? { purpose } : {}), ...(repository ? { repository } : {}) }), { mode: 0o600 });
       await rename(reqBase + '.tmp', reqBase + '.json');
       for (const end = Date.now() + 120000; Date.now() < end;) {
         if (signal?.aborted) return cancelled;

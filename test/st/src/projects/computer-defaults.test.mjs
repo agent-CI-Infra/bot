@@ -36,8 +36,8 @@ function fixture(t) {
 test('computers follow the resource defaults unless their project sets its own value, and null returns to the default', async t => {
   const f = fixture(t); await f.projects.register('101');
   let view = await f.projects.defaultsView();
-  assert.deepEqual(view.defaults, { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 }); assert.deepEqual(view.builtin, view.defaults);
-  assert.deepEqual(view.host, { cpus: 8, memory_mb: 32768 }); assert.deepEqual(view.allocated, { computers: 1, cpus: 2, memory_mb: 4096 });
+  assert.deepEqual(view.defaults, { cpus: 2, memory_mb: 16384, pids: 1024, tmp_mb: 20480 }); assert.deepEqual(view.builtin, view.defaults);
+  assert.deepEqual(view.host, { cpus: 8, memory_mb: 32768 }); assert.deepEqual(view.allocated, { computers: 1, cpus: 2, memory_mb: 16384 });
   for (const input of [{}, { cpus: 0.1 }, { memory_mb: 100 }, { pids: 1.5 }, { tmp_mb: '64' }, { egress: 'no' }, { cpus: null }, []])
     await assert.rejects(f.projects.setDefaults(input), /invalid_defaults/);
   // Docker cannot give a container more CPUs than the host has.
@@ -47,7 +47,7 @@ test('computers follow the resource defaults unless their project sets its own v
   await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { memory_mb: 2048 } });
   assert.deepEqual(f.projects.describe('101').computer.inherited, ['cpus', 'pids', 'tmp_mb']);
   view = await f.projects.setDefaults({ cpus: 4, memory_mb: 8192 });
-  assert.deepEqual(view.defaults, { cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 1024 });
+  assert.deepEqual(view.defaults, { cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 20480 });
   // The running computer is not touched; it shows the new values as pending until it is refreshed.
   const computer = f.projects.describe('101').computer;
   assert.deepEqual([computer.cpus, computer.memory_mb, computer.resources_pending, f.host('101').NanoCpus], [4, 2048, true, 2e9]);
@@ -100,7 +100,7 @@ test('global settings change the defaults through the manager, and an idle compu
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('t1','101','review.issue','running','')");
   h.store.run("INSERT INTO task_claims VALUES('t1','101','token','2026-01-01')");
   const saved = await admin('/api/settings', 'PATCH', { computer_defaults: { cpus: 3, memory_mb: 6144 } });
-  assert.equal(saved.status, 200); assert.deepEqual(saved.value.settings.computer_defaults.defaults, { cpus: 3, memory_mb: 6144, pids: 1024, tmp_mb: 1024 });
+  assert.equal(saved.status, 200); assert.deepEqual(saved.value.settings.computer_defaults.defaults, { cpus: 3, memory_mb: 6144, pids: 1024, tmp_mb: 20480 });
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='settings.updated' AND resource_id='computer.defaults'"));
   await h.projects.reconcile();
   assert.deepEqual([f.host('101').NanoCpus, f.host('202').NanoCpus, f.host('202').PidsLimit], [2e9, 3e9, 2048]);

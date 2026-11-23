@@ -19,17 +19,18 @@ import { logFailure, resourceBounds, validResource, validateCall as validateProj
  *
  * Hardening: uid 10001, read-only root, every capability dropped, no-new-privileges, init,
  * isolated network (configurable egress, default enabled on a dedicated ICC-disabled bridge network isolated from the
- * control network; when egress is disabled, no network at all), private IPC, CPU/memory (no swap)/PID limits, tmpfs
- * workspace and /tmp, Docker's default runtime.
+ * control network; when egress is disabled, no network at all), private IPC, CPU/memory (no swap)/PID limits, ephemeral
+ * disk-backed Docker volumes for /workspace and /tmp (decoupled from cgroup memory and deleted with the container), Docker's default runtime.
  * The only persistent mount is the owner's current HOME generation, a subpath of the shared HOME volume, never its parent.
  */
 const mib = 1024 * 1024, ownerPattern = /^[a-f0-9]{32}$/, idPattern = /^[a-f0-9]{48}$/, turnPattern = /^[A-Za-z0-9_-]{1,64}$/;
 export const assistantHome = '/home/assistant';
 // Timers and capacity, then each computer's resources and egress: the project computers' resources in the same bounds,
-// plus the size of the tmpfs working directory. tmpfs contents (/tmp and /workspace) count against the memory limit.
+// plus the working directory limit. /workspace and /tmp are ephemeral disk-backed Docker volumes so large checkouts and
+// builds (default 20 GiB) do not consume the container's 16 GiB RAM limit (#1279).
 // An idle computer stays half an hour (#1254): a harness turn (Pi, Codex, Claude Code) needs one every turn, and an idle
 // container costs a few MiB; when capacity is full the one used longest ago still gives way.
-export const assistantDefaults = { idle_minutes: 30, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512, egress: true };
+export const assistantDefaults = { idle_minutes: 30, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 16384, pids: 512, tmp_mb: 20480, workspace_mb: 20480, egress: true };
 const timerBounds = { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 7 * 24 * 60] };
 const sizeBounds = { ...resourceBounds, workspace_mb: resourceBounds.tmp_mb }, resourceKeys = Object.keys(sizeBounds);
 const bounds = { ...timerBounds, ...sizeBounds };
@@ -38,16 +39,26 @@ const resourcesOf = settings => Object.fromEntries(resourceKeys.map(key => [key,
 export const abandonAfterMs = 120_000;
 // A waiting owner keeps its place while it asks again within this time; the control plane retries every 2 s.
 const ticketMs = 15_000;
-// Runner operations an assistant computer accepts: a shell command in /workspace, file access below HOME, /workspace and /tmp.
-const types = ['command', 'assistant_read', 'assistant_write', 'assistant_delete'];
-const keys = { command: ['command', 'timeout_ms', 'keep_background'], assistant_read: ['path', 'offset', 'limit'], assistant_write: ['path', 'base64', 'offset'], assistant_delete: ['path'] };
+// Runner operations an assistant computer accepts: a shell command in /workspace, file access below HOME, /workspace and /tmp,
+// and control-plane staged repository archive extraction into /workspace or /tmp.
+const types = ['command', 'assistant_read', 'assistant_write', 'assistant_delete', 'assistant_archive_stage', 'assistant_archive_extract'];
+const keys = {
+  command: ['command', 'timeout_ms', 'keep_background'],
+  assistant_read: ['path', 'offset', 'limit'],
+  assistant_write: ['path', 'base64', 'offset'],
+  assistant_delete: ['path'],
+  assistant_archive_stage: ['stage_id', 'base64', 'offset'],
+  assistant_archive_extract: ['stage_id', 'destination', 'overwrite'],
+};
 
 function validateCall(call, harness = false) {
   if(harness&&(call?.type==='workspace_init'||call?.type==='reap'||call?.type?.startsWith('workspace_agent_')||call?.type?.startsWith('workspace_harness_'))){validateProjectCall(call);return;}
   if (!call || typeof call !== 'object' || !types.includes(call.type) || Object.keys(call).some(k => k !== 'type' && !keys[call.type].includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isSafeInteger(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.keep_background !== undefined && typeof call.keep_background !== 'boolean') throw new ManagerError('invalid_runner_request', 400);
-  if (call.type !== 'command' && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
+  if (['assistant_read', 'assistant_write', 'assistant_delete'].includes(call.type) && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
+  if (['assistant_archive_stage', 'assistant_archive_extract'].includes(call.type) && !idPattern.test(call.stage_id || '')) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'assistant_archive_extract' && (typeof call.destination !== 'string' || !call.destination || call.destination.length > 4096 || call.destination.includes('\0') || (call.overwrite !== undefined && typeof call.overwrite !== 'boolean'))) throw new ManagerError('invalid_runner_request', 400);
 }
 export function validateAssistantSettings(input, hostCpus = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.keys(input).some(k => !Object.hasOwn(assistantDefaults, k))) throw new ManagerError('invalid_assistant_settings', 400);
@@ -76,6 +87,22 @@ export class AssistantComputers {
       if (replaced) { delete values.idle_minutes; this.db.prepare("UPDATE settings SET value=? WHERE key='assistant_computers'").run(JSON.stringify(values)); }
       this.db.prepare("INSERT INTO settings VALUES('assistant_idle_default',?)").run(JSON.stringify({ default: assistantDefaults.idle_minutes, replaced: replaced ? 5 : null, at: new Date().toISOString() }));
       if (replaced) console.log(`[manager] assistant computers: the stored idle time of 5 minutes (the old default) now follows the default of ${assistantDefaults.idle_minutes} minutes`);
+    }
+    // Older saves stored every resource key including the old defaults (2048 MiB RAM, 512 MiB /tmp & /workspace).
+    // Drop those legacy default values once so upgraded deployments follow the new 16 GiB / 20 GiB defaults (#1279).
+    if (!this.db.prepare("SELECT 1 FROM settings WHERE key='assistant_resource_defaults_20g_16g'").get()) {
+      const saved = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(), values = saved ? JSON.parse(saved.value) : null;
+      const legacy = { memory_mb: 2048, tmp_mb: 512, workspace_mb: 512 };
+      const replaced = {};
+      if (values) {
+        for (const [k, oldVal] of Object.entries(legacy)) {
+          if (values[k] === oldVal) { delete values[k]; replaced[k] = oldVal; }
+        }
+        if (Object.keys(replaced).length) {
+          this.db.prepare("UPDATE settings SET value=? WHERE key='assistant_computers'").run(JSON.stringify(values));
+        }
+      }
+      this.db.prepare("INSERT INTO settings VALUES('assistant_resource_defaults_20g_16g',?)").run(JSON.stringify({ replaced, at: new Date().toISOString() }));
     }
   }
   effectiveGlobal() {
@@ -123,9 +150,33 @@ export class AssistantComputers {
   }
   validate(owner) { if (!ownerPattern.test(owner || '')) throw new ManagerError('invalid_assistant_owner', 400); }
   name(owner) { return `dbot-${this.deployment}-ac-${owner}`; }
+  workspaceVolumeName(owner) { return `dbot-${this.deployment}-ac-${owner}-ws`; }
+  tmpVolumeName(owner) { return `dbot-${this.deployment}-ac-${owner}-tmp`; }
   networkName() { return `dbot-${this.deployment}-ac-egress`; }
   labels(owner) { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'assistant', 'department.bot.owner': owner }; }
+  scratchVolumeLabels(owner, kind) { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': kind, 'department.bot.owner': owner }; }
   networkLabels() { return { 'department.bot.deployment': this.deployment, 'department.bot.kind': 'assistant' }; }
+  async removeScratchVolumes(owner) {
+    for (const [volName, kind] of [[this.workspaceVolumeName(owner), 'assistant-workspace'], [this.tmpVolumeName(owner), 'assistant-tmp']]) {
+      const existing = await this.docker.request('GET', `/volumes/${volName}`).catch(() => null);
+      if (!existing) continue;
+      if (Object.entries(this.scratchVolumeLabels(owner, kind)).some(([k, v]) => existing.Labels?.[k] !== v)) {
+        logFailure(`assistant scratch volume ${volName} ownership mismatch`, 'skipped removal');
+        continue;
+      }
+      await this.docker.request('DELETE', `/volumes/${volName}?force=true`).catch(error => logFailure(`assistant scratch volume ${volName} removal failed`, error));
+    }
+  }
+  async createScratchVolume(volName, owner, kind) {
+    const labels = this.scratchVolumeLabels(owner, kind);
+    const existing = await this.docker.request('GET', `/volumes/${volName}`).catch(() => null);
+    if (existing) {
+      if (Object.entries(labels).some(([k, v]) => existing.Labels?.[k] !== v)) throw new ManagerError('resource_ownership_mismatch', 403);
+      await this.docker.request('DELETE', `/volumes/${volName}?force=true`);
+    }
+    await this.docker.request('POST', '/volumes/create', { Name: volName, Labels: labels });
+    return volName;
+  }
   networkValid(network) {
     return !!network
       && !Object.entries(this.networkLabels()).some(([k, v]) => network.Labels?.[k] !== v)
@@ -193,7 +244,8 @@ export class AssistantComputers {
     lease.removed = reason;
     const previous = this.removing.get(lease.owner) || Promise.resolve();
     const done = previous.then(() => this.docker.request('DELETE', `/containers/${this.name(lease.owner)}?force=true`))
-      .then(() => { if (!this.settings().egress && ![...this.leases.values()].some(l => l.egress)) return this.removeNetwork(); })
+      .then(() => this.removeScratchVolumes(lease.owner))
+      .then(() => { if (this.db.isOpen && !this.settings().egress && ![...this.leases.values()].some(l => l.egress)) return this.removeNetwork(); })
       .catch(error => logFailure(`assistant computer ${lease.owner} removal (${reason}) failed`, error))
       .finally(() => { if (this.removing.get(lease.owner) === done) this.removing.delete(lease.owner); });
     this.removing.set(lease.owner, done);
@@ -301,6 +353,10 @@ export class AssistantComputers {
     await this.removing.get(owner);
     // A container left by an earlier lease of this owner (a failed removal) is never reused.
     if (await this.inspect(owner)) await this.docker.request('DELETE', `/containers/${name}?force=true`);
+    // Fresh ephemeral disk-backed volumes for /workspace and /tmp so large checkouts/builds (default 20 GiB)
+    // do not count against the 16 GiB memory cgroup limit and are always clean on recreate or fence change.
+    const wsVol = await this.createScratchVolume(this.workspaceVolumeName(owner), owner, 'assistant-workspace');
+    const tmpVol = await this.createScratchVolume(this.tmpVolumeName(owner), owner, 'assistant-tmp');
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
     const networkMode = lease.egress ? await this.ensureNetwork() : 'none';
     const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
@@ -308,12 +364,16 @@ export class AssistantComputers {
       ? [...Object.entries(lease.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(lease.env).join(',')}`]
       : [];
     const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
-      Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant', ...extraEnv], Labels: this.labels(owner),
+      Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant', `BOT_WORKSPACE_LIMIT_MB=${l.workspace_mb}`, `BOT_TMP_LIMIT_MB=${l.tmp_mb}`, ...extraEnv], Labels: this.labels(owner),
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: networkMode,
-        Mounts: [...results, { Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[])],
-        // Programs run from both, as on a work computer; Docker mounts a tmpfs noexec unless `exec` is given.
-        Tmpfs: { '/workspace': `rw,exec,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,exec,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
+        Mounts: [
+          ...results,
+          { Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },
+          { Type: 'volume', Source: wsVol, Target: '/workspace', ReadOnly: false },
+          { Type: 'volume', Source: tmpVol, Target: '/tmp', ReadOnly: false },
+          ...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[]),
+        ] } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
     await this.docker.request('POST', `/containers/${name}/start`);
     const health = await this.docker.runner(name, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
@@ -382,6 +442,7 @@ export class AssistantComputers {
       // (the control plane's sweep, a console clear, retention) would fail although the computer is gone.
       await this.removing.get(owner);
       if (await this.inspect(owner).catch(() => null)) await this.docker.request('DELETE', `/containers/${this.name(owner)}?force=true`);
+      await this.removeScratchVolumes(owner);
     }
     return { owner, state: 'removed' };
   }
@@ -405,11 +466,18 @@ export class AssistantComputers {
     await Promise.all(expired.map(([lease, reason]) => this.discard(lease, reason)));
     return expired.length;
   }
-  /** On start: assistant containers of this deployment are left from before and removed, never reused. */
+  /** On start: assistant containers and their ephemeral scratch volumes of this deployment are left from before and removed, never reused. */
   async recover() {
     const filters = encodeURIComponent(JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, 'department.bot.kind=assistant'] }));
     const containers = await this.docker.request('GET', `/containers/json?all=1&filters=${filters}`) || [];
     for (const container of containers) await this.docker.request('DELETE', `/containers/${container.Id}?force=true`).catch(error => logFailure('leftover assistant computer removal failed', error));
+    for (const kind of ['assistant-workspace', 'assistant-tmp']) {
+      const volFilters = encodeURIComponent(JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, `department.bot.kind=${kind}`] }));
+      const listed = await this.docker.request('GET', `/volumes?filters=${volFilters}`).catch(() => null);
+      for (const vol of listed?.Volumes ?? []) {
+        await this.docker.request('DELETE', `/volumes/${encodeURIComponent(vol.Name)}?force=true`).catch(error => logFailure(`leftover ${kind} volume ${vol.Name} removal failed`, error));
+      }
+    }
     await this.removeNetwork();
     return containers.length;
   }

@@ -101,6 +101,10 @@ export interface AgentSpec<T> {
     egress?: boolean;
     githubApiUrl?: string;
     allowHttpGit?: boolean;
+    /** Dynamic repository resolver for multi-repository/service sessions requesting on-demand read-only tokens (#1279). */
+    resolveGithubRepository?: (repository?: string) => Row | null;
+    /** Live GitHub read scopes for service sessions whose role permissions may update across turns. */
+    githubReadScopes?: () => string[];
     extraEnv?: Record<string, string>;
     executableOverride?: { executable: string; args?: string[]; nodeExecutable?: string; version?: string };
     fileProvider?: import('../harness/model-gateway.js').FileBackedModelProvider;

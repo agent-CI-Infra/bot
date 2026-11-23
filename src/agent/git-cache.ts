@@ -27,8 +27,8 @@ export class Mirror {
 }
 type Run = { stdout: Buffer; stderr: string; code: number | null };
 const objectId = /^[a-f0-9]{40}$/;
-// Only branch and pull request head refs are fetched by name, and only when GitHub refuses a commit by SHA.
-const fetchableRef = /^refs\/(?:heads\/(?!.*(?:\.\.|@\{|\/\/|\/\.|\.lock(?:\/|$)))[A-Za-z0-9._/-]+|pull\/\d+\/head)$/;
+// Only branch, tag and pull request head refs are fetched by name, and only when GitHub refuses a commit by SHA.
+const fetchableRef = /^refs\/(?:(?:heads|tags)\/(?!.*(?:\.\.|@\{|\/\/|\/\.|\.lock(?:\/|$)))[A-Za-z0-9._/-]+|pull\/\d+\/head)$/;
 export class GitCache {
   private readonly queues = new Map<string, Promise<unknown>>();
   constructor(readonly root: string, readonly fetchTimeoutMs = 30 * 60_000) {}
@@ -150,5 +150,23 @@ export class GitCache {
     if (!objectId.test(sha)) return null;
     const run = await this.git(['cat-file', 'blob', sha], { cwd: this.path(repository) }).catch(() => null);
     return run?.code === 0 ? run.stdout : null;
+  }
+  // Exports a fixed commit's tree as a compressed tar.gz archive (no .git directory or remote config).
+  // Written to a temporary file next to the cache; the caller removes it.
+  async archive(repository: string, commit: string): Promise<{ file: string; size: number }> {
+    if (!objectId.test(commit)) throw new Error('invalid_commit');
+    const dir = this.path(repository);
+    const file = join(this.root, `archive-${randomBytes(12).toString('hex')}.tar.gz`);
+    const out = await open(file, 'w', 0o600);
+    try {
+      const run = await this.git(['archive', '--format=tar.gz', commit], { cwd: dir, output: out.fd });
+      if (run.code !== 0) throw new Error(`git archive failed: ${run.stderr.trim() || 'exit ' + run.code}`);
+      return { file, size: (await out.stat()).size };
+    } catch (error) {
+      await rm(file, { force: true }).catch(() => {});
+      throw error;
+    } finally {
+      await out.close();
+    }
   }
 }

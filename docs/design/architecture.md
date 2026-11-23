@@ -46,7 +46,7 @@ flowchart LR
   - 每个仓库独立 bridge 网络，项目间互不可达，与控制面 `control` 网络隔离；默认开启外网（可按部署或项目关闭）。
   - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、只读工具卷（`/opt/agent-tools`）与只读工具结果卷（`/results`）划分数据边界。
 - **助手电脑（按对话归属短时容器）**：
-  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的 HOME 目录（`assistant-homes`）；`/workspace` 与 `/tmp` 为限额 tmpfs。
+  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
   - 默认连接关闭容器间通信（`enable_icc=false`）的独立外网 bridge 网络，与 `control` 及其他助手容器隔离；全局关闭外网时切换为 `NetworkMode: none`。
 - **可信与不可信代码检出区分**：
   - PR 检视、续修未合入 bot PR 属于非受信任检出：控制面禁止从该检出自动加载 `.agents/skills/`、`.pi/skills/`、根目录 `AGENTS.md`/`CLAUDE.md` 或任何本地 hooks/MCP，仅从受控基准分支注入可信配置。

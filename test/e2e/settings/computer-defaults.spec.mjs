@@ -35,7 +35,7 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     await page.goto(h.admin + '/#/settings/work-computers'); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     const panel = page.locator('#settings-panel'), defaults = panel.locator('section').filter({ has: page.getByRole('heading', { name: '默认资源', exact: true }) });
-    await expect(defaults).toContainText('8 CPU · 32 GB 内存'); await expect(defaults).toContainText('1 台，共分配 2 CPU · 4 GB 内存');
+    await expect(defaults).toContainText('8 CPU · 32 GB 内存'); await expect(defaults).toContainText('1 台，共分配 2 CPU · 16 GB 内存');
     // Common sizes inside the bounds, none above the host's 8 CPUs; the built-in value is marked.
     const cpu = defaults.locator('select[name=cpus]');
     await expect(cpu.locator('option')).toHaveText(['0.5 核', '1 核', '2 核（内置默认）', '4 核', '6 核', '8 核']);
@@ -43,7 +43,7 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     await cpu.selectOption('4'); await defaults.locator('select[name=memory_mb]').selectOption('8192');
     await defaults.getByRole('button', { name: '保存', exact: true }).click();
     await expect(defaults).toContainText('已保存：新建的虚拟电脑立即使用，已有的在空闲时重建');
-    expect(projects.resourceDefaults()).toEqual({ cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 1024 });
+    expect(projects.resourceDefaults()).toEqual({ cpus: 4, memory_mb: 8192, pids: 1024, tmp_mb: 20480 });
     // Saving reconciles at once; no task runs on 101, so it is rebuilt with the new defaults.
     await expect.poll(() => [host().NanoCpus, host().Memory]).toEqual([4e9, 8192 * mib]);
     expect(projects.describe('101').computer.resources_pending).toBe(false);

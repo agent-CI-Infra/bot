@@ -40,7 +40,7 @@
 | `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
 | `icode`、`workswarm`、`container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
 
-- **容器内短期 Git/`gh` 只读凭证**：`claude_code`、`codex`、`icode` 和 `container_acp` 使用运行级身份，由 `runner/git-credential-bot.mjs` 与 `runner/gh-wrapper.mjs` 向 `harness-entry.mjs` 申请短期只读安装令牌并流式脱敏。
+- **容器内短期 Git/`gh` 只读凭证（支持单仓与多仓按需签发）**：`pi`、`claude_code`、`codex`、`icode` 和 `container_acp` 均配置 `credential.useHttpPath=true`、`core.hooksPath=/dev/null` 与 `core.fsmonitor=false`，由 `runner/git-credential-bot.mjs`（解析仓库路径）与 `runner/gh-wrapper.mjs`（解析 `-R`/`--repo`、`gh api repos/...`、`gh repo`、`GH_REPO` 或当前仓库 remote）向回环凭证助手按 `(purpose, repository)` 申请并缓存短期只读安装令牌。控制面 `ScopedReadTokens` 实时校验当前会话仓库范围与 GitHub 读权限（`git` 用途仅签发 `contents: read + metadata: read`），对 PAT 仓库明确提示改用 `checkout_repository` 而不泄露长期凭据，全程经 `Redactor` 流式脱敏并在回合结束统一吊销。
 - **Claude Code / Codex「项目电脑内自行配置」（`model_source: 'local_config'`）**：
   - `harness_ref.model_source` 规范值为 `'gateway' | 'local_config'`（旧配置 `'subscription'` 自动归一化为 `'local_config'`）。
   - 选择 `local_config` 时，控制面与 `runner/harness-entry.mjs` **不注入**任何平台模型配置（无 `ANTHROPIC_*`、`--model`、`CODEX_RELAY_URL`、`OPENAI_*`、`BOT_NATIVE_MODEL_KEY`、`config.toml` 或 `-c model_providers.bot_direct`），同时保持每次运行独立的 `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。
@@ -126,8 +126,8 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 
 ### 助手电脑（`manager/assistant-computers.mjs`）
 
-- **按归属按需创建与全局镜像对齐**：Native 回合仅在需要执行命令或访问 `/tmp`/`/workspace` 时启动短时容器（纯读写 HOME 由控制面经 `/proc/self/fd` 边界核验直读直写）；容器默认直接继承全局默认环境与全局预编译镜像（及全局 `env`），全球默认更新后空闲容器在下一回合平滑切换。
+- **按归属按需创建、临时磁盘卷与全局镜像对齐**：Native 回合仅在需要执行命令或访问 `/tmp`/`/workspace` 时启动短时容器（纯读写 HOME 由控制面经 `/proc/self/fd` 边界核验直读直写）；容器默认直接继承全局默认环境与全局预编译镜像（默认 16 GB 内存，`/workspace` 与 `/tmp` 各默认 20 GB，及全局 `env`），全局默认更新后空闲容器在下一回合平滑切换。为避免大仓库检出与构建产物挤占容器 16 GB cgroup 内存上限（禁用 swap），助手电脑的 `/workspace` 与 `/tmp` 采用随容器生命周期自动创建、随容器销毁/`remove`/`recover`/`shutdown` 彻底回收的命名临时磁盘卷（标记 `department.bot.kind=assistant-workspace` / `assistant-tmp`），并通过环境变量注入 `BOT_WORKSPACE_LIMIT_MB` / `BOT_TMP_LIMIT_MB` 软限额，继续保持 `ReadonlyRootfs: true`、`cap_drop: [ALL]` 与无特权隔离边界。
 - **Harness 回合提前申请**：Pi、Codex、Claude Code 的服务助手回合整轮都在助手电脑上运行，所以回合一开始就调用 `AssistantComputer.warm()`，与上下文拼装、权限核对同时申请电脑。它按 Harness 运行环境的语义申请（同 `sessionWorkspace`，不要求 `run_command`）；首次使用与它共用同一次 HOME 准备和容器申请；申请失败不记住，首次使用会再遇到并报告；回合在申请完成前结束时，电脑一到手就归还。容量满时排队提示与原来相同。
-- **生命周期与 HOME 代次**：运行中每 30 秒续期，回合结束回收进程后空闲默认 30 分钟销毁（同一人或同一群隔几分钟再问时直接复用；设置只保存管理员改过的值，旧版本连同默认值存下的 5 分钟在升级时改为跟随新默认），单台最长存活 4 小时，达到并发上限淘汰最久空闲容器；归属的仓库范围收缩或更换绑定/角色时推进 HOME 代次并封存旧代次，超过软容量上限（默认 5 GB）自动降为只读提示清理。
+- **生命周期与 HOME 代次**：运行中每 30 秒续期，回合结束回收进程后空闲默认 30 分钟销毁（同一人或同一群隔几分钟再问时直接复用；设置只保存管理员改过的值，旧版本连同默认值存下的 5 分钟及旧默认资源值 2048 MB / 512 MB 在升级时改为跟随新默认），单台最长存活 4 小时，达到并发上限淘汰最久空闲容器；归属的仓库范围收缩或更换绑定/角色时推进 HOME 代次并封存旧代次，超过软容量上限（默认 5 GB）自动降为只读提示清理。
 - **必需组件提示**：有服务助手或启用的群绑定用 Pi、Codex 或 Claude Code 时，助手电脑不可用（控制面没配 manager、控制面没挂 `assistant-homes`、manager 不响应、manager 没挂 `assistant-homes`）会在控制面启动时写一条 `[assistant-computers]` 警告日志；控制台在这些后端的选择旁（`GET /api/assistant-computers/status`）和「助手电脑」设置页给出原因。
 - **预装浏览器与 X11 虚拟桌面**：项目与助手基础镜像统一预装 Chromium（`/usr/local/bin/bot-chromium`）与虚拟桌面包装（`/usr/local/bin/bot-desktop`，封装 `Xvfb`、`openbox`、`xdotool`、`scrot`、`ffmpeg` 等），兼容只读根文件系统与非特权用户，控制面本身不安装浏览器。
