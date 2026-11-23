@@ -948,3 +948,157 @@ test('#1122 bot PR comment continues active Issue development (blocking duplicat
   const auditRow = h.store.get("SELECT * FROM audit WHERE action='manager.work_types_migrated' AND repository_id='101' AND resource_id='101'");
   assert.ok(auditRow, 'audit entry written for work-type migration');
 });
+
+test('#1261 single-role observer records role_candidate and completes rework after QA return; PR move_to_sha is cleared on prepare so waiting_configuration backoff progresses', { timeout: 180000 }, async t => {
+  configureDispatch(null);
+  t.after(() => configureDispatch(ruleDecider));
+
+  const root = mkdtempSync(join(tmpdir(), 'bot-1261-'));
+  const computer = new LocalManager('101', root);
+  const ghFixture = createGitHubFixture(t);
+  ghFixture.server.listen(0, '127.0.0.1');
+  await once(ghFixture.server, 'listening');
+  const ghUrl = `http://127.0.0.1:${ghFixture.server.address().port}`;
+
+  let reviewerCalls = 0;
+  let qaCalls = 0;
+  let failModelAuth = false;
+
+  const modelServer = createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (failModelAuth) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: { message: 'invalid api key' } }));
+    }
+    const body = JSON.parse(raw);
+    const tools = (body.tools || []).map(x => x.function.name);
+    let reply;
+    if (tools.includes('submit_acceptance')) {
+      qaCalls++;
+      reply = qaCalls === 1
+        ? toolCall('submit_acceptance', { pass: false, issues: ['Cited file path does not exist; fix before publishing.'] })
+        : toolCall('submit_acceptance', { pass: true, issues: [] });
+    } else if (tools.includes('post_review')) {
+      reviewerCalls++;
+      reply = toolCall('post_review', {
+        summary: reviewerCalls === 1
+          ? 'Initial Issue #42 review with wrong path.'
+          : 'Corrected Issue #42 review citing calc.mjs:1.',
+        conclusion: 'ready_for_development',
+        recommendation: 'Proceed with implementation.',
+        findings: [],
+      });
+    } else {
+      reply = toolCall('submit_report', { summary: 'Fallback report', artifacts: [] });
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: reply }], usage: { prompt_tokens: 40, completion_tokens: 20 } }));
+  });
+  modelServer.listen(0, '127.0.0.1');
+  await once(modelServer, 'listening');
+  const modelUrl = `http://127.0.0.1:${modelServer.address().port}/v1`;
+
+  const h = await harness(undefined, computer);
+  const engine = new TaskEngine(h.store, computer, ghUrl);
+  t.after(async () => {
+    await engine.close();
+    await computer.recover();
+    await h.stop();
+    await new Promise(r => { modelServer.close(r); modelServer.closeAllConnections(); });
+    await new Promise(r => { ghFixture.server.close(r); ghFixture.server.closeAllConnections(); });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const { admin } = await setup(h);
+  const acct = await account(admin);
+  await repository(admin, acct.id, '101');
+  const model = (await admin('/api/models', 'POST', {
+    repository_id: '101',
+    model_name: 'rev-1261',
+    api_url: modelUrl,
+    api_key: testPassword(),
+  })).value.model;
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, capability_ceiling: 'comment' });
+  nativeRoles(h.store, '101');
+
+  const runClaimed = async (taskId, claim) => {
+    h.store.run("UPDATE tasks SET status='running',claim_token=?,next_run_at=0 WHERE id=?", claim, taskId);
+    h.store.run("INSERT OR REPLACE INTO task_claims VALUES(?,'101',?,'now')", taskId, claim);
+    authorizeKnowledgeTask(h.store, taskId);
+    await engine.run(taskId, claim);
+    h.store.run('DELETE FROM task_claims WHERE task_id=?', taskId);
+  };
+
+  // 1) Single-role reviewer Issue review: QA rejects round 1 -> round 2 must admit cleanly and publish
+  const issueReviewRes = await admin('/api/tasks', 'POST', {
+    repository_id: '101',
+    request: 'Review Issue #42',
+    contract: { goal: 'Review Issue #42', scope: ['calc.mjs'], criteria: ['Verify paths and publish review'], endpoint: 'review' },
+    intent: 'review',
+    executor_role: 'reviewer',
+    target: { type: 'issue', number: 42 },
+    writes: ['review'],
+  });
+  assert.equal(issueReviewRes.status, 201, JSON.stringify(issueReviewRes.value));
+  const issueTaskId = issueReviewRes.value.id;
+
+  await runClaimed(issueTaskId, 'claim-1261-r1');
+  const afterRound1 = h.store.get('SELECT * FROM tasks WHERE id=?', issueTaskId);
+  assert.equal(afterRound1.status, 'queued', 'QA return requeues task for rework');
+  assert.equal(afterRound1.attempt, 2);
+
+  const candidatesR1 = h.store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='role_candidate' ORDER BY id", issueTaskId);
+  assert.equal(candidatesR1.length, 1, 'round 1 single-role reviewer recorded role_candidate');
+  const firstAdm = JSON.parse(h.store.get("SELECT data FROM task_history WHERE task_id=? AND type='role_run_admission' AND json_extract(data,'$.role')='reviewer' ORDER BY id ASC LIMIT 1", issueTaskId).data);
+  assert.equal(firstAdm.admitted, true);
+  assert.equal(firstAdm.provided.fixed_candidate_read.evidence, 'task_history:' + candidatesR1[0].id);
+
+  // Round 2 rework after QA return (task_records.candidate is non-null from round 1!)
+  await runClaimed(issueTaskId, 'claim-1261-r2');
+  const afterRound2 = h.store.get('SELECT * FROM tasks WHERE id=?', issueTaskId);
+  assert.equal(afterRound2.status, 'succeeded', `expected succeeded after QA rework, got ${afterRound2.status} (${afterRound2.error_code})`);
+  assert.equal(reviewerCalls, 2);
+  assert.equal(qaCalls, 2);
+
+  const candidatesR2 = h.store.all("SELECT id FROM task_history WHERE task_id=? AND type='role_candidate'", issueTaskId);
+  assert.equal(candidatesR2.length, 2, 'round 2 recorded a fresh role_candidate');
+  const refusedAdmissions = h.store.all("SELECT id FROM task_history WHERE task_id=? AND type='role_run_admission' AND json_extract(data,'$.admitted')=0", issueTaskId);
+  assert.equal(refusedAdmissions.length, 0, 'no refused admissions across initial run and QA rework');
+  assert.ok((ghFixture.state.comments.get(42) || []).some(c => c.body.includes('Corrected Issue #42 review')), 'published corrected review after rework');
+
+  // 2) PR review with move_to_sha: move_to_sha must be cleared in persisted input so waiting_configuration backs off
+  ghFixture.state.pulls.get(123).head.sha = ghFixture.state.prHead2;
+  ghFixture.state.refs['feat/calc'] = ghFixture.state.prHead2;
+  const prReviewRes = await admin('/api/tasks', 'POST', {
+    repository_id: '101',
+    request: 'Review PR #123 at updated head',
+    contract: { goal: 'Review PR #123', scope: ['calc.mjs'], criteria: ['Review latest head'], endpoint: 'review' },
+    intent: 'review',
+    executor_role: 'reviewer',
+    target: { type: 'pr', number: 123, ref: ghFixture.state.prHead2 },
+    writes: ['review'],
+  });
+  assert.equal(prReviewRes.status, 201, JSON.stringify(prReviewRes.value));
+  const prTaskId = prReviewRes.value.id;
+  const seededInput = JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', prTaskId).input);
+  h.store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...seededInput, move_to_sha: ghFixture.state.prHead2 }), prTaskId);
+
+  failModelAuth = true;
+  await runClaimed(prTaskId, 'claim-1261-pr1');
+  const prAfter1 = h.store.get('SELECT * FROM tasks WHERE id=?', prTaskId);
+  assert.equal(prAfter1.status, 'waiting_configuration');
+  assert.equal(prAfter1.error_code, 'model_authentication_failed');
+  assert.equal(prAfter1.head_sha, ghFixture.state.prHead2);
+  assert.equal(prAfter1.wait_count, 0);
+  const inputAfter1 = JSON.parse(prAfter1.input);
+  assert.equal(inputAfter1.move_to_sha, undefined, 'consumed move_to_sha must not be resurrected by syncConcurrentInput()');
+
+  const workspaceBeforeRetry = prAfter1.workspace_id;
+  await runClaimed(prTaskId, 'claim-1261-pr2');
+  const prAfter2 = h.store.get('SELECT * FROM tasks WHERE id=?', prTaskId);
+  assert.equal(prAfter2.status, 'waiting_configuration');
+  assert.equal(prAfter2.error_code, 'model_authentication_failed');
+  assert.equal(prAfter2.workspace_id, workspaceBeforeRetry);
+  assert.equal(prAfter2.wait_count, 1, 'wait_count must advance on repeated waiting_configuration instead of resetting to 0');
+});

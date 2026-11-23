@@ -249,7 +249,7 @@ const codeActions: Record<string,string> = {
   task_pull_request_forbidden:'核对普通事项的 code／pull_request 写集合，以及来源与当前执行角色修改代码的能力（PR 本身是框架交付，不需要角色的 GitHub 写权限）。任务管理和委派不会增加写权限；旧请求的授权上限不会因后来加权而自动扩大。',
   role_authority_revoked:'角色或其权限在运行中被收回，后续能力调用已停止。恢复相应角色及权限配置后点「重试」继续。',
   role_revision_checkpoint:'角色在安全检查点结束本次运行，同一任务和角色实例会带新 revision 自动续接。',
-  unsupported_capability:'角色选用的执行后端或运行环境缺少这个阶段要求的能力（例如隔离、原始证据、取消或固定候选），运行没有启动，也不会换用其他后端。到「角色」页改用满足要求的执行后端或环境，保存后任务自动继续。',
+  unsupported_capability:'角色选用的执行后端或运行环境缺少这个阶段要求的能力（例如隔离、原始证据、取消或固定候选），运行没有启动，也不会换用其他后端。先看故障详情里缺失的具体能力项：若是执行后端/环境能力不足，到「角色」页更换后保存即可继续；若缺失 fixed_candidate_read 等平台核验记录，请反馈给 bot 维护者。',
   role_budget_exhausted:'这个角色在本任务中的累计预算已用尽，运行已取消，已有产物和检查点保留。确认用量后在「角色」页提高该角色的预算策略并保存；已开始的任务固定了启动时的配置，用 POST /api/tasks/:id/roles/apply 把新 revision 应用到这个角色后再重试。不会换模型重开预算。',
   model_revision_changed:'恢复运行时同一角色版本解析出的模型变了。为避免静默换模型，运行没有继续：恢复原模型，或在「角色」页明确保存新的模型配置。',
   conversation_harness_context_required:'当前非任务会话入口尚未提供所选外部后端的协议上下文，不能自动替换后端。请维护人查看角色配置与当前支持范围。',
@@ -290,6 +290,10 @@ export function explainFailure(code: string|null|undefined, state = 'failed', de
     cause, label: '模型连续 90 秒没有 token 输出', automatic: automatic.has(state), attempt_retry,
     action: ended.has(state) ? '任务已结束，无需处理。' : automatic.has(state) ? '模型连续 90 秒没有 token 输出，bot 会自动重试。'
       : '模型连续 90 秒没有 token 输出，已自动重试 5 次仍失败。请检查模型服务的输出是否中断，恢复后点「重试」。',
+  };
+  if (code === 'unsupported_capability' && detail?.includes('fixed_candidate_read')) return {
+    cause: 'bot', label: causes.bot.label, automatic: automatic.has(state), attempt_retry,
+    action: '当前运行缺少平台核验的固定候选记录（fixed_candidate_read），运行没有启动；该记录由平台生成，更换角色模型或执行后端无法补齐，请反馈给 bot 维护者。',
   };
   const action = codeActions[code] || (ended.has(state) ? '任务已结束，无需处理。' : causeActions[cause](state));
   return { cause, label: causes[cause].label, action, automatic: automatic.has(state) || state === 'waiting_permission' && resumedWaits.has(code), attempt_retry };

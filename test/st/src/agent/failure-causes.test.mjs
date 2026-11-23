@@ -57,6 +57,11 @@ test('causes separate outages, GitHub settings, GitHub refusals, the model, the 
   assert.match(explainFailure('github_publication_unknown','waiting_publication').action,/先再查一次，确实没有才重新发送/);
   assert.match(explainFailure('tool_operation_conflict','failed').action,/反馈给 bot 维护者/);
   assert.match(explainFailure('pull_request_head_changed','superseded').action,/无需处理/);
+  const fixedCand = explainFailure('unsupported_capability','waiting_configuration','reviewer（pi）缺少能力：fixed_candidate_read；未启动运行，也不会换用其他执行后端。');
+  assert.deepEqual([fixedCand.cause, fixedCand.automatic], ['bot', true]);
+  assert.match(fixedCand.action, /fixed_candidate_read.*反馈给 bot 维护者/);
+  const otherCap = explainFailure('unsupported_capability','waiting_configuration','reviewer（custom）缺少能力：raw_evidence；未启动运行，也不会换用其他执行后端。');
+  assert.equal(otherCap.cause, 'role_configuration');
 });
 
 test('network failures say whether it was a timeout, DNS, a reset, TLS or a refused connection',async t=>{
