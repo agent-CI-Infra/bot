@@ -1,4 +1,4 @@
-// #1171: Whole-directory trusted base-branch `.agents/skills/` auto-mounting across generic tasks (Pi & Native roles)
+// #1171: Whole-directory trusted base-branch `.agents/skills/` auto-mounting across generic tasks (Pi roles and in-process roles on the scripted test driver)
 // and Event Dispatch Manager (`read_skill`), with strict path & untrusted-PR/branch boundaries.
 const previousModelTransport = process.env.BOT_HARNESS_MODEL_TRANSPORT;
 process.env.BOT_HARNESS_MODEL_TRANSPORT = 'gateway';
@@ -552,7 +552,7 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; Nati
         reply = callTool('ignore_event', { reason: '已按需读取可信基准分支 skill 及附属文件。' });
       }
     } else {
-      // 2. Native worker role turn (reviewer on PR #88, branch/commit target, or direct model-phase role run)
+      // 2. In-process worker role turn on the scripted driver (reviewer on PR #88, branch/commit target, or direct model-phase role run)
       const promptObj = JSON.parse(msgText(messages[1].content));
       if (promptObj.direct_inflight_probe) {
         seen.inflightRolePrompt = promptObj;

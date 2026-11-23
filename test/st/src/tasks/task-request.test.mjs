@@ -166,18 +166,18 @@ test('default and saved-disabled projects execute an ordinary request with Manag
    const toolResults=messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}});
    const names=messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]).map(c=>c.function.name);
    let message;
-   // Native sends text content; a Pi session sends content parts (the default backend since #1068).
+   // The scripted driver sends text content; a Pi session sends content parts (the default backend since #1068).
    const text=content=>typeof content==='string'?content:Array.isArray(content)?content.map(part=>part?.text??'').join(''):'';
    if(body.tools?.some(tool=>tool.function.name==='delegate_role')){
     const ref=toolResults.find(result=>result.result_ref)?.result_ref,input=messages.filter(m=>m.role==='user').map(m=>{try{return JSON.parse(text(m.content));}catch{return null;}}).find(value=>value?.task_ref);
     message=!ref?call('delegate_role',{role:'dev',purpose:'Write the requested report',refs:[input.task_ref]},'delegate')
      :!names.includes('read_task_record')?call('read_task_record',{ref},'read-result'):call('nominate_delivery',{result_ref:ref},'nominate');
    }else if(text(messages[0].content).includes('independent delivery acceptance evaluator')){
-    // A Pi session submits through the offered tool; the in-process loop also takes the verdict as text.
+    // A Pi session submits through the offered tool; the scripted driver also takes the verdict as text.
     const tools=(body.tools??[]).map(tool=>tool.function.name);
     message=!names.includes('read_file')?call('read_file',{path:'report.md'},'qa-read'):tools.includes('submit_acceptance')?call('submit_acceptance',pass,'qa-verdict'):{role:'assistant',content:JSON.stringify(pass)};
    }else{
-    // Pi writes with its own file tool, the in-process loop with write_file.
+    // Pi writes with its own file tool, the scripted driver with write_file.
     const write=(body.tools??[]).some(tool=>tool.function.name==='write_file')?'write_file':'write';
     message=!names.includes(write)?call(write,{path:'report.md',content:'Observed repository fact: calc.mjs contains arithmetic.'},'write')
      :call('submit_delivery',{summary:'Observed report',artifacts:[{path:'report.md',description:'Observed report'}],evidence:[],unknowns:[]},'submit');
@@ -198,7 +198,7 @@ test('default and saved-disabled projects execute an ordinary request with Manag
   await engine.run('request','claim');
   assert.equal(new TaskRecords(store).get('request').progress.status,'completed',JSON.stringify(store.all("SELECT content FROM task_logs WHERE task_id='request'")));
   assert.deepEqual(store.all("SELECT DISTINCT role FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role),['dev','manager','qa']);
-  // The defaults run every role on the recommended backend; the legacy configuration kept Native.
+  // The defaults run every role on the recommended backend; the saved legacy configuration names the scripted driver.
   assert.deepEqual(store.all("SELECT DISTINCT role,harness FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role+':'+row.harness),['dev','manager','qa'].map(role=>role+':'+(saved?'scripted':'pi')));
   assert.equal(new TaskRecords(store).get('request').acceptance.outcome,'pass');
   assert.equal(store.get("SELECT actions_failures_enabled FROM policies WHERE repository_id='101'").actions_failures_enabled,0);

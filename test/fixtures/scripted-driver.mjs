@@ -20,7 +20,7 @@ registerRoleHarness({ id: scriptedHarness, version: 'test', session: 'checkpoint
 spec => services => run(spec, services));
 
 async function run(spec, services) {
-  const maxTurns = spec.maxTurns ?? 16, finishes = spec.finish ? spec.finish.names ?? [spec.finish.name] : [];
+  const maxTurns = spec.maxTurns ?? 32, finishes = spec.finish ? spec.finish.names ?? [spec.finish.name] : [];
   const closingNames = spec.finalizationTools ?? finishes, reserve = finalizationReserve(maxTurns), offeredTools = spec.tools ?? [];
   const messages = spec.session?.messages.length ? [...spec.session.messages, { role: 'user', content: spec.prompt }]
     : [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
@@ -31,8 +31,12 @@ async function run(spec, services) {
     const continued = turn > 0 && spec.task.id ? consumePendingTaskUpdates(spec.store, String(spec.task.id)) : [];
     if (continued.length) messages.push({ role: 'user', content: 'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n' + JSON.stringify(spec.redactor.clean(continued)) });
     const closing = !!spec.finish && turn >= maxTurns - reserve, tools = closing ? offeredTools.filter(t => closingNames.includes(t.function.name)) : offeredTools;
-    if (spec.finish && turn === maxTurns - reserve) messages.push({ role: 'user', content: `Execution has ${reserve} turns left. Save the bounded artifact and call ${finishes.join(' or ')}.` });
-    const { value, request_log_id } = await services.request({ messages, tools, tool_choice: tools.length ? 'auto' : 'none' }, `turn:${turn}`);
+    // The process worker's closing turns: the finalization notice, then on the last turn a forced single submission.
+    const last = closing && turn === maxTurns - 1;
+    if (spec.finish && turn === maxTurns - reserve) messages.push({ role: 'user', content: `Execution has ${reserve} turns left. ${spec.finish.finalizationMessage ?? 'Save the bounded artifact and submit the honest current result. Reuse existing evidence; do not invent verification.'}` });
+    if (last) messages.push({ role: 'user', content: `This is the last turn. Call ${finishes.join(' or ')} to submit now.` });
+    const toolChoice = last && finishes.length === 1 ? { type: 'function', function: { name: spec.finish.name } } : tools.length ? 'auto' : 'none';
+    const { value, request_log_id } = await services.request({ messages, tools, tool_choice: toolChoice }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
     if (!message) stop('agent_output_invalid');
     if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
