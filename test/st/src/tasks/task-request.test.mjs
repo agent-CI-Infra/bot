@@ -1,6 +1,5 @@
 import { pinLegacyTaskConfiguration } from '../../../fixtures/helpers.mjs';
-import { knowledgeActor, authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
-import { ProjectMemory } from '../../../../dist/memory/project.js';
+import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -101,7 +100,7 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
   nativeRoles(store,'101');
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
- const memorySeed=new ProjectMemory(store,{actor:knowledgeActor(store,'owner','101')}).save('101','memory.reuse',{kind:'implementation',body:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',sources:[{reference:'controlled repository fixture'}],scope:{module:'memory'}},0,'user:owner','seed retrieval integration');
+ const memorySeed=await manager.call('POST','/v1/projects/101/file-tree',{path:'memory/reuse.md',content:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',actor:'user:owner',create_parents:true});
  const engine=new TaskEngine(store,manager,gh+'/github');
  const runLegacy = (id, token) => { pinLegacyTaskConfiguration(store, id); return engine.run(id, token); };
  for(const mode of ['single','multiple','return','insufficient_evidence','write-outage']){

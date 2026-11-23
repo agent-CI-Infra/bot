@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { concurrencyValue } from '../app/settings.js';
 import { randomId, fail, type Json } from '../core/security.js';
 import type { Manager } from './service.js';
+import { FileTree } from '../../manager/file-tree.mjs';
 
 /** Single-repository development backend. Commands run as the current host user. */
 export class LocalManager implements Manager {
@@ -58,6 +59,37 @@ export class LocalManager implements Manager {
     for (const workspace_id of ids) { const result = await this.execute({ operation_id: randomId(), type: 'reap', workspace_id }); if (!result.ok) throw new Error('local_recovery_failed'); }
   }
   async call(method: string, path: string, input?: Json, timeoutMs = 90000): Promise<any> {
+    const url = new URL(path, 'http://local');
+    const fileTreeMatch = /^\/v1\/projects\/([1-9]\d*)\/file-tree(?:\/([^/]+))?(?:\/(versions|restore|move))?$/.exec(url.pathname);
+    if (fileTreeMatch && fileTreeMatch[1] === this.repositoryId) {
+      let id: string | undefined;
+      if (fileTreeMatch[2] !== undefined) {
+        try { id = decodeURIComponent(fileTreeMatch[2]); } catch { fail(400, 'invalid_note_id'); }
+      }
+      const action = fileTreeMatch[3], directories = id === 'directories', body = (input ?? {}) as Record<string, any>;
+      const actor = typeof body.actor === 'string' ? body.actor : 'console';
+      const tree = new FileTree(this.root + '/project-notes');
+      try {
+        if (directories && method === 'POST') return await tree.createDirectory(body.path);
+        if (directories && method === 'DELETE') return await tree.deleteDirectory(body.path);
+        if (id === undefined && method === 'GET') return await tree.list({ directory: url.searchParams.get('directory') ?? '', query: url.searchParams.get('query') ?? '', includeDeleted: url.searchParams.get('include_deleted') === '1', deletedOnly: url.searchParams.get('deleted_only') === '1', recursive: url.searchParams.get('recursive') === '1', preview: url.searchParams.get('preview') === '1' });
+        if (id === undefined && method === 'POST') return await tree.create(body.path, body.content, actor, { createParents: body.create_parents === true });
+        if (id !== undefined && method === 'GET' && action === 'versions') return await tree.versions(id);
+        if (id !== undefined && method === 'GET' && !action) return await tree.read(id, url.searchParams.has('revision') ? Number(url.searchParams.get('revision')) : undefined);
+        if (id !== undefined && method === 'PUT' && !action) return await tree.save(id, body.content, body.expected_revision, actor);
+        if (id !== undefined && method === 'DELETE' && !action) return await tree.delete(id, body.expected_revision, actor);
+        if (id !== undefined && method === 'POST' && action === 'restore') return await tree.restore(id, body.revision, body.expected_revision, actor);
+        if (id !== undefined && method === 'POST' && action === 'move') return await tree.move(id, body.path, body.expected_revision, actor);
+        return fail(405, 'method_not_allowed');
+      } catch (error: any) {
+        if (error?.code === 'ENOENT') fail(404, 'note_not_found');
+        if (error?.code === 'EACCES' || error?.code === 'EPERM') fail(503, 'note_permission_denied');
+        if (error?.message === 'unsupported_note_format') fail(415, error.message);
+        if (error?.message === 'note_revision_changed') fail(409, error.message);
+        if (/^(?:invalid_note|notes_|note_(?:path_conflict|not_found|move_)|directory_)/.test(String(error?.message || ''))) fail(error.status ?? 400, error.message);
+        throw error;
+      }
+    }
     const output=/^\/v1\/projects\/([1-9]\d*)\/output\/([a-f0-9]{48})\?offset=(\d+)$/.exec(path);
     if(method==='GET'&&output&&output[1]===this.repositoryId){const response=await this.execute({type:'tail',operation_id:output[2],offset:Number(output[3])});if(!response.ok)fail(503,'output_unavailable');return response.result;}
     const match = /^\/v1\/projects\/([1-9]\d*)(?:\/(parallel|execute|start|stop|configure|refresh))?$/.exec(path);

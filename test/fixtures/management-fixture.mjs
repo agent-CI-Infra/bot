@@ -20,8 +20,8 @@ export function replyWithTitle(response, title = '查看项目任务状态') {
     usage: { prompt_tokens: 12, completion_tokens: 6 } }));
 }
 
-export async function managementFixture(t,options={}) {
-  const h=await harness(t,undefined,options),{admin,password}=await setup(h),a=await account(admin);
+export async function managementFixture(t,options={},manager=undefined) {
+  const h=await harness(t,manager,options),{admin,password}=await setup(h),a=await account(admin);
   // The fixture model answers in process: the management assistant runs Native (#1255; native-roles.mjs).
   nativeServiceAssistants(h.store);
   await repository(admin,a.id,'101');await repository(admin,a.id,'102');await repository(admin,a.id,'201');

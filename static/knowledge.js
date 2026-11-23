@@ -216,10 +216,10 @@ function knowledgeSection() {
   function metadata(file) { return note(`v${file.revision ?? '未知'} · ${timeText(file.created_at, '时间未提供')} · ${actor(file.actor)} · ${fileBytes(file.bytes)}`); }
   function directoriesPage(main) {
     main.append(element('h2', state.trash ? '已删除文件' : locationText(state.directory)));
-    const search = input('knowledge_query', state.query, { placeholder: '搜索文件名或路径' }), form = element('form', '', 'knowledge-search');
-    search.setAttribute('aria-label', '搜索文件名或路径'); const submit = element('button', '搜索', 'quiet'); submit.type = 'submit'; form.append(search, submit);
+    const search = input('knowledge_query', state.query, { placeholder: '搜索文件名、路径或正文' }), form = element('form', '', 'knowledge-search');
+    search.setAttribute('aria-label', '搜索文件名、路径或正文'); const submit = element('button', '搜索', 'quiet'); submit.type = 'submit'; form.append(search, submit);
     form.addEventListener('submit', event => { event.preventDefault(); state.query = search.value; routeState(); void loadDirectory(); }); main.append(form);
-    if (state.query) main.append(note('搜索范围：全部目录的文件名和路径。'));
+    if (state.query) main.append(note('搜索范围：全部目录的文件名、路径和文本正文。'));
     const tools = element('div', '', 'actions');
     if (!state.trash && write()) {
       tools.append(actionButton('新建文件', () => createFile()), actionButton('新建文件夹', () => directoryDialog(false)));
@@ -248,7 +248,9 @@ function knowledgeSection() {
       for (const file of results?.files || []) {
         const target = state.trash ? {} : { directory: file.directory };
         const row = element('li'), open = actionButton(file.name, () => openFile(file.id, null, target)); open.title = file.path;
-        row.append(open, note(file.path), metadata(file)); rows.append(row);
+        row.append(open, note(file.path));
+        if (state.query && typeof file.preview === 'string' && file.preview) row.append(element('p', file.preview, 'knowledge-search-preview'));
+        row.append(metadata(file)); rows.append(row);
       }
       main.append(rows.children.length ? rows : note(state.trash ? '没有已删除文件。' : '没有匹配的文件。'));
     } else {
@@ -265,7 +267,7 @@ function knowledgeSection() {
     const file = selected; if (!file) { main.append(note('正在读取文件内容…')); return; }
     const heading = element('div', '', 'knowledge-file-heading'); heading.append(element('h2', file.name), element('p', file.path, 'knowledge-path'), metadata(file)); main.append(heading);
     if (file.historical) main.append(element('p', `正在查看 v${file.revision} · 只读，当前仍为 v${file.current_revision}`, 'knowledge-version-notice'), actionButton('返回当前版本', () => openFile(state.file)));
-    if (file.readonly) main.append(note(file.source === 'repository' ? '此文件来自仓库，正文修改通过仓库 PR 完成。' : '当前权限只能读取此文件。'));
+    if (file.readonly) main.append(note('当前权限只能读取此文件。'));
     const tools = element('div', '', 'actions');
     if (!editing && !file.historical && !file.current_deleted && !file.readonly && file.can_edit !== false) tools.append(actionButton('编辑文件', () => {
       editing = true; const body = textarea('', file.content ?? '');

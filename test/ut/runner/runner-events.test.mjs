@@ -52,7 +52,7 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   const [code]=await closed;assert.equal(code,0,output);assert.equal(JSON.parse(await readFile(join(dir,'state.json'),'utf8')).state,'completed',output);
   const all=await events();assert.ok(!JSON.stringify(all).includes(token));
   assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,131072);
-  assert.equal(await readFile(join(base,'project-notes/secret.md'),'utf8'),'secret '+token);
+  assert.equal(await readFile(join(base,'project-notes/secret.md'),'utf8'),'secret [REDACTED]');
   assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.written,true);
   // Every session binds first: the session and file the control plane keeps so the next run opens them again (#1040). Then
   // the session event identifies its runtime and exact tool list.

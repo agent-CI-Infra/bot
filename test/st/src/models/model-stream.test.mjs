@@ -127,7 +127,7 @@ test('the 90-second deadline resets on a token, then expires after the last toke
   t.mock.timers.tick(1);await assert.rejects(f.running,error=>error.code==='model_unavailable'&&/连续 90 秒没有 token 输出/.test(error.detail));
 });
 
-test('fragmented credentials reach note writes verbatim while text and reasoning remain masked',async t=>{
+test('fragmented credentials are redacted in note writes as well as text and reasoning',async t=>{
   for (const stream of [false,true]) await t.test(stream?'streamed runner reply':'JSON runner reply',async t=>{
     const f=await fixture(t,{stream});
     const args=JSON.stringify({path:'../notes/私有笔记.txt',content:key}),at=args.indexOf(key)+8;
@@ -137,7 +137,7 @@ test('fragmented credentials reach note writes verbatim while text and reasoning
     const reply=JSON.parse(Buffer.concat(f.replies));
     const value=await readModelResponse(new Response(reply.body,{headers:{'Content-Type':reply.content_type}}),async()=>{});
     const message=value.choices[0].message;
-    assert.ok(!('rejected_note_calls' in reply));assert.equal(JSON.parse(message.tool_calls[0].function.arguments).content,key);
+    assert.ok(!('rejected_note_calls' in reply));assert.equal(JSON.parse(message.tool_calls[0].function.arguments).content,'[REDACTED]');
     assert.equal(message.content,'[REDACTED]');assert.equal(message.reasoning_content,'[REDACTED]');
     assert.ok(!JSON.stringify(f.requests).includes(key));
   });

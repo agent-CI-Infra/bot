@@ -131,7 +131,7 @@ test('flat permissions filter actual tools and a later grant cannot widen an exi
   f.put({ roles: [{ role_id: 'dev', permissions: { project_memory: 'none', role_memory: 'none' } }] });
   const old = resolveRole(f.s, 'r', 'dev', 'task.request').snapshot;
   const result = await runRole({ ...f.spec, tools: ['read_file', 'write_file', 'run_command', 'search_project_memory', 'finish'].map(tool) }, 'dev');
-  assert.deepEqual(result.result.tools, ['read_file', 'write_file', 'run_command', 'finish','read_tool_result','read_managed_task','search_role_memory']);
+  assert.deepEqual(result.result.tools, ['read_file', 'write_file', 'run_command', 'finish','read_tool_result','read_managed_task']);
   f.put({ roles: [{ role_id: 'dev', permissions: { project_memory: 'write' } }] });
   assert.equal(roleAuthority(f.s, 'r', old, 'search_project_memory'), 'tool_not_in_permissions');
   assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('search_project_memory'));

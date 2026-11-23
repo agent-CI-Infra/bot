@@ -107,7 +107,7 @@ docker compose up -d
 | `bot-data` | 控制面 `control.sqlite`、轨迹文件 `trajectories/`、共享 `blobs/`、Git 镜像缓存、公开看板快照、飞书加密附件 `channel-resources/` 与历史浏览器证据 |
 | `bot-keys` | AES-256-GCM 加密主密钥（**丢了主密钥将无法解密任何已存凭据**） |
 | `internal-keys` | 控制面与 manager 内部认证材料及部署 ID 种子 |
-| `manager-data` | `manager.sqlite`、manager 轨迹与项目笔记卷元数据 |
+| `manager-data` | `manager.sqlite`、manager 轨迹与项目知识物理文件（`project-notes/` 及版本历史） |
 | `assistant-homes` | 群聊与管理助手电脑的持久 HOME，承载助手私有长期记忆（`~/memory/`）与跨轮个人/群文件（须纳入一致备份） |
 | `agent-tools` | 受信任的第三方容器 Agent 统一工具卷（Claude Code、Codex、iCode、WorkSwarm 及其受管 Node / `uv` 运行时与版本清单；内置 Pi 不在此卷）。各版本可并存 |
 | `tunnel-keys` | Cloudflare Tunnel token 文件 |

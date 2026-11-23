@@ -2,14 +2,14 @@ import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command
 import { taskTraceAccess } from '../memory/access.js';
 import { runRole, roleExecutionModel } from '../roles/run.js';
 import { roleBackendWorkspace } from '../roles/workspace.js';
-import { ProjectMemory, memoryTools, memoryTool } from '../memory/project.js';
+import { memoryTools, memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
 import { relatedDeliveryIndex, relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { readEvidence, previousVerificationEvidence, boundedCandidate } from './evidence.js';
 import { genericTask, softwareRequest } from './pull-request.js';
 import type { Store, Row } from '../storage/database.js';
 import { Workspace } from '../agent/workspace.js';
-import { Redactor, stop, blobSha } from '../agent/common.js';
+import { Redactor, stop } from '../agent/common.js';
 import { TaskRecords, validateVerdict, type Verdict } from './service.js';
 import { randomId } from '../core/security.js';
 
@@ -165,8 +165,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     tool('read_file', 'Read artifact or repository text in the shared task workspace', { path: { type: 'string' } }, ['path']),
   ];
   if (related.length) tools.push(relatedArtifactTool);
-  const hasMemory = !!store.get('SELECT 1 FROM project_memories WHERE repository_id=? LIMIT 1', task.repository_id);
-  if (hasMemory) tools.push(...memoryTools.filter(t => t.function.name !== 'remember_project_memory'));
+  tools.push(...memoryTools.filter(t => t.function.name !== 'remember_project_memory'));
   if (shell) {
     const cmdBudget = resolveCommandTimeout(store, task, 'qa', 120);
     tools.push(commandTool(cmdBudget.defaultSeconds, 'Run spot-check verification in the shared task workspace; do not modify source.', cmdBudget.maxSeconds));
@@ -285,7 +284,6 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
         system: acceptanceSystem,
         prompt: JSON.stringify({
           checklist: gatekeeperChecklist,
-          project_memory: hasMemory ? new ProjectMemory(store).context({ ...task, active_role: 'qa', head_sha: snapshot?.local_sha || task.head_sha }) : undefined,
           contract: record.contract,
           requirements_instruction: acceptanceRequirements(record.contract.completeness),
           scope_differences: record.scope_differences.map(d => ({ ...d, version_matches_candidate: candidate.artifacts.some(a => a.version === d.source_version) })),
@@ -317,12 +315,8 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
         },
         finalizationTools: ['submit_acceptance'],
         execute: async (name, args) => {
-          if (hasMemory && ['search_project_memory', 'read_project_memory'].includes(name)) {
-            return memoryTool(store, { ...task, head_sha: snapshot?.local_sha || task.head_sha }, name, redactor.clean(args), async doc => {
-              const raw = await verification.call('memory:' + randomId(), { type: 'workspace_read', path: doc.path });
-              if (raw.error || typeof raw.content !== 'string') throw new Error('memory_source_unavailable');
-              return { content: raw.content, sha: blobSha(Buffer.from(raw.content)) };
-            }, verification);
+          if (['search_project_memory', 'read_project_memory'].includes(name)) {
+            return memoryTool(store, { ...task, active_role: 'qa', head_sha: snapshot?.local_sha || task.head_sha }, name, redactor.clean(args), verification);
           }
           const result =
             name === 'read_related_artifact'

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { knowledgePath } from '../../../../dist/memory/catalog.js';
+import { knowledgePath } from '../../../../dist/memory/project.js';
 
 // #533: the sensitive-path check refused any path whose component was named `credentials`, so ordinary code and
 // documentation such as `src/auth/credentials.ts` or `docs/credentials.md` could not be referenced by a project

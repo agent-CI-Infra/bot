@@ -13,7 +13,7 @@ import {memoryTools,memoryTool} from '../memory/project.js';
 import type {Workspace} from '../agent/workspace.js';
 import {randomId} from '../core/security.js';
 import {traceEvent} from '../tasks/trace.js';
-import {stop,blobSha,validWorkspaceToolPath} from '../agent/common.js';
+import {stop,validWorkspaceToolPath} from '../agent/common.js';
 import type {AgentSpec} from '../agent/runtime.js';
 import {githubWriteTool,withMergePolicy} from '../github/write.js';
 import {autoMergePolicy} from '../github/merge-policy.js';
@@ -49,7 +49,7 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
    const actorTask={...task,active_role:spaces.role,trace_run_id:spaces.runId};
    if(eventSubscriptionToolNames.includes(name))return executeTaskSubscriptionTool(store,actorTask,name,redactor.clean(args));
    if(taskTools.some(t=>t.function.name===name)){const result=records.tool(task.id,name,redactor.clean(args),taskTraceAccess(store,actorTask));if(name==='record_progress'&&spaces.role==='dev')await checkpoint(store,task,workspace);return result;}
-   if(memoryTools.some(t=>t.function.name===name))return memoryTool(store,actorTask,name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('role-memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error)throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};},spaces.current);
+   if(memoryTools.some(t=>t.function.name===name))return memoryTool(store,actorTask,name,redactor.clean(args),spaces.current);
    if(name==='write_file'&&!validWorkspaceToolPath(args?.path))return {error:'invalid_artifact_path',instruction:'Write within the repository, /workspace, ../notes or /tmp.'};
    const active=spaces.current,key='role-tool:'+randomId();const snapshot=await active.artifact(key+':version');
    const result=name==='read_file'?await active.call(key,{type:'workspace_read',path:args?.path}):name==='write_file'?(await active.write(key,args?.path,Buffer.from(args?.content??'')),{ok:true}):name==='run_command'?await runCommand(active,key,args,180,spaces.role):{error:'tool_not_allowed'};

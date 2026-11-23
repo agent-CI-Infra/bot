@@ -52,6 +52,9 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     // Onboarding start requests, receipts, applications, plan drafts and sessions (#930, #932, #933); their conversations stay with the people who held them.
     ['DELETE FROM onboarding_requests WHERE repository_id=?', 1], ['DELETE FROM onboarding_receipts WHERE application_id IN (SELECT id FROM onboarding_applications WHERE repository_id=?)', 1],
     ['DELETE FROM onboarding_applications WHERE repository_id=?', 1], ['DELETE FROM onboarding_plans WHERE repository_id=?', 1], ['DELETE FROM onboarding_sessions WHERE repository_id=?', 1],
+    ['DELETE FROM project_memory_migrations WHERE repository_id=?', 1],
+    ['DELETE FROM project_memory_versions WHERE memory_id IN (SELECT id FROM project_memories WHERE repository_id=?)', 1],
+    ['DELETE FROM project_memories WHERE repository_id=?', 1],
     ['DELETE FROM project_admin_assignments WHERE repository_id=?', 1], ['DELETE FROM repo_integrations WHERE repository_id=?', 1],
     ['DELETE FROM github_repository_collaborators WHERE repository_id=?', 1], ['DELETE FROM github_repository_assignees WHERE repository_id=?', 1], ['DELETE FROM github_repository_member_cache WHERE repository_id=?', 1],
     ['DELETE FROM public_board_settings WHERE repository_id=?', 1], ['DELETE FROM public_board_consents WHERE repository_id=?', 1], ['DELETE FROM public_board_jobs WHERE repository_id=?', 1], ['DELETE FROM installed_repositories WHERE repository_id=?', 1], ['DELETE FROM repositories WHERE id=?', 1]];

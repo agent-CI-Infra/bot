@@ -2,7 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import type { Json } from '../core/security.js';
 import { roleKind } from './catalog.js';
 import { entryEnabled, roleConfiguration, type RoleConfiguration } from './definition.js';
-import { memoryAuthorize, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
+import { memoryAuthorize, type MemoryAccess } from '../memory/access.js';
 import { traceClean } from '../tasks/trace.js';
 
 /** Attributes a due `queued` task under controller or direct executor-role dispatch. */
@@ -458,13 +458,13 @@ function canReadPrivateRunEvents(access: MemoryAccess | undefined, repoId: strin
 /** Builds normalized per-run step summaries for non-`task_logs` harnesses (`native` Manager/QA, `claude_code`, `codex`) while enforcing memory ACLs. */
 function buildHistoryStepsForRun(
   store: Store,
-  repoId: string,
+  _repoId: string,
   runId: string,
   events: Row[],
   allowPrivate: boolean,
-  access?: MemoryAccess,
+  _access?: MemoryAccess,
 ): Json[] {
-  const safe = (v: any) => visibleMemorySnapshot(store, repoId, traceClean(v), access);
+  const safe = (v: any) => traceClean(v);
   const steps: Json[] = [];
   const observationsByCall = new Map<string, { row: Row; data: any }>();
 
@@ -629,14 +629,14 @@ export function taskRoleTrace(store: Store, task: Record<string, any>, access?: 
     eventsByRun.set(key, list);
   }
 
-  const safeFindings = (items: any[]) => visibleMemorySnapshot(store, repoId, traceClean(items), access);
+  const safeFindings = (items: any[]) => traceClean(items);
   const role_runs = blocks.map(block => {
     const runEvents = eventsByRun.get(String(block.run_id)) ?? [];
     const historySteps = buildHistoryStepsForRun(store, repoId, String(block.run_id), runEvents, allowPrivate, access);
     return {
       ...block,
-      summary: block.summary ? visibleMemorySnapshot(store, repoId, traceClean(block.summary), access) : null,
-      purpose: block.purpose ? visibleMemorySnapshot(store, repoId, traceClean(block.purpose), access) : null,
+      summary: block.summary ? traceClean(block.summary) : null,
+      purpose: block.purpose ? traceClean(block.purpose) : null,
       findings: safeFindings(block.findings),
       history_steps: historySteps,
     };

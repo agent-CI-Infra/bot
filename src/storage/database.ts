@@ -8,7 +8,7 @@ import {priorityStorage} from '../tasks/priority.js';
 import {coordinationStorage} from '../tasks/coordination.js';
 import { integrationStorage } from '../tasks/integration.js';
 import { roleStorage } from '../roles/storage.js';
-import { memoryStorage } from '../memory/project.js';
+import { memoryMigrationStorage } from '../memory/migration.js';
 import { traceStorage } from '../tasks/trace.js';
 import { taskStorage } from '../tasks/storage.js';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
@@ -277,7 +277,7 @@ export class Store {
     priorityStorage(this);
     // Reopening workers replace trace triggers too; DROP and CREATE must be one writer transaction.
     this.transaction(() => traceStorage(this));
-    memoryStorage(this);
+    memoryMigrationStorage(this);
     integrationStorage(this);
     coordinationStorage(this);
     childTaskStorage(this);

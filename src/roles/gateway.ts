@@ -1,8 +1,8 @@
 import type { Store, Row } from '../storage/database.js';
 import { TaskError } from '../agent/common.js';
 import { traceEvent, traceSource } from '../tasks/trace.js';
-import { memoryTool } from '../memory/project.js';
-import { canReadMemory, taskControllerReads, taskTraceAccess } from '../memory/access.js';
+import { isPhysicalNoteId, memoryTool, type NotesBridge } from '../memory/project.js';
+import { memoryAuthorize, taskControllerReads, taskTraceAccess } from '../memory/access.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { roleAuthority, type RoleSnapshot } from './definition.js';
 import { verifyRunToken, tenantOf } from './role-run.js';
@@ -22,9 +22,9 @@ const tool = (name: string, description: string, properties: any, required: stri
 export const gatewayTools = [
   tool('read_task_record', 'Read a retained record from THIS task by offered reference; the Task Manager can read all worker records. Use offset to page JSON; use read_managed_task for another authorized task.', { ref: { type: 'string' }, offset: { type: 'integer' } }, ['ref']),
   tool('list_task_records', 'List references (type and ref, no bodies) of this task\'s durable records, newest first. Expand one with read_task_record.', { types: { type: 'array', items: { type: 'string' } }, before: { type: 'integer' }, limit: { type: 'integer' } }),
-  tool('search_knowledge', 'Search this project\'s knowledge for your role. Previews are not proof; read the exact revision before relying on it.', { query: { type: 'string' }, module: { type: 'string' }, kind: { type: 'string' } }),
-  tool('read_knowledge', 'Read one exact project knowledge revision and its sources.', { id: { type: 'string' }, revision: { type: 'integer' }, offset: { type: 'integer' } }, ['id']),
-  tool('propose_experience', 'Propose an unverified experience candidate with its evidence references. It asserts no fact and changes no decision.', { key: { type: 'string' }, body: { type: 'string' }, evidence: { type: 'array', items: { type: 'string' } }, request_id: { type: 'string' } }, ['key', 'body', 'evidence'])
+  tool('search_knowledge', 'Search this project\'s shared notes in ../notes/ by filename, path or content. Previews are not proof; read the exact revision before relying on it.', { query: { type: 'string' }, path: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }),
+  tool('read_knowledge', 'Read one exact project note file revision from ../notes/ by file id or path.', { id: { type: 'string' }, revision: { type: 'integer' }, offset: { type: 'integer' } }, ['id']),
+  tool('propose_experience', 'Save a shared project note in ../notes/ with its evidence references. It does not publish to GitHub or finish this task.', { key: { type: 'string' }, path: { type: 'string' }, body: { type: 'string' }, evidence: { type: 'array', items: { type: 'string' } }, request_id: { type: 'string' } }, ['key', 'body', 'evidence'])
 ];
 export const gatewayToolNames = gatewayTools.map(t => t.function.name);
 // The resource-tool aliases used by flat permissions.
@@ -35,7 +35,7 @@ const refusal = (code: string) => ({ error: code });
 export interface GatewayRequest { tool: string; arguments?: any; run_id?: string; lease_epoch?: number; role?: string; request_id?: string }
 
 export class TaskToolGateway {
-  constructor(private readonly store: Store) {}
+  constructor(private readonly store: Store, private readonly notes?: NotesBridge) {}
   /** Tool definitions this token may call. */
   catalog(token: string) { const binding = verifyRunToken(this.store, token, {}); return gatewayTools.filter(t => binding.capabilities.includes('gateway:' + t.function.name)); }
   async call(token: string, request: GatewayRequest): Promise<any> {
@@ -88,14 +88,14 @@ export class TaskToolGateway {
       const visible = rows.filter(r => this.visible(task, run, role, 'task_history:' + r.id));
       return { records: visible.slice(0, limit).map(r => ({ ref: 'task_history:' + r.id, type: r.type, run_id: r.run_id, created_at: r.created_at })), next_before: rows.length > limit ? rows[limit - 1]!.id : null };
     }
-    // Knowledge reuses ProjectMemory and its trace; another role's scoped memory reads as missing.
+    // Knowledge reads and writes go directly to the physical project notes volume (../notes/).
     const scoped = { ...task, trace_run_id: run.id, active_role: role };
-    if (name === 'search_knowledge') return memoryTool(s, scoped, 'search_project_memory', { query: args.query ?? '', module: args.module, kind: args.kind, role_scope: role });
+    if (name === 'search_knowledge') return memoryTool(s, scoped, 'search_project_memory', { query: args.query ?? '', path: args.path, offset: args.offset, limit: args.limit }, this.notes);
     if (name === 'read_knowledge') {
       if (typeof args.id !== 'string') return refusal('knowledge_not_found');
-      const result = await memoryTool(s, scoped, 'read_project_memory', { id: args.id, revision: args.revision, offset: args.offset });
-      if (result?.error === 'memory_not_found') return refusal('knowledge_not_found');
-      return result?.error ? result : { ...result, ref: `project_memories:${result.id}:${result.revision}`, version: contentHash(result.body ?? null) };
+      const result = await memoryTool(s, scoped, 'read_project_memory', { id: args.id, revision: args.revision, offset: args.offset }, this.notes);
+      if (result?.error === 'note_not_found' || result?.error === 'memory_not_found') return refusal('knowledge_not_found');
+      return result?.error ? result : { ...result, ref: `notes:${result.id}:${result.revision}`, version: contentHash(result.body ?? null) };
     }
     // An experience candidate is idempotent per request id across every run of the scope: a confirmed write is not replayed.
     const requestId = typeof (request.request_id ?? args.request_id) === 'string' ? String(request.request_id ?? args.request_id).slice(0, 128) : null;
@@ -104,20 +104,30 @@ export class TaskToolGateway {
       if (prior) return { receipt: JSON.parse(String(prior.data)).receipt, reused: true };
     }
     if (!Array.isArray(args.evidence) || !args.evidence.length || args.evidence.length > 20 || args.evidence.some((ref: unknown) => typeof ref !== 'string' || !this.visible(task, run, role, ref))) return refusal('experience_evidence_invalid');
-    const saved = await memoryTool(s, scoped, 'remember_project_memory', { key: String(args.key ?? '').slice(0, 120), body: String(args.body ?? '').slice(0, 8000), kind: 'experience' });
-    return saved?.error ? saved : { receipt: { id: saved.id, revision: saved.revision, verification: saved.verification ?? 'unverified', evidence: args.evidence } };
+    const saved = await memoryTool(s, scoped, 'remember_project_memory', { ...(typeof args.path === 'string' ? { path: args.path } : {}), key: String(args.key ?? '').slice(0, 120), body: String(args.body ?? '').slice(0, 32000) }, this.notes);
+    return saved?.error ? saved : { receipt: { id: saved.id, path: saved.path, revision: saved.revision, evidence: args.evidence } };
   }
   /** Whether this run's role may expand a reference of its own task (#1121: roles within the same task share observations transparently). */
   private visible(task: Row, run: Row, role: string, ref: string): boolean {
     const s = this.store;
-    if (!ref.startsWith('project_memories:') && taskControllerReads(s, String(task.id), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }))) return true;
+    if (!ref.startsWith('project_memories:') && !ref.startsWith('notes:') && taskControllerReads(s, String(task.id), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }))) return true;
     const runRef = /^(?:model_requests|task_runs):([^:]+):/.exec(ref);
     if (runRef) {
       const exists = /^model_requests:/.test(ref) ? s.get('SELECT 1 FROM model_requests WHERE id=? AND task_id=?', runRef[1]!, task.id) : s.get('SELECT 1 FROM task_runs WHERE id=? AND task_id=?', runRef[1]!, task.id);
       return !!exists;
     }
+    const noteRef = /^notes:(.+):(\d+)$/.exec(ref);
+    if (noteRef && isPhysicalNoteId(noteRef[1]!)) {
+      try { memoryAuthorize(taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }), String(task.repository_id)); return true; }
+      catch { return false; }
+    }
     const memory = /^project_memories:([^:]+):(\d+)$/.exec(ref);
-    if (memory) return canReadMemory(s, String(task.repository_id), memory[1]!, Number(memory[2]), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }));
+    if (memory) {
+      if (!s.hasTable('project_memories') || !s.hasTable('project_memory_versions')) return false;
+      try { memoryAuthorize(taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }), String(task.repository_id)); }
+      catch { return false; }
+      return !!s.get('SELECT 1 FROM project_memory_versions v JOIN project_memories m ON m.id=v.memory_id WHERE m.repository_id=? AND m.id=? AND v.revision=?', task.repository_id, memory[1]!, Number(memory[2]));
+    }
     const history = /^task_history:(\d+)$/.exec(ref);
     if (history) {
       return !!s.get('SELECT 1 FROM task_history WHERE id=? AND task_id=?', Number(history[1]), task.id);

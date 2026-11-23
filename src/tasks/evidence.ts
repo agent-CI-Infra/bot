@@ -1,4 +1,4 @@
-import { taskControllerReads, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
+import type { MemoryAccess } from '../memory/access.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import type { Store } from '../storage/database.js';
 import { sha } from '../agent/common.js';
@@ -40,8 +40,7 @@ export function readEvidence(store:Store,taskId:string,candidate:Candidate,args:
   const verification=!evidence&&row.type==='acceptance_evidence'&&data&&typeof data.evaluation_id==='string'?store.get("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_started' AND json_extract(data,'$.evaluation_id')=? AND json_extract(data,'$.candidate_id')=? AND json_extract(data,'$.revision')=?",taskId,data.evaluation_id,candidate.id,candidate.revision):null;
   if(!evidence&&row.type!=='execution_evidence'&&!verification)return error('evidence_not_offered');
   if(evidence&&(evidence.result as any)?.digest!==sha(row.raw))return error('evidence_digest_changed');
-  const scoped=taskControllerReads(store,taskId,access)?data:visibleMemorySnapshot(store,store.get('SELECT repository_id FROM tasks WHERE id=?',taskId)!.repository_id,data,access);
-  if(scoped!==data)return error('evidence_knowledge_forbidden');
+  void access;
   const offset=args?.offset??0,length=args?.length??12000;
   if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<1||length>32000)return error('invalid_evidence_range');
   const binding=verification?JSON.parse(verification.data):null;

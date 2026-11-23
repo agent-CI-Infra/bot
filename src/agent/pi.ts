@@ -429,13 +429,6 @@ export function piAdapter<T>(session: PiSession<T>) {
           const { value, status, model: used } = modelResult;
           session.inspect?.(value?.choices?.[0]?.message);
           const cleaned = redactor.clean(value);
-          for (const [index, call] of (value.choices?.[0]?.message?.tool_calls || []).entries()) {
-            if (call.function?.name !== 'write_file') continue;
-            let args; try { args = JSON.parse(call.function.arguments); } catch { continue; }
-            if (typeof args.path === 'string' && args.path.startsWith('../notes/') && typeof args.content === 'string') {
-              cleaned.choices[0].message.tool_calls[index].function.arguments = JSON.stringify({ ...redactor.clean(args), content: args.content });
-            }
-          }
           let responseBody = JSON.stringify(cleaned), contentType = 'application/json';
           if (body.stream) {
             const value = JSON.parse(responseBody), message = value.choices?.[0]?.message; if (!message) stop('model_response_invalid', undefined, '转换模型流式响应时缺少 choices[0].message。');
