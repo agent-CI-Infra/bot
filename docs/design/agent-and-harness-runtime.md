@@ -50,7 +50,7 @@
 
 ### 默认后端
 
-项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的列默认值和读写缺省值，以及控制台新建表单。`native` 仍可手动选择，冻结在任务里的配置快照不改写。
+项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的读写缺省值和新建库的列默认值，以及控制台新建表单。升级库的这两列保留加列时的 `DEFAULT 'native'`（`ALTER TABLE ... ADD COLUMN` 只在加列时执行一次），但所有写入都显式给出后端，列默认值不影响行为。`native` 仍可手动选择，冻结在任务里的配置快照不改写。
 
 旧库在启动时由 `migrateNativeToPi`（`src/roles/native-to-pi.ts`，标记 `migration:1255:native-to-pi`）在一个事务里一次性改写，并在启动日志写一行计数：
 

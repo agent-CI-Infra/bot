@@ -62,7 +62,12 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await expect(page.getByLabel('提示词与职责说明', { exact: true })).toHaveValue('先给结论，再列出处。');
     await page.getByLabel('助手模型', { exact: true }).selectOption(sharedModel.id);
     await page.getByText('高级设置：Agent 后端', { exact: true }).click();
-    await page.getByLabel('Agent 后端', { exact: true }).selectOption('native');
+    // Unfolded, the backend select shows the labels in order with the recommended Pi first and chosen.
+    const backend = page.getByLabel('Agent 后端', { exact: true });
+    await expect(backend).toBeVisible();
+    await expect(backend).toHaveValue('pi');
+    await expect(backend.locator('option')).toHaveText(['Pi（推荐）', 'Native（兼容）', 'Codex', 'Claude Code']);
+    await backend.selectOption('native');
     // Native runs in the control plane: no assistant computer, no warning.
     await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeHidden();
     await save.click();
