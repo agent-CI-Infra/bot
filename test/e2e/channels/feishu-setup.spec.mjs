@@ -1,12 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { managementFixture } from '../../fixtures/management-fixture.mjs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { transport, connector, envelope, post, finished, credentials, bindFixture, until, channelFixture, privateChat } from '../../fixtures/channel-fixture.mjs';
 import { harness, setup } from '../../fixtures/helpers.mjs';
 import { FEISHU_SCOPES } from '../../../dist/channels/feishu.js';
 
-const output = '.tmp/feishu-setup-165';
 async function login(page, h, password, username = 'administrator') {
   await page.getByLabel('用户名', { exact: true }).fill(username); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -30,8 +29,6 @@ for (const width of [1440, 390]) test(`name lookup reports the missing directory
     await expect(grants).toContainText('缺少 1 项');
     const scopes = JSON.parse(await grants.getByLabel('完整权限 JSON', { exact: true }).inputValue());
     expect(scopes.scopes.tenant).toEqual(expect.arrayContaining(['contact:contact.base:readonly', 'contact:user.base:readonly']));
-    mkdirSync(output, { recursive: true });
-    await page.screenshot({ path: `${output}/directory-grant-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/identity/feishu');
     const binding = page.getByLabel('我的飞书账号', { exact: true });
     await expect(binding).toContainText('导入完整权限 JSON');
@@ -44,7 +41,6 @@ for (const width of [1440, 390]) test(`name lookup reports the missing directory
     await expect(conversation).toContainText('读取飞书姓名所需的权限尚未生效');
     await expect(conversation).toContainText('个人设置 → 组织飞书应用');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: `${output}/name-permission-${width}.png`, fullPage: true });
     f.wire.state.profileCode = 0; f.wire.state.profileStatus = 200;
     await conversation.getByRole('button', { name: '刷新飞书姓名', exact: true }).click();
     await expect(conversation).toContainText('张小明'); await expect(conversation).toContainText('名称已更新');
@@ -65,11 +61,9 @@ test('missing reaction permission gives an administrator an actionable hint on d
     await expect(page.getByLabel('飞书权限检查')).toContainText('im:message.reactions:write_only');
     await expect(page.getByText('处理中表情暂不可用：', { exact: false })).toContainText('im:message.reactions:write_only');
     await expect(page.getByText('处理中表情暂不可用：', { exact: false })).toContainText('普通消息回复不受影响');
-    mkdirSync(output, { recursive: true });
     for (const [name, width, height] of [['desktop', 1440, 1100], ['mobile', 390, 844]]) {
       await page.setViewportSize({ width, height });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: output + '/processing-reaction-permission-' + name + '.png', fullPage: true });
     }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
@@ -77,8 +71,7 @@ test('global administrator connects an app through the 3-step wizard, manages it
   test.setTimeout(90000);
   const wire = transport(), h = await harness(null, undefined, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
   const f = { h, ...await setup(h), close: () => h.stop() };
-  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
-  mkdirSync('.tmp/issue-1220', { recursive: true });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
     await expect(page.getByRole('heading', { name: '飞书应用连接', exact: true })).toBeVisible();
@@ -108,10 +101,8 @@ test('global administrator connects an app through the 3-step wizard, manages it
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedFeishuScopes = value; } } }));
     await page.getByRole('button', { name: '复制完整权限 JSON', exact: true }).click();
     expect(JSON.parse(await page.evaluate(() => window.copiedFeishuScopes))).toEqual(enterpriseScopes);
-    await page.screenshot({ path: '.tmp/issue-1220/wizard-step1-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/wizard-step1-390.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     expect(f.h.store.get('SELECT count(*) n FROM tenants').n).toBe(0);
     await expect(page.getByLabel('项目所属组织')).toHaveCount(0);
@@ -146,19 +137,15 @@ test('global administrator connects an app through the 3-step wizard, manages it
     const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'"); expect(c.enabled).toBe(1); expect(c.transport).toBe('http'); expect(c.bot_open_id).toBe('ou_automatic_save'); expect(c.installation_tenant).toBe('install-tenant');
     await page.getByRole('button', { name: '检查已发布的机器人与权限', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: '凭据已验证' })).toContainText('尚未验证事件投递');
-    await page.screenshot({ path: '.tmp/issue-1220/wizard-step2-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/wizard-step2-390.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('button', { name: '完成配置，进入绑定与试用' }).click();
     await expect(page).toHaveURL(new RegExp(c.id + '/setup/2$'));
     await expect(page.getByText('绑定后直接在私聊发送', { exact: false })).toContainText('确认收到助手回复后即完成接入');
     await expect(page.getByText('/project', { exact: false })).toHaveCount(0);
-    await page.screenshot({ path: '.tmp/issue-1220/wizard-step3-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/wizard-step3-390.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('link', { name: '进入应用管理页', exact: true }).click();
     await expect(page).toHaveURL(new RegExp('/#/settings/feishu/' + c.id + '$'));
@@ -190,19 +177,15 @@ test('global administrator connects an app through the 3-step wizard, manages it
     f.h.store.run("UPDATE channel_connectors SET connection_state='connected',app_name='研发值班助手',tenant_name='示例企业' WHERE app_id='cli_ws_list'");
     await page.reload();
     await expect(page.getByRole('group', { name: 'cli_ws_list', exact: true })).toContainText('已连接');
-    await page.screenshot({ path: '.tmp/issue-1220/list-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/list-390.png' });
     // Delete cli_wizard from the list via the confirm dialog.
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('group', { name: 'cli_wizard', exact: true }).getByRole('button', { name: '删除', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('删除飞书应用连接');
-    await page.screenshot({ path: '.tmp/issue-1220/delete-dialog-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/delete-dialog-390.png' });
     await dialog.getByRole('button', { name: '确认删除', exact: true }).click();
     await expect(page.getByRole('group', { name: 'cli_wizard', exact: true })).toHaveCount(0);
     expect(f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'")).toBeUndefined();
@@ -212,7 +195,7 @@ test('global administrator connects an app through the 3-step wizard, manages it
 
 test('app management detail refreshes current app names even when bot metadata is stale, with permission diagnostics on desktop and mobile', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
-  mkdirSync(output, { recursive: true }); mkdirSync('.tmp/issue-1220', { recursive: true });
+
   try {
     const id = await connector(f.admin);
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -242,10 +225,8 @@ test('app management detail refreshes current app names even when bot metadata i
     await expect(page.getByText('示例研发企业', { exact: true })).toBeVisible();
     await expect(status).toHaveText('应用与企业信息已检查。');
     expect(wire.state.authRequests.length).toBeGreaterThan(requests);
-    await page.screenshot({ path: '.tmp/issue-1220/detail-status-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/detail-status-390.png' });
     // A partly configured app lists what is missing, links Feishu's request page for exactly those scopes and offers the full import JSON.
     wire.state.scopes = FEISHU_SCOPES.filter(s => !['im:resource', 'im:message.group_msg', 'im:message.group_msg.include_bot:read', 'im:chat.members:read'].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
     await page.getByRole('button', { name: '刷新应用信息与权限', exact: true }).click();
@@ -319,7 +300,6 @@ test('store apps save without manual bot identity and synchronize it after recei
 
 test('enterprise long connections show collapsible event/callback guide and delete controls on the detail page (#1220)', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
-  mkdirSync('.tmp/issue-1220', { recursive: true });
   try {
     const id = await connector(f.admin, { transport: 'websocket' });
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -339,11 +319,9 @@ test('enterprise long connections show collapsible event/callback guide and dele
     const scopes = JSON.parse(await guide.getByLabel('完整权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toContain('cardkit:card:write');
     await guide.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
-    await page.screenshot({ path: '.tmp/issue-1220/detail-guide-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await guide.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
-    await page.screenshot({ path: '.tmp/issue-1220/detail-guide-390.png' });
     const current = f.h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id);
     await f.admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: current.revision, enabled: false });
     await page.reload();
@@ -353,15 +331,11 @@ test('enterprise long connections show collapsible event/callback guide and dele
     const dangerCard = page.locator('.feishu-danger-zone');
     await page.setViewportSize({ width: 1440, height: 1000 });
     await diagHeading.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
-    await page.screenshot({ path: '.tmp/issue-1220/detail-diag-1440.png' });
     await dangerCard.evaluate(node => { node.scrollIntoView({ block: 'end' }); });
-    await page.screenshot({ path: '.tmp/issue-1220/detail-delete-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await diagHeading.evaluate(node => { node.scrollIntoView({ block: 'start' }); scrollBy(0, -80); });
-    await page.screenshot({ path: '.tmp/issue-1220/detail-diag-390.png' });
     await dangerCard.evaluate(node => { node.scrollIntoView({ block: 'center' }); });
-    await page.screenshot({ path: '.tmp/issue-1220/detail-delete-390.png' });
     // Delete from detail page danger zone redirects back to the list.
     await page.getByRole('button', { name: '删除此飞书应用连接', exact: true }).click();
     const dialog = page.getByRole('dialog');
@@ -389,7 +363,7 @@ test('the detail and completion step send group scope to the group assistant bin
 test('ordinary users see connected bot names and private-chat links, confirm a private code and get an administrator contact empty state', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
-  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const local = await f.member('code-browser-user', {});
     await page.goto(f.h.admin + '/#/identity/feishu'); await login(page, f.h, local.password, 'code-browser-user');
@@ -413,7 +387,7 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     await identity.getByRole('button', { name: '确认绑定到当前账户' }).click();
     await expect(identity.getByRole('alert')).toContainText('认证字符串无效');
     await identity.getByLabel('飞书认证字符串', { exact: true }).fill(code);
-    await page.setViewportSize({ width: 1440, height: 1100 }); await page.screenshot({ path: output + '/code-binding-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1100 });
     const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
     await identity.getByRole('button', { name: '确认绑定到当前账户' }).click();
     await expect(identity).toContainText('code-browser-user 的飞书账号');
@@ -425,7 +399,6 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     expect(await page.evaluate(async () => (await fetch('/api/channels/setup')).status)).toBe(403);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/code-binding-mobile.png', fullPage: true });
     await page.evaluate(() => api('/api/auth/logout', 'POST', {})); await page.reload(); await login(page, f.h, f.password);
     await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toBeVisible();
     expect(errors).toEqual([]);
@@ -435,7 +408,7 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
 test('a repository admin connects an app for their organization from the identity page on a long connection only; it stays inside that organization (#424)', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), f = await managementFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
-  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     await connector(f.admin);
     const maintainer = await f.member('org-app-maintainer', { repository_ids: ['101'] }), outsider = await f.member('org-app-outsider', { repository_ids: ['201'] });
@@ -466,12 +439,9 @@ test('a repository admin connects an app for their organization from the identit
     const row = page.getByRole('group', { name: 'cli_org_wizard' });
     await expect(row).toContainText('组织 agent-test-zone 的应用 · 创建人 org-app-maintainer');
     await expect(row).toContainText('已启用');
-    mkdirSync('.tmp/issue-1220', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: '.tmp/issue-1220/org-admin-list-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/issue-1220/org-admin-list-390.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await row.getByRole('link', { name: '管理', exact: true }).click();
     await expect(page).toHaveURL(new RegExp('/#/identity/feishu-apps/' + c.id + '$'));
@@ -483,7 +453,6 @@ test('a repository admin connects an app for their organization from the identit
     await expect(identity.getByText('经它绑定的飞书身份只能使用你在该组织内的权限', { exact: false })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/organization-app-identity-mobile.png', fullPage: true });
     // Another organization's admin neither sees nor manages it.
     await page.evaluate(() => api('/api/auth/logout', 'POST', {})); await page.reload(); await login(page, f.h, outsider.password, 'org-app-outsider');
     await expect(identity.getByLabel('可绑定的飞书应用')).not.toContainText('组织 agent-test-zone');
@@ -498,7 +467,7 @@ test('a linked account shows readable names without blocking on directory lookup
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
   let release; wire.state.profileGate = new Promise(resolve => { release = resolve; });
   wire.state.appName = '项目协作助手'; wire.state.tenantName = '示例企业';
-  mkdirSync(output, { recursive: true }); const errors = []; page.on('pageerror', e => errors.push(e.message));
+   const errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const id = await connector(f.admin, { installation_tenant: undefined, bot_open_id: undefined }), local = await f.member('readable-user', {});
     bindFixture(f.h, id, local.id, 'ou_unreadable', 'install-tenant');
@@ -516,7 +485,6 @@ test('a linked account shows readable names without blocking on directory lookup
     await expect(binding).toContainText('已绑定');
     await expect(binding).toContainText('关联平台账户：readable-user');
     await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.screenshot({ path: output + '/readable-identity-desktop.png', fullPage: true });
     wire.state.profileCode = 99991672;
     await binding.getByRole('button', { name: '刷新飞书姓名' }).click();
     await expect(binding).toContainText('保留上次读取的姓名');
@@ -535,7 +503,6 @@ test('a linked account shows readable names without blocking on directory lookup
     await expect(binding).toContainText('已绑定');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/readable-identity-mobile.png', fullPage: true });
     await binding.getByRole('button', { name: '解除飞书绑定' }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认解除', exact: true }).click();
     await expect(binding).toContainText('已解绑'); await expect(binding).not.toContainText('ou_unreadable');
@@ -547,7 +514,7 @@ test('a linked account shows readable names without blocking on directory lookup
 test('personal Feishu guide completes both ends, shows the current identity and unlinks without exposing app configuration', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), f = await identityFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
-  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const id = await connector(f.admin, { installation_tenant: undefined, bot_open_id: undefined }), started = await post(f.h, id, envelope('/bind')); await finished(f.h, started.value.operation_id);
     const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
@@ -568,7 +535,7 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden();
     await expect(page.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
     await expect(page.locator('input[name="app_secret"]')).toHaveCount(0);
-    await page.setViewportSize({ width: 1440, height: 1100 }); await page.screenshot({ path: output + '/personal-pending-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1100 });
     const confirming = await post(f.h, id, envelope(confirmation)); expect((await finished(f.h, confirming.value.operation_id)).state).toBe('completed');
     await page.getByRole('button', { name: '刷新飞书绑定状态' }).click();
     await expect(page.getByLabel('我的飞书账号', { exact: true })).toContainText('已绑定');
@@ -580,7 +547,6 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     await page.goto(f.h.admin + '/#/channels'); await expect(page).toHaveURL(/#\/identity\/feishu$/);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/personal-bound-mobile.png', fullPage: true });
     const unlinkResponse = page.waitForResponse(r => r.request().method() === 'DELETE' && r.url().includes('/api/identity/bindings/'));
     await page.getByRole('button', { name: '解除飞书绑定' }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认解除', exact: true }).click();
@@ -594,7 +560,7 @@ test('personal Feishu guide completes both ends, shows the current identity and 
 test('a local account completes Feishu binding without GitHub login and keeps its existing repository scope', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), f = await managementFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
-  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const id = await connector(f.admin), local = await f.member('local-feishu-user', { repository_ids: ['101'] });
     const actor = { sender: { sender_id: { open_id: 'ou_local_browser' } } };
@@ -615,7 +581,6 @@ test('a local account completes Feishu binding without GitHub login and keeps it
     expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu'").n).toBe(0);
     const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
     await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.screenshot({ path: output + '/local-binding-pending-desktop.png', fullPage: true });
     const confirmed = await post(f.h, id, envelope(confirmation, actor));
     expect((await finished(f.h, confirmed.value.operation_id)).state).toBe('completed');
     await page.getByRole('button', { name: '刷新飞书绑定状态' }).click();
@@ -626,7 +591,6 @@ test('a local account completes Feishu binding without GitHub login and keeps it
     expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n).toBe(0);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/local-binding-bound-mobile.png', fullPage: true });
     // A repository admin may add apps for their own organization (#424), but never sees the platform-wide app's configuration.
     const own = await page.evaluate(async () => (await fetch('/api/channels/setup')).json());
     expect([own.platform, own.connectors]).toEqual([false, []]); expect(errors).toEqual([]);

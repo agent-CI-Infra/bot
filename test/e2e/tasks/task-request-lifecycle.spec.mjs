@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
@@ -127,9 +127,7 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     expect(f.h.store.get('SELECT count(*) n FROM tasks').n).toBe(1);
     expect(f.h.store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n).toBe(0);
     expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-    mkdirSync('.tmp/task-lifecycle-227/previews', { recursive: true });
     await dialog.locator('.task-execution').evaluate(el => el.scrollIntoView({ block: 'start' }));
-    await page.screenshot({ path: `.tmp/task-lifecycle-227/previews/report-${width}.png` });
     if (width === 1440) {
       // At 200% desktop zoom the same 1440 physical pixels have 720 CSS pixels and DPR 2.
       const cdp = await page.context().newCDPSession(page);

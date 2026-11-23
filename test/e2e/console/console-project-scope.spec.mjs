@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 
@@ -56,7 +55,6 @@ for (const width of [1440, 390]) test(`地址是唯一范围，各工作页面�
   const { h, password } = await fixture(), errors = [];
   const costs = queries(page, '/api/costs', url => url.searchParams.get('repository_id') || '');
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/project-scope-routes', { recursive: true });
   try {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
     await login(page, h, password);
@@ -68,7 +66,6 @@ for (const width of [1440, 390]) test(`地址是唯一范围，各工作页面�
       await expect(page.locator('#console-page select[aria-label="任务项目"]')).toHaveCount(0);
       await expect(page.locator('#costs-scope, #management-scope-note')).toHaveCount(0);
       if (name === 'costs') expect(costs.at(-1)).toBe(id);
-      await page.screenshot({ path: `.tmp/project-scope-routes/${name}-${id || 'all'}-${width}.png` });
       await page.reload(); await ready(page, name, id);
     }
     await page.goto(h.admin + '/#/projects');
@@ -144,12 +141,10 @@ test('新地址沿用项目拒绝状态，不查询或泄露无权项目的数�
   await admin('/api/users', 'POST', { username: 'member', password, role: 'project_admin', repository_ids: ['101'] });
   try {
     await login(page, h, password, '#/projects', 'member');
-    mkdirSync('.tmp/project-scope-routes', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
       for (const [name, id] of [['inbox', ''], ['costs', '101']]) {
         await page.goto(h.admin + '/' + address(name, id)); await ready(page, name, id);
-        await page.screenshot({ path: `.tmp/project-scope-routes/member-${name}-${id || 'all'}-${width}.png` });
       }
     }
     const forbiddenReads = queries(page, '/api/board/prs', url => url.searchParams.get('repository_id') || '');

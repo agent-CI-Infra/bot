@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
@@ -17,7 +17,7 @@ test('全局设置按账号、App 和组织显示 GitHub 请求额度的窗口�
   });
   github.listen(0, '127.0.0.1'); await once(github, 'listening');
   const h = await harness(undefined, undefined, store => ({ installations: new InstallationSync(store, 'http://127.0.0.1:' + github.address().port) })), errors = [];
-  page.on('pageerror', e => errors.push(e.message)); mkdirSync('.tmp/github-rate-limits', { recursive: true });
+  page.on('pageerror', e => errors.push(e.message));
   try {
     const { admin, password } = await setup(h), bot = await account(admin, { name: '部门机器人' });
     const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -42,10 +42,8 @@ test('全局设置按账号、App 和组织显示 GitHub 请求额度的窗口�
     await expect(card).toContainText('已读取 部门机器人 的请求额度');
     await expect(rows).toHaveCount(5); await expect(card).toContainText('Token 用户 dept-bot · REST'); await expect(card).toContainText('4321');
     expect(h.store.get("SELECT remaining FROM github_rate_limits WHERE bucket=?", 'user:' + bot.id).remaining).toBe(4321);
-    await page.screenshot({ path: '.tmp/github-rate-limits/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 }); await page.reload(); await expect(rows).toHaveCount(5);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/github-rate-limits/mobile.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); await new Promise(resolve => github.close(resolve)); }
 });

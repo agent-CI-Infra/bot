@@ -1,8 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
-const out = '.tmp/primary-nav-549';
 
 async function login(page, h, username, password, hash = '#/projects') {
   await page.goto(h.admin + '/' + hash);
@@ -26,7 +24,6 @@ async function visiblePrimaryCaptions(page) {
 test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可从主导航进入，更多不重复且 1440/768/390 无横向溢出', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness();
-  mkdirSync(out, { recursive: true });
   try {
     const { admin } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -46,7 +43,6 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     // #554: the project-admin 更多功能 entry carries the same linear icon as the other sidebar entries.
     await expect(page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(1440);
-    await page.screenshot({ path: `${out}/nav-member-1440.png`, fullPage: true });
 
     await page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true }).click();
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
@@ -64,13 +60,11 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理助手', '全局设置', '系统初始化', '安装档案', '机器人账号']) {
       expect([...settings, ...management]).not.toContain(duplicate);
     }
-    await page.screenshot({ path: `${out}/more-member-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 768, height: 900 });
     await expect(page.locator('#console-sidebar')).toBeVisible();
     expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '待处理', '管理助手', '更多功能', '个人设置']);
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(768);
-    await page.screenshot({ path: `${out}/nav-member-768.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('#console-sidebar')).toBeHidden();
@@ -87,7 +81,6 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     await expect(page.getByTestId('console-admin-group')).toBeVisible();
     await expect(page.locator('#console-page')).not.toContainText('全局设置');
     await expect(page.locator('#console-page')).not.toContainText('系统初始化');
-    await page.screenshot({ path: `${out}/nav-member-390.png`, fullPage: true });
 
   } finally { await h.stop(); }
 });

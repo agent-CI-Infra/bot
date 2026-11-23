@@ -1,4 +1,3 @@
-import { mkdirSync } from 'node:fs';
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { managementFixture } from '../../fixtures/management-fixture.mjs';
@@ -254,7 +253,7 @@ test('the chart is a group of labelled bars and a date × project table carries 
 test('all-project cost rows link to the project address and keep its query scope', async ({ page }) => {
   const f = await managementFixture(), { h } = f;
   try {
-    seedUsage(h); mkdirSync('.tmp/project-scope-routes', { recursive: true });
+    seedUsage(h);
     await page.clock.setFixedTime(new Date('2026-11-11T02:00:00Z'));
     await page.goto(h.admin + '/#/costs');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -270,7 +269,6 @@ test('all-project cost rows link to the project address and keep its query scope
         const cell = node.parentElement, style = getComputedStyle(cell), padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
         return { oneLine: box.height <= line + 1 && cell.offsetHeight <= line + padding + 2, hit: node.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)) };
       })).toMatchObject({ oneLine: true, hit: true });
-      await page.screenshot({ path: `.tmp/project-scope-routes/cost-project-links-${width}.png` });
     }
     const scoped = page.waitForRequest(request => {
       const url = new URL(request.url());

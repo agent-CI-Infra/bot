@@ -1,21 +1,18 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, testPassword } from '../../fixtures/helpers.mjs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 
 async function fill(page,username,password) {await page.getByLabel('用户名',{exact:true}).fill(username);await page.getByLabel('密码',{exact:true}).fill(password);}
 const bounds=async page=>expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-function shots(){mkdirSync('.tmp/console-access',{recursive:true});}
 
 test('first setup keeps one-time initialization and local recovery across screen sizes',async({page})=>{
   const h=await harness(),password=testPassword(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try {
     await page.goto(h.admin);await expect(page.getByRole('heading',{name:'创建第一名管理员',exact:true})).toBeVisible();
-    await expect(page.getByRole('link',{name:'使用 GitHub 登录'})).toBeHidden();shots();
+    await expect(page.getByRole('link',{name:'使用 GitHub 登录'})).toBeHidden();
     for(const width of [320,390,768,1024,1440,1920]){
       await page.setViewportSize({width,height:900});await bounds(page);
       expect(await page.getByLabel('密码',{exact:true}).evaluate(n=>getComputedStyle(n).fontSize)).toBe('16px');
-      if([390,1440].includes(width))await page.screenshot({path:`.tmp/console-access/setup-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:390,height:500});await fill(page,'first-administrator',password);
     await page.getByRole('button',{name:'显示密码',exact:true}).click();await expect(page.locator('#access-password')).toHaveAttribute('type','text');
@@ -69,10 +66,10 @@ test('GitHub entry keeps callback errors and successful login without projects l
   await page.route('https://avatars.githubusercontent.com/**',route=>route.abort());
   try {
     await page.goto(f.h.admin);await expect(page.getByRole('link',{name:'使用 GitHub 登录',exact:true})).toBeVisible();
-    shots();for(const width of [1440,390]){await page.setViewportSize({width,height:900});await bounds(page);await page.screenshot({path:`.tmp/console-access/login-${width}.png`,fullPage:true});}
+    for(const width of [1440,390]){await page.setViewportSize({width,height:900});await bounds(page);}
     await page.goto(f.h.admin+'/?auth_error=invalid_oauth_state');await expect(page.locator('#access-feedback #message')).toContainText('登录验证已过期');
     await page.reload();await expect(page.locator('#access-feedback #message')).toContainText('请重新发起 GitHub 登录');
-    shots();for(const width of [1440,390]){await page.setViewportSize({width,height:900});await bounds(page);await page.screenshot({path:`.tmp/console-access/login-error-${width}.png`,fullPage:true});}
+    for(const width of [1440,390]){await page.setViewportSize({width,height:900});await bounds(page);}
     await page.getByRole('link',{name:'使用 GitHub 登录',exact:true}).click();
     await expect(page.locator('#identity-panel')).toBeVisible();await page.goto(f.h.admin+'/#/projects');
     await expect(page.getByRole('heading',{name:'已登录，尚无可管理的项目'})).toBeVisible();await expect(page.locator('#access')).toBeHidden();

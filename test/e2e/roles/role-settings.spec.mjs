@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor } from '../helpers/prompt-editor.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
@@ -58,7 +57,6 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     expect(dev.capability_policy_ref).toBeUndefined();
     expect(dev.budget_policy_ref).toMatchObject({ id: 'bounded', max_turns: 200, max_output_tokens: 32768 });
     await openRoleFormAdvanced(page);
-    mkdirSync('.tmp/role-settings', { recursive: true });
     await page.getByLabel('预算方式',{exact:true}).selectOption('metered');
     await expect(page.locator('input[name=max_cost]')).toHaveCount(0);
     await expect(page.getByText('任务累计金额上限（留空不设置）',{exact:true})).toHaveCount(0);
@@ -68,10 +66,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
       await expect(page.getByLabel('单次运行最多模型轮数', { exact: true })).toHaveValue('200');
       await expect(page.getByLabel('单次输出最多 token', { exact: true })).toHaveValue('32768');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/role-settings/budget-${width}.png` });
       await page.getByLabel('任务累计秒数',{exact:true}).scrollIntoViewIfNeeded();
       await expect(page.getByLabel('任务累计秒数',{exact:true})).toBeVisible();
-      await page.screenshot({path:`.tmp/role-settings/cost-free-${width}.png`});
     }
     await page.getByLabel('预算方式',{exact:true}).selectOption('bounded');
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -94,8 +90,6 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await consoleSave(page).click();
     await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
     await expect(page.getByLabel('职责', { exact: true })).toHaveValue('保留这份未保存的职责。');
-    mkdirSync('.tmp/role-settings', { recursive: true });
-    await page.screenshot({ path: '.tmp/role-settings/role-detail.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByLabel('dev 项目任务与协作权限', { exact: true })).toHaveValue('write');
     await expect(page.getByLabel('dev 指派其他角色权限', { exact: true })).toHaveValue('deny');
@@ -104,7 +98,6 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page.getByRole('table', { name: '角色解析结果' })).toBeVisible();
     await expect(page.locator('[data-role-version]')).toHaveText(`有未保存的更改`);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/role-settings/overview-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
@@ -210,11 +203,9 @@ test('GitHub 权限文案说明读写开放 github_write；默认只有 Manager 
     await expect(box).toContainText('「可评论和打标签」只到 Issue、Pull Request 和 Actions（触发工作流、重跑或取消运行与 job）');
     const actions = page.getByLabel('manager Actions权限', { exact: true });
     await expect(actions.locator('option')).toHaveText(['无权限', '只读', '读写']);
-    mkdirSync('.tmp/role-settings-1072', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
       await actions.evaluate(node => { node.scrollIntoView({ block: 'center' }); });
-      await page.screenshot({ path: `.tmp/role-settings-1072/manager-actions-${width}.png` });
     }
     await page.setViewportSize({ width: 1280, height: 720 });
     await expect(box).toContainText('默认只有 Manager 可写，且只写它正在处理的事件所在仓库。');

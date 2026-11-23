@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
@@ -53,10 +52,8 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(result.getByRole('link', { name: '前往接受' })).toHaveCount(0);
     const settingsLink = result.getByRole('link', { name: '打开 App 的 Permissions & events' });
     await expect(settingsLink).toHaveAttribute('href', 'https://github.com/organizations/fixture/settings/apps/fixture-app/permissions');
-    mkdirSync('.tmp/app-permissions', { recursive: true });
     for (const [width, height] of [[1365, 900], [390, 844]]) {
       await page.setViewportSize({ width, height }); await result.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/app-permissions/missing-${width}.png`, fullPage: true });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
     // Confirmed CI changes and Actions failure analysis need more than the baseline; that is listed without failing it.
@@ -95,9 +92,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(items.nth(6)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
     for (const [width, height] of [[1365, 900], [1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
-      await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-${width}.png` });
       await items.nth(0).evaluate(node => node.scrollIntoView({ block: 'start' }));
-      await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-actions-${width}.png` });
       expect(await gapsView.evaluate(view => view.scrollWidth <= view.clientWidth)).toBe(true);
     }
     await page.setViewportSize({ width: 1365, height: 900 }); await gapsView.getByRole('button', { name: '关闭', exact: true }).click(); await expect(gapsView).toBeHidden();
@@ -114,7 +109,6 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/app-permissions/project-${width}.png`, fullPage: true });
     }
     await page.goto(h.admin + '/#/projects/101/overview');
     await expect(page.getByTestId('project-role-board')).toBeVisible();
@@ -125,7 +119,6 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/app-permissions/overview-gap-${width}.png`, fullPage: true });
     }
     await page.goto(h.admin + '/#/settings/projects');
     installations[0].events = allEvents; await sync.click();
@@ -143,7 +136,6 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await gapsView.getByRole('button', { name: '关闭', exact: true }).click();
     for (const [width, height] of [[1365, 900], [390, 844]]) {
       await page.setViewportSize({ width, height }); await row('101').scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/app-permissions/actions-row-${width}.png`, fullPage: true });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
     await page.setViewportSize({ width: 1365, height: 900 });
@@ -213,7 +205,6 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
       failures.push({ failure, text: await box.innerText() });
       for (const [width, height] of [[1440, 900], [768, 1024], [390, 844]]) {
         await page.setViewportSize({ width, height }); await box.scrollIntoViewIfNeeded();
-        await page.screenshot({ path: `.tmp/app-permissions/failure-${failure.name}-${width}.png`, fullPage: true });
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `horizontal overflow in the ${failure.name} strip at ${width}px`).toBe(true);
       }
       await page.unroute('**/api/accounts/*/permissions', failure.fulfil);

@@ -1,6 +1,6 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import {test,expect} from '@playwright/test';
-import {mkdirSync,rmSync} from 'node:fs';
+import { rmSync } from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../../fixtures/helpers.mjs';
 import {metricTask,usageRequest} from '../../fixtures/metrics-fixtures.mjs';
 
@@ -37,7 +37,7 @@ test('统计按浏览器本地日显示费用、token、各工作类型的任务
     ['review.issue','2026-11-03T16:30:00.000Z',2],['foreign','2026-11-03T16:30:00.000Z',3],
     ['review.issue','2026-11-04T16:00:00.000Z',4],['review.issue','2026-11-03T15:59:59.999Z',8],
   ]){const id=usageRequest(h.store,task,'fixture-model',{cost});h.store.run('UPDATE model_requests SET requested_at=? WHERE id=?',time,id);}
-  const errors=[];page.on('pageerror',error=>errors.push(error.message));mkdirSync('.tmp/statistics-evidence',{recursive:true});
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
   const taskRow=(target,kind)=>target.locator(`.statistics-task-summary tr[data-kind="${kind}"]`);
   try{
     await page.clock.setFixedTime(new Date('2026-11-03T16:45:00Z'));
@@ -56,19 +56,17 @@ test('统计按浏览器本地日显示费用、token、各工作类型的任务
     await expect(page.locator('.statistics-tasks details tbody')).toContainText('2026-11-04');
     await expect(page.locator('.statistics-tasks details tbody')).toContainText('25 小时 1 分');
     await expect(page.locator('#costs-panel')).toContainText('不含外部执行端自行发起');await expect(page.locator('#costs-panel')).not.toContainText('UTC');
-    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/statistics-evidence/statistics-desktop.png',fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
     await switchConsoleProject(page, '101');await page.getByRole('button',{name:'查看统计',exact:true}).click();
     await expect(page.locator('.cost-summary')).toContainText('USD 2.00');await expect(taskRow(page,'review.pr').locator('td').nth(1)).toHaveText('1');
     await expect(page.locator('#cost-body')).not.toContainText('project-202');
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     expect(await page.locator('.statistics-task-summary').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
-    await page.screenshot({path:'.tmp/statistics-evidence/statistics-mobile.png',fullPage:true});
     await dates(page,'2026-11-05');await expect(page.locator('.cost-summary')).toContainText('USD 4.00');
     await expect(page.locator('.statistics-tasks')).toContainText('这个日期范围内没有任务记录。');
     await dates(page,'2020-01-01');await expect(page.locator('#costs-panel')).toContainText('这个日期范围内没有模型请求记录。');
     await expect(page.locator('.cost-summary')).toContainText('USD 0.00');await expect(taskRow(page,'review.issue').locator('td').nth(1)).toHaveText('0');
     await expect(page.locator('.statistics-undated')).toContainText('— · 1 项耗时不完整');
-    await page.screenshot({path:'.tmp/statistics-evidence/statistics-empty.png',fullPage:true});
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'statistics-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext({timezoneId:'Asia/Shanghai'}),member=await context.newPage();
     try{
@@ -76,7 +74,6 @@ test('统计按浏览器本地日显示费用、token、各工作类型的任务
       await expect(member.locator('.cost-summary')).toContainText('USD 2.00');await expect(member.locator('#costs-panel')).not.toContainText('project-202');
       await member.locator('.console-scope-trigger:visible').click(); await expect(member.locator('#console-scope-projects [role=option]')).toHaveCount(1); await member.keyboard.press('Escape');
       expect((await context.request.get(h.admin+'/api/costs?from=2026-11-04&to=2026-11-04&repository_id=202&timezone=Asia%2FShanghai')).status()).toBe(403);
-      await member.screenshot({path:'.tmp/statistics-evidence/statistics-member.png',fullPage:true});
     }finally{await context.close();}
     expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}

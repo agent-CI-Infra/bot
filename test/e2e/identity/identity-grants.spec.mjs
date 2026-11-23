@@ -82,12 +82,9 @@ test('身份页按浏览器时区显示时间，有效期写成还剩多少分�
     const body = await panel.innerText();
     expect(body).toMatch(/还剩 \d+ 分钟（\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}（UTC[+-]\d/);
     const { mkdirSync } = await import('node:fs');
-    mkdirSync('.tmp/ui-518', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: '.tmp/ui-518/remaining-1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/ui-518/remaining-390.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

@@ -1,17 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { consoleSave } from '../helpers/console-save.mjs';
 
-const output = '.tmp/project-triggers';
 async function screenshots(page, role, name, target) {
-  mkdirSync(output, { recursive: true });
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1000 }); await target.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
-    await page.screenshot({ path: `${output}/${name}-${role}-${width}.png`, fullPage: name === 'events' });
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
 }

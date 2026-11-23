@@ -1,21 +1,18 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { managerFixture } from '../../fixtures/project-manager-fixture.mjs';
 import { RuleService } from '../../../dist/rules/service.js';
 import { consoleSave, consoleSaveStatus, confirmDiscard } from '../helpers/console-save.mjs';
 
-const out = '.tmp/unified-save-bar';
 
 // 390 CSS px: the dirty bar keeps its「保存」on screen without horizontal overflow; then back to the desktop width.
 async function capture390(page, name) {
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(consoleSave(page)).toBeVisible();
   await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
-  await page.screenshot({ path: `${out}/${name}-390.png`, fullPage: true });
   await page.setViewportSize({ width: 1440, height: 900 });
 }
 
@@ -29,7 +26,6 @@ async function login(page, url, password) {
 test('角色、基本设置和模型共用一条「保存」栏，放弃可恢复，保存写入服务器', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -54,7 +50,6 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     await expect(consoleSave(page)).toBeVisible();
     await expect(consoleSave(page)).toBeInViewport();
     await expect(page.getByRole('button', { name: '保存', exact: true })).toHaveCount(1);
-    await page.screenshot({ path: `${out}/role-1440.png`, fullPage: true });
     await capture390(page, 'role');
     await confirmDiscard(page);
     await expect(prompt).toHaveValue(previous);
@@ -75,16 +70,13 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     const statusBox = await consoleSaveStatus(page).boundingBox();
     const discardBox = await groupDiscards.first().boundingBox();
     expect(Math.abs(statusBox.y + statusBox.height / 2 - discardBox.y - discardBox.height / 2)).toBeLessThanOrEqual(2);
-    await page.screenshot({ path: `${out}/basic-clean-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(groupDiscards.first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
-    await page.screenshot({ path: `${out}/basic-clean-390.png`, fullPage: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.getByLabel('基准分支', { exact: true }).fill('feature/unified-save');
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     await expect(page.getByRole('button', { name: '保存', exact: true })).toHaveCount(1);
-    await page.screenshot({ path: `${out}/basic-1440.png`, fullPage: true });
     await capture390(page, 'basic');
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toHaveText('已保存');
@@ -94,7 +86,6 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     const defaultCard = page.locator('[data-overview-anchor="project-default-model"]');
     await defaultCard.getByRole('combobox', { name: '默认模型', exact: true }).selectOption(other.id);
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
-    await page.screenshot({ path: `${out}/model-1440.png`, fullPage: true });
     await capture390(page, 'model');
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toHaveText('已保存模型设置');
@@ -106,7 +97,6 @@ test('机器配置把「重新读取」直接放进保存栏，有草稿时先�
   test.setTimeout(90000);
   const cleanup = [], manager = await managerFixture({ after: action => cleanup.push(action) });
   const h = await harness(undefined, manager.manager);
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -139,7 +129,6 @@ test('机器配置把「重新读取」直接放进保存栏，有草稿时先�
     await cpu.fill('2');
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     await expect(consoleSave(page)).toBeVisible();
-    await page.screenshot({ path: `${out}/machine-1440.png`, fullPage: true });
     await capture390(page, 'machine');
     await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
@@ -183,7 +172,6 @@ test('项目管理员在机器配置里通过保存栏修改「同时运行的�
   test.setTimeout(90000);
   const cleanup = [], manager = await managerFixture({ after: action => cleanup.push(action) });
   const h = await harness(undefined, manager.manager);
-  mkdirSync(out, { recursive: true });
   try {
     const { admin } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -198,7 +186,6 @@ test('项目管理员在机器配置里通过保存栏修改「同时运行的�
     await page.getByLabel('这台虚拟电脑同时运行的任务数', { exact: true }).fill('3');
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     await expect(page.getByRole('button', { name: '保存', exact: true })).toHaveCount(1);
-    await page.screenshot({ path: `${out}/machine-project-admin-1440.png`, fullPage: true });
     await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101')).value.policy.task_concurrency).toBe(3);
   } finally {

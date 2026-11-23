@@ -1,10 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // #815: 角色 → Manager lists the standing rules in force, saves an edited list, and the dispatch records name the rule.
-const shots = process.env.BOT_E2E_SCREENSHOTS;
 
 test('the standing rules card shows the built-in rules, saves an edited list, and a record says which rule decided', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
@@ -29,7 +27,6 @@ test('the standing rules card shows the built-in rules, saves an edited list, an
       await rules.evaluate(element => { element.scrollIntoView({ block: 'start' }); const bar = document.querySelector('.console-save-bar');
         window.scrollBy(0, element.getBoundingClientRect().top - (bar ? bar.getBoundingClientRect().bottom : 0) - 8); });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/standing-rules-${width}.png` }); }
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     // A rule that would start development is refused with the reason, and nothing is saved.

@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { transport, connector, bindFixture, inGroup, post } from '../../fixtures/channel-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -40,7 +39,6 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     const save = page.getByRole('button', { name: '保存群聊助手', exact: true }), alert = page.locator('form').filter({ has: save }).getByRole('alert');
     await save.click();
     await expect(alert).toHaveText('所选模型没有授权给 fixture/project-102。群助手只能用对范围内每个项目都可用的模型：请换一个模型，或请超级管理员把共享模型授权给这些项目。');
-    mkdirSync('.tmp/channel-assistant-roles', { recursive: true }); await page.screenshot({ path: `.tmp/channel-assistant-roles/refused-${width}.png`, fullPage: true });
     // Unchecking 102 clears the warning and saves cleanly with project 101's own model.
     await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).uncheck();
     await expect(page.locator('#feishu-group-editor .feishu-model-warning')).toBeHidden();
@@ -50,7 +48,6 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await expect(binding.getByText('Project 101 model', { exact: true })).toBeVisible();
     await expect(binding).toContainText('先给结论，再列出处。');
     expect(h.store.get('SELECT scope,model_id,prompt,harness FROM channel_service_bindings')).toEqual({ scope: 'repositories', model_id: projectModel.id, prompt: '先给结论，再列出处。', harness: 'native' });
-    await page.screenshot({ path: `.tmp/channel-assistant-roles/bound-${width}.png`, fullPage: true });
     // Now bind the second group across both 101 and 102 with a shared model, copying prompt from the first group and picking Pi harness.
     await page.getByRole('link', { name: '创建群绑定', exact: true }).click();
     await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check();
@@ -60,7 +57,6 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await page.getByLabel('助手模型', { exact: true }).selectOption(sharedModel.id);
     await page.getByText('高级设置：Agent 后端', { exact: true }).click();
     await page.getByLabel('Agent 后端', { exact: true }).selectOption('pi');
-    await page.screenshot({ path: `.tmp/channel-assistant-roles/advanced-copy-${width}.png`, fullPage: true });
     await save.click();
     await expect(page.getByRole('article', { name: '群聊助手绑定' })).toHaveCount(2);
     await expect(page.getByRole('article', { name: '群聊助手绑定' }).last()).toContainText('Shared team model');

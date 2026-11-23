@@ -1,12 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { authorizeKnowledgeTask } from '../../fixtures/knowledge-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { TaskCommands } from '../../../dist/tasks/commands.js';
 import { executeTaskSubscriptionTool } from '../../../dist/tasks/event-subscriptions.js';
 
-const shots = process.env.BOT_E2E_SCREENSHOTS;
 
 const login = async (page, url, password) => {
   await page.goto(url);
@@ -84,12 +83,9 @@ test('task detail displays waiting event subscription state, hints, note, timeou
       await card.scrollIntoViewIfNeeded();
       expect(await card.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (shots) {
-        mkdirSync(shots, { recursive: true });
         await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
         await page.evaluate(() => window.scrollTo(0, 0));
-        await page.screenshot({ path: `${shots}/task-event-subscriptions-${width}.png` });
         await card.scrollIntoViewIfNeeded();
-        await page.screenshot({ path: `${shots}/task-event-subscriptions-card-${width}.png` });
       }
     }
 

@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 async function fixture() {
@@ -79,19 +78,15 @@ test('overview deep links, live permissions and late responses retain scope acro
   try {
     await login(page,h,password,'overview-member');
     await expect(page.locator('[data-workbench-view="tasks"]')).toContainText('92');
-    mkdirSync('.tmp/project-overview',{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]) {
       await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-      if(width===390||width===1440)await page.screenshot({path:`.tmp/project-overview/overview-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:390,height:844});
     await page.locator('[data-workbench-view="tasks"]').click();
     await expect(page.locator('.workbench-top .workbench-tabs')).toBeVisible();
     await page.evaluate(()=>scrollTo(0,0));
-    await page.screenshot({path:'.tmp/project-overview/tasks-390.png'});
     await page.setViewportSize({width:1440,height:900});
     await page.evaluate(()=>scrollTo(0,0));
-    await page.screenshot({path:'.tmp/project-overview/tasks-1440.png'});
     await page.setViewportSize({width:390,height:844});
     await page.locator('[data-task-group=attention]').click();
     await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(2);await expect(page.locator('.workspace-task-rows')).not.toContainText('foreign-private');

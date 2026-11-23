@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { managementFixture, command } from '../../fixtures/management-fixture.mjs';
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
@@ -8,7 +7,6 @@ async function login(page,h,password,hash,user='administrator') {
  await page.goto(h.admin+'/'+hash);await page.getByLabel('用户名',{exact:true}).fill(user);await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('#access')).toBeHidden();
 }
 async function fixture() {const h=await harness(),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');return {h,admin,password,a};}
-const out='.tmp/project-navigation-boundaries';
 
 test('a project receipt retains the navigation scope and both back links reopen its assistant without replaying a command',async({page})=>{
  const f=await managementFixture();try {
@@ -20,8 +18,6 @@ test('a project receipt retains the navigation scope and both back links reopen 
   await page.goto(f.h.admin+'/#/management/commands/'+receipt.id);await expect(page.locator('[data-receipt-state]')).toHaveText('已执行');
   await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','101');await expect(page.locator('#console-inbox-link')).toHaveAttribute('href','#/projects/101/inbox');
   expect(await page.evaluate(()=>localStorage.getItem('console-last-scope:'+me.id))).toBe('101');
-  mkdirSync(out,{recursive:true});
-  for(const width of [1440,390]) {await page.setViewportSize({width,height:width===1440?1000:844});await page.screenshot({path:`${out}/receipt-scope-${width}.png`,animations:'disabled'});}
   await page.setViewportSize({width:1440,height:1000});
   for(const caption of ['返回管理助手','回到管理会话']) {
    const link=page.locator('#management-receipt-page').getByRole('link',{name:caption,exact:true});await expect(link).toHaveAttribute('href','#/projects/101/management');await link.click();
@@ -44,14 +40,13 @@ test('revoking a retained project clears neutral navigation and memory while its
 });
 
 test('empty and inverted cost dates survive a scope change without sending a default-range request',async({page})=>{
- const {h,password}=await fixture(),queries=[];mkdirSync(out,{recursive:true});page.on('request',r=>{const u=new URL(r.url());if(u.pathname==='/api/costs')queries.push(u.searchParams);});
+ const {h,password}=await fixture(),queries=[];page.on('request',r=>{const u=new URL(r.url());if(u.pathname==='/api/costs')queries.push(u.searchParams);});
  try{
   await login(page,h,password,'#/costs');await expect(page.locator('#cost-body').getByRole('heading',{name:'项目占比',exact:true})).toBeVisible();
   const from=page.getByLabel('开始日期（本地）',{exact:true}),to=page.getByLabel('结束日期（本地）',{exact:true});
   for(const [width,name,value] of [[1440,'empty',''],[390,'inverted','2099-12-31']]) {
    await page.setViewportSize({width,height:width===1440?1000:844});await from.fill(value);await expect(page.getByRole('heading',{name:'请填写有效日期范围',exact:true})).toBeVisible();const before=queries.length,oldForm=await page.locator('.cost-filters').elementHandle();
    await switchConsoleProject(page,width===1440?'101':'202');await expect(page).toHaveURL(new RegExp('#/projects/'+(width===1440?'101':'202')+'/costs$'));await expect.poll(()=>oldForm.evaluate(n=>n.isConnected)).toBe(false);await expect(from).toHaveValue(value);await expect(page.locator('#count')).toHaveText('未查询');await expect(page.getByRole('heading',{name:'请填写有效日期范围',exact:true})).toBeVisible();expect(queries.length).toBe(before);
-   await page.screenshot({path:`${out}/costs-${name}-${width}.png`,animations:'disabled'});
   }
   await from.fill('2026-11-01');await to.fill('2026-11-02');await Promise.all([page.waitForResponse(r=>r.url().includes('/api/costs?')&&r.status()===200),page.getByRole('button',{name:'查看统计',exact:true}).click()]);
   await expect(page.locator('#count')).toHaveText('2026-11-01 至 2026-11-02');expect(queries.at(-1).get('from')).toBe('2026-11-01');expect(queries.at(-1).get('to')).toBe('2026-11-02');expect(queries.at(-1).get('repository_id')).toBe('202');

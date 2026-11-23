@@ -1,24 +1,20 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 
 // #708: signing in does not wait for the GitHub permission check. The console opens at once, shows the check's progress,
 // and lists the projects the person can manage once it ends.
-const output = '.tmp/ui-708';
 const noOverflow = async page => expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 
 test('GitHub 登录不等权限核验：先进控制台并显示核验进度，核验完成后出现可管理的项目', async ({ page }) => {
   const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
-  mkdirSync(output, { recursive: true });
   // The check waits at its first installation read until released.
   let release; const held = new Promise(resolve => { release = resolve; });
   f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
   const shots = async name => {
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 }); await noOverflow(page);
-      await page.screenshot({ path: `${output}/${name}-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
   };

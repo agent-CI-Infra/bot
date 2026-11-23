@@ -1,11 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { boardFixtures } from '../../fixtures/board-fixtures.mjs';
 
 // #699: the origin line on a board card (and in the task detail) is one plain sentence: where the work came from and which
 // role took it, with the role page's names. Stored kinds (event / operator / role), role ids and conversation ids stay out.
-const out = '.tmp/task-origin-caption-699';
 const origin = (store, task, kind, from, to, conversation = null, project = '101') => store.run(`INSERT INTO task_origins(task_id,source_kind,project_id,source_role,conversation_id,owner_key,executor_role,config_revision,created_at)
   VALUES(?,?,?,?,?,?,?,1,?)`, task, kind, project, from, conversation, 'fixture', to, '2026-10-01T12:00:00.000Z');
 
@@ -13,7 +11,6 @@ test('任务详情和待处理列表的来源用白话写明从哪来、交给�
   test.setTimeout(90000);
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202'); boardFixtures(h.store);
@@ -51,7 +48,6 @@ test('任务详情和待处理列表的来源用白话写明从哪来、交给�
       for (const raw of ['event', 'operator', 'mystery', 'manager →', '→ dev', '（委派）', 'chat-7f3c']) {
         await expect(page.locator('#task-external-bar')).not.toContainText(raw);
       }
-      if (taskId === 'developing') await page.screenshot({ path: `${out}/task-1440.png` });
     }
     // The inbox receives task list data and shows the same plain-language caption.
     h.store.run("UPDATE tasks SET status='needs_help' WHERE id='developing'");
@@ -59,7 +55,6 @@ test('任务详情和待处理列表的来源用白话写明从哪来、交给�
     await expect(page.locator('.console-attention-row[data-task-id="developing"]')).toContainText('来源：GitHub 事件 · 调度组交给Dev');
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('.console-attention-row[data-task-id="developing"]')).toContainText('来源：GitHub 事件 · 调度组交给Dev');
-    await page.screenshot({ path: `${out}/inbox-390.png` });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

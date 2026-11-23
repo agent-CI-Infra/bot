@@ -1,6 +1,5 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { harness, repository, testPassword } from '../../fixtures/helpers.mjs';
 
@@ -35,8 +34,7 @@ test('管理员完成初始化、登记账号，项目管理员只看到自己�
     await page.getByRole('link', { name: '项目', exact: true }).click();
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.locator('#rows')).toContainText('fixture/project-202');
-    mkdirSync('.tmp/screenshots', { recursive: true });
-    await page.setViewportSize({ width: 1365, height: 900 }); await page.screenshot({ path: '.tmp/screenshots/admin-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 1365, height: 900 });
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     await page.getByLabel('用户名', { exact: true }).fill('project-admin'); await page.getByLabel('密码', { exact: true }).fill(memberPassword);
@@ -50,7 +48,6 @@ test('管理员完成初始化、登记账号，项目管理员只看到自己�
     await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '系统初始化', exact: true })).toBeHidden();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/screenshots/project-mobile.png', fullPage: true });
     const context = await browser.newContext(), fresh = await context.newPage(); await fresh.goto(h.admin);
     await expect(fresh.getByRole('heading', { name: '登录', exact: true })).toBeVisible(); await context.close();
     expect(errors).toEqual([]);

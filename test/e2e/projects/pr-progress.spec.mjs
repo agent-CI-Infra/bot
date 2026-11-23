@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 async function fixture() {
@@ -121,7 +120,6 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
   await admin('/api/users', 'POST', { username: 'proj-admin', password: memberPassword, repository_ids: ['101'] });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
-  mkdirSync('.tmp/pr-progress', { recursive: true });
 
   try {
     // 1. All-projects shell: no "任务看板" on desktop sidebar or mobile bottom nav
@@ -129,10 +127,8 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
     await login(page, h, password, 'administrator', '#/projects');
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.locator('#tabs').getByRole('link', { name: '任务看板', exact: true })).toHaveCount(0);
-    await page.screenshot({ path: '.tmp/pr-progress/all-projects-sidebar-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '待处理', '助手', '更多']);
-    await page.screenshot({ path: '.tmp/pr-progress/all-projects-mobile-390.png' });
     await page.setViewportSize({ width: 1440, height: 900 });
 
     // Legacy global routes redirect cleanly to #/projects
@@ -164,7 +160,6 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
     await expect(page.locator('[data-pr-number="202"]')).toContainText('← Issue #102');
     await expect(page.locator('[data-pr-number="202"]')).toContainText('CI 运行中');
     await expect(page.locator('[data-pr-number="204"]')).toContainText('逻辑清晰、索引命中良好');
-    await page.screenshot({ path: '.tmp/pr-progress/prs-1440.png' });
 
     // 3. Expand PR #204 chain: shows review summary + truncated dispatch events (>20) + expand button
     await page.locator('[data-pr-toggle="204"]').click();
@@ -176,7 +171,6 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
     const expandBtn = chain204.getByRole('button', { name: '展开其余 12 条分派记录', exact: true });
     await expect(expandBtn).toBeVisible();
     await chain204.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: '.tmp/pr-progress/prs-chain-1440.png' });
     await expandBtn.click();
     await expect(chain204.locator('.issue-chain-block').last().locator('.issue-chain-item')).toHaveCount(20);
     await expect(expandBtn).toHaveCount(0);
@@ -223,13 +217,11 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
     }
     const toggleBox = await page.locator('[data-pr-toggle="201"]').boundingBox();
     expect(toggleBox.height).toBeGreaterThanOrEqual(44);
-    await page.screenshot({ path: '.tmp/pr-progress/prs-390.png' });
 
     // Capture expanded chain on 390px
     await page.locator('[data-pr-toggle="204"]').click();
     await expect(page.locator('[data-pr-chain="204"]')).toBeVisible();
     await page.locator('[data-pr-chain="204"]').scrollIntoViewIfNeeded();
-    await page.screenshot({ path: '.tmp/pr-progress/prs-chain-390.png' });
 
     // 6. Project admin role view & scope isolation (cannot see repo 202)
     const memberCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -240,7 +232,6 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
       await expect(memberPage.locator('#tabs').getByRole('link', { name: '任务看板', exact: true })).toHaveCount(0);
       await expect(memberPage.locator('.workbench-pr-row')).toHaveCount(6);
       await expect(memberPage.locator('.workspace-pr-rows')).not.toContainText('Secret repo PR');
-      await memberPage.screenshot({ path: '.tmp/pr-progress/prs-member-1440.png' });
       await memberPage.goto(h.admin + '/#/projects/202/overview/prs');
       await expect(memberPage.locator('#project-page')).toContainText('403');
     } finally {

@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 async function login(page,h,password,username='administrator',hash='#/projects') {
@@ -13,7 +12,6 @@ test('shared desktop rail and mobile navigation expose real destinations across 
   try {
     const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
     await login(page,h,password);
-    const out='.tmp/console-shell';mkdirSync(out,{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]) {
       await page.setViewportSize({width,height:900});await page.goto(h.admin+'/#/more');
       await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();
@@ -32,7 +30,6 @@ test('shared desktop rail and mobile navigation expose real destinations across 
         const boxes=await page.locator('#console-mobile-nav a').evaluateAll(nodes=>nodes.map(n=>({width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height})));
         expect(boxes.every(b=>b.width>=44&&b.height>=44)).toBe(true);
       }
-      await page.screenshot({path:`${out}/more-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
     for(const name of ['项目总览','管理助手','待处理','用量与成本','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('link',{name,exact:true})).toBeVisible();
@@ -65,9 +62,7 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     await settings.getByRole('link',{name:'个人设置',exact:true}).click();
     await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();
     await expect(settings.getByRole('link',{name:'个人设置',exact:true})).toHaveAttribute('aria-current','page');
-    await page.screenshot({path:`${out}/settings-footer-short-desktop.png`,fullPage:true});
     await page.setViewportSize({width:1440,height:1000});
-    await page.screenshot({path:`${out}/settings-footer-desktop.png`,fullPage:true});
     expect(errors).toEqual([]);
   } finally {await h.stop();}
 });
@@ -89,7 +84,6 @@ test('attention uses real tasks, does not count queued work, and handles failure
     await expect(page.locator('.console-state')).toContainText('尚不能判断');
     await page.unroute('**/api/tasks?attention=*');
     await page.getByRole('button',{name:'重新加载',exact:true}).click();await expect(page.locator('.console-attention-row')).toHaveCount(1);
-    mkdirSync('.tmp/console-shell',{recursive:true});await page.screenshot({path:'.tmp/console-shell/inbox-390.png',fullPage:true});
     h.store.run("UPDATE tasks SET status='succeeded' WHERE id='blocked'");
     await page.getByRole('button',{name:'刷新待处理',exact:true}).click();
     await expect(page.locator('.console-state')).toContainText('不代表服务、CI 或其他任务已经全部成功');

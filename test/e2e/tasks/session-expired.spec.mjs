@@ -1,14 +1,12 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { rmSync } from 'node:fs';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 
 // #715: once the session expires every page says 登录已过期 with 重新登录, one banner covers the console, the header stops
 // naming a role, and signing in again comes back to the page that was open.
-const out = resolve('.tmp/ui-715');
 test('登录过期后各页显示登录已过期与重新登录，只有一条横幅，重新登录后回到原页面', async ({ page }) => {
   test.setTimeout(60000);
-  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(out, { recursive: true });
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     await page.route('https://avatars.githubusercontent.com/**', route => route.fulfill({ contentType: 'image/svg+xml',
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#16636b"/></svg>' }));
@@ -34,7 +32,6 @@ test('登录过期后各页显示登录已过期与重新登录，只有一条�
         await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
         await expect(banner.getByRole('button', { name: '重新登录' })).toBeInViewport();
-        await page.screenshot({ path: `${out}/${name}-${width}.png`, fullPage: true });
       }
       await page.setViewportSize({ width: 1440, height: 900 });
     }

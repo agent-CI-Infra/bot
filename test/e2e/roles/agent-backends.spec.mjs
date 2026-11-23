@@ -74,7 +74,6 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await acpPicker.evaluate(el => el.scrollIntoView({ block: 'center' }));
-      await page.screenshot({ path: `.tmp/agent-backends/acp-${width}.png` });
     }
     await acpPicker.selectOption('workswarm');
     const swarmStatus = page.getByTestId('backend-runtime-status');
@@ -86,7 +85,6 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await swarmStatus.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/agent-backends/workswarm-${width}.png` });
     }
     const swarmRoot = join(toolsDir, 'acp', 'workswarm');
     const swarmVersion = join(swarmRoot, workswarmRelease.version);
@@ -107,7 +105,6 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await swarmStatus.scrollIntoViewIfNeeded();
-      await page.screenshot({ path: `.tmp/agent-backends/workswarm-ready-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'manager' });
@@ -161,10 +158,8 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await locator.evaluate(el => window.scrollTo(0, Math.max(0, el.getBoundingClientRect().top + window.scrollY - 120)));
       await targetPage.waitForTimeout(50);
     };
-    mkdirSync('.tmp/agent-backends', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await scrollUnderSticky(page, page.getByTestId('backend-runtime-status'));
-    await page.screenshot({ path: '.tmp/agent-backends/detail-untested-1440.png' });
 
     const probeResp = page.waitForResponse(r => r.url().endsWith('/api/repositories/101/roles/probe-model') && r.request().method() === 'POST');
     await page.getByTestId('probe-role-model').click();
@@ -173,16 +168,13 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
 
     await page.setViewportSize({ width: 1440, height: 1000 });
     await scrollUnderSticky(page, page.getByTestId('backend-runtime-status'));
-    await page.screenshot({ path: '.tmp/agent-backends/detail-editor-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     await scrollUnderSticky(page, page.getByTestId('backend-runtime-status'));
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/agent-backends/detail-editor-390.png' });
 
     await goRolePage(page, { role: 'dev' });
     await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('claude_code');
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: '.tmp/agent-backends/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -200,11 +192,8 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await expect(page.getByTestId('backend-availability-card')).toContainText('连通正常（HTTP 200）');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await scrollUnderSticky(page, page.getByTestId('backend-availability-card'));
-    await page.screenshot({ path: '.tmp/agent-backends/overview-390.png' });
-    await page.screenshot({ path: '.tmp/agent-backends/mobile.png', fullPage: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await scrollUnderSticky(page, page.getByTestId('backend-availability-card'));
-    await page.screenshot({ path: '.tmp/agent-backends/overview-1440.png' });
 
     // Read-only viewer (tasks.read without roles.edit) sees connectivity status without the probe mutation button.
     const readerPassword = testPassword();
@@ -221,11 +210,9 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await expect(readerPage.getByTestId('backend-runtime-status')).toContainText('连通正常（HTTP 200）');
       await expect(readerPage.getByTestId('probe-role-model')).toHaveCount(0);
       await scrollUnderSticky(readerPage, readerPage.getByTestId('backend-runtime-status'));
-      await readerPage.screenshot({ path: '.tmp/agent-backends/detail-readonly-1440.png' });
       await readerPage.setViewportSize({ width: 390, height: 844 });
       await scrollUnderSticky(readerPage, readerPage.getByTestId('backend-runtime-status'));
       expect(await readerPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await readerPage.screenshot({ path: '.tmp/agent-backends/detail-readonly-390.png' });
       // #740: a project administrator cannot open the tool volume category, so the same role page names who can install.
       await readerPage.goto(h.admin + '/#/projects/101/roles/dev');
       await expect(readerPage.getByTestId('backend-runtime-status')).toContainText('请平台管理员在「全局设置 → Agent CLI 工具卷」中安装兼容版本。');

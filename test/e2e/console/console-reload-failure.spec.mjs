@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 
 // #873: a reload of a signed-in console reads the project list before it can draw anything. When that read fails the
@@ -37,13 +36,11 @@ test('signed-in reload whose project list read fails stops on the boot card and 
     // One failure, one retry: the shared message strip holds no second copy, and no second retry button appears.
     await expect(page.getByText('控制台载入失败')).toHaveCount(1);
     await expect(page.getByRole('button', { name: '重试', exact: true })).toHaveCount(1);
-    mkdirSync('.tmp/console-reload-failure', { recursive: true });
     for (const width of [390, 768, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await expect(page.locator('#boot-message')).toBeInViewport();
       await expect(retry).toBeInViewport();
-      await page.screenshot({ path: `.tmp/console-reload-failure/reload-failed-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     // A retry that fails again leaves the same card and its button usable instead of a disabled retry under a stale page.
@@ -57,7 +54,6 @@ test('signed-in reload whose project list read fails stops on the boot card and 
     await expect(page.locator('#workspace')).toBeVisible();
     await expect(page.locator('#tabs')).toBeVisible();
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
-    await page.screenshot({ path: '.tmp/console-reload-failure/reload-recovered-1440.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

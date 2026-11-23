@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { goRolePage, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
@@ -38,9 +37,8 @@ test('role sections keep one editable draft, version and save operation reachabl
       const save = consoleSave(page); await expect(save).toBeInViewport();
       expect(await save.evaluate(el => { const box = el.getBoundingClientRect(), hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2); return el === hit || el.contains(hit); })).toBe(true);
     }
-    mkdirSync('.tmp/role-editor-229', { recursive: true });
-    await page.setViewportSize({ width: 1440, height: 1000 }); await page.getByRole('heading', { name: 'Agent 与模型', exact: true }).scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/role-editor-229/editor-desktop.png' });
-    await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole('heading', { name: '基本信息', exact: true }).scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/role-editor-229/editor-mobile.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 }); await page.getByRole('heading', { name: 'Agent 与模型', exact: true }).scrollIntoViewIfNeeded();
+    await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole('heading', { name: '基本信息', exact: true }).scrollIntoViewIfNeeded();
     await consoleSave(page).click(); await expect(page.locator('.flash')).toBeVisible();
     const dev = (await admin('/api/repositories/101/roles')).value.configuration.roles.find(row => row.role_id === 'dev');
     expect(dev.persona_prompt).toBe('Keep the reproduction and evidence.'); expect(dev.budget_policy_ref.max_turns).toBe(12); expect(errors).toEqual([]);

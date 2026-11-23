@@ -1,11 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // #555: projects, identity and management each show at most one enabled primary on the first screen.
-const out = resolve('.tmp/one-primary-555');
 
 async function login(page, h, password) {
   await page.goto(h.admin + '/');
@@ -36,7 +33,6 @@ async function enabledPrimaries(page) {
 test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛选和诊断默认折叠', async ({ page }) => {
   test.setTimeout(120000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const a = await account(admin);
@@ -58,7 +54,6 @@ test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛
       await expect(page.getByRole('button', { name: '筛选', exact: true })).toBeVisible();
       await filtersFold.locator('summary').click();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-      await page.screenshot({ path: resolve(out, `projects-after-${width}.png`), fullPage: true });
 
       await page.goto(h.admin + '/#/identity');
       await expect(page.locator('#identity-panel')).toBeVisible();
@@ -76,7 +71,6 @@ test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛
       const identityPrimaries = await enabledPrimaries(page);
       expect(identityPrimaries.length).toBeLessThanOrEqual(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-      await page.screenshot({ path: resolve(out, `identity-after-${width}.png`), fullPage: true });
 
       await page.goto(h.admin + '/#/management');
       await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 15000 });
@@ -89,7 +83,6 @@ test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛
       // The shell appears before its conversation has opened and enabled the composer.
       await expect.poll(() => enabledPrimaries(page)).toEqual(['发送']);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-      await page.screenshot({ path: resolve(out, `management-after-${width}.png`), fullPage: true });
     }
   } finally { await h.stop(); }
 });

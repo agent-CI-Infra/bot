@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import { identityFixture, openIdentityAdvanced } from '../../fixtures/identity-fixture.mjs';
 import { harness, setup, account, testPassword } from '../../fixtures/helpers.mjs';
@@ -34,9 +34,8 @@ test('独立 OAuth App 登录指引与仓库 App 分开，桌面和手机都能�
     await expect(page.getByLabel('Client secret（只保存，不回读）',{exact:true})).toHaveValue('');
     const redirect=new URL((await fetch(h.admin+'/auth/github/start',{redirect:'manual'})).headers.get('location'));
     expect(redirect.searchParams.get('client_id')).toBe('Ov23.login');expect(redirect.searchParams.get('scope')).toBe('');
-    mkdirSync('.tmp/github-login-guide',{recursive:true});await page.screenshot({path:'.tmp/github-login-guide/oauth-desktop.png',fullPage:true});
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    await page.screenshot({path:'.tmp/github-login-guide/oauth-mobile.png',fullPage:true});expect(errors).toEqual([]);
+    expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
 
@@ -95,14 +94,11 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await expect(page.locator('#message')).toContainText('GitHub 登录已启用');
     await expect(page.getByLabel('Client secret（只保存，不回读）', { exact: true })).toHaveValue('');
     await expect(page.getByLabel('启用 GitHub 账号登录', { exact: true })).toBeChecked();
-    mkdirSync('.tmp/onboarding-settings', { recursive: true });
-    await page.screenshot({ path: '.tmp/onboarding-settings/github-login-desktop.png', fullPage: true });
     await page.reload(); await expect(page.getByLabel('Client ID', { exact: true })).toHaveValue('fixture-client');
     await expect(page.getByLabel('Client secret（只保存，不回读）', { exact: true })).toHaveValue('');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator('.github-login-callback').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/onboarding-settings/github-login-mobile.png', fullPage: true });
     await page.getByLabel('启用 GitHub 账号登录', { exact: true }).uncheck();
     await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
     await expect(page.locator('#message')).toContainText('当前使用本地账号登录');

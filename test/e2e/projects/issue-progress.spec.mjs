@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { consoleSave } from '../helpers/console-save.mjs';
 
@@ -118,7 +117,6 @@ test('Issue Progress view displays clear auto-dev statuses, filters, expandable 
   await admin('/api/users', 'POST', { username: 'proj-admin', password: memberPassword, repository_ids: ['101'] });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
-  mkdirSync('.tmp/issue-progress', { recursive: true });
 
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -137,7 +135,6 @@ test('Issue Progress view displays clear auto-dev statuses, filters, expandable 
     await expect(page.locator('[data-issue-number="103"]')).toContainText('请补充浏览器报错日志');
     await expect(page.locator('[data-issue-number="104"]')).toContainText('决定是否保留旧长期令牌');
 
-    await page.screenshot({ path: '.tmp/issue-progress/issues-1440.png' });
 
     // Filter to "开发不了 · 需人工" and check sub-pills + expand chain
     await page.locator('[data-issue-group="needs_human"]').click();
@@ -153,7 +150,6 @@ test('Issue Progress view displays clear auto-dev statuses, filters, expandable 
     await expect(page.locator('[data-issue-chain="104"]')).toBeVisible();
     await expect(page.locator('[data-issue-chain="104"]')).toContainText('检视结论为需要人决定');
     await expect(page.locator('[data-issue-chain="104"]')).toContainText('检视 Issue #104');
-    await page.screenshot({ path: '.tmp/issue-progress/issues-needs-human-chain-1440.png' });
 
     // Sub-filter to needs_information
     await page.locator('[data-issue-group="needs_information"]').click();
@@ -181,14 +177,12 @@ test('Issue Progress view displays clear auto-dev statuses, filters, expandable 
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: '.tmp/issue-progress/issues-390.png' });
 
     // Basic settings needs_human_label field saves cleanly
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(h.admin + '/#/projects/101/basic');
     const nhInput = page.getByLabel('需人工标签');
     await expect(nhInput).toHaveValue('bot-needs-human');
-    await page.screenshot({ path: '.tmp/issue-progress/basic-labels-1440.png' });
     await nhInput.fill('triage-human');
     await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101/policy')).value.policy.needs_human_label).toBe('triage-human');
@@ -197,7 +191,6 @@ test('Issue Progress view displays clear auto-dev statuses, filters, expandable 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/basic');
     await page.getByLabel('需人工标签').scrollIntoViewIfNeeded();
-    await page.screenshot({ path: '.tmp/issue-progress/basic-labels-390.png' });
 
     // Verify project_admin role view & scope isolation (cannot see repo 202) in an isolated context
     const memberCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -207,7 +200,6 @@ test('Issue Progress view displays clear auto-dev statuses, filters, expandable 
       await login(memberPage, h, memberPassword, 'proj-admin', '#/projects/101/overview/issues');
       await expect(memberPage.locator('.workbench-issue-row')).toHaveCount(6);
       await expect(memberPage.locator('.workspace-issue-rows')).not.toContainText('Secret repo issue');
-      await memberPage.screenshot({ path: '.tmp/issue-progress/issues-member-1440.png' });
       await memberPage.goto(h.admin + '/#/projects/202/overview/issues');
       await expect(memberPage.locator('#project-page')).toContainText('403');
     } finally {

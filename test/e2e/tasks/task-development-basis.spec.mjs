@@ -1,11 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { recordBasis } from '../../../dist/dispatch/basis.js';
 
 // #815: a development's task page says why it was allowed to start.
-const shots = process.env.BOT_E2E_SCREENSHOTS;
 
 test('a development shows its basis: the maintainer\'s comment, who wrote it and their permission', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
@@ -29,7 +28,6 @@ test('a development shows its basis: the maintainer\'s comment, who wrote it and
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await card.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(await card.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/task-basis-${width}.png` }); }
     }
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rmSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { rmSync, mkdtempSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { Projects } from '../../../manager/projects.mjs';
@@ -12,7 +12,7 @@ import { consoleSave } from '../helpers/console-save.mjs';
 const mib = 1024 * 1024;
 test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建；项目留空的资源跟随默认', async ({ page }) => {
   // The real manager project logic over a Docker stand-in with an 8-CPU, 32 GiB host.
-  mkdirSync('.tmp/computer-defaults', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/computer-defaults/manager-')), docker = new FakeDocker();
+   const directory = mkdtempSync(resolve('.tmp/computer-defaults/manager-')), docker = new FakeDocker();
   docker.info = { NCPU: 8, MemTotal: 32768 * mib };
   const projects = new Projects({ database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
   const route = async (method, path, input) => {
@@ -39,7 +39,6 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     const cpu = defaults.locator('select[name=cpus]');
     await expect(cpu.locator('option')).toHaveText(['0.5 核', '1 核', '2 核（内置默认）', '4 核', '6 核', '8 核']);
     await expect(cpu).toHaveValue('2');
-    await page.screenshot({ path: '.tmp/computer-defaults/settings-desktop.png', fullPage: true });
     await cpu.selectOption('4'); await defaults.locator('select[name=memory_mb]').selectOption('8192');
     await defaults.getByRole('button', { name: '保存', exact: true }).click();
     await expect(defaults).toContainText('已保存：新建的虚拟电脑立即使用，已有的在空闲时重建');
@@ -52,7 +51,6 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     await page.goto(h.admin + '/#/projects/101/machine');
     const form = page.locator('.project-form').filter({ has: page.getByLabel('CPU（核）', { exact: true }) }), cores = form.getByLabel('CPU（核）', { exact: true });
     await expect(cores).toHaveValue(''); await expect(cores).toHaveAttribute('placeholder', '留空使用全局默认（4）');
-    await form.screenshot({ path: '.tmp/computer-defaults/project-machine.png' });
     await cores.fill('3'); await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     await expect.poll(() => [projects.own('101').cpus, host().NanoCpus]).toEqual([3, 3e9]);
@@ -63,7 +61,6 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
 
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/work-computers'); await expect(defaults).toContainText('8 CPU');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/computer-defaults/settings-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); projects.db.close(); rmSync(h.directory, { recursive: true, force: true }); rmSync(directory, { recursive: true, force: true }); }
 });

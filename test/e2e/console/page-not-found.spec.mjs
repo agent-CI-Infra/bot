@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 // #642: an unknown address says 找不到这个页面 at once with a way back; an unknown project page shows the same state inside
@@ -10,7 +10,6 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
   try {
     const { admin, password: adminPassword } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     const password = testPassword(); await admin('/api/users', 'POST', { username: 'member', password, role: 'project_admin', repository_ids: ['101'] });
-    mkdirSync('.tmp/page-not-found', { recursive: true });
     for (const width of [1440, 390]) {
       const context = await browser.newContext({ viewport: { width, height: 844 } }), page = await context.newPage(), errors = [];
       page.on('pageerror', e => errors.push(e.message));
@@ -35,7 +34,6 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
         const box = await back.boundingBox(); expect(box.x + box.width).toBeLessThanOrEqual(width); expect(await fits()).toBe(true);
         expect(lists, 'an unknown address issues no list read').toEqual([]); page.removeAllListeners('request');
       }
-      await page.screenshot({ path: `.tmp/page-not-found/console-${width}.png`, fullPage: true });
       await state.getByRole('link', { name: '回到项目列表', exact: true }).click();
       await expect(page).toHaveURL(/#\/projects$/); await expect(page.locator('#rows')).toContainText('fixture/project-101'); await expect(page).toHaveTitle('项目 · launchpad 管理');
       // The skip link's in-page anchor is not an address and keeps the current page.
@@ -57,7 +55,6 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
         await expect(inner.getByRole('link', { name: '回到项目列表', exact: true })).toHaveAttribute('href', '#/projects');
         await expect(inner.getByRole('link', { name: '回到项目总览', exact: true })).toBeVisible(); expect(await fits()).toBe(true);
       }
-      await page.screenshot({ path: `.tmp/page-not-found/project-${width}.png`, fullPage: true });
       await page.locator('#project-page').getByRole('link', { name: '回到项目总览', exact: true }).click();
       await expect(page).toHaveURL(/#\/projects\/101\/overview$/); await expect(page.locator('#project-page [data-page-not-found]')).toHaveCount(0);
       await expect(page.locator('#tabs [aria-current=page]')).toHaveText('项目总览'); await expect(page).toHaveTitle('fixture/project-101 · 项目总览 · launchpad 管理');
@@ -80,14 +77,12 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
       await expect(page.locator('#tabs [aria-current=page]')).toHaveCount(0);
       await expect(page.locator('#console-mobile-nav [aria-current=page]')).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/page-not-found/console-super-${width}.png`, fullPage: true });
       await page.goto(h.admin + '/#/projects/101/bogus');
       const inner = page.locator('#project-page [data-page-not-found="project"]');
       await expect(inner.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
       await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveCount(0);
       if (width === 390) await expect(page.locator('#console-section option:checked')).toHaveText('找不到页面');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/page-not-found/project-super-${width}.png`, fullPage: true });
       expect(errors).toEqual([]); await context.close();
     }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

@@ -1,6 +1,6 @@
 import { consoleNavigate } from '../helpers/console-navigation.mjs';
 import { test, expect } from '@playwright/test';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 test('每个页面都有地址，旧看板与任务地址原地重定向；全局设置按类别打开', async ({ page, browser }) => {
@@ -58,13 +58,11 @@ test('每个页面都有地址，旧看板与任务地址原地重定向；全�
     await page.reload(); await expect(nav.locator('[aria-current=page]')).toHaveText('用户'); await expect(page.locator('#settings-panel')).toContainText('administrator');
     // The old addresses of the two removed tabs open their settings category.
     await page.goto(h.admin + '/#/accounts'); await expect(page).toHaveURL(/#\/settings\/accounts$/); await expect(page.locator('#settings-panel')).toContainText('Test account');
-    mkdirSync('.tmp/console-addresses', { recursive: true }); await page.screenshot({ path: '.tmp/console-addresses/settings-accounts-desktop.png', fullPage: true });
     // #736: a malformed percent-encoding is an unknown address like any other, not a URIError shown to the reader.
     await page.goto(h.admin + '/#/settings/computers/%E0%A4%A');
     await expect(page.locator('#console-page [data-page-not-found="console"]')).toBeVisible();
     await expect(page.locator('#settings-panel .side-card > :is(h2,h3)')).toHaveCount(0);
     await expect(page.locator('#message')).not.toContainText('URI malformed');
-    await page.screenshot({ path: '.tmp/console-addresses/malformed-address-desktop.png', fullPage: true });
     // A settings detail id that cannot be decoded reads as "no id": that section still opens as a list.
     await page.goto(h.admin + '/#/settings/users/%E0%A4%A');
     await expect(page.locator('#settings-panel')).toContainText('administrator');
@@ -84,7 +82,7 @@ test('每个页面都有地址，旧看板与任务地址原地重定向；全�
     await expect.poll(() => member.locator('#settings-panel .side-card > :is(h2,h3)').allInnerTexts()).toEqual(['存储', '按项目', '项目电脑']);
     await expect(member.locator('#settings-panel')).toContainText('fixture/project-101'); await context.close();
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/users'); await expect(page.locator('#settings-panel')).toContainText('administrator');
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: '.tmp/console-addresses/settings-users-mobile.png', fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });

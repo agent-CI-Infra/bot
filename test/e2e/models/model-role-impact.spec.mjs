@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { openModelCatalog } from '../helpers/open-model-folds.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
@@ -36,13 +35,11 @@ test('role-only references remain clear before cancelling deletion on desktop an
     await expect(dialog(page)).toContainText('fixture/project-101 · Release reviewer（reviewer） · 已停用');
     await expect(dialog(page)).toContainText('显式模型引用会保留为不可用');
     await expect(dialog(page)).toContainText('不包括历史运行快照');
-    mkdirSync('.tmp/model-role-impact-230/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: width < 400 ? 568 : 1000 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       const cancel = dialog(page).getByRole('button', { name: '取消', exact: true }); await cancel.scrollIntoViewIfNeeded();
       await expect(cancel).toBeInViewport();
-      if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/model-role-impact-230/previews/model-impact-${width}.png` });
     }
     await dialog(page).getByRole('button', { name: '取消', exact: true }).click(); await expect(dialog(page)).toHaveCount(0);
     expect((await admin(`/api/models/${model.id}`)).status).toBe(200); expect(h.store.all('SELECT * FROM audit')).toEqual(before); expect(errors).toEqual([]);

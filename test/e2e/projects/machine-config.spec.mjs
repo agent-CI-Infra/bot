@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { managerFixture } from '../../fixtures/project-manager-fixture.mjs';
 import { RuleService } from '../../../dist/rules/service.js';
@@ -45,14 +45,12 @@ test('each machine field names its own source and target, and the same groups re
     await expect(page.locator('.machine-config-impact')).toContainText('工作卷、笔记和代次保留');
     await expect(page.locator('.machine-config-card')).toContainText('仓库里的 .bot/computer.yaml 不再读取');
     await expect(page.locator('#project-page')).not.toContainText('仓库文件');
-    mkdirSync('.tmp/machine-config-231/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 1000 });
       for (const name of ['资源上限', '软件与初始化', '网络与环境变量', '保存影响']) await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.getByLabel('环境变量', { exact: true }).fill('MODE=test');
       await expect(page.locator('.machine-config-draft')).toContainText('环境变量');
-      if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/machine-config-231/previews/machine-${width}.png`, fullPage: true });
     }
     await page.getByLabel('CPU（核）', { exact: true }).fill('4');
     await expect(page.locator('.machine-config-draft')).toContainText('CPU');

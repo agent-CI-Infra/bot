@@ -1,7 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { goRolePage } from '../helpers/open-role-advanced.mjs';
 import { RuleService } from '../../../dist/rules/service.js';
@@ -13,7 +12,6 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/manager-207', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
@@ -66,7 +64,6 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
     await expect(decisions.locator(`[data-dispatch-event="${decided.id}"]`)).toContainText('重复的问题，已有 Issue 在处理');
     const stuck = decisions.locator(`[data-dispatch-event="${failed.id}"]`);
     await expect(stuck).toContainText('等待人工重试'); await expect(stuck).toContainText('model_not_configured');
-    await page.screenshot({ path: '.tmp/manager-207/manager-desktop.png', fullPage: true });
     await stuck.getByRole('button', { name: '查看分派详情', exact: true }).click();
     const dispatchDetail = page.getByRole('dialog', { name: '分派详情', exact: true });
     await dispatchDetail.getByRole('button', { name: '重试这条分派', exact: true }).click();
@@ -85,7 +82,6 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
     await page.goto(h.admin + '/#/projects/101/roles/manager');
     await expect(promptReading(page, 'Manager 提示词')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
-    await page.screenshot({ path: '.tmp/manager-207/manager-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { configureDispatch(ruleDecider); await h.stop(); }
 });

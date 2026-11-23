@@ -1,10 +1,7 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 
 // #563: muted text and chips meet 4.5:1, and sidebar labels are at least 12px.
-const out = resolve('.tmp/contrast-563');
 
 function contrastScript() {
   return () => {
@@ -60,7 +57,6 @@ function contrastScript() {
 test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少 12px，1440 与 390 可对照', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness();
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const a = await account(admin);
@@ -76,7 +72,6 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
       expect(login.mutedText.fontSize).toBeGreaterThanOrEqual(12);
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: `${out}/login-after-1440.png`, fullPage: true });
 
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
@@ -100,7 +95,6 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
       expect(projects.chip.contrast).toBeGreaterThanOrEqual(4.5);
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: `${out}/projects-after-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/costs');
     await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible({ timeout: 10000 });
@@ -109,11 +103,9 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     expect(note).toBeTruthy();
     expect(note.contrast).toBeGreaterThanOrEqual(4.5);
     expect(note.fontSize).toBeGreaterThanOrEqual(12);
-    await page.screenshot({ path: `${out}/costs-after-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/more-after-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects');
@@ -121,15 +113,12 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     const mobile = await page.evaluate(contrastScript());
     if (mobile.mutedText) expect(mobile.mutedText.contrast).toBeGreaterThanOrEqual(4.5);
-    await page.screenshot({ path: `${out}/projects-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/');
     // already logged in — go via logout? login is only signed-out. Just shot costs and more.
     await page.goto(h.admin + '/#/costs');
     await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible({ timeout: 10000 });
-    await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    await page.screenshot({ path: `${out}/more-after-390.png`, fullPage: true });
     // login at 390: logout first. Since #481 the phone header keeps sign-out in the account menu.
     await page.getByRole('button', { name: '账号菜单' }).click();
     await page.getByRole('button', { name: '退出登录' }).click();
@@ -137,7 +126,6 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     const login390 = await page.evaluate(contrastScript());
     if (login390.mutedText) expect(login390.mutedText.contrast).toBeGreaterThanOrEqual(4.5);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: `${out}/login-after-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
 
@@ -190,7 +178,6 @@ test('#885 健康状态错误态文字至少 4.5:1', async ({ page }) => {
     await expect(healthNode).toBeVisible({ timeout: 20000 });
     const health = await read('.workspace-health-status');
     expect(health.contrast, `健康态 ${health.color} on ${health.background}`).toBeGreaterThanOrEqual(4.5);
-    await page.screenshot({ path: `${out}/health-885-after-1440.png`, fullPage: true });
     await page.unroute('**/api/environments/101', fail);
   } finally { await h.stop(); }
 });

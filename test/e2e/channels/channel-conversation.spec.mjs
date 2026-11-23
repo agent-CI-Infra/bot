@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { channelFixture, inGroup, envelope, post, until, shareAssistantModel } from '../../fixtures/channel-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
@@ -39,8 +38,6 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await expect(timeline.getByRole('article', { name: '成员消息', exact: true }).filter({ hasText: '消息已撤回' })).toBeVisible();
     await expect(sentReply).toContainText(reply);
     await sentReply.scrollIntoViewIfNeeded();
-    mkdirSync('.tmp/channel-conversation-312', { recursive: true });
-    await page.screenshot({ path: `.tmp/channel-conversation-312/group-history-${width}.png` });
     await page.getByText('本轮生成的回答', { exact: true }).click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('本群可用 admin-fixture-101，已按本地记录回答。');
     await expect(page.getByText(/当前群绑定：模型 Management fixture/)).toBeVisible();
@@ -52,7 +49,6 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await expect(page.getByLabel('消息与执行时间线')).toContainText('你好！可按项目名称管理任务，私信沿用同一会话。');
     await expect(page.getByRole('link', { name: '打开管理助手与执行记录', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    mkdirSync('.tmp/channel-conversation-312', { recursive: true }); await page.screenshot({ path: `.tmp/channel-conversation-312/conversation-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

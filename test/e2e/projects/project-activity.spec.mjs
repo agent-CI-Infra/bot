@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
 // #1124: the activity panel is rebuilt every five seconds and a rebuild replaces the card nodes, so one read of three
@@ -55,7 +55,6 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
     // Keep the visual evidence compact after checking the full recent-history window above.
     h.store.run("DELETE FROM tasks WHERE id LIKE 'done-%' AND object_number<116"); await page.reload();
     await expect(card('最近任务').getByRole('button')).toHaveCount(8); // Four completed plus four active/queued tasks.
-    mkdirSync('.tmp/project-activity', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     // #1124: the activity panel is rebuilt every five seconds and a rebuild replaces the card nodes. Ask for a rebuild
     // here, prove it replaced the nodes the page had, and then require the three boxes to come out of one stable read.
@@ -67,12 +66,10 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
     const [workBox, queueBox, historyBox] = titles.map(title => boxes[title]);
     expect(queueBox.x).toBeGreaterThan(workBox.x + workBox.width); expect(historyBox.width).toBeGreaterThan(workBox.width * 1.9);
     expect(historyBox.y).toBeGreaterThan(queueBox.y + queueBox.height);
-    await page.screenshot({ path: '.tmp/project-activity/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByLabel('当前页面', { exact: true })).toBeInViewport();
     await expect(page.getByLabel('当前页面', { exact: true })).toHaveValue('#/projects/101/activity');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/project-activity/mobile.png', fullPage: true });
     h.store.run("UPDATE tasks SET status='succeeded' WHERE id='active'"); h.store.run("DELETE FROM task_claims WHERE task_id='active'");
     h.store.run("UPDATE tasks SET status='running' WHERE id='queued-2'"); claim('queued-2');
     await expect(panel.getByRole('heading', { name: '排队任务 2', exact: true })).toBeVisible({ timeout: 10000 });

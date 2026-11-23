@@ -1,11 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { consoleSave, consoleSaveStatus } from '../helpers/console-save.mjs';
 
-const out = resolve('.tmp/role-defaults-1068');
 const following = '正在使用默认配置，内置默认更新时自动跟随。';
 
 // #1068: without a configuration of its own a project shows the defaults in force; saving a change makes it the
@@ -13,12 +10,10 @@ const following = '正在使用默认配置，内置默认更新时自动跟随�
 test('#1068 未配置时直接展示生效的默认配置，保存后为自定义，可恢复默认', async ({ page }) => {
   test.setTimeout(150000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   const shoot = async name => {
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1100 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-      await page.screenshot({ path: resolve(out, `${name}-${width}.png`), fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 1100 });
   };
@@ -76,7 +71,6 @@ test('#1068 未配置时直接展示生效的默认配置，保存后为自定�
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('恢复默认配置？');
     await expect(dialog).toContainText('当前配置保留在修订历史里；正在运行的任务继续使用开始时的配置。');
-    await page.screenshot({ path: resolve(out, 'restore-confirm-1440.png'), fullPage: false });
     await dialog.getByRole('button', { name: '取消', exact: true }).click();
     await expect(status).toHaveText('已保存');
     expect((await admin('/api/repositories/101/roles')).value.revision).toBe(1);

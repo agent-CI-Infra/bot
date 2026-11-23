@@ -1,8 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
-const out = '.tmp/admin-area-550';
 
 async function login(page, h, username, password, hash = '#/more') {
   await page.goto(h.admin + '/' + hash);
@@ -20,7 +18,6 @@ function adminCaptions(page) {
 test('#550 管理区按角色可见：项目管理员看不到接入向导，超级管理员能从管理区到达', async ({ page, browser }) => {
   test.setTimeout(90000);
   const h = await harness();
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -38,7 +35,6 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     await expect(page).toHaveURL(/#\/settings\/onboarding/);
     await expect(page.locator('#onboarding-panel')).toBeVisible();
     await page.goto(h.admin + '/#/more');
-    await page.screenshot({ path: `${out}/admin-super-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
@@ -46,7 +42,6 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     expect(await adminCaptions(page)).toContain('系统初始化');
     expect(await adminCaptions(page)).toContain('机器人账号');
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
-    await page.screenshot({ path: `${out}/admin-super-390.png`, fullPage: true });
 
     // Project administrator: 管理 is limited, platform pages stay hidden, 存储 still opens.
     const context = await browser.newContext(), member = await context.newPage();
@@ -66,7 +61,6 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
       await expect(member).toHaveURL(/#\/settings\/storage/);
       await expect(member.locator('#settings-panel')).toBeVisible();
       await member.goto(h.admin + '/#/more');
-      await member.screenshot({ path: `${out}/admin-member-1440.png`, fullPage: true });
 
       await member.setViewportSize({ width: 390, height: 844 });
       await member.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
@@ -75,7 +69,6 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
       await expect(member.locator('#console-page')).not.toContainText('系统初始化');
       await expect(member.locator('#console-page')).not.toContainText('全局设置');
       await expect(member.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
-      await member.screenshot({ path: `${out}/admin-member-390.png`, fullPage: true });
 
       // Remaining management addresses still open. #/events is not a page.
       await member.goto(h.admin + '/#/costs');

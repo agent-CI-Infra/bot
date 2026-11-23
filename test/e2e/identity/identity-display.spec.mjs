@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { identityFixture, openIdentityAdvanced } from '../../fixtures/identity-fixture.mjs';
 import { transport, connector, bindFixture, envelope, post, finished } from '../../fixtures/channel-fixture.mjs';
 
@@ -32,7 +32,7 @@ for (const kind of ['github', 'local']) for (const locale of ['zh-CN', 'en']) {
   test(`${kind} account names and repository scopes stay readable in ${locale} at desktop and mobile widths`, async ({ page }) => {
     test.setTimeout(90000);
     const wire = transport(), f = await identityFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
-    const errors = []; page.on('pageerror', err => errors.push(err.message)); mkdirSync(output, { recursive: true });
+    const errors = []; page.on('pageerror', err => errors.push(err.message));
     try {
       // A project GitHub administrator and the local platform administrator exercise both role layouts.
       f.state.owner = false; f.state.admin = true; f.state.login = 'a-github-username-with-thirty-nine-chars1';
@@ -65,7 +65,6 @@ for (const kind of ['github', 'local']) for (const locale of ['zh-CN', 'en']) {
         await expect(overview).toContainText(locale === 'en' ? `${name}’s Feishu identity` : `${name} 的飞书身份`);
         await expect(overview).not.toContainText(/github:\d+:/);
         await noOverflow(page);
-        await page.screenshot({ path: prefix + '-identity.png', fullPage: true });
         if (width < 768) {
           await page.locator('#console-account').click();
           await expect(page.locator('#console-account-login')).toHaveText(name);
@@ -84,7 +83,6 @@ for (const kind of ['github', 'local']) for (const locale of ['zh-CN', 'en']) {
           await expect(permissions).not.toContainText('other/project-201');
         }
         await noOverflow(page);
-        await permissions.screenshot({ path: prefix + '-permissions.png' });
         await overview.locator('a[href="#/identity/feishu"]').click();
         const binding = page.getByLabel('我的飞书账号', { exact: true });
         await expect(binding).toContainText(locale === 'en' ? `${name}’s Feishu account` : `${name} 的飞书账号`);
@@ -94,7 +92,6 @@ for (const kind of ['github', 'local']) for (const locale of ['zh-CN', 'en']) {
         await expect(page.locator('.feishu-legacy-binding form')).toContainText((locale === 'en' ? 'This will link to your current platform account: ' : '将绑定到当前平台账户：') + name);
         await expect(page.locator('#identity-panel')).not.toContainText(/github:\d+:/);
         await noOverflow(page);
-        await page.screenshot({ path: prefix + '-feishu.png', fullPage: true });
 
         // Open the actual link issued by the local Feishu transport, then claim it as the signed-in person.
         const started = await post(f.h, id, envelope('/bind', { sender: { sender_id: { open_id: 'ou_pending_' + width } } }));
@@ -106,13 +103,11 @@ for (const kind of ['github', 'local']) for (const locale of ['zh-CN', 'en']) {
         await expect(page.locator('#feishu-identity')).toContainText((locale === 'en' ? 'This will link to your current platform account: ' : '将绑定到当前平台账户：') + name);
         await expect(page.locator('#identity-panel')).not.toContainText(/github:\d+:/);
         await noOverflow(page);
-        await page.screenshot({ path: prefix + '-confirm.png', fullPage: true });
         await page.getByRole('button', { name: '绑定到当前平台账户', exact: true }).click();
         const pending = page.getByLabel('待确认的飞书身份').last();
         await expect(pending).toContainText(name);
         await expect(page.locator('#identity-panel')).not.toContainText(/github:\d+:/);
         await noOverflow(page);
-        await pending.screenshot({ path: prefix + '-pending.png' });
       }
       expect(errors).toEqual([]);
     } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }

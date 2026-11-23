@@ -1,9 +1,7 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 
-const output = '.tmp/project-switcher';
 const trigger = page => page.locator('.console-scope-trigger:visible');
 const options = page => page.locator('#console-scope-projects [role=option]');
 async function login(page, h, password, hash = '#/projects', username = 'administrator') {
@@ -29,7 +27,6 @@ const noOverflow = async page => expect(await page.evaluate(() => document.docum
 test('searchable scope list, long names, disabled state, keyboard and focus across desktop widths', async ({ page }) => {
   const { h, password } = await fixture(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync(output, { recursive: true });
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password, '#/projects/101/overview');
@@ -43,7 +40,6 @@ test('searchable scope list, long names, disabled state, keyboard and focus acro
       await noOverflow(page);
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `${output}/collapsed-1440.png`, fullPage: true });
     await page.keyboard.press('Control+k');
     const search = page.getByRole('combobox', { name: '搜索项目或组织' });
     await expect(search).toBeFocused();
@@ -55,12 +51,10 @@ test('searchable scope list, long names, disabled state, keyboard and focus acro
     await expect(options(page).filter({ hasText: 'bravo' })).toContainText('已禁用');
     await expect(options(page).locator('[data-permission], .console-nav-badge')).toHaveCount(0);
     await expect(page.locator('#console-scope-footer a')).toHaveText(['管理所有项目 →', '启动新仓库 →']);
-    await page.screenshot({ path: `${output}/expanded-1440.png`, fullPage: true });
     await search.fill('ALPHA/CHAR');
     await expect(options(page)).toHaveText(['charlie']);
     await expect(page.locator('#console-scope-recent')).toHaveCount(0);
     await expect(page.getByRole('listbox').getByRole('option').first()).toHaveText('全部项目');
-    await page.screenshot({ path: `${output}/search-1440.png`, fullPage: true });
     await search.fill('no-such-project');
     await expect(page.getByRole('status').filter({ hasText: '没有匹配的项目' })).toBeVisible();
     await expect(page.locator('#console-scope-projects [role=group]')).toHaveCount(0);
@@ -161,7 +155,6 @@ test('recent projects survive refresh, cap at five, filter revoked grants and is
 
 test('mobile range bar stays visible on board, inbox and projects; drawer is searchable and touch sized', async ({ page }) => {
   const { h, password } = await fixture();
-  mkdirSync(output, { recursive: true });
   try {
     await login(page, h, password);
     for (const width of [390, 320]) {
@@ -172,7 +165,6 @@ test('mobile range bar stays visible on board, inbox and projects; drawer is sea
         await expect(page.locator('#console-mobile-nav')).toBeVisible();
         await noOverflow(page);
       }
-      await page.screenshot({ path: `${output}/collapsed-${width}.png`, fullPage: true });
       await trigger(page).click();
       const search = page.getByRole('combobox', { name: '搜索项目或组织' });
       await expect(search).toBeFocused();
@@ -181,10 +173,8 @@ test('mobile range bar stays visible on board, inbox and projects; drawer is sea
       expect(await search.evaluate(node => parseFloat(getComputedStyle(node).fontSize))).toBeGreaterThanOrEqual(16);
       expect(await page.getByRole('listbox').getByRole('option').evaluateAll(nodes => nodes.every(node => node.getBoundingClientRect().height >= 44))).toBe(true);
       await noOverflow(page);
-      await page.screenshot({ path: `${output}/drawer-${width}.png` });
       await search.fill('beta');
       await expect(options(page)).toHaveCount(1);
-      await page.screenshot({ path: `${output}/search-${width}.png` });
       await options(page).first().click();
       await expect(page).toHaveURL(/#\/projects\/202\/overview$/);
       await trigger(page).click(); await page.keyboard.press('Escape'); await expect(trigger(page)).toBeFocused();

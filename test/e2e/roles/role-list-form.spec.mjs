@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { promptEditor, promptReading } from '../helpers/prompt-editor.mjs';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
@@ -10,8 +9,6 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  const out = '.tmp/role-list-form';
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -30,7 +27,6 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(table.getByRole('columnheader', { name: '模型', exact: true })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
-    await page.screenshot({ path: `${out}/list-1440.png`, fullPage: true });
 
     await openRoleFromList(page, 'Developer');
     await expect(page).toHaveURL(/\/roles\/dev$/);
@@ -53,7 +49,6 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await (await promptEditor(page, '角色提示词')).fill('先读复现，再改代码。');
     const save = consoleSave(page);
     await expect(save).toBeVisible();
-    await page.screenshot({ path: `${out}/form-1440.png`, fullPage: true });
     await save.click();
     await expect(page.locator('.flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'dev');
@@ -63,14 +58,12 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await crumb.click();
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: `${out}/list-390.png`, fullPage: true });
     await openRoleFromList(page, 'Developer');
     await expect(page.getByTestId('role-form')).toBeVisible();
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再改代码。');
     await openRoleFormAdvanced(page);
     await expect(page.getByLabel('dev 技能包', { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: `${out}/form-390.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

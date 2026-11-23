@@ -1,10 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // #815: the Manager's dispatch records show what the control plane refused and why, and the events its filters stopped.
-const shots = process.env.BOT_E2E_SCREENSHOTS;
 
 test('dispatch records show refusals with their reasons and filtered events with why nothing happened', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
@@ -40,7 +38,6 @@ test('dispatch records show refusals with their reasons and filtered events with
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (shots) await page.screenshot({ path: `${shots}/dispatch-filtered-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.keyboard.press('Escape');
@@ -52,13 +49,8 @@ test('dispatch records show refusals with their reasons and filtered events with
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/dispatch-refusal-${width}.png` }); }
     }
     await page.keyboard.press('Escape');
-    for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await reader.scrollIntoViewIfNeeded();
-      if (shots) await page.screenshot({ path: `${shots}/dispatch-list-${width}.png` });
-    }
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

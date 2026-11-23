@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
@@ -22,7 +21,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
   // The role and task routes belong to the task engine; it is never started, so the seeded tasks stay as written.
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
   const h = await harness(undefined, manager, store => ({ engine: new TaskEngine(store, manager) })), errors = [], model = await modelEndpoint(), out = '.tmp/console-presentation';
-  page.on('pageerror', error => errors.push(error.message)); mkdirSync(out, { recursive: true });
+  page.on('pageerror', error => errors.push(error.message));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     const fixture = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'fixture-model', api_url: model.url, api_key: 'fixture-key' })).value.model;
@@ -81,7 +80,6 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await expect(side.locator('.task-execution')).toContainText('没有读取到主控记录；实际 Agent 和模型以运行记录为准。');
     await expect(side.locator('.task-execution')).not.toContainText('Pi 进程');
     await expect(side.locator('.task-execution')).not.toContainText('委派记录');
-    await page.screenshot({ path: `${out}/task-original-executor.png` });
     // The dialog's close event arrives after the click; open the next task once it has.
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
@@ -101,8 +99,6 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     const [traceBox, sideBox, nextBox] = await Promise.all([page.locator('#task-layout').boundingBox(), side.boundingBox(), page.locator('#task-next').boundingBox()]);
     expect(nextBox.y + nextBox.height).toBeLessThanOrEqual(traceBox.y + 40);
     expect(traceBox.y + traceBox.height).toBeLessThanOrEqual(sideBox.y + 1);
-    await page.screenshot({ path: `${out}/task-coordinated.png` });
-    await side.screenshot({ path: `${out}/task-coordinated-side.png` });
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
     // 6. Narrow screens stack the delegation lanes.
@@ -111,7 +107,6 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await openRoleAdvanced(page);
     await expect(cardOf('角色概览')).toBeVisible();
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    await page.screenshot({ path: `${out}/roles-narrow.png`, fullPage: true });
 
     // 7. At 390px a task with a long timeline still opens with its next step in view, without horizontal overflow.
     task('logged', 'review.issue', 13, 'model'); record('logged', { next: 'Compare the redirect handler with the issue and reply' });
@@ -123,7 +118,6 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     const banner = await page.locator('#task-next').boundingBox();
     expect(banner.y).toBeGreaterThanOrEqual(0); expect(banner.y + banner.height).toBeLessThanOrEqual(900);
     expect(await page.evaluate(() => [document.documentElement.scrollWidth, document.getElementById('task-next').scrollWidth <= document.getElementById('task-next').clientWidth])).toEqual([390, true]);
-    await page.screenshot({ path: `${out}/task-narrow-with-logs.png` });
     expect(errors).toEqual([]);
   } finally { await model.close(); await h.stop(); }
 });

@@ -1,9 +1,7 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup } from '../../fixtures/helpers.mjs';
 
 test('全局设置的管理助手页查看和修改管理助手，旧服务角色路由兼容跳转，陈旧版本不覆盖 (#1249)', async ({ page }) => {
-  mkdirSync('.tmp/service-roles', { recursive: true });
   const h = await harness(), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const { admin, password } = await setup(h);
@@ -26,7 +24,7 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     const backend = assistant.getByRole('combobox', { name: 'Agent 后端', exact: true });
     await expect(backend).toHaveValue('native');
     await expect(backend.locator('option[value=container_acp], option[value=icode], option[value=workswarm]')).toHaveCount(0);
-    const captureBackend = async state => { for (const width of [1440, 390]) { await page.setViewportSize({ width, height: 900 }); await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: '.tmp/service-roles/backend-' + state + '-' + width + '.png', fullPage: true }); } await page.setViewportSize({ width: 1440, height: 1000 }); };
+    const captureBackend = async state => { for (const width of [1440, 390]) { await page.setViewportSize({ width, height: 900 }); await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);  } await page.setViewportSize({ width: 1440, height: 1000 }); };
     await captureBackend('before-save');
     await assistant.getByRole('combobox', { name: 'Agent 后端', exact: true }).selectOption('pi');
     await expect(assistant.locator('.endpoint-warning')).toContainText('不会改用其他模型');
@@ -43,7 +41,6 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     await page.goto(h.admin + '/#/settings/management-assistant');
     await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toHaveValue('pi');
     await captureBackend('saved-reloaded');
-    await page.screenshot({ path: '.tmp/service-roles/settings-desktop.png', fullPage: true });
 
     // Stale revision conflict is reported without overwriting.
     await assistant.locator('textarea[name=prompt]').fill('先给结论，再列出处。');
@@ -56,7 +53,6 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     await page.setViewportSize({ width: 390, height: 844 }); await page.reload();
     await expect(cardOf('管理助手')).toContainText('Shared assistant');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/service-roles/settings-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

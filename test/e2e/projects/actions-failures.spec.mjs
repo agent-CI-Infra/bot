@@ -1,12 +1,11 @@
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 
 test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独立配置错误', async ({ page }) => {
   const h = await harness(undefined, undefined, store=>({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/actions-failures', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     await page.goto(h.admin + '/#/projects/101/triggers');
@@ -29,10 +28,9 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
     await expect(status).toContainText('不是 Workflows 权限'); await expect(status).toContainText('Actions「Read-only」');
     h.store.run("UPDATE actions_failure_scans SET error='actions_permission_missing'");
     await expect(status).toContainText('此仓库使用的 App 安装没有 Actions 权限', { timeout: 10000 }); await expect(status).toContainText('为 Actions 授予至少「Read-only」'); await expect(status).toContainText('不需要 Workflows 权限');
-    await status.scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/actions-failures/desktop.png' });
+    await status.scrollIntoViewIfNeeded();
     await page.setViewportSize({ width: 390, height: 844 }); await status.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/actions-failures/mobile.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     // Saving the Actions switch leaves the review work types alone.
     await toggle.uncheck(); await save.click();

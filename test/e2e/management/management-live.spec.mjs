@@ -1,6 +1,6 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { managementFixture, settled } from '../../fixtures/management-fixture.mjs';
 
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -57,9 +57,7 @@ test('streams intermediate and final answers, and copies all the turn text after
     await expect(feed.getByRole('heading', { name: '正在检查', exact: true })).toBeVisible();
     await expect(feed.getByRole('heading', { name: '检查结果', exact: true })).toBeVisible();
     await expect(message).toHaveValue('下一条草稿');
-    mkdirSync('.tmp/management-live', { recursive: true }); await page.screenshot({ path: '.tmp/management-live/stream-desktop.png' });
     await page.setViewportSize({ width: 390, height: 844 }); await feed.evaluate(node => { node.scrollTop = 0; });
-    await page.screenshot({ path: '.tmp/management-live/stream-mobile.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
     final.resolve();
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
@@ -82,14 +80,12 @@ test('streams intermediate and final answers, and copies all the turn text after
     await feed.locator('.management-progress-message').hover();
     await expect(copy).toHaveCSS('opacity', '1');
     await expect(copy).toHaveCSS('height', '26px');
-    await page.screenshot({ path: '.tmp/management-live/result-desktop.png' });
     await copy.click();
     const copied = [intermediate, progressMessage, markdown].join('\n\n');
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(copied);
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(message).toBeInViewport(); await expect(page.getByRole('button', { name: '发送', exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/management-live/result-mobile.png' });
     await page.reload(); await reopenScope(page);
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成'); await expect(feed.locator('.management-answer')).toHaveCount(3);
     await expect(feed.getByRole('heading', { name: '检查结果', exact: true })).toBeVisible();
@@ -133,8 +129,6 @@ test('long execution progress scrolls independently and previews command and fil
     await expect(progress.locator('.management-step-preview').nth(2)).toHaveText('docs/onboarding/section-1.md');
     expect(await steps.evaluate(node => node.scrollHeight > node.clientHeight && node.clientHeight <= 260)).toBe(true);
     await steps.hover();
-    mkdirSync('.tmp/management-live', { recursive: true });
-    await page.screenshot({ path: '.tmp/management-live/progress-desktop.png' });
     await commandStep.locator('summary').first().click();
     await commandStep.getByText('查看请求参数', { exact: true }).click();
     await expect(commandStep.locator('.management-step-arguments pre')).toContainText(JSON.stringify(command));
@@ -147,7 +141,6 @@ test('long execution progress scrolls independently and previews command and fil
     await progress.evaluate(node => node.scrollIntoView({ block: 'start' }));
     await expect(commandStep.locator('.management-step-preview')).toHaveCSS('white-space', 'nowrap');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: '.tmp/management-live/progress-mobile.png' });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 

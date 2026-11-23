@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { boundGroup, channelFixture, privateChat } from '../../fixtures/channel-fixture.mjs';
 import { login } from '../helpers/channel-console-login.mjs';
 
@@ -22,8 +21,6 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
     await expect(list.locator('.channel-chat-choice')).toHaveCount(1); await search.fill('示例企业');
     await expect(list.locator('.channel-chat-choice')).toHaveCount(2); await search.clear();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    mkdirSync('.tmp/channel-names', { recursive: true });
-    await page.screenshot({ path: `.tmp/channel-names/names-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/identity/feishu/groups');
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding).toContainText('基础设施讨论群');

@@ -65,7 +65,7 @@ test('six widths handle long paths and text, and failed reads retry without expo
   try{
     const name='很长的文件名称用于检查窄屏换行和目录定位.txt';await f.admin('/api/repositories/101/knowledge-files','POST',{name,content:'long-line-'+ 'x'.repeat(4000)+'\n\n完整文本'});
     await f.login();await treeFile(page,name).click();await mkdir('.tmp/knowledge-files-232/screenshots',{recursive:true});
-    for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),String(width)).toBe(true);if([390,1440].includes(width))await page.screenshot({path:'.tmp/knowledge-files-232/screenshots/'+width+'.png',fullPage:true});}
+    for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),String(width)).toBe(true);}
     await exact(page,'← 返回目录').click();await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:503,json:{error:'fixture_unavailable'}}));await exact(page,'刷新文件').click();await expect(page.locator('.knowledge-status')).toContainText('fixture_unavailable');await page.unroute('**/api/repositories/101/knowledge-files?*');await exact(page,'重试读取').click();await expect(treeFile(page,name)).toBeVisible();
     await page.route('**/api/repositories/101/knowledge-files/*',route=>route.fulfill({status:403,json:{error:'capability_forbidden'}}));await treeFile(page,name).click();await expect(page.locator('.knowledge-status')).toContainText('文件访问权限已失效');await expect(page.locator('.knowledge-content')).toHaveCount(0);expect(f.errors).toEqual([]);
   }finally{await f.close();}
@@ -127,13 +127,11 @@ test('binary downloads keep raw bytes and useful previews share the console layo
     expect(treeBox.x+treeBox.width).toBeLessThanOrEqual(previewBox.x);
     expect(previewBox.y).toBeLessThan(treeBox.y+treeBox.height);
     await mkdir('.tmp/knowledge-files-232/previews',{recursive:true});
-    await page.screenshot({path:'.tmp/knowledge-files-232/previews/console-knowledge-desktop.png'});
     await page.getByText('更多操作',{exact:true}).click();
     await expect(exact(page,'重命名或移动')).toBeInViewport();
     await page.getByText('更多操作',{exact:true}).click();
     await page.setViewportSize({width:390,height:844});
     await expect(tree(page)).toBeHidden();
-    await page.screenshot({path:'.tmp/knowledge-files-232/previews/console-knowledge-mobile.png'});
     await page.getByText('更多操作',{exact:true}).click();
     await expect(exact(page,'重命名或移动')).toBeInViewport();
     await page.getByText('更多操作',{exact:true}).click();
@@ -240,8 +238,8 @@ test('search matches file names and path fragments in every directory and claims
     await expect(panel(page).getByRole('button',{name:'readme.txt',exact:true})).toBeVisible();
     await expect(panel(page)).toContainText('搜索范围：全部目录的文件名和路径。');
     mkdir('.tmp/knowledge-search-232',{recursive:true});
-    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/knowledge-search-232/search-1440.png',fullPage:true});
-    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'.tmp/knowledge-search-232/search-390.png',fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
+    await page.setViewportSize({width:390,height:844});
     expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });

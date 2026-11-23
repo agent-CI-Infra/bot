@@ -1,11 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // #562: 390 / 768 / 1440 layout sets; FAB and bottom bar do not cover primary actions. Does not rewrite #481 / #496 nav.
-const out = resolve('.tmp/responsive-layout-562');
 
 const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
 
@@ -79,7 +76,6 @@ async function metrics(page, name) {
 test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或底栏挡住', async ({ page }) => {
   test.setTimeout(120000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const a = await account(admin);
@@ -103,7 +99,6 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     await expect(assistant).toBeVisible();
     await expect(assistant).toHaveAccessibleName(/^助手/);
     expect(identity.navDisplay).toBe('grid');
-    await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
 
     await page.goto(h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
@@ -112,7 +107,6 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(projects.overflow).toBe(390);
     expect(projects.fabHitsTarget).toBe(false);
     expect(projects.fabHitsNav).toBe(false);
-    await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
     // Since #1068 an unconfigured role page opens on the role list of the defaults in force; its first link is Manager.
     await page.goto(h.admin + '/#/projects/101/roles');
@@ -153,13 +147,11 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(crumb.overflowX).toMatch(/auto|scroll/);
     await page.goto(h.admin + '/#/projects/101/roles');
     await expect(page.getByTestId('role-list-manager')).toBeVisible();
-    await page.screenshot({ path: resolve(out, 'roles-390.png'), fullPage: false });
 
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     const more390 = await metrics(page, '更多功能');
     expect(more390.overflow).toBe(390);
-    await page.screenshot({ path: resolve(out, 'more-390.png'), fullPage: true });
 
     // --- 768 ---
     await page.setViewportSize({ width: 768, height: 1024 });
@@ -194,10 +186,8 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(tablet.sidebarWidth).toBeGreaterThan(150);
     expect(tablet.sidebarWidth).toBeLessThanOrEqual(200);
     expect(tablet.mobileNav).toBe('none');
-    await page.screenshot({ path: resolve(out, 'roles-768.png'), fullPage: false });
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    await page.screenshot({ path: resolve(out, 'more-768.png'), fullPage: true });
 
     // --- 1440 ---
     await page.setViewportSize({ width: 1440, height: 1100 });
@@ -207,21 +197,18 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(deskId.target.inView).toBe(true);
     expect(deskId.fabHitsTarget).toBe(false);
     expect(deskId.sidebar.width).toBeGreaterThan(200);
-    await page.screenshot({ path: resolve(out, 'identity-1440.png'), fullPage: true });
 
     await page.goto(h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     const deskPr = await metrics(page, '设置');
     expect(deskPr.overflow).toBe(1440);
     expect(deskPr.fabHitsTarget).toBe(false);
-    await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/roles');
     await expect(page.getByTestId('role-list-manager')).toBeVisible();
     const deskRoles = await metrics(page, 'Manager');
     expect(deskRoles.overflow).toBe(1440);
     expect(deskRoles.fabHitsTarget).toBe(false);
-    await page.screenshot({ path: resolve(out, 'roles-1440.png'), fullPage: false });
   } finally {
     await h.stop();
   }

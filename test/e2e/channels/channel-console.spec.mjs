@@ -2,7 +2,6 @@ import { login } from '../helpers/channel-console-login.mjs';
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { openProjectDanger } from '../helpers/open-basic-folds.mjs';
-import { mkdirSync } from 'node:fs';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../../fixtures/channel-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
@@ -30,12 +29,10 @@ test('an edited supplemental message has a Chinese status in the conversation at
     await page.getByLabel('可查看的飞书会话').getByRole('link',{name:/群聊/}).click();
     const incoming=page.getByLabel('回合并入的消息');await incoming.getByText('并入的消息（1）',{exact:true}).click();
     await expect(incoming).toContainText('原消息已变更');await expect(incoming).not.toContainText(' · changed');
-    mkdirSync('.tmp/channel-source-status',{recursive:true});
     for(const width of [1440,390]) {
       await page.setViewportSize({width,height:1000});await incoming.scrollIntoViewIfNeeded();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
       await expect(incoming.getByText(/原消息已变更/)).toBeVisible();
-      await page.screenshot({path:`.tmp/channel-source-status/changed-${width}.png`,fullPage:true});
     }
     expect(errors).toEqual([]);
   }finally{release?.();await f.close();}
@@ -65,11 +62,9 @@ test('conversation shows the actual messages merged into a running turn on wide 
     await page.getByRole('button', { name: '刷新会话', exact: true }).click();
     await page.getByLabel('回合并入的消息').getByText('并入的消息（1）', { exact: true }).click();
     await page.getByText('本轮生成的回答', { exact: true }).click(); await expect(page.getByLabel('消息与执行时间线')).toContainText('已一并回应两位提问人。');
-    mkdirSync('.tmp/channel-console', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 1000 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/channel-console/turn-messages-${width}.png`, fullPage: true });
     }
     expect(calls).toBe(2); expect(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n).toBe(1);
   } finally { release?.(); await f.close(); }
@@ -101,7 +96,6 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await page.setViewportSize({ width, height: 1000 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.evaluate(() => scrollTo(0, 0));
-    mkdirSync('.tmp/channel-console', { recursive: true }); await page.screenshot({ path: `.tmp/channel-console/conversation-${width}.png`, fullPage: width >= 768 });
     await page.goto(f.h.admin + '/#/identity/feishu');
     await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
@@ -109,13 +103,11 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await expect(page.getByLabel('飞书群绑定列表')).toContainText('项目讨论群');
     await expect(page.getByLabel('飞书群绑定列表').getByRole('link', { name: '配置群聊助手', exact: true })).toBeVisible();
     await page.evaluate(() => { document.activeElement?.blur(); scrollTo(0, 0); });
-    await page.screenshot({ path: `.tmp/channel-console/bindings-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/preferences'); await expect(page.getByRole('heading', { name: '身份与权限', exact: true })).toBeVisible();
     await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('身份与权限');
     const identityOverview = page.getByRole('region', { name: '飞书绑定概览' });
     await identityOverview.getByText('查看维护的群与绑定范围', { exact: true }).click();
     await expect(identityOverview).toContainText('项目讨论群');
-    await page.screenshot({ path: `.tmp/channel-console/settings-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -233,10 +225,8 @@ test('conversation workspace shows a running group progress message and lets its
     await login(page, f, '#/conversations/' + chat.id);
     const progress = page.getByRole('region', { name: '助手进展消息' });
     await expect(progress).toContainText('正在核对项目证据，请稍等。'); await expect(progress).toContainText('已发送至飞书');
-    await page.screenshot({ path: '.tmp/channel-console/progress-1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/channel-console/progress-390.png', fullPage: true });
     await page.getByRole('button', { name: '停止回答', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '停止回答', exact: true }).click();
     await expect(page.locator('.channel-run .status')).toHaveText('已停止');
@@ -299,8 +289,6 @@ for (const width of [1440, 390]) test(`a platform administrator reads another us
     await expect(timeline.locator('.channel-step')).not.toHaveCount(0);
     await expect(timeline).not.toContainText('来源或授权范围已变化');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    mkdirSync('.tmp/channel-console', { recursive: true });
-    await page.screenshot({ path: `.tmp/channel-console/admin-private-history-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -333,11 +321,9 @@ for (const type of ['text', 'post']) test(`a mention-only ${type} message remain
     await expect(timeline).toContainText('你可以创建 issue 吗？');
     await timeline.getByText('本轮生成的回答', { exact: true }).click();
     await expect(timeline).toContainText('我看到了你在 @LaunchPad-Test');
-    mkdirSync('.tmp/channel-console', { recursive: true });
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 1000 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/channel-console/self-mention-${type}-${width}.png`, fullPage: true });
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }

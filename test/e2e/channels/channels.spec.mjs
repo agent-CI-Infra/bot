@@ -1,13 +1,12 @@
 import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { writeFileSync, rmSync } from 'node:fs';
 import { channelFixture, envelope, post, finished, until, inGroup } from '../../fixtures/channel-fixture.mjs';
 
 test('Feishu user scenarios show the same management operation in Web and refuse unproved binding and private group data', async ({ page }) => {
   test.setTimeout(90000);
   const f = await channelFixture(), { h, admin, password, wire, id } = f, errors = [];
-  page.on('pageerror', e => errors.push(e.message)); mkdirSync('.tmp/channels-165', { recursive: true });
-  try {
+  page.on('pageerror', e => errors.push(e.message));  try {
     await page.setViewportSize({ width: 1440, height: 1100 }); await page.goto(h.admin + '/#/channels');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -16,7 +15,6 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await expect(page.getByRole('button', { name: '消息渠道', exact: true })).toHaveCount(0);
     await page.goto(h.admin + '/#/settings/feishu/' + id + '/2');
     await expect(page.getByLabel('HTTP 回调地址', { exact: true })).toBeVisible();
-    await page.screenshot({ path: '.tmp/channels-165/configuration-desktop.png', fullPage: true });
     const query = await post(h, id, envelope('看看 blocked 任务的进展')); const queried = await finished(h, query.value.operation_id);
     const changed = await post(h, id, envelope('修改 agent-test-zone/admin-fixture-101 项目的提示词')); const result = await finished(h, changed.value.operation_id);
     const operation = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); expect(operation.state).toBe('succeeded');
@@ -28,7 +26,6 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await expect(feed).toContainText(operation.id); await expect(feed).toContainText('操作 更新 Manager 配置 · 已执行');
     const configured = (await admin('/api/management/query', 'POST', { operation: 'get_effective_config', target: { project_id: '101' }, arguments: {} })).value;
     expect(configured.manager.prompt.effective).toBe('Inspect evidence and cite the original logs.');
-    await page.screenshot({ path: '.tmp/channels-165/shared-operation-desktop.png', fullPage: true });
     const grantsBefore = h.store.get('SELECT count(*) n FROM scoped_grants').n;
     const unproved = await post(h, id, envelope('确认绑定 forwarded-or-unverified-token'));
     const unprovedResult = await finished(h, unproved.value.operation_id);
@@ -45,7 +42,6 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await expect(page.getByText('群聊的项目范围、权限、模型与提示词在「个人设置 → 飞书绑定」中为每个群单独设置', { exact: false })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/channels-165/diagnostics-mobile.png', fullPage: true });
     const web = (await admin('/api/management/commands/' + operation.id)).value;
     writeFileSync('.tmp/channels-165/evidence.json', JSON.stringify({ transport: 'signed local HTTP callbacks and protocol fixtures; no live Feishu credentials',
       query: { channel_operation: query.value.operation_id, state: queried.state, conversation_id: queried.conversation_id },

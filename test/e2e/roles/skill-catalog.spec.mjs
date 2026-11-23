@@ -1,6 +1,5 @@
 import { legacySkillBinding } from '../../fixtures/skill-fixtures.mjs';
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { goRolePage, openRoleFormAdvanced } from '../helpers/open-role-advanced.mjs';
@@ -31,7 +30,6 @@ const select = (catalogue, id) => catalogue.getByRole('navigation', { name: '技
 test('skill catalogue shows actual pinned sources and files, and ordinary sources and migrated files fit six widths', async ({ page }) => {
   const { h, catalogue, saved } = await prepared(page), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
-    mkdirSync('.tmp/skill-catalog/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 950 }); await select(catalogue, 'repository');
       await expect(catalogue.getByRole('region', { name: '已保存技能版本', exact: true })).toContainText('已固定提交：' + 'a'.repeat(40));
@@ -41,7 +39,6 @@ test('skill catalogue shows actual pinned sources and files, and ordinary source
       await select(catalogue, 'migrated'); await expect(catalogue).toContainText('已迁移为控制台文件'); await expect(catalogue.getByLabel('文件内容', { exact: true })).toHaveValue('Previously bound review instructions.');
       await expect(catalogue.getByRole('combobox', { name: '技能来源', exact: true }).locator('option')).toHaveText(['仓库技能文件', '自定义文件']);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if ([390, 1440].includes(width)) { await catalogue.scrollIntoViewIfNeeded(); await page.screenshot({ path: `.tmp/skill-catalog/previews/skill-catalog-${width}.png`, fullPage: true }); }
       await select(catalogue, 'console'); await expect(catalogue.getByLabel('文件内容', { exact: true })).toBeEditable();
     }
     await catalogue.getByLabel('搜索技能包', { exact: true }).fill('repository'); await expect(catalogue.getByRole('navigation', { name: '技能包列表', exact: true }).getByRole('button')).toHaveCount(1);

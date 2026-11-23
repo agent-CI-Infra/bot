@@ -1,12 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { RuleService } from '../../../dist/rules/service.js';
 import { consoleSave } from '../helpers/console-save.mjs';
 import { goRolePage } from '../helpers/open-role-advanced.mjs';
 
-const out = '.tmp/retired-rules-935';
 
 // A project upgraded from a version that read the repositories' .bot/ files (#935): the files were imported once, the
 // project pages say they can be deleted, the labels are settings and the Manager page lists the skills and the import.
@@ -14,7 +13,6 @@ test('an upgraded project shows its imported .bot/ files as deletable, its label
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     // The store as the previous version left it, then the upgrade.
@@ -36,7 +34,6 @@ test('an upgraded project shows its imported .bot/ files as deletable, its label
     await expect(notice).toContainText('.bot/rules/labels.md'); await expect(notice).toContainText('升级时已导入');
     await expect(page.getByLabel('检视标签', { exact: true })).toHaveValue('team-reviewed');
     await expect(page.getByLabel('开发标签', { exact: true })).toHaveValue('bot-develop');
-    await page.screenshot({ path: `${out}/basic-1440.png` });
     // The labels save through the page's save bar; an empty review label means none, and so does an empty developing label (#1047).
     await page.getByLabel('检视标签', { exact: true }).fill('');
     await page.getByLabel('开发中标签', { exact: true }).fill('');
@@ -46,9 +43,7 @@ test('an upgraded project shows its imported .bot/ files as deletable, its label
     await page.setViewportSize({ width: 390, height: 844 }); await page.evaluate(() => window.scrollTo(0, 0));
     await notice.scrollIntoViewIfNeeded(); await expect(notice).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: `${out}/basic-390.png` });
     await page.getByLabel('检视标签', { exact: true }).scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `${out}/basic-labels-390.png` });
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(h.admin + '/#/projects/101/roles');
@@ -68,13 +63,11 @@ test('an upgraded project shows its imported .bot/ files as deletable, its label
     // Full viewports at the changed cards: the skills card, then the import record.
     const card = page.locator('[data-overview-anchor="rule-sources"]');
     await card.evaluate(node => node.scrollIntoView({ block: 'start' })); await page.evaluate(() => window.scrollBy(0, -120));
-    await page.screenshot({ path: `${out}/manager-skills-1440.png` });
-    await record.evaluate(node => node.scrollIntoView({ block: 'center' })); await page.screenshot({ path: `${out}/manager-import-1440.png` });
+    await record.evaluate(node => node.scrollIntoView({ block: 'center' }));
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await card.evaluate(node => node.scrollIntoView({ block: 'start' })); await page.evaluate(() => window.scrollBy(0, -120));
-    await page.screenshot({ path: `${out}/manager-skills-390.png` });
-    await record.evaluate(node => node.scrollIntoView({ block: 'center' })); await page.screenshot({ path: `${out}/manager-import-390.png` });
+    await record.evaluate(node => node.scrollIntoView({ block: 'center' }));
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });

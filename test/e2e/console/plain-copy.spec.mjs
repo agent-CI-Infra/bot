@@ -1,11 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // #556: first-screen copy uses everyday words; jargon lives in closed 高级说明.
-const out = resolve('.tmp/plain-copy-556');
 
 /** After #514 the org-scope card lives inside a closed 高级／诊断 fold. Open it when present. */
 async function readyIdentity(page, url) {
@@ -58,7 +55,6 @@ async function login(page, h, password) {
 test('#556 登录、项目、身份、统计、成员首屏不再出现术语，登录页重复句合并为一句', async ({ page }) => {
   test.setTimeout(120000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
-  mkdirSync(out, { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const a = await account(admin);
@@ -77,9 +73,7 @@ test('#556 登录、项目、身份、统计、成员首屏不再出现术语，
     expect(loginCopy.description).not.toMatch(/使用本系统账号进入你有权访问的仓库/);
     expect(loginCopy.recovery).not.toMatch(/超级管理员/);
     expect(await visibleTerms(page)).toEqual({});
-    await page.screenshot({ path: resolve(out, 'login-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: resolve(out, 'login-390.png'), fullPage: true });
 
     await page.setViewportSize({ width: 1440, height: 1100 });
     await login(page, h, password);
@@ -93,15 +87,12 @@ test('#556 登录、项目、身份、统计、成员首屏不再出现术语，
     await expect(page.locator('#count')).not.toContainText('仓库 ID');
     // The repository number left the first screen but stays on hover, even for a row without a detail line.
     await expect(page.locator('#rows .row-content[title="编号 101"]')).toHaveCount(1);
-    await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await visibleTerms(page)).toEqual({});
     // On a phone the account menu is the only place that names the signed-in role (F4).
     await page.locator('#console-account').click();
     await expect(page.locator('#console-account-role')).toHaveText('管理员');
-    await page.screenshot({ path: resolve(out, 'account-menu-390.png'), fullPage: false });
     await page.keyboard.press('Escape');
-    await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
     await page.setViewportSize({ width: 1440, height: 1100 });
     await readyIdentity(page, h.admin + '/#/identity');
@@ -112,10 +103,8 @@ test('#556 登录、项目、身份、统计、成员首屏不再出现术语，
     await advanced.locator('summary').click();
     await expect(advanced).toContainText('权限记录版本');
     await advanced.locator('summary').click();
-    await page.screenshot({ path: resolve(out, 'identity-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await visibleTerms(page)).toEqual({});
-    await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
 
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.goto(h.admin + '/#/costs');
@@ -132,19 +121,15 @@ test('#556 登录、项目、身份、统计、成员首屏不再出现术语，
       await expect(costHelp.first()).toContainText('通过本系统发出的模型请求');
       await costHelp.first().locator('summary').click();
     }
-    await page.screenshot({ path: resolve(out, 'costs-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await visibleTerms(page)).toEqual({});
-    await page.screenshot({ path: resolve(out, 'costs-390.png'), fullPage: true });
 
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.goto(h.admin + '/#/projects/101/members');
     await expect(page.getByRole('heading', { name: '项目成员与授权来源' })).toBeVisible();
     expect(await visibleTerms(page)).toEqual({});
-    await page.screenshot({ path: resolve(out, 'members-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await visibleTerms(page)).toEqual({});
-    await page.screenshot({ path: resolve(out, 'members-390.png'), fullPage: true });
   } finally {
     await h.stop();
   }

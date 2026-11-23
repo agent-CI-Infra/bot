@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
@@ -28,7 +28,6 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
   });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  mkdirSync('.tmp/agent-tools-page', { recursive: true });
   try {
     const { admin, password } = await setup(h);
     const bot = await account(admin);
@@ -85,7 +84,6 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
     for (const [width, height] of [[1440, 1000], [768, 1000], [390, 844]]) {
       await page.setViewportSize({ width, height });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/agent-tools-page/after-${width}.png`, fullPage: true });
     }
 
     // A project administrator has no entry, and the API itself refuses them.
@@ -137,7 +135,6 @@ test('an unmounted tool volume still renders the page, the deployment guidance a
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('#console-mobile-nav')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/agent-tools-page/unmounted-390.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
