@@ -145,11 +145,12 @@ export class AssistantComputers {
   async host() {
     try {
       const info = await this.docker.request('GET', '/info');
-      if (info?.NCPU && info?.MemTotal) {
+      if (info?.NCPU > 0 && info?.MemTotal > 0) {
         this.lastHost = { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) };
         return this.lastHost;
       }
-      return null;
+      // Valid response missing host CPU/memory fields is treated as unavailable (fail closed, never fail open to 16 GiB).
+      return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
     } catch {
       return this.lastHost ?? { cpus: null, memory_mb: null, fallback_cap_mb: CONSERVATIVE_FALLBACK_MEMORY_MB };
     }
@@ -374,14 +375,14 @@ export class AssistantComputers {
       }
       // Aggregate memory admission on known hosts (#1279): cgroup Memory is a burst ceiling rather than reserved RAM,
       // so cap concurrently busy assistant containers at 2x the host's 75% safe memory cap (= 1.5x host RAM) minus
-      // memory already allocated to running project computers (always permitting at least one busy assistant).
+      // memory already allocated to running project computers. Over-budget requests queue (no unconditional floor).
       const hostCapMb = host?.memory_mb ? hostMemoryCap(host.memory_mb) : (host?.fallback_cap_mb ?? null);
       if (hostCapMb !== null) {
         const busyLeases = [...this.leases.values()].filter(l => l.owner !== owner && (l.state === 'busy' || l.state === 'creating'));
         const busyMemoryMb = busyLeases.reduce((sum, l) => sum + (l.resources?.memory_mb || 0), 0);
         const projectAllocatedMb = Math.max(0, Number(this.allocatedMemoryMb?.()) || 0);
-        const aggregateBudgetMb = Math.max(effectiveResources.memory_mb, hostCapMb * AGGREGATE_MEMORY_OVERCOMMIT - projectAllocatedMb);
-        if (busyLeases.length > 0 && busyMemoryMb + effectiveResources.memory_mb > aggregateBudgetMb) {
+        const aggregateBudgetMb = Math.max(0, hostCapMb * AGGREGATE_MEMORY_OVERCOMMIT - projectAllocatedMb);
+        if (busyMemoryMb + effectiveResources.memory_mb > aggregateBudgetMb) {
           const position = this.ticket(owner, turn);
           return { state: 'queued', reason: 'capacity', position };
         }

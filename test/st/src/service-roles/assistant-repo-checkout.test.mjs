@@ -678,18 +678,44 @@ test('assistant computers enforce small-host memory clamping, aggregate admissio
   await assistants.release(ownerB, { turn: 't-b' });
   await assistants.remove(ownerB);
 
-  // 3b. /info error on a cold manager falls back conservatively to 4096 MiB instead of failing open to 16 GiB.
-  const coldDocker = new FakeDocker();
-  coldDocker.homesMount = homes;
-  const origColdReq = coldDocker.request.bind(coldDocker);
-  coldDocker.request = async (method, path, body, raw, timeout) => {
-    if (path === '/info') throw new Error('docker_socket_unreachable');
-    return origColdReq(method, path, body, raw, timeout);
-  };
-  const coldAssistants = new AssistantComputers({ docker: coldDocker, db: projects.db, deployment: 'cold', image: 'approved', homes });
-  const coldView = await coldAssistants.settingsView();
-  assert.equal(coldView.settings.memory_mb, 4096);
-  await assert.rejects(coldAssistants.setSettings({ memory_mb: 8192 }), /memory_exceeds_host/);
+  // 3b. /info error OR resolved invalid/empty /info ({}, null) on a cold manager all fail closed to 4096 MiB.
+  for (const mode of ['throw', 'empty', 'null']) {
+    const coldDocker = new FakeDocker();
+    coldDocker.homesMount = homes;
+    const origColdReq = coldDocker.request.bind(coldDocker);
+    coldDocker.request = async (method, path, body, raw, timeout) => {
+      if (path === '/info') {
+        if (mode === 'throw') throw new Error('docker_socket_unreachable');
+        return mode === 'empty' ? {} : null;
+      }
+      return origColdReq(method, path, body, raw, timeout);
+    };
+    const coldAssistants = new AssistantComputers({ docker: coldDocker, db: projects.db, deployment: `cold-${mode}`, image: 'approved', homes });
+    const coldView = await coldAssistants.settingsView();
+    assert.equal(coldView.settings.memory_mb, 4096, mode);
+    await assert.rejects(coldAssistants.setSettings({ memory_mb: 8192 }), /memory_exceeds_host/);
+    const coldAcq = await coldAssistants.acquire(ownerC, { turn: `t-cold-${mode}`, fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+    assert.equal(coldAcq.state, 'ready');
+    assert.equal(coldDocker.containers.get(coldAssistants.name(ownerC)).HostConfig.Memory, 4096 * 1024 * 1024, mode);
+    await coldAssistants.release(ownerC, { turn: `t-cold-${mode}` });
+    await coldAssistants.remove(ownerC);
+  }
+
+  // 3c. Strict project-memory subtraction (no unconditional floor): when running projects leave less than one assistant's
+  // effective memory out of 2x hostCap, even the first assistant acquire queues instead of oversubscribing the host.
+  const tightDocker = new FakeDocker();
+  tightDocker.homesMount = homes;
+  tightDocker.info = { NCPU: 4, MemTotal: 16384 * 1024 * 1024 }; // hostCap = 12288, 2x = 24576
+  const tightAssistants = new AssistantComputers({
+    docker: tightDocker,
+    db: projects.db,
+    deployment: 'tight',
+    image: 'approved',
+    homes,
+    allocatedMemoryMb: () => 20000, // leaves 4576 MiB < 12288 MiB required
+  });
+  const tightQueued = await tightAssistants.acquire(ownerC, { turn: 't-tight', fence: 'f'.repeat(64), home_generation: 1, home_mode: 'rw' });
+  assert.deepEqual(tightQueued, { state: 'queued', reason: 'capacity', position: 1 });
 
   // 4. Archive extraction passes 180s timeout to docker.runner (matching control-plane timeout).
   await assistants.execute(ownerA, {
