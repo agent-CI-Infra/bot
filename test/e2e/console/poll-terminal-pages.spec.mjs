@@ -8,7 +8,7 @@ import { harness, setup, account, repository } from '../../fixtures/helpers.mjs'
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
 // A timer that was already scheduled when the terminal answer arrived still fires once; let it pass before counting.
-const settle = page => page.waitForTimeout(6000);
+const settle = page => page.clock.runFor(6000);
 
 async function loginAs(page, address, password, username = 'administrator') {
   await page.goto(address);
@@ -25,6 +25,7 @@ function countReads(page, pattern) {
 
 test('#743 发布页：404 之后停止读取发布记录并写终态文案', async ({ page }) => {
   const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) });
+  await page.clock.install();
   try {
     await loginAs(page, f.h.admin, f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
@@ -32,15 +33,20 @@ test('#743 发布页：404 之后停止读取发布记录并写终态文案', as
     await page.route('**/api/repositories/101/releases', route => route.fulfill({ status: 404, json: { error: 'not_found' } }));
     await page.getByRole('button', { name: '刷新发布记录', exact: true }).click();
     await expect(page.getByText(/发布记录已不可读取/)).toBeVisible();
+    // Wait for the already-scheduled poll to fire and receive its terminal 404 before counting subsequent ticks.
+    const trailing = page.waitForResponse(r => new URL(r.url()).pathname === '/api/repositories/101/releases');
     await settle(page);
+    await trailing;
     const reads = countReads(page, /^\/api\/repositories\/101\/releases$/);
-    await page.waitForTimeout(6500);
+    await page.clock.runFor(6500);
+    await page.evaluate(() => new Promise(resolve => queueMicrotask(resolve)));
     expect(reads.n, 'a 404 on the release records must not be retried by the poll').toBe(0);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 
 test('#743 发布页：5xx 仍会继续轮询', async ({ page }) => {
   const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) });
+  await page.clock.install();
   try {
     await loginAs(page, f.h.admin, f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
@@ -49,13 +55,16 @@ test('#743 发布页：5xx 仍会继续轮询', async ({ page }) => {
     await page.getByRole('button', { name: '刷新发布记录', exact: true }).click();
     await expect(page.getByText(/发布记录读取失败/)).toBeVisible();
     const reads = countReads(page, /^\/api\/repositories\/101\/releases$/);
-    await page.waitForTimeout(6500);
+    const retried = page.waitForResponse(r => new URL(r.url()).pathname === '/api/repositories/101/releases');
+    await page.clock.runFor(6500);
+    await retried;
     expect(reads.n, 'a 503 may clear on its own, so the poll keeps going').toBeGreaterThan(0);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 
 test('#743 监听与触发页：403 之后停止 Actions 配置检查并写终态文案', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -66,10 +75,11 @@ test('#743 监听与触发页：403 之后停止 Actions 配置检查并写终�
     const status = page.locator('[data-actions-status]');
     await expect(status).toContainText('配置检查通过后', { timeout: 10000 });
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 403, json: { error: 'repository_forbidden' } }));
+    await page.clock.runFor(5500);
     await expect(status).toContainText('配置检查已停止', { timeout: 12000 });
     await settle(page);
     const reads = countReads(page, /^\/api\/repositories\/101$/);
-    await page.waitForTimeout(6500);
+    await page.clock.runFor(6500);
     expect(reads.n, 'a 403 on the repository read must stop the configuration check').toBe(0);
   } finally { await h.stop(); }
 });
@@ -88,11 +98,13 @@ async function triggersPageWithActionsCheck(page, h, password) {
 
 test('#878 监听与触发页：可恢复的读取失败标注「读取失败，显示上次结果」和上次成功时间', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
     const status = await triggersPageWithActionsCheck(page, h, password);
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await page.clock.runFor(5500);
     await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
     // The last readable answer stays readable on the line under the result: only its freshness is in doubt.
     await expect(page.locator('[data-actions-policy]')).toContainText('配置检查通过后');
@@ -102,13 +114,16 @@ test('#878 监听与触发页：可恢复的读取失败标注「读取失败，
 
 test('#878 监听与触发页：下一次成功读取后清除过期标注', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
     const status = await triggersPageWithActionsCheck(page, h, password);
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await page.clock.runFor(5500);
     await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
     await page.unroute('**/api/repositories/101');
+    await page.clock.runFor(10500);
     await expect(status).not.toContainText('读取失败', { timeout: 20000 });
     await expect(status).toContainText('配置检查通过后');
   } finally { await h.stop(); }
@@ -123,6 +138,7 @@ test('#878 监听与触发页：下一次成功读取后清除过期标注', asy
 // announces any child-node change, so rewriting that sentence unchanged would interrupt the reader on every poll.
 test('#1078 监听与触发页：状态行常驻 polite live region，失败与终止之后仍是 status', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -153,15 +169,19 @@ test('#1078 监听与触发页：状态行常驻 polite live region，失败与�
     const poll = url => url.pathname === '/api/repositories/101';
     let polls = 0;
     await page.route(poll, route => { polls++; return route.continue(); });
-    await page.waitForTimeout(7000);
+    const polled = page.waitForResponse(response => new URL(response.url()).pathname === '/api/repositories/101');
+    await page.clock.runFor(7000);
+    await polled;
     await page.unroute(poll);
     expect(polls, 'the row was polled while it was watched').toBeGreaterThan(0);
     expect(await page.evaluate(() => window.__rowChanges), 'an unchanged answer must not rewrite a live region: a reader announces every child-node change again').toBe(0);
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await page.clock.runFor(5500);
     await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
     await expectSemantics('a failed refresh keeps the role instead of turning the row into an alert');
     await page.unroute('**/api/repositories/101');
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 401, json: { error: 'invalid_login' } }));
+    await page.clock.runFor(10500);
     await expect(status).toContainText('配置检查已停止', { timeout: 20000 });
     await expectSemantics('a stopped check keeps the role too');
   } finally { await h.stop(); }
@@ -173,6 +193,7 @@ test('#1078 监听与触发页：状态行常驻 polite live region，失败与�
 // sentence moves to its own muted note beside the row, the row keeps only this read's result, and the space is gone.
 test('#1079 监听与触发页：策略句搬到同级的 note，状态行只讲本次结果', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -184,6 +205,7 @@ test('#1079 监听与触发页：策略句搬到同级的 note，状态行只讲
     await expect(status).toContainText('配置检查通过后每分钟扫描', { timeout: 10000 });
     await expect(policy).toBeHidden();
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await page.clock.runFor(5500);
     await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
     // Two sentences on two lines, each readable on its own: the row is this read's result only, and the policy sentence
     // is still on the page in the note under it. Both are asserted as visible, so a note that is merely in the DOM —

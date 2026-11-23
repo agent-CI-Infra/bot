@@ -14,6 +14,7 @@ const retry = (line, name) => line.getByRole('button', { name, exact: true });
 test('门禁检查读取失败时保留旧徽章、写明是上次结果并只提供一个重试入口', async ({ page }) => {
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -43,7 +44,7 @@ test('门禁检查读取失败时保留旧徽章、写明是上次结果并只�
     await expect(page.locator('#rows .row [data-integration]').first()).toHaveText('门禁已配置');
     // One failed read, and no second one behind the reader's back.
     expect(checks).toBe(1);
-    await page.waitForTimeout(2000);
+    await page.clock.runFor(2000);
     expect(checks, 'a failed check schedules nothing by itself').toBe(1);
     await expect(retry(line, '重新检查门禁')).toBeVisible();
     // The statement is in frame at both supported widths; a long sentence must wrap, not push the page sideways.
@@ -66,6 +67,7 @@ test('门禁检查读取失败时保留旧徽章、写明是上次结果并只�
 test('权限检查读取失败时保留权限徽章、写明是上次结果并只提供一个重试入口', async ({ page }) => {
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  await page.clock.install();
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
@@ -98,7 +100,7 @@ test('权限检查读取失败时保留权限徽章、写明是上次结果并�
     await expect(line).toContainText(/上次成功读取：2026-01-01 \d{2}:00:00/);
     await expect(page.locator('#rows .row [data-permission]').first()).toHaveText('未检查');
     expect(checks).toBe(1);
-    await page.waitForTimeout(2000);
+    await page.clock.runFor(2000);
     expect(checks, 'a failed check schedules nothing by itself').toBe(1);
     failing = false;
     await retry(line, '重新检查权限').click();

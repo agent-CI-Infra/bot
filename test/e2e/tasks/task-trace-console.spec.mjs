@@ -48,6 +48,7 @@ test('task logs load a bounded recent page, load earlier evidence on demand and 
 
 test('a log outage keeps readable evidence, while a revoked task read clears all previous private detail', async ({ page }) => {
   const f = await fixture();
+  await page.clock.install();
   try {
     await login(page, f); await open(page, 'trace-page'); await expect(page.locator('#timeline .step')).toHaveCount(100);
     await page.route('**/api/tasks/trace-page/logs?*', route => route.fulfill({ status: 503, json: { error: 'logs_unavailable' } }));
@@ -67,7 +68,7 @@ test('a log outage keeps readable evidence, while a revoked task read clears all
     await page.unroute('**/api/tasks/trace-page');
     // A terminal answer ends the poll, so nothing is read again until the person asks for it.
     let reads = 0; page.on('request', request => { if (new URL(request.url()).pathname === '/api/tasks/trace-page') reads++; });
-    await page.waitForTimeout(6500);
+    await page.clock.runFor(6500);
     expect(reads, 'a terminal read failure must not poll again').toBe(0);
     // The explicit read in the same open dialog rebuilds the logs and the complete action bar.
     await page.getByRole('button', { name: '重新读取', exact: true }).click();

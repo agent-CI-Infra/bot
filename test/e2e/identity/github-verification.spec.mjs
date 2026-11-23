@@ -108,16 +108,18 @@ test('核验进行中会话过期时，不再跟进核验进度，交给「登�
   let release; const held = new Promise(resolve => { release = resolve; });
   f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
   let reads = 0; page.on('request', request => { if (new URL(request.url()).pathname === '/api/auth/me') reads++; });
+  await page.clock.install();
   try {
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
     const line = page.locator('#github-verification');
     await expect(line).toBeVisible();
     // The session ends while the check is still held: the next progress read is refused.
     f.h.store.run('DELETE FROM sessions');
+    await page.clock.runFor(1600);
     await expect(page.locator('#session-expired-banner')).toBeVisible();
     await expect(line).toBeHidden();
     // No more progress reads after that (the console polls every 1.5 s while it follows a check).
-    const after = reads; await page.waitForTimeout(4000); expect(reads).toBe(after);
+    const after = reads; await page.clock.runFor(4000); expect(reads).toBe(after);
     expect(errors).toEqual([]);
   } finally { f.state.apiGate = undefined; release(); await f.close(); }
 });
