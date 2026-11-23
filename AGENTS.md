@@ -27,7 +27,7 @@ launchpad 是一个基于 **Node.js 22.13+ / TypeScript** 的多账号 GitHub �
    - `docs/external-token-api.md` 由 `src/server.ts` 直接在 `/docs/external-token-api.md` 提供并随控制面镜像打包。
 2. **安全与权限边界由控制面强制执行**：
    - GitHub 写凭据、模型长期 API Key 与加密主密钥只驻留控制面（AES-256-GCM 密封），绝不进入项目电脑/助手电脑、日志、轨迹或浏览器响应。
-   - 提示词、仓库内容和 `.agents/skills/` 不能扩大工具或权限；修改 `.github/workflows/` 仅允许管理员在控制台显式确认的 `workflow_changes: true` 开发任务通过 bot PR 交付，`github_write` 永不写工作流文件。
+   - 提示词、仓库内容和 `.agents/skills/` 不能扩大工具或权限；修改 `.github/workflows/` 通过具备开发交付权限的任务以 bot PR 交付（发布前按需申请 `workflows: write` 令牌并在推送后立即撤销），`github_write` 永不写工作流文件、永不自动合并/入队修改 `.github/workflows/` 的 PR，也永不将含工作流改动的提交直接合入或移动到默认分支（须由人类维护者在 GitHub 合入）。
    - 外部 PR 或未合入分支属于非受信任检出：不得从不可信检出自动加载 `.agents/skills/`、`.pi/skills/`、仓库根 `AGENTS.md`/`CLAUDE.md` 或本地 hooks/MCP。
 3. **不再引入 `.bot/` 仓库规则覆盖**：
    - 仓库行为统一在控制台项目配置（Manager 提示词、角色配置、项目设置、机器配置）中维护；仓库内只读取可信基准分支的 `.agents/skills/`。

@@ -1,10 +1,10 @@
 import { appEvents, appPermissions, missingEvents, missingPermissions } from '../github/client.js';
 
 // What each console feature needs from a repository's GitHub account. Review and development make up the baseline that
-// onboarding asks for (appPermissions/appEvents). A bot pull request that changes .github/workflows/ needs workflows (only
-// for a task a person confirmed as a CI change, see tasks/pull-request.ts) and Actions failure analysis needs workflow_run;
-// both, like releases, run only through a GitHub App installation. Tokens still request only what each use needs; this
-// table only says which features a missing grant stops.
+// onboarding asks for (appPermissions/appEvents). A bot pull request that changes .github/workflows/ needs workflows
+// (requested on demand right before pushing the bot branch, see github/publisher.ts) and Actions failure analysis needs
+// workflow_run; both, like releases, run only through a GitHub App installation. Tokens still request only what each use
+// needs; this table only says which features a missing grant stops.
 export const features = ['review', 'review_threads', 'development', 'ci_reads', 'ci_checks', 'board', 'release', 'ci_changes', 'actions_failures', 'actions_dispatch'] as const;
 export type Feature = typeof features[number];
 interface Needs { permissions: Record<string, string>; events?: string[]; app?: boolean }

@@ -7,11 +7,12 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { githubWrite, writeRoute, githubWriteInstructions, withMergePolicy, githubWriteTool } from '../../../../dist/github/write.js';
 import { mergeBoundary, scopedMergeBoundary } from '../../../../dist/github/merge-policy.js';
 import { defaultPermissions, githubWriteAllowed, updatePermissions } from '../../../../dist/roles/permissions.js';
+import { explainFailure } from '../../../../dist/agent/failures.js';
 
 // #1170: merging through github_write follows the project's auto-merge policy. Merging and enqueueing are one action that
 // takes the develop ceiling and Contents plus Pull requests write; where the policy needs a maintainer's request, the call
 // names it and the control plane checks who made it. The base branch's merge queue decides between PUT merge and enqueue.
-const head = 'a'.repeat(40), merged = 'b'.repeat(40);
+const head = 'a'.repeat(40), merged = 'b'.repeat(40), wfSha = 'c'.repeat(40), rewindSha = 'd'.repeat(40), unreadableSha = 'e'.repeat(40);
 async function fixture(t) {
   const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
   store.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,?,'now')", store.secrets.seal({ token: 'fixture-bot-token' }, 'account:a'));
@@ -46,6 +47,35 @@ async function fixture(t) {
       // project administrator tightens the policy.
       const number = Number(match[1]), user = number === 10 ? { id: 900, login: 'fixture-bot', type: 'User' } : number === 11 ? null : { id: 501, login: 'maintainer', type: 'User' };
       return send({ number, node_id: 'PR_' + number, html_url: 'https://github.com/fixture/r/pull/' + number, state: 'open', user, head: { sha: head }, base: { ref: number === 9 ? 'queued' : number === 13 ? 'opaque' : number === 15 ? 'late' : 'main' } });
+    }
+    if ((match = /^\/repos\/fixture\/r\/pulls\/(\d+)\/files$/.exec(path)) && req.method === 'GET') {
+      const number = Number(match[1]);
+      if (number === 16) return send([{ filename: '.github/workflows/ci.yml', status: 'modified' }]);
+      if (number === 17) return send({ message: 'Forbidden' }, 403);
+      if (number === 18) return send([{ filename: 'docs/ci.md', previous_filename: '.github/workflows/old.yml', status: 'renamed' }]);
+      return send([{ filename: 'src/app.ts', status: 'modified' }]);
+    }
+    if ((match = /^\/repos\/fixture\/r\/compare\/(.+)$/.exec(path)) && req.method === 'GET') {
+      const spec = decodeURIComponent(match[1]);
+      if (spec === 'main...feature' || spec === `main...${merged}`) {
+        return send({ status: 'ahead', ahead_by: 1, behind_by: 0, commits: [{ sha: merged }], files: [{ filename: 'docs/a.md', status: 'modified' }] });
+      }
+      if (spec === 'main...wf-branch' || spec === `main...${wfSha}`) {
+        return send({ status: 'ahead', ahead_by: 1, behind_by: 0, commits: [{ sha: wfSha }], files: [{ filename: '.github/workflows/ci.yml', status: 'modified' }] });
+      }
+      if (spec === `main...${rewindSha}`) {
+        return send({ status: 'behind', ahead_by: 0, behind_by: 2, commits: [], files: [] });
+      }
+      if (spec === `${rewindSha}...main`) {
+        return send({ status: 'ahead', ahead_by: 2, behind_by: 0, commits: [{ sha: head }], files: [{ filename: '.github/workflows/release.yml', status: 'added' }] });
+      }
+      if (spec === 'main...unreadable' || spec === `main...${unreadableSha}`) {
+        return send({ message: 'Forbidden' }, 403);
+      }
+      if (spec === 'main...huge') {
+        return send({ status: 'ahead', ahead_by: 5, behind_by: 0, commits: [{ sha: head }], files: Array.from({ length: 300 }, (_, i) => ({ filename: `src/f${i}.ts`, status: 'modified' })) });
+      }
+      return send({ message: 'Not Found' }, 404);
     }
     if (path.startsWith('/repos/fixture/r/contents/') && ['PUT', 'DELETE'].includes(req.method)) return send({ content: { path: path.slice(26), sha: 'f'.repeat(40) }, commit: { sha: merged } }, 201);
     if (path.startsWith('/repos/fixture/r/git/refs/heads/') && req.method === 'PATCH') return send({ ref: 'refs/heads/' + path.slice(32), object: { sha: merged, type: 'commit' } });
@@ -262,4 +292,70 @@ test('every prompt that can merge states the current level instead of a fixed ba
   assert.match(scoped, /o\/a: allow_all; o\/b: disallow/);
   assert.match(scoped, /disallow: never merge/); assert.match(scoped, /allow_all: you may merge any pull request/);
   assert.doesNotMatch(scoped, /non_bot_only:/);
+});
+
+test('github_write refuses merging PRs that touch .github/workflows/ even under allow_all, pins head SHA, and fails closed when PR files cannot be read (#1269)', async t => {
+  const f = await fixture(t);
+  f.setPolicy('allow_all');
+  // #16 modifies .github/workflows/ci.yml; #18 renames out of .github/workflows/old.yml.
+  for (const [number, expectedPath] of [[16, '.github/workflows/ci.yml'], [18, '.github/workflows/old.yml']]) {
+    const refused = await f.write(merge(number));
+    assert.equal(refused.error, 'github_workflow_write_forbidden', `PR #${number}`);
+    assert.match(refused.detail, /never merged through github_write/);
+    assert.ok(refused.files.includes(expectedPath), JSON.stringify(refused));
+  }
+  // #17 fails to list PR files -> fail-closed refusal.
+  const unreadable = await f.write(merge(17));
+  assert.equal(unreadable.error, 'github_workflow_merge_check_unavailable');
+  assert.match(unreadable.detail, /human maintainer/);
+  // Stale requested sha is refused before sending to avoid TOCTOU bypass.
+  const stale = await f.write(merge(7, { body: { sha: '9'.repeat(40), merge_method: 'rebase' } }));
+  assert.equal(stale.error, 'pull_request_head_changed');
+  assert.equal(stale.expected_sha, head);
+  assert.deepEqual(f.merges(), [], 'no merge request may be sent for workflow, unverifiable, or stale-head PRs');
+  assert.deepEqual(f.enqueues(), [], 'no merge queue enqueue may be sent for workflow or unverifiable PRs');
+  // Clean PR merge automatically pins inspected pr.head.sha into PUT /pulls/{n}/merge body.
+  const ok = await f.write(merge(7, { key: 'clean-pin' }));
+  assert.equal(ok.merged, true);
+  const putReq = f.requests.find(r => r.method === 'PUT' && r.path === '/repos/fixture/r/pulls/7/merge');
+  assert.equal(putReq?.body?.sha, head);
+});
+
+test('github_write refuses default-branch moves (POST /merges, PATCH/DELETE /git/refs/heads/main) that touch or cannot verify .github/workflows/ even under allow_all (#1269)', async t => {
+  const f = await fixture(t);
+  f.setPolicy('allow_all');
+  // POST /merges with workflow-changing branch or commit under allow_all -> refused.
+  const wfMergeBranch = await f.write({ method: 'POST', path: '/merges', key: 'wf-merge-branch', body: { base: 'main', head: 'wf-branch' } });
+  assert.equal(wfMergeBranch.error, 'github_workflow_write_forbidden');
+  assert.deepEqual(wfMergeBranch.files, ['.github/workflows/ci.yml']);
+  const wfMergeSha = await f.write({ method: 'POST', path: '/merges', key: 'wf-merge-sha', body: { base: 'main', head: wfSha } });
+  assert.equal(wfMergeSha.error, 'github_workflow_write_forbidden');
+  // Even with a valid maintainer merge_request under disallow, workflow default-branch moves stay refused.
+  f.setPolicy('disallow');
+  const wfWithRequest = await f.write({ method: 'POST', path: '/merges', key: 'wf-merge-req', body: { base: 'main', head: 'wf-branch' }, merge_request: 'https://github.com/fixture/r/pull/8#issuecomment-14' });
+  assert.equal(wfWithRequest.error, 'github_workflow_write_forbidden');
+  f.setPolicy('allow_all');
+  // PATCH /git/refs/heads/main with workflow-changing commit or non-FF rewind dropping workflows -> refused.
+  const wfRef = await f.write({ method: 'PATCH', path: '/git/refs/heads/main', key: 'wf-ref', body: { sha: wfSha } });
+  assert.equal(wfRef.error, 'github_workflow_write_forbidden');
+  assert.deepEqual(wfRef.files, ['.github/workflows/ci.yml']);
+  const rewindRef = await f.write({ method: 'PATCH', path: '/git/refs/heads/main', key: 'wf-rewind', body: { sha: rewindSha, force: true } });
+  assert.equal(rewindRef.error, 'github_workflow_write_forbidden');
+  assert.deepEqual(rewindRef.files, ['.github/workflows/release.yml']);
+  // Unreadable compare, truncated compare (>=300 files), or DELETE default branch -> fail closed.
+  assert.equal((await f.write({ method: 'POST', path: '/merges', key: 'unreadable-merge', body: { base: 'main', head: 'unreadable' } })).error, 'github_workflow_merge_check_unavailable');
+  assert.equal((await f.write({ method: 'POST', path: '/merges', key: 'huge-merge', body: { base: 'main', head: 'huge' } })).error, 'github_workflow_merge_check_unavailable');
+  assert.equal((await f.write({ method: 'PATCH', path: '/git/refs/heads/main', key: 'unreadable-ref', body: { sha: unreadableSha } })).error, 'github_workflow_merge_check_unavailable');
+  assert.equal((await f.write({ method: 'DELETE', path: '/git/refs/heads/main', key: 'delete-main' })).error, 'github_workflow_merge_check_unavailable');
+  assert.deepEqual(f.branchWrites(), [], 'no default-branch write may reach GitHub when workflow changes are present or unverifiable');
+  // Clean POST /merges pins the inspected commit SHA into the outgoing body.
+  const cleanMerge = await f.write({ method: 'POST', path: '/merges', key: 'clean-merge', body: { base: 'main', head: 'feature' } });
+  assert.equal(cleanMerge.status, 201);
+  const mergeReq = f.requests.find(r => r.method === 'POST' && r.path === '/repos/fixture/r/merges');
+  assert.equal(mergeReq?.body?.head, merged);
+  // Prompt explicitly states default-branch workflow moves are refused even under allow_all; failure code is classified.
+  assert.match(mergeBoundary('allow_all'), /default-branch move that changes \.github\/workflows\/ .* always refused even under allow_all/);
+  const explained = explainFailure('github_workflow_merge_check_unavailable');
+  assert.equal(explained?.cause, 'github_access');
+  assert.match(explained?.action ?? '', /\.github\/workflows\//);
 });

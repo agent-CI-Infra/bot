@@ -9,7 +9,7 @@
 - **查询与命令契约**：
   - `POST /api/management/query`：只读查询目录（`list_projects`、`list_tasks`、`get_task`、`get_effective_config`、`get_usage`、`list_audit`、`search_knowledge` 等），统一通过 `resolveActor` 过滤项目范围。
   - `POST /api/management/commands`：写操作必须携带闭合 Schema 参数、`expected_revision`（冲突返回 `409 management_revision_conflict`）、操作者范围唯一 `idempotency_key` 与来源会话/消息引用；保存持久化回执（`succeeded` / `failed` / `unknown`）和变更 diff，支持按命令 ID 对账恢复。
-- **无审批直执行 + 唯一高危确认例外**：授权范围内的命令直接执行并记审计；唯一例外是修改 `.github/workflows/` 的 `task.create(workflow_changes: true)`——模型调用时不直接建单，而是返回 `confirmation_required` 预览，仅当项目管理员在 Web 控制台点击确认卡片并由服务端签发 `console:conversation:*` 来源时才放行。
+- **无审批直执行**：授权范围内的管理命令（含 `task.create`）直接执行并记审计，不设额外的控制台二次确认卡片拦截；历史请求中的 `workflow_changes` 布尔字段平滑兼容忽略。
 - **仓库接入归一**：管理助手原生覆盖已安装未启动仓库（`pending_repositories`）的只读探索与 `start_repository` 工具（超管或受信任组织管理员直接启动并同轮配置，未受信任组织落库 `onboarding_requests` 待超管审批）。
 - **流式持久会话**：对话事件经 `GET /api/management/conversations/:id/events?stream=1` 以 NDJSON 推送，支持断线续读不重发、随时停止及首轮自动生成标题；对话上下文按 `authorization_revision` 隔离，降权后隐藏旧权限记录。
 

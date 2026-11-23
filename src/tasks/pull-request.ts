@@ -3,7 +3,7 @@ import type { Store, Row } from '../storage/database.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
-import { hasWorkflowChangesConfirmation } from '../github/workflow-changes.js';
+import { changedWorkflowPaths, isWorkflowPath } from '../github/workflow-changes.js';
 import { pullRequestSummaryForProgress } from '../github/pull-request-media.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { permitsTool } from '../roles/permissions.js';
@@ -15,10 +15,51 @@ import { stopAboveCeiling } from '../projects/ceiling.js';
 
 export const isRequestedTask = (task: { kind?: unknown }) => ['task.request', 'task.development'].includes(String(task.kind ?? ''));
 
-export const workflowChanges = (task: Row) => hasWorkflowChangesConfirmation(task);
-
-export const pullRequestPermissions = (task: Row): Record<string, string> | undefined =>
-  workflowChanges(task) ? { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' } : undefined;
+/** Whether a task targets `.github/workflows/` or CI gates, used to attach the built-in `layered-ci-gates` skill. */
+export const workflowChanges = (
+  task: { repository_id?: unknown; kind?: unknown; object_number?: unknown; input?: unknown; summary?: unknown },
+  store?: Store,
+): boolean => {
+  try {
+    const input = JSON.parse(String(task.input || '{}'));
+    if (input?.workflow_changes) return true;
+    // 1. Deterministic PR diff files recorded on the task (development.pr in engine.ts or PR target in request.ts).
+    if (Array.isArray(input?.workflow_files) && input.workflow_files.some((p: unknown) => isWorkflowPath(p))) return true;
+    if (Array.isArray(input?.files) && input.files.some((f: any) => isWorkflowPath(f?.filename) || isWorkflowPath(f?.previous_filename))) return true;
+    // 2. Deterministic parent/source task linkage for bot PR revisions (handles default goal "Revise bot PR #N: <title>").
+    const repoId = task.repository_id != null ? String(task.repository_id) : '';
+    const prNumber =
+      String(task.kind ?? '').endsWith('.pr') && Number.isSafeInteger(Number(task.object_number))
+        ? Number(task.object_number)
+        : input?.target?.type === 'pr' && Number.isSafeInteger(Number(input.target.number))
+          ? Number(input.target.number)
+          : Number.isSafeInteger(Number(input?.bot_pr?.number))
+            ? Number(input.bot_pr.number)
+            : null;
+    if (store && repoId && prNumber != null && prNumber > 0) {
+      const owned = store.get('SELECT source_task_id FROM bot_pull_requests WHERE repository_id=? AND number=?', repoId, prNumber);
+      if (owned?.source_task_id) {
+        const candidateRow = store.get('SELECT data FROM development_candidates WHERE task_id=?', owned.source_task_id);
+        if (candidateRow?.data) {
+          try {
+            const candidate = JSON.parse(String(candidateRow.data));
+            if (changedWorkflowPaths(candidate.files ?? [], candidate.snapshot_files ?? []).length) return true;
+          } catch { /* ignore */ }
+        }
+        const sourceTask = store.get('SELECT repository_id,kind,object_number,input,summary FROM tasks WHERE id=?', owned.source_task_id);
+        if (sourceTask && workflowChanges(sourceTask)) return true;
+      }
+    }
+    // 3. Explicit task contract scope / request / goal / summary references.
+    const scope = Array.isArray(input?.contract?.scope) ? input.contract.scope : [];
+    if (scope.some((item: unknown) => isWorkflowPath(item) || (typeof item === 'string' && /\.github\/workflows/i.test(item)))) return true;
+    const texts = [input?.request, input?.contract?.goal, task.summary];
+    if (texts.some(text => typeof text === 'string' && /(?:\.github\/workflows|layered-ci-gates)/i.test(text))) return true;
+    return false;
+  } catch {
+    return false;
+  }
+};
 
 export const genericTask = (task: Row) => task.kind === 'task.request' && JSON.parse(task.input || '{}').generic === true;
 
@@ -118,8 +159,8 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
   github.purpose = 'pull_request';
   github.beforeWrite = check;
   try {
-    await github.connect(true, undefined, pullRequestPermissions(task));
     const candidate = JSON.parse(store.get('SELECT data FROM development_candidates WHERE task_id=?', task.id)!.data);
+    await github.connect(true);
     const publisher = new Publisher(store, github, task, validate, undefined, log);
     const commit = await publisher.branch(candidate);
     const pr = await publisher.pullRequest(candidate, commit);

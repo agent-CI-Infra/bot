@@ -71,7 +71,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null;
   let disposed = false, opening = false, submitting = false, historyReady = false, followOutput = true, unseenOutput = false, renderFrame = 0;
   let dynamicRecommendations = null, sessionItems = [];
-  const pendingMarkdown = new Set(), confirmButtons = new Set(), recommendationButtons = new Set();
+  const pendingMarkdown = new Set(), recommendationButtons = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const conversationIdle = () => !!conversation && historyReady && !opening && !submitting && !active;
   function pickRecommendation(item) {
@@ -175,7 +175,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     for (const choose of recommendationButtons) choose.disabled = composerDisabled;
     send.disabled = !conversationIdle(); stopButton.hidden = !active;
     fresh.disabled = opening || submitting || !conversation; sessionToggle.disabled = opening || !conversation;
-    for (const sync of confirmButtons) sync();
     syncRecommendationVisibility();
     input.classList.toggle('is-running', !!active); onActivity(!!active);
   };
@@ -191,43 +190,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     });
     pendingPreview = close; slot.replaceChildren(drawn.box); drawn.box.scrollIntoView({ block: 'nearest' });
     return drawn;
-  }
-  function stagedConfirmationCard(parent, receipt, step, currentTurn) {
-    const sourceMessage = 'confirm:' + step.id, command = receipt.preview_command;
-    if ([...messages.values()].some(m => m.source_message === sourceMessage)) {
-      setStepState(step, 'succeeded'); paintTurn(currentTurn);
-      parent.append(note('这项修改 .github/workflows/ 的开发任务已在下方确认提交，执行结果见对应操作回执。'));
-      return;
-    }
-    const slot = element('div', '', 'management-workflow-confirm');
-    parent.append(slot);
-    let busy = false, removeSync = null;
-    const clearSync = () => { if (removeSync) { confirmButtons.delete(removeSync); removeSync = null; } };
-    const openCard = () => {
-      clearSync();
-      const projectName = scopeProject('project:' + command.target?.project_id)?.full_name || command.target?.project_id;
-      const drawn = managementPreview(command, { project: projectName });
-      const sync = () => { drawn.confirm.disabled = opening || !historyReady || submitting || !!active || busy; };
-      removeSync = sync; confirmButtons.add(sync); sync();
-      drawn.cancel.addEventListener('click', () => {
-        clearSync();
-        const paused = element('div', '', 'actions');
-        paused.append(note('已暂缓确认修改 .github/workflows/ 的开发任务。'), button('重新打开确认卡片', openCard, 'quiet'));
-        slot.replaceChildren(paused);
-      });
-      drawn.confirm.addEventListener('click', async () => {
-        busy = true; sync();
-        if (await submit({ command }, sourceMessage)) {
-          clearSync();
-          setStepState(step, 'succeeded'); paintTurn(currentTurn);
-          slot.replaceChildren(note('已确认提交，正在下方生成操作回执…'));
-        } else {
-          busy = false; sync();
-        }
-      });
-      slot.replaceChildren(drawn.box);
-    };
-    openCard();
   }
   const turn = id => {
     if (turns.has(id)) return turns.get(id);
@@ -263,9 +225,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   function paintTurn(value) {
     const running = ['pending', 'running'].includes(value.state);
     const uncertain = value.steps.some(step => ['unknown', 'executing'].includes(step.state));
-    const waitingConfirm = value.steps.some(step => step.state === 'awaiting_confirmation');
-    value.badge.textContent = running ? value.stage : { completed: uncertain ? '结果待确认' : waitingConfirm ? '待你在控制台确认' : value.steps.some(step => step.state === 'failed' || step.state === 'rejected') ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
-    value.badge.dataset.state = running ? 'running' : (uncertain || waitingConfirm) ? 'unknown' : value.state;
+    value.badge.textContent = running ? value.stage : { completed: uncertain ? '结果待确认' : value.steps.some(step => step.state === 'failed' || step.state === 'rejected') ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
+    value.badge.dataset.state = running ? 'running' : uncertain ? 'unknown' : value.state;
     const end = running ? Date.now() : Date.parse(value.finishedAt || value.startedAt), seconds = Math.max(0, Math.floor((end - Date.parse(value.startedAt)) / 1000));
     value.elapsed.textContent = seconds < 60 ? seconds + ' 秒' : Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒';
     const completed = value.steps.filter(step => step.state === 'succeeded').length;
@@ -298,7 +259,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   function setStepState(step, state) {
     step.state = state; step.box.dataset.state = state;
-    step.status.textContent = { running: '进行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', unknown: '待确认', awaiting_confirmation: '待确认', executing: '执行中', interrupted: '结果未确认' }[state] ?? state;
+    step.status.textContent = { running: '进行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', unknown: '待确认', executing: '执行中', interrupted: '结果未确认' }[state] ?? state;
   }
   function toolStep(value, data, sequence) {
     const box = element('details', '', 'management-step'), summary = element('summary', '', 'management-step-summary');
@@ -425,15 +386,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
           if (me?.id === user && Array.isArray(list?.repositories)) { repositories = list.repositories; if (typeof syncScopePicker === 'function') syncScopePicker(); }
         }).catch(() => {});
       }
-      if (receipt?.confirmation_required && receipt?.preview_command) {
-        setStepState(step, 'awaiting_confirmation');
-        output(step.detail, '待确认操作', receipt, true);
-        stagedConfirmationCard(replies, receipt, step, currentTurn);
-      } else {
-        setStepState(step, receipt.operation ? receipt.state : (ownStep || step.name === 'start_repository') && receipt.error ? 'failed' : receipt.state === 'failed' ? 'failed' : 'succeeded');
-        if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
-        else output(step.detail, ownStep ? '独立任务结果' : '查询事实', receipt, true);
-      }
+      setStepState(step, receipt.operation ? receipt.state : (ownStep || step.name === 'start_repository') && receipt.error ? 'failed' : receipt.state === 'failed' ? 'failed' : 'succeeded');
+      if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
+      else output(step.detail, ownStep ? '独立任务结果' : '查询事实', receipt, true);
       currentTurn.stage = '正在整理结果';
       onActivity(!!active, true);
     } else if (row.type === 'reply') {
@@ -557,7 +512,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
-    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; confirmButtons.clear(); dynamicRecommendations = null;
+    const generation = ++scopeGeneration; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; dynamicRecommendations = null;
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
     syncRecommendations(); updateBusy();
     // The list on screen is the previous scope's (or the previous pick) until the new one arrives: none of it is current now.
@@ -629,6 +584,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     draft(text) { message.value = text; if (conversation) drafts.set(conversation, text); message.focus(); },
     setRecommendations(items) { syncRecommendations(items); },
     applyOnboarding() { return applyQueuedOnboarding(); },
-    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); confirmButtons.clear(); recommendationButtons.clear(); drafts.clear(); }
+    dispose() { disposed = true; scopeGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); recommendationButtons.clear(); drafts.clear(); }
   };
 }

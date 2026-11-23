@@ -56,8 +56,8 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
       await page.setViewportSize({ width, height }); await result.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
-    // Confirmed CI changes and Actions failure analysis need more than the baseline; that is listed without failing it.
-    await expect(result).toContainText('Workflows：改为「Read and write」（当前「No access」），经确认的 CI 改动需要');
+    // CI workflow changes and Actions failure analysis need more than the baseline; that is listed without failing it.
+    await expect(result).toContainText('Workflows：改为「Read and write」（当前「No access」），CI 工作流改动需要');
     await expect(result).toContainText('Subscribe to events：勾选 Workflow run，Actions 失败分析需要');
     // Workflow run sits next to the Workflows line but needs only Actions read.
     await expect(result).toContainText('这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」');
@@ -84,7 +84,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(gapsView.getByRole('heading', { name: '权限与事件缺口 · fixture/project-101' })).toBeVisible(); await expect(items).toHaveCount(7);
     await expect(items.nth(1)).toContainText('Workflows 需要「Read and write」，现在「No access」');
     await expect(items.nth(1)).toContainText('把 Workflows 设为「Read and write」并保存；新增权限要由安装所有者（fixture）在 GitHub 的安装设置里接受');
-    await expect(items.nth(1)).toContainText('经确认的 CI 改动（手动使用时）：推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来');
+    await expect(items.nth(1)).toContainText('CI 工作流改动（手动使用时）：推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来');
     // #1072: a project that cannot write Actions cannot start workflows either; it has no switch, so it reads as manual use.
     await expect(items.nth(0)).toContainText('触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流');
     await expect(items.nth(4)).toContainText('未订阅事件 Check run');
@@ -159,7 +159,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(englishResult).toContainText('Actions: set to "Read and write" (currently "No access")');
     await expect(englishResult).toContainText('Subscribe to events: tick Issue comment, Pull request review, Pull request review comment');
     // A feature gap usually names one feature, so the sentence has to read as well for one as for many.
-    await expect(englishResult).toContainText('Workflows: set to "Read and write" (currently "No access"); needed for Confirmed CI changes');
+    await expect(englishResult).toContainText('Workflows: set to "Read and write" (currently "No access"); needed for CI workflow changes');
     await expect(englishResult).toContainText('This is an event subscription, not the Workflows permission');
     await expect(englishResult).toContainText("Open the App's Permissions & events");
     expect(cjkWords(await englishResult.innerText()), 'Chinese text left in the English permission report').toEqual([]);
@@ -173,7 +173,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await wizardRow.locator('.permission-check button').first().click();
     const wizardResult = wizardRow.locator('.permission-result');
     await expect(wizardResult).toContainText('Actions: set to "Read and write" (currently "No access")');
-    await expect(wizardResult).toContainText('needed for Confirmed CI changes');
+    await expect(wizardResult).toContainText('needed for CI workflow changes');
     await expect(wizardResult).toContainText("needed for Actions failure analysis. This is an event subscription, not the Workflows permission");
     expect(cjkWords(await wizardResult.innerText()), 'Chinese text left in the English wizard report').toEqual([]);
     for (const [width, height] of [[1440, 900], [390, 844]]) {

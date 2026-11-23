@@ -25,7 +25,7 @@ Budgets, trust rules and placement rules are in [references/layers.md](reference
 4. Without a merge queue, L3 cases move to post-merge (push to the default branch) or to daily. Say what that delays: how long until a failure is seen, that it lands on the default branch, and who receives the signal.
 5. When a layer has no script, propose creating one: its name, its local command, and the tags or markers that select its cases. Workflows call these scripts and never keep their own lists of cases.
 6. Credentials never reach `pull_request` jobs, and `pull_request_target` never checks out PR code.
-7. Every workflow change goes through a bot pull request from a development task that a project administrator confirmed may change `.github/workflows/`. Repository settings (rulesets, required checks, merge queue, Environments, secrets) are changed by a person: list them and never report them as done.
+7. Every workflow change goes through a bot pull request from a development task and is reviewed and merged by a person. Repository settings (rulesets, required checks, merge queue, Environments, secrets) are changed by a person: list them and never report them as done.
 
 ## Method
 

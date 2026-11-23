@@ -8,6 +8,7 @@ import { autoMergePolicy, githubMaintainer, isBotPullRequest, mergeBoundary, mer
 import { mergeQueue } from './merge-queue.js';
 import { hostedMediaUrl } from './hosted-pr-media.js';
 import { commentMediaSchema, planMarkdownMedia, publishHostedMedia, type StoredMedia } from './pull-request-media.js';
+import { formatWorkflowPaths, isWorkflowPath } from './workflow-changes.js';
 
 /**
  * github_write: one GitHub write tool for every agent, shaped like the GitHub REST API (#381).
@@ -303,11 +304,11 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   };
   if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges, workflow dispatches, and Actions run/job reruns or cancellations.`);
   if (input.merge_request !== undefined && !entry.merge && !entry.move) return { error: 'invalid_arguments', detail: 'merge_request goes only with PUT /pulls/{n}/merge or a write that moves the default branch.' };
-  // CI changes are bot pull requests that people review and merge (#931). github_write's token never has the Workflows
+  // CI changes are bot pull requests that people review and merge. github_write's token never has the Workflows
   // permission, so GitHub refuses a ref update that would change .github/workflows/; a file write there is refused here,
   // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
   if (entry.resource === 'contents' && /^\/contents\/\.github\/workflows(?:\/|$)/i.test(decodedPath(path)))
-    return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request: a development task a project administrator confirmed as a CI change, reviewed and merged by people.');
+    return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request through a development task, reviewed and merged by people.');
   const mediaTexts = extractHumanMediaTexts(entry, input.body);
   let mediaPlan: ReturnType<typeof planMarkdownMedia> | null = null;
   if (input.media !== undefined || mediaTexts.some(text => text.includes('workspace:'))) {
@@ -378,13 +379,33 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     }
     // A merge (#1170): read the pull request, apply the auto-merge policy (checking the maintainer's request where it needs
     // one) and learn whether its base branch requires a merge queue, all before any write token exists.
-    let merging: { number: number; pr: any; own: boolean; request: string | null; queued: boolean } | null = null;
+    let merging: { number: number; pr: any; head: string; own: boolean; request: string | null; queued: boolean } | null = null;
     // A write that moves the default branch without a pull request (#1170): gated like the bot's own merge.
-    let moving: { branch: string; request: string | null } | null = null;
+    let moving: { branch: string; request: string | null; pinnedHead?: string } | null = null;
     if (entry.merge) {
       const reader = await client({ pull_requests: 'read', issues: 'read', contents: 'read' }, true, true), number = entry.number!;
       const pr = await reader.request('GET', reader.path('/pulls/' + number), undefined, true);
       if (!pr) return refuse('github_write_target_missing', `Pull request #${number} was not found in this repository.`);
+      const inspectedHead = typeof pr.head?.sha === 'string' && /^[0-9a-f]{40}$/i.test(pr.head.sha) ? pr.head.sha : '';
+      if (!inspectedHead) {
+        return refuse('github_workflow_merge_check_unavailable', `Could not verify pull request #${number} head SHA before merging. Nothing was sent; a human maintainer must review and merge it on GitHub.`);
+      }
+      const requestedSha = typeof (input.body as any)?.sha === 'string' ? (input.body as any).sha.trim() : '';
+      if (requestedSha && requestedSha.toLowerCase() !== inspectedHead.toLowerCase()) {
+        return refuse('pull_request_head_changed', `Pull request #${number} head is ${inspectedHead}, which does not match requested sha ${requestedSha}. Re-read the pull request before merging.`, { expected_sha: inspectedHead, requested_sha: requestedSha });
+      }
+      // Workflow changes must always be reviewed and merged by a human maintainer on GitHub, never through github_write
+      // (even under auto_merge_policy=allow_all or on a PAT bot account). Fail closed if PR files cannot be verified.
+      const prFiles = await reader.pages(reader.path(`/pulls/${number}/files`)).catch(() => null);
+      if (!prFiles || prFiles.length >= 3000) {
+        return refuse('github_workflow_merge_check_unavailable', `Could not verify whether pull request #${number} modifies .github/workflows/ (${!prFiles ? 'failed to list PR files' : 'PR exceeds 3000-file API limit'}). Nothing was sent; a human maintainer must review and merge it on GitHub.`);
+      }
+      const touchedWorkflows = [...new Set(prFiles.flatMap((f: any) =>
+        [f?.filename, f?.previous_filename].filter(isWorkflowPath).map(String),
+      ))].sort();
+      if (touchedWorkflows.length) {
+        return refuse('github_workflow_write_forbidden', `Pull request #${number} modifies .github/workflows/ (${formatWorkflowPaths(touchedWorkflows)}). Workflow changes are never merged through github_write (even under auto_merge_policy=allow_all); a human maintainer must review and merge this pull request on GitHub.`, { files: touchedWorkflows });
+      }
       const own = isBotPullRequest(store, repositoryId, number, pr.user ?? null, reader.actorId), policy = autoMergePolicy(store, repositoryId);
       let request: string | null = null;
       if (mergeNeedsRequest(policy, own)) {
@@ -396,15 +417,91 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
       const queue = await mergeQueue({ get: path => reader.request('GET', path, undefined, true), graphql: async (query, variables) => ({ data: await reader.graphql(query, variables) }) }, reader.fullName, base);
       // Not knowing whether the base branch requires a queue never becomes a direct merge GitHub may refuse halfway.
       if (queue.state === 'unknown') return refuse('merge_queue_unknown', `Could not read whether ${base} requires a merge queue (its rules, branch protection and GitHub's mergeQueue were unreadable with this installation's token). Nothing was sent; a person can merge it, or try again once the repository's rules can be read.`, { base });
-      merging = { number, pr, own, request, queued: queue.state === 'enabled' };
+      merging = { number, pr, head: inspectedHead, own, request, queued: queue.state === 'enabled' };
     } else if (entry.move) {
       const reader = await client({ contents: 'read', issues: 'read', pull_requests: 'read' }, true);
       const branch = movedBranch(entry, path, input.body, reader.defaultBranch), policy = autoMergePolicy(store, repositoryId);
-      if (branch === reader.defaultBranch && mergeNeedsRequest(policy, true)) {
-        const checked = await verifyMergeRequest(context, reader, null, input.merge_request);
-        if ('reason' in checked) return refuse('auto_merge_not_allowed', moveRefusal(policy, branch, checked.reason), { policy, default_branch: branch });
-        moving = { branch, request: checked.source };
-      } else if (branch === reader.defaultBranch) moving = { branch, request: null };
+      if (branch === reader.defaultBranch) {
+        let request: string | null = null;
+        if (mergeNeedsRequest(policy, true)) {
+          const checked = await verifyMergeRequest(context, reader, null, input.merge_request);
+          if ('reason' in checked) return refuse('auto_merge_not_allowed', moveRefusal(policy, branch, checked.reason), { policy, default_branch: branch });
+          request = checked.source;
+        }
+        // Moving the default branch without a PR (POST /merges or PATCH/DELETE /git/refs/heads/{default}) must also
+        // never introduce, modify, or revert .github/workflows/ changes (even under allow_all or with a PAT).
+        let pinnedHead: string | undefined;
+        if (entry.move === 'merges' || entry.move === 'ref') {
+          const fields = input.body && typeof input.body === 'object' && !Array.isArray(input.body) ? input.body as Record<string, unknown> : {};
+          const compareWorkflows = async (baseRef: string, headRef: string): Promise<{ files: string[]; headSha?: string; behindBy: number; status?: string; mergeBaseSha?: string } | { error: string; detail: string }> => {
+            const cmp = await reader.request('GET', reader.path(`/compare/${encodeURIComponent(baseRef)}...${encodeURIComponent(headRef)}`), undefined, true).catch(() => null);
+            if (!cmp || !Array.isArray(cmp.files) || cmp.files.length >= 300) {
+              return {
+                error: 'github_workflow_merge_check_unavailable',
+                detail: `Could not verify whether moving default branch (${branch}) modifies .github/workflows/ (${!cmp || !Array.isArray(cmp.files) ? 'failed to compare commits' : 'comparison exceeds 300-file API limit'}). Nothing was sent; a human maintainer must review and merge workflow changes via a pull request on GitHub.`,
+              };
+            }
+            const touched = [...new Set<string>(cmp.files.flatMap((f: any) =>
+              [f?.filename, f?.previous_filename].filter(isWorkflowPath).map(String),
+            ))].sort();
+            const commits = Array.isArray(cmp.commits) ? cmp.commits : [];
+            const lastSha = commits.length ? String(commits[commits.length - 1]?.sha ?? '') : '';
+            const mergeBaseSha = typeof cmp.merge_base_commit?.sha === 'string' && /^[0-9a-f]{40}$/i.test(cmp.merge_base_commit.sha) ? cmp.merge_base_commit.sha : undefined;
+            return {
+              files: touched,
+              headSha: /^[0-9a-f]{40}$/i.test(lastSha) ? lastSha : undefined,
+              behindBy: Number(cmp.behind_by ?? 0),
+              status: typeof cmp.status === 'string' ? cmp.status : undefined,
+              mergeBaseSha,
+            };
+          };
+          if (entry.move === 'merges') {
+            const moveHead = typeof fields.head === 'string' ? fields.head.trim() : '';
+            if (!moveHead) {
+              return refuse('github_workflow_merge_check_unavailable', `Could not verify whether merging into default branch (${branch}) modifies .github/workflows/ (missing head ref). Nothing was sent.`);
+            }
+            const cmp = await compareWorkflows(branch, moveHead);
+            if ('error' in cmp) return refuse(cmp.error, cmp.detail);
+            if (cmp.files.length) {
+              return refuse('github_workflow_write_forbidden', `Merging ${moveHead} into default branch (${branch}) modifies .github/workflows/ (${formatWorkflowPaths(cmp.files)}). Workflow changes are never merged or moved to the default branch through github_write (even under auto_merge_policy=allow_all); a human maintainer must review and merge them via a pull request on GitHub.`, { files: cmp.files });
+            }
+            if (/^[0-9a-f]{40}$/i.test(moveHead)) {
+              pinnedHead = moveHead;
+            } else if (cmp.headSha) {
+              pinnedHead = cmp.headSha;
+            } else if ((cmp.status === 'identical' || cmp.status === 'behind') && cmp.mergeBaseSha) {
+              pinnedHead = cmp.mergeBaseSha;
+            } else {
+              const resolved = await reader.request('GET', reader.path('/commits/' + encodeURIComponent(moveHead)), undefined, true).catch(() => null);
+              const resolvedSha = typeof resolved?.sha === 'string' && /^[0-9a-f]{40}$/i.test(resolved.sha) ? resolved.sha : '';
+              if (!resolvedSha) {
+                return refuse('github_workflow_merge_check_unavailable', `Could not pin commit SHA for ${moveHead} before merging into default branch (${branch}). Nothing was sent.`);
+              }
+              pinnedHead = resolvedSha;
+            }
+          } else if (method === 'DELETE') {
+            return refuse('github_workflow_merge_check_unavailable', `Deleting default branch (${branch}) cannot be verified against .github/workflows/ changes and is refused through github_write. Nothing was sent.`);
+          } else {
+            const targetSha = typeof fields.sha === 'string' ? fields.sha.trim() : '';
+            if (!/^[0-9a-f]{40}$/i.test(targetSha)) {
+              return refuse('github_workflow_merge_check_unavailable', `Could not verify whether updating default branch (${branch}) modifies .github/workflows/ (missing or invalid target commit SHA). Nothing was sent.`);
+            }
+            const forward = await compareWorkflows(branch, targetSha);
+            if ('error' in forward) return refuse(forward.error, forward.detail);
+            if (forward.files.length) {
+              return refuse('github_workflow_write_forbidden', `Moving default branch (${branch}) to ${targetSha} modifies .github/workflows/ (${formatWorkflowPaths(forward.files)}). Workflow changes are never merged or moved to the default branch through github_write (even under auto_merge_policy=allow_all); a human maintainer must review and merge them via a pull request on GitHub.`, { files: forward.files });
+            }
+            if (forward.behindBy > 0) {
+              const backward = await compareWorkflows(targetSha, branch);
+              if ('error' in backward) return refuse(backward.error, backward.detail);
+              if (backward.files.length) {
+                return refuse('github_workflow_write_forbidden', `Moving default branch (${branch}) to ${targetSha} would revert or remove changes in .github/workflows/ (${formatWorkflowPaths(backward.files)}). Workflow changes are never merged or moved to the default branch through github_write (even under auto_merge_policy=allow_all); a human maintainer must review and merge them via a pull request on GitHub.`, { files: backward.files });
+              }
+            }
+          }
+        }
+        moving = { branch, request, ...(pinnedHead ? { pinnedHead } : {}) };
+      }
     }
     // Exactly the needed resources: GitHub refuses the token for anything else.
     const wanted = writing.length ? writing : [resource];
@@ -437,6 +534,11 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     const again = earlier();
     if (again) return again;
     let effectiveBody: unknown = input.body;
+    if (merging && !merging.queued) {
+      effectiveBody = { ...(effectiveBody && typeof effectiveBody === 'object' && !Array.isArray(effectiveBody) ? effectiveBody as Record<string, unknown> : {}), sha: merging.head };
+    } else if (moving?.pinnedHead && entry.move === 'merges') {
+      effectiveBody = { ...(effectiveBody && typeof effectiveBody === 'object' && !Array.isArray(effectiveBody) ? effectiveBody as Record<string, unknown> : {}), head: moving.pinnedHead };
+    }
     if (collectedMedia?.length && mediaPlan) {
       let hosted;
       try { hosted = publishHostedMedia(github, collectedMedia); }
@@ -463,9 +565,9 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
       const outgoing = () => sanitize(entry, effectiveBody, registeredRedactor(store, redactor), `<!-- dept-bot-write:${marker} -->`);
       let response: any, url: string | null = null;
       if (merging?.queued) {
-        // The base branch requires a merge queue: the same merge is GitHub's enqueuePullRequest, pinned to the head the agent
-        // named (sha) or the one it read. The queue's own settings choose the merge method.
-        const head = typeof (input.body as any)?.sha === 'string' ? (input.body as any).sha : String(merging.pr.head?.sha ?? '');
+        // The base branch requires a merge queue: the same merge is GitHub's enqueuePullRequest, pinned to the head that
+        // was inspected for workflow files (and matched against any requested sha). The queue's own settings choose the merge method.
+        const head = merging.head;
         const value = await github.graphql('mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id position state}}}',
           { id: merging.pr.node_id, head });
         const queued = value?.enqueuePullRequest?.mergeQueueEntry;

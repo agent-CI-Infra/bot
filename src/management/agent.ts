@@ -2,7 +2,7 @@ import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-ses
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import { runAgent } from '../agent/runtime.js';
 import { requestModel, type AgentModel } from '../agent/gateway.js';
@@ -32,8 +32,6 @@ import { managerFlowInstructions } from '../dispatch/settings.js';
 import { lateSchedules } from '../actions/late-schedules.js';
 import { feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
 import { feishuCardInstructions, feishuCardTool, feishuCardToolName, FeishuCardTurn } from '../channels/cards.js';
-import { assertCeiling } from '../projects/ceiling.js';
-import { projectRefusal } from '../tasks/grants.js';
 import { sameRepositoryName } from './repository-name.js';
 
 const now=()=>new Date().toISOString();
@@ -325,13 +323,9 @@ export class ManagementAgent {
           if(callId!=='direct-command'&&args?.operation==='configuration.pr')throw Object.assign(new HttpError(400,'configuration_pr_removed'),{detail:configurationPrRemoved});
           validate(managementTools[1]!.function.parameters,args);
           if(!permitsManagement(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions),String(args.operation),true))fail(403,'operation_not_allowed');
-          if(callId!=='direct-command'&&args.operation==='task.create'&&args.arguments?.workflow_changes===true){
-            result=this.stageWorkflowChanges(actor,args);
-          }else{
-            const sourceConversation=callId==='direct-command'&&actor.channel==='web'&&!timer?'console:conversation:'+conversation:conversation;
-            const command={...args,idempotency_key:digest(conversation+':'+input.source_message+':'+callId),source_conversation:sourceConversation,source_message:String(input.source_message)};
-            result=await this.service.submit(actor,command);
-          }
+          const sourceConversation=callId==='direct-command'&&actor.channel==='web'&&!timer?'console:conversation:'+conversation:conversation;
+          const command={...args,idempotency_key:digest(conversation+':'+input.source_message+':'+callId),source_conversation:sourceConversation,source_message:String(input.source_message)};
+          result=await this.service.submit(actor,command);
         }else fail(403,'tool_not_allowed');
         await guard();result=boundedResult(redactor.clean(result),batchBytes,value=>resultFiles.preserve(value,name));this.event(id,'tool_result',{name,call_id:eventCallId,result});return result;
       }catch(error){
@@ -512,40 +506,6 @@ export class ManagementAgent {
       // The computer stays for the person's next turn unless their authorization changed: then it goes at once.
       await Promise.allSettled([computer?.close(personFence(this.store,actor.principal_id,tenant)!==fence),repositories.close()]);
     }
-  }
-  /** Validates and stages a `task.create` with `workflow_changes: true` for human console confirmation (#931, #1133). */
-  private stageWorkflowChanges(actor:ActorContext,args:any):Json{
-    const projectId=String(args.target.project_id);
-    this.service.scope(actor,projectId,'tasks.write');
-    const requestText=String(args.arguments.request??'');
-    if(!requestText.trim()||requestText.length>60000)fail(400,'invalid_task_request');
-    const contract=args.arguments.contract as any;
-    const development=args.arguments.intent==='development'||args.arguments.intent===undefined&&contract?.endpoint==='reviewable_pull_request';
-    if(!development||contract?.endpoint!=='reviewable_pull_request')fail(400,'invalid_workflow_changes');
-    try{
-      this.service.check(actor,args);
-      authorize(actor,'config.write',{project_id:projectId});
-      assertCeiling(this.store,projectId,'develop');
-      const refusal=projectRefusal(this.store,projectId,'pull_request');
-      if(refusal)fail(403,refusal.code);
-    }catch(error){
-      if(!(error instanceof HttpError||error instanceof TaskError))throw error;
-      return {state:'failed',confirmation_required:false,error:error.code,result:{error:error.code,http_status:error instanceof HttpError?error.status:409}};
-    }
-    const revision=this.service.revision(args.target);
-    return {
-      state:'confirmation_required',
-      confirmation_required:true,
-      created:false,
-      reason:'workflow_changes_need_person',
-      preview_command:{
-        operation:'task.create',
-        target:{project_id:projectId},
-        arguments:{...args.arguments,intent:'development',workflow_changes:true},
-        expected_revision:revision,
-      },
-      instruction:'The task was NOT created yet because modifying .github/workflows/ requires human confirmation in the web console. Tell the administrator to review and click Confirm on the confirmation card in the console conversation, and never claim the task is already created before they confirm it.',
-    };
   }
   async close():Promise<void>{for(const run of this.active.values())run.controller.abort();await Promise.allSettled([...this.active.values()].map(r=>r.work));}
 }

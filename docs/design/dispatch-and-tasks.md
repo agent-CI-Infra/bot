@@ -61,10 +61,11 @@ flowchart LR
   - 允许项目显式关闭 `delivery_gates.pull_request_qa`（前提是配置了有效 `test_command`）。
 - **幂等发布与未知状态对账**：
   - 评论、行内 Review（恒为 `COMMENT`，自动关闭已修复旧线程）、分支推送与 PR 创建全部经过持久 Outbox 与稳定写入键；大仓库使用 `base_tree` 增量构建 Git tree 并校验返回 tree 与候选完全一致。
+  - 当候选变更实际涉及 `.github/workflows/` 时，`Publisher.branch` / `publishRequestPullRequest` 在推送分支前按需向 GitHub App 申请短期 `workflows: write` 安装令牌（用完即撤销）；若安装未授予 `Workflows: Read and write`，则在写入任何 Git 对象前以 `github_workflows_permission_missing`（`waiting_permission`）中止并提示开通。
   - 网络中断导致远端结果未知时停留在 `waiting_publication`，重试前先按任务 marker/head 对账（bot 分支更新幂等则自动查证续发），避免重复发评论或开重复 PR。
 - **自动合并与并行集成**：
   - 人工合并（`POST /api/tasks/:id/merge`）持久化合并意图，核验候选、QA 与远端检查并支持三路集成与 Merge Queue 入队；
-  - Agent 经 `github_write PUT /pulls/{n}/merge` 或直接写默认分支时，统一经过 `auto_merge_policy` 策略校验与真实 `merge_request` 来源核实（协作者缓存或当前合法对话消息），并自动适配目标分支 Merge Queue。
+  - Agent 经 `github_write PUT /pulls/{n}/merge` 或直接写默认分支时，统一经过 `auto_merge_policy` 策略校验与真实 `merge_request` 来源核实（协作者缓存或当前合法对话消息），并自动适配目标分支 Merge Queue；任何涉及 `.github/workflows/` 改动（或无法核实差异）的 PR 合并/入队与默认分支移动（`POST /merges`、`PATCH`/`DELETE /git/refs/heads/{default}`）即使在 `allow_all` 下也强制拒绝（PR 合并与 `POST /merges` 同时固定已核验的 commit SHA 防 TOCTOU）。
 - **动作失败扫描与发版本**：
   - `src/actions/` 结合 Webhook 与持久化固定时间窗分页扫描发现默认分支/版本标签失败运行，限制单 run 最多一次 `rerun_failed_run`。
   - `src/releases/` 强校验 SemVer 递增与新增提交，创建注释标签跟踪 Release 工作流，基于提交区间事实生成草稿，最终发布权始终留给人。

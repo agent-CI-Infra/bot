@@ -84,7 +84,7 @@ test('repository skill roots stay discoverable rather than hiding below .agents'
  assert.equal(resolved.snapshot.skills.source.configured.source_path_root,'.agents/skills/');
 });
 
-test('a confirmed CI change gives its planning and writing roles the CI gate skill; other roles and tasks keep theirs',async t=>{
+test('a CI workflow task gives its planning and writing roles the CI gate skill; other roles and tasks keep theirs',async t=>{
  const s=fixture(t),ci=(role,options={})=>resolveRole(s,'r',role,'development.issue',{ciChange:true,...options});
  const ordinary=resolve(s);
  const manager=ci('manager');

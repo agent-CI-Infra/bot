@@ -1,7 +1,7 @@
-// #934, #1133: unified repository onboarding in the Management Assistant, at 1440 and at 390.
+// #934, #1133, #1269: unified repository onboarding in the Management Assistant, at 1440 and at 390.
 // An administrator with zero started projects opens 开始接入 (and legacy #/onboarding/103), analyzes the unstarted
 // repository read-only in #/management, files a start request, has a super administrator approve in 待处理 (#/inbox),
-// applies confirmed settings, confirms a staged workflow_changes: true development task card in the console, verifies
+// applies confirmed settings and creates a CI workflow PR development task directly without a confirmation card, verifies
 // project basic settings has no duplicate onboarding entry, and picks onboarding / gate / Actions / Issue prompts from
 // the assistant's recommendation list on #/projects/103/management. GitHub and the model are local fixtures.
 import { test, expect } from '@playwright/test';
@@ -39,11 +39,11 @@ const script = (context, body) => {
       const policyReceipt = obs.find(o => o.operation === 'project.update');
       return [call(2,
         ['management_command', { operation: 'task.create', target: { project_id: '103' }, expected_revision: policyReceipt.after_revision,
-          arguments: { intent: 'development', workflow_changes: true, request: '为 PR 增加 npm test 自动检查工作流',
+          arguments: { intent: 'development', request: '为 PR 增加 npm test 自动检查工作流',
             contract: { goal: '在 .github/workflows/ci.yml 中增加 PR 自动运行 npm test 的检查', scope: ['.github/workflows/ci.yml'],
               criteria: ['改动经 bot PR 交付，由人检视并合并', 'PR 触发 npm test'], endpoint: 'reviewable_pull_request' } } }])];
     }
-    return [{ role: 'assistant', content: '已保存测试命令 `npm test`（待首次运行验证）并创建标签；修改 `.github/workflows/ci.yml` 的开发任务需要你在上方确认卡片点击「确认执行」后才会创建。' }];
+    return [{ role: 'assistant', content: '已保存测试命令 `npm test`（待首次运行验证）、创建标签并直接创建修改 `.github/workflows/ci.yml` 的开发 PR 任务。' }];
   }
   if (steps === 0) {
     return [call(0,
@@ -68,7 +68,7 @@ const script = (context, body) => {
   ].join('\n') }];
 };
 
-for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手完成仓库接入、启动审批与工作流变更确认 (#1133)`, async ({ page, browser }) => {
+for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手完成仓库接入、启动审批与 CI 任务创建 (#1133, #1269)`, async ({ page, browser }) => {
   test.setTimeout(120_000);
   const cleanups = [], t = { after: fn => cleanups.push(fn) }, errors = [];
   const f = await identityFixture(undefined, { github: true });
@@ -146,19 +146,13 @@ for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手�
     await expect(adminPage.getByTestId('start-requests')).toHaveCount(0);
     await adminContext.close();
 
-    // Turn 3: apply policy + labels and stage workflow_changes: true task.create confirmation card.
+    // Turn 3: apply policy + labels and create the CI workflow PR development task directly without a confirmation card.
     await composer.fill('超级管理员已同意启动，请继续应用确认的配置并提交 CI 工作流变更开发任务');
     await chat.getByRole('button', { name: '发送', exact: true }).click();
-    await expect(chat).toContainText('点击「确认执行」后才会创建');
+    await expect(chat).toContainText('直接创建修改 .github/workflows/ci.yml 的开发 PR 任务');
     expect(routes.created.map(write => write.body.name)).toEqual(['kind/bug', 'bot-developing', 'bot-developed']);
+    await expect(chat.locator('.management-workflow-confirm')).toHaveCount(0);
 
-    const confirmCard = chat.locator('.management-workflow-confirm');
-    await expect(confirmCard).toContainText('执行前确认');
-    await expect(confirmCard).toContainText('.github/workflows/ci.yml');
-    expect(f.h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='103'").n).toBe(0);
-    await shot(page, '06-workflow-confirm');
-
-    await confirmCard.getByRole('button', { name: '确认执行', exact: true }).click();
     const createdReceipt = chat.locator('.management-receipt').filter({ hasText: '操作 创建任务' });
     await expect(createdReceipt).toContainText('已执行');
     const createdCommand = f.h.store.get("SELECT * FROM management_commands WHERE operation='task.create' AND project_id='103'");
@@ -172,13 +166,12 @@ for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手�
     await expect(createdReceipt).not.toContainText(`版本 ${createdCommand.before_revision.slice(0, 12)} → ${createdCommand.after_revision.slice(0, 12)}`);
     expect(f.h.store.get("SELECT count(*) AS n FROM tasks WHERE repository_id='103'").n).toBe(1);
     const createdTask = f.h.store.get("SELECT input FROM tasks WHERE repository_id='103'");
-    expect(Boolean(JSON.parse(createdTask.input).workflow_changes?.confirmed_by)).toBe(true);
-    await shot(page, '07-confirmed-receipt');
+    expect(JSON.parse(createdTask.input).workflow_changes).toBeUndefined();
+    await shot(page, '07-created-receipt');
 
-    // Reloading does not offer a duplicate confirmation button for an already-confirmed step.
+    // Reloading preserves the created receipt cleanly.
     await page.reload();
-    await expect(chat).toContainText('这项修改 .github/workflows/ 的开发任务已在下方确认提交');
-    await expect(chat.locator('.management-workflow-confirm').getByRole('button', { name: '确认执行' })).toHaveCount(0);
+    await expect(chat.locator('.management-receipt').filter({ hasText: '操作 创建任务' })).toContainText('已执行');
 
     // Started project's basic settings no longer duplicates 仓库接入; onboarding and common actions live in the assistant's recommendation list.
     await page.goto(f.h.admin + '/#/projects/103/basic');

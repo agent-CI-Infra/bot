@@ -2,18 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { testPassword } from '../../../fixtures/helpers.mjs';
 import { managementFixture, query } from '../../../fixtures/management-fixture.mjs';
 import { Store } from '../../../../dist/storage/database.js';
 import { blobSha, Redactor, treeSha } from '../../../../dist/agent/common.js';
-import { GitHub } from '../../../../dist/github/client.js';
 import { githubWrite } from '../../../../dist/github/write.js';
-import { pullRequestPermissions, publishRequestPullRequest, requestPolicyHash } from '../../../../dist/tasks/pull-request.js';
+import { publishRequestPullRequest, requestPolicyHash } from '../../../../dist/tasks/pull-request.js';
 import { TaskCommands } from '../../../../dist/tasks/commands.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
@@ -23,21 +21,32 @@ import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs'
 import { managerPrompt } from '../../../../dist/dispatch/settings.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
 
-// CI changes are bot pull requests that people review and merge (#931): only a development a project administrator
-// confirmed as a CI change pushes with the Workflows permission; github_write never has it.
+// CI changes are bot pull requests that people review and merge (#931, #1269): any PR-capable development task may
+// modify `.github/workflows/` and requests `workflows: write` on demand when pushing its bot branch; `github_write`
+// still never modifies workflows.
 
 // A GitHub App installation that grants `granted`, and a GitHub that records every request. `extra` is added to every
 // token GitHub returns, as if it granted more than was asked for.
 async function appFixture(t, granted, extra = {}) {
-  const requests = [], tokens = [];
+  const requests = [], tokens = [], revokedTokens = [], requestTokenScopes = [];
+  const tokenScopes = new Map();
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const path = new URL(req.url, 'http://fixture').pathname, send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    const authToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     requests.push(`${req.method} ${path}`);
+    if (tokenScopes.has(authToken)) requestTokenScopes.push({ request: `${req.method} ${path}`, permissions: tokenScopes.get(authToken) });
     if (path === '/repos/fixture/r/installation') return send({ id: 55, account: { id: 1 }, permissions: { metadata: 'read', ...granted } });
     if (path === '/app/installations/55/access_tokens') {
       const body = JSON.parse(raw); tokens.push(body.permissions);
-      return send({ token: 'ghs_' + randomBytes(12).toString('hex'), expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: { ...body.permissions, ...extra } }, 201);
+      const secret = 'ghs_' + randomBytes(12).toString('hex');
+      const perms = { ...body.permissions, ...extra };
+      tokenScopes.set(secret, perms);
+      return send({ token: secret, expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: perms }, 201);
+    }
+    if (path === '/installation/token' && req.method === 'DELETE') {
+      revokedTokens.push(authToken);
+      res.writeHead(204); return res.end();
     }
     if (path === '/repositories/r') return send({ id: 'r', owner: { id: 1 }, full_name: 'fixture/r', default_branch: 'main' });
     if (path === '/app') return send({ slug: 'fixture-bot' });
@@ -80,7 +89,7 @@ async function appFixture(t, granted, extra = {}) {
   const repository = store.get("SELECT * FROM repositories WHERE id='r'"), apiUrl = 'http://127.0.0.1:' + server.address().port;
   // The caller's own permission allows every write: only the rules under test refuse.
   const write = args => githubWrite({ store, repository, redactor: new Redactor(), guard: async () => {}, apiUrl, scope: 'test', actor: { kind: 'manager', role: 'manager' }, allowed: () => true }, args);
-  return { store, repository, apiUrl, requests, tokens, write };
+  return { store, repository, apiUrl, requests, tokens, revokedTokens, requestTokenScopes, write };
 }
 
 test('github_write refuses .github/workflows/ before anything reaches GitHub, and never asks for Workflows', async t => {
@@ -113,63 +122,41 @@ test('github_write refuses a token GitHub returns with Workflows', async t => {
   assert.ok(!f.requests.includes('POST /repos/fixture/r/git/refs'), 'nothing was sent with that token');
 });
 
-test('only a task a person confirmed as a CI change publishes with Workflows, and only where the installation grants it', async t => {
-  const task = workflow_changes => ({ input: JSON.stringify({ request: 'Change CI', contract: { endpoint: 'reviewable_pull_request' }, ...(workflow_changes ? { workflow_changes } : {}) }) });
-  assert.equal(pullRequestPermissions(task()), undefined);
-  // The control plane writes workflow_changes with the person who confirmed it; anything else is not a confirmation.
-  assert.equal(pullRequestPermissions(task({ confirmed_at: 'now' })), undefined);
-  const confirmed = pullRequestPermissions(task({ confirmed_by: 'u1', confirmed_at: 'now' }));
-  assert.deepEqual(confirmed, { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' });
-  for (const [granted, expected] of [[{ contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' }, { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' }],
-    [{ contents: 'write', issues: 'write', pull_requests: 'write' }, { contents: 'write', issues: 'write', pull_requests: 'write' }]]) {
-    const f = await appFixture(t, granted), github = new GitHub(f.store, f.repository, new Redactor(), async () => {}, f.apiUrl);
-    await github.connect(true, undefined, confirmed, false);
-    assert.deepEqual(f.tokens, [expected]);
-  }
-  // The usual development token, which every other task pushes with.
-  const f = await appFixture(t, { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' }), github = new GitHub(f.store, f.repository, new Redactor(), async () => {}, f.apiUrl);
-  await github.connect(true, undefined, pullRequestPermissions(task()), false);
-  assert.deepEqual(f.tokens, [{ contents: 'write', issues: 'write', pull_requests: 'write' }]);
-});
-
-test('a project administrator confirms a CI change in the console; members, reports and assistants cannot', async t => {
+test('task creation requires no workflow_changes confirmation and smoothly ignores legacy boolean workflow_changes', async t => {
   const { h, admin } = await managementFixture(t);
   h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
   const contract = endpoint => ({ goal: 'Run the tests on Node 22', scope: ['.github/workflows/ci.yml'], criteria: ['CI runs on Node 22'], endpoint });
   const create = (client, body) => client('/api/tasks', 'POST', { repository_id: '101', request: 'Move CI to Node 22', ...body });
-  const confirmed = await create(admin, { intent: 'development', contract: contract('reviewable_pull_request'), workflow_changes: true });
-  assert.equal(confirmed.status, 201, JSON.stringify(confirmed.value));
-  const input = JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', confirmed.value.id).input);
-  assert.ok(input.workflow_changes.confirmed_by); assert.ok(input.workflow_changes.confirmed_at);
-  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='task.workflow_changes' AND resource_id=?", confirmed.value.id).n, 1);
-  // Only a code PR can change workflows; the flag is a boolean.
-  assert.equal((await create(admin, { intent: 'report', contract: contract('report'), workflow_changes: true })).value.error, 'invalid_workflow_changes');
-  assert.equal((await create(admin, { intent: 'development', contract: contract('reviewable_pull_request'), workflow_changes: 'yes' })).status, 400);
-  const plain = await create(admin, { intent: 'development', contract: contract('reviewable_pull_request') });
-  assert.equal(plain.status, 201); assert.equal(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', plain.value.id).input).workflow_changes, undefined);
 
-  // A member who may create tasks but not configure the project.
+  // Legacy boolean workflow_changes is accepted and ignored without persisting confirmation or extra audit rows.
+  const legacy = await create(admin, { intent: 'development', contract: contract('reviewable_pull_request'), workflow_changes: true });
+  assert.equal(legacy.status, 201, JSON.stringify(legacy.value));
+  const input = JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', legacy.value.id).input);
+  assert.equal(input.workflow_changes, undefined);
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='task.workflow_changes' AND resource_id=?", legacy.value.id).n, 0);
+  assert.equal((await create(admin, { intent: 'development', contract: contract('reviewable_pull_request'), workflow_changes: 'yes' })).status, 400);
+
+  // Project member with tasks.write (no config.write) can create CI development tasks directly.
   const password = testPassword(), user = (await admin('/api/users', 'POST', { username: 'member', password, repository_ids: [] })).value.user;
   const principal = h.store.get('SELECT id FROM principals WHERE user_id=?', user.id).id, tenant = h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
   assert.equal((await admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: tenant, project_id: '101', capabilities: ['tasks.read', 'tasks.write'] })).status, 201);
   const member = h.client(); await member('/api/auth/login', 'POST', { username: 'member', password });
-  const refused = await create(member, { intent: 'development', contract: contract('reviewable_pull_request'), workflow_changes: true });
-  assert.equal(refused.status, 403, JSON.stringify(refused.value));
+  assert.equal((await create(member, { intent: 'development', contract: contract('reviewable_pull_request'), workflow_changes: true })).status, 201);
   assert.equal((await create(member, { intent: 'development', contract: contract('reviewable_pull_request') })).status, 201);
-  // The console offers the checkbox only to who may tick it.
-  assert.equal((await query(admin, 'get_effective_config', { project_id: '101' })).value.task_creation.workflow_changes, true);
-  assert.equal((await query(member, 'get_effective_config', { project_id: '101' })).value.task_creation.workflow_changes, false);
 
-  // Through management commands: the console's new-task page is a person; any other source (an assistant's conversation,
-  // a group chat) cannot confirm a CI change, even for an administrator.
-  const command = async (source, key) => admin('/api/management/commands', 'POST', { operation: 'task.create', target: { project_id: '101' },
-    arguments: { request: 'Move CI to Node 22', contract: contract('reviewable_pull_request'), intent: 'development', workflow_changes: true },
+  // get_effective_config no longer exposes task_creation.workflow_changes.
+  assert.deepEqual((await query(admin, 'get_effective_config', { project_id: '101' })).value.task_creation, { allowed: true, reason: null });
+  assert.deepEqual((await query(member, 'get_effective_config', { project_id: '101' })).value.task_creation, { allowed: true, reason: null });
+
+  // Management commands from non-console conversations (such as assistant or group chat) also succeed directly.
+  const command = async (source, key, extra = {}) => admin('/api/management/commands', 'POST', { operation: 'task.create', target: { project_id: '101' },
+    arguments: { request: 'Move CI to Node 22', contract: contract('reviewable_pull_request'), intent: 'development', ...extra },
     expected_revision: (await query(admin, 'get_effective_config', { project_id: '101' })).value.revision, idempotency_key: key, source_conversation: source, source_message: key });
-  const fromAssistant = await command('assistant-conversation', 'assistant');
-  assert.equal(fromAssistant.value.error ?? fromAssistant.value.result?.error, 'workflow_changes_need_person', JSON.stringify(fromAssistant.value));
+  const fromAssistant = await command('assistant-conversation', 'assistant', { workflow_changes: true });
+  assert.equal(fromAssistant.value.state, 'succeeded', JSON.stringify(fromAssistant.value));
+  assert.equal(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', fromAssistant.value.result.id).input).workflow_changes, undefined);
   const fromConsole = await command('console:new-task', 'console');
   assert.equal(fromConsole.value.state, 'succeeded', JSON.stringify(fromConsole.value));
-  assert.ok(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', fromConsole.value.result.id).input).workflow_changes.confirmed_by);
 });
 
 test('the gate onboarding addresses answer 410 with what replaces them', async t => {
@@ -192,7 +179,6 @@ test('upgrading ends unfinished gate onboarding tasks and drops its settings, se
   const now = new Date().toISOString();
   for (const [id, status] of [['open', 'queued'], ['waiting', 'waiting_environment'], ['done', 'succeeded']])
     store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,created_at,updated_at) VALUES(?,'r','gate.onboarding',?,'Gate turn',?,?)", id, status, now, now);
-  // What an older version kept for gate onboarding conversations and the one-click runs before them.
   store.db.exec("CREATE TABLE gate_onboarding_sessions(id TEXT PRIMARY KEY,repository_id TEXT); INSERT INTO gate_onboarding_sessions VALUES('s','r'); CREATE TABLE quickstart_runs(id TEXT PRIMARY KEY)");
   store.close(); store = new Store(database, key); t.after(() => store.close());
 
@@ -202,26 +188,27 @@ test('upgrading ends unfinished gate onboarding tasks and drops its settings, se
   assert.deepEqual(JSON.parse(policy.work_settings), {});
   assert.deepEqual(JSON.parse(policy.task_models), {});
   assert.ok(!store.hasTable('gate_onboarding_sessions') && !store.hasTable('quickstart_runs'));
-  // Custom review.pr section migrates onto the reviewer role, while gate.onboarding is dropped.
   const prompt = managerPrompt(store, 'r');
   assert.doesNotMatch(prompt.content, /gate\.onboarding|接入门禁/);
   const reviewer = roleConfiguration(store, 'r').roles.find(r => r.role_id === 'reviewer');
   assert.match(reviewer.persona_prompt, /Read the diff\./);
   assert.doesNotMatch(reviewer.persona_prompt, /gate\.onboarding|接入门禁/);
-  // Once.
   const revBefore = roleConfiguration(store, 'r').revision;
   store.close(); store = new Store(database, key);
   assert.equal(roleConfiguration(store, 'r').revision, revBefore);
 });
 
-test('publishRequestPullRequest distinguishes unconfirmed tasks, missing Workflows permission, and authorized workflow publishing', async t => {
+test('publishRequestPullRequest requests workflows: write on demand and reports github_workflows_permission_missing when installation lacks it', async t => {
   const wfBase = { path: '.github/workflows/ci.yml', mode: '100644', sha: '1'.repeat(40) };
   const wfNewBytes = Buffer.from('name: CI\non: [push, pull_request]\n');
   const wfNew = { path: '.github/workflows/ci.yml', mode: '100644', sha: blobSha(wfNewBytes), base64: wfNewBytes.toString('base64') };
-  const expectedTree = treeSha([wfNew]);
+  const codeBase = { path: 'src/index.ts', mode: '100644', sha: '2'.repeat(40) };
+  const codeNewBytes = Buffer.from('export const ok = true;\n');
+  const codeNew = { path: 'src/index.ts', mode: '100644', sha: blobSha(codeNewBytes), base64: codeNewBytes.toString('base64') };
   const baseSha = 'b'.repeat(40);
-  const setupTask = (f, confirmWorkflow) => {
+  const setupTask = (f, files, snapshotFiles) => {
     const now = new Date().toISOString();
+    const expectedTree = treeSha(files);
     f.store.run("UPDATE policies SET development_enabled=1,test_command='true' WHERE repository_id='r'");
     const commands = new TaskCommands(f.store);
     const operator = { id: 'u1', role: 'project_admin', repositories: ['r'] };
@@ -230,7 +217,6 @@ test('publishRequestPullRequest distinguishes unconfirmed tasks, missing Workflo
       request: 'Update CI workflow',
       intent: 'development',
       contract: { goal: 'Update CI workflow', scope: ['.github/workflows/ci.yml'], criteria: ['Workflow updated'], endpoint: 'reviewable_pull_request' },
-      ...(confirmWorkflow ? { workflow_changes: true } : {}),
     });
     const taskId = created.id;
     const savedInput = JSON.parse(f.store.get('SELECT input FROM tasks WHERE id=?', taskId).input);
@@ -240,8 +226,8 @@ test('publishRequestPullRequest distinguishes unconfirmed tasks, missing Workflo
     const branch = `bot/task-${taskId}`;
     f.store.run("INSERT INTO bot_branches VALUES('r',?,?)", branch, taskId);
     const candidate = {
-      files: [wfNew],
-      snapshot_files: [wfBase],
+      files,
+      snapshot_files: snapshotFiles,
       source_tree: '0'.repeat(40),
       tree_sha: expectedTree,
       local_sha: 'd'.repeat(40),
@@ -265,43 +251,50 @@ test('publishRequestPullRequest distinguishes unconfirmed tasks, missing Workflo
     return task;
   };
 
-  // 1. Unconfirmed task against an installation that DOES grant workflows: write -> workflow_changes_not_confirmed, no POST /git/trees.
+  // 1. Ordinary development task touching workflows against an installation WITH workflows: write ->
+  // connects least-privilege first, mints {contents, workflows} only during Publisher.branch, revokes it right after push,
+  // and creates the PR with the base token (without workflows: write).
   const f1 = await appFixture(t, { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' });
-  const task1 = setupTask(f1, false);
-  await assert.rejects(publishRequestPullRequest(f1.store, task1, new Redactor(), async () => {}, () => {}, f1.apiUrl), error => {
-    assert.equal(error.code, 'workflow_changes_not_confirmed');
-    assert.equal(error.state, 'waiting_permission');
-    assert.ok(error.detail.includes('.github/workflows/ci.yml'));
-    assert.match(error.detail, /重试原任务不会生效/);
-    return true;
-  });
-  assert.ok(!f1.requests.includes('POST /repos/fixture/r/git/trees'));
-  assert.ok(!f1.requests.includes('POST /repos/fixture/r/git/blobs'));
+  const task1 = setupTask(f1, [wfNew], [wfBase]);
+  const published = await publishRequestPullRequest(f1.store, task1, new Redactor(), async () => {}, () => {}, f1.apiUrl);
+  assert.equal(published.pr_number, 12);
+  assert.deepEqual(f1.tokens, [
+    { contents: 'write', issues: 'write', pull_requests: 'write' },
+    { contents: 'write', workflows: 'write' },
+  ]);
+  assert.ok(f1.requests.includes('POST /repos/fixture/r/git/trees'));
+  assert.ok(f1.requests.includes('POST /repos/fixture/r/pulls'));
+  const treeScope = f1.requestTokenScopes.find(r => r.request === 'POST /repos/fixture/r/git/trees')?.permissions;
+  const prScope = f1.requestTokenScopes.find(r => r.request === 'POST /repos/fixture/r/pulls')?.permissions;
+  assert.equal(treeScope?.workflows, 'write', 'Git branch push must use on-demand workflows: write token');
+  assert.equal(prScope?.workflows, undefined, 'PR creation must not hold workflows: write');
+  assert.equal(f1.revokedTokens.length, 2, 'both the on-demand workflow push token and base token must be revoked');
+  const wfRevokeIdx = f1.requests.indexOf('DELETE /installation/token');
+  const prCreateIdx = f1.requests.indexOf('POST /repos/fixture/r/pulls');
+  assert.ok(wfRevokeIdx > 0 && wfRevokeIdx < prCreateIdx, 'on-demand workflow token must be revoked before PR creation');
 
-  // 2. Confirmed task against an installation MISSING workflows: write -> github_workflows_permission_missing, no POST /git/trees.
-  const f2 = await appFixture(t, { contents: 'write', issues: 'write', pull_requests: 'write' });
-  const task2 = setupTask(f2, true);
-  await assert.rejects(publishRequestPullRequest(f2.store, task2, new Redactor(), async () => {}, () => {}, f2.apiUrl), error => {
+  // 2. Ordinary development task NOT touching workflows -> never requests workflows: write even if installation grants it.
+  const f2 = await appFixture(t, { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' });
+  const task2 = setupTask(f2, [wfBase, codeNew], [wfBase, codeBase]);
+  const publishedCodeOnly = await publishRequestPullRequest(f2.store, task2, new Redactor(), async () => {}, () => {}, f2.apiUrl);
+  assert.equal(publishedCodeOnly.pr_number, 12);
+  assert.deepEqual(f2.tokens, [{ contents: 'write', issues: 'write', pull_requests: 'write' }]);
+
+  // 3. Ordinary development task touching workflows against an installation MISSING workflows: write -> github_workflows_permission_missing, no POST /git/trees.
+  const f3 = await appFixture(t, { contents: 'write', issues: 'write', pull_requests: 'write' });
+  const task3 = setupTask(f3, [wfNew], [wfBase]);
+  await assert.rejects(publishRequestPullRequest(f3.store, task3, new Redactor(), async () => {}, () => {}, f3.apiUrl), error => {
     assert.equal(error.code, 'github_workflows_permission_missing');
     assert.equal(error.state, 'waiting_permission');
     assert.ok(error.detail.includes('.github/workflows/ci.yml'));
     assert.match(error.detail, /Workflows: Read and write/);
     return true;
   });
-  assert.ok(!f2.requests.includes('POST /repos/fixture/r/git/trees'));
-  assert.ok(!f2.requests.includes('POST /repos/fixture/r/git/blobs'));
-
-  // 3. Confirmed task against an installation WITH workflows: write -> publishes PR normally.
-  const f3 = await appFixture(t, { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' });
-  const task3 = setupTask(f3, true);
-  const published = await publishRequestPullRequest(f3.store, task3, new Redactor(), async () => {}, () => {}, f3.apiUrl);
-  assert.equal(published.pr_number, 12);
-  assert.deepEqual(f3.tokens, [{ contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' }]);
-  assert.ok(f3.requests.includes('POST /repos/fixture/r/git/trees'));
-  assert.ok(f3.requests.includes('POST /repos/fixture/r/pulls'));
+  assert.ok(!f3.requests.includes('POST /repos/fixture/r/git/trees'));
+  assert.ok(!f3.requests.includes('POST /repos/fixture/r/git/blobs'));
 });
 
-test('open_pull_request refuses unconfirmed .github/workflows/ edits at submission before running QA', async t => {
+test('ordinary development task (open_pull_request) modifies .github/workflows/ and publishes PR normally', async t => {
   const root = mkdtempSync(join(tmpdir(), 'bot-wf-submit-'));
   const store = new Store(':memory:', randomBytes(32));
   const computer = new LocalManager('101', root);
@@ -310,7 +303,7 @@ test('open_pull_request refuses unconfirmed .github/workflows/ edits at submissi
   const gh = 'http://127.0.0.1:' + ghServer.address().port;
   await fetch(gh + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: 'wf-submit-token' }) });
 
-  let qaCalls = 0, devStep = 0, workflowRefusal = null;
+  let qaCalls = 0, devStep = 0;
   const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
   const model = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -324,11 +317,8 @@ test('open_pull_request refuses unconfirmed .github/workflows/ edits at submissi
       devStep++;
       if (devStep === 1) {
         message = call('write_file', { path: '.github/workflows/ci.yml', content: 'name: CI\non: push\n' });
-      } else if (devStep === 2) {
-        message = call('open_pull_request', { summary: 'Add CI workflow', artifacts: [{ path: '.github/workflows/ci.yml', description: 'CI' }], change_title: 'ci: add workflow' });
       } else {
-        workflowRefusal = messages.filter(m => m.role === 'tool').map(m => String(m.content)).find(text => text.includes('workflow_changes_not_confirmed'));
-        message = call('submit_report', { summary: 'Needs a CI-confirmed task by a project administrator.', artifacts: [], evidence: [], unknowns: [] });
+        message = call('open_pull_request', { summary: 'Add CI workflow', artifacts: [{ path: '.github/workflows/ci.yml', description: 'CI' }], change_title: 'ci: add workflow' });
       }
     } else {
       throw new Error('unexpected model tools: ' + tools.join(','));
@@ -350,7 +340,7 @@ test('open_pull_request refuses unconfirmed .github/workflows/ edits at submissi
   store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', 'a', 'fixture', 'bot_account', null, store.secrets.seal({ token: 'wf-submit-token' }, 'account:a'), 'now');
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'wf-model-token' }, 'model:m'), 'now');
-  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','node --test')");
+  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','true')");
   nativeRoles(store, '101');
 
   const commands = new TaskCommands(store);
@@ -367,98 +357,198 @@ test('open_pull_request refuses unconfirmed .github/workflows/ edits at submissi
   authorizeKnowledgeTask(store, id);
 
   await engine.run(id, 'claim');
-  assert.ok(workflowRefusal, 'model must receive workflow_changes_not_confirmed refusal');
-  assert.ok(workflowRefusal.includes('.github/workflows/ci.yml'));
-  assert.equal(qaCalls, 0, 'QA must not run for an unconfirmed workflow submission');
-  const task = store.get('SELECT status, error_code FROM tasks WHERE id=?', id);
-  assert.equal(task.status, 'completed');
+  assert.equal(qaCalls, 1, 'QA must run and approve the workflow change');
+  const task = store.get('SELECT status, error_code, result FROM tasks WHERE id=?', id);
+  assert.equal(task.status, 'pr_opened', JSON.stringify(task));
   assert.equal(task.error_code, null);
+  assert.ok(JSON.parse(task.result).pr_number, JSON.stringify(task.result));
 });
 
-test('create_pull_request refuses unconfirmed .github/workflows/ edits before running policy tests or QA', async t => {
-  const root = mkdtempSync(join(tmpdir(), 'bot-wf-create-pr-'));
-  const store = new Store(':memory:', randomBytes(32));
-  const computer = new LocalManager('101', root);
-  const { server: ghServer } = await import('../../../fixtures/agent-server.mjs');
-  ghServer.listen(0, '127.0.0.1'); await once(ghServer, 'listening');
-  const gh = 'http://127.0.0.1:' + ghServer.address().port;
-  await fetch(gh + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: 'wf-create-pr-token' }) });
+test('Manager-dispatched PR revision (development.pr) updates .github/workflows/ with on-demand workflows: write token, and reports missing App permission cleanly', async t => {
+  const baseCommitSha = '1'.repeat(40);
+  const prHeadSha = '2'.repeat(40);
+  const newCommitSha = '3'.repeat(40);
+  const readmeBytes = Buffer.from('# Repo\n');
+  const readmeSha = blobSha(readmeBytes);
+  const oldWfBytes = Buffer.from('name: CI\non: push\n');
+  const oldWfSha = blobSha(oldWfBytes);
+  const initialTreeSha = treeSha([
+    { path: 'README.md', mode: '100644', sha: readmeSha },
+    { path: '.github/workflows/ci.yml', mode: '100644', sha: oldWfSha },
+  ]);
 
-  let qaCalls = 0;
-  const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
-  const latestResult = messages => messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return null; } }).filter(r => r?.result_ref).at(-1)?.result_ref;
-  const hasWorkflowFeedback = () => store.all("SELECT data FROM task_history WHERE type='team_feedback'").some(r => String(r.data).includes('workflow_changes_not_confirmed'));
-  const model = createServer(async (req, res) => {
-    let raw = ''; for await (const chunk of req) raw += chunk;
-    const body = JSON.parse(raw), messages = body.messages;
-    const tools = (body.tools ?? []).map(tool => tool.function.name);
-    const names = messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls ?? []).map(c => c.function.name);
-    const sawFeedback = hasWorkflowFeedback();
-    let message;
-    if (messages[0].content.includes('independent delivery acceptance evaluator')) {
-      qaCalls++;
-      message = { role: 'assistant', content: JSON.stringify({ outcome: 'pass', reason: 'ok', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true }) };
-    } else if (tools.includes('delegate_role')) {
-      const prompt = JSON.parse(messages[1].content);
-      const delegated = names.filter(n => n === 'delegate_role').length;
-      const nominated = names.filter(n => n === 'nominate_delivery').length;
-      if (delegated <= nominated) {
-        message = call('delegate_role', { role: 'dev', purpose: sawFeedback ? 'Revert workflow file and report no_changes' : 'Edit .github/workflows/ci.yml', refs: [prompt.task_ref] });
-      } else {
-        message = call('nominate_delivery', { result_ref: latestResult(messages) });
+  const runRevision = async (grantedPermissions) => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-wf-pr-rev-'));
+    const store = new Store(':memory:', randomBytes(32));
+    const computer = new LocalManager('101', root);
+    const tokens = [], revoked = [], gitWrites = [];
+    let currentHead = prHeadSha;
+
+    const ghServer = createServer(async (req, res) => {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      const url = new URL(req.url, 'http://fixture'), path = url.pathname;
+      const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+      if (path === '/app') return send({ slug: 'fixture-bot' });
+      if (path === '/users/fixture-bot%5Bbot%5D') return send({ id: 901, login: 'fixture-bot[bot]' });
+      if (path === '/repos/fixture/project-101/installation') return send({ id: 55, account: { id: 10 }, permissions: { metadata: 'read', ...grantedPermissions } });
+      if (path === '/app/installations/55/access_tokens') {
+        const body = JSON.parse(raw);
+        tokens.push(body.permissions);
+        const granted = Object.fromEntries(Object.entries(body.permissions || {}).filter(([k]) => grantedPermissions[k]));
+        return send({ token: 'ghs_' + randomBytes(8).toString('hex'), expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: granted }, 201);
       }
-    } else if (tools.includes('submit_delivery')) {
-      if (!sawFeedback) {
-        if (!names.includes('write_file')) message = call('write_file', { path: '.github/workflows/ci.yml', content: 'name: CI\non: push\n' });
-        else message = call('submit_delivery', { summary: 'Add CI workflow', test_command: 'node --test', change_title: 'ci: add workflow' });
-      } else {
-        if (!names.includes('run_command')) message = call('run_command', { command: 'rm -rf .github/workflows/ci.yml' });
-        else message = call('submit_delivery', { summary: 'Cannot modify .github/workflows/ without CI confirmation.', test_command: 'node --test', change_title: 'ci: blocked without confirmation' });
+      if (path === '/installation/token' && req.method === 'DELETE') {
+        revoked.push(String(req.headers.authorization || ''));
+        res.writeHead(204); return res.end();
       }
-    } else {
-      throw new Error('unexpected model tools: ' + tools.join(','));
+      if (path === '/repositories/101') return send({ id: '101', owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
+      if (path === '/repos/fixture/project-101/pulls/201' && req.method === 'GET') {
+        return send({
+          id: 2010, number: 201, state: 'open', draft: false, title: 'ci: initial', body: 'Initial CI PR',
+          html_url: 'https://github.invalid/fixture/project-101/pull/201',
+          user: { id: 901, login: 'fixture-bot[bot]' }, labels: [],
+          base: { ref: 'main', sha: baseCommitSha },
+          head: { ref: 'bot/issue-1-src', sha: currentHead, repo: { id: '101' } },
+        });
+      }
+      if (path === '/repos/fixture/project-101/pulls/201' && req.method === 'PATCH') {
+        const body = JSON.parse(raw);
+        return send({
+          id: 2010, number: 201, state: 'open', draft: false, title: body.title, body: body.body,
+          html_url: 'https://github.invalid/fixture/project-101/pull/201',
+          user: { id: 901, login: 'fixture-bot[bot]' }, labels: [],
+          base: { ref: 'main', sha: baseCommitSha },
+          head: { ref: 'bot/issue-1-src', sha: currentHead, repo: { id: '101' } },
+        });
+      }
+      if (path === '/repos/fixture/project-101/pulls/201/files') return send([{ filename: '.github/workflows/ci.yml', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }]);
+      if (path === '/repos/fixture/project-101/pulls/201/reviews') return send([]);
+      if (path === '/repos/fixture/project-101/pulls/201/comments') return send([]);
+      if (path === '/repos/fixture/project-101/issues/201/comments' && req.method === 'GET') return send([]);
+      if (path === '/repos/fixture/project-101/issues/201/comments' && req.method === 'POST') return send({ id: 5001, html_url: 'https://github.invalid/fixture/project-101/pull/201#issuecomment-5001', body: JSON.parse(raw).body, user: { id: 901 } }, 201);
+      if (path === '/repos/fixture/project-101/labels') return send([]);
+      if (path === '/repos/fixture/project-101/git/ref/heads/main') return send({ ref: 'refs/heads/main', object: { sha: baseCommitSha, type: 'commit' } });
+      if (path === '/repos/fixture/project-101/git/ref/heads/bot%2Fissue-1-src') return send({ ref: 'refs/heads/bot/issue-1-src', object: { sha: currentHead, type: 'commit' } });
+      if (path === `/repos/fixture/project-101/git/commits/${baseCommitSha}` || path === `/repos/fixture/project-101/git/commits/${prHeadSha}`) {
+        return send({ sha: path.split('/').at(-1), tree: { sha: initialTreeSha }, parents: [] });
+      }
+      if (path === `/repos/fixture/project-101/git/trees/${initialTreeSha}`) {
+        return send({
+          sha: initialTreeSha, truncated: false,
+          tree: [
+            { path: 'README.md', mode: '100644', type: 'blob', sha: readmeSha, size: readmeBytes.length },
+            { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: oldWfSha, size: oldWfBytes.length },
+          ],
+        });
+      }
+      if (path === `/repos/fixture/project-101/git/blobs/${readmeSha}`) return send({ sha: readmeSha, encoding: 'base64', content: readmeBytes.toString('base64') });
+      if (path === `/repos/fixture/project-101/git/blobs/${oldWfSha}`) return send({ sha: oldWfSha, encoding: 'base64', content: oldWfBytes.toString('base64') });
+      if (path === '/repos/fixture/project-101/git/blobs' && req.method === 'POST') {
+        gitWrites.push(`${req.method} ${path}`);
+        return send({ sha: blobSha(Buffer.from(JSON.parse(raw).content, 'base64')) }, 201);
+      }
+      if (path === '/repos/fixture/project-101/git/trees' && req.method === 'POST') {
+        gitWrites.push(`${req.method} ${path}`);
+        const body = JSON.parse(raw);
+        const merged = new Map([
+          ['README.md', { path: 'README.md', mode: '100644', sha: readmeSha }],
+          ['.github/workflows/ci.yml', { path: '.github/workflows/ci.yml', mode: '100644', sha: oldWfSha }],
+        ]);
+        for (const entry of body.tree || []) {
+          if (entry.sha === null) merged.delete(entry.path);
+          else merged.set(entry.path, { path: entry.path, mode: entry.mode, sha: entry.sha });
+        }
+        return send({ sha: treeSha([...merged.values()]) }, 201);
+      }
+      if (path === '/repos/fixture/project-101/git/commits' && req.method === 'POST') {
+        gitWrites.push(`${req.method} ${path}`);
+        const body = JSON.parse(raw);
+        return send({ sha: newCommitSha, tree: { sha: body.tree } }, 201);
+      }
+      if (path === '/repos/fixture/project-101/git/refs/heads/bot%2Fissue-1-src' && req.method === 'PATCH') {
+        gitWrites.push(`${req.method} ${path}`);
+        currentHead = JSON.parse(raw).sha;
+        return send({ ref: 'refs/heads/bot/issue-1-src', object: { sha: currentHead, type: 'commit' } });
+      }
+      return send({ message: `Not Found: ${req.method} ${path}` }, 404);
+    });
+    ghServer.listen(0, '127.0.0.1'); await once(ghServer, 'listening');
+
+    const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
+    const latestResult = messages => messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return null; } }).filter(r => r?.result_ref).at(-1)?.result_ref;
+    const model = createServer(async (req, res) => {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw), messages = body.messages;
+      const tools = (body.tools ?? []).map(tool => tool.function.name);
+      const names = messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls ?? []).map(c => c.function.name);
+      let message;
+      if (messages[0].content.includes('independent delivery acceptance evaluator')) {
+        message = { role: 'assistant', content: JSON.stringify({ outcome: 'pass', reason: 'ok', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true }) };
+      } else if (tools.includes('delegate_role')) {
+        const prompt = JSON.parse(messages[1].content);
+        if (!names.includes('delegate_role')) message = call('delegate_role', { role: 'dev', purpose: 'Fix workflow per review feedback', refs: [prompt.task_ref] });
+        else message = call('nominate_delivery', { result_ref: latestResult(messages) });
+      } else if (tools.includes('submit_delivery')) {
+        if (!names.includes('write_file')) message = call('write_file', { path: '.github/workflows/ci.yml', content: 'name: CI\non: [push, pull_request]\n' });
+        else message = call('submit_delivery', { summary: 'Fixed workflow trigger on PR', test_command: 'true', change_title: 'ci: trigger on pull_request' });
+      } else {
+        throw new Error('unexpected model tools: ' + tools.join(','));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 8, completion_tokens: 4 } }));
+    });
+    model.listen(0, '127.0.0.1'); await once(model, 'listening');
+
+    const engine = new TaskEngine(store, computer, 'http://127.0.0.1:' + ghServer.address().port);
+    try {
+      const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+      store.run("INSERT INTO accounts VALUES('a','fixture','github_app','123',?,'now')", store.secrets.seal({ private_key: privateKey }, 'account:a'));
+      store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
+      store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'wf-model-token' }, 'model:m'), 'now');
+      store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','true')");
+      nativeRoles(store, '101');
+
+      const now = new Date().toISOString();
+      store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,created_at,updated_at) VALUES('src','101','development.issue',1,'pr_opened','done','Open CI PR','{}',?,?)", now, now);
+      store.run("INSERT INTO bot_branches VALUES('101','bot/issue-1-src','src')");
+      store.run("INSERT INTO bot_pull_requests VALUES('101',201,'2010','901','101','bot/issue-1-src',?,'src',0)", prHeadSha);
+
+      const id = 'wf-pr-rev-1';
+      store.run(
+        "INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,claim_token,created_at,updated_at) VALUES(?,'101','development.pr',201,'running','prepare','Revise CI PR #201',?,'claim',?,?)",
+        id,
+        JSON.stringify({ revision: { source: 'request', requests: [{ author: 'maintainer', id: 'c1', type: 'comment', body: 'Also trigger on pull_request' }] }, review: { implementation_goal: 'Add pull_request trigger to workflow' } }),
+        now,
+        now,
+      );
+      store.run("INSERT OR REPLACE INTO task_claims VALUES(?,'101','claim','now')", id);
+      authorizeKnowledgeTask(store, id);
+
+      await engine.run(id, 'claim');
+      const task = store.get('SELECT status, error_code, result FROM tasks WHERE id=?', id);
+      return { task, tokens, revoked, gitWrites, currentHead };
+    } finally {
+      await engine.close();
+      await computer.recover();
+      await new Promise(r => { model.close(r); model.closeAllConnections(); });
+      await new Promise(r => { ghServer.close(r); ghServer.closeAllConnections(); });
+      store.close();
+      rmSync(root, { recursive: true, force: true });
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 8, completion_tokens: 4 } }));
-  });
-  model.listen(0, '127.0.0.1'); await once(model, 'listening');
-  const engine = new TaskEngine(store, computer, gh + '/github');
-  t.after(async () => {
-    await engine.close();
-    await computer.recover();
-    await new Promise(r => { model.close(r); model.closeAllConnections(); });
-    await new Promise(r => { ghServer.close(r); ghServer.closeAllConnections(); });
-    store.close();
-    rmSync(root, { recursive: true, force: true });
-  });
+  };
 
-  store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', 'a', 'fixture', 'bot_account', null, store.secrets.seal({ token: 'wf-create-pr-token' }, 'account:a'), 'now');
-  store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
-  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', 'http://127.0.0.1:' + model.address().port + '/v1', 'fixture', store.secrets.seal({ value: 'wf-model-token' }, 'model:m'), 'now');
-  // Policy command fails if ever executed while .github/workflows/ci.yml exists.
-  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,capability_ceiling,test_command) VALUES('101','m',1,1,'develop','test ! -e .github/workflows/ci.yml')");
-  nativeRoles(store, '101');
+  // 1. App installation grants workflows: write -> initial connect omits workflows, Publisher mints short-lived workflows: write token on demand and revokes it.
+  const ok = await runRevision({ contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' });
+  assert.equal(ok.task.status, 'completed', JSON.stringify(ok.task));
+  assert.equal(ok.task.error_code, null);
+  assert.equal(ok.currentHead, newCommitSha);
+  assert.deepEqual(ok.tokens[0], { contents: 'write', issues: 'write', pull_requests: 'write' }, 'initial task token must stay least-privilege');
+  assert.ok(ok.tokens.some(scope => scope.contents === 'write' && scope.workflows === 'write'), `expected on-demand workflows: write token, got ${JSON.stringify(ok.tokens)}`);
+  assert.ok(ok.revoked.length >= 1, 'on-demand workflow token must be revoked after branch push');
 
-  const now = new Date().toISOString();
-  const id = 'wf-dev-issue-1';
-  store.run(
-    "INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,claim_token,created_at,updated_at) VALUES(?,'101','development.issue',1,'running','prepare','Add CI',?,'claim',?,?)",
-    id,
-    JSON.stringify({ basis: { kind: 'rule', reason: 'fixture' }, review: { implementation_goal: 'Add CI workflow' } }),
-    now,
-    now,
-  );
-  store.run("INSERT OR REPLACE INTO task_claims VALUES(?,'101','claim','now')", id);
-  authorizeKnowledgeTask(store, id);
-
-  await engine.run(id, 'claim');
-  const feedback = store.all("SELECT data FROM task_history WHERE task_id=? AND type='team_feedback'", id).map(r => JSON.parse(r.data));
-  const task = store.get('SELECT status, error_code, result FROM tasks WHERE id=?', id);
-  const logs = store.all('SELECT content FROM task_logs WHERE task_id=?', id).map(r => JSON.parse(r.content));
-  assert.ok(feedback.some(entry => entry.result?.error === 'workflow_changes_not_confirmed' && entry.result?.files?.includes('.github/workflows/ci.yml')), JSON.stringify({ feedback, task }));
-  assert.ok(!logs.some(entry => entry.type === 'command' && entry.exit_code !== 0), 'policy test must not run during the refused workflow submission');
-  assert.equal(qaCalls, 1, 'QA runs only once for the final no_changes submission, never for the refused workflow edit');
-  assert.equal(task.status, 'completed', JSON.stringify({ task, feedback, logs: logs.slice(-5) }));
-  assert.equal(task.error_code, null);
-  assert.equal(JSON.parse(task.result).status, 'no_changes');
+  // 2. App installation lacks workflows: write -> stops with github_workflows_permission_missing before any git write.
+  const denied = await runRevision({ contents: 'write', issues: 'write', pull_requests: 'write' });
+  assert.equal(denied.task.status, 'waiting_permission', JSON.stringify(denied.task));
+  assert.equal(denied.task.error_code, 'github_workflows_permission_missing');
+  assert.deepEqual(denied.gitWrites, [], 'must stop before uploading blobs/trees/refs when installation lacks workflows: write');
 });
