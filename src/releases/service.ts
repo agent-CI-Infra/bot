@@ -6,7 +6,9 @@ import { stop } from '../agent/common.js';
 import { releaseStorage, releaseIdleDrafts } from './storage.js';
 import { inspect, fingerprint, preflightToken } from './preflight.js';
 import { enabled, releaseRedactor, withGitHub } from './github.js';
-import { validVersion } from './version.js';
+import { validVersion, scheduledVersion } from './version.js';
+import { majorFeature, nextRunAt, scheduleBranchPattern, scheduleTimePattern } from './schedule.js';
+import { newCommits, previousTag, sources } from './range.js';
 import { ReleaseWorker } from './worker.js';
 import { requestObservation } from './observe.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
@@ -25,6 +27,7 @@ export class ReleaseService {
     this.processing = (async () => {
       for (const row of this.store.all("SELECT id FROM project_releases WHERE active=1 AND stage IN ('tagging','waiting_run','running','preparing_notes','creating_draft','publishing') AND next_poll<=?", Date.now()))
         await this.worker.process(row.id);
+      await this.runSchedules();
     })().finally(() => { this.processing = undefined; });
     return this.processing;
   }
@@ -32,6 +35,25 @@ export class ReleaseService {
     const match = /^\/api\/repositories\/([^/]+)\/releases(?:\/(.*))?$/.exec(url.pathname);
     if (!match) return undefined;
     const id = match[1]!, action = match[2] || ''; repository(this.store, user, id);
+    // The schedule is the only release setting a repository keeps outside a release record: the daily time, the branch
+    // and the first-release version. It is stored with the administrator who set it, which is the actor the worker
+    // guard checks on every scheduled release.
+    if (action === 'schedule') {
+      if (method === 'GET') return { schedule: this.schedule(id) };
+      if (method === 'POST') {
+        fields(input, ['enabled', 'branch', 'time', 'start_version']);
+        enabled(this.store, id);
+        const time = String(input.time ?? ''), branch = input.branch === undefined || input.branch === null ? '' : String(input.branch);
+        const start = input.start_version === undefined || input.start_version === null || input.start_version === '' ? null : String(input.start_version);
+        if (!scheduleTimePattern.test(time)) return fail(400, 'release_schedule_invalid');
+        if (branch && (!scheduleBranchPattern.test(branch) || branch.includes('..') || branch.startsWith('-') || branch.endsWith('/'))) return fail(400, 'release_schedule_invalid');
+        if (start !== null && !validVersion(start)) return fail(400, 'release_schedule_invalid');
+        this.saveSchedule(id, user.id, { enabled: input.enabled !== false, branch: branch || await this.defaultBranch(id), time, start });
+        this.store.audit(user.id, 'release.schedule', id, id);
+        return { schedule: this.schedule(id) };
+      }
+      return fail(404, 'not_found');
+    }
     if (method === 'GET' && action === 'preflight') {
       const version = url.searchParams.get('version') || '', redactor = releaseRedactor(this.store, id);
       try {
@@ -141,6 +163,68 @@ export class ReleaseService {
       return { release: this.view(this.find(id, row.id)) };
     }
     return fail(404, 'not_found');
+  }
+  // A repository without a schedule row is simply not scheduled; the console reads the same shape either way.
+  schedule(id: string): Json {
+    const row = this.store.get('SELECT * FROM release_schedules WHERE repository_id=?', id);
+    if (!row) return { enabled: false, branch: 'main', time: null, start_version: null, next_run_at: null, last_run_at: null, last_error: null, last_error_at: null };
+    return { enabled: !!row.enabled, branch: row.branch, time: row.time, start_version: row.start_version ?? null,
+      next_run_at: row.next_run_at ? new Date(row.next_run_at).toISOString() : null, last_run_at: row.last_run_at ?? null,
+      last_error: row.last_error ?? null, last_error_at: row.last_error_at ?? null };
+  }
+  saveSchedule(id: string, actorId: string, input: { enabled: boolean; branch: string; time: string; start: string | null }): void {
+    this.store.run(`INSERT INTO release_schedules(repository_id,enabled,branch,time,start_version,actor_id,next_run_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
+      ON CONFLICT(repository_id) DO UPDATE SET enabled=excluded.enabled,branch=excluded.branch,time=excluded.time,start_version=excluded.start_version,actor_id=excluded.actor_id,updated_at=excluded.updated_at`,
+      id, input.enabled ? 1 : 0, input.branch, input.time, input.start, actorId, nextRunAt(input.time), new Date().toISOString());
+  }
+  // A branch the console did not name is the repository's default branch as GitHub reports it now. If GitHub cannot be
+  // read, fall back to `main` so the setting is still saved and the next run reports the real failure.
+  async defaultBranch(id: string): Promise<string> {
+    try { return await withGitHub(this.store, id, this.apiUrl, {}, releaseRedactor(this.store, id), github => Promise.resolve(github.defaultBranch || 'main')); }
+    catch { return 'main'; }
+  }
+  // A due schedule is advanced before it runs, so a failing repository cannot fire the same minute twice.
+  async runSchedules(): Promise<void> {
+    const now = Date.now();
+    for (const row of this.store.all('SELECT * FROM release_schedules WHERE enabled=1 AND next_run_at<=?', now)) {
+      this.store.run('UPDATE release_schedules SET next_run_at=? WHERE repository_id=? AND next_run_at<=?', nextRunAt(row.time, now), row.repository_id, now);
+      try { await this.releaseScheduled(row); }
+      catch (error) { this.scheduleError(row.repository_id, String((error as any)?.code || 'release_schedule_failed')); }
+    }
+  }
+  scheduleError(id: string, code: string): void {
+    this.store.run('UPDATE release_schedules SET last_error=?,last_error_at=? WHERE repository_id=?', code, new Date().toISOString(), id);
+  }
+  // A scheduled release is the same record the console confirmation creates, so tagging, CI, notes and publication keep
+  // running through the one worker; only the candidate branch, the version and the draft flag differ.
+  async releaseScheduled(row: any): Promise<void> {
+    const store = this.store, id = String(row.repository_id);
+    if (store.get('SELECT 1 FROM project_releases WHERE repository_id=? AND active=1', id)) return;
+    const redactor = releaseRedactor(store, id);
+    await withGitHub(store, id, this.apiUrl, { pull_requests: 'read' }, redactor, async github => {
+      const ref = await github.ref(row.branch), target = ref?.object?.sha;
+      if (!/^[a-f0-9]{40}$/.test(String(target || ''))) return this.scheduleError(id, 'release_branch_missing');
+      const previous = await previousTag(github, target, '');
+      const changed = await newCommits(github, target, previous);
+      if (previous && !changed.length) return this.scheduleError(id, 'release_no_changes');
+      const major = previous ? majorFeature(await sources(github, target, previous)) : false;
+      const version = previous ? scheduledVersion(previous.name, major) : row.start_version;
+      if (!version || !validVersion(version)) return this.scheduleError(id, 'release_start_version_required');
+      if (this.current(id, version)) return this.scheduleError(id, 'release_version_exists');
+      const preview = await inspect(github, version, releaseNotesPrompt(store, id), row.branch);
+      if (preview.no_changes) return this.scheduleError(id, 'release_no_changes');
+      if (!preview.available) return this.scheduleError(id, 'release_preflight_failed');
+      const now = new Date().toISOString(), releaseId = randomId();
+      store.transaction(() => {
+        releaseIdleDrafts(store);
+        if (store.get('SELECT 1 FROM project_releases WHERE repository_id=? AND active=1', id)) return;
+        store.run(`INSERT INTO project_releases(id,repository_id,version,target_sha,actor_id,stage,data,created_at,updated_at) VALUES(?,?,?,?,?,'tagging',?,?,?)`,
+          releaseId, id, preview.version, preview.target_sha, row.actor_id,
+          JSON.stringify(redactor.clean({ ...preview, body: '', body_revision: 0, failure_step: null, scheduled: true, draft: false,
+            version_reason: { major, previous: previous?.name ?? null, start_version: row.start_version ?? null } })), now, now);
+      });
+      store.run('UPDATE release_schedules SET last_error=NULL,last_error_at=NULL,last_run_at=? WHERE repository_id=?', now, id);
+    });
   }
   current(id: string, version: string) {
     return this.store.get('SELECT * FROM project_releases WHERE repository_id=? AND version=?', id, version);

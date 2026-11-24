@@ -53,6 +53,15 @@
 2. **自动打标签与跟踪 CI**：确认后由 GitHub App 创建注释标签并跟踪对应 Release 工作流；运行失败不会自动重跑，也不会移动或删除同名标签，可按需触发 AI 运行分析排查日志。
 3. **发行说明草稿与人工发布**：全部 job 成功后，控制面基于本次版本区间内的真实提交与已合并 PR（如仓库存在 `.agents/skills/release-notes/SKILL.md` 则按该规则组织）创建 GitHub Release 草稿，最终由人在页面编辑并点击 **「正式发布」**。
 
+### 4.1 定时发版本（每日）
+
+仓库也可以不用人守着发版本：`GET /api/repositories/<id>/releases/schedule` 读取当前配置，`POST` 同一路径保存（`enabled`、`time` 为 UTC 的 `HH:MM`、`branch`、`start_version`；不写 `branch` 时取该仓库在 GitHub 上的默认分支，`start_version` 只在首次发布时使用）。
+
+- **版本只升 Y 或 Z**：从发布分支尖端相对上一枚可达版本标签取变更；变更集里有 `feat`/`feature`/`BREAKING CHANGE` 的提交或 PR 时只升次版本号 Y，其余只升修订号 Z，主版本号 X 不动；上一枚是预发布版本时先落到它自己的正式版本。选择结果与理由（`major`、`previous`、`start_version`）写入发布记录的 `version_reason`。
+- **无人值守边界**：仓库已有进行中的发布、没有新提交、预检不可用或首次发布没有配置 `start_version` 时不打标签、不创建 Release，原因写回 `schedule.last_error`（如 `release_no_changes`、`release_start_version_required`），下一次到点再试。
+- **操作者**：定时任务沿用配置该计划的管理员作为发起人，工作线程仍按当前项目发布权限复核；该管理员权限被收回时，发布停在等待权限而不是继续写入。
+- **直接正式发布**：定时路径创建的 Release 为正式发布（`draft=false`）；手动发版本仍是草稿交人点击发布，两条路径互不改写。
+
 ## 5. 公共 Dashboard 与单仓公开看板
 
 launchpad 随同一业务端口（`8791`）内置托管公开看板，**无需控制台登录**即可访问，也不依赖 GitHub Pages：
