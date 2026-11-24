@@ -18,6 +18,7 @@
   "auto-merge-policy": 1.923,
   "board": 2.248,
   "bot-acceptance-scripts": 2.703,
+  "bot-pr-patrol": 10.5,
   "bot-pr-revision": 2.918,
   "bot-pr-wake": 39.511,
   "browser-policy": 2.504,

@@ -9,7 +9,7 @@ const managerErrors = {
 const managerError = err => { const code = /· (\w+)$/.exec(err.message)?.[1] ?? err.message; return managerErrors[code] ? `${managerErrors[code]}（${code}）` : readErrorText(err); };
 const dispatchEventNames = { 'issue.opened': 'Issue 打开', 'issue.updated': 'Issue 更新', 'issue.mention': 'Issue 提及', 'issue.labeled': 'Issue 加标签', 'pull_request.opened': 'PR 打开',
   'pull_request.synchronize': 'PR 推送', 'pull_request.updated': 'PR 讨论', 'pull_request.mention': 'PR 提及', 'pull_request.labeled': 'PR 加标签', 'pull_request.checks_failed': 'bot PR 检查失败',
-  'pull_request.conflicted': 'bot PR 合并冲突', 'review.published': '检视发布', 'development.stopped': '开发停下',
+  'pull_request.conflicted': 'bot PR 合并冲突', 'pull_request.patrol': 'bot PR 内部巡检', 'review.published': '检视发布', 'development.stopped': '开发停下',
   'release.manual': '发版本', 'actions.run_failed': 'Actions 失败', 'schedule.due': '定时检查' };
 const decisionNames = { create: ['新建任务', 'success'], continue: ['续接任务', 'info'], ignore: ['不分派任务', ''] };
 function managerSection(roles) {

@@ -62,14 +62,6 @@ const projects = new ProjectService(store, manager);
 // Repository mirrors live next to the database on the control plane's own volume.
 const gitCache = new GitCache(process.env.BOT_GIT_CACHE_DIR || resolve(dirname(databasePath), 'git-cache'));
 const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCache);
-// Tasks in 待处理 that nobody needs to act on any more leave it in small batches (#713).
-engine.obsolete.start();
-engine.botPrWake.start();
-const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
-// Fail closed on saved project_environments before starting TaskEngine immediately, then reconcile in the background
-// so slow pending operations never delay engine startup and manager_not_ready never clears the startup gate.
-void startProjectRuntime(projects, engine);
-const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
 // A count read from the environment, or the default when unset; a value that is not a positive integer stops startup
 // instead of turning into NaN, which would make a threshold that never fires (#771).
 const count = (name: string, fallback: number, min = 1): number => {
@@ -78,6 +70,20 @@ const count = (name: string, fallback: number, min = 1): number => {
   if (!Number.isSafeInteger(value) || value < min) { console.error(`${name} must be an integer >= ${min}, got ${JSON.stringify(raw)}`); process.exit(1); }
   return value;
 };
+const patrolIntervalMs = (() => {
+  const value = count('BOT_PR_PATROL_INTERVAL_MS', 6 * 60 * 60 * 1000, 0);
+  if (value > 0 && value < 60_000) { console.error(`BOT_PR_PATROL_INTERVAL_MS must be 0 or >= 60000, got ${value}`); process.exit(1); }
+  return value;
+})();
+const patrolCooldownMs = count('BOT_PR_PATROL_COOLDOWN_MS', 24 * 60 * 60 * 1000, 60_000);
+// Tasks in 待处理 that nobody needs to act on any more leave it in small batches (#713).
+engine.obsolete.start();
+engine.botPrWake.start(60_000, { intervalMs: patrolIntervalMs, cooldownMs: patrolCooldownMs });
+const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
+// Fail closed on saved project_environments before starting TaskEngine immediately, then reconcile in the background
+// so slow pending operations never delay engine startup and manager_not_ready never clears the startup gate.
+void startProjectRuntime(projects, engine);
+const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
 // A deletion that could not delete its notes volume is retried with backoff; what stays behind fails `/readyz` (#771).
 const reclaimer = new NotesReclaimer(store, projects, {
   maxAttempts: count('BOT_NOTES_RECLAIM_ATTEMPTS', 6),
