@@ -100,19 +100,27 @@ export function reportMilestone(store: Store, taskId: string, args: any): { reco
  * and brief), the label it puts on and the language of the comment. A development that runs again (a person's retry, the
  * label added again) drops how it stopped, so the label goes back on and the comment says it is working again.
  */
-export function startProgress(store: Store, task: Row, issue: any) {
+export function startProgress(store: Store, task: Row, issue: any, options?: { baseBranch?: string; defaultBranch?: string }) {
   const now = new Date().toISOString(), id = String(task.id);
+  const parsedInput = (() => { try { return JSON.parse(task.input || '{}'); } catch { return {}; } })();
+  const redactor = configuredRedactor(store);
+  const resolvedBaseBranch = String(options?.baseBranch || parsedInput.base_branch || '').trim();
+  const resolvedDefaultBranch = String(options?.defaultBranch || parsedInput.default_branch || '').trim();
+  const nonDefaultBase = resolvedBaseBranch && resolvedDefaultBranch && resolvedBaseBranch !== resolvedDefaultBranch ? excerpt(resolvedBaseBranch, maxItem, redactor) : null;
   const existing = store.get('SELECT milestones FROM issue_development_progress WHERE task_id=?', id);
   if (existing) {
     const milestones = JSON.parse(existing.milestones);
     delete milestones.stopped;
+    if (nonDefaultBase) milestones.start = { ...(milestones.start ?? {}), base_branch: nonDefaultBase };
+    else if (resolvedBaseBranch && resolvedDefaultBranch && resolvedBaseBranch === resolvedDefaultBranch && milestones.start?.base_branch) delete milestones.start.base_branch;
     store.run('UPDATE issue_development_progress SET milestones=?,final=0,pending=1,next_at=0,settled_status=NULL,updated_at=? WHERE task_id=?', JSON.stringify(milestones), now, id);
     return;
   }
-  const manager = JSON.parse(task.input || '{}').manager, redactor = configuredRedactor(store);
+  const manager = parsedInput.manager;
   const brief = manager?.brief, basis = taskBasis(store, id);
   const setting = store.get('SELECT review_language FROM policies WHERE repository_id=?', task.repository_id)?.review_language;
   const start = { ...(basis ? { basis } : {}), ...(manager?.reason ? { reason: excerpt(manager.reason, maxText, redactor) } : {}),
+    ...(nonDefaultBase ? { base_branch: nonDefaultBase } : {}),
     ...(brief?.goal ? { goal: excerpt(brief.goal, maxText * 2, redactor) } : {}), ...(Array.isArray(brief?.criteria) ? { criteria: brief.criteria.slice(0, 12).map((c: unknown) => excerpt(c, maxItem, redactor)) } : {}) };
   const nhLabel = needsHumanLabel(store, task.repository_id) || null;
   const priorNeedsHuman = nhLabel
@@ -143,20 +151,23 @@ function state(task: Row) {
   const result = (() => { try { return JSON.parse(task.result || 'null'); } catch { return null; } })(), status = String(task.status);
   const pr = ['pr_opened', 'completed'].includes(status) && result?.pr_url ? { number: Number(result.pr_number), url: String(result.pr_url), updated: status === 'completed', result } : null;
   const unchanged = status === 'completed' && result?.status === 'no_changes';
+  const endedWithoutPr = !pr && (status === 'completed' || status === 'succeeded');
   const stopped = !pr && (unchanged || stoppedStates.has(status) || endedStates.has(status));
-  return { status, result, pr, unchanged, stopped, ended: endedStates.has(status) };
+  return { status, result, pr, unchanged, endedWithoutPr, stopped, ended: endedStates.has(status) };
 }
 
 type Language = 'zh' | 'en';
 const words = {
   zh: { title: 'bot 开发进展', status: '状态', working: '开发中', opened: (n: number) => `已开出 PR #${n}`, updated: (n: number) => `已更新 PR #${n}`, stopped: '已停止', paused: '已暂停',
+    endedNoPr: '已结束（未开出 PR）', ended: '已结束', endedNoPrReason: '任务已正常结束，未开出 PR。', baseBranch: '基线分支',
     basis: '开始依据', goal: '目标', criteria: '验收标准', plan: '分析与计划', conclusion: '结论', decisions: '自动做的决定', changes: '主要改动', acceptance: '验收',
     done: '完成', pr: 'PR', highlights: '修改重点', tests: '测试', stop: '停止', reason: '原因', action: '需要人做的',
     footer: 'bot 只在这一条评论里更新这次开发的进展。',
     label: (who: string, label: string) => `${who} 加了开发标签「${label}」`, request: (who: string, url: string | null) => `维护者 ${who} 在${url ? `[评论](${url})` : '评论'}里要求开发`,
     rule: '项目 Manager 提示词里的规则允许 bot 自行开发', own: 'bot 从 Actions 失败提报的 Issue' },
   en: { title: 'Bot development progress', status: 'Status', working: 'In development', opened: (n: number) => `Pull request #${n} opened`, updated: (n: number) => `Pull request #${n} updated`,
-    stopped: 'Stopped', paused: 'Paused', basis: 'Started on', goal: 'Goal', criteria: 'Acceptance criteria', plan: 'Analysis and plan', conclusion: 'Conclusion',
+    stopped: 'Stopped', paused: 'Paused', endedNoPr: 'Ended (no pull request)', ended: 'Ended', endedNoPrReason: 'The task ended normally without opening a pull request.', baseBranch: 'Base branch',
+    basis: 'Started on', goal: 'Goal', criteria: 'Acceptance criteria', plan: 'Analysis and plan', conclusion: 'Conclusion',
     decisions: 'Decisions made on its own', changes: 'Main changes', acceptance: 'Acceptance', done: 'Done', pr: 'Pull request', highlights: 'Key changes', tests: 'Tests',
     stop: 'Stopped', reason: 'Reason', action: 'What a person needs to do', footer: 'The bot reports this development only in this comment.',
     label: (who: string, label: string) => `${who} added the development label "${label}"`, request: (who: string, url: string | null) => `maintainer ${who} asked for it in ${url ? `[a comment](${url})` : 'a comment'}`,
@@ -165,6 +176,7 @@ const words = {
 // Why a development stopped when the control plane stopped it, and what a person can do, in the comment's language.
 function controlStop(language: Language, status: string, code: string): { reason: string; action?: string } {
   const zh = language === 'zh';
+  if (status === 'completed' || status === 'succeeded') return zh ? { reason: words.zh.endedNoPrReason } : { reason: words.en.endedNoPrReason };
   if (status === 'paused') return zh ? { reason: '有人在控制台暂停了这次开发。', action: '在控制台的任务里点「重试」继续。' } : { reason: 'Someone paused this development in the console.', action: 'Press Retry on the task in the console to continue.' };
   if (code === 'development_not_approved') return zh ? { reason: '开发标签被移除，开发停下。', action: '重新加上开发标签，开发会接着做。' } : { reason: 'The development label was removed, so the development stopped.', action: 'Add the development label again to continue it.' };
   if (code === 'object_closed_or_draft') return zh ? { reason: 'Issue 已关闭，开发取消。' } : { reason: 'The Issue was closed, so the development was cancelled.' };
@@ -179,14 +191,20 @@ function controlStop(language: Language, status: string, code: string): { reason
 /** The status comment of a development, as it reads for the task's current state. */
 export function renderProgress(row: Row, task: Row, redactor: PublicationValues = new Redactor()): string {
   const language: Language = row.language === 'zh' ? 'zh' : 'en', w = words[language], m = JSON.parse(row.milestones || '{}'), now = state(task);
+  const taskInput = (() => { try { return JSON.parse(task.input || '{}'); } catch { return {}; } })();
   const colon = language === 'zh' ? '：' : ': ', field = (name: string, value: string) => `**${name}**${colon}${value}`;
   const bullets = (items: string[]) => items.map(item => `- ${item}`).join('\n');
   const parts: string[] = [`### ${w.title}`];
-  parts.push(field(w.status, now.pr ? (now.pr.updated ? w.updated(now.pr.number) : w.opened(now.pr.number)) : now.stopped ? now.status === 'paused' ? w.paused : w.stopped : w.working));
+  parts.push(field(w.status, now.pr ? (now.pr.updated ? w.updated(now.pr.number) : w.opened(now.pr.number)) : now.endedWithoutPr ? w.endedNoPr : now.stopped ? (now.status === 'paused' ? w.paused : w.stopped) : w.working));
   const start = m.start ?? {}, basis = start.basis, lines: string[] = [];
   const said = basis?.kind === 'label' ? w.label(`\`${basis.labeled_by}\``, basis.label) : basis?.kind === 'maintainer_request' ? w.request(`\`${basis.author}\``, basis.url)
     : basis?.kind === 'project_rule' ? w.rule : basis?.kind === 'own_issue' ? w.own : null;
   if (said) lines.push(field(w.basis, said + (language === 'zh' && start.reason ? `。${start.reason}` : '')));
+  const displayBaseBranch = start.base_branch
+    || (typeof taskInput.base_branch === 'string' && typeof taskInput.default_branch === 'string' && taskInput.base_branch.trim() && taskInput.default_branch.trim() && taskInput.base_branch.trim() !== taskInput.default_branch.trim()
+      ? excerpt(taskInput.base_branch.trim(), maxItem, redactor)
+      : null);
+  if (displayBaseBranch) lines.push(field(w.baseBranch, `\`${displayBaseBranch}\``));
   if (start.goal) lines.push(field(w.goal, start.goal));
   if (start.criteria?.length) lines.push(`**${w.criteria}**\n${bullets(start.criteria)}`);
   if (lines.length) parts.push(lines.join('\n\n'));
@@ -198,6 +216,11 @@ export function renderProgress(row: Row, task: Row, redactor: PublicationValues 
     const tests = m.completed?.tests ?? (now.pr.result.validation ? publicText(testEvidence(now.pr.result), redactor).split('\n').filter(Boolean).map(line => safe(line, maxItem)) : []);
     parts.push([`#### ${w.done}`, field(w.pr, `[#${now.pr.number}](${now.pr.url})`), ...(highlights.length ? [`**${w.highlights}**\n${bullets(highlights)}`] : []),
       ...(tests.length ? [`**${w.tests}**\n${bullets(tests)}`] : [])].join('\n\n'));
+  } else if (now.endedWithoutPr) {
+    const summaryText = typeof now.result?.summary === 'string' && now.result.summary.trim() ? excerpt(now.result.summary, maxText, redactor) : null;
+    const reason = (typeof m.stopped?.reason === 'string' && m.stopped.reason.trim() ? m.stopped.reason : null) ?? summaryText ?? w.endedNoPrReason;
+    const humanAction = typeof m.stopped?.human_action === 'string' && m.stopped.human_action.trim() ? m.stopped.human_action : null;
+    parts.push([`#### ${w.ended}`, field(w.reason, reason), ...(humanAction ? [field(w.action, humanAction)] : [])].join('\n\n'));
   } else if (now.stopped) {
     // The agent's reason when it stopped on its own (a milestone, or the summary of an unchanged tree), else the control plane's.
     const own = m.stopped ?? (now.unchanged && now.result?.summary ? { reason: excerpt(now.result.summary, maxText, redactor) } : null);

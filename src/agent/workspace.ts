@@ -400,7 +400,7 @@ export class Workspace {
     this.log({type:'snapshot',sha:commitSha,files:files.length,bytes:files.reduce((sum,f)=>sum+(f.size||0),0),skipped:skipped.length,source:'git_worktree',cache:mirror.state,pack_bytes:packed,
       detail:`${done} ${files.length} 个文件（git worktree，含仓库历史）${packed?`，本次向虚拟电脑传送 ${packed} 字节的 git 对象`:'，虚拟电脑已有所需提交'}${skipped.length?`；${skipped.length} 个子模块条目未检出`:''}`});
     return {files:files.map(({path,sha,mode})=>({path,sha,mode})),skipped_files:skipped.map(({path,sha,mode})=>({path,sha,mode})),materials:[],tree_sha:listing.tree_sha,
-      source_tree_sha:listing.tree_sha,history:true,coverage:[`Checkout: ${files.length} files at ${commitSha} in a git worktree with the repository's history${skipped.length?`; ${skipped.length} submodule entries not checked out`:''}`]};
+      source_tree_sha:listing.tree_sha,local_sha:commitSha,history:true,coverage:[`Checkout: ${files.length} files at ${commitSha} in a git worktree with the repository's history${skipped.length?`; ${skipped.length} submodule entries not checked out`:''}`]};
   }
   // Files the agent reads on demand, next to the checkout under ../context/ (the Issue or PR, its discussion, the
   // project's skills). Written straight to the computer, after redaction, without keeping them with the task.
@@ -479,6 +479,7 @@ export class Workspace {
       const ready=await this.call('prepare:git',{type:'workspace_snapshot',tree_sha:expected});
       if(ready.error||ready.tree_sha!==expected)stop('workspace_snapshot_mismatch','waiting_environment',`Snapshot tree mismatch: expected ${expected}, actual ${ready.tree_sha||'unavailable'}; ${ready.detail||ready.error||'runner returned a different tree'}`);
       return {files:accepted,skipped_files:skipped.map(({path,sha,mode}:any)=>({path,sha,mode})),materials,tree_sha:expected,source_tree_sha:commit.tree.sha,
+        ...(typeof ready.local_sha==='string'&&/^[a-f0-9]{40}$/i.test(ready.local_sha)?{local_sha:ready.local_sha}:{}),
         coverage:[`Snapshot: ${accepted.length} files, ${bytes} bytes; skipped ${skipped.length} entries`,`Initial model context: ${materials.length} files; other accepted files available through tools`,'Git workspace contains a fixed snapshot, not full upstream history']};
     }finally{
       // source: where the listing came from; cache: whether the mirror already held the commit (hit) or fetched it.
@@ -496,6 +497,21 @@ export class Workspace {
   private async collectArtifact(key:string){
     const result=await this.call(key,{type:'workspace_finalize'});
     if(result.error||!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment',`Could not finalize workspace: ${result.detail||result.error||'missing manifest'}`);
+    const expectedHead=(()=>{
+      try{
+        const parsed=this.task?.input?JSON.parse(String(this.task.input)):null;
+        const candidate=parsed?.workspace_base_head_sha||parsed?.snapshot_sha||this.task?.head_sha;
+        return typeof candidate==='string'&&/^[a-f0-9]{40}$/i.test(candidate)?candidate.toLowerCase():null;
+      }catch{
+        return typeof this.task?.head_sha==='string'&&/^[a-f0-9]{40}$/i.test(this.task.head_sha)?this.task.head_sha.toLowerCase():null;
+      }
+    })();
+    const headMatches=typeof result.head_matches_baseline==='boolean'
+      ?result.head_matches_baseline
+      :expectedHead&&typeof result.head_sha==='string'&&/^[a-f0-9]{40}$/i.test(result.head_sha)
+        ?result.head_sha.toLowerCase()===expectedHead
+        :undefined;
+    const enriched={...result,...(headMatches!==undefined?{head_matches_baseline:headMatches}:{})};
     // Finalizing unchanged files can mint a different commit timestamp. Observers and Publisher must keep the exact
     // collected writer commit while its tree and execution baseline are unchanged.
     const pinned=this.store.get(`SELECT h.data,r.run_context FROM role_run_events e JOIN task_runs r ON r.id=e.run_id
@@ -505,8 +521,8 @@ export class Workspace {
       ORDER BY ${historyOrder} DESC LIMIT 1`,this.task.id);
     if(pinned){const output=JSON.parse(pinned.data).data,candidate=output.candidate_ref?.kind==='code'?output.candidate_ref:output.source_snapshot,ctx=JSON.parse(pinned.run_context??'{}'),base=executionBaseline(this.task);
       const source=base&&/^[a-f0-9]{40}$/.test(base)?'commit:'+base:'contract:revision:'+ctx.contract_revision;
-      if(candidate?.commit_sha&&candidate.tree_hash===result.tree_sha&&ctx.source_ref===source)return {...result,local_sha:candidate.commit_sha};}
-    return result;
+      if(candidate?.commit_sha&&candidate.tree_hash===enriched.tree_sha&&ctx.source_ref===source)return {...enriched,local_sha:candidate.commit_sha};}
+    return enriched;
   }
   async contents(manifest:any[],upstream:any[]=[]){
     const files:any[]=[],original=new Map(upstream.map(file=>[file.path,file])),originalShas=new Set(upstream.map(file=>file.sha).filter(Boolean));

@@ -444,7 +444,7 @@ export class TaskEngine {
         // The worktree's record follows the move, so a later review of this head can take it over (#769).
         await workspace!.context({'files.json':JSON.stringify(files,null,2)});if(held)worktreeMoved(this.store,String(task.repository_id),held.worktree_id,next,moved.tree_sha);
         const latest=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),context=input.context||{};
-        input={...input,...latest,snapshot_sha:next,snapshot_tree:moved.tree_sha,source_tree:moved.source_tree_sha,snapshot_files:moved.files,skipped_files:moved.skipped_files,
+        input={...input,...latest,snapshot_sha:next,workspace_base_head_sha:moved.local_sha||next,snapshot_tree:moved.tree_sha,source_tree:moved.source_tree_sha,snapshot_files:moved.files,skipped_files:moved.skipped_files,
           coverage:moved.coverage,files,heads:[...heads,next],behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),
           context:{...context,reviewed_sha:next,coverage:moved.coverage,
             ...(context.pull_request?{pull_request:{...context.pull_request,head:{ref:object.head?.ref||null,sha:next},diff:base?`git diff ${base}...${next}`:null}}:{}),
@@ -601,7 +601,7 @@ export class TaskEngine {
         }
         const skills=skillIndex(effectiveRules.files);
         await workspace.context({...target.files,...Object.fromEntries(effectiveRules.files.filter((f:any)=>skillFilePath(f.path)).map((f:any)=>['skills/'+f.path.slice('.agents/skills/'.length),f.effective]))});
-        input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
+        input={...input,snapshot_sha:target.sha,workspace_base_head_sha:snapshot.local_sha||target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
           checkout_trusted:eventCheckoutTrusted,trusted_agents_md:eventTrustedAgentsMd,trusted_claude_md:eventTrustedClaudeMd,repository_skill_bundle:pinnedEventSkills,
           context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path,support_files})=>({name,description,path,...(support_files?{support_files}:{})})),
             ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:target.sha,mode:'read'})}:{}),
@@ -714,7 +714,7 @@ export class TaskEngine {
         const labeling=review||writes.includes('labels');
         const labels=!labeling?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         const checkoutTrusted=Boolean(!pr&&!input.bot_pr&&!input.integration&&ref.object.sha===ruleSha);
-        input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
+        input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,default_branch:github.defaultBranch,snapshot_sha:ref.object.sha,workspace_base_head_sha:snapshot.local_sha||ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
           checkout_trusted:checkoutTrusted,trusted_agents_md:trustedAgentsMd,trusted_claude_md:trustedClaudeMd,repository_skill_bundle:pinnedSkills,
           files,...(pr?{heads:[...(input.heads||[]).filter((head:string)=>head!==ref.object.sha),ref.object.sha]}:{}),coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
@@ -877,7 +877,7 @@ export class TaskEngine {
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
           const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,labels:labels.labels,...(media?{media}:{}),
-            implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
+            implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,expected_head_sha:input.workspace_base_head_sha||input.snapshot_sha,base_branch:input.base_branch,
             publication_key:input.publication_key||input.integration?.id,...(input.integration?{integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           saveDevelopmentCandidate(this.store,id,candidate,String(task.repository_id));
           if(!development)return publishPullRequest();

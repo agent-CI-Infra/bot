@@ -28,7 +28,9 @@ flowchart TD
 
 ## 2. 通用任务引擎、队列与恢复（`src/tasks/`）
 
-- **统一任务抽象**：所有新任务统一为 `task.request`，携带通用检出目标 `target`（`issue` / `pr` / `branch` / `commit`）、版本化合同 `contract`（目标、范围、验收标准、交付终点）、可选直派角色 `executor_role` 与显式写入授权集合 `task_write_grants`（`review`、`pull_request`、`github`、`actions_rerun`）。
+- **统一任务抽象与目标解析**：所有新任务统一为 `task.request`，携带通用检出目标 `target`（`issue` / `pr` / `branch` / `commit`）、版本化合同 `contract`（目标、范围、验收标准、交付终点）、可选直派角色 `executor_role` 与显式写入授权集合 `task_write_grants`（`review`、`pull_request`、`github`、`actions_rerun`）。其中 `target: { type: "issue", number, ref? }` 在无开放 `bot_pr` 时支持解析远端分支名作为检出基线与 PR `base`（去重键计入 `target.ref`；分支不存在明确报错 `target_branch_not_found` 而不回退默认分支；裸提交/标签仅允许只读任务，带 `pull_request` 写权限时报错 `target_ref_not_branch`）；仓库规则与 `.agents/skills/` 仍严格从项目可信基准分支（`policy.base_branch || defaultBranch`）加载。
+- **全链路交付上下文透明化**：控制面通过 `buildDeliveryContext`（`src/tasks/delivery-context.ts`）从持久化字段确定性生成结构化 `delivery_context`（`target`、`base_branch`、`base_sha`、PR 基线语义说明、`goal`、`intended_delivery`、生效 `writes`），贯通 Task Manager、Dev 与 Observer（`reviewer`/`test`）；团队模式在 `latest_dev_result` 与 `delegate_role` 返回值中暴露 `delivery` 与改动文件数，在 `read_child_tasks` 暴露子任务 `target`/`base_branch`/`delivery`/`pr_url`，并在 Observer 输入中附带当前候选的变更文件摘要 `candidate_changes`。
+- **团队提名 `delivery` 语义与子任务聚合**：`nominate_delivery` 支持可选 `delivery`（`pull_request` / `review` / `report`，仅 generic 任务生效且受父任务 `effectiveWrites` 约束），`validateNominationResult` 按实际目标收尾工具（`open_pull_request`/`post_review`/`submit_report`）校验而不再硬编码 `submit_report`。子任务结果不自动导入代码文件到父工作区：子任务已开出 PR（存在 `pr_url`）时，父任务缺省按 `report` 聚合汇报并保留 `child_pull_requests` 关联而不重复开 PR；父任务合同要求 `reviewable_pull_request` 且被提名子任务无 `pr_url` 时，未显式传入 `delivery` 明确拒收防静默降级。
 - **任务一律以角色运行执行**：省略 `executor_role` 时由 Task Manager 团队协调（含重试报告评估），直派角色单独运行；Manager 开关退役前冻结、入口开关仍为关闭的旧任务，同样按退役开关解析、由 Manager 团队协调，不存在绕过角色的工具循环。
 - **三重写入闸门**：每次外部写入同时校验 **项目能力上限 `capability_ceiling` ∩ 任务 `task_write_grants` ∩ 来源/角色实时授权**；`grant_writes` 允许 Manager 或管理员在不越过上限的前提下动态调整运行中任务的写入授权。
 - **优先级队列与并发认领**：
@@ -57,9 +59,9 @@ flowchart LR
   Outbox --> GH["GitHub API (PR / COMMENT Review / Labels / Merge Queue)"]
 ```
 
-- **不可变候选快照与渐进披露**：代码交付固定工作树快照并保留 Git tree/commit 引用，测试生成的脏文件不进入候选；任务上下文与 QA 输入只携带精简索引和哈希引用（通过 `read_evidence` / `read_related_artifact` 按需分页读取），避免把数百 KB 原始日志塞进每轮模型请求。
+- **不可变候选快照、HEAD 漂移护栏与 QA 交接摘要**：代码交付固定工作树快照并保留 Git tree/commit 引用，测试生成的脏文件不进入候选；`runner/workspace.mjs` 的 `workspace_finalize` 返回实际 `head_sha`，控制面在 `open_pull_request` 校验与 QA 确定性预检中拦截非冲突解冲/集成场景下的工作区 `HEAD` 脱离发布基线（`workspace_head_drifted`），防止向错误目标分支发出全量跨分支差异 PR。任务上下文与 QA 输入只携带精简索引和哈希引用（通过 `read_evidence` / `read_related_artifact` 按需分页读取），同时在 QA 输入顶层提供不会被 `boundedCandidate` 折叠的 `delivery_handoff`（目标与合同目标、预期 vs 实际交付方式、基线与 `head_matches_baseline`、变更路径增删改摘要及 `.github/workflows/` 标记、提名来源与说明）。
 - **轻量守门人独立 QA**：
-  - 纯内部只读问答跳过 QA；对外交付（开 PR、正式检视、提报）先在共享任务工作区原地执行确定性预检（策略 `test_command`、敏感文件/冲突标记校验、行内评审 diff 锚点预检防止 422），再以全新上下文运行独立 QA，产出五类明确结论：`pass`、`pass_with_issues`、`return`、`insufficient_evidence`、`needs_human`。
+  - 纯内部只读问答跳过 QA；对外交付（开 PR、正式检视、提报）先在共享任务工作区原地执行确定性预检（策略 `test_command`、HEAD 基线一致校验、敏感文件/冲突标记/凭据扫描与行内评审 diff 锚点预检防止 422；其中 `privateKeyBlock` 文本启发式仅对任意层级测试目录 `tests?`/`__tests__`/`specs?` 及 `.test.`/`.spec.`/`test_*`/`*_test.*` 豁免，真实注册凭据 `redactor.contains` 与 `dirtyPathPattern` 保持严格不豁免），再以全新上下文运行独立 QA，产出五类明确结论：`pass`、`pass_with_issues`、`return`、`insufficient_evidence`、`needs_human`。
   - 允许项目显式关闭 `delivery_gates.pull_request_qa`（前提是配置了有效 `test_command`）。
 - **幂等发布与未知状态对账**：
   - 评论、行内 Review（恒为 `COMMENT`，自动关闭已修复旧线程）、分支推送与 PR 创建全部经过持久 Outbox 与稳定写入键；大仓库使用 `base_tree` 增量构建 Git tree 并校验返回 tree 与候选完全一致。

@@ -649,10 +649,12 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       if(type!=='blob'||!['100644','100755','120000'].includes(mode))throw new Error(`unsupported_tree_entry: ${name}, type ${type}, mode ${mode}`);
       files.push({path:name,mode,sha:hash,size:Number(size)});
     }
+    const head=(await git(['rev-parse','HEAD'])).toString().trim();
     const local=(await git(['commit-tree',tree,'-p','HEAD'],Buffer.from('Project agent candidate\n'))).toString().trim();
     // SQLite references must remain readable after Git's ordinary garbage collection.
     await git(['update-ref','refs/bot/artifacts/'+local,local]);
-    return {tree_sha:tree,local_sha:local,files,...unlocked};
+    const expectedHead=typeof input.expected_head_sha==='string'&&/^[a-f0-9]{40}$/i.test(input.expected_head_sha)?input.expected_head_sha.toLowerCase():null;
+    return {tree_sha:tree,local_sha:local,head_sha:head,...(expectedHead?{head_matches_baseline:head.toLowerCase()===expectedHead}:{}),files,...unlocked};
   });
   if(input.type==='workspace_blob'){
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_blob');

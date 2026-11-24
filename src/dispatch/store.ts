@@ -979,7 +979,12 @@ function createGenericDispatchedTask(store: Store, event: Row, checked: Decision
   const repo = String(event.repository_id);
   const target = checked.target ?? undefined;
   const writes = checked.writes ?? [];
-  const uniqueSuffix = `${executor ?? 'team'}:${[...writes].sort().join(',')}:${target ? `${target.type}:${target.number ?? target.ref ?? ''}` : 'none'}`;
+  const targetKey = target
+    ? target.type === 'issue' || target.type === 'pr'
+      ? `${target.type}:${target.number ?? ''}${target.ref ? `@${target.ref}` : ''}`
+      : `${target.type}:${target.ref ?? ''}`
+    : 'none';
+  const uniqueSuffix = `${executor ?? 'team'}:${[...writes].sort().join(',')}:${targetKey}`;
   const key = `${repo}:dispatch:${event.event_key}:${uniqueSuffix}`;
   if (store.get('SELECT 1 FROM tasks WHERE unique_key=?', key)) return null;
 

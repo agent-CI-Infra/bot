@@ -34,7 +34,8 @@ export function nominationSource(s:Store,task:Row,ref:unknown) {
 }
 
 /** A reused child is evidence; it must still satisfy the receiving entry's result schema. */
-export async function validateNominationResult(spec:import('../agent/runtime.js').AgentSpec<any>,result:any){
- try{return spec.finish?await spec.finish.validate(result,spec.finish.name):spec.validate?await spec.validate(JSON.stringify(result)):result;}
- catch(error){throw new SubmissionError('role_nomination_invalid',{reason:'parent_result_contract_mismatch',expected:'A result matching the CURRENT parent entry contract',observed_fields:result&&typeof result==='object'?Object.keys(result).slice(0,30):[],validation_code:String((error as any)?.code??(error as any)?.message??'invalid_result').slice(0,500),hint:'Reuse compatible child evidence, supply the missing parent-specific result through an appropriate role, or choose another coordination action. Child acceptance does not change the parent result schema.'});}
+export async function validateNominationResult(spec:import('../agent/runtime.js').AgentSpec<any>,result:any,finishName?:string){
+ const toolName=finishName??spec.finish?.name;
+ try{return spec.finish?await spec.finish.validate(result,toolName):spec.validate?await spec.validate(JSON.stringify(result)):result;}
+ catch(error){throw new SubmissionError('role_nomination_invalid',{reason:'parent_result_contract_mismatch',expected:`A result matching the CURRENT parent entry contract${toolName?` (${toolName})`:''}`,...(toolName?{target_tool:toolName}:{}),observed_fields:result&&typeof result==='object'?Object.keys(result).slice(0,30):[],validation_code:String((error as any)?.code??(error as any)?.message??'invalid_result').slice(0,500),...(typeof (error as any)?.detail==='string'?{validation_detail:(error as any).detail.slice(0,500)}:{}),hint:'Reuse compatible child evidence, supply the missing parent-specific result through an appropriate role, or choose another coordination action. Child acceptance does not change the parent result schema and child files are not auto-imported into the parent workspace.'});}
 }
