@@ -8,6 +8,7 @@ import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { evaluateDelivery } from '../../../../dist/tasks/acceptance.js';
 import { Redactor } from '../../../../dist/agent/common.js';
+import { scriptedHarness } from '../../../fixtures/scripted-driver.mjs';
 
 // The console's three layers: the Manager page says what each work type may write and who executes it; the roles say how
 // the controller delegates and on which executor each role runs; a task shows its own facts and who is doing what now.
@@ -285,9 +286,10 @@ test('independent QA started by development and review delivery is named in the 
   const p = await realProject(t), model = await heldModel(t);
   const fixture = (await p.admin('/api/models', 'POST', { repository_id: '101', model_name: 'qa-fixture', api_url: model.url, api_key: 'fixture-key' })).value.model;
   await p.admin('/api/repositories/101/policy', 'PATCH', { model_id: fixture.id });
-  // QA's backend is beside the point here and its verification checkout is a stub, so QA runs in process.
+  // QA's backend is beside the point here and its verification checkout is a stub, so QA runs in process on the test-only
+  // scripted driver (QA's only production backend is Pi, #1337).
   const roles = (await p.admin('/api/repositories/101/roles')).value;
-  assert.equal((await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, roles: [{ role_id: 'qa', harness_ref: { id: 'process' } }] })).status, 200);
+  assert.equal((await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, roles: [{ role_id: 'qa', harness_ref: { id: scriptedHarness } }] })).status, 200);
   const cases = [['dev-qa', 'development.issue', { kind: 'code', reference: 'task:dev-qa:candidate', version: 'tree0123456789abcdef', content: { tree_sha: 'tree0123456789abcdef' } }],
     ['review-qa', 'review.issue', { kind: 'report', reference: 'task:review-qa:candidate', version: 'report0123456789', content: { summary: 'Review report' } }]];
   for (const [id, kind, artifact] of cases) {

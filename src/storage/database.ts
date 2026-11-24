@@ -44,7 +44,7 @@ import { taskManagementStorage } from '../tasks/management.js';
 import { conversationStorage } from '../roles/conversation-storage.js';
 import { serviceRoleStorage } from '../service-roles/roles.js';
 import { serviceBindingStorage } from '../channels/service-bindings.js';
-import { migrateNativeToPi, retireNativeProjectRoles, retireNativeServiceAssistants } from '../roles/native-to-pi.js';
+import { migrateNativeToPi, pinAssistantsToPi, retireNativeProjectRoles, retireNativeServiceAssistants } from '../roles/native-to-pi.js';
 import { workspaceStorage } from '../projects/workspace-cleanup.js';
 import { worktreeStorage } from '../projects/worktrees.js';
 import { projectToolsStorage } from '../projects/tools.js';
@@ -308,10 +308,11 @@ export class Store {
     serviceBindingStorage(this);
     // Native service roles, group bindings and project roles move to Pi once (#1255), after all three tables exist. Native is
     // gone (#1257): a service assistant left on it moves at every start; project roles, frozen task configurations and role
-    // instances move once.
+    // instances move once. The assistants, Manager and QA then move once to Pi from any other backend (#1337).
     migrateNativeToPi(this);
     retireNativeServiceAssistants(this);
     retireNativeProjectRoles(this);
+    pinAssistantsToPi(this);
     scheduleStorage(this);
     // GitHub owners whose repository administrators start their own repositories (#848).
     trustedOrganizationStorage(this);

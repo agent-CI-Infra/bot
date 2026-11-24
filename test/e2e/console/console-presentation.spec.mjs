@@ -34,8 +34,11 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await openRoleAdvanced(page);
     await expect(cardOf('角色概览')).toBeVisible();
     await goRolePage(page, { role: 'manager' });
+    // The Manager runs only on Pi (#1337): its page names the backend instead of offering one.
     const managerPicker=page.getByRole('combobox',{name:'manager Agent 后端',exact:true});
-    await expect(managerPicker).toHaveValue('pi');
+    const managerFixed=page.getByTestId('role-form').getByText('Agent 后端：Pi（这个角色固定使用 Pi，不能切换）',{exact:true});
+    await expect(managerPicker).toHaveCount(0);await expect(managerFixed).toBeVisible();
+    // A configuration that still names another backend (stored after start-up, so no migration moved it) offers the way back.
     h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{manager:'process'}}));
     await page.reload();
     await goRolePage(page, { role: 'manager' });
@@ -43,7 +46,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await managerPicker.selectOption('pi');
     await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
-    await expect(managerPicker).toHaveValue('pi');
+    await expect(managerPicker).toHaveCount(0);await expect(managerFixed).toBeVisible();
     await expect(page.locator('[data-work-type]')).toHaveCount(0);
     await expect(page.locator('textarea[name=role_configuration]')).toHaveCount(0);
 

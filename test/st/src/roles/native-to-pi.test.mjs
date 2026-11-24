@@ -1,5 +1,6 @@
 // #1255: Pi is the default backend of the management assistant, group assistants and project roles. A database from before
-// it moves what it saved as Native to Pi once at start-up; every other backend stays.
+// it moves what it saved as Native to Pi once at start-up; every other backend stays. #1337: the management assistant, group
+// assistants, Manager and QA run only on Pi, and what was saved for them on another backend moves to Pi once.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -9,7 +10,7 @@ import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
-import { migrateNativeToPi, retireNativeProjectRoles, retireNativeServiceAssistants } from '../../../../dist/roles/native-to-pi.js';
+import { migrateNativeToPi, pinAssistantsToPi, retireNativeProjectRoles, retireNativeServiceAssistants } from '../../../../dist/roles/native-to-pi.js';
 import { rolePool } from '../../../../dist/roles/pool.js';
 import { managementAssistant, serviceRole, updateServiceRole } from '../../../../dist/service-roles/roles.js';
 
@@ -31,10 +32,10 @@ function fixture(t) {
   t.after(() => s.close());
   return s;
 }
-// A V2 configuration whose `roleId` was saved on Native, as a database from before #1257 holds it: saved through the API on
-// another backend (the API no longer takes Native), then stored with Native in its place.
+// A V2 configuration whose `roleId` was saved on Native, as a database from before #1257 holds it: saved through the API
+// (which no longer takes Native), then stored with Native in its place.
 function saveNative(s, repo, roleId) {
-  put(s, repo, { roles: [{ role_id: roleId, harness_ref: { id: 'process' } }] });
+  put(s, repo, { roles: [{ role_id: roleId, harness_ref: { id: 'pi' } }] });
   const value = stored(s, repo);
   save(s, repo, { ...value, roles: value.roles.map(role => role.role_id === roleId ? { ...role, harness_ref: { id: 'native', version: '1' } } : role) });
 }
@@ -204,5 +205,62 @@ test('Native is gone for project roles (#1257): saved configurations, frozen tas
     [[String(revision('kept')), 'kept'], ['0', 'legacy'], [String(revision('v2')), 'v2']]);
   // Once: nothing runs again.
   retireNativeProjectRoles(s, line => lines.push(line));
+  assert.equal(lines.length, 1);
+});
+
+test('the assistants, Manager and QA run only on Pi (#1337): what was saved on other backends moves once; worker roles keep theirs', t => {
+  const s = fixture(t);
+  // Saved before #1337: the management assistant and a group on Codex or Claude Code.
+  s.run("UPDATE service_roles SET harness='codex',revision=3 WHERE id=?", managementAssistant);
+  for (const [id, harness] of [['g-codex', 'codex'], ['g-pi', 'pi']]) {
+    s.run("INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,created_at,last_received_at) VALUES(?,'feishu','app','tenant',?,'group','connector',1,1)", 'chat-' + id, 'oc-' + id);
+    s.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,revision,model_id,prompt,harness,created_at,updated_at)
+      VALUES(?,?,'group-assistant','repositories',?,'admin','admin',4,NULL,'',?,1,1)`, id, 'chat-' + id, 'principal-' + id, harness);
+  }
+  // v2: Manager on Codex with its own model configuration, QA on Claude Code with a model profile Pi cannot speak, Dev and
+  // the reviewer on CLIs too (the API no longer takes the first two).
+  put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }, { role_id: 'reviewer', harness_ref: { id: 'claude_code' } }] });
+  const anthropic = { ...textJsonProfile, api: 'anthropic-messages', structured_output: 'tool_call' }, v2 = stored(s, 'v2');
+  save(s, 'v2', { ...v2, roles: v2.roles.map(role => role.role_id === 'manager' ? { ...role, harness_ref: { id: 'codex', version: '1', model_source: 'local_config' } }
+    : role.role_id === 'qa' ? { ...role, harness_ref: { id: 'claude_code', version: role.harness_ref.version }, model_profile_ref: anthropic } : role) });
+  s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'codex', qa: 'process', dev: 'claude_code' } }));
+  const frozen = { 't-v2': ['v2', { roles: stored(s, 'v2') }], 't-legacy': ['legacy', { roles: { enabled: true, harnesses: { qa: 'codex', dev: 'codex' } } }] };
+  for (const [task, [repo, snapshot]] of Object.entries(frozen)) {
+    s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES(?,?,'task.request','pr_opened','frozen','{}',1,1)", task, repo);
+    s.run("INSERT INTO task_execution_configs(task_id,revision,snapshot,created_at) VALUES(?,1,?,'then')", task, JSON.stringify(snapshot));
+  }
+  for (const [id, task, role, harness] of [['ri-manager', 't-v2', 'manager', 'codex'], ['ri-qa', 't-legacy', 'qa', 'claude_code'], ['ri-dev', 't-v2', 'dev', 'codex']])
+    s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,session,harness_state,updated_at) VALUES(?,?,?,'{}',?,'[\"old\"]','{\"turn\":3}','then')", id, task, role, harness);
+  const before = stored(s, 'v2').revision;
+  s.run("DELETE FROM settings WHERE key='migration:1337:assistants-on-pi'");
+  const lines = [];
+  pinAssistantsToPi(s, line => lines.push(line));
+
+  // Service assistants: a new revision for the management assistant, a group binding keeps its own (its fence).
+  assert.deepEqual({ ...s.get('SELECT harness,revision FROM service_roles WHERE id=?', managementAssistant) }, { harness: 'pi', revision: 4 });
+  assert.deepEqual(s.all('SELECT id,harness,revision FROM channel_service_bindings ORDER BY id').map(row => [row.id, row.harness, row.revision]), [['g-codex', 'pi', 4], ['g-pi', 'pi', 4]]);
+  // Saved configurations: Manager and QA move (the model source with them, the pinned profile stays); Dev and the reviewer keep theirs.
+  assert.deepEqual(harnessOf(s, 'v2'), { manager: 'pi', dev: 'codex', test: 'pi', reviewer: 'claude_code', ux: 'pi', qa: 'pi' });
+  const saved = stored(s, 'v2'), role = id => saved.roles.find(entry => entry.role_id === id);
+  assert.deepEqual([saved.revision, saved.updated_by, role('manager').harness_ref, role('qa').model_profile_ref.api], [before + 1, 'migration:1337', role('test').harness_ref, 'anthropic-messages']);
+  assert.equal(role('test').harness_ref.id, 'pi');
+  assert.equal(s.get("SELECT actor FROM role_config_revisions WHERE repository_id='v2' AND revision=?", saved.revision).actor, 'migration:1337');
+  assert.deepEqual(stored(s, 'legacy').harnesses, { manager: 'pi', qa: 'pi', dev: 'claude_code' });
+  // Frozen task configurations resume on Pi for those two roles only.
+  const snapshot = task => JSON.parse(s.get('SELECT snapshot FROM task_execution_configs WHERE task_id=?', task).snapshot).roles;
+  assert.deepEqual(snapshot('t-v2').roles.map(entry => [entry.role_id, entry.harness_ref.id]), Object.entries(harnessOf(s, 'v2')));
+  assert.ok(snapshot('t-v2').revision > before);
+  assert.deepEqual(snapshot('t-legacy').harnesses, { qa: 'pi', dev: 'codex' });
+  // Their role instances start again from task records on Pi; Dev's stays as it was.
+  const instance = id => ({ ...s.get('SELECT harness,session,harness_state FROM role_instances WHERE id=?', id) });
+  assert.deepEqual([instance('ri-manager'), instance('ri-qa'), instance('ri-dev')], [{ harness: 'pi', session: '[]', harness_state: '{}' }, { harness: 'pi', session: '[]', harness_state: '{}' }, { harness: 'codex', session: '["old"]', harness_state: '{"turn":3}' }]);
+  // One log line with the counts, naming the role that waits for configuration.
+  assert.deepEqual(lines, ['[migration:1337] assistants on Pi: 1 service roles, 1 group bindings, 4 Manager/QA roles in 2 projects, 2 frozen task configurations, 2 role instances; 1 of those roles pin a model profile Pi cannot use and wait for configuration']);
+  assert.deepEqual(s.all("SELECT action,resource_id,repository_id FROM audit WHERE user_id='migration:1337' ORDER BY action,resource_id").map(row => [row.action, row.resource_id, row.repository_id]), [
+    ['channel.service_binding.moved_to_pi', 'g-codex', null], ['roles.moved_to_pi', '0', 'legacy'], ['roles.moved_to_pi', String(saved.revision), 'v2'], ['service_role.moved_to_pi', managementAssistant, null]]);
+  // Once: a later start finds the marker and changes nothing, and nothing logs.
+  s.run("UPDATE channel_service_bindings SET harness='codex' WHERE id='g-pi'");
+  pinAssistantsToPi(s, line => lines.push(line));
+  assert.equal(s.get("SELECT harness FROM channel_service_bindings WHERE id='g-pi'").harness, 'codex');
   assert.equal(lines.length, 1);
 });

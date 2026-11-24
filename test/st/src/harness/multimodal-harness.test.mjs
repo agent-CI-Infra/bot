@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { Store } from '../../../../dist/storage/database.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
@@ -597,125 +597,6 @@ test('Pi models.json writes input:["text"] when image_input=false and view_messa
   const modelsJson = findPiModelsJson(root);
   assert.deepEqual(Object.values(modelsJson.providers)[0].models[0].input, ['text']);
 });
-
-for (const scenario of [
-  { backend: 'codex', transport: 'gateway', upstream: 'openai-chat-completions', useLarge: true, wsPath: null },
-  { backend: 'codex', transport: 'gateway', upstream: 'anthropic-messages', useLarge: false, wsPath: '~/crop.png' },
-  { backend: 'codex', transport: 'direct', upstream: 'openai-responses', useLarge: false, wsPath: null },
-  { backend: 'claude_code', transport: 'gateway', upstream: 'openai-chat-completions', useLarge: true, wsPath: null },
-  { backend: 'claude_code', transport: 'gateway', upstream: 'openai-responses', useLarge: false, wsPath: '~/crop.png' },
-  { backend: 'claude_code', transport: 'direct', upstream: 'anthropic-messages', useLarge: false, wsPath: null },
-]) {
-  test(`${scenario.backend} (${scenario.transport} -> ${scenario.upstream}, ${scenario.wsPath ? 'view_workspace_image' : 'view_message_image'}${scenario.useLarge ? ' 4.5 MiB' : ''}) delivers MCP image blocks and keeps base64 out of events/receipts`, { timeout: 90000 }, async t => {
-    const root = mkdtempSync(join(tmpdir(), `bot-mm-${scenario.backend}-${scenario.transport}-`));
-    const store = new Store(':memory:', randomBytes(32));
-    const manager = new LocalManager('101', root);
-    const redactor = new Redactor();
-
-    const imageData = scenario.useLarge ? Buffer.concat([smallPng, Buffer.alloc(4.5 * 1024 * 1024, 0x66)]) : smallPng;
-    const expectedBase64 = imageData.toString('base64');
-    const expectedPrefix = expectedBase64.slice(0, 80);
-
-    let capturedRequest = null;
-    const provider = createServer(async (req, res) => {
-      if (req.method === 'GET') {
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ data: [{ id: scenario.backend === 'claude_code' ? 'claude-sonnet-4-5-20250929' : 'gpt-5-codex' }] }));
-        return;
-      }
-      let raw = '';
-      for await (const chunk of req) raw += chunk;
-      capturedRequest = { url: req.url, body: JSON.parse(raw) };
-      res.setHeader('content-type', 'application/json');
-      if (scenario.upstream === 'openai-chat-completions') {
-        res.end(JSON.stringify({ id: 'cmpl-mm', choices: [{ message: { role: 'assistant', content: 'saw image' }, finish_reason: 'stop' }], usage: { prompt_tokens: 15, completion_tokens: 5 } }));
-      } else if (scenario.upstream === 'openai-responses') {
-        res.end(JSON.stringify({ id: 'resp-mm', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'saw image' }] }], usage: { input_tokens: 15, output_tokens: 5 } }));
-      } else {
-        res.end(JSON.stringify({ id: 'msg-mm', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5-20250929', content: [{ type: 'text', text: 'saw image' }], stop_reason: 'end_turn', usage: { input_tokens: 15, output_tokens: 5 } }));
-      }
-    });
-    provider.listen(0, '127.0.0.1');
-    await once(provider, 'listening');
-    t.after(async () => {
-      await manager.recover();
-      provider.closeAllConnections();
-      await new Promise(r => provider.close(r));
-      store.close();
-      rmSync(root, { recursive: true, force: true });
-    });
-
-    const modelName = scenario.backend === 'claude_code' ? 'claude-sonnet-4-5-20250929' : 'gpt-5-codex';
-    store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m',NULL,?,?,?,'now')",
-      `http://127.0.0.1:${provider.address().port}/v1`, modelName, store.secrets.seal({ value: 'mm-key' }, 'model:m'));
-    saveModelMetadata(store, 'm', { interface_type: scenario.upstream, capabilities: { image_input: true } });
-    const before = serviceRole(store, managementAssistant);
-    updateServiceRole(store, 'admin', managementAssistant, { expected_revision: before.revision, harness: scenario.backend, model_id: 'm' });
-    const role = serviceRole(store, managementAssistant);
-    await manager.call('PUT', '/v1/projects/101');
-
-    const { turn: mediaTurn } = createMediaHarness(
-      store,
-      new Map([['img_fixture_1', { data: imageData, mime: 'image/png' }]]),
-      new Map([['~/crop.png', { data: imageData, name: 'crop.png' }]]),
-      () => true,
-    );
-    const computer = {
-      async sessionWorkspace(task, workspaceId, r, log) {
-        const ws = new Workspace(store, manager, { ...task, repository_id: '101', workspace_id: workspaceId, generation: 1 }, r, async () => {}, log, 'service_role_operations');
-        await ws.call('init', { type: 'workspace_init' });
-        return ws;
-      },
-    };
-    const spec = {
-      store,
-      task: { id: randomBytes(24).toString('hex'), kind: 'management.agent', repository_id: null, service_role_id: role.id, conversation_id: 'mm-' + scenario.backend, source_message: 'm1' },
-      redactor,
-      guard: async () => {},
-      system: 'Inspect the image.',
-      prompt: JSON.stringify({ fixture_mode: 'multimodal', ...(scenario.wsPath ? { fixture_workspace_path: scenario.wsPath } : {}) }),
-      model: serviceRoleModel(store, role.id),
-      tools: mediaTools,
-      containerOptions: {
-        modelTransport: scenario.transport,
-        executableOverride: scenario.backend === 'codex'
-          ? { executable: process.execPath, args: [resolve('test/fixtures/codex-app-server.mjs'), 'app-server'], version: '0.166.0' }
-          : { executable: resolve('test/fixtures/claude-code.mjs'), version: '2.1.319' },
-      },
-      execute: async (name, args) => mediaTurn.execute(name, args),
-    };
-
-    const reply = await runAgent({
-      ...spec,
-      adapter: services => serviceHarnessTurn(spec, services, role, computer, 'owner:' + scenario.backend + ':' + scenario.transport, mediaTurn),
-    });
-    const parsedReply = JSON.parse(reply);
-    assert.equal(parsedReply.image_blocks, 1);
-    assert.equal(parsedReply.relay_status, 200);
-    assert.ok(capturedRequest, 'upstream model provider must receive the multimodal request');
-
-    // Verify exact protocol image part forwarded to upstream.
-    if (scenario.upstream === 'openai-chat-completions') {
-      const imgPart = capturedRequest.body.messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(p => p.type === 'image_url');
-      assert.equal(imgPart?.image_url?.url, `data:image/png;base64,${expectedBase64}`);
-    } else if (scenario.upstream === 'openai-responses') {
-      const imgPart = capturedRequest.body.input.flatMap(i => Array.isArray(i.output) ? i.output : Array.isArray(i.content) ? i.content : []).find(p => p.type === 'input_image');
-      assert.equal(imgPart?.image_url, `data:image/png;base64,${expectedBase64}`);
-    } else {
-      const tr = capturedRequest.body.messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(b => b.type === 'tool_result');
-      const imgPart = Array.isArray(tr?.content) ? tr.content.find(b => b.type === 'image') : null;
-      assert.equal(imgPart?.source?.type, 'base64');
-      assert.equal(imgPart?.source?.media_type, 'image/png');
-      assert.equal(imgPart?.source?.data, expectedBase64);
-    }
-
-    // Verify ZERO raw base64 leaked into service_harness_events or task_events!
-    const harnessEvents = JSON.stringify(store.all('SELECT * FROM service_harness_events'));
-    assert.ok(!harnessEvents.includes(expectedPrefix), 'service_harness_events must never contain raw image base64');
-    const taskEvents = JSON.stringify(store.all('SELECT * FROM task_events'));
-    assert.ok(!taskEvents.includes(expectedPrefix), 'task_events must never contain raw image base64');
-  });
-}
 
 test('Pi task agent native read tool sends workspace image when image_input=true and scrubs base64 from events.jsonl', { skip: piSkip, timeout: 90000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'bot-mm-pi-task-'));

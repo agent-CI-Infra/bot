@@ -49,7 +49,11 @@
   - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志；写入内容在控制面、manager 与 runner 三处统一限制上限为 32 KiB（超限返回 `400 invalid_cli_config_content`），由 manager 经 Docker exec 环境变量 `BOT_CLI_CONFIG_B64` 传入（不进入命令行 `argv`，runner 读取后立即清除环境变量）。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
 
-### 默认后端
+### 默认后端与固定 Pi 的角色
+
+管理助手、群聊助手、Manager 和 QA 只在 `pi` 上运行（#1337）。服务助手的可选后端 `serviceHarnesses` 只有 `pi`（`src/service-roles/roles.ts`），服务角色与群绑定提交其他后端返回 `unknown_role_harness`，控制台不再提供选择。项目角色仍按注册表声明的 `kinds` 准入：只有 Pi 声明 `controller`（Manager）和 `evaluator`（QA），所以保存配置时这两个角色选其他后端返回 `harness_role_unsupported`，`resolveRole` 对容器后端的入口覆盖同样拒绝；Codex、Claude Code 的运行时身份检查也只接受 `writer` 和 `observer`。Dev、Test、Reviewer、UX 和自定义角色的可选后端不变。
+
+旧库在启动时由 `pinAssistantsToPi`（`src/roles/native-to-pi.ts`，标记 `migration:1337:assistants-on-pi`）在一个事务里一次性改写，有改动时启动日志写一行 `[migration:1337]` 计数：服务角色改为 `pi` 并递增 revision；群绑定改为 `pi`、revision 不变（群的授权围栏）；Manager 与 QA 由通用的 `moveRolesToPi`（`src/roles/definition.ts`）改写已保存配置（V2 生成新配置版本，旧格式 `harnesses` 条目原地改写）、`task_execution_configs` 冻结快照和 `role_instances`（清空 `session` 与 `harness_state`）。角色固定的模型保留，Pi 不支持其模型 API 时计入日志，角色停在等待配置，不改用其他模型。
 
 项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的读写缺省值和新建库的列默认值，以及控制台新建表单。升级库的这两列保留加列时的 `DEFAULT 'native'`（`ALTER TABLE ... ADD COLUMN` 只在加列时执行一次），但所有写入都显式给出后端，列默认值不影响行为。`native` 后端已删除（#1257，见下文）。
 
@@ -63,7 +67,7 @@
 
 `native` 后端已删除（#1257）：控制面里不再有自己的工具循环，`runAgent` 必须带适配器（缺少时抛出 `agent_adapter_required`），每个注册的后端都自带传输。角色配置提交 `native` 由已有校验返回 `unknown_role_harness`；`text_json` 结构化输出仍保留，`process` 支持它。
 
-- 服务助手：服务角色和群绑定的可选后端只剩 `pi`、`codex`、`claude_code`（`serviceHarnesses`，`src/service-roles/roles.ts`），提交 `native` 由已有校验返回 `unknown_role_harness`。`migration:1255` 之后手动选成 `native` 的残留值，由 `retireNativeServiceAssistants`（`src/roles/native-to-pi.ts`）在每次启动时改为 `pi`：服务角色递增 revision，群绑定 revision 不变，有改动时启动日志写 `[migration:1257]` 计数。没有任何写入能再存回 `native`，所以首次启动之后它什么也找不到。
+- 服务助手：提交 `native` 由已有校验返回 `unknown_role_harness`（#1337 起只接受 `pi`，见上文）。`migration:1255` 之后手动选成 `native` 的残留值，由 `retireNativeServiceAssistants`（`src/roles/native-to-pi.ts`）在每次启动时改为 `pi`：服务角色递增 revision，群绑定 revision 不变，有改动时启动日志写 `[migration:1257]` 计数。没有任何写入能再存回 `native`，所以首次启动之后它什么也找不到。
 - 项目角色：`retireNativeProjectRoles`（标记 `migration:1257:retire-native-roles`）在一个事务里一次性改写 `migration:1255` 之后剩下的 `native`：已保存配置里的 V2 角色（生成新配置版本，`updated_by: migration:1257`）和旧格式 `harnesses` 条目、冻结在 `task_execution_configs` 里的任务配置快照（照 #705 退役 ACP 的做法，等待中或重新唤醒的任务能继续运行），以及 `role_instances`（取其任务迁移后的角色后端，否则 `pi`，并清空 `session` 与 `harness_state`，下次运行从任务记录重建）。角色覆写的模型要求 `text_json` 输出时改为 `process`，其余改为 `pi`；有改动时启动日志写一行 `[migration:1257]` 计数。
 
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
@@ -150,8 +154,8 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 ### 助手电脑（`manager/assistant-computers.mjs`）
 
 - **按归属按需创建、临时磁盘卷与全局镜像对齐**：服务助手每一轮都在会话归属的短时容器里运行，回合一开始就申请（经控制面的 `list_files`/`read_file`/`write_file`/`delete_file` 纯列举与读写 HOME 不经容器，由控制面经 `O_NOFOLLOW` 与 `/proc/self/fd` 边界核验直通服务，统一支撑 `~/memory/` 助手私有记忆文件）；容器默认直接继承全局默认环境与全局预编译镜像（默认 16 GB 内存；单容器统一按宿主机内存 75% 安全上限收紧并拒绝保存超限值，预留 25% 给宿主机与控制面，`/info` 异常或返回缺失字段且无缓存时均保守回退至 4 GB / 2 核；项目电脑的 Docker `--memory` 为单容器 cgroup 突发上限而非常驻物理内存预留，空闲 `ready` 项目容器仅运行 `idle.mjs` 约占 ~7.5 MiB RSS，因此多仓部署的 `register`/`recover`/`start` 不按空闲项目上限之和拒启；并发忙碌助手容器按 `2×` 安全上限即 `1.5×` 宿主机内存严格扣除当前处于 `busy` 执行态的项目电脑内存做准入排队，无无条件保底绕过，既避免活跃构建与助手叠加挤爆内存，也防止多仓空闲容器饿死助手；`/workspace` 与 `/tmp` 各默认 20 GB 应用层软限额，项目电脑 `/tmp` 保持默认 4 GB 内存型 `tmpfs` 并受容器生效内存上限约束），全局默认更新后空闲容器在下一回合平滑切换。为避免大仓库检出与构建产物挤占容器 16 GB cgroup 内存上限（禁用 swap），助手电脑的 `/workspace` 与 `/tmp` 采用随容器生命周期自动创建、随容器销毁/`remove`/`recover`/`shutdown` 彻底回收的命名临时磁盘卷（标记 `department.bot.kind=assistant-workspace` / `assistant-tmp`），通过环境变量注入 `BOT_WORKSPACE_LIMIT_MB` / `BOT_TMP_LIMIT_MB` 应用层软限额（`runner/assistant-files.mjs` 以短时缓存计数加增量更新避免逐块全盘遍历，并在覆盖解包时计入峰值占用），并接入 `manager/disk.mjs` `DiskGuard`（数据盘低于安全预留时先回收空闲助手临时卷，仍不足则拒绝创建与写入返回 `disk_full`）及 `runner/disk.mjs`（同时监测 `/workspace` 与 `/tmp`）写保护，继续保持 `ReadonlyRootfs: true`、`cap_drop: [ALL]` 与无特权隔离边界。控制面 `GitCache.archive` 以流式字节上限（256 MiB）和解包前 tree 大小校验硬截断超大归档，防止写爆控制面卷。
-- **Harness 回合提前申请**：Pi、Codex、Claude Code 的服务助手回合整轮都在助手电脑上运行，所以回合一开始就调用 `AssistantComputer.warm()`，与上下文拼装、权限核对同时申请电脑。它按 Harness 运行环境的语义申请（同 `sessionWorkspace`，不要求 `run_command`）；首次使用与它共用同一次 HOME 准备和容器申请；申请失败不记住，首次使用会再遇到并报告；回合在申请完成前结束时，电脑一到手就归还。容量满时排队提示与原来相同。
+- **Harness 回合提前申请**：服务助手的 Pi 回合整轮都在助手电脑上运行，所以回合一开始就调用 `AssistantComputer.warm()`，与上下文拼装、权限核对同时申请电脑。它按 Harness 运行环境的语义申请（同 `sessionWorkspace`，不要求 `run_command`）；首次使用与它共用同一次 HOME 准备和容器申请；申请失败不记住，首次使用会再遇到并报告；回合在申请完成前结束时，电脑一到手就归还。容量满时排队提示与原来相同。
 - **生命周期与 HOME 代次**：运行中每 30 秒续期，回合结束回收进程后空闲默认 30 分钟销毁（同一人或同一群隔几分钟再问时直接复用；设置只保存管理员改过的值，旧版本连同默认值存下的 5 分钟及旧默认资源值 2048 MB / 512 MB 在升级时改为跟随新默认），单台最长存活 4 小时，达到并发上限淘汰最久空闲容器；归属的仓库范围收缩或更换绑定/角色时推进 HOME 代次并封存旧代次，超过软容量上限（默认 5 GB）自动降为只读提示清理。
-- **必需组件提示**：有服务助手或启用的群绑定用 Pi、Codex 或 Claude Code 时，助手电脑不可用（控制面没配 manager、控制面没挂 `assistant-homes`、manager 不响应、manager 没挂 `assistant-homes`）会在控制面启动时写一条 `[assistant-computers]` 警告日志；控制台在这些后端的选择旁（`GET /api/assistant-computers/status`）和「助手电脑」设置页给出原因。
+- **必需组件提示**：启用管理助手或群绑定时，助手电脑不可用（控制面没配 manager、控制面没挂 `assistant-homes`、manager 不响应、manager 没挂 `assistant-homes`）会在控制面启动时写一条 `[assistant-computers]` 警告日志；控制台在管理助手和群配置的编辑处（`GET /api/assistant-computers/status`）和「助手电脑」设置页给出原因。
 - **群聊助手只读项目工具挂载与空闲切换**：群聊助手仅在助手电脑与 `project-tools` 卷可用时才于 `context.scope.project_tools` 宣告本群可达项目的只读工具路径，并在 `acquire` 时传入活跃工具版本列表（`project_tools`）；`manager/assistant-computers.mjs` 校验目录后按项目隔离只读挂入 `/opt/project-tools/<owner>__<repo>`（若 `project-tools` 卷或单个版本目录缺失，仅跳过对应挂载并记录告警，不中断群聊回合），并将版本集合签名（`projectToolsSignature`）纳入空闲容器复用条件——运行中的回合绝不中断，下一空闲回合自动重建切换新版本。管理助手（控制台与飞书私聊）可通过 `assistant_archive_pack` / `assistant_archive_read` / `assistant_archive_cleanup` 流式导出 `/workspace` 或 `/tmp` 中已验证的文件/目录，经控制面安全校验后发布到目标项目的工具卷；群聊助手不具备工具卷写入权限。
 - **预装浏览器与 X11 虚拟桌面**：项目与助手基础镜像统一预装 Chromium（`/usr/local/bin/bot-chromium`）与虚拟桌面包装（`/usr/local/bin/bot-desktop`，封装 `Xvfb`、`openbox`、`xdotool`、`scrot`、`ffmpeg` 等），兼容只读根文件系统与非特权用户，控制面本身不安装浏览器。

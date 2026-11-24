@@ -51,19 +51,21 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await expect(page.getByTestId('backend-availability-card')).toBeVisible();
     await expect(page.getByTestId('backend-availability-card')).toContainText('Claude Code');
     await expect(page.getByTestId('backend-availability-card')).toContainText('Codex');
+    // Manager and QA run only on Pi (#1337): their pages name it; every other role chooses among all backends.
+    const fixedPi = () => page.getByTestId('role-form').getByText('Agent 后端：Pi（这个角色固定使用 Pi，不能切换）', { exact: true });
     for (const role of roles) {
       await goRolePage(page, { role });
       const picker = page.getByTestId('role-form').getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
+      if (['manager', 'qa'].includes(role)) {
+        await expect(picker).toHaveCount(0); await expect(fixedPi()).toBeVisible();
+        continue;
+      }
+      await expect(fixedPi()).toHaveCount(0);
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
-      const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp', 'icode', 'workswarm'] : [];
-      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', ...acp, 'process']);
+      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'container_acp', 'icode', 'workswarm', 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
-      for (const backend of ['pi', 'process']) expect(await optionDisabled(backend)).toBe(false);
-      // Harness selection is independent of controller/worker role.
-      for (const backend of ['claude_code', 'codex']) {
-        expect(await optionDisabled(backend)).toBe(false);
-      }
+      for (const backend of ['pi', 'process', 'claude_code', 'codex']) expect(await optionDisabled(backend)).toBe(false);
     }
     await goRolePage(page, { role: 'dev' });
     const acpPicker = page.getByLabel('dev Agent 后端', { exact: true });
@@ -107,8 +109,6 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await swarmStatus.scrollIntoViewIfNeeded();
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    await goRolePage(page, { role: 'manager' });
-    await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('process');
     await goRolePage(page, { role: 'reviewer' });
     await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('codex');
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
@@ -147,14 +147,14 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value;
-    expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('process');
+    expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('pi');
     expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.id).toBe('codex');
     expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.model_source).toBeUndefined();
     expect(saved.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id).toBe('claude_code');
     expect(saved.configuration.roles.find(r => r.role_id === 'qa').harness_ref.id).toBe('pi');
     await page.reload();
     await goRolePage(page, { role: 'manager' });
-    await expect(page.getByRole('combobox', { name: 'manager Agent 后端', exact: true })).toHaveValue('process');
+    await expect(fixedPi()).toBeVisible();
     await goRolePage(page, { role: 'reviewer' });
     await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('codex');
     await expect(page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true })).toHaveValue('gateway');
@@ -192,7 +192,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await page.goBack();
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     await goRolePage(page, { role: 'qa' });
-    await expect(page.getByRole('combobox', { name: 'qa Agent 后端', exact: true })).toBeVisible();
+    await expect(fixedPi()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await goRolePage(page);
     await expect(page.getByTestId('backend-availability-card')).toBeVisible();

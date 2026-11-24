@@ -1,5 +1,7 @@
 import type { Store } from '../storage/database.js';
-import { moveNativeRolesToPi, retireNativeRoles } from './definition.js';
+import { moveNativeRolesToPi, moveRolesToPi, retireNativeRoles } from './definition.js';
+import { harnesses } from './harness.js';
+import { requiredRoles } from './pool.js';
 
 /**
  * One-time migration (#1255): Pi is the default backend for the management assistant, group assistants and project roles,
@@ -75,4 +77,37 @@ export function retireNativeProjectRoles(s: Store, log: (line: string) => void =
   });
   if (counts.roles || counts.tasks || counts.instances)
     log(`[migration:1257] Native retired: ${counts.roles} roles in ${counts.projects} projects (${counts.process} to Process for text_json output, the rest to Pi), ${counts.tasks} frozen task configurations, ${counts.instances} role instances`);
+}
+
+/**
+ * The management assistant, group assistants, Manager and QA run only on Pi (#1337): the console offers no other backend
+ * for them and the API refuses one. Once, at start-up, what a database saved for them on another backend moves to Pi:
+ * - Service roles: `service_roles.harness` → `pi`, a new revision (as in #1255).
+ * - Group bindings: `channel_service_bindings.harness` → `pi`; the revision stays, it is part of the group's fence.
+ * - Manager and QA in saved and frozen role configurations and their role instances: see moveRolesToPi.
+ */
+export function pinAssistantsToPi(s: Store, log: (line: string) => void = line => console.log(line)) {
+  const marker = 'migration:1337:assistants-on-pi';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  const counts = s.transaction(() => {
+    const time = new Date().toISOString();
+    const roles = s.hasTable('service_roles') ? s.all("SELECT id FROM service_roles WHERE harness<>'pi' ORDER BY id").map(row => String(row.id)) : [];
+    for (const id of roles) {
+      s.run("UPDATE service_roles SET harness='pi',revision=revision+1,updated_at=? WHERE id=?", time, id);
+      s.audit('migration:1337', 'service_role.moved_to_pi', id);
+    }
+    const bindings = s.hasTable('channel_service_bindings') ? s.all("SELECT id FROM channel_service_bindings WHERE harness<>'pi' ORDER BY id").map(row => String(row.id)) : [];
+    for (const id of bindings) {
+      s.run("UPDATE channel_service_bindings SET harness='pi' WHERE id=?", id);
+      s.audit('migration:1337', 'channel.service_binding.moved_to_pi', id);
+    }
+    // Every other registered backend; earlier migrations already moved the unregistered ones (Native, ACP).
+    const others = harnesses.map(h => h.id).filter(id => id !== 'pi');
+    const project = moveRolesToPi(s, 'migration:1337', others, (role, backend) => requiredRoles.includes(role) && backend !== 'pi');
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, time);
+    return { serviceRoles: roles.length, bindings: bindings.length, ...project };
+  });
+  if (counts.serviceRoles || counts.bindings || counts.roles || counts.tasks || counts.instances)
+    log(`[migration:1337] assistants on Pi: ${counts.serviceRoles} service roles, ${counts.bindings} group bindings, ${counts.roles} Manager/QA roles in ${counts.projects} projects, ${counts.tasks} frozen task configurations, ${counts.instances} role instances`
+      + (counts.unusable ? `; ${counts.unusable} of those roles pin a model profile Pi cannot use and wait for configuration` : ''));
 }

@@ -2,9 +2,6 @@ const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
 // Pi is the default backend (#1255): a new group starts on it, and only another backend is shown as a badge or opens the
 // advanced settings.
-const defaultGroupHarness = 'pi';
-const groupHarnessOptions = [['pi', 'Pi（推荐）'], ['codex', 'Codex'], ['claude_code', 'Claude Code']];
-const groupHarnessName = id => groupHarnessOptions.find(([key]) => key === id)?.[1] || id;
 // Group binding permissions are split into three orthogonal dimensions (#1206): GitHub, project tasks, and platform capabilities.
 const githubLevelOptions = [
   ['read', '只读', '读取范围内仓库的 Issue、PR、代码、Actions 和检查状态；不写 GitHub。'],
@@ -245,7 +242,8 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   form.append(presetBar, githubFieldset, taskModes, platformFieldset,
     element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按以上权限配置使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
 
-  // Inline group assistant configuration (#1249): model (filtered to the selected scope), prompt/responsibility, and Agent harness.
+  // Inline group assistant configuration (#1249): model (filtered to the selected scope) and prompt/responsibility. The
+  // assistant runs only on Pi (#1337), so there is no backend to choose.
   const assistantFieldset = element('fieldset', '', 'feishu-assistant-fieldset');
   assistantFieldset.append(element('legend', '助手模型与提示词'));
   const modelList = Array.isArray(data.models) ? data.models : [];
@@ -333,12 +331,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     placeholder: '选填：补充本群助手的职责、回答风格或协作要求（附加在内置安全提示之后，不能扩大工具或权限）',
   });
   promptInput.setAttribute('aria-label', '提示词与职责说明');
-  const harnessSelect = document.createElement('select'); harnessSelect.name = 'binding_harness'; harnessSelect.setAttribute('aria-label', 'Agent 后端');
-  for (const [id, label] of groupHarnessOptions) { const opt = element('option', label); opt.value = id; harnessSelect.append(opt); }
-  harnessSelect.value = defaultGroupHarness;
-  const harnessDetails = element('details', '', 'fold feishu-guide-details');
   const computerWarning = harnessComputerWarning();
-  harnessDetails.append(element('summary', '高级设置：Agent 后端'), field('Agent 后端', harnessSelect));
 
   const assistantPresetBar = element('div', '', 'feishu-preset-bar');
   const copySourceSelect = document.createElement('select'); copySourceSelect.setAttribute('aria-label', '选择要复制配置的已有群');
@@ -346,15 +339,13 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     const source = data.bindings.find(b => b.chat_id === copySourceSelect.value);
     if (!source) return;
     promptInput.value = source.prompt || '';
-    harnessSelect.value = source.harness || defaultGroupHarness;
-    if (harnessSelect.value !== defaultGroupHarness) harnessDetails.open = true;
     preferredModelId = source.model_id || '';
     updateModelOptions();
   }, 'quiet');
   const copyRow = element('div', '', 'feishu-copy-row');
   copyRow.append(copySourceSelect, copyBtn);
   const refreshCopySources = () => {
-    const others = data.bindings.filter(b => b.chat_id !== chat.value && (b.model_id || b.prompt || (b.harness && b.harness !== defaultGroupHarness)));
+    const others = data.bindings.filter(b => b.chat_id !== chat.value && (b.model_id || b.prompt));
     copySourceSelect.replaceChildren();
     for (const b of others) copySourceSelect.add(new Option(`${channelChatName(b.chat)}${b.model ? ' · ' + modelChoiceName(b.model) : ''}`, b.chat_id));
     copyRow.hidden = !others.length;
@@ -364,9 +355,8 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     button('填入默认问答提示', () => { promptInput.value = data.default_prompt || ''; }, 'quiet'),
     copyRow,
   );
-  assistantFieldset.append(field('助手模型', modelSelect), modelWarning, modelHint, assistantPresetBar, field('提示词与职责说明', promptInput), harnessDetails,
-    // Outside the folded section: every backend needs an assistant computer, so a group set up with the defaults still
-    // learns that its turns would fail.
+  assistantFieldset.append(field('助手模型', modelSelect), modelWarning, modelHint, assistantPresetBar, field('提示词与职责说明', promptInput),
+    // Every turn needs an assistant computer, so a group set up with the defaults still learns that its turns would fail.
     computerWarning);
   form.append(assistantFieldset);
 
@@ -411,8 +401,6 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     renderPlatformItems(initial);
     participation.value = current?.participation || 'mentions';
     promptInput.value = current ? (current.prompt || '') : '';
-    harnessSelect.value = current?.harness || defaultGroupHarness;
-    harnessDetails.open = harnessSelect.value !== defaultGroupHarness;
     preferredModelId = current ? (current.model_id || '') : '';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;
@@ -438,7 +426,6 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
         permissions,
         model_id: modelSelect.value || null,
         prompt: promptInput.value,
-        harness: harnessSelect.value,
         enabled: true,
         expected_revision: expected,
       });
@@ -484,7 +471,6 @@ function buildGroupBindingsList(data) {
     const modelLabel = b.model ? `${modelChoiceName(b.model)}${b.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置模型';
     const modelBadge = element('span', modelLabel, b.model?.key_configured ? 'feishu-binding-badge' : 'feishu-binding-badge feishu-binding-badge-warning');
     titleWrap.append(groupName, stateBadge, modelBadge);
-    if (b.harness && b.harness !== defaultGroupHarness) titleWrap.append(element('span', groupHarnessName(b.harness), 'feishu-binding-badge feishu-binding-badge-info'));
 
     const participationLabel = participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation;
     const permSummary = `GitHub ${bindingGithubSummary(b, data.permission_items)} · 项目任务 ${groupTaskShort(b)} · 平台 ${bindingPlatformSummary(b, data.permission_items)}`;

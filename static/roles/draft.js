@@ -81,6 +81,12 @@ function roleModelPicker(role, state, redraw) {
   if (redraw) select.addEventListener('change', redraw);
   select.disabled = external || localConfig; return select;
 }
+// Manager and QA run only on Pi (#1337): when a single backend declares the role's kind and the role already uses it, the
+// editor shows that backend instead of offering a choice.
+function roleFixedBackend(role, state) {
+  const able = state.data.backends.filter(backend => backend.kinds.includes(role.kind));
+  return able.length === 1 && able[0].id === role.harness_ref.id ? able[0] : null;
+}
 function roleBackendPicker(role, state, redraw) {
   const candidates = state.data.backends.filter(backend => backend.kinds.includes(role.kind) || backend.id === role.harness_ref.id);
   return roleSelect(role.role_id + ' Agent 后端', role.harness_ref.id, candidates.map(backend => [

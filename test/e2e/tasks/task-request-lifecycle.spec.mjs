@@ -8,6 +8,7 @@ import { harness, setup, account, repository } from '../../fixtures/helpers.mjs'
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { LocalManager } from '../../../dist/projects/local-manager.js';
 import { server as github } from '../../fixtures/agent-server.mjs';
+import { scriptedHarness } from '../../fixtures/scripted-driver.mjs';
 
 const reportText = 'Observed repository fact: calc.mjs contains the arithmetic implementation.';
 const send = (res, message) => {
@@ -72,7 +73,8 @@ async function fixture() {
     expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id, development_enabled: true })).status).toBe(200);
     const roles = (await admin('/api/repositories/101/roles')).value;
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, enabled: false,
-      roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'process' } })) })).status).toBe(200);
+      // In process: Dev on Process; Manager and QA, which run only on Pi in production (#1337), on the test-only scripted driver.
+      roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'dev' ? 'process' : scriptedHarness } })) })).status).toBe(200);
     return { h, admin, password, requests, qaStarted, releaseQA, close,
       run() { advance = true; engine.tick(); return Promise.all(engine.active.values()); } };
   } catch (error) { await close(); throw error; }

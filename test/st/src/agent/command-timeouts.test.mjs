@@ -52,7 +52,7 @@ async function fixture(t, backend, kind, respond) {
   store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,?,?,?,?,?,?,?,?)', 't', '101', kind, 'running', 'command fixture', '{}', 1, environment.generation, randomBytes(24).toString('hex'));
   const records = new TaskRecords(store);
   records.contract('t', { goal: 'Observe commands', scope: ['fixture'], criteria: ['Use actual observations'], endpoint: 'report' });
-  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa', 'reviewer'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'manager' ? 'scripted' : backend } })) });
+  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa', 'reviewer'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'manager' || role_id === 'qa' && backend !== 'pi' ? 'scripted' : backend } })) });
   const task = store.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {}, workspace = new Workspace(store, manager, task, redactor, guard, log => logs.push(log));
   await workspace.call('init', { type: 'workspace_init' });
   await workspace.write('seed-write', 'fixture.txt', Buffer.from('baseline'));
@@ -97,9 +97,10 @@ test('command timeouts validate configuration and explicit values, clamp with a 
   assert.match(commandTool(120).function.parameters.properties.keep_background.description, /log_path/);
 });
 
-// Cover every backend adapter (process, pi) on single-role QA and team-delegated development, while covering
-// all four workflow entry points (QA, development, request, observer) without repeating a full 3x4 Cartesian matrix.
-for (const backend of ['process', 'pi']) {
+// Cover every backend adapter (process, pi) on team-delegated development and QA's backends (Pi, and in process the
+// test-only scripted driver: QA runs only on Pi in production, #1337), while covering all four workflow entry points
+// (QA, development, request, observer) without repeating a full 3x4 Cartesian matrix.
+for (const backend of ['scripted', 'pi']) {
   test(`independent QA forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'task.request', body => nextCommand(body) ?? call('submit_acceptance', pass));
     f.records.submit('t', [{ kind: 'report', reference: 'report.md', version: 'v1', content: 'observed' }], [], {});
@@ -166,7 +167,7 @@ test('kept background service remains accessible to later task commands', async 
   assert.equal(read.exit_code, 0); assert.equal(read.output.trim(), 'ready');
 });
 
-for(const backend of ['process','pi'])test(`QA consumes a complete large command result by read-only pagination (${backend})`,{skip:backend==='pi'&&skipPi,timeout:90000},async t=>{
+for(const backend of ['scripted','pi'])test(`QA consumes a complete large command result by read-only pagination (${backend})`,{skip:backend==='pi'&&skipPi,timeout:90000},async t=>{
   let observed;
   const f=await fixture(t,backend,'task.request',body=>{
     const results=receipts(body),command=results.find(r=>r.file&&r.exit_code===0);

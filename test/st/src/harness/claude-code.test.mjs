@@ -184,16 +184,16 @@ test('Claude Code protocol fixture: seven RoleRun operations, container stdio MC
   assert.ok(!launch.env_names.includes('GITHUB_TOKEN'));
 });
 
-test('Claude Code protocol fixture: reviewers and QA use fresh contexts; missing native session rebuilds honestly', async t => {
+test('Claude Code protocol fixture: each worker role keeps its own session; QA cannot run on it; missing native session rebuilds honestly', async t => {
   const f = await claudeFixture(t);
   await runRole(f.spec, 'dev', undefined, 'claude_code');
   const dev = f.state();
   await runRole(f.spec, 'reviewer', undefined, 'claude_code');
-  await runRole(f.spec, 'qa', undefined, 'claude_code');
-  await runRole(f.spec, 'qa');
+  // QA runs only on Pi (#1337), even when an entry names another backend.
+  await assert.rejects(runRole(f.spec, 'qa', undefined, 'claude_code'), { code: 'harness_role_unsupported' });
   const sessions = f.s.all('SELECT role,harness_state FROM role_instances').map(r => ({ role: r.role, state: JSON.parse(r.harness_state) }));
-  assert.equal(new Set(sessions.map(r => r.state.sessionId)).size, 3);
-  assert.equal(sessions.find(r => r.role === 'qa').state.recoveryMode, 'fresh_evaluation');
+  assert.deepEqual(sessions.map(r => r.role).sort(), ['dev', 'reviewer']);
+  assert.equal(new Set(sessions.map(r => r.state.sessionId)).size, 2);
   rmSync(join(f.cliHome(dev), '.claude', 'projects'), { recursive: true, force: true });
   await runRole(f.spec, 'dev');
   assert.equal(f.state().recoveryMode, 'rebuilt_from_task_records');
@@ -756,17 +756,17 @@ test('Claude protocol fixture + synthetic provider: a metered 429 rejection can 
   assert.equal(instanceUsage(f.s, id).unknown_requests, 0);
 });
 
-test('Claude configuration rejects invalid profiles but controller roles can select the backend', async t => {
+test('Claude configuration rejects invalid profiles; Manager and QA cannot select the backend', async t => {
   const f=await claudeFixture(t);const {provider,...external}=f.config;
   writeFileSync(f.file,JSON.stringify({...external,gatewayUrl:provider.baseUrl}));
   await assert.rejects(roleRuns.prepare(f.spec,'dev',undefined,'claude_code'),{code:'claude_configuration_invalid'});
   writeFileSync(f.file,JSON.stringify(f.config));
   const admin={id:'admin',role:'project_admin',repositories:['r']},url=new URL('http://local/api/repositories/r/roles');
-  for(const role of ['manager']){
+  // Manager and QA run only on Pi (#1337): saving Claude Code is refused, and so is resolving them on it.
+  for(const role of ['manager','qa']){
     const current=roleApi(f.s,admin,'GET',url,{});
-    const saved=roleApi(f.s,admin,'PUT',url,{expected_revision:current.configuration.revision,enabled:true,roles:[{role_id:role,harness_ref:{id:'claude_code'}}]});
-    assert.equal(saved.configuration.roles.find(r=>r.role_id===role).harness_ref.id,'claude_code');
-    const resolved=resolveRole(f.s,'r',role,'task.request',{persist:false});assert.equal(resolved.snapshot.kind,'controller');
+    assert.throws(()=>roleApi(f.s,admin,'PUT',url,{expected_revision:current.configuration.revision,enabled:true,roles:[{role_id:role,harness_ref:{id:'claude_code'}}]}),e=>e.code==='harness_role_unsupported'&&e.field===`roles.${role}.harness_ref.id`);
+    assert.throws(()=>resolveRole(f.s,'r',role,'task.request',{harness:'claude_code',persist:false}),{code:'harness_role_unsupported'});
   }
 });
 

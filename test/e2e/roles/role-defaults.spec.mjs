@@ -45,7 +45,9 @@ test('#1068 未配置时直接展示生效的默认配置，保存后为自定�
     await expect(page.getByTestId('restore-default-roles')).toHaveCount(0);
     // A role page shows the same backend the server runs; its fold draws a marker.
     await page.getByTestId('role-list-manager').click();
-    await expect(page.getByLabel('manager Agent 后端', { exact: true })).toHaveValue(fresh.recommended_backend);
+    // The Manager runs only on Pi (#1337), the recommended backend: the page names it instead of offering a choice.
+    expect(fresh.recommended_backend).toBe('pi');
+    await expect(page.getByTestId('role-form').getByText('Agent 后端：Pi（这个角色固定使用 Pi，不能切换）', { exact: true })).toBeVisible();
     await expect(page.getByTestId('role-form').getByText(/^默认配置 · /)).toBeVisible();
     const marker = await page.getByTestId('role-form-advanced').locator(':scope > summary').evaluate(el => getComputedStyle(el, '::before').content);
     expect(marker).toBe('"▸"');

@@ -397,6 +397,84 @@ export function retireNativeRoles(s: Store): { projects: number; roles: number; 
 }
 
 /**
+ * Moves the project roles `moves(role, backend)` selects to Pi, for a one-time start-up migration that runs inside the
+ * caller's transaction (#1337). `from` lists the backend ids it may select, so only rows naming one of them are read.
+ * - Saved configurations: V2 roles under a new configuration revision (`updated_by: actor`), legacy `harnesses` entries in
+ *   place (a legacy role it does not name already runs Pi).
+ * - Frozen `task_execution_configs` snapshots, as #705 and #1257 did, so a waiting or reopened task resumes on Pi instead of
+ *   stopping at the backend check.
+ * - `role_instances` on a selected backend: session and harness state are cleared, so the next run rebuilds from task records.
+ * A moved role keeps its pinned model profile; `unusable` counts those Pi cannot use, which wait for configuration rather
+ * than switching models.
+ */
+export function moveRolesToPi(s: Store, actor: string, from: string[], moves: (role: string, backend: string) => boolean) {
+  const pi = harnesses.find(h => h.id === 'pi')!, ref = harnessRef('pi'), counts = { projects: 0, roles: 0, unusable: 0, tasks: 0, instances: 0 };
+  const named = (column: string) => '(' + from.map(() => `${column} LIKE ?`).join(' OR ') + ')', patterns = from.map(id => `%"${id}"%`);
+  const usable = (role: any) => { const p = role?.model_profile_ref; return !p || pi.model_api.includes(p.api) && pi.structured_output.includes(p.structured_output); };
+  // A V2 role list with the selected roles moved, or null when none is selected.
+  const moveRoles = (roles: any[], counted: boolean) => {
+    let moved = 0;
+    const next = roles.map(role => {
+      if (!moves(String(role?.role_id), String(role?.harness_ref?.id))) return role;
+      moved++; if (counted && !usable(role)) counts.unusable++;
+      return { ...role, harness_ref: ref, revision: Number(role.revision ?? 0) + 1 };
+    });
+    if (counted) counts.roles += moved;
+    return moved ? next : null;
+  };
+  const moveMap = (map: Record<string, unknown>) => Object.entries(map).some(([id, harness]) => moves(id, String(harness)))
+    ? Object.fromEntries(Object.entries(map).map(([id, harness]) => [id, moves(id, String(harness)) ? 'pi' : harness])) : null;
+
+  for (const row of s.all(`SELECT key,value FROM settings WHERE key LIKE 'roles:%' AND ${named('value')}`, ...patterns)) {
+    let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+    if (!stored || typeof stored !== 'object' || followsDefault(stored)) continue;
+    const repositoryId = String(row.key).slice('roles:'.length);
+    if (stored.schema !== 2) {
+      const map = stored.harnesses && typeof stored.harnesses === 'object' ? moveMap(stored.harnesses) : null;
+      if (!map) continue;
+      s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify({ ...stored, harnesses: map }), row.key);
+      counts.projects++; counts.roles += Object.entries(stored.harnesses).filter(([id, harness]) => moves(id, String(harness))).length;
+      s.audit(actor, 'roles.moved_to_pi', '0', repositoryId);
+      continue;
+    }
+    if (!Array.isArray(stored.roles)) continue;
+    const current = roleConfiguration(s, repositoryId, stored), roles = moveRoles(current.roles, true);
+    if (!roles) continue;
+    const now = new Date().toISOString(), { updated_at, updated_by, ...config } = { ...current, roles, revision: current.revision + 1 };
+    const saved = { ...config, updated_at: now, updated_by: actor };
+    s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), actor, now);
+    s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
+    counts.projects++;
+    s.audit(actor, 'roles.moved_to_pi', String(saved.revision), repositoryId);
+  }
+
+  if (s.hasTable('task_execution_configs')) for (const row of s.all(`SELECT c.task_id,c.snapshot,t.repository_id FROM task_execution_configs c LEFT JOIN tasks t ON t.id=c.task_id WHERE ${named('c.snapshot')}`, ...patterns)) {
+    let snap: any; try { snap = JSON.parse(String(row.snapshot)); } catch { continue; }
+    if (!snap?.roles || typeof snap.roles !== 'object') continue;
+    let roles: any = null;
+    if (snap.roles.schema === 2 && Array.isArray(snap.roles.roles)) {
+      const moved = moveRoles(snap.roles.roles, false);
+      // As #705 did: a revision past both the frozen one and the project's current one, so role instances pinned to a
+      // later revision still read this snapshot.
+      if (moved) roles = { ...snap.roles, roles: moved, revision: Math.max(Number(snap.roles.revision ?? 0) + 1, row.repository_id ? roleConfiguration(s, String(row.repository_id)).revision : 0) };
+    } else if (snap.roles.harnesses && typeof snap.roles.harnesses === 'object') {
+      const map = moveMap(snap.roles.harnesses);
+      if (map) roles = { ...snap.roles, harnesses: map };
+    }
+    if (!roles) continue;
+    s.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify({ ...snap, roles }), row.task_id);
+    counts.tasks++;
+  }
+
+  if (s.hasTable('role_instances')) for (const row of s.all(`SELECT id,role,harness FROM role_instances WHERE harness IN (${from.map(() => '?').join(',')})`, ...from)) {
+    if (!moves(String(row.role), String(row.harness))) continue;
+    s.run("UPDATE role_instances SET harness='pi',session='[]',harness_state='{}' WHERE id=?", row.id);
+    counts.instances++;
+  }
+  return counts;
+}
+
+/**
  * One-time migration (#1121): per-run isolated container profiles (`isolated-workspace`, `isolated-candidate`) are retired;
  * saved project configurations and frozen `task_execution_configs` downgrade safely to shared project-computer profiles.
  */

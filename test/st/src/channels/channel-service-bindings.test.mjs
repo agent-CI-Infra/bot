@@ -154,10 +154,12 @@ test('binding needs a Feishu-bound maintainer in the group with config.write ove
   const actor = maintainer(f, 'maintainer', ['101'], 'ou_maintainer'), tenant = h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
   await assert.rejects(bindings.configure(actor, chat.id, { ...input, scope: { kind: 'repositories', repositories: ['101', '201'] } }), { code: 'capability_forbidden' });
   await assert.rejects(bindings.configure(actor, chat.id, { ...input, scope: { kind: 'organization', organization: tenant } }), { code: 'capability_forbidden' });
-  await assert.rejects(bindings.configure(actor, chat.id, { ...input, harness: 'container_acp' }), { code: 'unknown_role_harness' });
+  // A group assistant runs only on Pi (#1337).
+  for (const harness of ['container_acp', 'codex', 'claude_code']) await assert.rejects(bindings.configure(actor, chat.id, { ...input, harness }), { code: 'unknown_role_harness' });
   await assert.rejects(bindings.configure(actor, chat.id, { ...input, scope: { kind: 'repositories', repositories: [] } }), { code: 'channel_service_scope_invalid' });
   assert.equal(h.store.get('SELECT count(*) n FROM channel_service_bindings').n, 0);
-  const bound = await bindings.configure(actor, chat.id, input);
+  const bound = await bindings.configure(actor, chat.id, { ...input, harness: 'pi' });
+  assert.equal(bound.harness, 'pi');
   assert.equal(bound.state, 'active'); assert.deepEqual(bound.reachable, [repo(101)]); assert.equal(bound.configured_by, 'maintainer');
   await assert.rejects(bindings.configure(actor, chat.id, input), { code: 'channel_revision_conflict' });
   const binding = h.store.get('SELECT * FROM channel_service_bindings'), principal = h.store.get('SELECT * FROM principals WHERE id=?', binding.principal_id);

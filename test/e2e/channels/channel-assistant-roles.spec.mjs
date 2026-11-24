@@ -3,10 +3,10 @@ import { harness, setup, account, repository, testPassword } from '../../fixture
 import { transport, connector, bindFixture, inGroup, post } from '../../fixtures/channel-fixture.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 
-// #849 / #1249: a project administrator configures a group binding's model, prompt and harness directly on the group
+// #849 / #1249: a project administrator configures a group binding's model and prompt directly on the group
 // binding editor (#/identity/feishu/groups/new), choosing project-owned models for single-repo groups and shared models
 // for multi-repo groups, without hopping to a separate service-role page.
-for (const width of [1440, 390]) test(`a project administrator configures a group binding's model, prompt and harness inline at ${width}px (protocol fixtures)`, async ({ page }) => {
+for (const width of [1440, 390]) test(`a project administrator configures a group binding's model and prompt inline at ${width}px (protocol fixtures)`, async ({ page }) => {
   const wire = transport(), errors = [], h = await harness(undefined, undefined, store => ({
     engine: new TaskEngine(store, { call: async () => null }), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }
   }));
@@ -33,9 +33,10 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     const modelSelect = page.getByLabel('助手模型', { exact: true });
     await modelSelect.selectOption(projectModel.id);
     await page.getByLabel('提示词与职责说明', { exact: true }).fill('先给结论，再列出处。');
-    // Pi is the default backend (#1255). This deployment has no assistant computers, so the editor says why its turns would
-    // fail without opening the advanced settings (#1254).
-    await expect(page.getByLabel('Agent 后端', { exact: true })).toHaveValue('pi');
+    // A group assistant runs only on Pi (#1337): the editor offers no backend. This deployment has no assistant computers,
+    // so the editor says why its turns would fail (#1254).
+    await expect(page.getByLabel('Agent 后端', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('高级设置：Agent 后端', { exact: true })).toHaveCount(0);
     await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toContainText('控制面没有挂载 assistant-homes 卷');
     // Widening scope to include 102 keeps the stale choice visible with a warning and refuses save naming 102.
     await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).check();
@@ -53,28 +54,20 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await expect(binding.getByText('Project 101 model · 127.0.0.1:9', { exact: true })).toBeVisible();
     await expect(binding).toContainText('先给结论，再列出处。');
     expect(h.store.get('SELECT scope,model_id,prompt,harness FROM channel_service_bindings')).toEqual({ scope: 'repositories', model_id: projectModel.id, prompt: '先给结论，再列出处。', harness: 'pi' });
-    // The default backend gets no badge.
+    // There is no backend badge.
     await expect(binding.locator('.feishu-binding-badge-info')).toHaveCount(0);
-    // Now bind the second group across both 101 and 102 with a shared model, copying prompt from the first group and picking Codex by hand.
+    // Now bind the second group across both 101 and 102 with a shared model, copying prompt from the first group.
     await page.getByRole('link', { name: '创建群绑定', exact: true }).click();
     await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check();
     await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).check();
     await page.getByRole('button', { name: '复制模型与提示词', exact: true }).click();
     await expect(page.getByLabel('提示词与职责说明', { exact: true })).toHaveValue('先给结论，再列出处。');
     await page.getByLabel('助手模型', { exact: true }).selectOption(sharedModel.id);
-    await page.getByText('高级设置：Agent 后端', { exact: true }).click();
-    // Unfolded, the backend select shows the labels in order with the recommended Pi first and chosen.
-    const backend = page.getByLabel('Agent 后端', { exact: true });
-    await expect(backend).toBeVisible();
-    await expect(backend).toHaveValue('pi');
-    // Native is gone (#1257): every backend offered runs on an assistant computer, so the warning stays.
-    await expect(backend.locator('option')).toHaveText(['Pi（推荐）', 'Codex', 'Claude Code']);
-    await backend.selectOption('codex');
-    await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeVisible();
+    await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toContainText('助手的每一轮都在助手电脑上用 Pi 运行');
     await save.click();
     await expect(page.getByRole('article', { name: '群聊助手绑定' })).toHaveCount(2);
     await expect(page.getByRole('article', { name: '群聊助手绑定' }).last()).toContainText('Shared team model');
-    await expect(page.getByRole('article', { name: '群聊助手绑定' }).last().locator('.feishu-binding-badge-info')).toHaveText('Codex');
+    expect(h.store.all('SELECT harness FROM channel_service_bindings').map(row => row.harness)).toEqual(['pi', 'pi']);
     // Project Settings -> Roles no longer displays a separate 群助手角色 view.
     await page.goto(h.admin + '/#/projects/101/roles');
     await expect(page.locator('[data-testid="role-assistant-roles-link"]')).toHaveCount(0);

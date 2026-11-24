@@ -21,20 +21,13 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     // Group assistant templates and creation form are retired from Global Settings (#1249).
     await expect(panel.getByRole('heading', { name: '仓库问答助手', exact: true })).toHaveCount(0);
     await expect(panel.getByRole('heading', { name: '新建服务角色', exact: true })).toHaveCount(0);
-    const backend = assistant.getByRole('combobox', { name: 'Agent 后端', exact: true });
-    // A new deployment starts on Pi (#1255). This harness has no assistant computers, so the form says each of its turns would
-    // fail (#1254).
-    await expect(backend).toHaveValue('pi');
-    await expect(backend.locator('option').first()).toHaveText('Pi（推荐）');
-    await expect(assistant.getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toContainText('Pi、Codex 和 Claude Code 的每一轮都要在助手电脑上运行');
-    await expect(backend.locator('option[value=container_acp], option[value=icode], option[value=workswarm]')).toHaveCount(0);
-    const captureBackend = async state => { for (const width of [1440, 390]) { await page.setViewportSize({ width, height: 900 }); await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);  } await page.setViewportSize({ width: 1440, height: 1000 }); };
-    await captureBackend('before-save');
-    // Native is gone (#1257): every backend offered runs on an assistant computer, so the warning stays whichever is chosen.
-    await expect(backend.locator('option')).toHaveText(['Pi（推荐）', 'Codex', 'Claude Code']);
-    await backend.selectOption('codex');
+    // The management assistant runs only on Pi (#1337): the card names it and offers no backend to choose. This harness has
+    // no assistant computers, so the form says each of its turns would fail (#1254).
+    await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toHaveCount(0);
+    await expect(assistant.locator('select[name=harness]')).toHaveCount(0);
+    await expect(assistant.locator('dt').filter({ hasText: 'Agent 后端' }).locator('xpath=following-sibling::dd[1]')).toHaveText('Pi');
+    await expect(assistant.getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toContainText('助手的每一轮都在助手电脑上用 Pi 运行');
     await expect(assistant.locator('.endpoint-warning').filter({ hasText: '不会改用其他模型' })).toHaveCount(1);
-    await expect(assistant.getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeVisible();
     await expect(assistant.getByRole('button', { name: '删除角色' })).toHaveCount(0);
 
     // Choose the shared model and save.
@@ -43,11 +36,7 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     await assistant.getByRole('button', { name: '保存', exact: true }).click();
     await expect(assistant).toContainText('已保存'); await expect(assistant).toContainText('Shared assistant · 127.0.0.1:9');
     await expect(assistant).not.toContainText('预算上限');
-    expect(h.store.get("SELECT harness FROM service_roles WHERE id='management-assistant'").harness).toBe('codex');
-    expect(h.store.get("SELECT model_id,budget FROM service_roles WHERE id='management-assistant'")).toEqual({ model_id: shared.id, budget: null });
-    await page.goto(h.admin + '/#/settings/management-assistant');
-    await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toHaveValue('codex');
-    await captureBackend('saved-reloaded');
+    expect(h.store.get("SELECT harness,model_id,budget FROM service_roles WHERE id='management-assistant'")).toEqual({ harness: 'pi', model_id: shared.id, budget: null });
 
     // Stale revision conflict is reported without overwriting.
     await assistant.locator('textarea[name=prompt]').fill('先给结论，再列出处。');
