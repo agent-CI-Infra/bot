@@ -1,7 +1,7 @@
 import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
 import { versionTools, versionTool } from './versions.js';
 import { applyIntegration } from './integration.js';
-import { blobValue, storedInput } from '../storage/payloads.js';
+import { blobValue, saveDevelopmentCandidate, storedInput } from '../storage/payloads.js';
 import { assessRetryReport } from '../roles/retries.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { executionRuleFiles, taskConfiguration, trustedTaskRuleFiles } from './configuration.js';
@@ -1212,7 +1212,7 @@ export async function runRequest(
             no_changes: snapshot.tree_sha === input.snapshot_tree && !verifiedConflictMerge?.gitMerged && !candidateRebase,
           };
           store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING', task.repository_id, branch, ownerTaskId);
-          store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data', task.id, JSON.stringify(code));
+          saveDevelopmentCandidate(store, task.id, code, String(task.repository_id));
           policyEvidence = [{ source: 'policy_validation', version: snapshot.tree_sha, verified: validation.source === 'policy' && !validation.error && validation.exit_code === 0 && !validation.timed_out, result: validation }];
         }
         for (const delivered of (result.artifacts ?? []).slice(0, 16)) {
@@ -1270,7 +1270,7 @@ export async function runRequest(
           if (proof) {
             const verified = JSON.parse(proof.data);
             if (verified.result.exit_code === 0 && !verified.result.timed_out && !verified.result.error) {
-              store.run('UPDATE development_candidates SET data=? WHERE task_id=?', JSON.stringify({ ...code, validation: { ...verified.result, command, source: 'policy' } }), task.id);
+              saveDevelopmentCandidate(store, task.id, { ...code, validation: { ...verified.result, command, source: 'policy' } }, String(task.repository_id));
             }
           }
           records.stage(task.id, candidate.id, candidate.revision, verdict, task.claim_token, { policy_hash: requestPolicyHash(store, task) });

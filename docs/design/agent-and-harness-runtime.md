@@ -12,7 +12,8 @@
 - **统一工具集与结果预算**：
   - **只读仓库探索（`RepositoryExplorer`）**：`github_read`、`github_search`、`read_job_log`、`download_artifact` 固定 GET 与当前仓库范围，返回前脱敏。
   - **受控 GitHub 写入（`github_write`）**：类 REST 接口，按路由映射细粒度资源权限与能力上限，单次调用临时签发最小写权限安装令牌并在发出后立即撤销，支持按 scope+key 去重，**永远拒绝直接写入 `.github/workflows/`，且永远拒绝合并/入队修改 `.github/workflows/` 的 PR**（即使在 `auto_merge_policy=allow_all` 下也须由人类维护者在 GitHub 合入）。
-  - **超长结果分页**：超过预算或需折叠的工具输出统一脱敏写入 `tool-results` 卷（24 小时过期），仅向模型返回首尾预览与句柄，通过 `read_tool_result` 或容器内只读 `/results/<id>.utf8` 按需读取。
+  - **超长结果分页**：超过预算或需折叠的工具输出统一脱敏写入 `tool-results` 卷（24 小时过期），仅向模型返回首尾预览与句柄，通过 `read_tool_result` 或容器内只读 `/results/<id>.utf8` 按需读取；`runner/workspace.mjs` 的 `workspace_read` 同样在超过 1 MiB 时返回首尾预览与可读文件路径（Git 对象落盘到任务 `logs/`），并支持 `max_bytes` / `skip_binary` 供验收预检跳过大文件与二进制；`manager/docker.mjs` 移除 4 MiB 响应硬上限，改由 runner 落盘协议控制输出大小。
+  - **孤儿笔记卷与已停止容器自愈**：`manager/projects.mjs` 的 `reclaimNotes` 在删除已删仓库的 `-notes` 卷前，会校验并清理仍挂载该卷的本部署已停止孤儿容器、残留网络与 `manager.sqlite` 孤儿行（若容器仍在运行则以 `409 notes_volume_in_use` 拒绝，绝不误杀运行中实例）。
   - **命令时限与后台进程**：`run_command` 支持 `timeout_seconds`（受 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 统一封顶）与 `keep_background: true`（自动将日志落盘到 `log_path` 并随任务结束回收进程组）。
 
 ## 2. `bot.role-run/1` 协议与 `TaskToolGateway`（`src/roles/`）

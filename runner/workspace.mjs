@@ -3,7 +3,9 @@ import { constants } from 'node:fs';
 import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { command,environment,workspaceTag } from './command.mjs';
+import { outputLimit } from './command-output.mjs';
 import {agentOperation} from './agent.mjs';
 import { git as storeGit, storeRoot } from './store.mjs';
 import {withWorkspaceLock} from './workspace-lock.mjs';
@@ -30,6 +32,37 @@ export async function checkoutDirectory(repo,worktreeRoot=worktreesDirectory){
   }
   const actual=await realpath(repo);if(actual!==repo)throw new Error(`workspace_replaced: expected ${repo}, actual ${actual}`);
   return repo;
+}
+function previewBytes(headBuf, tailBuf, totalBytes, sourcePath) {
+  const head = new StringDecoder('utf8').write(headBuf);
+  let start = 0; while (start < 3 && (tailBuf[start] & 0xc0) === 0x80) start++;
+  const tail = tailBuf.subarray(start).toString('utf8');
+  const omitted = Math.max(0, totalBytes - Buffer.byteLength(head) - Buffer.byteLength(tail));
+  return head + `\n[… ${omitted} bytes omitted; read the complete file from ${sourcePath} …]\n` + tail;
+}
+async function readBoundedFile(handle, displayPath, { maxBytes, skipBinary } = {}) {
+  const size = (await handle.stat()).size;
+  if (Number.isSafeInteger(maxBytes) && maxBytes > 0 && size > maxBytes) return { skipped: true, reason: 'file_too_large', size };
+  if (skipBinary && size > 0) {
+    const probe = Buffer.alloc(Math.min(8192, size));
+    const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
+    if (probe.subarray(0, bytesRead).includes(0)) return { skipped: true, reason: 'binary_file', size };
+  }
+  if (size > outputLimit) {
+    const slice = 64 * 1024;
+    const headBuf = Buffer.alloc(slice), tailBuf = Buffer.alloc(slice);
+    const { bytesRead: headRead } = await handle.read(headBuf, 0, slice, 0);
+    const { bytesRead: tailRead } = await handle.read(tailBuf, 0, slice, Math.max(0, size - slice));
+    return { content: previewBytes(headBuf.subarray(0, headRead), tailBuf.subarray(0, tailRead), size, displayPath), truncated: true, size, path: displayPath };
+  }
+  const buf = Buffer.alloc(size);
+  let pos = 0;
+  while (pos < size) {
+    const { bytesRead } = await handle.read(buf, pos, size - pos, pos);
+    if (!bytesRead) break;
+    pos += bytesRead;
+  }
+  return { content: buf.subarray(0, pos).toString('utf8') };
 }
 // A worktree's tracked changes against HEAD and its untracked files that are not ignored. Ignored files (installed
 // dependencies, build output) are no change: they stay with the worktree for the next task.
@@ -320,7 +353,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   if(!input.sha&&!input.snapshot&&outsideRepo(input.path)&&(input.type==='workspace_read'||input.type==='workspace_write'||input.type==='workspace_export')){
     if(input.type==='workspace_read'){
       const target=await computerPath(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
-      try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
+      try{return await readBoundedFile(handle,target,{maxBytes:input.max_bytes,skipBinary:input.skip_binary===true});}finally{await handle.close();}
     }
     if(input.type==='workspace_write'){
       if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
@@ -582,9 +615,24 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     await git(['read-tree','--reset','-u',input.sha]);return {restored:true,tree_sha:tree,...unlocked};
   }
   if(input.type==='workspace_read'){
-    if(input.sha){if(!/^[a-f0-9]{40}$/.test(input.sha))throw new Error('invalid_read_commit');return {content:(await git(['show',input.sha+':'+safe(input.path)])).toString('utf8'),version:input.sha};}
+    const opts={maxBytes:input.max_bytes,skipBinary:input.skip_binary===true};
+    if(input.sha){
+      if(!/^[a-f0-9]{40}$/.test(input.sha))throw new Error('invalid_read_commit');
+      const spec=input.sha+':'+safe(input.path);
+      const size=Number((await git(['cat-file','-s',spec])).toString().trim());
+      if(Number.isSafeInteger(opts.maxBytes)&&opts.maxBytes>0&&Number.isFinite(size)&&size>opts.maxBytes)return {skipped:true,reason:'file_too_large',size,version:input.sha};
+      const raw=await git(['show',spec]);
+      if(opts.skipBinary&&raw.subarray(0,8192).includes(0))return {skipped:true,reason:'binary_file',size:raw.length,version:input.sha};
+      if(raw.length>outputLimit){
+        const logsDir=root+'/logs';await mkdir(logsDir,{recursive:true,mode:0o700});
+        const spillPath=logsDir+'/read-'+input.sha.slice(0,12)+'-'+createHash('sha256').update(spec).digest('hex').slice(0,16)+'.out';
+        await writeFile(spillPath,raw,{mode:0o600});
+        return {content:previewBytes(raw.subarray(0,64*1024),raw.subarray(Math.max(0,raw.length-64*1024)),raw.length,spillPath),truncated:true,size:raw.length,log_path:spillPath,version:input.sha};
+      }
+      return {content:raw.toString('utf8'),version:input.sha};
+    }
     const target=await path(String(input.path||'')),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
-    try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
+    try{return await readBoundedFile(handle,target,opts);}finally{await handle.close();}
   }
   // Snapshot one regular private-workspace file; later chunks read this immutable blob, never a live mutable path.
   if(input.type==='workspace_export')return exportFile(await path(input.path));

@@ -1,5 +1,6 @@
 import { integratedPublication } from './integration.js';
 import type { Store, Row } from '../storage/database.js';
+import { loadDevelopmentCandidate, stripPublishedCandidateBodies } from '../storage/payloads.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
@@ -39,13 +40,10 @@ export const workflowChanges = (
     if (store && repoId && prNumber != null && prNumber > 0) {
       const owned = store.get('SELECT source_task_id FROM bot_pull_requests WHERE repository_id=? AND number=?', repoId, prNumber);
       if (owned?.source_task_id) {
-        const candidateRow = store.get('SELECT data FROM development_candidates WHERE task_id=?', owned.source_task_id);
-        if (candidateRow?.data) {
-          try {
-            const candidate = JSON.parse(String(candidateRow.data));
-            if (changedWorkflowPaths(candidate.files ?? [], candidate.snapshot_files ?? []).length) return true;
-          } catch { /* ignore */ }
-        }
+        try {
+          const candidate = loadDevelopmentCandidate(store, String(owned.source_task_id));
+          if (candidate && changedWorkflowPaths(candidate.files ?? [], candidate.snapshot_files ?? []).length) return true;
+        } catch { /* ignore */ }
         const sourceTask = store.get('SELECT repository_id,kind,object_number,input,summary FROM tasks WHERE id=?', owned.source_task_id);
         if (sourceTask && workflowChanges(sourceTask)) return true;
       }
@@ -166,12 +164,13 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
   github.purpose = 'pull_request';
   github.beforeWrite = check;
   try {
-    const candidate = JSON.parse(store.get('SELECT data FROM development_candidates WHERE task_id=?', task.id)!.data);
+    const candidate = loadDevelopmentCandidate(store, String(task.id))!;
     await github.connect(true, undefined, pullRequestPermissions(candidate));
     const publisher = new Publisher(store, github, task, validate, undefined, log);
     const commit = await publisher.branch(candidate);
     const pr = await publisher.pullRequest(candidate, commit);
     await validate();
+    stripPublishedCandidateBodies(store, String(task.id), candidate, String(task.repository_id));
     integratedPublication(store, task, commit);
     return {
       summary: pullRequestSummaryForProgress(candidate),

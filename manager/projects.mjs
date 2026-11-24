@@ -635,12 +635,39 @@ export class Projects {
   }
   // Idempotent name-based reclaim: it never needs the project row, so it also works once a project is gone here. It is
   // how a retried deletion finishes, and how a reconnected repository starts from empty notes instead of old ones.
+  // If stopped orphan containers owned by this deployment+repository still hold the volume (#1304), remove them first;
+  // a still-running container refuses reclaim (409) instead of being killed blindly.
   async reclaimNotes(repo) {
     const volume = await this.docker.request('GET', '/volumes/' + this.notesName(repo));
     if (volume && Object.entries(this.notesLabels(repo)).some(([key, value]) => volume.Labels?.[key] !== value)) throw new ManagerError('resource_ownership_mismatch', 403);
+    const filters = JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, `department.bot.repository=${repo}`] });
+    const listed = await this.docker.request('GET', '/containers/json?all=1&filters=' + encodeURIComponent(filters));
+    const containers = Array.isArray(listed) ? listed : [];
+    const stopped = [];
+    for (const entry of containers) {
+      const id = String(entry?.Id || '').trim();
+      if (!id) continue;
+      const info = await this.docker.request('GET', '/containers/' + encodeURIComponent(id) + '/json');
+      if (!info) continue;
+      if (info.Config?.Labels?.['department.bot.deployment'] !== this.deployment || info.Config?.Labels?.['department.bot.repository'] !== String(repo)) {
+        throw new ManagerError('resource_ownership_mismatch', 403);
+      }
+      if (info.State?.Running) throw new ManagerError('notes_volume_in_use', 409);
+      stopped.push(id);
+    }
+    for (const id of stopped) await this.docker.request('DELETE', '/containers/' + encodeURIComponent(id));
+    const generations = this.db.prepare('SELECT generation FROM resources WHERE repository_id=?').all(repo);
+    for (const { generation } of generations) {
+      const net = this.names(repo, generation).network;
+      if (await this.inspect(repo, generation, 'network')) await this.docker.request('DELETE', '/networks/' + encodeURIComponent(net)).catch(() => {});
+    }
     if (volume) await this.docker.request('DELETE', '/volumes/' + this.notesName(repo));
+    if (stopped.length || generations.length) {
+      this.db.prepare('DELETE FROM resources WHERE repository_id=?').run(repo);
+      this.db.prepare("UPDATE projects SET state='deleted',desired='deleted',error=NULL,notes_purge=0 WHERE repository_id=?").run(repo);
+    }
     await rm(this.notesRoot + '/' + repo, { recursive: true, force: true });
-    return { reclaimed: true, repository_id: repo, volume: !!volume };
+    return { reclaimed: true, repository_id: repo, volume: !!volume, containers_removed: stopped.length };
   }
   async notesVolume(repo, create = true) {
     const name = this.notesName(repo), labels = this.notesLabels(repo);
