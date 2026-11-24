@@ -263,7 +263,8 @@ test('a harness turn takes its computer early: the first use shares that take, a
   // Without a command permission, like a group whose role lacks run_command: the harness runtime needs none.
   const first = f.turn('turn-1', { commands: () => false });
   first.warm();
-  await until(() => f.computers.leases.get(f.owner)?.state === 'busy');
+  // Wait for the control plane to record the active turn, not only the manager lease flipping to busy before the PUT reply lands.
+  await until(() => f.service.active.has('turn-1') && f.computers.leases.get(f.owner)?.state === 'busy');
   assert.deepEqual([created(f), f.computers.leases.get(f.owner).turn, f.computers.leases.get(f.owner).harness], [1, 'turn-1', true]);
   first.warm(); await first.close();
   assert.deepEqual([puts, f.computers.leases.get(f.owner).state], [1, 'idle']);
