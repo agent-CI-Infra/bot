@@ -1,6 +1,6 @@
 import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
 import {steersServiceTurns} from '../roles/harness.js';
-import {piNativeTools,ProgressBudget,type ServiceProgress} from '../harness/service-progress.js';
+import {CallIdentities,piNativeTools,ProgressBudget,type ServiceProgress} from '../harness/service-progress.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
@@ -140,9 +140,15 @@ export class ChannelServiceSessions {
       VALUES(?,?,?,?,?,?,?,'running',?,?)`, id, chat.id, binding.id, binding.revision, roleId, turn.source_message, fence, Date.now(), Date.now());
     this.active.set(id, controller);
     const incoming = this.incomingMessages?.(turn, id);
-    // Persist step metadata, never tool arguments, results or private model reasoning.
-    const event = (type: string, name = '') => this.store.run('INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,?,?,?)', id, type,
-      !name || name === staySilentName || serviceTools.some(tool => tool.function.name === name) || piNativeTools.includes(name) ? name : 'unknown_tool', Date.now());
+    // Persist step metadata, never tool arguments, results or private model reasoning. A tool call and its own result share
+    // a call id and each keeps the clock reading taken when it was written (#1313), so the console pairs them by identity
+    // and never infers a duration from neighbouring events.
+    const event = (type: string, name = '', call = '') => {
+      const at = Date.now();
+      return this.store.run('INSERT INTO channel_service_events(turn_id,type,name,call_id,started_at,ended_at,created_at) VALUES(?,?,?,?,?,?,?)', id, type,
+        !name || name === staySilentName || serviceTools.some(tool => tool.function.name === name) || piNativeTools.includes(name) ? name : 'unknown_tool',
+        call || null, type === 'tool_call' ? at : null, type === 'tool_result' || type === 'tool_error' ? at : null, at);
+    };
     event('running');
     // The binding's level (#849), not the role's: changing it is a new binding revision, so check() ends this turn first.
     const permissions = (): RolePermissions => this.bindings.permissions(binding);
@@ -420,9 +426,9 @@ export class ChannelServiceSessions {
           // The harness runs the tools itself; each call is still a step of this turn.
           const harnessTurn = (spec: Partial<import('../agent/runtime.js').AgentSpec<unknown>>, control?: ServiceTurnControl) =>
             serviceHarnessTurn({ ...turnSpec, ...spec, execute: async (name: string, args: unknown) => {
-              event('tool_call', name);
-              try { const result = await execute(name, args, 'harness:' + randomId()) as Json; event(result?.error ? 'tool_error' : 'tool_result', name); return result; }
-              catch (error) { event('tool_error', name); throw error; }
+              const call = randomId(); event('tool_call', name, call);
+              try { const result = await execute(name, args, 'harness:' + randomId()) as Json; event(result?.error ? 'tool_error' : 'tool_result', name, call); return result; }
+              catch (error) { event('tool_error', name, call); throw error; }
             } } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence, media, control);
           if (!steersServiceTurns(harness)) { reply = await harnessTurn({}); return; }
           // Model context is bounded: older local messages are folded into a rolling summary; originals stay searchable.
@@ -482,23 +488,25 @@ export class ChannelServiceSessions {
             return JSON.stringify(value);
           };
           const quiet = (args: unknown): Json => {
-            event('tool_call', staySilentName);
+            const call = randomId(); event('tool_call', staySilentName, call);
             try {
               // Handled here, not in execute: it ends the turn, and own tasks (which reach execute) never offer it.
               check();
               const silent = turn.allowSilence ? staySilent(args, mustReply) : { error: 'tool_not_allowed' };
               if (!silent.error) { silence = String(silent.reason); this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id); }
-              event(silent.error ? 'tool_error' : 'tool_result', staySilentName); return silent;
-            } catch (error) { event('tool_error', staySilentName); throw error; }
+              event(silent.error ? 'tool_error' : 'tool_result', staySilentName, call); return silent;
+            } catch (error) { event('tool_error', staySilentName, call); throw error; }
           };
           // A steering driver (Pi) streams its answer, merges messages that arrive meanwhile, starts again after an edit and may
           // end through stay_silent (#1253). Its own tool calls and model steps join the turn's steps (#1296), by name as every
           // step is, while the turn runs.
-          const budget = new ProgressBudget(); let progressing = true;
+          const budget = new ProgressBudget(), calls = new CallIdentities(randomId); let progressing = true;
           const piSteps = (step: ServiceProgress) => {
             if (!progressing || step.kind === 'notice' || this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'running' || !budget.admit(step)) return;
+            // Pi may reuse its own call id in a later step, so the step is keyed by an identity made for this invocation.
             if (step.kind === 'model_step') event('model_start');
-            else event(step.kind === 'tool_started' ? 'tool_call' : step.state === 'failed' ? 'tool_error' : 'tool_result', step.name);
+            else if (step.kind === 'tool_started') event('tool_call', step.name, calls.start(step.call_id));
+            else event(step.state === 'failed' ? 'tool_error' : 'tool_result', step.name, calls.finish(step.call_id));
           };
           try {
             reply = redactor.text(await harnessTurn({ prompt: seed }, { incoming, merged: batch => { mustReply ||= batch.direct; },

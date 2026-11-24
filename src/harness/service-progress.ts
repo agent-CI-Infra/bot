@@ -110,3 +110,15 @@ export class ProgressBudget {
  /** Tool calls skipped since the last call of this. */
  skipped():number{const count=this.skippedCalls;this.skippedCalls=0;return count;}
 }
+
+/**
+ * One console identity per tool invocation of a turn (#1313): Pi may reuse its own call id in a later step of the same
+ * turn, so the id the conversation pairs a call with its result on is generated here; Pi's id is only the lookup key
+ * while the call is open. A finish without a start still gets an identity, so nothing is ever merged by name.
+ */
+export class CallIdentities {
+ private readonly open=new Map<string,string>();
+ constructor(private readonly next:()=>string){}
+ start(call:string):string{const id=this.next();this.open.set(call,id);return id;}
+ finish(call:string):string{const id=this.open.get(call);this.open.delete(call);return id??this.next();}
+}

@@ -193,8 +193,16 @@ export class ChannelConsole {
     if (binding) {
       const turn = store.get('SELECT * FROM channel_service_turns WHERE id=? AND chat_id=?', turnId, chatId);
       if (!turn) return fail(404, 'channel_turn_not_found');
-      const rows = store.all('SELECT sequence,type,name,created_at FROM channel_service_events WHERE turn_id=? AND sequence>? ORDER BY sequence LIMIT 101', turnId, after);
-      return { events: rows.slice(0, 100), has_more: rows.length > 100, next_after: rows.slice(0, 100).at(-1)?.sequence ?? after,
+      // A tool call's duration is its own start and its own result's end, paired by call id (#1313); a call recorded before
+      // those columns existed projects duration_ms null, which the console reads as unrecorded rather than as zero.
+      const rows = store.all(`SELECT e.sequence,e.type,e.name,e.created_at,e.call_id,e.started_at,
+        (SELECT MIN(r.ended_at) FROM channel_service_events r WHERE r.turn_id=e.turn_id AND r.call_id=e.call_id
+          AND r.ended_at IS NOT NULL AND r.sequence>e.sequence) AS finished_at
+        FROM channel_service_events e WHERE e.turn_id=? AND e.sequence>? ORDER BY e.sequence LIMIT 101`, turnId, after);
+      const events = rows.slice(0, 100).map(row => ({ sequence: row.sequence, type: row.type, name: row.name, created_at: row.created_at,
+        ...(row.call_id ? { call_id: row.call_id } : {}),
+        ...(row.type === 'tool_call' ? { duration_ms: row.started_at !== null && row.finished_at !== null ? Number(row.finished_at) - Number(row.started_at) : null } : {}) }));
+      return { events, has_more: rows.length > 100, next_after: events.at(-1)?.sequence ?? after,
         coverage: rows.length || after ? 'recorded_steps' : 'legacy_steps_unavailable' };
     }
     const sessions = chat.chat_type === 'p2p' ? this.personalSessions(chat) : [];
