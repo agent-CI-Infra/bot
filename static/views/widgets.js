@@ -1,11 +1,24 @@
 // An event task has no Issue or PR: it names its summary instead (the release or the Actions run).
 function isPrTask(task) {
-  return String(task.kind || '').endsWith('.pr') || task.target?.type === 'pr' || /^(?:PR|检视 PR|Review PR)\s*#\d+/i.test(String(task.summary || ''));
+  if (!task) return false;
+  const kind = String(task.kind || '');
+  if (kind.endsWith('.pr')) return true;
+  if (kind.endsWith('.issue')) return false;
+  const targetType = task.target?.type;
+  if (targetType) return targetType === 'pr' || targetType === 'pull_request';
+  if (task.object_number != null && task.external?.pull_request?.number === task.object_number && task.external?.issue?.number !== task.object_number) return true;
+  return /^(?:PR|检视 PR|Review PR|Revise(?: bot)? PR|跟进(?: bot)? PR)\s*#\d+/i.test(String(task.summary || ''));
 }
-function objectLabel(task) { return task.object_number == null ? String(task.summary || kindLabels[task.kind] || task.kind) : `${isPrTask(task) ? 'PR' : 'Issue'} #${task.object_number}`; }
+function taskObjectNumber(task) {
+  if (task?.object_number != null) return task.object_number;
+  if ((task?.target?.type === 'pr' || task?.target?.type === 'pull_request' || task?.target?.type === 'issue') && task.target.number != null) return task.target.number;
+  return null;
+}
+function objectLabel(task) { const num = taskObjectNumber(task); return num == null ? String(task.summary || kindLabels[task.kind] || task.kind) : `${isPrTask(task) ? 'PR' : 'Issue'} #${num}`; }
 function githubUrl(task) {
-  if (!/^[\w.-]+\/[\w.-]+$/.test(task.full_name || '') || !task.object_number) return null;
-  return `https://github.com/${task.full_name}/${isPrTask(task) ? 'pull' : 'issues'}/${task.object_number}`;
+  const num = taskObjectNumber(task);
+  if (!/^[\w.-]+\/[\w.-]+$/.test(task.full_name || '') || !num) return null;
+  return `https://github.com/${task.full_name}/${isPrTask(task) ? 'pull' : 'issues'}/${num}`;
 }
 function link(url, text, className) {
   try {

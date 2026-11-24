@@ -124,6 +124,122 @@ function summarizeChecks(items: { name: string; status: string; conclusion: stri
   return { status, head_sha: headSha, total, passed, running, failed, checks: items.slice(0, 12), url, ...(total === 0 && Boolean(headSha) && eventsUnsubscribed ? { events_unsubscribed: true } : {}) };
 }
 
+export interface PublicTaskTarget {
+  type: 'issue' | 'pr' | 'branch' | 'commit';
+  number?: number;
+  ref?: string;
+}
+
+export function taskTargetSelectSQL(column = 'input'): string {
+  return `CASE WHEN json_valid(${column}) THEN json_extract(${column},'$.target.type','$.target.number','$.target.ref') END`;
+}
+
+function positiveInt(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? value : null;
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) {
+    const n = Number(value);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
+function normalizeTargetType(value: unknown): PublicTaskTarget['type'] | null {
+  if (value === 'pull_request' || value === 'pr') return 'pr';
+  if (value === 'issue' || value === 'branch' || value === 'commit') return value;
+  return null;
+}
+
+function nonEmptyString(value: unknown, max = 500): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : null;
+}
+
+function httpUrl(value: unknown): string | null {
+  return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null;
+}
+
+function validSha(value: unknown): string | null {
+  return typeof value === 'string' && hexSha.test(value) ? value : null;
+}
+
+export function parseTaskTargetMeta(raw: unknown): PublicTaskTarget | null {
+  if (typeof raw !== 'string') return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!Array.isArray(parsed)) return null;
+  const type = normalizeTargetType(parsed[0]);
+  if (!type) return null;
+  const number = positiveInt(parsed[1]);
+  const ref = nonEmptyString(parsed[2], 256);
+  const target: PublicTaskTarget = { type };
+  if (number !== null) target.number = number;
+  if (ref !== null) target.ref = ref;
+  return target;
+}
+
+interface TaskInputMeta {
+  targetType: PublicTaskTarget['type'] | null;
+  targetNumber: number | null;
+  targetRef: string | null;
+  botPrNumber: number | null;
+  botPrBranch: string | null;
+  botPrSha: string | null;
+  botPrTitle: string | null;
+  botPrState: string | null;
+  botPrDraft: boolean;
+  botPrMerged: boolean;
+  botPrUrl: string | null;
+  objectPrBranch: string | null;
+  objectPrSha: string | null;
+  objectPrTitle: string | null;
+  objectPrState: string | null;
+  objectPrDraft: boolean;
+  objectPrMerged: boolean;
+  objectPrUrl: string | null;
+}
+
+function parseTaskInputMeta(raw: unknown): TaskInputMeta | null {
+  if (typeof raw !== 'string') return null;
+  let arr: unknown;
+  try { arr = JSON.parse(raw); } catch { return null; }
+  if (!Array.isArray(arr)) return null;
+  return {
+    targetType: normalizeTargetType(arr[0]),
+    targetNumber: positiveInt(arr[1]),
+    targetRef: nonEmptyString(arr[2], 256),
+    botPrNumber: positiveInt(arr[3]),
+    botPrBranch: nonEmptyString(arr[4], 256),
+    botPrSha: validSha(arr[5]),
+    botPrTitle: nonEmptyString(arr[6], 300),
+    botPrState: nonEmptyString(arr[7], 32),
+    botPrDraft: arr[8] === true || arr[8] === 1,
+    botPrMerged: arr[9] === true || arr[9] === 1,
+    botPrUrl: httpUrl(arr[10]),
+    objectPrBranch: nonEmptyString(arr[11], 256),
+    objectPrSha: validSha(arr[12]),
+    objectPrTitle: nonEmptyString(arr[13], 300),
+    objectPrState: nonEmptyString(arr[14], 32),
+    objectPrDraft: arr[15] === true || arr[15] === 1,
+    objectPrMerged: arr[16] === true || arr[16] === 1,
+    objectPrUrl: httpUrl(arr[17]),
+  };
+}
+
+function issueNumberOfSourceTask(src: Row | undefined, expectedRepoId: string): number | null {
+  if (!src) return null;
+  if (expectedRepoId && String(src.repository_id ?? '') !== expectedRepoId) return null;
+  const srcKind = String(src.kind ?? '');
+  if (srcKind === 'development.issue' || srcKind === 'review.issue') {
+    return positiveInt(src.object_number);
+  }
+  const target = parseTaskTargetMeta(src.target_meta);
+  if (target?.type === 'issue') {
+    return target.number ?? positiveInt(src.object_number);
+  }
+  return null;
+}
+
 export function attachExternalLinks<T extends Record<string, any>>(store: Store, tasks: T[]): (T & { external: Json })[] {
   if (!tasks.length) return [];
   const ids = tasks.map(t => String(t.id));
@@ -136,24 +252,69 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
   for (const row of store.all(`SELECT task_id,data FROM development_candidates WHERE task_id IN (${placeholders})`, ...ids)) {
     try { candidates.set(String(row.task_id), JSON.parse(String(row.data))); } catch {}
   }
+
+  // Extract only lightweight target / PR metadata in one SQLite JSON pass without loading full task `input` blobs.
+  const inputMetaByTask = new Map<string, TaskInputMeta>();
+  for (const row of store.all(
+    `SELECT id,
+       CASE WHEN json_valid(input) THEN json_extract(input,
+         '$.target.type','$.target.number','$.target.ref',
+         '$.bot_pr.number','$.bot_pr.head.ref','$.bot_pr.head.sha',
+         '$.bot_pr.title','$.bot_pr.state','$.bot_pr.draft','$.bot_pr.merged','$.bot_pr.html_url',
+         '$.object.head.ref','$.object.head.sha',
+         '$.object.title','$.object.state','$.object.draft','$.object.merged','$.object.html_url'
+       ) END AS meta
+     FROM tasks WHERE id IN (${placeholders})`,
+    ...ids,
+  )) {
+    const meta = parseTaskInputMeta(row.meta);
+    if (meta) inputMetaByTask.set(String(row.id), meta);
+  }
+
   const ownedPrsByTask = new Map<string, Row>();
   const ownedPrsByKey = new Map<string, Row>();
   for (const row of store.all(`SELECT * FROM bot_pull_requests WHERE source_task_id IN (${placeholders})`, ...ids)) {
     ownedPrsByTask.set(String(row.source_task_id), row);
     ownedPrsByKey.set(`${row.repository_id}:${row.number}`, row);
   }
+
+  const effectsByTask = new Map<string, any>();
+  for (const row of store.all(`SELECT task_id,response FROM github_effects WHERE task_id IN (${placeholders}) AND kind='pull_request' AND response IS NOT NULL`, ...ids)) {
+    try { effectsByTask.set(String(row.task_id), JSON.parse(String(row.response))); } catch {}
+  }
+
+  const resolvedPrByTask = new Map<string, number>();
   const prNumbersByRepo = new Map<string, Set<number>>();
   for (const task of tasks) {
+    const id = String(task.id);
     const repoId = String(task.repository_id ?? '');
     const kind = String(task.kind ?? '');
-    const prNo = (kind === 'review.pr' || kind === 'development.pr') && Number.isSafeInteger(task.object_number) && task.object_number > 0
-      ? Number(task.object_number)
-      : Number.isSafeInteger(task.result?.pr_number) && task.result.pr_number > 0 ? Number(task.result.pr_number)
-      : Number.isSafeInteger(candidates.get(String(task.id))?.pr_number) ? Number(candidates.get(String(task.id)).pr_number) : null;
-    if (repoId && prNo) {
-      let set = prNumbersByRepo.get(repoId);
-      if (!set) { set = new Set(); prNumbersByRepo.set(repoId, set); }
-      set.add(prNo);
+    const meta = inputMetaByTask.get(id) ?? null;
+    const targetType = meta?.targetType ?? normalizeTargetType(task.target?.type);
+    const targetNumber = meta?.targetNumber ?? positiveInt(task.target?.number);
+    const result = task.result && typeof task.result === 'object' ? task.result : null;
+    const candidate = candidates.get(id) ?? null;
+    const owned = ownedPrsByTask.get(id) ?? null;
+    const effect = effectsByTask.get(id) ?? null;
+    const directPrNo = (kind === 'review.pr' || kind === 'development.pr')
+      ? positiveInt(task.object_number)
+      : targetType === 'pr'
+        ? (targetNumber ?? positiveInt(task.object_number))
+        : null;
+    const prNo = directPrNo
+      ?? positiveInt(result?.pr_number)
+      ?? positiveInt(candidate?.pr_number)
+      ?? meta?.botPrNumber
+      ?? positiveInt(owned?.number)
+      ?? positiveInt(effect?.number)
+      ?? null;
+    if (prNo !== null) {
+      resolvedPrByTask.set(id, prNo);
+      if (repoId) {
+        let set = prNumbersByRepo.get(repoId);
+        if (!set) { set = new Set(); prNumbersByRepo.set(repoId, set); }
+        set.add(prNo);
+      }
     }
   }
   for (const [repoId, nums] of prNumbersByRepo) {
@@ -164,10 +325,6 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
     }
   }
 
-  const effectsByTask = new Map<string, any>();
-  for (const row of store.all(`SELECT task_id,response FROM github_effects WHERE task_id IN (${placeholders}) AND kind='pull_request' AND response IS NOT NULL`, ...ids)) {
-    try { effectsByTask.set(String(row.task_id), JSON.parse(String(row.response))); } catch {}
-  }
   const mergedTasks = new Set<string>();
   if (hasMerge) {
     for (const row of store.all(`SELECT task_id FROM task_merge_requests WHERE task_id IN (${placeholders}) AND state='merged'`, ...ids)) mergedTasks.add(String(row.task_id));
@@ -181,10 +338,26 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
     if (typeof row.data === 'string') { try { mergeChecksByTask.set(String(row.task_id), JSON.parse(row.data)); } catch {} }
   }
 
-  const sourceIds = [...new Set(tasks.map(t => t.source_task_id).filter((v): v is string => typeof v === 'string' && v.length > 0))];
+  const sourceIdSet = new Set<string>();
+  for (const task of tasks) {
+    if (typeof task.source_task_id === 'string' && task.source_task_id.length > 0) {
+      sourceIdSet.add(task.source_task_id);
+    }
+    const id = String(task.id);
+    const repoId = String(task.repository_id ?? '');
+    const prNo = resolvedPrByTask.get(id) ?? null;
+    const prOwned = prNo ? (ownedPrsByKey.get(`${repoId}:${prNo}`) ?? ownedPrsByTask.get(id) ?? null) : (ownedPrsByTask.get(id) ?? null);
+    if (typeof prOwned?.source_task_id === 'string' && prOwned.source_task_id.length > 0) {
+      sourceIdSet.add(prOwned.source_task_id);
+    }
+  }
+  const sourceIds = [...sourceIdSet];
   const sourceTasks = new Map<string, Row>();
   if (sourceIds.length) {
-    for (const row of store.all(`SELECT id,kind,object_number FROM tasks WHERE id IN (${sourceIds.map(() => '?').join(',')})`, ...sourceIds)) {
+    for (const row of store.all(
+      `SELECT id,repository_id,kind,object_number,${taskTargetSelectSQL()} AS target_meta FROM tasks WHERE id IN (${sourceIds.map(() => '?').join(',')})`,
+      ...sourceIds,
+    )) {
       sourceTasks.set(String(row.id), row);
     }
   }
@@ -220,19 +393,30 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
     const candidate = candidates.get(id) ?? null;
     const effect = effectsByTask.get(id) ?? null;
     const owned = ownedPrsByTask.get(id) ?? null;
+    const meta = inputMetaByTask.get(id) ?? null;
+    const targetType = meta?.targetType ?? normalizeTargetType(task.target?.type);
+    const targetNumber = meta?.targetNumber ?? positiveInt(task.target?.number);
+    const targetRef = meta?.targetRef ?? nonEmptyString(task.target?.ref, 256);
+    const isPrTarget = kind === 'review.pr' || kind === 'development.pr' || targetType === 'pr';
 
-    // 1. Issue resolution
+    const prNumber = resolvedPrByTask.get(id) ?? null;
+    const prOwned = prNumber ? (ownedPrsByKey.get(`${repoId}:${prNumber}`) ?? owned) : owned;
+
+    // 1. Issue resolution (direct Issue target, source task, or bot PR root Issue)
     let issueNumber: number | null = null;
-    if ((kind === 'review.issue' || kind === 'development.issue') && Number.isSafeInteger(task.object_number) && task.object_number > 0) {
-      issueNumber = Number(task.object_number);
-    } else if (kind.startsWith('workflow.') && Number.isSafeInteger(task.object_number) && task.object_number > 0) {
+    if ((kind === 'review.issue' || kind === 'development.issue') && positiveInt(task.object_number)) {
+      issueNumber = positiveInt(task.object_number);
+    } else if (targetType === 'issue') {
+      issueNumber = targetNumber ?? positiveInt(task.object_number);
+    } else if (kind.startsWith('workflow.') && positiveInt(task.object_number)) {
       const isPr = hasBoard && !!store.get("SELECT 1 FROM board_objects WHERE repository_id=? AND object_type='pr' AND object_number=?", repoId, task.object_number);
-      if (!isPr) issueNumber = Number(task.object_number);
-    } else if (typeof task.source_task_id === 'string') {
-      const src = sourceTasks.get(task.source_task_id);
-      if (src && (src.kind === 'development.issue' || src.kind === 'review.issue') && Number.isSafeInteger(src.object_number) && src.object_number > 0) {
-        issueNumber = Number(src.object_number);
-      }
+      if (!isPr) issueNumber = positiveInt(task.object_number);
+    }
+    if (!issueNumber && typeof task.source_task_id === 'string' && task.source_task_id) {
+      issueNumber = issueNumberOfSourceTask(sourceTasks.get(task.source_task_id), repoId);
+    }
+    if (!issueNumber && typeof prOwned?.source_task_id === 'string' && prOwned.source_task_id) {
+      issueNumber = issueNumberOfSourceTask(sourceTasks.get(prOwned.source_task_id), repoId);
     }
     const issueRow = issueNumber && hasBoard ? store.get("SELECT title,github_state FROM board_objects WHERE repository_id=? AND object_type='issue' AND object_number=?", repoId, issueNumber) : undefined;
     const issue = issueNumber ? {
@@ -243,31 +427,39 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
     } : null;
 
     // 2. Pull Request resolution
-    const prNumber = (kind === 'review.pr' || kind === 'development.pr') && Number.isSafeInteger(task.object_number) && task.object_number > 0
-      ? Number(task.object_number)
-      : Number.isSafeInteger(result?.pr_number) && result.pr_number > 0 ? Number(result.pr_number)
-      : Number.isSafeInteger(candidate?.pr_number) && candidate.pr_number > 0 ? Number(candidate.pr_number)
-      : owned && Number.isSafeInteger(owned.number) ? Number(owned.number)
-      : Number.isSafeInteger(effect?.number) && effect.number > 0 ? Number(effect.number)
-      : null;
-    const prOwned = prNumber ? (ownedPrsByKey.get(`${repoId}:${prNumber}`) ?? owned) : owned;
+    const matchingBotPr = meta && meta.botPrNumber !== null && meta.botPrNumber === prNumber ? meta : null;
+    const directPrNum = isPrTarget ? (targetType === 'pr' ? (targetNumber ?? positiveInt(task.object_number)) : positiveInt(task.object_number)) : null;
+    const matchingObjPr = meta && isPrTarget && directPrNum !== null && directPrNum === prNumber ? meta : null;
     const prBoard = prNumber && hasBoard ? store.get("SELECT title,github_state,draft FROM board_objects WHERE repository_id=? AND object_type='pr' AND object_number=?", repoId, prNumber) : undefined;
-    const isMerged = mergedTasks.has(id) || result?.merged === true || effect?.merged === true;
+    const isMerged = mergedTasks.has(id) || result?.merged === true || effect?.merged === true || matchingBotPr?.botPrMerged === true || matchingObjPr?.objectPrMerged === true;
     const prBranch = typeof result?.branch === 'string' && result.branch ? result.branch
       : typeof candidate?.branch === 'string' && candidate.branch ? candidate.branch
-      : typeof prOwned?.branch === 'string' && prOwned.branch ? prOwned.branch
-      : typeof effect?.head?.ref === 'string' && effect.head.ref ? effect.head.ref
-      : null;
-    const prSha = [task.pushed_sha, result?.sha, candidate?.remote_sha, prOwned?.sha, effect?.head?.sha, (kind === 'review.pr' || kind === 'development.pr') ? task.head_sha : null]
-      .find(v => typeof v === 'string' && hexSha.test(v)) ?? null;
+      : matchingBotPr?.botPrBranch
+      ?? (typeof prOwned?.branch === 'string' && prOwned.branch ? prOwned.branch : null)
+      ?? (typeof effect?.head?.ref === 'string' && effect.head.ref ? effect.head.ref : null)
+      ?? matchingObjPr?.objectPrBranch
+      ?? null;
+    const prSha = [
+      task.pushed_sha,
+      result?.sha,
+      candidate?.remote_sha,
+      matchingBotPr?.botPrSha,
+      prOwned?.sha,
+      effect?.head?.sha,
+      matchingObjPr?.objectPrSha,
+      isPrTarget ? task.head_sha : null,
+      isPrTarget ? validSha(targetRef) : null,
+    ].find(v => typeof v === 'string' && hexSha.test(v)) ?? null;
     const prUrl = typeof result?.pr_url === 'string' && /^https?:\/\//i.test(result.pr_url) ? result.pr_url
       : typeof effect?.html_url === 'string' && /^https?:\/\//i.test(effect.html_url) ? effect.html_url
-      : prNumber && ghBase ? `${ghBase}/pull/${prNumber}` : null;
+      : matchingBotPr?.botPrUrl
+      ?? matchingObjPr?.objectPrUrl
+      ?? (prNumber && ghBase ? `${ghBase}/pull/${prNumber}` : null);
     const pull_request = prNumber ? {
       number: prNumber,
-      title: prBoard?.title ? String(prBoard.title) : typeof effect?.title === 'string' ? effect.title : null,
-      state: isMerged ? 'merged' : prBoard?.github_state ? String(prBoard.github_state) : typeof effect?.state === 'string' ? effect.state : 'open',
-      draft: prBoard?.draft === 1 || effect?.draft === true,
+      title: prBoard?.title ? String(prBoard.title) : matchingBotPr?.botPrTitle ?? matchingObjPr?.objectPrTitle ?? (typeof effect?.title === 'string' ? effect.title : null),
+      state: isMerged ? 'merged' : prBoard?.github_state ? String(prBoard.github_state) : matchingBotPr?.botPrState ?? matchingObjPr?.objectPrState ?? (typeof effect?.state === 'string' ? effect.state : 'open'),
+      draft: prBoard?.draft === 1 || (!prBoard && (matchingBotPr?.botPrDraft === true || matchingObjPr?.objectPrDraft === true)) || effect?.draft === true,
       branch: prBranch,
       head_sha: prSha ? String(prSha).toLowerCase() : null,
       url: prUrl,

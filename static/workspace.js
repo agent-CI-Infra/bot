@@ -86,8 +86,10 @@ function parseWorkbenchRoute(item) {
 }
 
 function roleTaskRefLabel(entry) {
-  if (entry.object_number != null) {
-    return `${String(entry.kind || '').endsWith('.pr') ? 'PR' : '#'}#${entry.object_number}`.replace('##', '#');
+  const num = typeof taskObjectNumber === 'function' ? taskObjectNumber(entry) : entry.object_number;
+  if (num != null) {
+    const isPr = typeof isPrTask === 'function' ? isPrTask(entry) : String(entry.kind || '').endsWith('.pr');
+    return `${isPr ? 'PR' : '#'}#${num}`.replace('##', '#');
   }
   return '#' + shortId(entry.task_id);
 }
@@ -237,16 +239,18 @@ function renderWorkbenchTaskRow(row) {
   metaLine.append(badge(prio, prio === 'P0' ? 'danger' : prio === 'P1' ? 'warning' : ''));
 
   const ext = row.external || {};
+  const isPr = typeof isPrTask === 'function' ? isPrTask(row) : String(row.kind || '').endsWith('.pr');
+  const fallbackNum = typeof taskObjectNumber === 'function' ? taskObjectNumber(row) : row.object_number;
   if (ext.issue) {
     metaLine.append(element('span', `Issue #${ext.issue.number}`, 'task-assoc-tag'));
-  } else if (row.object_number != null && !String(row.kind || '').endsWith('.pr')) {
-    metaLine.append(element('span', `Issue #${row.object_number}`, 'task-assoc-tag'));
+  } else if (fallbackNum != null && !isPr) {
+    metaLine.append(element('span', `Issue #${fallbackNum}`, 'task-assoc-tag'));
   }
   if (ext.pull_request) {
     const pr = ext.pull_request;
     metaLine.append(element('span', `PR #${pr.number}${pr.state === 'merged' ? ' (已合入)' : pr.draft ? ' (Draft)' : ''}`, 'task-assoc-tag task-assoc-pr'));
-  } else if (row.object_number != null && String(row.kind || '').endsWith('.pr')) {
-    metaLine.append(element('span', `PR #${row.object_number}`, 'task-assoc-tag task-assoc-pr'));
+  } else if (fallbackNum != null && isPr) {
+    metaLine.append(element('span', `PR #${fallbackNum}`, 'task-assoc-tag task-assoc-pr'));
   }
   if (ext.actions && ext.actions.total > 0) {
     const act = ext.actions;
@@ -869,7 +873,7 @@ function workspaceOverview() {
   const prDetailLoading = new Set();
   const prDetailErrors = new Map();
 
-  const rowKey = row => JSON.stringify([row.id, row.repository_id, row.kind, row.object_number, row.status, row.priority, row.summary, row.error_code, row.updated_at, row.external, row.role_flow]);
+  const rowKey = row => JSON.stringify([row.id, row.repository_id, row.kind, row.object_number, row.target, row.status, row.priority, row.summary, row.error_code, row.updated_at, row.external, row.role_flow]);
 
   const expired = (node, err, time) => {
     node.classList.add('view-error'); node.setAttribute('role', 'alert');
