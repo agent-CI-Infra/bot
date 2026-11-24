@@ -1,7 +1,16 @@
-import { commandOptions } from '../../runner/command-policy.mjs';
+import { commandLimit, commandOptions, requestTooLarge, runnerRequestLimit } from '../../runner/command-policy.mjs';
 import type { Workspace } from './workspace.js';
 
+// The command length contract and its transport backstop are shared with the manager (runner/command-policy.mjs), so
+// the schema, the runner, the control plane and the manager always state and enforce the same numbers.
+export { commandFailure, commandLimit, commandTooLong, requestTooLarge, runnerRequestLimit } from '../../runner/command-policy.mjs';
+
 const maxTimerSeconds = Math.floor((2147483647 - 120000) / 1000);
+
+// The command length contract, stated where the model reads it. maxLength is deliberately not used: Pi and other
+// harnesses would then reject an over-long command at the schema with a generic validation error, before the runner can
+// answer command_too_long with the limit and the actual length.
+export const commandLengthNotice = `The /bin/sh command to run, as UTF-8: at most ${commandLimit} bytes (64 KiB). A longer command is refused with command_too_long; write the script to a file and run the file instead.`;
 
 export function commandTimeoutLimit() {
   const seconds = Number(process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS ?? 600);
@@ -54,7 +63,7 @@ export function commandInstructions(defaultSeconds?: number | null, maxSeconds =
 export function commandTool(defaultSeconds: number | null, description = 'Run a shell command in this task workspace inside the long-lived project container, with internet access for installing dependencies. Output is streamed to the console.', maxSeconds = commandTimeoutLimit()) {
   return { type: 'function', function: { name: 'run_command', description: description + ' ' + commandInstructions(defaultSeconds, maxSeconds),
     parameters: { type: 'object', properties: {
-      command: { type: 'string' },
+      command: { type: 'string', description: commandLengthNotice },
       // The runtime clamps values above the limit, so the schema must allow them to reach it (including Pi validation).
       timeout_seconds: { type: 'integer', minimum: 1, description: `Optional timeout in seconds; configured maximum ${maxSeconds}. Larger values are reduced with a result notice.` },
       keep_background: { type: 'boolean', description: 'Keep servers and watchers available for later commands of this task; output is automatically written to the returned log_path. Kept processes stop when the task ends.' }

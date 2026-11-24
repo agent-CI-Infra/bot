@@ -2,7 +2,14 @@ import http from 'node:http';
 import { posix } from 'node:path';
 import { hostname } from 'node:os';
 
+import { requestTooLarge, runnerRequestLimit } from '../runner/command-policy.mjs';
+
 const defaultMaxResponseBytes = 4 * 1024 * 1024;
+// A runner request is handed to `docker exec` as one base64url argument, and Linux refuses a single argument at 131072
+// bytes (MAX_ARG_STRLEN). 95 KiB of JSON encodes to ~127 KiB, so a command at the 64 KiB limit (runner/command-policy.mjs)
+// still reaches the computer; a larger request would need the request delivered over stdin instead. The bound and the
+// predicate live in runner/command-policy.mjs so the control plane answers the same refusal by name.
+export { runnerRequestLimit };
 
 export class ManagerError extends Error {
   constructor(code, status = 409) { super(code); this.status = status; }
@@ -140,7 +147,8 @@ export class Docker {
       block_read_bytes: io.filter(r => /read/i.test(r.op)).reduce((t, r) => t + r.value, 0), block_write_bytes: io.filter(r => /write/i.test(r.op)).reduce((t, r) => t + r.value, 0) };
   }
   async runner(container, input, timeout = 90000, extraEnv = []) {
-    if (Buffer.byteLength(JSON.stringify(input)) > 64 * 1024) throw new ManagerError('runner_request_too_large', 413);
+    const tooLarge = requestTooLarge(input);
+    if (tooLarge) throw Object.assign(new ManagerError(tooLarge.error, 413), tooLarge);
     const exec = await this.request('POST', `/containers/${encodeURIComponent(container)}/exec`, { AttachStdout: true, AttachStderr: true,
       User: '10001:10001', WorkingDir: '/workspace', Env: [`BOT_OPERATION_ID=${input.operation_id}`, ...(Array.isArray(extraEnv) ? extraEnv : [])],
       Cmd: ['node', '/opt/runner/runner.mjs', Buffer.from(JSON.stringify(input)).toString('base64url')] });

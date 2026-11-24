@@ -15,6 +15,7 @@
   - **超长结果分页**：超过预算或需折叠的工具输出统一脱敏写入 `tool-results` 卷（24 小时过期），仅向模型返回首尾预览与句柄，通过 `read_tool_result` 或容器内只读 `/results/<id>.utf8` 按需读取；`manager/docker.mjs` 保留默认 4 MiB 单次响应保护上限（允许调用方按需显式传入有限上限，防止异常大响应引发 OOM），`runner/workspace.mjs` 的 `workspace_read` 在超过 1 MiB 时返回首尾预览与可读文件路径（Git 对象落盘到任务 `logs/`，调用方分页接口保持 `complete: false`、`truncated: true` 而不误标完整），并支持 `max_bytes` / `skip_binary` 供验收预检跳过 >256 KiB 文件与二进制。
   - **孤儿笔记卷与已停止容器自愈**：`manager/projects.mjs` 将 `reclaimNotes`、`reclaimStaleNotes` 与项目删除（`delete_notes`）统一到共享安全清理入口 `purgeNotesVolume`：删除 `-notes` 卷前按容器实际 `Mounts` 精准识别仍挂载该卷的本部署已停止孤儿容器，仅清理其对应代次的网络与 `resources` 行（不误伤未挂载 `-notes` 卷的运行中容器或活跃项目行；若有运行中容器仍挂载该卷，则以 `409 notes_volume_in_use` / `503 notes_residue_unclearable` 拒绝，绝不误杀运行中实例）。
   - **命令时限与后台进程**：`run_command` 支持 `timeout_seconds`（受 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 统一封顶）与 `keep_background: true`（自动将日志落盘到 `log_path` 并随任务结束回收进程组）。
+  - **命令长度**：任务电脑与助手电脑的 `run_command` 共用同一个命令上限，按 UTF-8 计 64 KiB（`runner/command-policy.mjs` 的 `commandLimit`），schema 的 `command` 描述里写明；超限回稳定 code `command_too_long`，带 `limit` 与 `length`，并提示改写成脚本文件。上限不为无限：整条 runner 请求会 base64url 成一个 `docker exec` 参数，Linux 单参数上限 128 KiB，所以 `runnerRequestLimit`（95 KiB JSON）是传输兜底。传输按 JSON 编码后的字节计，引号与换行会再转义一次，因此 64 KiB 以内的命令也可能超传输上限；控制面与 manager 共用 `requestTooLarge`，命中时回稳定 code `runner_request_too_large`，带 `limit`、`length`（编码后字节）和改写成脚本文件的提示，不再变成 `execution_interrupted` 与重启；再大需要改成 stdin 投递。
 
 ## 2. `bot.role-run/1` 协议与 `TaskToolGateway`（`src/roles/`）
 

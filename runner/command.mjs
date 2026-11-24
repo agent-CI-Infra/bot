@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync, 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommandOutput, maskedStream, outputLimit, backgroundOutputNotice } from './command-output.mjs';
+import { commandTooLong } from './command-policy.mjs';
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
 import { volume as readWorkspaceVolume, watchVolume, watchedVolume } from './disk.mjs';
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
@@ -28,7 +29,9 @@ export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvi
 // volume replaces the statfs reader in tests.
 export const workspaceTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_WORKSPACE_ID: id } : {};
 export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv,workspaceId,backgroundDirectory,volume}={}) {
-  if(typeof value!=='string'||!value||value.length>32768)throw new Error('invalid_command');
+  const tooLong=commandTooLong(value);
+  if(tooLong)throw Object.assign(new Error('command_too_long'),tooLong);
+  if(typeof value!=='string'||!value)throw new Error('invalid_command');
   // Local mode shares the host process namespace: use task cleanup, never name-wide kills.
   if(local&&/(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value))return Promise.resolve({exit_code:126,output:'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.',timed_out:false,truncated:false});
   const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
