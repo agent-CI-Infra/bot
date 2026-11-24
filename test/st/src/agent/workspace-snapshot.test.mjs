@@ -129,12 +129,12 @@ test('preparing 250 files records starts, progress and skipped paths before fina
 });
 
 test('candidate transfer reuses unchanged upstream blobs and has no 32 MiB total cap',async()=>{
-  const data=Buffer.alloc(17*1024*1024,120),file=entry('large.bin',data),unchanged={...file,path:'original.bin'};
+  const data=Buffer.alloc(17*1024*1024,120),file=entry('large.bin',data),unchanged=entry('original.bin',Buffer.from('unchanged-upstream')),renamed={...unchanged,path:'moved.bin'};
   const workspace=new Workspace(null,null,{},new Redactor(),async()=>{},()=>{}),calls=[];
   workspace.call=async(_key,request)=>{calls.push(request);return {base64:data.subarray(request.offset,request.offset+30000).toString('base64')};};
-  const files=await workspace.contents([unchanged,file,{...file,path:'second.bin'}],[unchanged]);
-  assert.equal(files[0].base64,undefined);assert.equal(files.length,3);
-  assert.equal(Buffer.from(files[1].base64,'base64').length+Buffer.from(files[2].base64,'base64').length,34*1024*1024);
+  const files=await workspace.contents([unchanged,renamed,file,{...file,path:'second.bin'}],[unchanged]);
+  assert.equal(files[0].base64,undefined);assert.equal(files[1].base64,undefined,'renamed upstream blob reuses existing sha without transfer');assert.equal(files.length,4);
+  assert.equal(Buffer.from(files[2].base64,'base64').length+Buffer.from(files[3].base64,'base64').length,34*1024*1024);
   assert.equal(calls.filter(request=>request.offset===0).length,2);
 });
 
@@ -161,7 +161,10 @@ test('runner writes and reads a large file in chunks, finalizes over 2000 files 
   await run({type:'workspace_init'});
   const data=Buffer.alloc(5*1024*1024+17,120),file=entry('large.txt',data);
   for(let offset=0;offset<data.length;offset+=30000)await run({type:'workspace_write',path:file.path,mode:file.mode,sha:file.sha,snapshot:true,offset,base64:data.subarray(offset,offset+30000).toString('base64'),final:offset+30000>=data.length});
-  assert.equal((await run({type:'workspace_read',path:file.path})).content.length,data.length);
+  const largeRead=await run({type:'workspace_read',path:file.path});
+  assert.equal(largeRead.truncated,true);assert.equal(largeRead.size,data.length);
+  assert.ok(largeRead.content.length<200_000&&largeRead.path.endsWith('/'+file.path));
+  assert.equal(readFileSync(join(repo,file.path)).length,data.length);
   assert.equal((await run({type:'workspace_snapshot',tree_sha:treeHash([file])})).tree_sha,treeHash([file]));
   const directory=Array(5).fill('d'.repeat(180)).join('/');mkdirSync(join(repo,directory),{recursive:true});
   for(let i=0;i<5001;i++)writeFileSync(join(repo,directory,`${String(i).padStart(5,'0')}-${'f'.repeat(50)}`),'');
