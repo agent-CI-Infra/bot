@@ -22,7 +22,7 @@ function serviceRoleCard(view, initial, level = 'h2') {
     const head = element('p', '');
     head.append(badge('内置', 'info'), ' ', role.enabled ? badge('已启用', 'success') : badge('已停用', 'warning'));
     const model = role.model ? `${modelChoiceName(role.model)}${role.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置';
-    const nodes = [head, facts([['职责', role.responsibility || '—'], ['模型', model], ['权限', '全部能力已允许'],
+    const nodes = [head, facts([['职责', role.responsibility || '—'], ['Agent 后端', 'Pi'], ['模型', model], ['权限', '全部能力已允许'],
       ['累计用量', serviceUsageText(role.usage)], ['最近请求', role.usage.last_requested_at ? timestamp(role.usage.last_requested_at) : null], ['配置版本', String(role.revision)]])];
     if (!role.model) nodes.push(element('p', '没有配置模型时，管理助手的对话会直接提示到这里配置，不会改用其他模型。', 'endpoint-warning'));
     const name = input('name', role.name, { maxLength: 80, required: true }), responsibility = textarea('responsibility', role.responsibility, { maxLength: 2000, rows: 2 });
@@ -33,15 +33,11 @@ function serviceRoleCard(view, initial, level = 'h2') {
     }
     modelSelect.value = role.model_id ?? '';
 
-    const harnessSelect = document.createElement('select'); harnessSelect.name = 'harness';
-    for (const [id, label] of [['pi', 'Pi（推荐）'], ['codex', 'Codex'], ['claude_code', 'Claude Code']]) {
-      const option = element('option', label); option.value = id; harnessSelect.append(option);
-    }
-    harnessSelect.value = role.harness ?? 'pi';
+    // The management assistant runs only on Pi (#1337): there is no backend to choose.
     const computerWarning = harnessComputerWarning();
     const grid = permissionEditor(structuredClone(role.permissions), view.items, () => {}, '', true);
-    nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field('Agent 后端', harnessSelect), computerWarning, field('模型（部署共享模型）', modelSelect), grid], '保存', async () => {
-      const change = { expected_revision: role.revision, harness: harnessSelect.value, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };
+    nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), computerWarning, field('模型（部署共享模型）', modelSelect), grid], '保存', async () => {
+      const change = { expected_revision: role.revision, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };
       role = (await serviceRoleRequest('/api/service-roles/' + role.id, 'PATCH', change)).service_role;
       live.section.querySelector(level).textContent = role.name; redraw('已保存');
     }));

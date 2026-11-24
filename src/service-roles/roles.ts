@@ -16,8 +16,9 @@ export const groupAssistant = 'group-assistant';
 export const defaultGroupAssistantPrompt = '查询 GitHub Issue 和 PR、解释代码仓；能否写入和派活由本群的权限配置决定。';
 
 const now = () => new Date().toISOString();
-/** The backends a service assistant may run on (#1257: Native is gone); a group binding offers the same ones. */
-export const serviceHarnesses: readonly string[] = ['pi', 'codex', 'claude_code'];
+/** The backends a service assistant may run on: only Pi (#1337), for the management assistant and every group binding. A
+ * request naming another backend is refused; the field is still accepted with `pi` so older clients can save. */
+export const serviceHarnesses: readonly string[] = ['pi'];
 export const serviceItems = permissionItems;
 /** What the repository assistant granted before #849; bindings migrated from it read as the read level. */
 export const repositoryAssistantPermissions: RolePermissions = normalizePermissions({ github: 'read' });

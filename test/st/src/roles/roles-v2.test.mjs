@@ -717,16 +717,18 @@ test('a running old V2 review keeps its Pi binding on the next delegation; expli
   assert.deepEqual([adopted.harness.id, adopted.harness.source, adopted.config_revision], ['process', 'role', selected.revision]);
 });
 
-test('backend selection is independent of role; container CLIs use gateway relay, reserve subscription mode, and new roles default to Pi', async t => {
+test('worker roles choose their backend, Manager and QA only Pi; container CLIs use gateway relay, reserve subscription mode, and new roles default to Pi', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, ...body });
   const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
   assert.equal(view.harnesses.find(h => h.id === 'acp'), undefined);
   const pi = view.harnesses.find(h => h.id === 'pi');
   assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller', 'writer', 'observer', 'evaluator'], 'native_resume', false]);
-  // Codex and Claude Code run worker roles inside the shared project computer through the platform model relay.
+  // Codex and Claude Code run worker roles inside the shared project computer through the platform model relay. Only Pi
+  // declares the Manager's and QA's kinds (#1337).
   const codex = view.harnesses.find(h => h.id === 'codex');
-  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'none']);
+  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'none']);
+  assert.deepEqual(view.harnesses.filter(h => h.kinds.includes('controller') || h.kinds.includes('evaluator')).map(h => h.id), ['pi']);
   const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' } }] }).configuration;
   assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'codex');
   assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'pi']);

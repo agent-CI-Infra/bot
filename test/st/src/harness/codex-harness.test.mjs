@@ -686,16 +686,14 @@ test('A session refused before its binding counts a restated usage increment onc
   assert.equal(f.state().usage.total, 330);
 });
 
-test('Codex roles keep separate threads; QA always starts a new one; legacy isolated profiles downgrade safely and subscription reservation works', async t => {
+test('Codex roles keep separate threads; QA cannot run on Codex; legacy isolated profiles downgrade safely and subscription reservation works', async t => {
   const f = fixture(t);
   await runRole(f.spec, 'dev', undefined, 'codex');
   await runRole(f.spec, 'reviewer', undefined, 'codex');
-  await runRole(f.spec, 'qa', undefined, 'codex');
-  const first = f.state('qa').sessionId;
-  await runRole(f.spec, 'qa');
+  // QA runs only on Pi (#1337).
+  await assert.rejects(runRole(f.spec, 'qa', undefined, 'codex'), { code: 'harness_role_unsupported' });
   const threads = f.s.all('SELECT harness_state FROM role_instances').map(r => JSON.parse(r.harness_state).sessionId);
-  assert.equal(new Set(threads).size, 3);
-  assert.notEqual(f.state('qa').sessionId, first);
+  assert.equal(new Set(threads).size, 2);
   assert.equal(f.lines('requests.jsonl').filter(r => r.method === 'thread/resume').length, 0, "no role resumed another role's thread");
   assert.deepEqual(roleHarness('codex').capabilities.recovery, ['native_resume', 'rebuilt_from_task_records']);
   assert.equal(roleHarness('codex').capabilities.isolation, 'none');

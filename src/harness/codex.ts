@@ -314,7 +314,8 @@ export async function runCodex<T>(
   if (!spec.runAccess?.token) {
     return stop('run_token_invalid', 'failed', '容器内 Codex 运行缺少控制面签发的运行级身份令牌。');
   }
-  if (ctx && !['controller', 'writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
+  // Manager, QA and the service assistants run only on Pi (#1337).
+  if (ctx && !['writer', 'observer'].includes(ctx.execution_context?.kind ?? '')) {
     return stop('harness_role_unsupported', 'waiting_configuration');
   }
 

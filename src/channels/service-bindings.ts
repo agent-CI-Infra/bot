@@ -525,7 +525,7 @@ export class ChannelServiceBindings {
     if (!participations.includes(String(participation))) fail(400, 'channel_participation_invalid', 'participation');
     // Accommodate migrated legacy responsibility (<=2000) + "\n\n" + prompt (<=32000) = 34002 chars without making bindings unsavable.
     const prompt = input.prompt !== undefined ? optionalText(input.prompt, 35000, 'prompt') : String(previous?.prompt ?? '');
-    // As for a service role, a backend the request names must be one the console offers; an omitted one keeps the saved one.
+    // As for a service role, a backend the request names must be Pi (#1337); an omitted one keeps the saved one.
     const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'pi');
     if (input.harness !== undefined && !serviceHarnesses.includes(harness)) fail(400, 'unknown_role_harness', 'harness');
     const permissions = this.levelInput(input, previous);
@@ -656,7 +656,7 @@ export class ChannelServiceBindings {
     return { bindings: bindings.map(b => { const governs = this.governs(actor, b);
       return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_view: platform || !!this.canView(actor, b.chat_id),
         can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
-      models, default_model_id: defaultModelId, default_prompt: defaultGroupAssistantPrompt, harnesses: [...serviceHarnesses],
+      models, default_model_id: defaultModelId, default_prompt: defaultGroupAssistantPrompt,
       levels: bindingLevels.map(level => ({ id: level, permissions: levelPermissions(level) })),
       github_levels: bindingGithubLevels.map(level => ({ id: level, permissions: githubLevelPermissions(level) })),
       default_permissions: levelPermissions('read'),

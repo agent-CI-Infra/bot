@@ -61,29 +61,31 @@ async function fixture(t, respond) {
   return { root, s, manager, requests, task, redactor, guard, workspace, put, view: () => roleApi(s, admin, 'GET', url, {}) };
 }
 
-test('new roles default to Pi; general backends preserve role authority and container backends also support controllers', async t => {
+test('new roles default to Pi; general backends preserve role authority; Manager and QA run only on Pi', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const config = f.put({ roles: [{ role_id: 'security' }] });
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
+  // Manager and QA stay on Pi (#1337); every other role may take another backend and keeps its authority.
+  const pinned = ['manager', 'qa'];
   for (const backend of ['process', 'pi']) {
-    const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: backend } })) });
-    assert.ok(saved.roles.every(r => r.harness_ref.id === backend));
+    const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: pinned.includes(r.role_id) ? 'pi' : backend } })) });
+    assert.ok(saved.roles.every(r => r.harness_ref.id === (pinned.includes(r.role_id) ? 'pi' : backend)));
     assert.equal(saved.roles.find(r => r.role_id === 'manager').permissions.delegation, 'allow');
     assert.equal(saved.roles.find(r => r.role_id === 'qa').output_schema_ref.id, 'acceptance-verdict');
   }
   const claude = f.view().backends.find(b => b.id === 'claude_code');
   assert.equal(claude.available, true);
-  assert.deepEqual(claude.kinds, ['controller', 'writer', 'observer', 'evaluator']);
+  assert.deepEqual(claude.kinds, ['writer', 'observer']);
   assert.deepEqual(claude.supported_model_sources, ['gateway', 'local_config']);
   assert.ok(claude.runtime_status && typeof claude.runtime_status.compatible_range === 'string');
   const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
-  assert.equal(f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'claude_code' } }] }).roles.find(r => r.role_id === 'manager').harness_ref.id, 'claude_code');
+  assert.throws(() => f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'claude_code' } }] }), e => e.code === 'harness_role_unsupported' && e.field === 'roles.manager.harness_ref.id');
   // Codex App Server (#171 / #705) is a container worker backend like Claude Code.
   const codex = f.view().backends.find(b => b.id === 'codex');
-  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['controller', 'writer', 'observer', 'evaluator'], 'project', ['gateway', 'local_config'], null]);
+  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['writer', 'observer'], 'project', ['gateway', 'local_config'], null]);
   assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
-  assert.equal(f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'manager').harness_ref.id, 'codex');
+  assert.throws(() => f.put({ roles: [{ role_id: 'qa', harness_ref: { id: 'codex' } }] }), e => e.code === 'harness_role_unsupported' && e.field === 'roles.qa.harness_ref.id');
   for (const backend of ['acp', 'opencode']) {
     const view = f.view();
     assert.equal(view.backends.find(b => b.id === backend), undefined);

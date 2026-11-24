@@ -45,11 +45,14 @@ test('the singleton management assistant is seeded once, edited with revisions a
   assert.deepEqual([stale.status,stale.value.error],[409,'service_role_revision_conflict']);
   assert.equal((await role(admin,'management-assistant')).name,'平台管理助手');
 
+  // The management assistant runs only on Pi (#1337): another backend is refused, Pi itself is still accepted.
   for(const [body,code] of [[{permissions:{github:'read'}},'service_role_permissions_fixed'],
-    [{model_id:f.model.id},'shared_model_required'],[{unknown:true},'unknown_field']]){
+    [{model_id:f.model.id},'shared_model_required'],[{unknown:true},'unknown_field'],[{harness:'codex'},'unknown_role_harness'],[{harness:'claude_code'},'unknown_role_harness']]){
     const current=await role(admin,'management-assistant'),result=await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,...body});
     assert.deepEqual([result.status,result.value.error],[400,code],JSON.stringify(body));
   }
+  const onPi=await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:(await role(admin,'management-assistant')).revision,harness:'pi'});
+  assert.deepEqual([onPi.status,onPi.value.service_role.harness],[200,'pi']);
   const current=await role(admin,'management-assistant');
   assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,enabled:false})).value.error,'builtin_service_role_required');
   assert.equal((await admin('/api/service-roles/management-assistant','DELETE',{expected_revision:current.revision})).value.error,'builtin_service_role_required');

@@ -100,17 +100,17 @@ test('a manager without the HOME volume is an alert on the category (#1254)', as
   assert.match(alert.textContent, /manager 没有挂载 assistant-homes 卷，建不了助手电脑/);
 });
 
-test('next to the Agent backend choice, a deployment without assistant computers is said with the reason (#1254)', async () => {
+test('in the assistant editors, a deployment without assistant computers is said with the reason (#1254)', async () => {
   let reads = 0, status = { available: false, reason: 'assistant_homes_unavailable' };
   const page = loadConsole(scripts, (_method, path) => {
     if (path === '/api/assistant-computers/status') { reads++; return [200, status]; }
     throw new Error('Unexpected request: ' + path);
   });
-  // Every backend (Pi, Codex, Claude Code) runs its turns on an assistant computer: the status is read once, whatever is chosen.
+  // A service assistant runs every turn on Pi on an assistant computer (#1337): the status is read once.
   page.run('var warning = harnessComputerWarning();');
   await settle();
   assert.deepEqual([reads, page.run('warning.hidden')], [1, false]);
-  assert.match(page.run('warning.textContent'), /助手电脑现在不可用（manager 没有挂载 assistant-homes 卷）。Pi、Codex 和 Claude Code 的每一轮都要在助手电脑上运行/);
+  assert.match(page.run('warning.textContent'), /助手电脑现在不可用（manager 没有挂载 assistant-homes 卷）。助手的每一轮都在助手电脑上用 Pi 运行/);
   // Available: nothing to say.
   status = { available: true };
   page.run('var quiet = harnessComputerWarning();'); await settle();

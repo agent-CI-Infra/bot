@@ -404,7 +404,8 @@ export async function runClaudeCode<T>(
   const prepared = (spec.harnessPreparation as ClaudePreparation | undefined) ?? (await prepareClaudeCode(spec));
   const ctx = spec.runContext?.();
   if (!ctx || !spec.runAccess?.token) return fail('claude_run_context_required');
-  if (!['controller', 'writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
+  // Manager, QA and the service assistants run only on Pi (#1337).
+  if (!['writer', 'observer'].includes(ctx.execution_context?.kind ?? '')) {
     return fail('harness_role_unsupported');
   }
   await spec.guard();

@@ -29,14 +29,16 @@ test('a session can accept a later turn and cancellation does not poison its nex
  assert.deepEqual(events.map(e=>e.status),['completed','completed','cancelled','completed']);
 });
 
-test('every backend may be selected for the controller without changing its role',()=>{
+test('Manager and QA run only on Pi; Dev keeps every backend (#1337)',()=>{
  const s=new Store(':memory:',randomBytes(32));try{
  s.run("INSERT INTO accounts VALUES('a','test','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/probe','o','a')");s.run("INSERT INTO policies(repository_id,enabled) VALUES('101',1)");
- for(const backend of ['pi','codex','claude_code']){
-  const current=roleApi(s,{id:'admin',role:'project_admin',repositories:['101']},'GET',new URL('http://local/api/repositories/101/roles'),{});
-  const saved=roleApi(s,{id:'admin',role:'project_admin',repositories:['101']},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:current.configuration.revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:backend}}]});
-  assert.equal(saved.configuration.roles.find(r=>r.role_id==='manager').harness_ref.id,backend);
+ const admin={id:'admin',role:'project_admin',repositories:['101']},url=new URL('http://local/api/repositories/101/roles');
+ const put=roles=>roleApi(s,admin,'PUT',url,{expected_revision:roleApi(s,admin,'GET',url,{}).configuration.revision,enabled:true,roles}).configuration;
+ for(const role of ['manager','qa']){
+  assert.equal(put([{role_id:role,harness_ref:{id:'pi'}}]).roles.find(r=>r.role_id===role).harness_ref.id,'pi');
+  for(const backend of ['codex','claude_code','process'])assert.throws(()=>put([{role_id:role,harness_ref:{id:backend}}]),e=>e.status===400&&e.code==='harness_role_unsupported'&&e.field===`roles.${role}.harness_ref.id`);
  }
+ for(const backend of ['codex','claude_code','pi'])assert.equal(put([{role_id:'dev',harness_ref:{id:backend}}]).roles.find(r=>r.role_id==='dev').harness_ref.id,backend);
  }finally{s.close();}
 });
 
