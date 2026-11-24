@@ -13,6 +13,7 @@
 - **Webhook 签名转发**：
   - Webhook 验签归档与转发任务入队在同一事务完成；后台按「至少一次」语义投递，携带 `X-Bot-Delivery`、`X-Bot-Event` 与原始字节 HMAC-SHA256 `X-Bot-Signature-256`，剥离原 GitHub 认证头。
   - **SSRF 防护**：默认只允许 HTTPS 且每次投递前校验并固定解析 IP（拒绝回环/私网/链路本地且不跟随重定向）；内网接收主机仅允许 `BOT_FORWARD_PRIVATE_HOSTS` 显式精确白名单。
+  - **出口脱敏与控制台同一规则**：转发的是已接受投递的原文，与控制台详情、管理回执共用 `src/core/redaction.ts` 的字段名名单——键名恰为 `token`/`secret`/`password`/`authorization`/`cookie`/`private_key`（大小写不敏感、任意层级、含数组元素）的值替换为 `[redacted]`，其余字段原样转发；不按值的形状猜测，存储不变。
 - **事件轮询（`GET /external/events`）**：
   - 直接复用已兑换的 GitHub 安装令牌（通过 `external_grants.token_hash` 校验活跃状态与归属），不引入第二套令牌也不扣兑换额度；返回最近 24 小时已验签归档的 `issues` / `pull_request` 事件，并在 HTTP 200 写出完成后推进客户端独立持久化游标。
 
