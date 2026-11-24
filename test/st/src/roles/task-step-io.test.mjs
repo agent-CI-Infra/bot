@@ -29,7 +29,26 @@ async function fixture(t) {
     request_source: 'model_requests:mr-1:request', response_source: 'model_requests:mr-1:response',
   }), '2026-11-24T08:01:05Z', 'run-io', 'framework');
   insHist.run('t-io', 'role_run_event', JSON.stringify({ type: 'message', data: { text: longOutput } }), '2026-11-24T08:02:00Z', 'run-io', 'agent');
-  return { admin, h };
+  // A receipt written the way recordExternalModelRequest writes it, plus one failure state and one unknown state.
+  const insModel = h.store.db.prepare(
+    `INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,finished_at,http_status,state,request_snapshot,response_snapshot)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  for (const [id, state] of [['mr-ex', 'external_received'], ['mr-exu', 'external_usage_unknown'], ['mr-http', 'http_error'], ['mr-odd', 'queued']]) {
+    insModel.run(id, 't-io', '101', 'req-' + id, 'model-1', 'gpt-5.4', '2026-11-24T08:03:00Z', '2026-11-24T08:03:05Z', 200, state,
+      JSON.stringify({ messages: [{ role: 'user', content: 'external ' + id }] }),
+      JSON.stringify({ choices: [{ message: { content: 'done ' + id } }] }));
+    insHist.run('t-io', 'model_request', JSON.stringify({
+      request_id: id, state, http_status: 200,
+      request_source: `model_requests:${id}:request`, response_source: `model_requests:${id}:response`,
+    }), '2026-11-24T08:03:05Z', 'run-io', 'framework');
+  }
+  // Two tool calls whose own body is over the 64 KiB detail limit, one on the call, one on its observation.
+  const bigArgsId = Number(insHist.run('t-io', 'tool_started', JSON.stringify({ call_id: 'c-big-args', name: 'write_big', arguments: { blob: 'G'.repeat(70000) } }), '2026-11-24T08:04:00Z', 'run-io', 'agent').lastInsertRowid);
+  insHist.run('t-io', 'tool_observation', JSON.stringify({ call_id: 'c-big-args', observation: { data: { content: 'small acknowledgement' } } }), '2026-11-24T08:04:01Z', 'run-io', 'agent');
+  insHist.run('t-io', 'tool_started', JSON.stringify({ call_id: 'c-big-out', name: 'read_big', arguments: { path: 'big.txt' } }), '2026-11-24T08:04:10Z', 'run-io', 'agent');
+  const bigOutId = Number(insHist.run('t-io', 'tool_observation', JSON.stringify({ call_id: 'c-big-out', observation: { data: { content: 'H'.repeat(70000) } } }), '2026-11-24T08:04:11Z', 'run-io', 'agent').lastInsertRowid);
+  return { admin, h, ids: { bigArgsId, bigOutId } };
 }
 
 test('#1207: a recorded model request is its own step with separate input and output sources', async t => {
@@ -86,4 +105,37 @@ test('#1207: two steps with the same tool name keep their own input and output',
     const expected = step.output.content;
     assert.equal(own.value.source.data.observation.data.content, expected);
   }
+});
+
+test('#1207: a request state maps to ok, error or unknown instead of comparing against received alone', async t => {
+  const { admin } = await fixture(t);
+  const detail = await admin('/api/tasks/t-io');
+  const run = detail.value.role_runs.find(item => item.run_id === 'run-io');
+  const step = id => run.history_steps.find(item => item.kind === 'model' && item.input_source === `model_requests:${id}:request`);
+
+  assert.equal(step('mr-ex').status, 'ok', 'an externally accounted request is not a failure');
+  assert.equal(step('mr-exu').status, 'ok', 'an unknown external usage is not a failure');
+  assert.equal(step('mr-http').status, 'error');
+  assert.equal(step('mr-odd').status, 'unknown', 'an unrecognised state is not turned into an error');
+});
+
+test('#1207: a tool row over 64 KiB keeps its step and its readable input or output', async t => {
+  const { admin, ids } = await fixture(t);
+  const detail = await admin('/api/tasks/t-io');
+  const run = detail.value.role_runs.find(item => item.run_id === 'run-io');
+
+  const bigCall = run.history_steps.find(item => item.kind === 'tool' && item.input_source === `task_history:${ids.bigArgsId}`);
+  assert.ok(bigCall, 'a tool call whose arguments exceed the detail limit keeps a step');
+  assert.notEqual(bigCall.status, 'running');
+  const callBody = await admin(`/api/tasks/t-io/source?ref=${encodeURIComponent(bigCall.input_source)}`);
+  assert.equal(callBody.status, 200);
+  assert.equal(callBody.value.source.data.arguments.blob.length, 70000);
+
+  const bigOutput = run.history_steps.find(item => item.kind === 'tool' && item.tool === 'read_big');
+  assert.ok(bigOutput, 'a tool call whose observation exceeds the detail limit keeps its step');
+  assert.notEqual(bigOutput.status, 'running');
+  assert.equal(bigOutput.output_source, `task_history:${ids.bigOutId}`);
+  const outputBody = await admin(`/api/tasks/t-io/source?ref=${encodeURIComponent(bigOutput.output_source)}`);
+  assert.equal(outputBody.status, 200);
+  assert.equal(outputBody.value.source.data.observation.data.content.length, 70000);
 });
