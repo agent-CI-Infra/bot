@@ -244,3 +244,38 @@ test('code PR task creation has no workflow_changes checkbox and submits cleanly
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
+
+// #527 slice: the new-task page was never in the dictionary — every label, the page state and the receipt were
+// hardcoded Chinese (static/task-create.js). An English console must show none of them in the page body; the console
+// shell around it is a different slice, so the reading is scoped to #console-page. Three layouts are read because the
+// form and the execution-context card stack differently below 1024.
+const han = /[\u4e00-\u9fff]/;
+
+test('English 界面：新建任务页整页不再出现中文，三个视口都不溢出', async ({ page }) => {
+  const f = await fixture(), errors = [];
+  page.on('pageerror', err => errors.push(err.message));
+  try {
+    await login(page, f);
+    await page.getByRole('button', { name: 'English' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    const body = page.locator('#console-page');
+    await expect(body.getByRole('heading', { name: 'Create a task', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Submit task', exact: true })).toBeEnabled();
+
+    for (const [width, height] of [[1440, 900], [768, 1024], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `horizontal overflow at ${width}px`).toBe(true);
+      const text = await body.innerText();
+      expect(text.match(/[^\s]*[\u4e00-\u9fff][^\s]*/g) || [], `Chinese text left on the new-task page at ${width}px`).toEqual([]);
+      expect(text, `raw dictionary key at ${width}px`).not.toContain('taskCreate.');
+    }
+
+    // The fields and the execution-context card must read in English too, not only the heading.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByLabel('Original request', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('Acceptance criteria (one item per line)', { exact: true })).toBeVisible();
+    await expect(page.locator('#console-page').getByRole('region', { name: 'Execution context' })).toContainText('Current identity');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
