@@ -1,6 +1,7 @@
 import { publicContent, registeredRedactor } from '../core/redaction.js';
 import { publicationFact } from '../tasks/publication.js';
 import { type Store, type Row } from '../storage/database.js';
+import { saveDevelopmentCandidate } from '../storage/payloads.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, sha, stop, TaskError, treeSha } from '../agent/common.js';
 import { implementationText, reviewLanguage, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted } from './text.js';
@@ -254,7 +255,7 @@ export class Publisher {
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-')&&!direct)stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
     const workflowFiles=assertWorkflowChangesAuthorized(this.github,candidate);
-    const save=()=>this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
+    const save=()=>saveDevelopmentCandidate(this.store,this.task.id,candidate,String(this.task.repository_id));
     if(candidate.media?.length&&!candidate.hosted_media){
       this.store.transaction(()=>{
         assertTaskExternalEffect(this.store,this.task,'pull_request');

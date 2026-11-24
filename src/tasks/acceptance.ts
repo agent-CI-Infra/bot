@@ -91,10 +91,12 @@ export function skipQa(store: Store, task: Row, candidate: any, method = 'qa_not
 }
 
 const dirtyPathPattern = /(?:^|\/)(?:\.env(?:\.(?!example$|sample$|template$)[^/]+)?|\.DS_Store|node_modules|id_(?:rsa|ed25519)|[^/]+\.(?:pem|key))(?:\/|$)/i;
+const binaryPathPattern = /\.(?:zip|tar|gz|tgz|bz2|xz|7z|rar|png|jpe?g|gif|webp|ico|bmp|tiff?|pdf|woff2?|ttf|otf|eot|mp3|mp4|mov|avi|wav|ogg|wasm|so|dylib|dll|exe|bin|class|jar|pyc|pyo|sqlite3?|db|har|hap|hsp)$/i;
+const preflightMaxBytes = 262144;
 const conflictMarker = (text: string) => /^(?:<<<<<<< |>>>>>>> )/m.test(text) && /^=======\r?$/m.test(text);
 const privateKeyBlock = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/;
 
-async function deterministicCandidateIssues(store: Store, _task: Row, workspace: Workspace, candidate: any, redactor: Redactor): Promise<string[]> {
+export async function deterministicCandidateIssues(store: Store, _task: Row, workspace: Workspace, candidate: any, redactor: Redactor): Promise<string[]> {
   const issues: string[] = [];
   const serializedClaims = JSON.stringify(candidate.claims ?? '');
   if (redactor.contains(Buffer.from(serializedClaims))) {
@@ -119,16 +121,23 @@ async function deterministicCandidateIssues(store: Store, _task: Row, workspace:
           issues.push(`Forbidden or dirty file staged in candidate: ${filePath} (remove .env, private keys, .DS_Store, or node_modules).`);
           continue;
         }
-        if (Number(file.size ?? 0) > 262144) continue;
+        if (binaryPathPattern.test(filePath)) continue;
+        if (typeof file.size === 'number' && file.size > preflightMaxBytes) continue;
         let text: string | null = null;
         if (typeof file.base64 === 'string') {
-          text = Buffer.from(file.base64, 'base64').toString('utf8');
+          if (Math.floor(file.base64.length * 3 / 4) > preflightMaxBytes) continue;
+          const bytes = Buffer.from(file.base64, 'base64');
+          if (bytes.length > preflightMaxBytes || bytes.subarray(0, 8192).includes(0)) continue;
+          text = bytes.toString('utf8');
         } else if (typeof workspace?.call === 'function') {
           const read = await workspace.call(`accept:preflight:${randomId()}`, {
             type: 'workspace_read',
             path: filePath,
+            max_bytes: preflightMaxBytes,
+            skip_binary: true,
             ...(content.local_sha ? { sha: content.local_sha } : {}),
           }).catch(() => null);
+          if (read?.skipped) continue;
           if (typeof read?.content === 'string') text = read.content;
         }
         if (text === null) continue;

@@ -1,6 +1,6 @@
 import type { Row, Store } from './database.js';
 import { payloadHeader, segment, type RecordType, type TrajectoryScope } from './trajectories.js';
-import { inlineLogBytes, inputBlobKeys, legacySnapshot, logData, storedInput } from './payloads.js';
+import { candidateBlobKeys, inlineLogBytes, inputBlobBytes, inputBlobKeys, legacySnapshot, logData, storedCandidate, storedInput } from './payloads.js';
 import { diskFull } from './disk.js';
 import { createHash } from 'node:crypto';
 
@@ -219,6 +219,19 @@ export class PayloadMigration {
         const blobs = inputBlobKeys.map(key => JSON.parse(text)[key]?.$blob).filter((hash): hash is string => typeof hash === 'string');
         return { refs: [], blobs, bytes: String(row.input).length - text.length, apply: () => s.run('UPDATE tasks SET input=? WHERE id=? AND input=?', text, row.id, row.input) };
       } },
+      { name: 'development_candidates', table: 'development_candidates', move: row => {
+        // Large candidate file lists move out of SQLite into content-addressed blobs (#1304); rows already externalized skip.
+        const raw = String(row.data || '');
+        if (raw.length <= inputBlobBytes) return null;
+        const repositoryId = this.repository(String(row.task_id));
+        if (!repositoryId) return null;
+        const candidate = JSON.parse(raw);
+        const text = storedCandidate(s, candidate, repositoryId);
+        if (text.length === raw.length) return null;
+        const parsed = JSON.parse(text);
+        const blobs = candidateBlobKeys.map(key => parsed[key]?.$blob).filter((hash): hash is string => typeof hash === 'string');
+        return { refs: [], blobs, bytes: raw.length - text.length, apply: () => s.run('UPDATE development_candidates SET data=? WHERE task_id=? AND data=?', text, row.task_id, row.data) };
+      } },
       { name: 'task_history', table: 'task_history', move: row => {
         // Snapshots of runner calls and logs, copied by triggers: moved as they are, the row keeps the ref.
         if (!['operation', 'runtime_log'].includes(row.type) || String(row.data).length <= inlineLogBytes) return null;
@@ -243,7 +256,7 @@ export class PayloadMigration {
 }
 
 /** The tables the migration walks, in order. */
-export const migratedTables = ['task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'task_history'];
+export const migratedTables = ['task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'development_candidates', 'task_history'];
 
 /**
  * Progress per table (cursor, counts, bytes, last error, finished time), the rate, and the rows not examined yet per

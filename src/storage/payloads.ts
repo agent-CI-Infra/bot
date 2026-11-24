@@ -108,8 +108,12 @@ export function insertTaskLog(store: Store, task: Row, content: string, createdA
 
 /** Task input keys whose large values (a pull request's changed files, the repository's file list) are stored as blobs. */
 export const inputBlobKeys = ['files', 'snapshot_files', 'skipped_files'] as const;
+/** Development candidate keys whose large file arrays are stored as content-addressed blobs outside SQLite (#1304). */
+export const candidateBlobKeys = ['files', 'snapshot_files', 'skipped_files'] as const;
 /** Values whose JSON is larger than this become blobs. */
 export const inputBlobBytes = 2048;
+
+const candidateBlobRefs = new WeakMap<object, Map<string, { value: unknown; ref: { $blob: string; bytes: number } }>>();
 
 /**
  * The JSON text a task's input is stored as: its large file lists replaced by blob references. Readers of those keys
@@ -127,4 +131,60 @@ export function storedInput(store: Store, input: Record<string, any>, repository
 /** A task input value that may be a blob reference. */
 export function blobValue<T = any>(store: Store, value: T | { $blob: string }): T {
   return value && typeof value === 'object' && typeof (value as { $blob?: unknown }).$blob === 'string' ? store.trajectories.getBlob((value as { $blob: string }).$blob) as T : value as T;
+}
+
+/**
+ * The JSON text a development_candidates row is stored as: large file/snapshot lists become content-addressed blobs so
+ * hot metadata reads (`base_sha`, `tree_sha`, `branch`, `published`, `remote_sha`) never parse multi-megabyte SQLite rows.
+ */
+export function storedCandidate(store: Store, candidate: Record<string, any>, repositoryId: string): string {
+  const stored = { ...candidate };
+  const cached = candidateBlobRefs.get(candidate);
+  for (const key of candidateBlobKeys) {
+    const value = stored[key];
+    if (!Array.isArray(value)) continue;
+    const hit = cached?.get(key);
+    if (hit && hit.value === value) { stored[key] = hit.ref; continue; }
+    if (JSON.stringify(value).length > inputBlobBytes) {
+      const ref = store.trajectories.putBlob(value, repositoryId);
+      stored[key] = ref;
+      let map = candidateBlobRefs.get(candidate);
+      if (!map) { map = new Map(); candidateBlobRefs.set(candidate, map); }
+      map.set(key, { value, ref });
+    }
+  }
+  return JSON.stringify(stored);
+}
+
+/** Persists a development candidate with its large file arrays externalized to the blob store. */
+export function saveDevelopmentCandidate(store: Store, taskId: string, candidate: Record<string, any>, repositoryId?: string): void {
+  const repoId = repositoryId || String(store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id ?? '');
+  const text = repoId ? storedCandidate(store, candidate, repoId) : JSON.stringify(candidate);
+  store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data', taskId, text);
+}
+
+/** Reads a development candidate and expands any externalized blob arrays, caching their refs for fast metadata saves. */
+export function loadDevelopmentCandidate(store: Store, taskId: string): any {
+  const row = store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
+  if (!row?.data) return null;
+  const candidate = JSON.parse(String(row.data));
+  if (!candidate || typeof candidate !== 'object') return candidate;
+  const refs = new Map<string, { value: unknown; ref: { $blob: string; bytes: number } }>();
+  for (const key of candidateBlobKeys) {
+    const raw = candidate[key];
+    if (raw && typeof raw === 'object' && typeof raw.$blob === 'string') {
+      const resolved = blobValue(store, raw);
+      candidate[key] = resolved;
+      refs.set(key, { value: resolved, ref: raw });
+    }
+  }
+  if (refs.size) candidateBlobRefs.set(candidate, refs);
+  return candidate;
+}
+
+/** Drops inline base64 file bodies from a confirmed-published candidate while keeping its path/sha/mode manifest. */
+export function stripPublishedCandidateBodies(store: Store, taskId: string, candidate: Record<string, any>, repositoryId?: string): void {
+  if (!Array.isArray(candidate?.files) || !candidate.files.some((f: any) => typeof f?.base64 === 'string')) return;
+  const slim = { ...candidate, files: candidate.files.map(({ base64: _b, ...rest }: any) => rest) };
+  saveDevelopmentCandidate(store, taskId, slim, repositoryId);
 }

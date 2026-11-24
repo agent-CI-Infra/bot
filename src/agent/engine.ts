@@ -25,7 +25,7 @@ import { assertManagedExecution } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery, shouldRunQa, skipQa } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
-import { blobValue, insertTaskLog, logContent, storedInput } from '../storage/payloads.js';
+import { blobValue, insertTaskLog, loadDevelopmentCandidate, logContent, saveDevelopmentCandidate, storedInput, stripPublishedCandidateBodies } from '../storage/payloads.js';
 import { diskFull, floorBytes } from '../storage/disk.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
@@ -524,13 +524,14 @@ export class TaskEngine {
       const publishPullRequest=async()=>{
         log({type:'phase',phase:'pull_request',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
-        const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+        const candidate=loadDevelopmentCandidate(this.store,id)!;
         const checked=await accept(candidate,[{source:'policy_validation',version:candidate.tree_sha,verified:candidate.validation?.source==='policy',result:candidate.validation}]);
         if(checked.error)return checked;
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
         const published={number:pr.number,html_url:pr.html_url,sha:commit};
-        this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify({...JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data),published}),id);
+        const strippedFiles=Array.isArray(candidate.files)?candidate.files.map(({base64:_b,...rest}:any)=>rest):candidate.files;
+        saveDevelopmentCandidate(this.store,id,{...candidate,files:strippedFiles,published},String(task.repository_id));
         return {pr:published};
       };
       // A revision people asked for names their comments, so each person sees what answered them (#1104).
@@ -538,11 +539,12 @@ export class TaskEngine {
       const publishDevelopment=async()=>{
         update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
-        const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+        const candidate=loadDevelopmentCandidate(this.store,id)!;
         const checked=await accept(candidate,[{source:'policy_validation',version:candidate.tree_sha,verified:candidate.validation?.source==='policy',result:candidate.validation}]);
         if(checked.error)return checked;
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
+        stripPublishedCandidateBodies(this.store,id,candidate,String(task.repository_id));
         integratedPublication(this.store,task,commit);
         // An Issue's development reports its pull request in its status comment (#1047); a revision of the bot's own pull
         // request still says so on that pull request.
@@ -753,7 +755,7 @@ export class TaskEngine {
             const candidate={...prior,...artifact,source_workspace_id:task.workspace_id,files:await workspace.contents(artifact.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),
               base_sha:ref.object.sha,expected_sha:input.bot_pr?.head?.sha??null,pr_number:input.bot_pr?.number??prior.pr_number,publication_key:integration.id,integration,validation,
               remote_sha:undefined,published_tree_sha:undefined,published:undefined};
-            this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),id);
+            saveDevelopmentCandidate(this.store,id,candidate,String(task.repository_id));
             update({phase:'publish',result:JSON.stringify({summary:prior.summary,test_command:prior.test_command})});
           }else{
             input.integration={...integration,failure_ref:checked};input.context.integration={...input.context.integration,failure_ref:checked,instruction:'The three-way merge was clean but combined policy tests failed. Read this failure record and repair this integrated checkout in the SAME Dev context; do not overwrite changes from main.'};
@@ -877,7 +879,7 @@ export class TaskEngine {
           const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,labels:labels.labels,...(media?{media}:{}),
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             publication_key:input.publication_key||input.integration?.id,...(input.integration?{integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
-          this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
+          saveDevelopmentCandidate(this.store,id,candidate,String(task.repository_id));
           if(!development)return publishPullRequest();
           update({result:JSON.stringify(args),phase:'publish'});
           return publishDevelopment();

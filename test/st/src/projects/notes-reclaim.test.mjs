@@ -188,3 +188,37 @@ test('the notes-volume list reads a bare array and a volumes envelope, and refus
     await assert.rejects(service(unreadable).notesVolumes(), { status: 503, code: 'manager_notes_volumes_unavailable' },
       'an answer without a volume list is unreadable, not an empty list');
 });
+
+test('reclaimNotes removes stopped orphan containers holding a deleted repository notes volume and refuses running ones', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
+  f.docker.enforceVolumeInUse = true;
+  // Simulate a legacy deletion where the control plane dropped the repository row while the manager still kept
+  // a stopped container + network + project/resource rows mounting the notes volume (#1304).
+  await f.projects.operate('101', 'start', { operation_id: 'a'.repeat(48), generation: 1 });
+  const containerName = f.projects.names('101', 1).container;
+  const networkName = f.projects.names('101', 1).network;
+  const volumeName = f.projects.notesName('101');
+  assert.ok(f.docker.containers.get(containerName)?.State?.Running, 'project container starts running');
+  h.store.run('DELETE FROM policies WHERE repository_id=?', '101');
+  h.store.run('DELETE FROM project_environments WHERE repository_id=?', '101');
+  h.store.run('DELETE FROM repositories WHERE id=?', '101');
+
+  // While the container is still running, reclaim refuses (409) instead of killing it blindly.
+  await assert.rejects(f.projects.reclaimNotes('101'), { status: 409, message: 'notes_volume_in_use' });
+  assert.ok(f.docker.containers.has(containerName), 'running container is untouched');
+  assert.ok(f.docker.volumes.has(volumeName), 'volume stays while container is running');
+
+  // Once the orphan container is stopped (Exited), a NotesReclaimer sweep removes the container, network,
+  // orphan manager rows, and the notes volume, bringing /readyz back to 200.
+  f.docker.containers.get(containerName).State.Running = false;
+  const reclaim = await import('../../../../dist/projects/reclaim.js');
+  const reclaimer = new reclaim.NotesReclaimer(h.store, h.projects, { baseDelayMs: 0 });
+  const left = await reclaimer.sweep();
+  assert.deepEqual(left, [], 'stopped orphan container and notes volume are both reclaimed');
+  assert.equal(f.docker.containers.has(containerName), false, 'stopped orphan container removed');
+  assert.equal(f.docker.networks.has(networkName), false, 'orphan network removed');
+  assert.equal(f.docker.volumes.has(volumeName), false, 'notes volume deleted once unmounted');
+  assert.equal(f.projects.db.prepare('SELECT count(*) n FROM resources WHERE repository_id=?').get('101').n, 0, 'orphan resources cleared');
+  assert.equal(f.projects.get('101').state, 'deleted', 'orphan project marked deleted');
+  assert.equal((await fetch(h.admin + '/readyz')).status, 200, 'readiness heals to 200');
+});

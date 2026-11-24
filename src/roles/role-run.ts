@@ -32,6 +32,8 @@ export function roleRunStorage(s: Store) {
   const existing = new Set(s.all('PRAGMA table_info(task_runs)').map(r => r.name));
   for (const [name, type] of Object.entries({ lease_scope: 'TEXT', lease_epoch: 'INTEGER', resume_from_run_id: 'TEXT', run_context: 'TEXT', admission: 'TEXT', protocol_recovery: 'TEXT', operation_id: 'TEXT', cli_version: 'TEXT' }))
     if (!existing.has(name)) s.db.exec(`ALTER TABLE task_runs ADD COLUMN ${name} ${type}`);
+  s.db.exec(`CREATE INDEX IF NOT EXISTS task_run_operation ON task_runs(operation_id);
+    CREATE INDEX IF NOT EXISTS task_run_lease_scope ON task_runs(lease_scope,status);`);
   // A restart ends every run that was still running (interruptRuns); their tokens must not outlive them.
   s.run("UPDATE role_run_tokens SET revoked_at=?,revoke_reason='run_not_running' WHERE revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.id=role_run_tokens.run_id AND r.status='running')", Date.now());
 }

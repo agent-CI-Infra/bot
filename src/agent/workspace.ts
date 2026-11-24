@@ -509,11 +509,14 @@ export class Workspace {
     return result;
   }
   async contents(manifest:any[],upstream:any[]=[]){
-    const files:any[]=[],original=new Map(upstream.map(file=>[file.path,file]));
+    const files:any[]=[],original=new Map(upstream.map(file=>[file.path,file])),originalShas=new Set(upstream.map(file=>file.sha).filter(Boolean));
     for(const file of manifest){
       safePath(file.path);
-      // Existing upstream objects need no round trip through a base64 candidate buffer.
-      if(original.get(file.path)?.sha===file.sha){files.push({path:file.path,mode:file.mode,sha:file.sha});continue;}
+      // Existing upstream objects (including renames/moves whose git blob sha already lives on GitHub) need no base64 copy.
+      if(original.get(file.path)?.sha===file.sha||originalShas.has(file.sha)){
+        files.push({path:file.path,mode:file.mode,sha:file.sha,...(typeof file.size==='number'?{size:file.size}:{})});
+        continue;
+      }
       const chunks:Buffer[]=[];
       for(let offset=0;offset<file.size||offset===0;offset+=30000){
         const part=await this.call(`candidate:blob:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset});
@@ -521,7 +524,7 @@ export class Workspace {
       }
       const bytes=Buffer.concat(chunks);
       if(blobSha(bytes)!==file.sha||this.redactor.contains(bytes))stop('candidate_blob_invalid',undefined,`Candidate blob hash or credential check failed: ${file.path}`);
-      files.push({path:file.path,mode:file.mode,sha:file.sha,base64:bytes.toString('base64')});
+      files.push({path:file.path,mode:file.mode,sha:file.sha,size:bytes.length,base64:bytes.toString('base64')});
     }
     return files;
   }

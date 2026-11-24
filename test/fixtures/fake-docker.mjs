@@ -50,7 +50,14 @@ export class FakeDocker {
     }
     if (kind === 'volumes') {
       if (method === 'POST') { this.volumes.set(body.Name, { Labels: body.Labels, Options: body.DriverOpts }); return {}; }
-      if (method === 'DELETE') { if (this.failVolume) throw new ManagerError('injected_volume_failure'); this.volumes.delete(name); return {}; }
+      if (method === 'DELETE') {
+        if (this.failVolume) throw new ManagerError('injected_volume_failure');
+        if (this.enforceVolumeInUse && [...this.containers.values()].some(c => (c.Mounts ?? []).some(m => m.Name === name))) {
+          throw Object.assign(new ManagerError('docker_operation_failed', 503), { detail: `DELETE /volumes/${name} → HTTP 409: volume is in use` });
+        }
+        this.volumes.delete(name);
+        return {};
+      }
       if (this.volumes.has(name)) return this.volumes.get(name);
       if (this.toolsMount && name === (this.toolsVolumeName ?? 'fixture-agent-tools')) {
         return { Name: name, Labels: this.toolsVolumeLabels ?? { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' } };
