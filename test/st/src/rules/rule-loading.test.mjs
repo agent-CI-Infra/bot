@@ -326,3 +326,22 @@ test('#1171 whole .agents/skills/<name>/ companion files are loaded and staged, 
   ])),{code:'too_many_bot_skills'});
   assert.equal(explainFailure('skill_file_too_large','waiting_configuration').label,'仓库内容或规则');
 });
+
+test('#532: 33 SKILL.md files are indexed instead of rejected',()=>{
+  const files=Object.fromEntries(Array.from({length:33},(_,i)=>[`.agents/skills/s${i}/SKILL.md`,`---\nname: s${i}\ndescription: Skill ${i}.\n---\nBody ${i}.\n`]));
+  const indexed=skillIndex(resolveRules({},files).files).map(s=>s.name);
+  assert.equal(indexed.length,33);
+  assert.deepEqual(indexed,[...indexed].sort());
+  assert.ok(indexed.includes('s32'));
+});
+
+test('#532: a repository with 33 SKILL.md files runs its task instead of waiting for configuration',async t=>{
+  const files=Object.fromEntries(Array.from({length:33},(_,i)=>[`.agents/skills/s${i}/SKILL.md`,`---\nname: s${i}\ndescription: Skill ${i}.\n---\nBody ${i}.\n`]));
+  const f=await repositoryFixture(t);
+  f.heads.main=f.commit({'src/app.js':'export {};\n',...files});
+  await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
+  const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
+  assert.equal(task.status,'succeeded',task.error_code);
+  assert.match(f.context['skills/s0/SKILL.md'],/Body 0\./);
+  assert.match(f.context['skills/s32/SKILL.md'],/Body 32\./);
+});
