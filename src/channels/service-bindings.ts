@@ -520,8 +520,9 @@ export class ChannelServiceBindings {
     if (!participations.includes(String(participation))) fail(400, 'channel_participation_invalid', 'participation');
     // Accommodate migrated legacy responsibility (<=2000) + "\n\n" + prompt (<=32000) = 34002 chars without making bindings unsavable.
     const prompt = input.prompt !== undefined ? optionalText(input.prompt, 35000, 'prompt') : String(previous?.prompt ?? '');
+    // As for a service role, a backend the request names must be one the console offers; an omitted one keeps the saved one.
     const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'pi');
-    if (!(harnesses as readonly string[]).includes(harness)) fail(400, 'unknown_role_harness', 'harness');
+    if (input.harness !== undefined && !(harnesses as readonly string[]).includes(harness)) fail(400, 'unknown_role_harness', 'harness');
     const permissions = this.levelInput(input, previous);
     const previewScope = this.scopeInput(actor, input.scope, chat);
     const resolveModel = (scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): string | null => {
