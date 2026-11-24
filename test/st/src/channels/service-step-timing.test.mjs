@@ -92,3 +92,13 @@ test('a call whose result lands on the next page still shows its own duration (#
   const page2 = (await f.admin(`/api/channels/chats/${chat.id}/turns/${turn.id}?after=${page1.next_after}`)).value;
   assert.equal(page2.events[0].type, 'tool_result');
 });
+
+test('a call with no result stays unrecorded and never borrows the next call’s end (#1313)', async t => {
+  const f = await channelFixture(t); await repositoryAssistant(f); const chat = await boundGroup(f);
+  const turn = await emptyTurn(f, chat), at = 1_700_000_000_000;
+  // An edited turn restarts the Pi session, so this call's result row is never written; a later call of the same tool is.
+  toolRow(f, turn, 'tool_call', 'orphan', at);
+  toolRow(f, turn, 'tool_call', 'later', at + 10); toolRow(f, turn, 'tool_result', 'later', at + 30);
+  const calls = (await steps(f, chat, turn)).filter(e => e.type === 'tool_call');
+  assert.deepEqual(calls.map(c => [c.call_id, c.duration_ms]), [['orphan', null], ['later', 20]], 'no name/nearest pairing');
+});

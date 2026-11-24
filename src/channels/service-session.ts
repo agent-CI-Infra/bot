@@ -498,8 +498,8 @@ export class ChannelServiceSessions {
             } catch (error) { event('tool_error', staySilentName, call); throw error; }
           };
           // A steering driver (Pi) streams its answer, merges messages that arrive meanwhile, starts again after an edit and may
-          // end through stay_silent (#1253). Its own tool calls and model steps join the turn's steps (#1296), by name as every
-          // step is, while the turn runs.
+          // end through stay_silent (#1253). Its own tool calls and model steps join the turn's steps (#1296), each call under
+          // an identity made for that invocation (#1313), while the turn runs.
           const budget = new ProgressBudget(), calls = new CallIdentities(randomId); let progressing = true;
           const piSteps = (step: ServiceProgress) => {
             if (!progressing || step.kind === 'notice' || this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'running' || !budget.admit(step)) return;

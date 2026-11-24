@@ -154,6 +154,23 @@ test('a Pi group turn lists its native commands and model steps among its steps,
   await until(() => sent(f).some(s => s.includes('电脑上看过了')));
 });
 
+// Pi's provider may hand out one call id per tool name ('call-' + name in this fixture), so two calls of one tool in the
+// same turn would share it; the turn must give each invocation its own identity (#1313).
+test('two Pi calls of one tool keep identities of their own, not the provider id both were given (#1313)', { skip: piSkip, timeout: 240000 }, async t => {
+  const f = await piGroup(t, { commands: true }), bodies = [];
+  f.modelState.respond = async (body, res) => { bodies.push(body); return bodies.length <= 2 ? call(res, 'bash', { command: `echo run-${bodies.length}` }) : say(res, '两次都跑完了。'); };
+  const asked = await post(f.h, f.id, inGroup('在电脑上跑两次'));
+  assert.equal((await until(() => row(f, asked), r => ['completed', 'failed'].includes(r?.state), 180000)).state, 'completed');
+  const turn = f.h.store.get('SELECT * FROM channel_service_turns');
+  const calls = f.h.store.all("SELECT call_id,started_at FROM channel_service_events WHERE turn_id=? AND type='tool_call' ORDER BY sequence", turn.id);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(c => c.call_id && c.started_at !== null));
+  assert.notEqual(calls[0].call_id, calls[1].call_id, 'one provider id for two invocations must not become one identity');
+  const view = (await f.admin(`/api/channels/chats/${f.chat.id}/turns/${turn.id}`)).value.events.filter(e => e.type === 'tool_call');
+  assert.deepEqual(view.map(e => e.call_id), calls.map(c => c.call_id));
+  assert.ok(view.every(e => Number.isInteger(e.duration_ms) && e.duration_ms >= 0), 'each call measures its own window');
+});
+
 test('a Pi group turn starts from the native context and ends silently through stay_silent (#1253, #489)', { skip: piSkip, timeout: 120000 }, async t => {
   const f = await piGroup(t), bodies = [];
   f.modelState.respond = async (body, res) => { bodies.push(body); return call(res, 'stay_silent', { reason: '群友在闲聊午饭' }); };
