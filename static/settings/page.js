@@ -103,6 +103,7 @@ const settingsCards = {
       const host = settingsCard('采集明细', 'h2'), known = view.host.known ?? {};
       const table = costTable(['占用', '大小']);
       for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'], ['channel_resources', '飞书附件存储 channel-resources'], ['channel_cards', '飞书交互卡片 channel-cards'],
+        ...(Object.hasOwn(known, 'project_tools') ? [['project_tools', '项目工具卷 project-tools']] : []),
         ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存'],
         ['docker_volumes', 'Docker 卷（未被计入的部分）'], ['assistant_homes', '助手电脑 HOME（assistant-homes 卷）']])
         row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);
@@ -197,6 +198,25 @@ const settingsCards = {
     }
     computers.append(note('任务工作区按保留规则分类：运行中（仅保留未结束任务当前仍在用的目录及 30 分钟内活跃目录，旧尝试与已发布旧轮次的目录归入待删除）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束或已被新尝试/新轮次取代，到期后由后台清理删除）。「其他」含 /workspace/tmp 和卷根目录下的其他文件；项目笔记是单独的卷，不计入。'));
     cards.push(computers);
+    const withProjectTools = view.projects.filter(project => project.project_tools);
+    if (withProjectTools.length) {
+      const ptCard = settingsCard('项目工具卷', 'h2');
+      const ptTable = costTable(['项目', '当前生效版本', '保留版本数', '当前快照大小', '磁盘实际占用', '项目配额']);
+      ptTable.wrap.classList.add('storage-projects');
+      for (const project of withProjectTools) {
+        const pt = project.project_tools;
+        row(ptTable, [
+          project.name || project.repository_id,
+          pt.active_revision ? `rev-${pt.active_revision}` : '已清空',
+          `${count(pt.revisions_count)} 个`,
+          size(pt.logical_bytes),
+          pt.disk_bytes === null || pt.disk_bytes === undefined ? '待目录采样' : size(pt.disk_bytes),
+          size(pt.quota_bytes),
+        ]);
+      }
+      ptCard.append(ptTable.wrap, note('项目工具卷按项目独立隔离存放在 project-tools 卷（默认单项目配额 20 GiB，保留当前版本及最近 3 个回滚旧版，硬链接共享的未改动文件在磁盘上只计一次）。'));
+      cards.push(ptCard);
+    }
     if (view.overview) {
       const details = element('details', '', 'storage-diagnostics');
       details.append(element('summary', '查看采集、回收与项目明细'), ...cards.splice(detailStart));
@@ -272,8 +292,34 @@ const settingsCards = {
       } catch (err) { message.className = 'view-error'; announceSave(message, readErrorText(err), true); } finally { submit.disabled = false; }
     });
     concurrency.append(form);
+    const toolsQuotaCards = [];
+    if (Array.isArray(settings.project_tools_quota_bounds)) {
+      const [qMin, qMax] = settings.project_tools_quota_bounds;
+      const quotaCard = settingsCard('项目工具卷默认配额');
+      const qForm = document.createElement('form'), qInput = input('project_tools_quota_gb', settings.project_tools_quota_gb ?? 20, { type: 'number', min: qMin, max: qMax, step: 1, required: true });
+      const qMsg = element('p', '', 'view-error'), qActions = element('div', '', 'actions form-actions'), qSubmit = element('button', '保存配额');
+      qForm.className = 'project-form'; qForm.noValidate = true; qSubmit.type = 'submit'; qMsg.setAttribute('role', 'status'); qActions.append(qSubmit);
+      qForm.append(
+        field('单项目工具卷容量上限（GiB）', qInput),
+        note(`取 ${qMin}–${qMax} GiB，默认 20 GiB。限制每个项目在 /opt/project-tools 中的快照容量及单次流式上传上限；每个项目保留当前版本与最近 3 个回滚旧版。`),
+        qMsg, qActions,
+      );
+      qForm.addEventListener('submit', async event => {
+        event.preventDefault(); qMsg.className = 'view-error'; announceSave(qMsg, '', false);
+        if (!qInput.checkValidity()) { announceSave(qMsg, `需要 ${qMin}–${qMax} 之间的整数`, true); qInput.focus(); return; }
+        qSubmit.disabled = true;
+        try {
+          const saved = await api('/api/settings', 'PATCH', { project_tools_quota_gb: Number(qInput.value) });
+          qInput.value = saved.settings.project_tools_quota_gb;
+          qMsg.className = 'view-success';
+          announceSave(qMsg, `已保存：单项目工具卷上限为 ${saved.settings.project_tools_quota_gb} GiB`, false);
+        } catch (err) { qMsg.className = 'view-error'; announceSave(qMsg, readErrorText(err), true); } finally { qSubmit.disabled = false; }
+      });
+      quotaCard.append(qForm);
+      toolsQuotaCards.push(quotaCard);
+    }
     const resources = { computer: settings.computer_defaults };
-    return [concurrency, liveCard('默认资源', redraw => resourceDefaultsBody(resources, redraw)).section, about];
+    return [concurrency, ...toolsQuotaCards, liveCard('默认资源', redraw => resourceDefaultsBody(resources, redraw)).section, about];
   },
   // Where GitHub's webhooks arrive: a self-hosted HTTPS address, or a Cloudflare Tunnel in front of it. The login
   // configuration is shown read-only beside them, so the address, its check, the tunnel and the login agree on one page.

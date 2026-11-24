@@ -42,7 +42,7 @@ export const abandonAfterMs = 120_000;
 const ticketMs = 15_000;
 // Runner operations an assistant computer accepts: a shell command in /workspace, file access below HOME, /workspace and /tmp,
 // and control-plane staged repository archive extraction into /workspace or /tmp.
-const types = ['command', 'assistant_list', 'assistant_read', 'assistant_write', 'assistant_delete', 'assistant_archive_stage', 'assistant_archive_extract'];
+const types = ['command', 'assistant_list', 'assistant_read', 'assistant_write', 'assistant_delete', 'assistant_archive_stage', 'assistant_archive_extract', 'assistant_archive_pack', 'assistant_archive_read', 'assistant_archive_cleanup'];
 const keys = {
   command: ['command', 'timeout_ms', 'keep_background'],
   assistant_list: ['path', 'recursive'],
@@ -51,6 +51,9 @@ const keys = {
   assistant_delete: ['path'],
   assistant_archive_stage: ['stage_id', 'base64', 'offset'],
   assistant_archive_extract: ['stage_id', 'destination', 'overwrite'],
+  assistant_archive_pack: ['pack_id', 'path', 'max_bytes'],
+  assistant_archive_read: ['pack_id', 'offset', 'limit'],
+  assistant_archive_cleanup: ['pack_id'],
 };
 
 function validateCall(call, harness = false) {
@@ -58,10 +61,33 @@ function validateCall(call, harness = false) {
   if (!call || typeof call !== 'object' || !types.includes(call.type) || Object.keys(call).some(k => k !== 'type' && !keys[call.type].includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isSafeInteger(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.keep_background !== undefined && typeof call.keep_background !== 'boolean') throw new ManagerError('invalid_runner_request', 400);
-  if (['assistant_list', 'assistant_read', 'assistant_write', 'assistant_delete'].includes(call.type) && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
+  if (['assistant_list', 'assistant_read', 'assistant_write', 'assistant_delete', 'assistant_archive_pack'].includes(call.type) && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'assistant_list' && call.recursive !== undefined && typeof call.recursive !== 'boolean') throw new ManagerError('invalid_runner_request', 400);
   if (['assistant_archive_stage', 'assistant_archive_extract'].includes(call.type) && !idPattern.test(call.stage_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'assistant_archive_extract' && (typeof call.destination !== 'string' || !call.destination || call.destination.length > 4096 || call.destination.includes('\0') || (call.overwrite !== undefined && typeof call.overwrite !== 'boolean'))) throw new ManagerError('invalid_runner_request', 400);
+  if (['assistant_archive_pack', 'assistant_archive_read', 'assistant_archive_cleanup'].includes(call.type) && !idPattern.test(call.pack_id || '')) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'assistant_archive_pack' && call.max_bytes !== undefined && !(Number.isSafeInteger(call.max_bytes) && call.max_bytes > 0)) throw new ManagerError('invalid_runner_request', 400);
+}
+
+const projectToolRepoPattern = /^[1-9]\d{0,19}$/;
+const projectToolMountNamePattern = /^[A-Za-z0-9._-]+__[A-Za-z0-9._-]+$/;
+function normalizeAssistantProjectTools(input) {
+  if (input === undefined) return [];
+  if (!Array.isArray(input) || input.length > 200) throw new ManagerError('invalid_assistant_request', 400);
+  const seen = new Set();
+  const out = [];
+  for (const item of input) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new ManagerError('invalid_assistant_request', 400);
+    if (Object.keys(item).some(k => !['repository_id', 'mount_name', 'revision'].includes(k))) throw new ManagerError('invalid_assistant_request', 400);
+    const repo = String(item.repository_id ?? ''), mountName = String(item.mount_name ?? ''), revision = item.revision;
+    if (!projectToolRepoPattern.test(repo) || !projectToolMountNamePattern.test(mountName) || mountName.length > 140 || mountName.includes('..') || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new ManagerError('invalid_assistant_request', 400);
+    }
+    if (seen.has(mountName)) throw new ManagerError('invalid_assistant_request', 400);
+    seen.add(mountName);
+    out.push({ repository_id: repo, mount_name: mountName, revision });
+  }
+  return out.sort((a, b) => a.mount_name.localeCompare(b.mount_name));
 }
 // Aggregate busy-container burst-limit overcommit multiplier relative to the host's 75% safe memory cap
 // (2x of 75% = 1.5x physical host RAM across concurrently busy assistant containers, minus running project computers).
@@ -87,8 +113,8 @@ export function validateAssistantSettings(input, host = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
-    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.resultMount=resultMount;
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, projectToolsMount = null, projectToolsVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
+    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.resultMount=resultMount;
     this.globalEnvironment = globalEnvironment; this.disk = disk; this.allocatedMemoryMb = allocatedMemoryMb; this.lastHost = null;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
@@ -256,7 +282,7 @@ export class AssistantComputers {
   }
   view(lease) {
     return { owner: lease.owner, state: lease.state, turn: lease.turn, fence: lease.fence, home: { generation: lease.generation, mode: lease.mode },
-      resources: lease.resources, egress: lease.egress, image: lease.image, created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
+      resources: lease.resources, egress: lease.egress, image: lease.image, project_tools: lease.projectTools ?? [], created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
   }
   list() { return { computers: [...this.leases.values()].filter(l => l.state !== 'creating').map(l => this.view(l)), waiting: this.waiting.length, settings: this.settings() }; }
   /** Inspected facts of the owner's container, for the control plane's own policy check and for tests. */
@@ -301,8 +327,10 @@ export class AssistantComputers {
   async acquire(owner, input) {
     this.validate(owner);
     if (input?.harness !== undefined && typeof input.harness !== 'boolean') throw new ManagerError('invalid_assistant_request', 400);
-    if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['turn', 'fence', 'home_generation', 'home_mode','harness'].includes(k))) throw new ManagerError('invalid_assistant_request', 400);
+    if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['turn', 'fence', 'home_generation', 'home_mode', 'harness', 'project_tools'].includes(k))) throw new ManagerError('invalid_assistant_request', 400);
     const { turn, fence, home_generation: generation, home_mode: mode } = input;
+    const projectTools = normalizeAssistantProjectTools(input.project_tools);
+    const projectToolsSignature = JSON.stringify(projectTools);
     if (!turnPattern.test(turn || '') || !/^[a-f0-9]{16,128}$/.test(fence || '') || !Number.isSafeInteger(generation) || generation < 1 || !['rw', 'ro'].includes(mode)) throw new ManagerError('invalid_assistant_request', 400);
     return this.lock(owner, async () => {
       const now = Date.now(), settings = this.settings(), globalEnv = this.effectiveGlobal();
@@ -346,6 +374,7 @@ export class AssistantComputers {
         const held = lease.state === 'busy' && lease.turn === turn;
         const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && (!input.harness || lease.harness)
           && (held || (lease.image === targetImage && (lease.envSignature ?? '[]') === envSignature
+            && (lease.projectToolsSignature ?? '[]') === projectToolsSignature
             && lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(effectiveResources) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
@@ -392,7 +421,7 @@ export class AssistantComputers {
         }
       }
       this.waiting = this.waiting.filter(t => t.owner !== owner);
-      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: effectiveResources, egress: settings.egress, image: targetImage, env, envSignature, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
+      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: effectiveResources, egress: settings.egress, image: targetImage, env, envSignature, projectTools, projectToolsSignature, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
       this.leases.set(owner, lease);
       try {
         await this.create(lease);
@@ -424,6 +453,32 @@ export class AssistantComputers {
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
     const networkMode = lease.egress ? await this.ensureNetwork() : 'none';
     const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
+    const projectToolMounts = [];
+    const mountedProjectTools = [];
+    if (lease.projectTools?.length) {
+      const ptVol = await this.projectToolsVolume?.().catch(() => null);
+      if (!ptVol) {
+        console.warn(`[assistant-computers] project-tools volume unavailable; starting ${owner} without project tool mounts`);
+      } else {
+        for (const item of lease.projectTools) {
+          const subpath = `${item.repository_id}/rev-${item.revision}`;
+          let available = true;
+          if (this.projectToolsMount) {
+            for (const checkPath of [`${this.projectToolsMount}/${item.repository_id}`, `${this.projectToolsMount}/${subpath}`]) {
+              const info = await lstat(checkPath).catch(() => null);
+              if (!info?.isDirectory() || info.isSymbolicLink()) { available = false; break; }
+            }
+          }
+          if (!available) {
+            console.warn(`[assistant-computers] skipping missing project-tools subpath ${subpath} for ${owner}`);
+            continue;
+          }
+          projectToolMounts.push({ Type: 'volume', Source: ptVol, Target: `/opt/project-tools/${item.mount_name}`, ReadOnly: true, VolumeOptions: { NoCopy: true, Subpath: subpath } });
+          mountedProjectTools.push(item);
+        }
+      }
+    }
+    lease.projectTools = mountedProjectTools;
     const extraEnv = lease.env && Object.keys(lease.env).length
       ? [...Object.entries(lease.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(lease.env).join(',')}`]
       : [];
@@ -437,6 +492,7 @@ export class AssistantComputers {
           { Type: 'volume', Source: wsVol, Target: '/workspace', ReadOnly: false },
           { Type: 'volume', Source: tmpVol, Target: '/tmp', ReadOnly: false },
           ...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[]),
+          ...projectToolMounts,
         ] } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
     await this.docker.request('POST', `/containers/${name}/start`);

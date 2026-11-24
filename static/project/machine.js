@@ -150,6 +150,7 @@ function machineSection(globalSettings = false) {
     note('工作卷、笔记和代次保留。项目任务并发在另一组单独保存，不会重建电脑。'));
   if (pc.resources_pending) impact.append(note('全局默认已变化，电脑等待空闲后重建。电脑报告的资源是配置目标，不能据此确认运行中容器已使用新上限。'));
   if (pc.image_pending) impact.append(note('新的预编译镜像已就绪，电脑将在当前运行任务全部空闲后自动平滑切换，不会中断正在执行的任务。'));
+  if (pc.tools_pending) impact.append(note('项目工具卷已发布新版本，电脑将在当前运行任务全部空闲后自动整卷轮换，不会中断正在执行的任务。'));
   if (pc.toolchain_pending) impact.append(note('预编译工具链正在构建或等待切换，新任务将暂缓认领直到新镜像切换到位。'));
   if (pc.toolchain_missing) impact.append(note('预编译构建失败或已停止，当前电脑缺少项目预装软件包/初始化脚本（降级运行中），任务可继续认领；请修复配置后保存或重新预编译。'));
   const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
@@ -220,10 +221,12 @@ function machineSection(globalSettings = false) {
   toolbar.after(sourceReadError);
   if(unread)toolbar.after(note('已保存的机器配置读取失败，不能区分项目自己的值和默认值。请重新读取配置后保存。'));
   const concurrency = globalSettings ? null : concurrencyForm();
+  const projectTools = globalSettings ? null : projectToolsCard(canConfigure);
   const cliConfig = globalSettings ? null : cliConfigCard(canConfigure);
   const page = element('div', '', 'machine-settings');
   if (concurrency) page.append(concurrency);
   page.append(form);
+  if (projectTools) page.append(projectTools);
   if (cliConfig) page.append(cliConfig);
   if (canEdit) {
     attachUnifiedSettingsBar(page, [form, concurrency].filter(Boolean), {
@@ -236,6 +239,338 @@ function machineSection(globalSettings = false) {
     attachUnifiedSettingsBar(page, [concurrency]);
   }
   return [status, page];
+}
+
+// #1322: Per-project isolated read-only binary tools volume (/opt/project-tools).
+// Streaming upload directly to the control plane, immutable revisions, idle rotation, and 3-revision rollback.
+function projectToolsCard(canConfigure) {
+  const target = current, id = target.id, token = typeof renderToken === 'number' ? renderToken : 0;
+  const section = card('项目工具卷（/opt/project-tools）');
+  section.dataset.testid = 'machine-project-tools';
+  const guidance = element('div', '', 'project-tools-guidance');
+  const guidanceTitle = element('strong', '工具配置优先级（先系统、再预编译镜像、最后才用项目工具卷）');
+  const guidanceList = element('ol', '', 'project-tools-priority-list');
+  for (const line of [
+    '优先使用基础镜像已预装的通用工具链（Node.js、Python/uv、git、gh、gcc/make、ripgrep、jq、Chromium 等）。',
+    '凡可通过 Debian apt 或在线/内网软件源声明式安装的软件与 SDK，优先在上方「软件与初始化」配置 packages 与 setup_script 预编译缓存。',
+    '仅当需要私有、离线或闭源预编译二进制工具时，才上传到本项目工具卷。工具卷按项目严格隔离、只读挂载在 /opt/project-tools（/opt/project-tools/bin 追加在 PATH 末尾，绝不覆盖系统工具）；群聊助手仅只读挂载已授权项目到 /opt/project-tools/<owner>__<repo>；更新后等待空闲整卷轮换，不中断正在执行的任务。',
+  ]) guidanceList.append(element('li', line));
+  guidance.append(guidanceTitle, guidanceList);
+  section.append(guidance);
+
+  const summaryHost = element('div', '', 'project-tools-summary');
+  summaryHost.append(note('正在读取项目工具卷状态…'));
+  const feedback = element('p', '', 'muted');
+  feedback.setAttribute('role', 'status');
+  const uploadHost = element('div', '', 'project-tools-upload');
+  const filesHost = element('div', '', 'project-tools-files');
+  const historyHost = element('div', '', 'project-tools-history');
+  section.append(summaryHost, feedback, uploadHost, filesHost, historyHost);
+
+  const live = () => current === target && (typeof renderToken !== 'number' || renderToken === token) && section.isConnected;
+  const fmtBytes = value => {
+    if (!Number.isFinite(value) || value < 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let n = value, i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toLocaleString('zh-CN', { maximumFractionDigits: i ? 2 : 0 }) + ' ' + units[i];
+  };
+  const modeLabel = mode => mode === 'replace' ? '整卷替换' : mode === 'merge' ? '增量合并' : String(mode || '—');
+  const sourceLabel = src => ({ console: '控制台上传', assistant: '管理助手', api: 'API' }[src] || String(src || '—'));
+  const isArchiveName = name => /\.(?:tar\.gz|tgz|zip)$/i.test(String(name || ''));
+
+  const renderState = data => {
+    const writable = canConfigure && data?.can_manage !== false && data?.available !== false;
+    summaryHost.replaceChildren();
+    const badges = element('div', '', 'actions project-tools-badges');
+    badges.append(
+      data?.active_revision ? badge(`当前版本 rev-${data.active_revision}`, 'success') : badge('未配置工具卷', ''),
+      ...(data?.tools_pending === true
+        ? [badge(`等待空闲切换（运行中 ${data.applied_revision ? 'rev-' + data.applied_revision : '未挂载'} → 目标 ${data.active_revision ? 'rev-' + data.active_revision : '清空'}）`, 'warning')]
+        : data?.tools_pending === null || data?.rotation_status === 'unknown'
+          ? [badge('轮换状态未知（manager 暂不可达）', '')]
+          : data?.applied_revision
+            ? [badge(`容器已挂载 rev-${data.applied_revision}`, 'info')]
+            : []),
+      ...(data?.available === false ? [badge('控制面未挂载 project-tools 卷', 'danger')] : []),
+    );
+    const used = Number(data?.used_bytes) || 0;
+    const quota = Number(data?.quota_bytes) || 0;
+    const pct = quota > 0 ? Math.min(100, Math.round(used / quota * 1000) / 10) : 0;
+    summaryHost.append(
+      badges,
+      facts([
+        ['挂载路径（只读）', `${data?.mount_path || '/opt/project-tools'}（bin/ 位于 PATH 末尾）`],
+        ['当前容量 / 配额', `${fmtBytes(used)} / ${data?.quota_gb ?? 20} GiB（${pct}%） · ${data?.files_count ?? 0} 个文件`],
+        ['历史保留策略', `保留当前生效版本与最近 ${data?.retain_previous ?? 3} 个历史版本供回滚；更早未挂载版本自动回收`],
+        ['最近更新', data?.updated_at ? `${timestamp(data.updated_at)}${(data.updated_by_label || data.updated_by) ? ' · ' + (data.updated_by_label || data.updated_by) : ''}` : '尚未发布'],
+      ]),
+    );
+    if (!canConfigure || data?.can_manage === false) {
+      summaryHost.append(note('当前账号为只读权限：仅本项目管理员或超级管理员可上传、删除或回滚项目工具卷。'));
+    }
+
+    uploadHost.replaceChildren();
+    if (writable) {
+      const formEl = element('form', '', 'project-tools-form');
+      formEl.dataset.testid = 'project-tools-upload-form';
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.name = 'tool_file';
+      fileInput.dataset.testid = 'project-tools-file';
+
+      const modeSelect = document.createElement('select');
+      modeSelect.name = 'tool_mode';
+      modeSelect.dataset.testid = 'project-tools-mode';
+      modeSelect.add(new Option('增量合并（保留未改动文件，覆盖同名文件）', 'merge'));
+      modeSelect.add(new Option('整卷替换（清空旧文件并发布新快照）', 'replace'));
+
+      const kindSelect = document.createElement('select');
+      kindSelect.name = 'tool_kind';
+      kindSelect.dataset.testid = 'project-tools-kind';
+      kindSelect.add(new Option('单文件上传', 'file'));
+      kindSelect.add(new Option('压缩包安全解压（.tar.gz / .tgz / .zip）', 'archive'));
+
+      const targetPathInput = input('tool_target_path', '', {
+        placeholder: '例如 bin/my-cli（留空默认使用原文件名）',
+        spellcheck: false,
+      });
+      targetPathInput.dataset.testid = 'project-tools-target-path';
+      const targetPathWrap = field('目标相对路径（仅单文件）', targetPathInput);
+
+      const execWrap = checkbox('tool_executable', true, '赋予可执行权限（chmod +x，推荐用于 bin/ 下的工具）');
+      const execInput = execWrap.querySelector('input');
+      execInput.dataset.testid = 'project-tools-executable';
+
+      const noteInput = input('tool_note', '', { placeholder: '可选：说明工具名称、版本或用途', maxLength: 500 });
+      noteInput.dataset.testid = 'project-tools-note';
+
+      const syncKindControls = () => {
+        const isFile = kindSelect.value === 'file';
+        targetPathWrap.hidden = !isFile;
+        execWrap.hidden = !isFile;
+      };
+      fileInput.addEventListener('change', () => {
+        const picked = fileInput.files?.[0];
+        if (!picked) return;
+        kindSelect.value = isArchiveName(picked.name) ? 'archive' : 'file';
+        if (kindSelect.value === 'file' && !targetPathInput.value.trim()) {
+          targetPathInput.value = 'bin/' + picked.name;
+        }
+        syncKindControls();
+      });
+      kindSelect.addEventListener('change', syncKindControls);
+      syncKindControls();
+
+      const submitBtn = element('button', '流式上传并发布新版本', 'btn-primary');
+      submitBtn.type = 'submit';
+      submitBtn.dataset.testid = 'project-tools-upload-submit';
+
+      const actionsRow = element('div', '', 'actions');
+      actionsRow.append(submitBtn);
+      if (data?.active_revision) {
+        const clearBtn = button('清空工具卷', async () => {
+          if (typeof askConfirm === 'function' && !await askConfirm({
+            title: '清空本项目工具卷？',
+            body: ['清空后项目电脑与群聊助手将在空闲轮换时卸载 /opt/project-tools；历史版本仍按保留策略留存以便回滚。'],
+            action: '确认清空',
+            danger: true,
+          })) return;
+          clearBtn.disabled = true;
+          try {
+            const res = await api(`/api/repositories/${id}/tools/clear`, 'POST', { confirm: true });
+            if (!live()) return;
+            feedback.className = 'view-success';
+            feedback.textContent = '已清空当前生效工具卷，容器将在空闲后自动卸载。';
+            renderState(res?.state || await api(`/api/repositories/${id}/tools`));
+            void refreshProjectStatus(renderToken);
+          } catch (err) {
+            if (!live()) return;
+            feedback.className = 'view-error';
+            feedback.textContent = '清空失败：' + readErrorText(err);
+            clearBtn.disabled = false;
+          }
+        }, 'btn-danger');
+        clearBtn.dataset.testid = 'project-tools-clear';
+        actionsRow.append(clearBtn);
+      }
+
+      const grid = element('div', '', 'field-grid');
+      grid.append(field('选择文件或压缩包（流式直传，支持大包）', fileInput), field('发布模式', modeSelect), field('处理方式', kindSelect), targetPathWrap);
+      formEl.append(element('h4', '上传与发布'), grid, execWrap, field('变更说明（可选）', noteInput), note('上传过程自动阻止路径穿越、符号链接逃逸、敏感凭据文件（如 .env / *.pem / *.key / id_rsa）与已登记密钥明文。'), actionsRow);
+
+      formEl.addEventListener('submit', async event => {
+        event.preventDefault();
+        const file = fileInput.files?.[0];
+        if (!file) {
+          feedback.className = 'view-error';
+          feedback.textContent = '请先选择要上传的文件或压缩包（.tar.gz / .tgz / .zip）。';
+          return;
+        }
+        submitBtn.disabled = true;
+        feedback.className = 'muted';
+        feedback.textContent = `正在流式上传 ${file.name}（${fmtBytes(file.size)}）并执行安全校验…`;
+        try {
+          const qs = new URLSearchParams({
+            mode: modeSelect.value,
+            kind: kindSelect.value,
+            filename: file.name,
+          });
+          if (kindSelect.value === 'file') {
+            const rel = targetPathInput.value.trim();
+            if (rel) qs.set('target_path', rel);
+            if (execInput.checked) qs.set('executable', '1');
+          }
+          if (noteInput.value.trim()) qs.set('note', noteInput.value.trim());
+          const response = await fetch(`/api/repositories/${id}/tools/upload?${qs.toString()}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}),
+            },
+            body: file,
+          });
+          let payload;
+          try { payload = await response.json(); } catch { payload = null; }
+          if (!live()) return;
+          if (!response.ok) {
+            if (typeof isSessionExpiry === 'function' && isSessionExpiry(response.status, payload?.error)) markSessionExpired();
+            const code = payload?.error || `HTTP ${response.status}`;
+            const detail = payload?.detail ? `（${payload.detail}）` : '';
+            throw new Error(`${response.status} · ${code}${detail}`);
+          }
+          feedback.className = 'view-success';
+          feedback.textContent = `已发布 rev-${payload.revision}（共 ${payload.files_count} 个文件，${fmtBytes(payload.total_bytes)}）。项目电脑将在空闲后自动切换，不中断在途任务。`;
+          renderState(payload.state || await api(`/api/repositories/${id}/tools`));
+          void refreshProjectStatus(renderToken);
+        } catch (err) {
+          if (!live()) return;
+          feedback.className = 'view-error';
+          feedback.textContent = '上传发布失败：' + readErrorText(err);
+          submitBtn.disabled = false;
+        }
+      });
+      uploadHost.append(formEl);
+    }
+
+    filesHost.replaceChildren();
+    filesHost.append(element('h4', '当前文件清单'));
+    const files = Array.isArray(data?.files) ? data.files : [];
+    if (!files.length) {
+      filesHost.append(note('当前工具卷为空。'));
+    } else {
+      const { table, body } = projectTable(writable ? ['路径', '类型与权限', '大小', '操作'] : ['路径', '类型与权限', '大小'], '项目工具卷文件清单');
+      table.dataset.testid = 'project-tools-files-table';
+      for (const file of files.slice(0, 200)) {
+        const tr = document.createElement('tr');
+        tableCell(tr, '路径', element('code', file.path));
+        const permText = file.type === 'symlink'
+          ? `相对软链 → ${file.target || ''}`
+          : file.executable ? '可执行文件 (+x)' : '普通文件';
+        tableCell(tr, '类型与权限', note(permText));
+        tableCell(tr, '大小', note(file.type === 'symlink' ? '—' : fmtBytes(file.size)));
+        if (writable) {
+          const ops = element('div', '', 'actions');
+          const delBtn = button('移除', async () => {
+            if (typeof askConfirm === 'function' && !await askConfirm({
+              title: `从工具卷移除 ${file.path}？`,
+              body: ['移除将以增量合并方式生成新的不可变版本；原有历史版本仍可回滚。'],
+              action: '确认移除',
+              danger: true,
+            })) return;
+            delBtn.disabled = true;
+            try {
+              const res = await api(`/api/repositories/${id}/tools/delete-files`, 'POST', { paths: [file.path] });
+              if (!live()) return;
+              feedback.className = 'view-success';
+              feedback.textContent = `已移除 ${file.path} 并发布 rev-${res.revision}。`;
+              renderState(res.state || await api(`/api/repositories/${id}/tools`));
+              void refreshProjectStatus(renderToken);
+            } catch (err) {
+              if (!live()) return;
+              feedback.className = 'view-error';
+              feedback.textContent = '移除失败：' + readErrorText(err);
+              delBtn.disabled = false;
+            }
+          }, 'quiet destructive');
+          ops.append(delBtn);
+          tableCell(tr, '操作', ops);
+        }
+        body.append(tr);
+      }
+      filesHost.append(table);
+      if (files.length > 200) filesHost.append(note(`当前共 ${files.length} 个文件，界面展示前 200 项。`));
+    }
+
+    historyHost.replaceChildren();
+    historyHost.append(element('h4', '版本历史与一键回滚'));
+    const revisions = Array.isArray(data?.revisions) ? data.revisions : [];
+    if (!revisions.length) {
+      historyHost.append(note('尚无已发布的工具卷版本。'));
+    } else {
+      const { table, body } = projectTable(writable ? ['版本', '方式', '内容', '来源', '发布时间', '说明', '操作'] : ['版本', '方式', '内容', '来源', '发布时间', '说明'], '项目工具卷版本历史');
+      table.dataset.testid = 'project-tools-revisions-table';
+      for (const rev of revisions) {
+        const tr = document.createElement('tr');
+        tr.dataset.revision = String(rev.revision);
+        const revCell = element('div', '', 'actions');
+        revCell.append(element('strong', `rev-${rev.revision}`));
+        if (rev.revision === data?.active_revision) revCell.append(badge('当前生效', 'success'));
+        tableCell(tr, '版本', revCell);
+        tableCell(tr, '方式', note(modeLabel(rev.mode)));
+        tableCell(tr, '内容', note(`${rev.files_count} 个文件 · ${fmtBytes(rev.total_bytes)}`));
+        tableCell(tr, '来源', note(`${sourceLabel(rev.source)} · ${rev.actor_label || rev.actor}`));
+        tableCell(tr, '发布时间', note(timestamp(rev.created_at) || '—'));
+        tableCell(tr, '说明', note(rev.note || '—'));
+        if (writable) {
+          const ops = element('div', '', 'actions');
+          if (rev.revision !== data?.active_revision) {
+            const rbBtn = button('回滚到此版本', async () => {
+              if (typeof askConfirm === 'function' && !await askConfirm({
+                title: `回滚项目工具卷至 rev-${rev.revision}？`,
+                body: ['回滚将立即切换目标版本，运行中的任务不受影响，项目电脑与群聊助手将在空闲后整卷轮换。'],
+                action: '确认回滚',
+              })) return;
+              rbBtn.disabled = true;
+              try {
+                const res = await api(`/api/repositories/${id}/tools/rollback`, 'POST', { revision: rev.revision });
+                if (!live()) return;
+                feedback.className = 'view-success';
+                feedback.textContent = `已将目标版本回滚至 rev-${rev.revision}，容器将在空闲后自动切换。`;
+                renderState(res.state || await api(`/api/repositories/${id}/tools`));
+                void refreshProjectStatus(renderToken);
+              } catch (err) {
+                if (!live()) return;
+                feedback.className = 'view-error';
+                feedback.textContent = '回滚失败：' + readErrorText(err);
+                rbBtn.disabled = false;
+              }
+            }, 'btn-secondary');
+            rbBtn.dataset.testid = `project-tools-rollback-${rev.revision}`;
+            ops.append(rbBtn);
+          } else {
+            ops.append(note('—'));
+          }
+          tableCell(tr, '操作', ops);
+        }
+        body.append(tr);
+      }
+      historyHost.append(table);
+    }
+  };
+
+  const load = async () => {
+    try {
+      const data = await api(`/api/repositories/${id}/tools`);
+      if (!live()) return;
+      renderState(data);
+    } catch (err) {
+      if (!live()) return;
+      summaryHost.replaceChildren(element('p', '暂时无法读取项目工具卷状态：' + readErrorText(err), 'view-error'));
+    }
+  };
+  void load();
+  return section;
 }
 
 // #1260: Write-only editor for Claude Code / Codex local model configs in /workspace/home.
@@ -403,6 +738,7 @@ function machineStatus() {
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
     ['资源', pc.resources_pending ? '全局默认资源已改，等没有任务运行时按新值重建' : null],
     ['预编译镜像切换', pc.image_pending ? '新预编译镜像已就绪，等没有任务运行时自动切换（新任务暂缓认领）' : pc.toolchain_pending ? '预编译工具链构建/恢复中，暂缓认领新任务' : pc.toolchain_missing ? '预编译构建失败或已停止，当前缺少项目增量工具链（降级可认领任务）' : null],
+    ['项目工具卷', pc.tools_pending ? `等待空闲整卷轮换（当前 ${pc.applied_tools_revision ? 'rev-' + pc.applied_tools_revision : '未挂载'} → 目标 ${pc.tools_revision ? 'rev-' + pc.tools_revision : '清空'}）` : pc.applied_tools_revision ? `rev-${pc.applied_tools_revision}（只读挂载于 /opt/project-tools）` : null],
     ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', environmentFault(env.error)]]));machine.append(record);
   if(pc.image)machine.append(collapsible('完整运行镜像',pc.image));
   environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error).forEach((control,index)=>{control.id='computer-action-'+index;if(!available)control.disabled=true;lifecycle.append(control);}); machine.append(lifecycle);

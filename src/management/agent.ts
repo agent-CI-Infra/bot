@@ -36,6 +36,13 @@ import { lateSchedules } from '../actions/late-schedules.js';
 import { feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
 import { feishuCardInstructions, feishuCardTool, feishuCardToolName, FeishuCardTurn } from '../channels/cards.js';
 import { sameRepositoryName } from './repository-name.js';
+import {
+  executeProjectToolsAssistantTool,
+  projectToolsAssistantNames,
+  projectToolsAssistantTools,
+  projectToolsListName,
+  projectToolsPriorityGuidance,
+} from '../projects/tools-assistant.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -298,7 +305,12 @@ export class ManagementAgent {
     const activeReadSkillTool=cardTurn?makeReadSkillTool(feishuAssistantSkills):readSkillTool;
     const computerOffered=!!this.service.assistants?.available()&&canUseComputer();
     const canCheckout=()=>!!this.service.assistants?.available()&&canUseComputer()&&githubReadScopes(permissions()).includes('contents');
-    const tools=[readToolResult,...managementTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
+    const canListProjectTools=()=>!!this.service.projectTools&&permitsManagement(permissions(),'get_environment',false);
+    const canWriteProjectTools=()=>!!this.service.projectTools&&permitsManagement(permissions(),'project.update',true);
+    const offeredProjectToolTools=this.service.projectTools
+      ? projectToolsAssistantTools.filter(t=>t.function.name===projectToolsListName?canListProjectTools():canWriteProjectTools())
+      : [];
+    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
@@ -337,6 +349,13 @@ export class ManagementAgent {
         else if(name===startRepositoryName){if(!permitsManagement(permissions(),'project.update',true))fail(403,'tool_not_allowed');validate(startRepositoryTool.function.parameters,args);result=await this.onboarding.tool(actor,args);}
         else if(name===conversationScheduleName){if(!schedules)fail(403,'tool_not_allowed');result=schedules!(args);}
         else if(name===startRequestsName){if(!deciding)fail(403,'tool_not_allowed');validate(startRequestsTool.function.parameters,args);result=await requests.tool(actor,args);}
+        else if(projectToolsAssistantNames.includes(name)){
+          const projectTools=this.service.projectTools;
+          if(!projectTools)return fail(503,'project_tools_unavailable');
+          const allowed=name===projectToolsListName?canListProjectTools():canWriteProjectTools();
+          if(!allowed)return fail(403,'tool_not_allowed');
+          result=await executeProjectToolsAssistantTool({store:this.store,actor,service:this.service,projectTools,computer,media,guard},name,args);
+        }
         else if(assistantComputerNames.includes(name))result=computer?await computer.execute(name,args):fail(409,'computer_not_configured');
         else if(ownTaskNames.includes(name)){
           // The assistant's own independent task: same tools and the user's own permissions, only the conclusion returns.
@@ -394,6 +413,7 @@ export class ManagementAgent {
           +'\n\n'+onboardingInstructions
           // #1123: explain a flow from the project's own Manager prompt; change it only after a before/after flowchart is confirmed.
           +'\n\n'+managerFlowInstructions
+          +'\n\n'+projectToolsPriorityGuidance+(offeredProjectToolTools.length?' Use project_tools_list, project_tools_publish, and project_tools_rollback for authorized projects\' read-only tool volumes; never attempt to write to live project computers or store secrets/credentials in project tools.':'')
           +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. If an image is unsupported in format or rejected for size/resolution/context limits, use import_message_resource and your assistant computer (Python Pillow or ImageMagick) to resize, compress, crop or convert it, then call view_workspace_image to inspect the processed image. Other binary inputs also need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs or claim unsupported or omitted inputs were inspected; selecting an attachment is not delivery.':'')
           +(cardTurn?'\n'+feishuCardInstructions:'')

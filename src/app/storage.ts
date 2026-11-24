@@ -12,6 +12,7 @@ import { storageFootprint, type Footprint, type Category } from '../../manager/s
 import { machineSample, storageOverview, type MachineSample } from '../storage/overview.js';
 import { ManualReclaim } from '../storage/reclaim.js';
 import { noteTaskUsage, unfinishedTaskWorkspaces, workspaceClasses } from '../projects/workspace-cleanup.js';
+import { projectToolsQuotaBytes } from '../projects/tools.js';
 
 // The storage page (#436, #671): every kind of storage the bot uses. Per project, what its trajectory files, records and
 // blobs take on the control plane, its runner-call files in the manager, and its project computer's work volume (task
@@ -32,7 +33,7 @@ interface Measured { bytes: number | null; measured_at: string }
 // manager_error: why the last refresh could not read the manager (null once a read succeeds); manager_read_at: when the
 // numbers in `manager` and `computers` were read, kept as they are across a failed refresh (#793).
 interface Snapshot { refreshed_at: string; control: Json; manager: Json | null; open: Record<string, Usage>; computers: Record<string, Json>; cleanup: Record<string, Json>;
-  unfinished: Record<string, Json>; manager_error: string | null; manager_read_at: string | null }
+  unfinished: Record<string, Json>; project_tools: Record<string, Json>; manager_error: string | null; manager_read_at: string | null }
 
 const hour = 3600_000;
 const run = (command: string, args: string[], timeout: number) => new Promise<{ error: Error | null; stdout: string }>(resolve =>
@@ -58,7 +59,7 @@ export class StorageReport {
   private readonly machineDirectory?: string;
   private readonly extra: string[];
   private readonly paths: Record<string, string>;
-  constructor(private readonly store: Store, private readonly manager?: Manager, paths: { git_cache?: string; public_boards?: string; homes?: string; tools?: string; machine?: string } = {},
+  constructor(private readonly store: Store, private readonly manager?: Manager, paths: { git_cache?: string; public_boards?: string; homes?: string; tools?: string; project_tools?: string; machine?: string } = {},
     private readonly vacuum?: { state(): unknown }, retention = new RetentionCleanup(store, manager), workspaces?: { run(): Promise<{ count: number; bytes: number; failed: number }> }) {
     this.machineDirectory = paths.machine;
     this.extra = [paths.homes, paths.tools].filter((path): path is string => Boolean(path));
@@ -69,7 +70,7 @@ export class StorageReport {
       await this.refresh();
     });
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
-    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources'), channel_cards: data && join(data, 'channel-cards') })
+    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources'), channel_cards: data && join(data, 'channel-cards'), ...(paths.project_tools ? { project_tools: paths.project_tools } : {}) })
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
   }
 
@@ -112,7 +113,7 @@ export class StorageReport {
             const locations: [Category, string, boolean?, string?][] = [
               ['trajectories', this.store.trajectories.root, true], ['trajectories', this.store.trajectories.blobs],
               ['other', this.store.trajectories.results.root], ...this.extra.map(path => ['other', path] as [Category, string]),
-              ...Object.entries(this.paths).map(([name, path]) => ['other', path, false, name] as [Category, string, boolean, string]),
+              ...Object.entries(this.paths).map(([name, path]) => ['other', path, name === 'project_tools', name] as [Category, string, boolean, string]),
             ];
             this.footprint = await storageFootprint(this.store.path, locations);
           }
@@ -146,10 +147,35 @@ export class StorageReport {
           }
           if (cached.value) unfinished[repoId] = cached.value;
         }
+        const projectTools: Record<string, Json> = {};
+        const toolsFootprint = this.footprint?.entries.find(row => row.label === 'project_tools')?.projects ?? {};
+        const toolsQuotaBytes = projectToolsQuotaBytes(this.store);
+        if (this.store.hasTable('project_tool_state') && this.store.hasTable('project_tool_revisions')) {
+          for (const row of this.store.all(`
+            SELECT s.repository_id, s.active_revision,
+              (SELECT count(*) FROM project_tool_revisions r WHERE r.repository_id=s.repository_id AND r.status IN ('active','retained')) AS revisions_count,
+              coalesce((SELECT r.total_bytes FROM project_tool_revisions r WHERE r.repository_id=s.repository_id AND r.revision=s.active_revision), 0) AS logical_bytes
+            FROM project_tool_state s
+          `)) {
+            const rid = String(row.repository_id);
+            projectTools[rid] = {
+              active_revision: Number.isSafeInteger(row.active_revision) ? Number(row.active_revision) : null,
+              revisions_count: Number(row.revisions_count) || 0,
+              logical_bytes: Number(row.logical_bytes) || 0,
+              disk_bytes: typeof toolsFootprint[rid] === 'number' ? toolsFootprint[rid]! : null,
+              quota_bytes: toolsQuotaBytes,
+            };
+          }
+        }
+        for (const [rid, diskBytes] of Object.entries(toolsFootprint)) {
+          if (!Object.hasOwn(projectTools, rid) && typeof diskBytes === 'number') {
+            projectTools[rid] = { active_revision: null, revisions_count: 0, logical_bytes: 0, disk_bytes: diskBytes, quota_bytes: toolsQuotaBytes };
+          }
+        }
         let cleanup: Record<string, Json> = {}, compaction: Json | null = null;
         try { cleanup = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}'); } catch {}
         try { compaction = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='compaction'")?.value ?? 'null'); } catch {}
-        this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup, unfinished, manager_error: managerError, manager_read_at: managerReadAt,
+        this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup, unfinished, project_tools: projectTools, manager_error: managerError, manager_read_at: managerReadAt,
           control: { database: databaseSize(this.store.db), disk: this.disk(), migration: migrationProgress(this.store), directories: this.directories.values,
             // The compaction at the last start and the incremental vacuum since (#671).
             compaction, vacuum: (this.vacuum?.state() ?? null) as Json | null } };
@@ -234,6 +260,7 @@ export class StorageReport {
       if (!entry) projects.set(id, entry = { repository_id: id || null, name: name ?? (id ? id : '不属于项目的会话'), files: { count: 0, bytes: 0 }, records: {}, blobs: { count: 0, bytes: 0 },
         open: snapshot?.open[id] ?? { count: 0, bytes: 0 }, manager: null,
         unfinished_workspaces: snapshot?.unfinished[id] ?? [],
+        project_tools: snapshot?.project_tools[id] ?? null,
         computer: snapshot?.computers[id] ? { ...snapshot.computers[id] as object, cleanup: snapshot.cleanup[id] ?? null } : null });
       return entry;
     };
@@ -292,6 +319,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     browser_evidence: measured(control?.directories?.browser_evidence?.bytes),
     channel_resources: measured(control?.directories?.channel_resources?.bytes),
     channel_cards: measured(control?.directories?.channel_cards?.bytes),
+    ...(control?.directories && Object.hasOwn(control.directories, 'project_tools') ? { project_tools: measured(control.directories.project_tools?.bytes) } : {}),
     manager_database: database(manager?.database),
     manager_trajectories: manager ? sum(p => bytesOf(p.manager?.files?.bytes) + bytesOf(p.manager?.open?.bytes)) : null,
     computers: manager?.computers ? sum(p => p.computer?.total_bytes) : null,

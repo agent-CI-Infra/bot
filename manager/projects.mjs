@@ -93,11 +93,11 @@ export function sanitizeTrajectoryResult(type, result) {
 export const walSizeLimit = 512 * 1024 * 1024;
 
 export class Projects {
-  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', results = null }) {
+  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, results = null }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
-    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
@@ -147,6 +147,9 @@ export class Projects {
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'notes_purge')) this.db.exec('ALTER TABLE projects ADD COLUMN notes_purge INTEGER NOT NULL DEFAULT 0');
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'spec_revision')) this.db.exec('ALTER TABLE projects ADD COLUMN spec_revision INTEGER NOT NULL DEFAULT 0');
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'configured_keys')) this.db.exec('ALTER TABLE projects ADD COLUMN configured_keys TEXT');
+    // tools_revision: desired immutable revision of /opt/project-tools; applied_tools_revision: what the current container mounted (#1322).
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'tools_revision')) this.db.exec('ALTER TABLE projects ADD COLUMN tools_revision INTEGER');
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'applied_tools_revision')) this.db.exec('ALTER TABLE projects ADD COLUMN applied_tools_revision INTEGER');
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
     // The last answer of each computer's work volume scan (#671): written by scanStorage, read by the storage page.
     this.db.exec('CREATE TABLE IF NOT EXISTS computer_storage(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,scanned_at TEXT NOT NULL,result TEXT NOT NULL)');
@@ -397,6 +400,11 @@ export class Projects {
       },
       inherited: resourceKeys.filter(key => own[key] === undefined),
       resources_pending: !!applied && applied !== JSON.stringify(resources(spec)),
+      tools_revision: Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null,
+      applied_tools_revision: Number.isSafeInteger(project.applied_tools_revision) && project.applied_tools_revision >= 1 ? project.applied_tools_revision : null,
+      tools_pending: ['ready', 'busy'].includes(project.state)
+        && ((Number.isSafeInteger(project.applied_tools_revision) && project.applied_tools_revision >= 1 ? project.applied_tools_revision : null)
+          !== (Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null)),
       image_pending: imagePending,
       toolchain_pending: toolchainPending,
       toolchain_missing: toolchainMissing } };
@@ -824,6 +832,58 @@ export class Projects {
     if (!volume || !trusted) throw new ManagerError('agent_tools_volume_invalid', 503);
     return name;
   }
+  async projectToolsVolume() {
+    if (!this.projectToolsMount) return null;
+    const name = await this.docker.volumeName(this.projectToolsMount);
+    if (!name) return null;
+    const volume = await this.docker.request('GET', '/volumes/' + encodeURIComponent(name));
+    const labels = volume?.Labels;
+    const trusted = typeof name === 'string' && /^(?:[a-z0-9][a-z0-9._-]*[_-])?project-tools$/i.test(name) &&
+      labels && typeof labels === 'object' &&
+      (labels['com.docker.compose.volume'] === 'project-tools' || labels['department.bot.kind'] === 'project-tools');
+    if (!volume || !trusted) throw new ManagerError('project_tools_volume_invalid', 503);
+    return name;
+  }
+  async projectToolsSpecMount(repo, revision) {
+    this.validate(repo);
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new ManagerError('invalid_tools_revision', 400);
+    const volume = await this.projectToolsVolume();
+    if (!volume) throw new ManagerError('project_tools_volume_missing', 503);
+    const subpath = `${repo}/rev-${revision}`;
+    for (const checkPath of [`${this.projectToolsMount}/${repo}`, `${this.projectToolsMount}/${subpath}`]) {
+      const info = await lstat(checkPath).catch(() => null);
+      if (!info?.isDirectory() || info.isSymbolicLink()) throw new ManagerError('project_tools_revision_missing', 409);
+    }
+    return { Type: 'volume', Source: volume, Target: '/opt/project-tools', ReadOnly: true, VolumeOptions: { NoCopy: true, Subpath: subpath } };
+  }
+  setToolsRevision(repo, revision) {
+    this.validate(repo);
+    if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) throw new ManagerError('invalid_tools_revision', 400);
+    const project = this.get(repo);
+    if (!project) return null;
+    this.db.prepare('UPDATE projects SET tools_revision=?,revision=revision+1 WHERE repository_id=?').run(revision, repo);
+    return this.describe(repo);
+  }
+  activeProjectToolMounts(assistants = null) {
+    const mounts = [];
+    for (const project of this.list()) {
+      if (['deleted', 'stopped'].includes(project.state)) continue;
+      if (Number.isSafeInteger(project.applied_tools_revision) && project.applied_tools_revision >= 1) {
+        mounts.push({ repository_id: project.repository_id, revision: project.applied_tools_revision, kind: 'project' });
+      }
+      if (['provisioning', 'recovering'].includes(project.state) && Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1) {
+        mounts.push({ repository_id: project.repository_id, revision: project.tools_revision, kind: 'project' });
+      }
+    }
+    if (assistants?.leases) {
+      for (const lease of assistants.leases.values()) {
+        for (const item of lease.projectTools ?? []) {
+          mounts.push({ repository_id: item.repository_id, revision: item.revision, kind: 'assistant', owner: lease.owner });
+        }
+      }
+    }
+    return { mounts };
+  }
   async resultMount(owner) {
     if (!this.resultsMount) return [];
     if (!/^[a-z]+-[a-f0-9]{64}$/.test(owner)) throw new ManagerError('tool_result_owner_invalid', 400);
@@ -879,6 +939,8 @@ export class Projects {
     await this.inspect(repo, generation, 'volume');
     await this.notesVolume(repo);
     const toolsVolume = await this.agentToolsVolume();
+    const desiredToolsRevision = Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null;
+    const projectToolsMounts = desiredToolsRevision ? [await this.projectToolsSpecMount(repo, desiredToolsRevision)] : [];
     const resultMounts = await this.resultMount(computerResultOwner('project',repo));
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
     // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
@@ -891,10 +953,13 @@ export class Projects {
     const toolsMountStale = toolsVolume
       ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === toolsVolume && m.Target === '/opt/agent-tools' && m.ReadOnly === true)
       : !!host?.Mounts?.some(m => m.Target === '/opt/agent-tools');
+    const existingProjectToolsMounts = host?.Mounts?.filter(m => m.Target === '/opt/project-tools') ?? [];
+    const projectToolsMountStale = existingProjectToolsMounts.length !== projectToolsMounts.length
+      || projectToolsMounts.some(expected => !existingProjectToolsMounts.some(m => m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath));
     if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
       || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
-      || toolsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
+      || toolsMountStale || projectToolsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -907,6 +972,7 @@ export class Projects {
         { Type: 'volume', Source: names.volume, Target: '/workspace' },
         { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
         ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
+        ...projectToolsMounts,
         ...resultMounts,
       ];
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
@@ -917,7 +983,7 @@ export class Projects {
           Mounts: mounts } });
       container = await this.inspect(repo, generation, 'container');
     }
-    this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), repo);
+    this.db.prepare('UPDATE projects SET applied=?,applied_tools_revision=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), desiredToolsRevision, repo);
     if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
     // Readiness is a protocol and journal check, not a Docker running flag.
     const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });

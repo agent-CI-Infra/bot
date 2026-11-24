@@ -4,6 +4,7 @@ import { fail, fields, type Json } from '../core/security.js';
 import { type InstallationSync } from '../app/installations.js';
 import { dropUninstalledIntegrations } from './integrations.js';
 import { type ProjectService } from './service.js';
+import { type ProjectToolsService } from './tools.js';
 import { removeBrowserEvidence } from '../browser/evidence.js';
 
 // The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
@@ -39,6 +40,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM event_subscriptions WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pr_states WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1], ['DELETE FROM bot_pr_requests WHERE repository_id=?', 1],
     ['DELETE FROM tasks WHERE repository_id=?', 1], ['DELETE FROM automation_runs WHERE repository_id=?', 1], ['DELETE FROM deliveries WHERE repository_id=?', 1],
     ['DELETE FROM environment_operations WHERE repository_id=?', 1], ['DELETE FROM project_environments WHERE repository_id=?', 1],
+    ['DELETE FROM project_tool_revisions WHERE repository_id=?', 1], ['DELETE FROM project_tool_state WHERE repository_id=?', 1],
     // Role configuration revisions, pinned skill bundles and run snapshots belong to the project.
     ['DELETE FROM role_snapshots WHERE repository_id=?', 1], ['DELETE FROM skill_bundle_revisions WHERE repository_id=?', 1], ['DELETE FROM role_config_revisions WHERE repository_id=?', 1],
     ["DELETE FROM settings WHERE key IN ('roles:'||?,'rules:trusted_sha:'||?)", 2],
@@ -85,7 +87,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
 // Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.
 export class ProjectRemoval {
   constructor(readonly store: Store, readonly installations?: InstallationSync, readonly projects?: ProjectService, readonly engine?: RunningTasks,
-    readonly settleMs = 120_000) {}
+    readonly settleMs = 120_000, readonly projectTools?: ProjectToolsService) {}
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     // The legacy local removal endpoint must also remove the environment and notes, rather than only database rows.
     const local = /^\/api\/projects\/([1-9]\d*)$/.exec(url.pathname);
@@ -173,6 +175,8 @@ export class ProjectRemoval {
         removeBrowserEvidence(this.store, taskIds);
       }
       catch { this.store.audit(user.id, 'repository.evidence_removal_failed', id, id); }
+      try { await this.projectTools?.removeProject(id); }
+      catch { this.store.audit(user.id, 'repository.project_tools_removal_failed', id, id); }
       return removed;
     } finally { this.projects?.endRemoval(id); }
   }

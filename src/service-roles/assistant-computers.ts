@@ -9,6 +9,7 @@ import { digest, fail, fields, HttpError, randomId, text, type Json } from '../c
 import { superAdmin, type Actor } from '../app/auth.js';
 import { commandFailure, commandLengthNotice, commandTimeoutLimit, commandTooLong, requestTooLarge } from '../agent/command.js';
 import { readFileChunks } from './checkout.js';
+import type { ProjectToolMountSpec } from '../projects/tools.js';
 
 /**
  * Assistant computers (#457): group assistants and the management assistant get a computer of their conversation owner, a
@@ -475,6 +476,8 @@ export interface TurnOptions {
   commands: () => boolean;
   /** Throws when this owner may not use a computer at all. */
   eligible: () => void;
+  /** Authorized projects' active read-only tool volume revisions to mount under /opt/project-tools/<owner>__<repo>. */
+  projectTools?: () => ProjectToolMountSpec[];
   /** Tells the conversation that the turn waits for a computer. */
   notify?: (text: string) => Promise<unknown> | unknown;
 }
@@ -520,8 +523,9 @@ export class AssistantComputer {
     for (;;) {
       if (this.closed) fail(409, 'assistant_computer_released');
       await this.options.check();
+      const projectTools = this.options.projectTools?.() ?? [];
       const result = await this.service.manager!.call('PUT', '/v1/assistant-computers/' + home.id,
-        { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode,...(runtime?{harness:true}:{}) }, 120_000).catch(error => {
+        { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode, ...(runtime ? { harness: true } : {}), ...(projectTools.length ? { project_tools: projectTools } : {}) }, 120_000).catch(error => {
         if (error instanceof HttpError && error.code === 'disk_full') throw new Refusal({ error: 'assistant_computer_disk_full', detail: '宿主机数据盘剩余空间低于安全预留，已拒绝创建助手电脑以保护控制面与持久化数据。' });
         // No fallback to a project computer or the host: the turn learns that the computer is unavailable.
         if (error instanceof HttpError && ['manager_unavailable', 'docker_operation_failed', 'assistant_computer_create_failed', 'runner_not_ready', 'assistant_homes_unavailable', 'assistant_home_missing', 'not_found'].includes(error.code)) fail(503, 'assistant_computer_unavailable');
@@ -691,6 +695,80 @@ export class AssistantComputer {
       .catch(error => { if (error instanceof Refusal) fail(400, String(error.result.error)); throw error; });
     if (!file.size || file.size > maxBytes || file.data.length !== file.size) fail(413, 'channel_resource_too_large');
     return { data: file.data, name: where.display.split('/').filter(Boolean).at(-1)! };
+  }
+  /** Streams a regular file from /workspace or /tmp in bounded chunks (for project_tools_publish, #1322). */
+  readFileStream(path: string, maxBytes: number): AsyncIterable<Buffer> {
+    const where = locate(path);
+    if (where.home) return fail(400, 'project_tools_source_must_be_workspace_or_tmp');
+    const targetPath = where.path;
+    const self = this;
+    const step = 512 * 1024;
+    return (async function* () {
+      let offset = 0;
+      let total = 0;
+      for (;;) {
+        const part = await self.run({ type: 'assistant_read', path: targetPath, offset, limit: step })
+          .catch(error => { if (error instanceof Refusal) fail(400, String(error.result.error)); throw error; });
+        const fileSize = Number(part.size);
+        if (fileSize > maxBytes) fail(413, 'project_tools_quota_exceeded');
+        const data = Buffer.from(String(part.base64), 'base64');
+        if (data.length) {
+          total += data.length;
+          if (total > maxBytes) fail(413, 'project_tools_quota_exceeded');
+          yield data;
+          offset += data.length;
+        }
+        if (!data.length || offset >= fileSize) break;
+      }
+    })();
+  }
+  /** Packs a file or directory under /workspace or /tmp into a temporary tar.gz and streams it out without OOM (#1322). */
+  async packArchiveStream(path: string, maxBytes: number): Promise<{
+    kind: 'file' | 'directory';
+    name: string;
+    executable: boolean;
+    size: number;
+    stream: AsyncIterable<Buffer>;
+    cleanup: () => Promise<void>;
+  }> {
+    const where = locate(path);
+    if (where.home) return fail(400, 'project_tools_source_must_be_workspace_or_tmp');
+    const targetPath = where.path;
+    const packId = randomId();
+    const packed = await this.run({ type: 'assistant_archive_pack', pack_id: packId, path: targetPath, max_bytes: maxBytes }, 300_000)
+      .catch(error => { if (error instanceof Refusal) fail(400, String(error.result.error)); throw error; });
+    const totalSize = Number(packed.size) || 0;
+    const self = this;
+    let cleaned = false;
+    const cleanup = async () => {
+      if (cleaned) return;
+      cleaned = true;
+      await self.run({ type: 'assistant_archive_cleanup', pack_id: packId }, 30_000).catch(() => {});
+    };
+    const step = 512 * 1024;
+    const stream: AsyncIterable<Buffer> = (async function* () {
+      try {
+        let offset = 0;
+        while (offset < totalSize) {
+          const part = await self.run({ type: 'assistant_archive_read', pack_id: packId, offset, limit: step })
+            .catch(error => { if (error instanceof Refusal) fail(400, String(error.result.error)); throw error; });
+          const data = Buffer.from(String(part.base64), 'base64');
+          if (!data.length) break;
+          offset += data.length;
+          yield data;
+        }
+      } finally {
+        await cleanup();
+      }
+    })();
+    return {
+      kind: packed.kind === 'directory' ? 'directory' : 'file',
+      name: String(packed.name || 'tools'),
+      executable: Boolean(packed.executable),
+      size: totalSize,
+      stream,
+      cleanup,
+    };
   }
   /** Stages and safely extracts a control-plane tar.gz archive into /workspace or /tmp (checkout_repository, #1279). */
   async extractArchive(archive: Buffer | { file: string; size: number }, destination: string, options: { overwrite?: boolean } = {}): Promise<Json> {

@@ -107,7 +107,8 @@ export function resumeInstallationWaits(store:Store,active:(id:string)=>boolean)
   }
 }
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
-  extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
+  extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null,
+  project_tools:c.applied_tools_revision?{mount:'/opt/project-tools',bin_in_path_suffix:'/opt/project-tools/bin',read_only:true,revision:c.applied_tools_revision,pending_revision:c.tools_pending?c.tools_revision:null}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
 // at once, each in its own workspace and under its own claim; the rest stay queued.
 export class TaskEngine {

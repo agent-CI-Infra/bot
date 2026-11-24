@@ -143,6 +143,10 @@ let result;
 if (request.type === 'journal_clear' && assistant) {
   try { for (const name of await readdir(journal)) await rm(`${journal}/${name}`, { force: true }); result = { ok: true, result: { cleared: true } }; }
   catch { result = { ok: false, error: 'journal_clear_failed' }; }
+} else if (assistant && ['assistant_archive_read', 'assistant_archive_cleanup'].includes(request.type)) {
+  // Streaming reads and cleanup of packed archives are repeatable and never journaled so multi-GB exports never bloat .runner-journal.
+  try { result = { ok: true, result: await assistantFile(request) }; }
+  catch (error) { result = failedFull(request, error) ?? { ok: false, error: 'runner_operation_failed', detail: `${request.type}: ${String(error?.message || 'operation failed').slice(0, 2000)}` }; }
 } else if (['tail', 'reap', 'reap_operation', 'usage', 'storage_scan', 'prune', 'tasks_list', 'tasks_remove', 'worktrees_list', 'worktrees_remove', 'workspace_harness_poll', 'cli_config_status', 'cli_config_write', 'cli_config_delete'].includes(request.type)) {
   // Reading progress or usage, measuring the work volume, stopping leftovers, removing old journal records, listing or
   // removing task directories and shared worktrees, and managing /workspace/home CLI config files are repeatable and

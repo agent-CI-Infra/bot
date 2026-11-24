@@ -3,6 +3,12 @@ import { type Actor, superAdmin } from './auth.js';
 import { fail, fields, type Json } from '../core/security.js';
 import type { Manager } from '../projects/service.js';
 import type { AssistantComputerService } from '../service-roles/assistant-computers.js';
+import {
+  PROJECT_TOOLS_QUOTA_KEY,
+  projectToolsQuotaBounds,
+  projectToolsQuotaGb,
+  validateProjectToolsQuotaGb,
+} from '../projects/tools.js';
 
 // Tasks one project computer runs at the same time: a global default, optionally overridden per project.
 export const concurrencyBounds = [1, 32] as const;
@@ -39,13 +45,15 @@ export async function settingsApi(store: Store, user: Actor, method: string, pat
     return { ...result, computer_defaults: await manager!.call('GET', '/v1/defaults').catch(() => null) };
   }
   const view = async (computer?: Json) => ({ settings: { task_concurrency: defaultConcurrency(store), task_concurrency_bounds: [...concurrencyBounds],
+    project_tools_quota_gb: projectToolsQuotaGb(store), project_tools_quota_bounds: [...projectToolsQuotaBounds],
     computer_defaults: computer ?? await manager?.call('GET', '/v1/defaults').catch(() => null) ?? null,
     assistant_computers: await assistants?.settingsView().catch(() => null) ?? null }, version: runningVersion(imageTag) });
   if (method === 'GET') return view();
   if (method !== 'PATCH') return undefined;
-  fields(input, ['task_concurrency', 'computer_defaults', 'assistant_computers']);
-  if (input.task_concurrency === undefined && input.computer_defaults === undefined && input.assistant_computers === undefined) fail(400, 'invalid_settings');
+  fields(input, ['task_concurrency', 'project_tools_quota_gb', 'computer_defaults', 'assistant_computers']);
+  if (input.task_concurrency === undefined && input.project_tools_quota_gb === undefined && input.computer_defaults === undefined && input.assistant_computers === undefined) fail(400, 'invalid_settings');
   const value = input.task_concurrency === undefined ? undefined : concurrencyValue(input.task_concurrency);
+  const toolsQuota = input.project_tools_quota_gb === undefined ? undefined : validateProjectToolsQuotaGb(input.project_tools_quota_gb);
   const defaults = input.computer_defaults as Json | undefined;
   if (defaults !== undefined && (!defaults || typeof defaults !== 'object' || Array.isArray(defaults))) fail(400, 'invalid_defaults');
   if (defaults !== undefined && !manager) fail(503, 'manager_not_configured');
@@ -57,6 +65,10 @@ export async function settingsApi(store: Store, user: Actor, method: string, pat
     if (value !== undefined) {
       store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', concurrencyKey, String(value));
       store.audit(user.id, 'settings.updated', concurrencyKey);
+    }
+    if (toolsQuota !== undefined) {
+      store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', PROJECT_TOOLS_QUOTA_KEY, String(toolsQuota));
+      store.audit(user.id, 'settings.updated', PROJECT_TOOLS_QUOTA_KEY);
     }
     if (computer) store.audit(user.id, 'settings.updated', 'computer.defaults');
   });
