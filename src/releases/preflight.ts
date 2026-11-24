@@ -11,8 +11,9 @@ export const versionNotHigher = (version: string, previous: string) =>
   `版本 ${version} 不高于上一枚版本标签 ${previous}，不能发布。请填写更高的版本，例如 ${nextVersions(previous).join(' 或 ')}。`;
 export const builtinRule = 'release-notes-v1: list only verified commits and merged pull requests with source links; never infer features, tests or performance.';
 // consolePrompt: the release.notes workflow's console prompt, used when the repository has no release-notes skill.
-export async function inspect(github: GitHub, version: string, consolePrompt?: string | null) {
-  const ref = await github.ref(github.defaultBranch), target = ref?.object?.sha;
+// branch: the branch a scheduled release takes the candidate commit from; the console path omits it and uses the default branch.
+export async function inspect(github: GitHub, version: string, consolePrompt?: string | null, branch?: string | null) {
+  const ref = await github.ref(branch || github.defaultBranch), target = ref?.object?.sha;
   if (!/^[a-f0-9]{40}$/.test(target)) stop('release_empty_repository', 'failed', '默认分支还没有可发布的提交。');
   const commit = await github.request('GET', github.path('/commits/' + target));
   const config = await file(github, target, '.github/ci-gates.json', true);

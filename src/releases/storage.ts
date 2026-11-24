@@ -13,7 +13,12 @@ export function releaseStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS release_observers(release_id TEXT PRIMARY KEY REFERENCES project_releases(id) ON DELETE CASCADE,
     token TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS release_attempts(release_id TEXT NOT NULL REFERENCES project_releases(id) ON DELETE CASCADE,
-    run_id INTEGER NOT NULL,attempt INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(release_id,run_id,attempt));`);
+    run_id INTEGER NOT NULL,attempt INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(release_id,run_id,attempt));
+    -- A daily schedule releases a branch tip without a person. actor_id is the administrator whose project permission
+    -- the worker guard keeps checking, so a revoked administrator stops the schedule instead of releasing silently.
+    CREATE TABLE IF NOT EXISTS release_schedules(repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL,branch TEXT NOT NULL,time TEXT NOT NULL,start_version TEXT,actor_id TEXT NOT NULL,
+    next_run_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,last_error_at TEXT,last_run_at TEXT,updated_at TEXT NOT NULL);`);
   releaseIdleDrafts(store);
 }
 

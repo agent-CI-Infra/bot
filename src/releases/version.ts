@@ -16,6 +16,16 @@ export function compareVersions(a: string, b: string): number {
   }
   return 0;
 }
+// A scheduled release picks the version itself, so the rule lives here instead of in each schedule row: a feature or a
+// breaking change recorded in the change set moves the minor, everything else moves the patch, and the major version
+// never moves on its own. A prerelease reaches its own stable version before either counter moves.
+export function scheduledVersion(previous: string | null, major: boolean): string | null {
+  if (!previous || !validVersion(previous)) return null;
+  const stable = previous.includes('-') ? previous.slice(0, previous.indexOf('-')) : previous;
+  if (stable !== previous) return stable;
+  const [x, y, z] = stable.slice(1).split('.').map(BigInt) as [bigint, bigint, bigint];
+  return major ? `v${x}.${y + 1n}.0` : `v${x}.${y}.${z + 1n}`;
+}
 // Suggestions shown when a version is not above the previous tag: a prerelease's own stable version, otherwise the
 // next patch and the next minor. The major version is never raised for the maintainer.
 export function nextVersions(version: string): string[] {

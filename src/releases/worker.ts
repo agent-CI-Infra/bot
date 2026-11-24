@@ -233,7 +233,9 @@ export class ReleaseWorker {
     await this.ensureCI(github, row); await this.requireTag(github, row);
     const data = JSON.parse(row.data);
     if (redactor.contains(Buffer.from(data.body))) return stop('release_sensitive_body', 'failed', '发行说明包含已登记的密钥，已拒绝写入。');
-    const request = { tag_name: row.version, name: row.version, body: data.body, draft: true, prerelease: prerelease(row.version) };
+    // A scheduled release is the decision to publish: it creates the Release directly. The console path keeps the draft
+    // a person still has to publish.
+    const request = { tag_name: row.version, name: row.version, body: data.body, draft: data.draft !== false, prerelease: prerelease(row.version) };
     const release = await this.effect(row, 'draft', request, () => github.request('POST', github.path('/releases'), request), () => releases(github, row.version, data.release_id), redactor);
     this.adopt(row, release, redactor);
   }
