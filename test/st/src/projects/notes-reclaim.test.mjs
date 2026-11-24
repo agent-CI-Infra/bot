@@ -222,3 +222,65 @@ test('reclaimNotes removes stopped orphan containers holding a deleted repositor
   assert.equal(f.projects.get('101').state, 'deleted', 'orphan project marked deleted');
   assert.equal((await fetch(h.admin + '/readyz')).status, 200, 'readiness heals to 200');
 });
+
+test('notes reclaim checks container Mounts (ignores non-mounting running containers) and unifies reclaimStaleNotes and delete paths', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
+  f.docker.enforceVolumeInUse = true;
+  await f.projects.operate('101', 'start', { operation_id: 'a'.repeat(48), generation: 1 });
+  const gen1Container = f.projects.names('101', 1).container;
+  const volumeName = f.projects.notesName('101');
+
+  // 1. A running container owned by the same repo that does NOT mount the notes volume must neither block reclaim
+  // nor be deleted, and must not wipe its project/resources metadata.
+  const otherContainer = f.projects.names('101', 99).container;
+  f.docker.containers.set(otherContainer, {
+    Config: { Labels: f.projects.labels('101', 99, 'container') },
+    Mounts: [{ Type: 'volume', Name: 'other-work-vol', Source: 'other-work-vol', Destination: '/workspace' }],
+    State: { Running: true, StartedAt: '99' },
+  });
+  f.projects.db.prepare('INSERT INTO resources VALUES(?,?,?)').run('101', 99, 'sha256:fixture');
+  // Stop gen1 (which mounts -notes) and run reclaimNotes: gen1 is removed, gen99 & its resource survive.
+  f.docker.containers.get(gen1Container).State.Running = false;
+  const res = await f.projects.reclaimNotes('101');
+  assert.equal(res.containers_removed, 1, 'only the stopped container mounting -notes is removed');
+  assert.equal(f.docker.containers.has(gen1Container), false, 'gen1 mounting container removed');
+  assert.equal(f.docker.containers.has(otherContainer), true, 'non-mounting running container stays untouched');
+  assert.equal(f.docker.volumes.has(volumeName), false, 'notes volume deleted');
+  assert.equal(f.projects.db.prepare('SELECT count(*) n FROM resources WHERE repository_id=? AND generation=99').get('101').n, 1, 'non-mounting generation resource stays intact');
+  assert.notEqual(f.projects.get('101').state, 'deleted', 'live project row with another container is not forced to deleted');
+  // Clean up synthetic gen99 container/resource before testing the other two entry points.
+  f.docker.containers.delete(otherContainer);
+  f.projects.db.prepare('DELETE FROM resources WHERE repository_id=? AND generation=99').run('101');
+
+  // 2. reclaimStaleNotes (reconnect / notes read path) clears a stopped orphan container mounting -notes,
+  // and returns 503 notes_residue_unclearable when a mounting container is running.
+  await f.projects.notesVolume('101', true);
+  f.docker.containers.set('orphan-stale-101', {
+    Config: { Labels: f.projects.labels('101', 2, 'container') },
+    Mounts: [{ Type: 'volume', Name: volumeName, Source: volumeName, Destination: '/workspace/project-notes' }],
+    State: { Running: true, StartedAt: '2' },
+  });
+  f.projects.db.prepare('UPDATE projects SET notes_purge=1 WHERE repository_id=?').run('101');
+  await assert.rejects(f.projects.reclaimStaleNotes('101'), { status: 503, message: 'notes_residue_unclearable' });
+  assert.ok(f.docker.containers.has('orphan-stale-101'), 'running mounting container is not removed by reclaimStaleNotes');
+
+  f.docker.containers.get('orphan-stale-101').State.Running = false;
+  assert.equal(await f.projects.reclaimStaleNotes('101'), true, 'reclaimStaleNotes removes stopped mounting container and volume');
+  assert.equal(f.docker.containers.has('orphan-stale-101'), false);
+  assert.equal(f.docker.volumes.has(volumeName), false);
+  assert.equal(Number(f.projects.get('101').notes_purge), 0);
+
+  // 3. Project deletion with delete_notes clears an untracked stopped orphan container mounting -notes.
+  await f.projects.notesVolume('101', true);
+  f.docker.containers.set('untracked-delete-101', {
+    Config: { Labels: f.projects.labels('101', 3, 'container') },
+    Mounts: [{ Type: 'volume', Name: volumeName, Source: volumeName, Destination: '/workspace/project-notes' }],
+    State: { Running: false, StartedAt: '3' },
+  });
+  await f.projects.operate('101', 'delete', { operation_id: 'b'.repeat(48), generation: 1, request: { delete_notes: true } });
+  assert.equal(f.docker.containers.has('untracked-delete-101'), false, 'delete removes untracked stopped mounting container');
+  assert.equal(f.docker.volumes.has(volumeName), false, 'delete removes notes volume cleanly');
+  assert.equal(f.projects.get('101').state, 'deleted');
+  assert.equal(Number(f.projects.get('101').notes_purge), 0);
+  void admin;
+});

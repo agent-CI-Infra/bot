@@ -18,6 +18,7 @@ import { resolveRules } from '../../../../dist/rules/service.js';
 import { Redactor, TaskError } from '../../../../dist/agent/common.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { Publisher } from '../../../../dist/github/publisher.js';
+import { loadDevelopmentCandidate } from '../../../../dist/storage/payloads.js';
 import { roleConfiguration, saveConfiguration } from '../../../../dist/roles/definition.js';
 import { server as githubFixture } from '../../../fixtures/agent-server.mjs';
 import { agentOperation, waitingAgent } from '../../../../runner/agent.mjs';
@@ -265,7 +266,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 // The manager substitutes for the project computer; no deployment or external API is used.
 // custom: run a reply task with these writes instead of development; it files an Issue (github_write, when custom.issue),
 // opens the PR and replies. custom.permissions: the executing dev role's saved permissions.
-async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture, labels, repositoryLabels, milestones = [] } = {}) {
+async function developmentHarness(t, { policy = '', change = true, extraFiles = [], validationResult, repair = true, faults, custom, acceptor = acceptanceFixture, labels, repositoryLabels, milestones = [] } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
@@ -290,7 +291,11 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
       else if (custom?.issue && !filed) value = { state: 'running', tool_requests: [{ id: 'f'.repeat(48), kind: 'repository', name: 'github_write', arguments: { method: 'POST', path: '/issues', key: 'follow-up', body: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } }] };
       else if (milestoneReplies.length < milestones.length) value = { state: 'running', tool_requests: [{ id: milestoneIds[milestoneReplies.length], kind: 'control', name: 'report_development_milestone', arguments: milestones[milestoneReplies.length] }] };
       else {
-        if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
+        if (!started) {
+          started = true;
+          if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n');
+          for (const [filePath, fileContent] of extraFiles) write(filePath, fileContent);
+        }
         ids[step] ||= randomBytes(24).toString('hex');
         value = { state: 'running', tool_requests: [{ id: ids[step], kind: 'pull_request', name: 'create_pull_request', arguments: labels ? { ...args, labels: labels[Math.min(step, labels.length - 1)] } : args }] };
       }
@@ -352,7 +357,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   const engine = new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptor);
   pinLegacyTaskConfiguration(h.store, taskId);
   await engine.run(taskId, 'claim');
-  const task = h.store.get('SELECT * FROM tasks WHERE id=?', taskId), saved = h.store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
+  const task = h.store.get('SELECT * FROM tasks WHERE id=?', taskId), candidate = loadDevelopmentCandidate(h.store, taskId) ?? undefined;
   const continueIssue = async () => {
     revision++; repoDirectory = join(h.directory, 'revision-' + revision); mkdirSync(repoDirectory);
     started = false; terminal = undefined; step = 0; ids.length = 0;
@@ -361,9 +366,9 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     h.store.run('DELETE FROM task_claims'); h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", nextId, new Date().toISOString());
     pinLegacyTaskConfiguration(h.store, nextId);
     await engine.run(nextId, 'claim');
-    return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: JSON.parse(h.store.get('SELECT data FROM development_candidates WHERE task_id=?', nextId)?.data || 'null') };
+    return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: loadDevelopmentCandidate(h.store, nextId) };
   };
-  return { h, task, candidate: saved && JSON.parse(saved.data), replies, toolReplies, milestoneReplies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
+  return { h, task, candidate, replies, toolReplies, milestoneReplies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
 }
 
 test('create_pull_request with empty policy never reruns agent evidence and returns the published call-time tree', async t => {
@@ -552,8 +557,19 @@ test('policy-generated untracked files and tracked edits stay outside the publis
   assert.equal(d.task.status, 'pr_opened'); assert.deepEqual(d.commands, [policy]); assert.equal(d.snapshots, 1);
   assert.ok(existsSync(join(d.repoDirectory, '__pycache__/test.pyc')));
   assert.ok(!d.candidate.files.some(f => f.path.startsWith('__pycache__/')));
-  assert.match(Buffer.from(d.candidate.files.find(f => f.path === 'calc.mjs').base64, 'base64').toString(), /a \+ b/);
+  const publishedCalc = d.candidate.files.find(f => f.path === 'calc.mjs');
+  assert.equal(publishedCalc.base64, undefined, 'inline base64 body is stripped from development_candidates after publication');
+  assert.match(d.git('cat-file', 'blob', publishedCalc.sha), /a \+ b/);
   assert.equal(readFileSync(join(d.repoDirectory, 'calc.mjs'), 'utf8'), 'changed by policy');
+});
+
+test('custom workflow with an externalized (>2KiB) candidate completes report acceptance after PR publication', async t => {
+  const extraFiles = Array.from({ length: 30 }, (_, i) => [`src/ext-${i}.mjs`, `export const v${i} = '${'a'.repeat(120)}';\n`]);
+  const d = await developmentHarness(t, { custom: { writes: ['pull_request', 'reply'] }, extraFiles });
+  assert.equal(d.task.status, 'succeeded', JSON.stringify(d.h.store.all('SELECT content FROM task_logs WHERE task_id=?', d.task.id)));
+  const rawRow = JSON.parse(String(d.h.store.get('SELECT data FROM development_candidates WHERE task_id=?', d.task.id).data));
+  assert.equal(typeof rawRow.files?.$blob, 'string', 'large published candidate stays externalized as a blob ref in SQLite');
+  assert.ok(d.candidate.files.length >= 30 && d.candidate.files.every(f => f.base64 === undefined), 'loaded candidate keeps full manifest without base64');
 });
 
 test('policy failure returns output without publication and the same agent can repair and call again', async t => {

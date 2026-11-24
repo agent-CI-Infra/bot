@@ -38,7 +38,7 @@ function previewBytes(headBuf, tailBuf, totalBytes, sourcePath) {
   let start = 0; while (start < 3 && (tailBuf[start] & 0xc0) === 0x80) start++;
   const tail = tailBuf.subarray(start).toString('utf8');
   const omitted = Math.max(0, totalBytes - Buffer.byteLength(head) - Buffer.byteLength(tail));
-  return head + `\n[… ${omitted} bytes omitted; read the complete file from ${sourcePath} …]\n` + tail;
+  return head + `\n[… ${omitted} bytes omitted from inline preview; inspect slices of ${sourcePath} directly (e.g., head/tail/sed) …]\n` + tail;
 }
 async function readBoundedFile(handle, displayPath, { maxBytes, skipBinary } = {}) {
   const size = (await handle.stat()).size;

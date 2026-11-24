@@ -10,12 +10,16 @@ import { traceStorage } from '../../../../dist/tasks/trace.js';
 import { roleStorage } from '../../../../dist/roles/storage.js';
 import {
   loadDevelopmentCandidate,
+  loadDevelopmentCandidateMeta,
   saveDevelopmentCandidate,
   stripPublishedCandidateBodies,
 } from '../../../../dist/storage/payloads.js';
 import { PayloadMigration } from '../../../../dist/storage/migration.js';
 import { deterministicCandidateIssues } from '../../../../dist/tasks/acceptance.js';
-import { Redactor } from '../../../../dist/agent/common.js';
+import { readRelatedArtifact } from '../../../../dist/tasks/related.js';
+import { TaskRecords } from '../../../../dist/tasks/service.js';
+import { Publisher } from '../../../../dist/github/publisher.js';
+import { blobSha, Redactor, treeSha } from '../../../../dist/agent/common.js';
 import { workspace as runnerWorkspace } from '../../../../runner/workspace.mjs';
 import { validateCall } from '../../../../manager/project-runner-calls.mjs';
 import { Docker } from '../../../../manager/docker.mjs';
@@ -32,8 +36,19 @@ function makeStore(t) {
   return { dir, store };
 }
 
-test('task_runs indexes eliminate full table scans on operation_id, lease_scope, and role_instance_id', t => {
-  const { store } = makeStore(t);
+test('task_runs indexes eliminate full table scans on operation_id, lease_scope, and role_instance_id (including legacy schema upgrades)', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'prod-hardening-upgrade-'));
+  const store = new Store(join(dir, 'control.sqlite'), Buffer.alloc(32, 8));
+  t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  // Simulate an older database whose task_runs table predates role_instance_id, operation_id, and lease_scope.
+  store.db.exec('PRAGMA foreign_keys=OFF; DROP TABLE IF EXISTS task_runs;');
+  store.db.exec(`CREATE TABLE task_runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,kind TEXT NOT NULL,attempt INTEGER NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,summary TEXT,error_code TEXT,detail TEXT);`);
+  store.db.exec('PRAGMA foreign_keys=ON;');
+  traceStorage(store);
+  roleStorage(store);
+  const cols = new Set(store.all('PRAGMA table_info(task_runs)').map(r => String(r.name)));
+  assert.ok(cols.has('operation_id') && cols.has('lease_scope') && cols.has('role_instance_id'), 'upgrade adds missing columns before indexing');
+
   const plan = sql => store.all(`EXPLAIN QUERY PLAN ${sql}`).map(r => String(r.detail)).join(' | ');
   for (const [label, sql] of [
     ['operation_id', "SELECT 1 FROM task_runs WHERE operation_id='op1'"],
@@ -84,11 +99,27 @@ test('development_candidates externalizes large file arrays to blobs, preserves 
   assert.equal(afterMetaSave.files.$blob, storedRow.files.$blob);
   assert.equal(afterMetaSave.remote_sha, '4'.repeat(40));
 
-  // Stripping bodies after publication removes base64 while keeping manifest paths/shas.
+  // loadDevelopmentCandidateMeta returns scalar metadata without exposing raw {$blob} refs as arrays.
+  const meta = loadDevelopmentCandidateMeta(store, 't1');
+  assert.equal(meta.base_sha, '3'.repeat(40));
+  assert.equal(meta.files, undefined, 'meta reader strips externalized blob ref');
+  assert.equal(meta.snapshot_files, undefined, 'meta reader strips externalized snapshot_files ref');
+
+  // Shared content-addressed blob stays intact when another task strips its own published candidate bodies.
+  store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,created_at,updated_at) VALUES('t3','101','task.request',3,'running','model','s','{}','2026-01-01','2026-01-01')");
+  saveDevelopmentCandidate(store, 't3', { ...candidate, branch: 'bot/task-t3' }, '101');
+  const sharedRow = JSON.parse(String(store.get('SELECT data FROM development_candidates WHERE task_id=?', 't3').data));
+  assert.equal(sharedRow.snapshot_files.$blob, storedRow.snapshot_files.$blob, 'identical snapshot_files share the same content-addressed blob');
+
+  // Stripping bodies after publication removes base64 while keeping manifest paths/shas and leaving shared blobs intact.
   stripPublishedCandidateBodies(store, 't1', loaded, '101');
   const stripped = loadDevelopmentCandidate(store, 't1');
   assert.equal(stripped.files.length, 60);
   assert.ok(stripped.files.every(f => f.base64 === undefined && typeof f.path === 'string' && typeof f.sha === 'string'));
+  const t3Loaded = loadDevelopmentCandidate(store, 't3');
+  assert.equal(t3Loaded.files.length, 60);
+  assert.equal(t3Loaded.files[0].base64, largeFiles[0].base64, 'other task sharing the blob still reads intact content');
+  assert.equal(t3Loaded.snapshot_files.length, 60);
 
   // Background PayloadMigration also externalizes legacy inline development_candidates rows.
   store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,created_at,updated_at) VALUES('t2','101','task.request',2,'completed','done','s','{}','2026-01-01','2026-01-01')");
@@ -156,17 +187,113 @@ test('workspace_read honors max_bytes and skip_binary on disk and git commits, a
   assert.throws(() => validateCall({ type: 'workspace_command', workspace_id: wsId, command: 'ls', max_bytes: 100 }), /invalid_runner_request/);
 });
 
-test('manager Docker.request allows responses larger than 4 MiB without artificial docker_response_too_large cap', async t => {
+test('manager Docker.request retains 4 MiB default cap while allowing explicit finite per-call overrides', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'docker-sock-'));
   const sock = join(dir, 'docker.sock');
-  const payload = Buffer.alloc(5 * 1024 * 1024, 0x61); // 5 MiB > old 4 MiB cap
+  const payload = Buffer.alloc(5 * 1024 * 1024, 0x61); // 5 MiB > default 4 MiB cap
   const server = http.createServer((_req, res) => { res.writeHead(200); res.end(payload); });
   await new Promise(resolve => server.listen(sock, resolve));
   t.after(() => new Promise(resolve => server.close(() => { rmSync(dir, { recursive: true, force: true }); resolve(); })));
 
   const docker = new Docker(sock);
-  const raw = await docker.request('GET', '/large', undefined, true, 15000);
-  assert.equal(raw.length, payload.length, '5 MiB raw Docker response succeeds without 4 MiB cap');
+  await assert.rejects(docker.request('GET', '/large', undefined, true, 15000), /docker_response_too_large/, 'default 4 MiB cap still protects Docker API calls');
+  await assert.rejects(docker.request('GET', '/large', undefined, true, 15000, 0), /docker_response_too_large/, 'passing 0 cannot disable response cap');
+  const raw = await docker.request('GET', '/large', undefined, true, 15000, 8 * 1024 * 1024);
+  assert.equal(raw.length, payload.length, 'explicit finite higher cap allows 5 MiB response');
+});
+
+test('Publisher.branch publishes an externalized candidate end-to-end and keeps SQLite row compact', async t => {
+  const { store } = makeStore(t);
+  const taskId = 'a'.repeat(48);
+  const branchName = 'bot/task-' + taskId;
+  store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,created_at,updated_at) VALUES(?,'101','task.request',10,'publishing','publish','s','{}','2026-01-01','2026-01-01')", taskId);
+  store.run('INSERT INTO bot_branches VALUES(?,?,?)', '101', branchName, taskId);
+
+  const files = Array.from({ length: 40 }, (_, i) => {
+    const content = Buffer.from(`export const value${i} = '${'x'.repeat(80)}';\n`);
+    return { path: `src/mod-${i}.ts`, mode: '100644', sha: blobSha(content), size: content.length, base64: content.toString('base64') };
+  });
+  const expectedTree = treeSha(files);
+  const candidate = {
+    tree_sha: expectedTree,
+    local_sha: '2'.repeat(40),
+    base_sha: '3'.repeat(40),
+    source_tree: '4'.repeat(40),
+    branch: branchName,
+    owner_task_id: taskId,
+    summary: 'Externalized candidate publish test',
+    change_title: 'Externalized candidate publish test',
+    date: '2026-01-01T00:00:00.000Z',
+    files,
+    snapshot_files: [],
+    skipped_files: [],
+  };
+  saveDevelopmentCandidate(store, taskId, candidate, '101');
+  const storedBefore = JSON.parse(String(store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId).data));
+  assert.equal(typeof storedBefore.files?.$blob, 'string', 'candidate files externalized before publish');
+
+  let currentRef = null;
+  const uploadedBlobs = new Map();
+  const commitSha = '5'.repeat(40);
+  const github = {
+    defaultBranch: 'main',
+    actorId: '999',
+    permissions: { contents: 'write', pull_requests: 'write' },
+    path: p => '/repos/fixture/repo' + p,
+    authorEmail: () => 'bot@example.com',
+    ref: async () => (currentRef ? { ref: 'refs/heads/' + branchName, object: { sha: currentRef } } : null),
+    request: async (method, reqPath, body) => {
+      if (reqPath.endsWith('/git/blobs') && method === 'POST') {
+        const buf = Buffer.from(body.content, 'base64');
+        const digest = blobSha(buf);
+        uploadedBlobs.set(digest, buf);
+        return { sha: digest };
+      }
+      if (reqPath.endsWith('/git/trees') && method === 'POST') return { sha: expectedTree };
+      if (reqPath.endsWith('/git/commits') && method === 'POST') return { sha: commitSha, tree: { sha: body.tree } };
+      if (reqPath.endsWith('/git/refs') && method === 'POST') { currentRef = body.sha; return { ref: body.ref, object: { sha: body.sha } }; }
+      throw new Error(`unexpected github call: ${method} ${reqPath}`);
+    },
+  };
+  const task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
+  const loaded = loadDevelopmentCandidate(store, taskId);
+  const publisher = new Publisher(store, github, task, async () => {}, undefined, () => {});
+  const publishedSha = await publisher.branch(loaded);
+  assert.equal(publishedSha, commitSha);
+  assert.equal(uploadedBlobs.size, 40, 'all 40 externalized blobs were uploaded to GitHub');
+  const storedAfter = JSON.parse(String(store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId).data));
+  assert.equal(storedAfter.files.$blob, storedBefore.files.$blob, 'metadata save during branch publish reuses blob ref');
+  assert.equal(storedAfter.remote_sha, commitSha);
+});
+
+test('readRelatedArtifact marks truncated >1 MiB workspace_read results as incomplete instead of complete: true', async t => {
+  const { store } = makeStore(t);
+  const records = new TaskRecords(store);
+  const rootId = 'r'.repeat(48), childId = 'c'.repeat(48), wsId = 'w'.repeat(48);
+  const bigSha = '9'.repeat(40);
+  store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,workspace_id,generation,created_at,updated_at) VALUES(?,'101','task.request',1,'running','model','root','{}',?,1,'2026-01-01','2026-01-01')", rootId, 'a'.repeat(48));
+  store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,workspace_id,generation,created_at,updated_at) VALUES(?,'101','task.request',2,'running','model','child','{}',?,1,'2026-01-01','2026-01-01')", childId, wsId);
+  store.run("INSERT INTO task_children VALUES(?,?,'2026-01-01')", rootId, childId);
+  records.contract(rootId, { goal: 'root', scope: ['s'], criteria: ['c'], endpoint: 'artifact', completeness: 'explicit' });
+  records.contract(childId, { goal: 'child', scope: ['s'], criteria: ['c'], endpoint: 'artifact', completeness: 'explicit' });
+  const cand = records.submit(childId, [{ kind: 'code', reference: 'task:' + childId, version: '1'.repeat(40), content: { local_sha: '2'.repeat(40), files: [{ path: 'big.log', sha: bigSha }] } }], [], { summary: 'done' });
+  records.decide(childId, cand.id, cand.revision, { outcome: 'pass', reason: 'ok', gaps: [], criteria_results: [] }, 'completed', true);
+
+  const task = store.get('SELECT * FROM tasks WHERE id=?', rootId);
+  const fakeManager = {
+    async call(_m, _p, body) {
+      if (body?.request?.type === 'workspace_read') {
+        return { ok: true, result: { content: 'head\n[omitted]\ntail', truncated: true, size: 2_000_000, log_path: '/workspace/tasks/' + wsId + '/logs/read.out', version: '2'.repeat(40) } };
+      }
+      return { ok: true, result: {} };
+    },
+  };
+  const fakeWorkspace = { manager: fakeManager, redactor: new Redactor([]), guard: async () => {}, log: () => {} };
+  const page = await readRelatedArtifact(store, task, fakeWorkspace, { task_id: childId, candidate_id: cand.id, path: 'big.log', offset: 0, length: 8000 });
+  assert.equal(page.truncated, true);
+  assert.equal(page.complete, false, 'truncated preview must never report complete: true');
+  assert.equal(page.total_bytes, 2_000_000);
+  assert.equal(page.log_path, '/workspace/tasks/' + wsId + '/logs/read.out');
 });
 
 test('acceptance preflight skips binary and oversized files without calling workspace_read, and bounds text reads', async t => {

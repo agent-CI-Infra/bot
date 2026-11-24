@@ -173,6 +173,11 @@ node scripts/install-acp-product.mjs select --product workswarm --version 0.2.9
 
 - **任务失败或等待**：优先查看控制台任务详情页的「原因分类」与时间线（明确区分外部波动、GitHub 权限、模型配置、项目电脑、仓库内容与 Bot 自身故障）。
 - **GitHub 限流**：在「全局设置 → 机器人账号 → GitHub 请求额度」查看每个安装与 Token 账号的剩余配额与重置时间（限流等待不消耗重试次数）。
+- **数据库索引、候选大载荷外置与通道保护**：
+  - 升级启动后控制面自动补齐 `task_runs` 的 `operation_id`、`(lease_scope, status)` 与 `role_instance_id` 索引，避免任务量增长后出现高频 `[slow-sql]` 全表扫描；
+  - `development_candidates` 中超过 2 KiB 的文件列表（`files`、`snapshot_files`、`skipped_files`）自动去重外置到 `bot-data` 的共享 `blobs/` 目录，后台迁移会自动瘦身存量旧行，且 PR 发布确认后自动剥离内联 base64 正文（不影响其他任务共享的内容寻址 blob）；
+  - 验收预检自动按真实字节数跳过 >256 KiB 文件与二进制文件，`workspace_read` 对 >1 MiB 文件返回首尾预览与容器内可读路径（同时保留 manager 对 Docker API 的默认 4 MiB 响应上限保护）。
+- **孤儿笔记卷与 `/readyz` 自愈**：删除仓库后若遗留仍挂载 `-notes` 卷的本部署已停止孤儿容器，manager 会在 `reclaimNotes`、`reclaimStaleNotes`（重连/读笔记/重启前）及项目删除流程中按容器实际挂载自动清理这些已停止容器与对应代次网络/资源后再删除笔记卷，使 `/readyz` 自动恢复 200；若仍有运行中容器挂载该卷，会拒绝误删并返回 `409 notes_volume_in_use`（`/readyz` 保持告警直到人为处理或容器停止）。
 - **服务日志与健康检查**：
   ```sh
   docker compose -p bot logs --since 1h bot       # 控制面：事件循环卡顿 [stall]、慢 SQL [slow-sql]、对账与任务异常
