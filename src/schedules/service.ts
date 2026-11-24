@@ -4,6 +4,7 @@ import { fail, HttpError, randomId, type Json } from '../core/security.js';
 import { installationExecutionDenied } from '../installations/archive.js';
 import type { ChannelService } from '../channels/service.js';
 import type { ChannelEvent } from '../channels/types.js';
+import { chatProfile } from '../channels/profiles.js';
 import type { ManagementCommand, ManagementService } from '../management/service.js';
 import { parameterHash } from '../management/service.js';
 import { validate } from '../management/catalog.js';
@@ -180,7 +181,11 @@ export class ScheduleService {
       const binding = channels.serviceBindings.canView(actor, chat.id);
       if (!binding || !channels.serviceBindings.reachable(channels.serviceBindings.assertUsable(binding), project, ['tasks.read'])) fail(403, 'schedule_destination_unavailable');
     }));
-    return [...personal, ...groups].map(chat => ({ id: 'chat:' + chat.id, type: chat.chat_type, chat_id: chat.chat_id }));
+    return [...personal, ...groups].map(chat => ({ id: 'chat:' + chat.id, type: chat.chat_type, chat_id: chat.chat_id, name: this.chatName(chat.id) }));
+  }
+  /** A destination chat's name (#1360): a group's Feishu name or the private chat person's, as stored; null when none is known. */
+  private chatName(id: string | undefined): string | null {
+    return (id ? String(chatProfile(this.store, id).display_name ?? '') : '') || null;
   }
   /** A chosen chat ('chat:<id>') is registered for this project and registrant when saved, with every check of a registration;
    * the saved subscription keeps the registered destination. Previews only check that the chat may be chosen. */
@@ -383,7 +388,10 @@ export class ScheduleService {
     }
     if (operation === 'list_schedule_destinations') {
       const destinations: Json[] = this.store.all("SELECT id,created_at FROM channel_outbox WHERE state='registered'").flatMap(r => {
-        try { const d = this.destination(r.id, project); return [{ id: r.id, type: d.event.chat_type, chat_id: d.event.chat_id }]; } catch { return []; }
+        try {
+          const d = this.destination(r.id, project), chat = this.store.get('SELECT id FROM channel_chats WHERE connector_id=? AND chat_id=?', d.event.connector_id, d.event.chat_id);
+          return [{ id: r.id, type: d.event.chat_type, chat_id: d.event.chat_id, name: this.chatName(chat?.id) }];
+        } catch { return []; }
       });
       // Chats that may receive this project's event notifications are offered directly; no separate registration step (#330).
       destinations.push(...this.chatDestinations(actor, project).filter(chat => !destinations.some(d => d.chat_id === chat.chat_id)));

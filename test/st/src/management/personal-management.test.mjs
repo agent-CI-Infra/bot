@@ -44,6 +44,40 @@ test('multi-project greetings use the shared management agent and private histor
   assert.ok(!JSON.stringify(f.wire.sent).includes('/chat /project'));assert.equal(f.h.store.get('SELECT count(*) n FROM management_commands WHERE source_message LIKE \'feishu:%\' OR source_message=\'fixture-web\'').n,0);
 });
 
+test('each management turn tells the model where its own message came from: web console, Feishu private chat or timer (#1360)',async t=>{
+  const f=await channelFixture(t),seen=[];
+  // Only the assistant's turns: a console conversation's title request goes to the same fixture model.
+  f.modelState.respond=async(body,res)=>{if(/scoped management assistant/.test(body.messages[0].content))seen.push({system:body.messages[0].content,context:input(body)});reply(res,'收到。');};
+  const source=()=>seen.at(-1).context.message_source;
+  // A private chat message; the person's Feishu name is null until it is known.
+  const first=await im(f,'第一条私聊');assert.equal(first.row.state,'completed',first.row.error);
+  assert.deepEqual(source(),{kind:'feishu_private_chat',chat_name:null});
+  f.h.store.run("UPDATE external_identities SET display_name='张小明' WHERE principal_id=? AND provider='feishu'",f.principal);
+  assert.equal((await im(f,'第二条私聊')).row.state,'completed');
+  assert.deepEqual(source(),{kind:'feishu_private_chat',chat_name:'张小明'});
+  // The same conversation continued in the console: the source is this message's own, each history round keeps its own.
+  const conversation=first.row.conversation_id;
+  const continued=(await f.admin('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'fixture-web-continued',content:'在网页上继续'})).value;
+  assert.equal((await settled(f.admin,conversation,continued.id)).messages.at(-1).state,'completed');
+  assert.deepEqual(source(),{kind:'web_console'});
+  assert.deepEqual(seen.at(-1).context.history.map(round=>round.source),['feishu_private_chat','feishu_private_chat']);
+  assert.equal((await web(f,'网页里的新对话')).history.messages[0].state,'completed');
+  assert.deepEqual(source(),{kind:'web_console'});assert.deepEqual(seen.at(-1).context.history,[]);
+  // A timer of the person's: its name and the private chat its result goes to.
+  const chat=f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_private'");
+  const timer=(await f.admin('/api/channels/chats/'+chat.id+'/schedules','POST',{name:'每日巡检',prompt:'检查失败的任务。',timezone:'Asia/Shanghai',cron:'0 9 * * *'})).value.schedule;
+  assert.equal((await f.admin('/api/channels/schedules/'+timer.id+'/run','POST',{})).status,201);
+  const run=await until(()=>f.h.store.get('SELECT state,error FROM channel_schedule_runs WHERE schedule_id=?',timer.id),row=>row&&row.state!=='running');
+  assert.equal(run.state,'completed',run.error);
+  assert.deepEqual(source(),{kind:'timer',timer_name:'每日巡检',chat_name:'张小明'});
+  // The prompt reads the source from these fields, and never from a guess about a group.
+  for(const {system} of seen){
+    assert.match(system,/message_source says where the current message came from/);
+    assert.match(system,/never say that this conversation or a message comes from a group/);
+    assert.doesNotMatch(system,/Feishu private chat or console conversation/);
+  }
+});
+
 test('authorized names, ambiguous project clarification, continuation and switching share real Web query results',async t=>{
   const f=await channelFixture(t),member=await f.member('personal-names',{organization_ids:['10']});
   bindFixture(f.h,f.id,member.id,'ou_member');

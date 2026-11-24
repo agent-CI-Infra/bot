@@ -546,7 +546,7 @@ export class ChannelServiceBindings {
     const identity = !previous || !this.governs(actor, previous) ? this.employees.feishuIdentity(chat, actor.principal_id) : undefined;
     // The audience lookup is a network call; the decision below reads the snapshot it stored, inside the transaction.
     if (identity) await this.employees.verify(id, true);
-    return this.store.transaction(() => {
+    const saved = this.store.transaction(() => {
       assertCurrent(actor);
       const current = this.employees.chat(id), scope = this.scopeInput(actor, input.scope, current);
       const nextModel = resolveModel(scope);
@@ -579,6 +579,24 @@ export class ChannelServiceBindings {
       this.store.audit(actor.principal_id, 'channel.service_binding.configured', binding);
       return this.view(this.get(id)!);
     });
+    // #1360: a group is named when it is bound, or on a later edit while it still has no name, so its assistant and the
+    // schedule destinations can call it by name. Only after the binding is saved: a failed lookup never undoes it.
+    if (previous?.enabled && chat.display_name) return saved;
+    return await this.readName(id) ? this.view(this.get(id)!) : saved;
+  }
+  /** Best effort: the group's Feishu name, stored unless its chat or connection changed meanwhile. Never throws. */
+  private async readName(id: string): Promise<boolean> {
+    try {
+      const chat = this.employees.chat(id);
+      const guard = () => {
+        const current = this.employees.chat(id);
+        if (current.connector_id !== chat.connector_id || current.connector.revision !== chat.connector.revision || current.revision !== chat.revision)
+          fail(409, 'channel_configuration_changed');
+      };
+      const name = await this.employees.adapter(chat.connector, guard).chatName(chat.chat_id);
+      this.store.transaction(() => { guard(); this.store.run('UPDATE channel_chats SET display_name=? WHERE id=?', name, id); });
+      return true;
+    } catch { return false; }
   }
   private disable(actor: ActorContext, binding: Row | undefined, expected: number): Json {
     if (!binding) return fail(404, 'channel_service_binding_not_found');

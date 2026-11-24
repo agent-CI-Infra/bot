@@ -75,6 +75,6 @@ export function validate(schema: Json, value: any): void {
 }
 const toolCommandSchema={...obj({operation:(commandSchema.properties as Json).operation,target:targetSchema,arguments:{type:'object'},expected_revision:str},['operation','target','arguments','expected_revision']),anyOf:Object.entries(commands).map(([operation,entry])=>obj({operation:{type:'string',enum:[operation]},target:targetSchema,arguments:entry.arguments,expected_revision:str},['operation','target','arguments','expected_revision']))};
 export const managementTools = [
-  { type:'function',function:{name:'management_query',description:'Read scoped persisted management facts. Never invent status, logs, costs or configuration.',parameters:querySchema} },
+  { type:'function',function:{name:'management_query',description:'Read scoped persisted management facts. Never invent status, logs, costs or configuration. list_schedule_destinations gives each Feishu chat its chat_id and name (the group name, or the Feishu name of the person in a private chat; null when none is known yet). Chat names and chat_ids are not secrets: show them as returned, never shorten or mask them, and refer to chats by name. When a name is null, say it is not known yet instead of guessing one.',parameters:querySchema} },
   { type:'function',function:{name:'management_command',description:'Execute an authorized business command. Read its current revision first. Authorized commands execute directly without an approval step.',parameters:toolCommandSchema} },
 ];

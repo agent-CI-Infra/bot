@@ -9,10 +9,12 @@ test('group names migrate, fill existing views and refresh without changing chat
   const f = await channelFixture(t), chat = await boundGroup(f), path = `/api/channels/chats/${chat.id}/name`;
   f.h.store.run("UPDATE channel_connectors SET tenant_name='Fixture enterprise' WHERE id=?", f.id);
   const before = { ...f.h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id) };
+  // Binding the group read its name once (#1360).
+  assert.equal(before.display_name, '项目讨论群'); assert.equal(f.wire.state.chatRequests.length, 1);
   f.h.store.db.exec('ALTER TABLE channel_chats DROP COLUMN display_name'); ledgerStorage(f.h.store); ledgerStorage(f.h.store);
   assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
   const list = await f.admin('/api/channels/conversations');
-  assert.equal(list.value.conversations[0].display_name, ''); assert.equal(f.wire.state.chatRequests.length, 0, 'listing reads only local metadata');
+  assert.equal(list.value.conversations[0].display_name, ''); assert.equal(f.wire.state.chatRequests.length, 1, 'listing reads only local metadata');
   f.wire.state.chatName = '  研发讨论群  ';
   const named = await f.admin(path, 'POST', {}); assert.equal(named.status, 201, JSON.stringify(named.value));
   assert.equal(named.value.display_name, '研发讨论群'); assert.equal(named.value.tenant_name, 'Fixture enterprise');
@@ -32,21 +34,23 @@ test('group names migrate, fill existing views and refresh without changing chat
 
 test('group name refresh checks group visibility before provider access and again after asynchronous lookup', async t => {
   const f = await channelFixture(t), chat = await boundGroup(f), reader = await f.member('name-reader', {});
-  const route = `/api/channels/chats/${chat.id}/name`;
-  assert.equal((await reader.client(route, 'POST', {})).status, 403); assert.equal(f.wire.state.chatRequests.length, 0);
+  const route = `/api/channels/chats/${chat.id}/name`, bound = f.wire.state.chatRequests.length;
+  // The name binding read (#1360) stays whenever a later refresh is refused.
+  f.wire.state.chatName = '改名后的群';
+  assert.equal((await reader.client(route, 'POST', {})).status, 403); assert.equal(f.wire.state.chatRequests.length, bound);
   bindFixture(f.h, f.id, reader.id, 'ou_name_reader');
   const quiet = inGroup('pick this group', 'ou_name_reader'); quiet.event.message.mentions = []; await post(f.h, f.id, quiet);
   let release; f.wire.state.chatGate = new Promise(resolve => { release = resolve; });
   t.after(() => release());
-  const pending = reader.client(route, 'POST', {}); await until(() => f.wire.state.chatRequests.length === 1);
+  const pending = reader.client(route, 'POST', {}); await until(() => f.wire.state.chatRequests.length === bound + 1);
   f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=?", reader.id); release();
   assert.equal((await pending).status, 403);
-  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '项目讨论群');
   f.wire.state.chatGate = new Promise(resolve => { release = resolve; });
-  const changed = f.admin(route, 'POST', {}); await until(() => f.wire.state.chatRequests.length === 2);
+  const changed = f.admin(route, 'POST', {}); await until(() => f.wire.state.chatRequests.length === bound + 2);
   f.h.store.run('UPDATE channel_connectors SET revision=revision+1 WHERE id=?', f.id); release();
   assert.equal((await changed).status, 409);
-  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '项目讨论群');
 });
 
 test('private conversation names require the exact active owner binding and keep the robot enterprise distinct', async t => {
@@ -281,16 +285,18 @@ const consoleAgainst = f => {
 const signInSandbox = page => page.run("me = { role: 'super_admin', csrf_token: 'fixture-csrf' }; renderVersion = 0;");
 
 test('a refused name lookup is tried once per chat, not on every redraw, and the button still retries it (#870)', async t => {
-  const f = await channelFixture(t), chat = await boundGroup(f);
-  assert.equal(chat.display_name, '', 'the fixture chat starts without a name');
+  const f = await channelFixture(t);
   f.wire.state.chatCode = 99991672; // the app is missing the contact scope, so the provider refuses every lookup
+  // Binding still succeeds when its name lookup (#1360) is refused; the chat stays without a name.
+  const chat = await boundGroup(f), bound = f.wire.state.chatRequests.length;
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '', 'the fixture chat starts without a name');
   const page = consoleAgainst(f), profile = JSON.stringify({ ...chat, can_refresh_name: true });
   signInSandbox(page);
   page.run(`var chat = ${profile};`);
   const draw = async () => { page.run('renderVersion++; var box = channelProfileDetails(chat)'); await settle(page); };
   await draw();
   assert.equal(nameLookups(page), 1, 'the first draw reads the missing name once');
-  await until(() => f.wire.state.chatRequests.length, count => count >= 1);
+  await until(() => f.wire.state.chatRequests.length, count => count >= bound + 1);
   await draw(); await draw();
   assert.equal(nameLookups(page), 1, 'redrawing the same chat does not ask the provider again');
   const refresh = page.run('box.children.find(node => node.tagName === "BUTTON")');
@@ -298,15 +304,16 @@ test('a refused name lookup is tried once per chat, not on every redraw, and the
   refresh.listeners.click[0]();
   await settle(page);
   assert.equal(nameLookups(page), 2, 'the reader can still retry by hand');
-  await until(() => f.wire.state.chatRequests.length, count => count >= 2);
+  await until(() => f.wire.state.chatRequests.length, count => count >= bound + 2);
   await draw();
   assert.equal(nameLookups(page), 2, 'and that failed retry is remembered too');
 });
 
 test('the group bindings section does not name every group again on each redraw (#870)', async t => {
-  const f = await channelFixture(t), chat = await boundGroup(f);
-  assert.equal(chat.display_name, '', 'the fixture chat starts without a name');
+  const f = await channelFixture(t);
   f.wire.state.chatCode = 99991672;
+  const chat = await boundGroup(f), bound = f.wire.state.chatRequests.length;
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '', 'the fixture chat starts without a name');
   const page = consoleAgainst(f), data = (await f.admin('/api/channels/service-bindings')).value;
   signInSandbox(page);
   page.run(`var groupData = ${JSON.stringify(data)};`);
@@ -314,7 +321,7 @@ test('the group bindings section does not name every group again on each redraw 
   await settle(page);
   const attempts = nameLookups(page);
   assert.ok(attempts > 0, 'the group editor reads the missing name');
-  await until(() => f.wire.state.chatRequests.length, count => count >= 1);
+  await until(() => f.wire.state.chatRequests.length, count => count >= bound + 1);
   const requests = f.wire.state.chatRequests.length;
   page.run('renderVersion++; buildGroupBindingEditor(groupData); buildGroupBindingsList(groupData)');
   await settle(page);
