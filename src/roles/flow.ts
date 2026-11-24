@@ -455,6 +455,17 @@ function canReadPrivateRunEvents(access: MemoryAccess | undefined, repoId: strin
   try { memoryAuthorize(access, repoId, true); return true; } catch { return false; }
 }
 
+/**
+ * #1207: `model_requests.state` is not a success flag. A request accounted for by the executor is a completed call,
+ * several states are real failures, and anything else stays unknown instead of being reported as a failure.
+ */
+function modelRequestStepStatus(state: string): 'ok' | 'error' | 'unknown' {
+  if (state === 'received' || state === 'external_received' || state === 'external_usage_unknown') return 'ok';
+  if (state === 'http_error' || state === 'transport_error' || state === 'invalid_response'
+    || state === 'guard_failed' || state === 'interrupted') return 'error';
+  return 'unknown';
+}
+
 /** Builds normalized per-run step summaries for non-`task_logs` harnesses (`process`, `claude_code`, `codex`, and runs recorded on the retired `native`) while enforcing memory ACLs. */
 function buildHistoryStepsForRun(
   store: Store,
@@ -466,11 +477,17 @@ function buildHistoryStepsForRun(
 ): Json[] {
   const safe = (v: any) => traceClean(v);
   const steps: Json[] = [];
-  const observationsByCall = new Map<string, { row: Row; data: any }>();
+  const observationsByCall = new Map<string, { row: Row; data: any; oversize?: boolean }>();
 
   for (const row of events) {
     if (row.type !== 'tool_observation') continue;
     const data = parseJson(row.data);
+    if (!data) {
+      // A masked observation still proves the call finished, and its body is read on demand from its own source.
+      const callId = row.oversize_call_id ? String(row.oversize_call_id) : '';
+      if (callId) observationsByCall.set(callId, { row, data: null, oversize: true });
+      continue;
+    }
     if (data?.call_id) observationsByCall.set(String(data.call_id), { row, data });
   }
 
@@ -481,7 +498,31 @@ function buildHistoryStepsForRun(
     const data = parseJson(row.data);
     if (!data) {
       // A body over 64 KiB is not shipped with the task detail: keep a placeholder step that reads it on demand.
-      if (row.type === 'role_run_event' || row.type === 'model_request') {
+      const callId = row.oversize_call_id ? String(row.oversize_call_id) : '';
+      if (row.type === 'tool_started') {
+        // #1207: the call itself stays a step; its arguments and a masked observation are read through their sources
+        // instead of the whole call disappearing or claiming a finished call is still running.
+        const obs = callId ? observationsByCall.get(callId) : undefined;
+        const obsOversize = !!obs?.oversize;
+        const obsError = !!(obs?.row as any)?.oversize_error;
+        const obsPayload = obsOversize ? null : (obs?.data?.observation?.data ?? obs?.data?.observation ?? null);
+        steps.push({
+          id: `hist:${row.id}`,
+          kind: 'tool',
+          tool: row.oversize_name ? String(row.oversize_name) : 'tool',
+          created_at: row.created_at,
+          status: !obs ? 'unknown' : obsError ? 'error' : 'ok',
+          source_ref: obs ? `task_history:${obs.row.id}` : `task_history:${row.id}`,
+          input_source: `task_history:${row.id}`,
+          output_source: obs ? `task_history:${obs.row.id}` : null,
+          arguments: null,
+          output: allowPrivate && obsPayload !== null ? safe(obsPayload) : null,
+          input_omitted: true,
+          output_omitted: obsOversize,
+          oversize: true,
+          body_omitted: !allowPrivate,
+        });
+      } else if (row.type === 'role_run_event' || row.type === 'model_request') {
         steps.push({
           id: `hist:${row.id}`,
           kind: 'event',
@@ -501,8 +542,10 @@ function buildHistoryStepsForRun(
       const callId = String(data.call_id ?? row.id);
       const name = String(data.name ?? 'tool');
       const obs = observationsByCall.get(callId);
-      const obsPayload = obs?.data?.observation?.data ?? obs?.data?.observation ?? null;
-      const isError = !!(obsPayload && typeof obsPayload === 'object' && obsPayload.error);
+      const obsOversize = !!obs?.oversize;
+      const obsPayload = obsOversize ? null : (obs?.data?.observation?.data ?? obs?.data?.observation ?? null);
+      const isError = !!(obs?.row as any)?.oversize_error
+        || !!(obsPayload && typeof obsPayload === 'object' && obsPayload.error);
       steps.push({
         id: `hist:${row.id}`,
         kind: 'tool',
@@ -514,6 +557,8 @@ function buildHistoryStepsForRun(
         output_source: obs ? `task_history:${obs.row.id}` : null,
         arguments: allowPrivate ? safe(data.arguments ?? {}) : null,
         output: allowPrivate && obsPayload !== null ? safe(obsPayload) : null,
+        output_omitted: obsOversize,
+        oversize: obsOversize,
         body_omitted: !allowPrivate,
       });
     } else if (row.type === 'model_request') {
@@ -530,7 +575,7 @@ function buildHistoryStepsForRun(
         kind: 'model',
         tool: null,
         created_at: row.created_at,
-        status: state === 'received' ? 'ok' : 'error',
+        status: modelRequestStepStatus(state),
         source_ref: `task_history:${row.id}`,
         input_source: allowPrivate ? requestSource : null,
         output_source: allowPrivate ? responseSource : null,
@@ -650,6 +695,10 @@ export function taskRoleTrace(store: Store, task: Record<string, any>, access?: 
         );
         const stepRows = store.all(
           `SELECT id,task_id,type,run_id,created_at,CASE WHEN length(data)<=65536 THEN data END AS data,
+             CASE WHEN length(data)>65536 THEN json_extract(data,'$.call_id') END AS oversize_call_id,
+             CASE WHEN length(data)>65536 THEN json_extract(data,'$.name') END AS oversize_name,
+             CASE WHEN length(data)>65536 THEN COALESCE(json_extract(data,'$.observation.data.error'),
+               json_extract(data,'$.observation.error')) END AS oversize_error,
              (SELECT m.model_name FROM model_requests m WHERE m.id=json_extract(task_history.data,'$.request_id')) AS model_name
            FROM task_history WHERE task_id=?
            AND type IN ('tool_started','tool_observation','role_run_event','model_request')

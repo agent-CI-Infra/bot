@@ -293,8 +293,8 @@ function summarizeHistoryStep(item, index) {
   }
   const caption = argHint ? `${label}：${argHint}` : label;
   const timeText = item.created_at ? timestamp(item.created_at).slice(11, 19) : '';
-  const tone = item.status === 'error' ? 'danger' : item.status === 'returned' ? 'warning' : item.status === 'running' ? 'info' : 'success';
-  const statusText = item.status === 'error' ? '异常' : item.status === 'returned' ? '发现问题' : item.status === 'running' ? '执行中' : '完成';
+  const tone = item.status === 'error' ? 'danger' : item.status === 'returned' ? 'warning' : item.status === 'running' ? 'info' : item.status === 'unknown' ? '' : 'success';
+  const statusText = item.status === 'error' ? '异常' : item.status === 'returned' ? '发现问题' : item.status === 'running' ? '执行中' : item.status === 'unknown' ? '状态未知' : '完成';
   const badgeNode = badge(statusText, tone);
 
   const bodyNodes = [];
@@ -312,6 +312,23 @@ function summarizeHistoryStep(item, index) {
         nodes: typeof item.output === 'string' ? [element('pre', item.output, 'output')] : [],
         source: item.output_source || null,
         truncated: !!item.output_truncated,
+      },
+    };
+  } else if (item.kind === 'tool' && (item.oversize || item.input_omitted || item.output_omitted)) {
+    // #1207: a tool row whose own body was over the detail limit keeps a source for each side instead of a bare
+    // 「没有记录」 or an empty call.
+    const inlineOutput = item.output !== null && item.output !== undefined && !item.output_omitted;
+    const inlineArgs = args && Object.keys(args).length;
+    io = {
+      input: {
+        nodes: inlineArgs ? [element('pre', JSON.stringify(args, null, 2), 'output')] : [],
+        source: item.input_source || null,
+        omitted: !!item.input_source && !inlineArgs,
+      },
+      output: {
+        nodes: inlineOutput ? [element('pre', jsonPreview(item.output), 'output')] : [],
+        source: item.output_source || null,
+        omitted: !!item.output_source && !inlineOutput,
       },
     };
   } else if (item.kind === 'tool' && !item.body_omitted) {
@@ -390,10 +407,27 @@ function createInnerStepFold(task, spec, foldState) {
   }
 
   const cache = new Map();
+  const unreadableText = reason => {
+    if (reason === 'not_captured_or_unavailable') return '这一步没有留下全文记录：原始请求或响应未被捕获。';
+    if (reason === 'role_private') return '当前授权看不到这条原始记录。';
+    if (reason === 'capture_limit_exceeded') return '原始记录超过捕获上限，只留下了预览，读不到全文。';
+    if (reason === 'blob_unavailable') return '原始记录的文件已不可用，读不到全文。';
+    if (reason === 'binary_utf8_conversion' || reason === 'sanitized_representation' || reason === 'blob_hash_mismatch') {
+      return '原始记录无法按原样展示（' + reason + '）。';
+    }
+    return '原始记录不完整（' + (reason || '原因未知') + '），读不到全文。';
+  };
   const readSource = ref => {
     if (!cache.has(ref)) {
       cache.set(ref, api(`/api/tasks/${encodeURIComponent(task.id)}/source?ref=${encodeURIComponent(ref)}`)
-        .then(res => stepSourceText(ref, res?.source ?? res)));
+        .then(res => {
+          const value = res?.source ?? res;
+          // #1207: a record that was never captured is missing; it is not a full text that happens to be JSON.
+          if (value && typeof value === 'object' && value.complete === false) {
+            return { complete: false, text: unreadableText(String(value.missing_reason || '')) };
+          }
+          return { complete: true, text: stepSourceText(ref, value) };
+        }));
     }
     return cache.get(ref);
   };
@@ -405,13 +439,18 @@ function createInnerStepFold(task, spec, foldState) {
       if (section.loaded) continue;
       section.loaded = true;
       readSource(section.source)
-        .then(text => { slot.replaceChildren(element('p', '以上是留下的全文。', 'muted step-io-note'), element('pre', text, 'output')); })
+        .then(result => {
+          if (!result.complete) { slot.replaceChildren(element('p', result.text, 'muted step-io-missing')); return; }
+          slot.replaceChildren(element('p', '以上是留下的全文。', 'muted step-io-note'), element('pre', result.text, 'output'));
+        })
         .catch(err => { slot.replaceChildren(element('p', '无法读取全文：' + readErrorText(err), 'muted')); });
     }
     if (spec.bodyOmitted && spec.sourceRef && !spec.io && !loadedSource) {
       loadedSource = true;
       readSource(spec.sourceRef)
-        .then(text => { body.replaceChildren(element('pre', text, 'output')); })
+        .then(result => {
+          body.replaceChildren(result.complete ? element('pre', result.text, 'output') : element('p', result.text, 'muted'));
+        })
         .catch(err => { body.replaceChildren(element('p', '无法读取步骤原始正文：' + readErrorText(err), 'muted')); });
     }
   });

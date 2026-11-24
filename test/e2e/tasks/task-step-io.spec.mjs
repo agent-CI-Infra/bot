@@ -28,7 +28,16 @@ async function fixture() {
     request_id: 'mr-1', state: 'received', http_status: 200,
     request_source: 'model_requests:mr-1:request', response_source: 'model_requests:mr-1:response',
   }), '2026-11-24T08:01:05Z', 'run-io', 'framework');
-  insHist.run('t-io', 'role_run_event', JSON.stringify({ type: 'message', data: { text: longOutput } }), '2026-11-24T08:02:00Z', 'run-io', 'agent');
+  // A request whose body was never captured: the expanded step must say why instead of calling JSON the full text.
+  h.store.run(
+    `INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,finished_at,http_status,state,request_snapshot,response_snapshot)
+     VALUES('mr-none','t-io','101','req-none','model-1','gpt-5.4','2026-11-24T08:02:30Z','2026-11-24T08:02:35Z',200,'external_received',NULL,NULL)`,
+  );
+  insHist.run('t-io', 'model_request', JSON.stringify({
+    request_id: 'mr-none', state: 'external_received', http_status: 200,
+    request_source: 'model_requests:mr-none:request', response_source: 'model_requests:mr-none:response',
+  }), '2026-11-24T08:02:35Z', 'run-io', 'framework');
+  insHist.run('t-io', 'role_run_event', JSON.stringify({ type: 'message', data: { text: longOutput } }), '2026-11-24T08:03:00Z', 'run-io', 'agent');
   return { h, password, close: async () => { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); } };
 }
 
@@ -51,12 +60,11 @@ test('a task step states its own input and output, keeps the full text readable 
     await expect(runs).toHaveCount(1);
     await runs.locator('summary').first().click();
     const steps = runs.locator('details.step-fold');
-    await expect(steps).toHaveCount(4);
+    await expect(steps).toHaveCount(5);
     for (const step of await steps.all()) expect(await step.evaluate(el => el.open)).toBe(false);
 
     // The recorded request pair is one step whose expanded body separates the prompt from the answer.
-    const request = steps.filter({ hasText: '模型请求' });
-    await expect(request).toHaveCount(1);
+    const request = steps.filter({ hasText: '模型请求' }).first();
     await expect(request).not.toContainText('请修复登录按钮。');
     await request.locator('summary').click();
     await expect(request).toContainText('这一步的输入');
@@ -70,6 +78,18 @@ test('a task step states its own input and output, keeps the full text readable 
     await expect(message).toContainText('这一步没有留下输入记录。');
     await expect(message).toContainText('以上是留下的全文。');
     await expect(message).toContainText('LONG-END');
+
+    // A request whose body was never captured says so; JSON that merely records the gap is not the full text.
+    const requests = steps.filter({ hasText: '模型请求' });
+    await expect(requests).toHaveCount(2);
+    const uncaptured = requests.nth(1);
+    await uncaptured.locator('summary').click();
+    await expect(uncaptured).toContainText('这一步的输入');
+    // Wait for the on-demand read to land: either the note or the missing-reason line appears at that point.
+    await expect(uncaptured.locator('.step-io-note, .step-io-missing').first()).toBeVisible();
+    await expect(uncaptured).not.toContainText('以上是留下的全文。');
+    await expect(uncaptured).not.toContainText('missing_reason');
+    await expect(uncaptured).toContainText('这一步没有留下全文记录');
 
     // Two read_file steps with the same title keep their own bodies.
     const reads = steps.filter({ hasText: '读取文件' });
