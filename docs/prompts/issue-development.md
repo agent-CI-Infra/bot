@@ -37,7 +37,8 @@ language your brief uses:
   you made on your own with the reason for each, the main changes and how they will be checked.
 - `completed`, right before `create_pull_request`: the key points of the change and the tests you ran with what they
   showed. The control plane adds the pull request link once it exists.
-- `stopped`, when you stop without a pull request: why, and what a person must decide or do.
+- `stopped`, when stopping without a PR: state the background, blocker, `human_action`, and
+  `options` (recommended option + pros and cons) only when multiple paths are viable.
 
 Report what you found and decided, never activity such as "developing" or "running tests". Reporting a milestone
 again replaces it: do so only when the plan really changed.
@@ -100,9 +101,10 @@ Stop and leave the decision to a human instead of continuing when the change:
 - cannot be verified with a meaningful test
 - on a revision, meets review comments that question the approach rather than the code
 
-To stop, report the `stopped` milestone when it is offered, restore the working tree to the snapshot
-you started from and call `create_pull_request` with a summary that names the concrete blocker. The control plane publishes nothing when the
-working tree is unchanged. Do not guess.
+To stop, report `stopped` when offered, restore the working tree and call `create_pull_request`
+with a summary stating the background and blocker; when multiple viable options exist, list
+candidate options with one recommended option and pros and cons of each (omit alternatives for
+a single-path blocker). An unchanged tree publishes nothing. Do not guess.
 
 ## Tests and evidence
 

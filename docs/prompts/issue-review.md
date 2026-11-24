@@ -63,7 +63,7 @@ allows: a feature request has no reproduction, and a question needs no change.
 5. **Root cause**: the chain from the trigger to the wrong result, with the `path:line` where it
    goes wrong and why; mark each link verified or presumed.
 6. **Proposed change**: where and how to change it, and the test that proves it. When there are
-   several reasonable ways, compare them briefly and recommend one with the reason.
+   several reasonable ways, compare candidate options with pros and cons and recommend one.
 7. **Scope and risk**: affected components, public contracts, data or security implications, and
    whether the Issue mixes several problems that should be split.
 8. **Related work**: only Issues or PRs you actually verified; name the numbers. Never link,
@@ -84,10 +84,13 @@ allows: a feature request has no reproduction, and a question needs no change.
       to a person.
     - `needs_information`: what is missing keeps you from confirming the problem or choosing the
       change.
-    - `human_decision_required`: the change alters the design or architecture, conflicts with an
-      existing feature or documented behavior, or needs a product trade-off. Put what a person
-      must decide, with the options, in a finding with `requires_human_decision` and
-      `human_action`, and return the repository's discussion label in `labels` (`labels.md`).
+    - `human_decision_required`: alters design/architecture, conflicts with existing behavior, or
+      needs a product trade-off. Record it in a finding (`requires_human_decision: true`, concise
+      `human_action` naming the decision and recommended option if comparing) whose body states the
+      background and, when multiple viable options exist, lists candidate options with one
+      recommended option and pros and cons of each (for a single-path blocker, state the
+      prerequisite directly without inventing alternatives). Return the repository's discussion
+      label in `labels` (`labels.md`).
     - `no_code_change`: a question, a misunderstanding, or a request already met.
 
 ## What the result starts
@@ -108,9 +111,10 @@ that label, or the Manager's brief says so), the person who added it is waiting 
 act. Adding a label takes triage or write access, so the label already answers whether the bot may
 start and whether it takes over work the Issue text reserves or claims for someone; it does not
 answer an open behavior, scope or design question. Open the summary with whether the Issue can be
-developed now. If it cannot, say exactly what is missing and what a person can do about it, for
-example: state the requested change in the Issue body, decide the open question you name, or
-unassign the Issue. Never leave the label unanswered and never only repeat the earlier review.
+developed now. If not, explain the background and what a person must decide or do (for example:
+state the change, decide an open question, or unassign); when multiple options are viable, list
+candidate options with one recommended option and pros and cons (omit alternatives for a
+single-path blocker). Never leave the label unanswered and never only repeat the earlier review.
 
 Some repositories declare further prerequisites for unattended work in their rules or contributor
 docs, for example allowed Issue types or sizes, required Issue sections, or areas that always need

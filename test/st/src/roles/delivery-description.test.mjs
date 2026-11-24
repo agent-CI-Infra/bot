@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
@@ -16,13 +16,14 @@ import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { developmentTeam } from '../../../../dist/roles/development.js';
 import { roleApi } from '../../../../dist/roles/api.js';
+import { roleAssignmentContext, workspaceProfile } from '../../../../dist/agent/profiles.js';
 
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 const receipts = body => body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(typeof m.content === 'string' ? m.content : m.content.map(c => c.text ?? '').join('')));
 const parameter = (body, tool, name) => body.tools.find(t => t.function.name === tool)?.function.parameters.properties[name];
 const devText = '## What changed\n\nThe fixture file now says delivered.\n\n## Verification\n\n`printf ok` printed ok.\n\n## Risk\n\nNone known.';
 
-async function fixture(t, respond) {
+async function fixture(t, respond, options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'bot-delivery-text-')), store = new Store(':memory:', randomBytes(32)), manager = new LocalManager('101', root), bodies = [];
   const model = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -44,7 +45,7 @@ async function fixture(t, respond) {
   await workspace.write('seed-write', 'fixture.txt', Buffer.from('baseline\n'));
   assert.equal((await workspace.call('seed-commit', { type: 'workspace_command', command: 'git init -q && git add fixture.txt && git -c user.name=Fixture -c user.email=fixture@example.test commit -qm baseline', timeout_ms: 10000 })).exit_code, 0);
   const published = [];
-  const run = () => developmentTeam(workspace, 'Implement', '{}', async (_, candidate) => { published.push(candidate); return { pr: { number: 1 } }; }, { read: true, write: true, shell: true });
+  const run = () => developmentTeam(workspace, options.system ?? 'Implement', options.prompt ?? '{}', async (_, candidate) => { published.push(candidate); return { pr: { number: 1 } }; }, { read: true, write: true, shell: true }, undefined, options.milestone);
   return { store, bodies, published, run };
 }
 
@@ -78,4 +79,54 @@ test('a nomination without summary publishes the developer\'s text, which the Ma
   const later = input(f.bodies.slice(before).find(body => body.tools.some(t => t.function.name === 'nominate_delivery'))).latest_dev_result;
   assert.deepEqual(later, { ref: receipt.result_ref, summary: devText, change_title: 'Say delivered' });
   assert.equal(f.published.length, 2); assert.equal(f.published[1].summary, devText);
+});
+
+test('team development adapts issue-development rules and tools from create_pull_request to submit_delivery (#1306)', { timeout: 90000 }, async t => {
+  const issueDevRules = readFileSync(new URL('../../../../docs/prompts/issue-development.md', import.meta.url), 'utf8');
+  const context = {
+    effective_rules: {
+      development_label: 'bot-develop',
+      files: [{ path: '.bot/rules/issue-development.md', source: 'default', effective: issueDevRules }],
+    },
+    // Issue content mentioning create_pull_request as data should remain untouched while rules are adapted.
+    object: { number: 42, title: 'Clarify create_pull_request vs submit_delivery' },
+  };
+  const profile = workspaceProfile('development.issue', context);
+  // Single-agent profile keeps create_pull_request intact.
+  assert.match(profile.system, /\bcreate_pull_request\b/);
+
+  const f = await fixture(t, body => {
+    if (body.tools.some(tool => tool.function.name === 'nominate_delivery')) {
+      const done = receipts(body).find(r => r.result_ref);
+      return done ? call('nominate_delivery', { result_ref: done.result_ref }) : call('delegate_role', { role: 'dev', purpose: 'Implement the change', refs: [] });
+    }
+    return body.messages.at(-1).role === 'tool'
+      ? call('submit_delivery', { summary: devText, test_command: 'printf ok', change_title: 'Say delivered' })
+      : call('write_file', { path: 'fixture.txt', content: 'delivered\n' });
+  }, { system: profile.system, prompt: JSON.stringify(roleAssignmentContext(context)), milestone: async () => ({ recorded: true, milestone: 'plan' }) });
+
+  await f.run();
+  const developer = f.bodies.find(body => body.tools.some(tool => tool.function.name === 'submit_delivery'));
+  assert.ok(developer, 'delegated dev request must be captured');
+
+  const devToolNames = developer.tools.map(tool => tool.function.name);
+  assert.ok(devToolNames.includes('submit_delivery'));
+  assert.ok(devToolNames.includes('report_development_milestone'));
+  assert.ok(!devToolNames.includes('create_pull_request'));
+
+  const devSystem = developer.messages.find(m => m.role === 'system').content;
+  assert.match(devSystem, /\bsubmit_delivery\b/);
+  assert.doesNotMatch(devSystem, /\bcreate_pull_request\b/, 'delegated dev system must not instruct calling create_pull_request');
+
+  const devInput = JSON.parse(developer.messages.find(m => m.role === 'user').content);
+  const original = JSON.parse(JSON.parse(devInput.source_context).original);
+  const adaptedRule = original.project_instructions.rules.find(r => r.section === 'development')?.content ?? '';
+  assert.match(adaptedRule, /call `submit_delivery`/);
+  assert.match(adaptedRule, /stopped[\s\S]*submit_delivery[\s\S]*background[\s\S]*options[\s\S]*recommended[\s\S]*pros and cons/i);
+  assert.doesNotMatch(adaptedRule, /\bcreate_pull_request\b/, 'team dev project_instructions rules must replace all create_pull_request instructions');
+  assert.equal(original.object.title, 'Clarify create_pull_request vs submit_delivery', 'non-rule issue data must remain untouched');
+
+  const milestoneDesc = developer.tools.find(tool => tool.function.name === 'report_development_milestone').function.description;
+  assert.match(milestoneDesc, /\bsubmit_delivery\b/);
+  assert.doesNotMatch(milestoneDesc, /\bcreate_pull_request\b/, 'team milestone tool description must reference submit_delivery');
 });

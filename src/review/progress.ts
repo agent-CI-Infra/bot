@@ -48,10 +48,13 @@ export const milestoneTool = { type: 'function', function: { name: milestoneTool
     changes: list('plan: the main changes you will make; completed: the key points of the change you made'),
     acceptance: list('plan: how the change will be checked: the tests and criteria'),
     tests: list('completed: the tests you ran and what they showed'),
-    reason: { type: 'string', description: 'stopped: why you stop' },
+    reason: { type: 'string', description: 'stopped: background and concrete blocker explaining what was checked and why you stop' },
+    options: { type: 'array', maxItems: 5, description: 'stopped: when multiple viable paths exist, list candidate options with one recommended option and pros and cons of each; omit for single-path blockers',
+      items: { type: 'object', additionalProperties: false, required: ['option', 'pros', 'cons'], properties: {
+        option: text, recommended: { type: 'boolean' }, pros: text, cons: text } } },
     human_action: { type: 'string', description: 'stopped: what a person must decide or do so that the work can go on' } } } } };
 
-const maxText = 1500, maxItem = 500;
+const maxText = 1500, maxStopText = 3000, maxItem = 500;
 type PublicationValues = Pick<Redactor, 'publicationPattern'>;
 const safe = (text: string, limit: number) => {
   text = text.trim();
@@ -81,7 +84,16 @@ export function reportMilestone(store: Store, taskId: string, args: any): { reco
     value = { changes: strings(args.changes), tests: strings(args.tests) };
     if (!value.changes.length || !value.tests.length) return invalid('A completed milestone needs the key points of the change (changes) and the tests you ran (tests).');
   } else if (kind === 'stopped') {
-    value = { reason: field(args.reason, maxText), human_action: field(args.human_action, maxText) };
+    const options = (Array.isArray(args.options) ? args.options : [])
+      .filter((o: any) => typeof o?.option === 'string' && o.option.trim())
+      .slice(0, 5)
+      .map((o: any) => ({
+        option: field(o.option, maxItem),
+        recommended: o.recommended === true,
+        pros: field(o.pros, maxItem),
+        cons: field(o.cons, maxItem),
+      }));
+    value = { reason: field(args.reason, maxStopText), human_action: field(args.human_action, maxStopText), ...(options.length ? { options } : {}) };
     if (!value.reason) return invalid('A stopped milestone needs the reason.');
   } else return invalid('milestone must be plan, completed or stopped.');
   // The comment has one language, the one its headings use (the Issue's, unless the project sets one): a milestone in the
@@ -161,7 +173,7 @@ const words = {
   zh: { title: 'bot 开发进展', status: '状态', working: '开发中', opened: (n: number) => `已开出 PR #${n}`, updated: (n: number) => `已更新 PR #${n}`, stopped: '已停止', paused: '已暂停',
     endedNoPr: '已结束（未开出 PR）', ended: '已结束', endedNoPrReason: '任务已正常结束，未开出 PR。', baseBranch: '基线分支',
     basis: '开始依据', goal: '目标', criteria: '验收标准', plan: '分析与计划', conclusion: '结论', decisions: '自动做的决定', changes: '主要改动', acceptance: '验收',
-    done: '完成', pr: 'PR', highlights: '修改重点', tests: '测试', stop: '停止', reason: '原因', action: '需要人做的',
+    done: '完成', pr: 'PR', highlights: '修改重点', tests: '测试', stop: '停止', reason: '原因', options: '备选方案', recommended: '推荐', pros: '优点', cons: '缺点', action: '需要人做的',
     footer: 'bot 只在这一条评论里更新这次开发的进展。',
     label: (who: string, label: string) => `${who} 加了开发标签「${label}」`, request: (who: string, url: string | null) => `维护者 ${who} 在${url ? `[评论](${url})` : '评论'}里要求开发`,
     rule: '项目 Manager 提示词里的规则允许 bot 自行开发', own: 'bot 从 Actions 失败提报的 Issue' },
@@ -169,7 +181,7 @@ const words = {
     stopped: 'Stopped', paused: 'Paused', endedNoPr: 'Ended (no pull request)', ended: 'Ended', endedNoPrReason: 'The task ended normally without opening a pull request.', baseBranch: 'Base branch',
     basis: 'Started on', goal: 'Goal', criteria: 'Acceptance criteria', plan: 'Analysis and plan', conclusion: 'Conclusion',
     decisions: 'Decisions made on its own', changes: 'Main changes', acceptance: 'Acceptance', done: 'Done', pr: 'Pull request', highlights: 'Key changes', tests: 'Tests',
-    stop: 'Stopped', reason: 'Reason', action: 'What a person needs to do', footer: 'The bot reports this development only in this comment.',
+    stop: 'Stopped', reason: 'Reason', options: 'Candidate options', recommended: 'Recommended', pros: 'Pros', cons: 'Cons', action: 'What a person needs to do', footer: 'The bot reports this development only in this comment.',
     label: (who: string, label: string) => `${who} added the development label "${label}"`, request: (who: string, url: string | null) => `maintainer ${who} asked for it in ${url ? `[a comment](${url})` : 'a comment'}`,
     rule: 'a rule of the project\'s Manager prompt lets the bot develop it on its own', own: 'the bot filed this Issue from an Actions failure' } };
 
@@ -223,9 +235,18 @@ export function renderProgress(row: Row, task: Row, redactor: PublicationValues 
     parts.push([`#### ${w.ended}`, field(w.reason, reason), ...(humanAction ? [field(w.action, humanAction)] : [])].join('\n\n'));
   } else if (now.stopped) {
     // The agent's reason when it stopped on its own (a milestone, or the summary of an unchanged tree), else the control plane's.
-    const own = m.stopped ?? (now.unchanged && now.result?.summary ? { reason: excerpt(now.result.summary, maxText, redactor) } : null);
+    const own = m.stopped ?? (now.unchanged && now.result?.summary ? { reason: excerpt(now.result.summary, maxStopText, redactor) } : null);
     const told = own ?? controlStop(language, now.status, String(task.error_code ?? now.status));
-    parts.push([`#### ${w.stop}`, field(w.reason, told.reason), ...(told.human_action || (told as any).action ? [field(w.action, told.human_action || (told as any).action)] : [])].join('\n\n'));
+    const sep = language === 'zh' ? '；' : '; ';
+    const formatOption = (o: any) => {
+      const badge = o.recommended ? (language === 'zh' ? `（${w.recommended}）` : ` (${w.recommended})`) : '';
+      const details = [o.pros ? `${w.pros}${colon}${o.pros}` : '', o.cons ? `${w.cons}${colon}${o.cons}` : ''].filter(Boolean).join(sep);
+      return `**${o.option}**${badge}${details ? `${colon}${details}` : ''}`;
+    };
+    const optionBlock = Array.isArray((told as any).options) && (told as any).options.length
+      ? [`**${w.options}**\n${bullets((told as any).options.map(formatOption))}`]
+      : [];
+    parts.push([`#### ${w.stop}`, field(w.reason, told.reason), ...optionBlock, ...(told.human_action || (told as any).action ? [field(w.action, told.human_action || (told as any).action)] : [])].join('\n\n'));
   }
   parts.push(`<sub>${w.footer}</sub>`, `<!-- dept-bot:development-status:${row.task_id} -->`);
   return publicText(parts.join('\n\n'), redactor);

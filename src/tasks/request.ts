@@ -907,7 +907,7 @@ export async function runRequest(
           function: {
             ...submit.function,
             name: 'submit_report',
-            description: 'Deliver your result as a report. This ends execution; nothing is published to GitHub. Use it whenever the goal is answered (for example Q&A or branch/PR test diagnostics), or when a needed write was not granted.',
+            description: 'Deliver your result as a report. This ends execution; nothing is published to GitHub. Use it whenever the goal is answered (for example Q&A or branch/PR test diagnostics), or for non-review tasks when a needed write was not granted or human decision is required (when post_review is offered for a formal review, publish human decisions through post_review with requires_human_decision: true instead). For human decisions, state the background in summary; when multiple viable options exist, list candidate options with one recommended option and pros and cons of each (omit alternatives for single-path blockers).',
           },
         };
         const openPullRequest = {
