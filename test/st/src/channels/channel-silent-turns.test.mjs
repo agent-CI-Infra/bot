@@ -65,7 +65,9 @@ test('stay_silent is refused once a merged message mentions the assistant, and t
   const mention = await post(f.h, f.id, inGroup('最近一次失败是什么？', 'ou_alice')); assert.equal(row(f, mention).state, 'merged');
   held.release(); await done(f, chat); await done(f, mention);
   assert.equal(bodies.length, 3);
-  assert.equal(toolResults(bodies[2]).at(-1).error, 'reply_required');
+  // The refused submission comes back as an observation with the reason, as on Pi.
+  const refused = toolResults(bodies[2]).at(-1);
+  assert.equal(refused.error, 'invalid_submission'); assert.equal(refused.code, 'reply_required');
   const delivered = await until(() => sent(f).find(s => s.includes('最近一次失败是 lint')));
   assert.doesNotMatch(delivered, /无需回复/);
   const view = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value.conversation.turns[0];

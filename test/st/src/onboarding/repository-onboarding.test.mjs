@@ -92,7 +92,7 @@ test('an administrator with zero started projects analyzes an unstarted reposito
   const unconfigured = await say(repoAdmin, conversation, '请分析 fixture/project-103');
   assert.ok(unconfigured.history.events.some(e => e.type === 'error' && e.data.error === 'service_role_model_not_configured' && /共享模型/.test(e.data.notice)));
 
-  await assistantModel(admin, model);
+  await assistantModel(f, model);
 
   // Direct management query also returns pending_repositories alongside empty started projects.
   const queryRes = await repoAdmin(`/api/management/conversations/${conversation}/messages`, 'POST',
@@ -172,7 +172,7 @@ test('an administrator with zero started projects mounts their personal computer
       { role: 'assistant', content: '已写入个人电脑。' },
     ];
   });
-  await assistantModel(admin, model);
+  await assistantModel(f, model);
 
   const repoAdmin = await person(f, 42, 'admin');
   const owner = ownerId({ kind: 'person', subject: repoAdmin.principal, tenant: '' });

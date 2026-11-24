@@ -70,7 +70,10 @@ test('a text preamble followed by a tool call resumes admission and incorporates
 });
 
 test('an empty model answer closes admission at its finish marker before delayed usage or platform work (#458)', async t => {
-  const f = await group(t), finished = gate(t), trailer = gate(t); let calls = 0;
+  // The native loop closes admission at the stream's finish marker; Pi closes it when the whole response has arrived, and
+  // a message admitted meanwhile returns to the queue when the turn finishes. Removed with the native loop in #1257.
+  const f = await channelFixture(t); await repositoryAssistant(f); f.groupHarness = 'native'; f.chat = await boundGroup(f);
+  const finished = gate(t), trailer = gate(t); let calls = 0;
   const binding = f.service.serviceBindings.get(f.chat.id);
   await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
     scope: { kind:'repositories', repositories:['101'] }, participation:'all', enabled:true, expected_revision:binding.revision });

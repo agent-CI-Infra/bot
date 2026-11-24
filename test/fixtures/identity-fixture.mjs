@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { GitHubIdentity } from '../../dist/identity/github.js';
 import { GitHubLogin } from '../../dist/identity/github-login.js';
 import { harness, setup, account, repository } from './helpers.mjs';
+import { withLentSessionWorkspaces } from './scripted-roles.mjs';
 
 function roleFlags(role) {
   const value = String(role || '').toLowerCase();
@@ -230,7 +231,8 @@ export async function identityFixture(t, options = {}) {
   const { wizardOnly = false, github = false, extra, ...serverOptions } = options;
   const { state, base, server } = await githubIdentityServer(t);
   let identity, githubLogin;
-  const h = await harness(t, undefined, store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); githubLogin = wizardOnly ? new GitHubLogin(store, { apiUrl: base, webUrl: base }) : undefined; return { ...(githubLogin ? { githubLogin } : { githubIdentity: identity }), ...(github ? { githubUrl: base } : {}), ...serverOptions, ...(extra?.(store) ?? {}) }; });
+  // Service assistants on the scripted test driver borrow an empty session workspace (#1256; scripted-roles.mjs).
+  const h = await harness(t, undefined, withLentSessionWorkspaces(store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); githubLogin = wizardOnly ? new GitHubLogin(store, { apiUrl: base, webUrl: base }) : undefined; return { ...(githubLogin ? { githubLogin } : { githubIdentity: identity }), ...(github ? { githubUrl: base } : {}), ...serverOptions, ...(extra?.(store) ?? {}) }; }));
   identity.config.redirectUri = h.admin + '/auth/github/callback';
   const { admin, password } = await setup(h), a = await account(admin, { type: 'github_app', app_id: '123', token: undefined, private_key: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) }); await repository(admin, a.id, '101');
   // Another tenant has an enabled project. It is never in the user's App installation.

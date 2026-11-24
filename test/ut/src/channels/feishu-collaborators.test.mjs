@@ -30,14 +30,16 @@ test('a Write collaborator lists tasks and creates a development task from a pri
 
   // A Read collaborator sees the same tasks, and the same request is refused before anything is created.
   Object.assign(f.github.state, { permission: 'read' }); await f.person(61, 'reader', 'ou_reader');
-  scriptedModel(f, createSteps);
+  let refused;
+  scriptedModel(f, [...createSteps.slice(0, 3), done => { refused = done[2]; return '你在 101 只有读权限，不能创建开发任务。'; }]);
   const read = await f.privately('ou_reader', '看看 101 的任务，然后建一个修复登录测试的开发任务');
-  assert.equal(read.state, 'failed');
-  // A refused command ends the assistant's turn as failed, by design; the person is told it lacks the permission.
+  // The refusal comes back to the assistant, which tells the person (maintainers' decision on #1256); the turn completes.
+  assert.equal(read.state, 'completed', read.error);
   const message = h.store.get('SELECT * FROM management_messages WHERE id=?', read.message_id);
-  assert.equal(message.state, 'failed');
+  assert.equal(message.state, 'completed');
   assert.equal(h.store.all("SELECT 1 FROM management_events WHERE message_id=? AND type='tool_result'", message.id).length, 2, 'listing tasks and reading the project worked');
-  await f.sent('没有访问此对象或执行此操作的权限');
+  assert.match(String(refused?.error), /forbidden|not_allowed/);
+  await f.sent('只有读权限，不能创建开发任务');
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, before + 1);
   assert.ok(!JSON.stringify(f.wire.sent).includes('当前账户没有可访问的项目'));
 });

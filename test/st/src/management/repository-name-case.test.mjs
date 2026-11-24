@@ -19,7 +19,7 @@ test('management turns resolve a case-different repository name, correct an unkn
     call(3, ['github_write', { repository: 'FIXTURE/PROJECT-101', method: 'POST', path: '/not-a-supported-write', body: {}, key: 'case-write' }]),
     reply('已读取 fixture/project-101。'),
   ]);
-  await assistantModel(admin, provider);
+  await assistantModel(f, provider);
 
   const conversation = (await admin('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
   const turn = await say(admin, conversation, '请读取这个仓库的 README');
@@ -50,7 +50,7 @@ test('an onboarding turn resolves a case-different name of its unstarted reposit
     call(0, ['start_repository', { action: 'status', repository: 'FIXTURE/PROJECT-103' }]),
     reply('fixture/project-103 尚未启动。'),
   ]);
-  await assistantModel(admin, provider);
+  await assistantModel(f, provider);
 
   const repositoryAdmin = await person(f, 42, 'admin');
   const conversation = (await repositoryAdmin('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;

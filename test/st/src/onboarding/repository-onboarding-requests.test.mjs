@@ -30,7 +30,7 @@ test('a direct start_repository request reaches super administrators, is checked
       { role: 'assistant', content: '已提交启动申请，等待超级管理员处理。' },
     ];
   });
-  await assistantModel(admin, model);
+  await assistantModel(f, model);
 
   const requester = await person(f, 42, 'admin'), writer = await person(f, 43, 'write');
   const feishu = await connector(admin), superAdmin = (await admin('/api/auth/me')).value.id;
@@ -118,7 +118,7 @@ test('a super administrator decides a direct start request by answering its noti
   const { h, admin, state } = f;
   installed(f, '103'); installed(f, '104'); installed(f, '105'); state.accessible = ['103', '104', '105']; repositoryRoutes(f);
 
-  const model = await provider(t, context => {
+  const model = await provider(t, (context, body) => {
     const text = typeof context.request === 'string' ? context.request : JSON.stringify(context.request?.messages ?? context.request ?? '');
     const askMatch = /申请启动\s*(\d+)/.exec(text);
     if (askMatch) {
@@ -127,11 +127,13 @@ test('a super administrator decides a direct start request by answering its noti
     }
     const pending = context.pending_start_requests?.[0];
     if (!pending) return [{ role: 'assistant', content: '没有待处理的启动申请。' }];
+    // A refused decision comes back as the tool's observation; the assistant then reports it.
+    const refused = body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content)).find(result => result.error)?.error;
     return /拒绝/.test(text)
       ? [call(0, ['start_requests', { action: 'reject', request_id: pending.id, reason: '先确认谁来维护。' }]), { role: 'assistant', content: '已拒绝。' }]
-      : [call(0, ['start_requests', { action: 'approve', request_id: pending.id }]), { role: 'assistant', content: '已同意，项目已启动。' }];
+      : [call(0, ['start_requests', { action: 'approve', request_id: pending.id }]), { role: 'assistant', content: refused ? `没有同意：${refused}` : '已同意，项目已启动。' }];
   });
-  await assistantModel(admin, model);
+  await assistantModel(f, model);
 
   const requester = await person(f, 42, 'admin');
   const feishu = await connector(admin), superAdmin = (await admin('/api/auth/me')).value.id;
@@ -173,7 +175,8 @@ test('a super administrator decides a direct start request by answering its noti
   assert.equal(projectCeiling(h.store, '103'), 'develop');
   await told('oc_bob', 'fixture/project-103 的启动申请已同意');
 
-  // Decided on 待处理 while Feishu turn is in flight: ends with onboarding_request_closed.
+  // Decided on 待处理 while the Feishu turn is in flight: the approval is refused with onboarding_request_closed, which comes
+  // back to the assistant (maintainers' decision on #1256); the console's decision stands.
   const third = await requestStart('104'), before = model.requests.length;
   let release; model.state.gate = new Promise(resolve => { release = resolve; });
   const operation = (await post(h, feishu, envelope('同意', { message: { chat_id: 'oc_admin' } }))).value.operation_id;
@@ -181,8 +184,9 @@ test('a super administrator decides a direct start request by answering its noti
   assert.equal((await admin(`/api/management/onboarding-requests/${third.id}/reject`, 'POST', { reason: '已在控制台处理。' })).status, 201);
   model.state.gate = null; release();
   await finished(h, operation);
-  assert.equal(managementOutcome(h, operation).error, 'onboarding_request_closed');
-  await told('oc_admin', '这份启动申请已经有人处理过');
+  assert.equal(managementOutcome(h, operation).message, 'completed');
+  await told('oc_admin', '没有同意：onboarding_request_closed');
+  assert.deepEqual(decided(third.id), ['rejected', '已在控制台处理。', superAdmin]);
 
   // Organization-confined Feishu app sends super administrator to 待处理.
   h.store.run("UPDATE channel_connectors SET owner_tenant='github.com:10' WHERE id=?", feishu);

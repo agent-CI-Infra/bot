@@ -1,8 +1,8 @@
 // A test-only role driver (#1256). In-process tests of role and task mechanics run their scripted fake model through it.
 // It is registered in the test process only and as unlisted (`listed: false`), so no production process has it and no
 // backend listing offers it, even in a long-lived test process such as a Playwright worker. It keeps its own model
-// and tool exchange, the process driver's worker loop (runner/role-worker.mjs) without the child process, and never runs
-// the control-plane tool loop that #1257 removes.
+// and tool exchange and never runs the control-plane tool loop that #1257 removes: a role run follows the process
+// driver's worker loop (runner/role-worker.mjs) without the child process, a service assistant's turn follows Pi.
 // The store first: entered at roles/harness.js, the module graph would run tasks/followups.js before tasks/priority.js
 // has finished (a test file may import this fixture before anything else).
 import '../../dist/storage/database.js';
@@ -12,13 +12,63 @@ import { toolArguments, toolCallsProblem, finalizationReserve } from '../../dist
 import { stop } from '../../dist/agent/common.js';
 import { traceEvent } from '../../dist/tasks/trace.js';
 import { consumePendingTaskUpdates } from '../../dist/review/bot-pr-wake.js';
+import { createTaskToolDispatcher } from '../../dist/roles/task-tools.js';
 
 export const scriptedHarness = 'scripted';
 registerRoleHarness({ id: scriptedHarness, version: 'test', listed: false, session: 'checkpoint_transcript', events: 'tool_observations',
   kinds: ['controller', 'writer', 'observer', 'evaluator'], structured_output: ['tool_call', 'text_json'],
   capabilities: { raw_evidence: 'control_plane_tools', cancel: 'abort_signal', isolation: 'none', version_binding: true, output_validation: true,
-    fresh_context: true, recovery: ['checkpoint_restore', 'rebuilt_from_task_records'] } },
-spec => services => run(spec, services));
+    fresh_context: true, recovery: ['checkpoint_restore', 'rebuilt_from_task_records'] }, steered_turns: true },
+spec => services => serviceTurn(spec) ? runServiceTurn(spec, services) : run(spec, services));
+
+// serviceHarnessTurn's run context is the only one with the assistant environment profile.
+const serviceTurn = spec => spec.runContext?.()?.execution_context?.environment_profile === 'assistant';
+
+/**
+ * A service assistant's turn (#1256), as Pi works it (runner/pi-entry.mjs with src/agent/pi.ts), so in-process tests of the
+ * management and group assistants check what production runs. Tools run through the harness tool dispatcher: a
+ * correctable refusal comes back to the model as an observation, results are bounded and tool images return with them. An
+ * answer in text ends the turn; a finishing call (finish, or stay_silent when the turn may stay silent) ends it with its
+ * submission. With the steering serviceHarnessTurn gives a driver declaring `steered_turns` (spec.pi.service), messages
+ * taken before the first request and at each boundary after a tool batch join as user messages, the answer streams, and
+ * each response says whether it called tools. An edit throws from the steering or a tool call, and serviceHarnessTurn
+ * starts the turn again.
+ */
+async function runServiceTurn(spec, services) {
+  const steering = spec.pi?.service, maxTurns = spec.maxTurns ?? 32, tools = spec.tools ?? [];
+  const messages = [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
+  const join = added => { for (const content of added ?? []) messages.push({ role: 'user', content }); };
+  if (steering) join(steering.steer());
+  const onToken = steering && (async delta => { if (typeof delta?.content === 'string' && delta.content) await steering.text(spec.redactor.text(delta.content)); });
+  const dispatcher = createTaskToolDispatcher(spec, { includeSubmissionDetails: true });
+  try {
+    for (let turn = 0; turn < maxTurns; turn++) {
+      await services.guard();
+      // Each model step as it starts, as Pi's runner reports it for a service turn (#1296).
+      spec.onHarnessEvent?.({ type: 'model_start', step: turn + 1 });
+      const { value } = await services.request({ messages, tools, tool_choice: tools.length ? 'auto' : 'none' }, `turn:${turn}`, onToken);
+      const message = value?.choices?.[0]?.message;
+      if (!message) stop('agent_output_invalid');
+      const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      steering?.responded(calls.length > 0);
+      if (!calls.length) return spec.onTurnEnd({ text: spec.redactor.text(typeof message.content === 'string' ? message.content : '') });
+      if (toolCallsProblem(calls)) stop('agent_tool_calls_invalid');
+      messages.push(spec.redactor.clean({ role: 'assistant', content: typeof message.content === 'string' ? message.content : null, tool_calls: calls }));
+      for (const call of calls) {
+        await services.guard();
+        const args = toolArguments(call);
+        // Arguments that are not a JSON object come back for the model to correct, as Pi's own validation does.
+        const out = args === null || typeof args !== 'object' || Array.isArray(args) ? { observation: { error: 'invalid_arguments', detail: 'Tool arguments must be a JSON object.' } }
+          : await dispatcher.call(dispatcher.token, { id: call.id, name: call.function.name, arguments: args, transport: 'mailbox' });
+        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(out.observation) });
+        if (out.submitted) return dispatcher.result;
+        if (out.images?.length) messages.push({ role: 'user', content: out.images.map(image => ({ type: 'image_url', image_url: { url: `data:${image.mimeType};base64,${image.data}` } })) });
+      }
+      if (steering) join((await steering.boundary()).messages);
+    }
+    stop('agent_turn_limit', 'failed', `Agent 达到 ${maxTurns} 轮上限，请检查已取得的证据后继续。`);
+  } finally { await dispatcher.close(); }
+}
 
 async function run(spec, services) {
   const maxTurns = spec.maxTurns ?? 32, finishes = spec.finish ? spec.finish.names ?? [spec.finish.name] : [];

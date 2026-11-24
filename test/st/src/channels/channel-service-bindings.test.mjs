@@ -17,6 +17,7 @@ import { ChannelServiceBindings } from '../../../../dist/channels/service-bindin
 import { serviceRolesApi } from '../../../../dist/service-roles/api.js';
 import { deleteProjectRecords } from '../../../../dist/projects/removal.js';
 import { OwnTasks } from '../../../../dist/service-roles/own-tasks.js';
+import { scriptedGroup } from '../../../fixtures/scripted-roles.mjs';
 
 // Groups bind one service role and one project scope (#312). All GitHub and Feishu traffic goes to local protocol fixtures.
 const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -62,10 +63,13 @@ async function fixture(t, manager = undefined) {
   await shareAssistantModel(f);
   const discovery = groupMessage('Group discussion before binding', 'ou_alice'); discovery.event.message.mentions = []; await post(h, f.id, discovery);
   const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
-  const bind = (input = {}, chatId = chat.id) => f.admin('/api/channels/chats/' + chatId + '/service-binding', 'PUT', {
-    model_id: f.assistantModel.id,
-    // Native, as the in-process fixture model needs (#1255; test/fixtures/native-roles.mjs).
-    scope: { kind: 'repositories', repositories: ['101', '102'] }, participation: 'mentions', harness: 'native', enabled: true, expected_revision: 0, ...input });
+  // A new binding runs the scripted test driver, as the in-process fixture model needs (#1256; scripted-roles.mjs).
+  const bind = async (input = {}, chatId = chat.id) => {
+    const saved = await f.admin('/api/channels/chats/' + chatId + '/service-binding', 'PUT', {
+      model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101', '102'] }, participation: 'mentions', enabled: true, expected_revision: 0, ...input });
+    if (saved.status === 200 && input.harness === undefined) scriptedGroup(h.store, chatId);
+    return saved;
+  };
   /** Change what the group may do (#849, #1249): a level name, or individual items as the advanced editor sends them. */
   const setLevel = async (value, chatId = chat.id) => {
     const current = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === chatId);
@@ -319,7 +323,8 @@ test('two groups on the same role keep separate scopes; a grantor losing a repos
   const second = groupMessage('Second group discussion', 'ou_alice', 'oc_group_2'); second.event.message.mentions = []; await post(h, f.id, second);
   const chat2 = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group_2'");
   const actor = maintainer(f, 'maintainer', ['101', '102'], 'ou_maintainer');
-  await f.service.serviceBindings.configure(actor, f.chat.id, { model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101', '102'] }, harness: 'native', enabled: true, expected_revision: 0 });
+  await f.service.serviceBindings.configure(actor, f.chat.id, { model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 });
+  scriptedGroup(h.store, f.chat.id);
   assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['201'] } }, chat2.id)).status, 200);
   let target;
   f.modelState.respond = async (body, res) => { const seen = observations(body); return !seen.length ? call(res, 'list_projects', {}) : seen.length === 1 ? call(res, 'github_read', { repository: target, path: '/pulls' }) : say(res, 'done ' + target); };
@@ -362,7 +367,7 @@ test('legacy group employees migrate once to a repository assistant binding; the
   assert.equal(binding.migrated_from, 'channel_employee'); assert.equal(binding.configured_by, f.principal); assert.equal(binding.owner_id, f.principal);
   // A migrated group starts on the default backend (#1255); this one answers through the in-process fixture model.
   assert.equal(binding.harness, 'pi');
-  h.store.run("UPDATE channel_service_bindings SET harness='native' WHERE id=?", binding.id);
+  scriptedGroup(h.store, chat.id);
   assert.deepEqual(h.store.all('SELECT project_id,grantor_id FROM scoped_grants WHERE principal_id=?', binding.principal_id).map(g => [g.project_id, g.grantor_id]), [['101', f.principal]]);
   assert.equal(h.store.get('SELECT enabled FROM channel_employee_grants WHERE id=?', legacy.id).enabled, 1);
   assertManagedExecution(h.store, h.store.get('SELECT * FROM tasks WHERE id=?', created.id));
@@ -512,12 +517,15 @@ test('a group assistant works a side question in its own task with the same tool
   assert.deepEqual(hidden.own_tasks, []); assert.equal(refused.error, 'own_task_not_found');
 });
 
-test('a group assistant reads ten repositories with one tool call each in a single step; large results share one bounded budget (#333)', async t => {
+// One tool batch sharing one result budget is the native loop's (#333). A steering driver (Pi, here the scripted driver)
+// bounds each result by itself; its session's compaction and result files replace that budget (#1253). The Native half
+// goes with the native loop in #1257.
+for (const native of [true, false]) test(`a group assistant reads ten repositories with one tool call each in a single step; ${native ? 'on Native large results share one bounded budget' : 'each result is bounded by itself'} (#333)`, async t => {
   const f = await fixture(t), ids = ['101', '102', '103', '104', '105', '106', '107', '108', '109', '110'];
   for (const id of ids.slice(2)) await repository(f.admin, f.a.id, id);
   f.h.store.run("UPDATE repositories SET full_name='agent-test-zone/admin-fixture-'||id,owner_id='10' WHERE id<>'201'");
   await shareAssistantModel(f);
-  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ids } }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ids }, ...(native ? { harness: 'native' } : {}) }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
   assert.equal(bound.value.reachable.length, 10);
   // Every repository has many open PRs with long Chinese titles: each result alone is larger than its share.
   for (const id of ids) f.gh.state.pulls['admin-fixture-' + id] = Array.from({ length: 60 }, (_, n) => ({ number: n + 1, title: '修复跨仓库并发查询时的上下文膨胀问题'.repeat(8), state: 'open' }));
@@ -540,6 +548,13 @@ test('a group assistant reads ten repositories with one tool call each in a sing
   const second = bodies[1], tools = second.messages.filter(m => m.role === 'tool');
   assert.deepEqual(tools.map(m => m.tool_call_id), ['call-projects', ...ids.map(id => 'call-pulls-' + id)]);
   assert.equal(JSON.parse(tools[0].content).projects.length, 10);
+  if (!native) {
+    for (const message of tools.slice(1)) {
+      assert.ok(Buffer.byteLength(message.content) <= 256 * 1024 + 512, 'each result is bounded by itself');
+      assert.equal(JSON.parse(message.content).truncated, undefined, 'a result within its own bound is whole');
+    }
+    return;
+  }
   for (const message of tools.slice(1)) {
     const result = JSON.parse(message.content);
     assert.equal(result.truncated, true); assert.match(result.notice, /read_tool_result/); assert.ok(result.file); assert.match(result.fields.repository, /admin-fixture-1\d\d$/);
@@ -752,8 +767,10 @@ test('a project administrator binds one group at read and another at dispatch; e
   // A project administrator of 101 only, no super administrator involved.
   const admin = maintainer(f, 'project-admin', ['101'], 'ou_project_admin');
   const scope = { kind: 'repositories', repositories: ['101'] };
-  const a = await bindings.configure(admin, f.chat.id, { model_id: f.assistantModel.id, scope, level: 'read', harness: 'native', enabled: true, expected_revision: 0 });
-  const b = await bindings.configure(admin, chatB.id, { model_id: f.assistantModel.id, scope, level: 'dispatch', harness: 'native', enabled: true, expected_revision: 0 });
+  const a = await bindings.configure(admin, f.chat.id, { model_id: f.assistantModel.id, scope, level: 'read', enabled: true, expected_revision: 0 });
+  scriptedGroup(h.store, f.chat.id);
+  const b = await bindings.configure(admin, chatB.id, { model_id: f.assistantModel.id, scope, level: 'dispatch', enabled: true, expected_revision: 0 });
+  scriptedGroup(h.store, chatB.id);
   assert.deepEqual([a.level, b.level, a.owner, b.owner], ['read', 'dispatch', 'project-admin', 'project-admin']);
   assert.equal(b.permissions.github_contents, 'read', 'dispatch never includes Contents write');
   const grants = chat => JSON.parse(h.store.get("SELECT g.capabilities FROM scoped_grants g JOIN channel_service_bindings b ON b.principal_id=g.principal_id WHERE b.chat_id=?", chat).capabilities);
@@ -854,8 +871,8 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
   assert.equal(view(f.chat.id).prompt, '负责协助派活\n\n先说结论。');
   // Mutating the retired service_roles row no longer affects the migrated binding's model, prompt or permissions.
   h.store.run("UPDATE service_roles SET permissions=?,prompt='已被废弃',model_id=NULL WHERE id='custom-legacy'", JSON.stringify({ github: 'none', delegation: 'deny' }));
-  // Reset harness to native for native scripted model verification.
-  h.store.run("UPDATE channel_service_bindings SET harness='native' WHERE chat_id=?", f.chat.id);
+  // The migrated binding answers through the in-process fixture model on the scripted test driver.
+  scriptedGroup(h.store, f.chat.id);
   let system;
   f.modelState.respond = async (body, res) => {
     system = body.messages[0].content; const seen = observations(body);
@@ -960,13 +977,15 @@ test('a project administrator configures a group directly with a project model o
   assert.deepEqual(roles(f, pa.user, 'GET', '/api/service-roles').value.service_roles, []);
   assert.equal(roles(f, pa.user, 'POST', '/api/service-roles', { project_id: '101', name: 'x' }).value.error, 'super_admin_required');
   // Single-repo group with project 101's own model and custom prompt: succeeds and bills project 101.
-  const bound = await bindings.configure(pa.context, f.chat.id, { model_id: own.id, prompt: '先给结论。', scope: { kind: 'repositories', repositories: ['101'] }, harness: 'native', enabled: true, expected_revision: 0 });
+  const bound = await bindings.configure(pa.context, f.chat.id, { model_id: own.id, prompt: '先给结论。', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 });
+  scriptedGroup(h.store, f.chat.id);
   assert.deepEqual([bound.state, bound.model_id, bound.model.project_id, bound.prompt], ['active', own.id, '101', '先给结论。']);
   // Project 101's own model cannot cover a 2-repo group; refusal names project 102.
   await assert.rejects(bindings.configure(pa.context, chatB.id, { model_id: own.id, prompt: '跨仓问答。', scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 }),
     error => error.code === 'channel_service_model_unavailable' && JSON.stringify(error.detail) === JSON.stringify({ projects: [repo(102)] }));
   // With a shared model covering both repos, the project admin configures a multi-repo group with a custom prompt without needing a super admin!
-  const multi = await bindings.configure(pa.context, chatB.id, { model_id: f.assistantModel.id, prompt: '先汇总双仓差异。', scope: { kind: 'repositories', repositories: ['101', '102'] }, harness: 'native', enabled: true, expected_revision: 0 });
+  const multi = await bindings.configure(pa.context, chatB.id, { model_id: f.assistantModel.id, prompt: '先汇总双仓差异。', scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 });
+  scriptedGroup(h.store, chatB.id);
   assert.deepEqual([multi.state, multi.model_id, multi.prompt], ['active', f.assistantModel.id, '先汇总双仓差异。']);
   // Organization scope refuses a project-owned model.
   const tenant = h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
