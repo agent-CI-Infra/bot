@@ -318,30 +318,28 @@ export function moveNativeRolesToPi(s: Store): { projects: number; roles: number
 }
 
 /**
+ * A role moved to Pi by a start-up migration (#1257, #1337, #1338), under its next role revision. Its pinned model stays; a
+ * profile that answered in text_json, which only the removed Process driver read, now answers through tool calls like every
+ * remaining backend (#1338).
+ */
+const onPi = (role: any) => ({ ...role, harness_ref: harnessRef('pi'), revision: Number(role.revision ?? 0) + 1,
+  ...(role?.model_profile_ref?.structured_output === 'text_json' ? { model_profile_ref: { ...role.model_profile_ref, structured_output: 'tool_call' } } : {}) });
+
+/**
  * The project role part of retiring Native (#1257, run once by src/roles/native-to-pi.ts inside its transaction), for what
  * #1255 left: roles chosen as Native by hand since, roles kept on Native because their pinned model profile answers in
- * text_json, frozen task configurations and role instances. A role moves to Pi, or to Process when its pinned model profile
- * needs text_json output (Pi cannot take it; Process can, and runs in the control plane as Native did).
+ * text_json, frozen task configurations and role instances. Every such role moves to Pi (see onPi; Process, which these
+ * text_json roles went to before, is gone since #1338).
  * - Saved configurations: V2 roles under a new configuration revision (`updated_by: migration:1257`), legacy `harnesses`
  *   entries in place.
  * - Frozen `task_execution_configs` snapshots, as #705 did for ACP, so a waiting or reopened task resumes instead of
  *   stopping at `unknown_role_harness`.
- * - `role_instances`: the backend of its task's (migrated) role, else Pi; session and harness state are cleared, so the
- *   next run rebuilds from task records.
+ * - `role_instances` move to Pi; session and harness state are cleared, so the next run rebuilds from task records.
  */
-export function retireNativeRoles(s: Store): { projects: number; roles: number; process: number; tasks: number; instances: number } {
-  const pi = harnesses.find(h => h.id === 'pi')!, counts = { projects: 0, roles: 0, process: 0, tasks: 0, instances: 0 };
-  const target = (role: any) => { const output = role?.model_profile_ref?.structured_output; return output && !pi.structured_output.includes(output) ? 'process' : 'pi'; };
+export function retireNativeRoles(s: Store): { projects: number; roles: number; tasks: number; instances: number } {
+  const counts = { projects: 0, roles: 0, tasks: 0, instances: 0 };
   // A V2 role list with its Native roles moved; null when none was Native.
-  const moveRoles = (roles: any[]) => {
-    let moved = 0;
-    const next = roles.map(role => {
-      if (role?.harness_ref?.id !== 'native') return role;
-      moved++;
-      return { ...role, harness_ref: harnessRef(target(role)), revision: Number(role.revision ?? 0) + 1 };
-    });
-    return moved ? next : null;
-  };
+  const moveRoles = (roles: any[]) => roles.some(role => role?.harness_ref?.id === 'native') ? roles.map(role => role?.harness_ref?.id === 'native' ? onPi(role) : role) : null;
   const moveMap = (map: Record<string, unknown>) => Object.values(map).includes('native') ? Object.fromEntries(Object.entries(map).map(([id, harness]) => [id, harness === 'native' ? 'pi' : harness])) : null;
 
   for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%' AND value LIKE '%native%'")) {
@@ -363,13 +361,10 @@ export function retireNativeRoles(s: Store): { projects: number; roles: number; 
     const saved = { ...config, updated_at: now, updated_by: 'migration:1257' };
     s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:1257', now);
     s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
-    const moved = current.roles.filter(role => role.harness_ref?.id === 'native');
-    counts.projects++; counts.roles += moved.length; counts.process += moved.filter(role => target(role) === 'process').length;
+    counts.projects++; counts.roles += current.roles.filter(role => role.harness_ref?.id === 'native').length;
     s.audit('migration:1257', 'roles.native_retired', String(saved.revision), repositoryId);
   }
 
-  // The role backends each migrated task now runs, for its role instances below.
-  const taskRoles = new Map<string, Record<string, string>>();
   if (s.hasTable('task_execution_configs')) for (const row of s.all("SELECT c.task_id,c.snapshot,t.repository_id FROM task_execution_configs c LEFT JOIN tasks t ON t.id=c.task_id WHERE c.snapshot LIKE '%native%'")) {
     let snap: any; try { snap = JSON.parse(String(row.snapshot)); } catch { continue; }
     if (!snap?.roles || typeof snap.roles !== 'object') continue;
@@ -385,14 +380,9 @@ export function retireNativeRoles(s: Store): { projects: number; roles: number; 
     if (!roles) continue;
     s.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify({ ...snap, roles }), row.task_id);
     counts.tasks++;
-    if (Array.isArray(roles.roles)) taskRoles.set(String(row.task_id), Object.fromEntries(roles.roles.map((role: any) => [role.role_id, role.harness_ref?.id])));
   }
 
-  if (s.hasTable('role_instances')) for (const row of s.all("SELECT id,task_id,role FROM role_instances WHERE harness='native'")) {
-    const harness = row.task_id ? taskRoles.get(String(row.task_id))?.[String(row.role)] : undefined;
-    s.run("UPDATE role_instances SET harness=?,session='[]',harness_state='{}' WHERE id=?", harness === 'process' ? 'process' : 'pi', row.id);
-    counts.instances++;
-  }
+  if (s.hasTable('role_instances')) counts.instances = Number(s.run("UPDATE role_instances SET harness='pi',session='[]',harness_state='{}' WHERE harness='native'").changes);
   return counts;
 }
 
@@ -404,11 +394,11 @@ export function retireNativeRoles(s: Store): { projects: number; roles: number; 
  * - Frozen `task_execution_configs` snapshots, as #705 and #1257 did, so a waiting or reopened task resumes on Pi instead of
  *   stopping at the backend check.
  * - `role_instances` on a selected backend: session and harness state are cleared, so the next run rebuilds from task records.
- * A moved role keeps its pinned model profile; `unusable` counts those Pi cannot use, which wait for configuration rather
- * than switching models.
+ * A moved role keeps its pinned model (see onPi); `unusable` counts those whose profile Pi still cannot use (another model
+ * API), which wait for configuration rather than switching models.
  */
 export function moveRolesToPi(s: Store, actor: string, from: string[], moves: (role: string, backend: string) => boolean) {
-  const pi = harnesses.find(h => h.id === 'pi')!, ref = harnessRef('pi'), counts = { projects: 0, roles: 0, unusable: 0, tasks: 0, instances: 0 };
+  const pi = harnesses.find(h => h.id === 'pi')!, counts = { projects: 0, roles: 0, unusable: 0, tasks: 0, instances: 0 };
   const named = (column: string) => '(' + from.map(() => `${column} LIKE ?`).join(' OR ') + ')', patterns = from.map(id => `%"${id}"%`);
   const usable = (role: any) => { const p = role?.model_profile_ref; return !p || pi.model_api.includes(p.api) && pi.structured_output.includes(p.structured_output); };
   // A V2 role list with the selected roles moved, or null when none is selected.
@@ -416,8 +406,9 @@ export function moveRolesToPi(s: Store, actor: string, from: string[], moves: (r
     let moved = 0;
     const next = roles.map(role => {
       if (!moves(String(role?.role_id), String(role?.harness_ref?.id))) return role;
-      moved++; if (counted && !usable(role)) counts.unusable++;
-      return { ...role, harness_ref: ref, revision: Number(role.revision ?? 0) + 1 };
+      const onto = onPi(role);
+      moved++; if (counted && !usable(onto)) counts.unusable++;
+      return onto;
     });
     if (counted) counts.roles += moved;
     return moved ? next : null;

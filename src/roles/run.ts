@@ -232,8 +232,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
-  // External CLIs own their turn semantics; only these two loops share the request-based finalization reserve.
-  const reservedBackend=['process','pi'].includes(harness),configuredTurns=bounded?.max_turns??spec.maxTurns,limitTurns=configuredTurns??32;
+  // External CLIs own their turn semantics; only Pi's loop uses the request-based finalization reserve.
+  const reservedBackend=harness==='pi',configuredTurns=bounded?.max_turns??spec.maxTurns,limitTurns=configuredTurns??32;
   const availableTurns=reservedBackend&&cumulative&&budget.max_model_requests!==null?Math.min(limitTurns,budget.max_model_requests-instanceUsage(s,instance.id).model_requests):limitTurns;
   if(spec.finish&&reservedBackend&&availableTurns<=finalizationReserve(availableTurns))stop('role_budget_exhausted','waiting_configuration',`${role}：剩余 ${availableTurns} 次请求不足以保留至少一轮工作和收尾，运行尚未启动。`);
   const live:Live={bound:null,exhausted:null,tools:0};

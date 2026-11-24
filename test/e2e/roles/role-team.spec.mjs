@@ -77,8 +77,8 @@ async function prepared(page) {
   // metered resource budget; legacy monetary values are accepted but omitted on save.
   const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true,
     skills: [{ id: 'skills_1', source: { type: 'inline', files: [{ path: 'guide.md', content: 'fixture' }] } }],
-    // Process, which offers two structured output modes to switch between (Pi, the default, offers one).
-    roles: [{ ...editable, harness_ref: { id: 'process' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
+    // Codex, which offers several model APIs to switch between (Pi, the default, offers one).
+    roles: [{ ...editable, harness_ref: { id: 'codex' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
       budget_policy_ref: { id: 'metered', max_tool_calls: 5, max_cost: { amount: 1, currency: 'USD' } } }] });
   expect(saved.status).toBe(200);
   expect(saved.value.configuration.roles.find(role=>role.role_id==='dev').budget_policy_ref.max_cost).toBeUndefined();
@@ -96,10 +96,10 @@ async function other(select) {
   await select.selectOption(value);
 }
 for (const [name, act] of [
-  ['结构化输出方式', async page => {
+  ['模型 API', async page => {
     const envOptions = await page.getByLabel('运行环境', { exact: true }).locator('option').evaluateAll(entries => entries.map(entry => entry.value));
     expect(envOptions).toEqual(['task-workspace']);
-    await other(page.getByLabel('结构化输出方式', { exact: true }));
+    await other(page.getByLabel('模型 API', { exact: true }));
   }],
   ['任务累计工具调用', async page => page.getByLabel('任务累计工具调用', { exact: true }).fill('9')],
 ]) test(`详情页的「${name}」改一下，回到列表就标记为草稿，放弃后回到已生效`, async ({ page }) => {

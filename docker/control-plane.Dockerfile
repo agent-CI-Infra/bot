@@ -35,8 +35,7 @@ COPY docs/external-token-api.md ./docs/external-token-api.md
 # The built-in rule files; dist/rules/service.js reads them at startup.
 COPY docs/prompts ./docs/prompts
 COPY skills ./skills
-# Process Harness executes this worker in the control-plane container.
-COPY runner/role-worker.mjs ./runner/role-worker.mjs
+# Runner modules the control plane imports directly (tool volumes, command policy, notes, disk checks).
 COPY runner/agent-products.mjs runner/acp-products.mjs runner/acp-install-worker.mjs runner/cli-config.mjs runner/command-policy.mjs runner/command-output.mjs runner/image-budget.mjs runner/result-owner.mjs runner/filesystem-id.mjs runner/credential-redaction.mjs runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/notes.mjs runner/note-catalog.mjs runner/note-path.mjs ./runner/
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
 COPY manager/compaction.mjs manager/storage-footprint.mjs manager/file-tree.mjs ./manager/

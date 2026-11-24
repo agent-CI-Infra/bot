@@ -138,7 +138,7 @@ test('flat permissions filter actual tools and a later grant cannot widen an exi
   assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('search_project_memory'));
 });
 
-for (const harness of ['process','pi']) test(`${harness} workers keep task reads and recover from unoffered management calls`, async t => {
+for (const harness of ['scripted','pi']) test(`${harness} workers keep task reads and recover from unoffered management calls`, async t => {
   for (const role of ['dev','reviewer','test','ux','security']) await t.test(role, async t => {
     const refused = ['create_task','manage_task','list_managed_tasks'];
     const f = await fixture(t, body => {
@@ -229,7 +229,7 @@ test('saving RoleDefinitionV2 checks expected_revision, project scope and the ha
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, ...body });
   rejects(() => put({}), 'expected_revision_required', 'expected_revision');
   rejects(() => put({ expected_revision: 3 }), 'role_configuration_conflict', 'expected_revision');
-  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'process', version: '9' } }] }), 'harness_version_unavailable', 'roles.reviewer.harness_ref.version');
+  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', version: '9' } }] }), 'harness_version_unavailable', 'roles.reviewer.harness_ref.version');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', model_profile_ref: { model_id: 'm2', structured_output: 'json_schema' } }] }), 'harness_structured_output_unsupported', 'roles.manager.model_profile_ref.structured_output');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', model_profile_ref: { model_id: 'm2', tool_calls: false } }] }), 'harness_tool_calls_required', 'roles.reviewer.model_profile_ref.tool_calls');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', model_profile_ref: { model_id: 'm2', api: 'anthropic-messages' } }] }), 'harness_model_api_unsupported', 'roles.reviewer.model_profile_ref.api');
@@ -281,12 +281,12 @@ test('two roles resolve different supported models, pinned skills and harnesses;
   const config = f.put({ skills: [
     { id: 'review-kit', source: { type: 'inline', files: [{ path: 'checklist.md', content: 'Check boundaries and error paths.' }] } },
     { id: 'repo-sec', source: { type: 'repository', commit: 'b'.repeat(40), paths: ['.agents/skills/sec/SKILL.md'] } }],
-    roles: [{ role_id: 'reviewer', harness_ref: { id: 'process' }, model_profile_ref: { model_id: 'm2' }, skill_bundle_ref: { id: 'review-kit' } },
+    roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' }, skill_bundle_ref: { id: 'review-kit' } },
       { role_id: 'test', skill_bundle_ref: { id: 'repo-sec' } }] });
   const repo = config.skills.find(b => b.id === 'repo-sec');
   assert.equal(repo.source.commit, 'b'.repeat(40)); assert.equal(repo.files[0].path, '.agents/skills/sec/SKILL.md'); assert.match(repo.files[0].sha256, /^[a-f0-9]{64}$/);
   const reviewer = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot, tester = resolveRole(f.s, 'r', 'test', 'task.request').snapshot;
-  assert.deepEqual([reviewer.model.id, reviewer.model.source, reviewer.harness.id, reviewer.skills.id], ['m2', 'role', 'process', 'review-kit']);
+  assert.deepEqual([reviewer.model.id, reviewer.model.source, reviewer.harness.id, reviewer.skills.id], ['m2', 'role', 'codex', 'review-kit']);
   assert.deepEqual([tester.model.id, tester.model.source, tester.harness.id, tester.skills.id], ['m', 'project', 'scripted', 'repo-sec']);
   assert.notEqual(reviewer.skills.content_hash, tester.skills.content_hash);
   // Retired task_models overrides are ignored; only role profile and project default model apply (#1122).
@@ -693,10 +693,10 @@ test('old V2 review/Actions entries keep Pi through reads and identical saves; o
   // Omitting harness_ref is also an unchanged choice.
   roleApi(f.s, admin, 'PUT', rolesUrl, { expected_revision: 2, enabled: true, roles: [{ role_id: 'dev' }] });
   assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'omitted'))), ['pi', 'entry_executor']);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
-  for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-' + kind, kind))), ['process', 'role']);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
-  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'repeated'))), ['process', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'pi' } }] });
+  for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-' + kind, kind))), ['pi', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'pi' } }] });
+  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'repeated'))), ['pi', 'role']);
   f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' } }] });
   assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-scripted'))), ['scripted', 'role']);
 });
@@ -710,11 +710,11 @@ test('a running old V2 review keeps its Pi binding on the next delegation; expli
   const before = roleInstance(f.s, task, 'dev', 'pi');
   assert.equal((await runEntry(f, task)).harness.id, 'pi');
   assert.equal(f.s.get('SELECT snapshot_id FROM role_instances WHERE id=?', before.id).snapshot_id, before.snapshot_id);
-  const selected = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
+  const selected = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'pi' } }] });
   assert.equal((await runEntry(f, task)).harness.id, 'pi', 'fixed task configuration is unchanged by a project save');
   roleApi(f.s, admin, 'POST', new URL('http://local/api/tasks/running-review/roles/apply'), { role: 'dev', expected_revision: selected.revision });
   const adopted = await runEntry(f, task);
-  assert.deepEqual([adopted.harness.id, adopted.harness.source, adopted.config_revision], ['process', 'role', selected.revision]);
+  assert.deepEqual([adopted.harness.id, adopted.harness.source, adopted.config_revision], ['pi', 'role', selected.revision]);
 });
 
 test('worker roles choose their backend, Manager and QA only Pi; container CLIs use gateway relay, reserve subscription mode, and new roles default to Pi', async t => {
@@ -742,12 +742,13 @@ test('worker roles choose their backend, Manager and QA only Pi; container CLIs 
   assert.equal(localResolved.model.id, 'codex:local_config');
   assert.equal(localResolved.model.key, '');
   assert.equal(localResolved.snapshot.model.source, 'local_config');
-  // Non-CLI backends (e.g., process) reject local_config / subscription model_source.
+  // Non-CLI backends (e.g., Pi) reject local_config / subscription model_source.
   assert.throws(
-    () => put({ expected_revision: 2, roles: [{ role_id: 'reviewer', harness_ref: { id: 'process', model_source: 'local_config' } }] }),
+    () => put({ expected_revision: 2, roles: [{ role_id: 'reviewer', harness_ref: { id: 'pi', model_source: 'local_config' } }] }),
     e => e.code === 'subscription_mode_not_implemented',
   );
-  assert.equal(harnesses.filter(h => ['claude_code', 'codex', 'pi', 'process'].includes(h.id)).length, 4);
+  assert.equal(harnesses.filter(h => ['claude_code', 'codex', 'pi'].includes(h.id)).length, 3);
+  assert.equal(harnesses.some(h => h.id === 'process'), false, 'Process is no longer registered (#1338)');
   assert.equal(harnesses.some(h => h.id === 'native'), false, 'Native is no longer registered (#1257)');
 });
 

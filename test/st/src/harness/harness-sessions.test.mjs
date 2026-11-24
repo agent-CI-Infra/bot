@@ -36,7 +36,7 @@ test('Manager and QA run only on Pi; Dev keeps every backend (#1337)',()=>{
  const put=roles=>roleApi(s,admin,'PUT',url,{expected_revision:roleApi(s,admin,'GET',url,{}).configuration.revision,enabled:true,roles}).configuration;
  for(const role of ['manager','qa']){
   assert.equal(put([{role_id:role,harness_ref:{id:'pi'}}]).roles.find(r=>r.role_id===role).harness_ref.id,'pi');
-  for(const backend of ['codex','claude_code','process'])assert.throws(()=>put([{role_id:role,harness_ref:{id:backend}}]),e=>e.status===400&&e.code==='harness_role_unsupported'&&e.field===`roles.${role}.harness_ref.id`);
+  for(const backend of ['codex','claude_code'])assert.throws(()=>put([{role_id:role,harness_ref:{id:backend}}]),e=>e.status===400&&e.code==='harness_role_unsupported'&&e.field===`roles.${role}.harness_ref.id`);
  }
  for(const backend of ['codex','claude_code','pi'])assert.equal(put([{role_id:'dev',harness_ref:{id:backend}}]).roles.find(r=>r.role_id==='dev').harness_ref.id,backend);
  }finally{s.close();}
@@ -88,7 +88,7 @@ test('effective access is prepared from one permission definition and respects e
 
 test('public driver sessions keep updated native bindings between sends and reject an already-cancelled run',async()=>{
  const {roleHarness,registerRoleHarness}=await import('../../../../dist/roles/harness.js');
- registerRoleHarness({...roleHarness('process'),id:'binding_probe'},spec=>async()=>{await spec.guard();const turn=(spec.harnessState.value.turn??0)+1;spec.harnessState.save({turn});return turn;});
+ registerRoleHarness({...roleHarness('pi'),id:'binding_probe'},spec=>async()=>{await spec.guard();const turn=(spec.harnessState.value.turn??0)+1;spec.harnessState.save({turn});return turn;});
  const s=new Store(':memory:',randomBytes(32));try{
  s.run("INSERT INTO accounts VALUES('a','test','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/probe','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','101','task.request','running','session probe','{}')");
  const spec={store:s,task:s.get("SELECT * FROM tasks WHERE id='t'"),redactor:new Redactor(),guard:async()=>{},system:'test',prompt:'test'};

@@ -39,10 +39,10 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     const managerFixed=page.getByTestId('role-form').getByText('Agent 后端：Pi（这个角色固定使用 Pi，不能切换）',{exact:true});
     await expect(managerPicker).toHaveCount(0);await expect(managerFixed).toBeVisible();
     // A configuration that still names another backend (stored after start-up, so no migration moved it) offers the way back.
-    h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{manager:'process'}}));
+    h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{manager:'codex'}}));
     await page.reload();
     await goRolePage(page, { role: 'manager' });
-    await expect(managerPicker).toHaveValue('process');
+    await expect(managerPicker).toHaveValue('codex');
     await managerPicker.selectOption('pi');
     await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');

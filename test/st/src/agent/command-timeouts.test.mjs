@@ -52,7 +52,7 @@ async function fixture(t, backend, kind, respond) {
   store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,?,?,?,?,?,?,?,?)', 't', '101', kind, 'running', 'command fixture', '{}', 1, environment.generation, randomBytes(24).toString('hex'));
   const records = new TaskRecords(store);
   records.contract('t', { goal: 'Observe commands', scope: ['fixture'], criteria: ['Use actual observations'], endpoint: 'report' });
-  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa', 'reviewer'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'manager' || role_id === 'qa' && backend !== 'pi' ? 'scripted' : backend } })) });
+  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa', 'reviewer'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'manager' ? 'scripted' : backend } })) });
   const task = store.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {}, workspace = new Workspace(store, manager, task, redactor, guard, log => logs.push(log));
   await workspace.call('init', { type: 'workspace_init' });
   await workspace.write('seed-write', 'fixture.txt', Buffer.from('baseline'));
@@ -97,9 +97,9 @@ test('command timeouts validate configuration and explicit values, clamp with a 
   assert.match(commandTool(120).function.parameters.properties.keep_background.description, /log_path/);
 });
 
-// Cover every backend adapter (process, pi) on team-delegated development and QA's backends (Pi, and in process the
-// test-only scripted driver: QA runs only on Pi in production, #1337), while covering all four workflow entry points
-// (QA, development, request, observer) without repeating a full 3x4 Cartesian matrix.
+// Cover Pi, the only backend that runs in the control plane's tool path, and in process the test-only scripted driver, on
+// QA and team-delegated development, while covering all four workflow entry points (QA, development, request, observer)
+// without repeating a full 3x4 Cartesian matrix.
 for (const backend of ['scripted', 'pi']) {
   test(`independent QA forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'task.request', body => nextCommand(body) ?? call('submit_acceptance', pass));
@@ -108,7 +108,7 @@ for (const backend of ['scripted', 'pi']) {
     assertCommands(f, 120);
   });
 }
-for (const backend of ['process', 'pi']) {
+for (const backend of ['scripted', 'pi']) {
   test(`role development forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'development.issue', body => {
       if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
@@ -189,7 +189,7 @@ for(const backend of ['scripted','pi'])test(`QA consumes a complete large comman
 
 // #1047: a development under the project team reports its milestones like a single executor: the dev role is offered the
 // tool, and each report goes to the control plane's handler (which writes the Issue's status comment).
-for (const backend of ['process', 'pi']) test(`role development offers the dev role the milestone tool and hands each report to the control plane (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
+for (const backend of ['scripted', 'pi']) test(`role development offers the dev role the milestone tool and hands each report to the control plane (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
   const reported = [];
   const f = await fixture(t, backend, 'development.issue', body => {
     if (body.tools.some(t => t.function.name === 'nominate_delivery')) {

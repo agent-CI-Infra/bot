@@ -1,12 +1,12 @@
 // A test-only role driver (#1256). In-process tests of role and task mechanics run their scripted fake model through it.
 // It is registered in the test process only and as unlisted (`listed: false`), so no production process has it and no
 // backend listing offers it, even in a long-lived test process such as a Playwright worker. It keeps its own model
-// and tool exchange and never runs the control-plane tool loop that #1257 removes: a role run follows the process
-// driver's worker loop (runner/role-worker.mjs) without the child process, a service assistant's turn follows Pi.
+// and tool exchange and never runs the control-plane tool loop that #1257 removes: a role run keeps a checkpointed
+// transcript in process (the loop of the Process driver, removed in #1338), a service assistant's turn follows Pi.
 // The store first: entered at roles/harness.js, the module graph would run tasks/followups.js before tasks/priority.js
 // has finished (a test file may import this fixture before anything else).
 import '../../dist/storage/database.js';
-import { registerRoleHarness, completeTranscript } from '../../dist/roles/harness.js';
+import { registerRoleHarness } from '../../dist/roles/harness.js';
 import { submissionFeedback } from '../../dist/roles/submission-feedback.js';
 import { toolArguments, toolCallsProblem, finalizationReserve } from '../../dist/agent/tool-context.js';
 import { stop } from '../../dist/agent/common.js';
@@ -16,7 +16,7 @@ import { createTaskToolDispatcher } from '../../dist/roles/task-tools.js';
 
 export const scriptedHarness = 'scripted';
 registerRoleHarness({ id: scriptedHarness, version: 'test', listed: false, session: 'checkpoint_transcript', events: 'tool_observations',
-  kinds: ['controller', 'writer', 'observer', 'evaluator'], structured_output: ['tool_call', 'text_json'],
+  kinds: ['controller', 'writer', 'observer', 'evaluator'],
   capabilities: { raw_evidence: 'control_plane_tools', cancel: 'abort_signal', isolation: 'none', version_binding: true, output_validation: true,
     fresh_context: true, recovery: ['checkpoint_restore', 'rebuilt_from_task_records'] }, steered_turns: true },
 spec => services => serviceTurn(spec) ? runServiceTurn(spec, services) : run(spec, services));
@@ -70,12 +70,18 @@ async function runServiceTurn(spec, services) {
   } finally { await dispatcher.close(); }
 }
 
+const completeTranscript = messages => {
+  const last = messages.findLastIndex(m => m?.role === 'assistant');
+  if (last < 0 || !messages[last].tool_calls?.length) return true;
+  const answered = new Set(messages.slice(last + 1).filter(m => m?.role === 'tool').map(m => m.tool_call_id));
+  return messages[last].tool_calls.every(c => answered.has(c.id));
+};
 async function run(spec, services) {
   const maxTurns = spec.maxTurns ?? 32, finishes = spec.finish ? spec.finish.names ?? [spec.finish.name] : [];
   const closingNames = spec.finalizationTools ?? finishes, reserve = finalizationReserve(maxTurns), offeredTools = spec.tools ?? [];
   const messages = spec.session?.messages.length ? [...spec.session.messages, { role: 'user', content: spec.prompt }]
     : [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
-  // A transcript whose every call has its result is a safe point to end a run, as for the process driver.
+  // A transcript whose every call has its result is a safe point to end a run.
   const save = async () => { spec.session?.save(spec.redactor.clean(messages)); if (spec.checkpoint && completeTranscript(messages)) await spec.checkpoint(); };
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard(); await save();

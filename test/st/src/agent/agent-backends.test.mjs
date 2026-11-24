@@ -67,7 +67,7 @@ test('new roles default to Pi; general backends preserve role authority; Manager
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
   // Manager and QA stay on Pi (#1337); every other role may take another backend and keeps its authority.
   const pinned = ['manager', 'qa'];
-  for (const backend of ['process', 'pi']) {
+  for (const backend of ['codex', 'pi']) {
     const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: pinned.includes(r.role_id) ? 'pi' : backend } })) });
     assert.ok(saved.roles.every(r => r.harness_ref.id === (pinned.includes(r.role_id) ? 'pi' : backend)));
     assert.equal(saved.roles.find(r => r.role_id === 'manager').permissions.delegation, 'allow');
@@ -86,7 +86,7 @@ test('new roles default to Pi; general backends preserve role authority; Manager
   assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['writer', 'observer'], 'project', ['gateway', 'local_config'], null]);
   assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
   assert.throws(() => f.put({ roles: [{ role_id: 'qa', harness_ref: { id: 'codex' } }] }), e => e.code === 'harness_role_unsupported' && e.field === 'roles.qa.harness_ref.id');
-  for (const backend of ['acp', 'opencode']) {
+  for (const backend of ['acp', 'opencode', 'process']) {
     const view = f.view();
     assert.equal(view.backends.find(b => b.id === backend), undefined);
     assert.throws(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: backend } }] }), e => e.code === 'unknown_role_harness' && e.field === 'roles.dev.harness_ref.id');

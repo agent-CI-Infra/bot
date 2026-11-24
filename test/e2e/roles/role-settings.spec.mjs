@@ -27,7 +27,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: '技能包目录', exact: true })).toBeVisible();
     await goRolePage(page, { role: 'dev' });
     await expect(page).toHaveURL(/\/roles\/dev$/);
-    await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('process');
+    await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('codex');
     await page.getByLabel('dev 模型', { exact: true }).selectOption(model.id);
     await (await promptEditor(page, '角色提示词')).fill('先读复现，再修改代码并验证。');
     await expect(page.getByLabel('系统提示词', { exact: true })).toHaveAttribute('readonly', '');
