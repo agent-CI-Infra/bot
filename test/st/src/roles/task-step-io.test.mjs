@@ -48,7 +48,10 @@ async function fixture(t) {
   insHist.run('t-io', 'tool_observation', JSON.stringify({ call_id: 'c-big-args', observation: { data: { content: 'small acknowledgement' } } }), '2026-11-24T08:04:01Z', 'run-io', 'agent');
   insHist.run('t-io', 'tool_started', JSON.stringify({ call_id: 'c-big-out', name: 'read_big', arguments: { path: 'big.txt' } }), '2026-11-24T08:04:10Z', 'run-io', 'agent');
   const bigOutId = Number(insHist.run('t-io', 'tool_observation', JSON.stringify({ call_id: 'c-big-out', observation: { data: { content: 'H'.repeat(70000) } } }), '2026-11-24T08:04:11Z', 'run-io', 'agent').lastInsertRowid);
-  return { admin, h, ids: { bigArgsId, bigOutId } };
+  // A masked call whose observation is small and reports an error: the failure must not hide behind the over-limit row.
+  const bigErrId = Number(insHist.run('t-io', 'tool_started', JSON.stringify({ call_id: 'c-big-err', name: 'write_failed', arguments: { blob: 'F'.repeat(70000) } }), '2026-11-24T08:04:20Z', 'run-io', 'agent').lastInsertRowid);
+  insHist.run('t-io', 'tool_observation', JSON.stringify({ call_id: 'c-big-err', observation: { data: { error: { message: 'disk full' } } } }), '2026-11-24T08:04:21Z', 'run-io', 'agent');
+  return { admin, h, ids: { bigArgsId, bigOutId, bigErrId } };
 }
 
 test('#1207: a recorded model request is its own step with separate input and output sources', async t => {
@@ -138,4 +141,17 @@ test('#1207: a tool row over 64 KiB keeps its step and its readable input or out
   const outputBody = await admin(`/api/tasks/t-io/source?ref=${encodeURIComponent(bigOutput.output_source)}`);
   assert.equal(outputBody.status, 200);
   assert.equal(outputBody.value.source.data.observation.data.content.length, 70000);
+});
+
+test('#1207: a masked call whose observation failed is an error, not a success', async t => {
+  const { admin, ids } = await fixture(t);
+  const detail = await admin('/api/tasks/t-io');
+  const run = detail.value.role_runs.find(item => item.run_id === 'run-io');
+
+  const failed = run.history_steps.find(item => item.kind === 'tool' && item.input_source === `task_history:${ids.bigErrId}`);
+  assert.ok(failed, 'a call whose arguments exceed the detail limit keeps its step');
+  assert.equal(failed.status, 'error', 'a failed observation is not reported as success just because the argument row was masked');
+
+  const kept = run.history_steps.find(item => item.kind === 'tool' && item.input_source === `task_history:${ids.bigArgsId}`);
+  assert.equal(kept.status, 'ok', 'a successful observation stays ok');
 });
