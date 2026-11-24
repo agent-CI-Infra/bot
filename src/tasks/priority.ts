@@ -4,7 +4,7 @@ import {fail,randomId} from '../core/security.js';
 import {traceEvent} from './trace.js';
 
 export const priorities=['P0','P1','P2','P3'] as const;
-export const priorityInstructions=`Task priority is decided by Task Manager, not QA. P0: observed or credibly imminent major damage requiring immediate containment (ongoing data loss, credential exposure/unauthorized access, widespread core-service outage without an alternative). P1: a core goal or critical delivery is blocked with no acceptable workaround. P2: ordinary planned work, final integration/acceptance, or bounded defects with an acceptable workaround. P3: non-core polish, wording, or verification beyond required acceptance. Cite occurrence conditions, affected scope, evidence, workaround and delivery impact; adjectives or your own task's importance are not evidence. Missing facts default to P2 with an explicit uncertainty; credible major risk may justify containment. Higher priority takes the next free slot; never preempt a running task. Same-priority tasks are FIFO. Changed priority joins the new priority's tail; setting the same value does not move it. Retries receive a new queue ticket when scheduled, and are eligible only after their retry time/dependencies are ready.`;
+export const priorityInstructions=`Task priority is decided by Task Manager, not QA. P0: observed or credibly imminent major damage requiring immediate containment (ongoing data loss, credential exposure/unauthorized access, widespread core-service outage without an alternative). P1: a core goal or critical delivery is blocked with no acceptable workaround. P2: ordinary planned work, final integration/acceptance, or bounded defects with an acceptable workaround. P3: non-core polish, wording, or verification beyond required acceptance. Cite occurrence conditions, affected scope, evidence, workaround and delivery impact; adjectives or your own task's importance are not evidence. Missing facts default to P2 with an explicit uncertainty; credible major risk may justify containment. Higher priority takes the next free slot; never preempt a running task. Same-priority tasks are FIFO. Changed priority joins the new priority's tail; setting the same value does not move it. Retries receive a new queue ticket when scheduled, unless the user continues a task they paused: that one resumes at the queue position it already held. A retry is eligible only after its retry time/dependencies are ready.`;
 export function priorityStorage(s:Store){
  const columns=s.all('PRAGMA table_info(tasks)');
  if(!columns.some(r=>r.name==='priority'))s.db.exec("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3'))");
@@ -21,13 +21,21 @@ export function priorityStorage(s:Store){
  CREATE TRIGGER IF NOT EXISTS task_queue_insert AFTER INSERT ON tasks BEGIN
  UPDATE task_queue_counter SET value=value+1 WHERE id=1;
  UPDATE tasks SET queue_seq=(SELECT value FROM task_queue_counter WHERE id=1) WHERE id=NEW.id;
- END;
- CREATE TRIGGER IF NOT EXISTS task_queue_reentry AFTER UPDATE OF status,priority ON tasks
- WHEN OLD.priority<>NEW.priority OR (OLD.status<>NEW.status AND NEW.status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head')) BEGIN
+ END;`);
+ // A queue ticket is a place in line, and continuing protected state keeps it: a task the user paused (`user_pause`)
+ // resumes where it stood, while a task that fails and retries takes a new ticket like new work. A draft created paused
+ // never held a place, so starting it joins the tail; a new configuration is a replan (its attempt moves on) and does too.
+ // The trigger is rebuilt on start so a database created before this rule gets it as well. Another worker can open
+ // this database concurrently, so the DROP and the CREATE must commit together: otherwise an update can land in the
+ // gap and skip re-ticketing, or a second opener can meet `trigger task_queue_reentry already exists`.
+ s.transaction(()=>s.db.exec(`DROP TRIGGER IF EXISTS task_queue_reentry;
+ CREATE TRIGGER task_queue_reentry AFTER UPDATE OF status,priority ON tasks
+ WHEN OLD.priority<>NEW.priority OR (OLD.status<>NEW.status AND NEW.status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head')
+   AND NOT (OLD.status='paused' AND coalesce(OLD.error_code,'')='user_pause' AND NEW.attempt=OLD.attempt)) BEGIN
  UPDATE task_queue_counter SET value=value+1 WHERE id=1;
  UPDATE tasks SET queue_seq=(SELECT value FROM task_queue_counter WHERE id=1) WHERE id=NEW.id;
  INSERT INTO task_history(task_id,type,data,created_at) VALUES(NEW.id,'queue_entered',json_object('priority',NEW.priority,'previous_status',OLD.status,'status',NEW.status,'sequence',(SELECT value FROM task_queue_counter WHERE id=1)),strftime('%Y-%m-%dT%H:%M:%fZ','now'));
- END;`);
+ END;`));
  // Migrate once in chronological order; reopening the database never moves existing queue entries.
  s.transaction(()=>{for(const r of s.all('SELECT id FROM tasks WHERE queue_seq=0 ORDER BY julianday(created_at),id')){
  s.run('UPDATE task_queue_counter SET value=value+1 WHERE id=1');s.run('UPDATE tasks SET queue_seq=(SELECT value FROM task_queue_counter WHERE id=1) WHERE id=?',r.id);
