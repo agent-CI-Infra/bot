@@ -34,6 +34,7 @@ flowchart TD
 - **优先级队列与并发认领**：
   - 持久化 `priority`（`P0`–`P3`，默认 `P2`）与单调 `queue_seq`，在 `BEGIN IMMEDIATE` 事务中按优先级 + 序号原子认领，并受项目并发上限（1–32）约束；不抢占运行中任务。
   - **条件等待 vs 失败退避**：限流（`github_rate_limited`）、等待电脑/配置/PR head/事件订阅（`waiting_event`）属于条件等待，不消耗失败重试计数；真正执行失败按 5s → 15s → 45s → 135s → 300s 短退避，同码连续 5 次后转入每任务 **8 小时重试周期**。
+  - **失败解释**：`src/agent/failures.ts` 负责错误归类、重试判断及解释组装，按错误码显示的处理提示集中在 `src/agent/failure-actions.ts`。
 - **无打断更新与下一轮续接**：
   - 排队或运行中的检视收到评论、编辑或 PR 新推送时直接写入更新收件箱；运行中在回合边界刷新 `../context/` 或原地推进 git worktree 到新 head（`workspace_advance`），不作废原任务。
   - 已发布检视收到新更新时在同一任务上启动下一轮（`round + 1`），通过 `updates_through` 游标保证已覆盖更新不重复开轮、未覆盖更新不遗漏。
