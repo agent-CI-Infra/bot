@@ -92,3 +92,26 @@ test('#750 the dark palette meets AA on the surfaces phase 1 covers', () => {
     assert.ok(ratio >= minimum, `${foreground} on ${background} is ${ratio.toFixed(2)}:1, needs ${minimum}:1`);
   }
 });
+
+test('#750 status text that paints no background takes a dark token in both dark blocks', () => {
+  // F2: `.view-success`, `.view-progress` and `.machine-config-error` are dark literals on no background of their own,
+  // so in dark they are dark-on-dark (2.27–2.33:1 on `--color-surface`). The identity page — the page this change adds
+  // the three-way control to — writes its success notice as `.view-success`, so both blocks must swap these three for
+  // the palette tokens; a light-only fix would leave the manual dark choice broken.
+  const views = read('static/views.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...views.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selector, body]) => ({ selector: selector.trim(), body }));
+  const rows = [
+    ['.view-success', '--color-success'],
+    ['.view-progress', '--color-info'],
+    ['.machine-config-error', '--color-danger']
+  ];
+  for (const scope of [':root:not([data-theme="light"])', ':root[data-theme="dark"]']) {
+    const scoped = rules.filter((rule) => rule.selector.startsWith(scope));
+    for (const [selector, token] of rows) {
+      const hit = scoped.find((rule) => rule.selector.includes(selector) && new RegExp(`color:\\s*var\\(${token}\\)`).test(rule.body));
+      assert.ok(hit, `${scope} must set ${selector} to var(${token})`);
+      const ratio = contrast(darkManual.get(token), darkManual.get('--color-surface'));
+      assert.ok(ratio >= 4.5, `${selector} on the dark surface is ${ratio.toFixed(2)}:1, needs 4.5:1`);
+    }
+  }
+});
