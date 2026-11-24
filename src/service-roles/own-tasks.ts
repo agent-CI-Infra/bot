@@ -115,7 +115,8 @@ export class OwnTasks {
       { role: 'user', content: JSON.stringify({ own_task: { title: row.title, previous_rounds: shown, ...(omitted ? { earlier_rounds_omitted: omitted } : {}) }, instruction: request }) }];
     if(host.run){
       const check=async()=>{await host.check();const control=this.store.get('SELECT control FROM service_role_own_tasks WHERE id=?',row.id)?.control;if(control)fail(409,'own_task_'+control);};
-      const conclusion=host.redact(await host.run({system:host.system+suffix,prompt:JSON.stringify(messages[1].content),tools:tools(),scope:row.id,check,execute:host.execute})).slice(0,8000);
+      // The same context as the loop below, already JSON: encoding it once more would hand the harness an escaped string.
+      const conclusion=host.redact(await host.run({system:host.system+suffix,prompt:messages[1].content,tools:tools(),scope:row.id,check,execute:host.execute})).slice(0,8000);
       await check();if(!conclusion.trim())fail(502,'own_task_reply_invalid');
       this.store.run("UPDATE service_role_own_tasks SET state='completed',rounds=rounds+1,history=?,error=NULL,updated_at=? WHERE id=? AND state='running'",this.store.secrets.seal({rounds:[...previous,{instruction:request,conclusion,at:Date.now()}]},'own-task:'+row.id),Date.now(),row.id);
       return {task_id:row.id,title:row.title,state:'completed',round:round+1,conclusion};
