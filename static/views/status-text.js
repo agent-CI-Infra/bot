@@ -5,7 +5,7 @@ const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', '
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', acceptance: '独立验收', publish: '发布', done: '完成' };
 const own = (map, key) => Object.hasOwn(map, key) ? map[key] : undefined;
-const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP', claude_code: 'Claude Code', codex: 'Codex', icode: 'iCode' };
+const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP', claude_code: 'Claude Code', codex: 'Codex', icode: 'iCode', workswarm: 'WorkSwarm' };
 const harnessName = id => own(harnessNames, id) || id || '—';
 const builtinRoleIds = new Set(['manager', 'dev', 'test', 'reviewer', 'ux', 'qa']);
 const roleLabel = (id, name) => name || id;

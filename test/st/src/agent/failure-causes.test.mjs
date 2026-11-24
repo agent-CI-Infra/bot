@@ -53,7 +53,7 @@ test('causes separate outages, GitHub settings, GitHub refusals, the model, the 
   for (const code of ['acp_lease_expired', 'acp_process_exited', 'disk_full']) assert.equal(failureCause(code), 'environment');
   const acpExit = explainFailure('acp_process_exited','retry_wait');
   assert.equal(acpExit.automatic, true);
-  assert.match(acpExit.action,/容器内 ACP 进程异常退出，bot 会自动重试。.*查看本次运行日志/);
+  assert.match(acpExit.action,/iCode 或 WorkSwarm 进程异常退出，bot 会自动重试。.*查看本次运行日志/);
   assert.match(explainFailure('github_publication_unknown','waiting_publication').action,/先再查一次，确实没有才重新发送/);
   assert.match(explainFailure('tool_operation_conflict','failed').action,/反馈给 bot 维护者/);
   assert.match(explainFailure('pull_request_head_changed','superseded').action,/无需处理/);

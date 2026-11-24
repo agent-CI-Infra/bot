@@ -3,25 +3,23 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { acpProductExecutable, acpProductId, acpVersion, icodeProductId, icodeReleases, readAcpProduct } from '../runner/acp-products.mjs';
+import { acpProductExecutable, acpVersion, icodeProductId, icodeReleases, readAcpProduct, workswarmProductId } from '../runner/acp-products.mjs';
 import { icodeLaunch } from '../runner/agent-products.mjs';
-import { buildPythonAcpProduct, stageAcpSource } from '../runner/acp-install-worker.mjs';
+import { buildWorkSwarmProduct } from '../runner/acp-install-worker.mjs';
 
 const [action, ...args] = process.argv.slice(2);
 const { values: options } = parseArgs({ args, options: {
   root: { type: 'string', default: '/opt/agent-tools' },
   product: { type: 'string' }, version: { type: 'string' }, source: { type: 'string' },
-  archive: { type: 'string' }, preset: { type: 'string' }, 'python-executable': { type: 'string' },
+  archive: { type: 'string' }, 'python-executable': { type: 'string' },
   'uv-bin': { type: 'string' }, offline: { type: 'boolean' },
 } });
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-if (action === 'hash-source' && options.source) {
-  console.log(stageAcpSource(realpathSync(options.source)));
-  process.exit(0);
+if (!['install', 'select', 'remove'].includes(action) || !options.product || !acpVersion.test(options.version ?? '')) {
+  throw new Error('Expected install, select or remove with --product and --version.');
 }
-if (!['install', 'select', 'remove'].includes(action) || !acpProductId.test(options.product ?? '') || !acpVersion.test(options.version ?? '')) {
-  throw new Error('Expected install, select or remove with --product and --version, or hash-source with --source.');
-}
+// Only the iCode and WorkSwarm backends run ACP products (#1339).
+if (![icodeProductId, workswarmProductId].includes(options.product)) throw new Error('acp_product_unsupported');
 
 const parent = join(realpathSync(options.root), 'acp', options.product);
 mkdirSync(parent, { recursive: true, mode: 0o755 });
@@ -40,12 +38,11 @@ function useVersion() {
 
 function install() {
   if (options.archive) return installICode();
-  buildPythonAcpProduct({
+  buildWorkSwarmProduct({
     root: options.root,
     product: options.product,
     version: options.version,
     sourceDir: options.source,
-    presetFile: options.preset,
     pythonExecutable: options['python-executable'],
     uvExecutable: options['uv-bin'] || 'uv',
     offline: Boolean(options.offline),

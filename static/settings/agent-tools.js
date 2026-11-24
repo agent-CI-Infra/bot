@@ -196,20 +196,6 @@ function agentToolsCliNodes(cli, state, refreshAll) {
   return nodes;
 }
 
-function agentToolsGenericAcpCard() {
-  const section = settingsCard('容器内 ACP（通用）');
-  section.dataset.cli = 'container_acp';
-  section.classList.add('agent-tools-generic-acp');
-  section.append(
-    facts([
-      ['管理方式', '由部署环境声明（只读说明）'],
-      ['配置入口', 'BOT_ACP_PRODUCT / 离线安装脚本'],
-    ]),
-    note('通用「容器内 ACP」后端不对应固定上游发行包，不参与自动安装，也不在此提供安装、升级或删除操作。如需接入自定义 ACP 产品，请按部署文档预先安装到工具卷并通过环境变量声明。'),
-  );
-  return section;
-}
-
 function agentToolsInstallNodes(state, redraw, refresh) {
   const status = state.status, bounds = Array.isArray(status.retain_bounds) ? status.retain_bounds : [];
   const cli = document.createElement('select'); cli.name = 'cli';
@@ -302,13 +288,12 @@ async function agentToolsCards(request) {
     section.section.dataset.cli = cli; section.section.classList.add('agent-tools-cli');
     return section;
   });
-  const genericAcp = agentToolsGenericAcpCard();
   const redrawClis = () => { volume.redraw(); for (const card of clis) card.redraw(); };
   const prune = liveCard('清理旧版本', redraw => agentToolsPruneNodes(state, redraw, redrawClis));
   prune.section.classList.add('agent-tools-prune');
   const install = liveCard('安装版本', redraw => agentToolsInstallNodes(state, redraw, () => { redrawClis(); prune.redraw(); }));
   install.section.classList.add('agent-tools-install');
   redrawAll = () => { redrawClis(); install.redraw(); prune.redraw(); };
-  return [volume.section, ...clis.map(card => card.section), genericAcp, install.section, prune.section];
+  return [volume.section, ...clis.map(card => card.section), install.section, prune.section];
 }
 settingsCards['agent-tools'] = agentToolsCards;

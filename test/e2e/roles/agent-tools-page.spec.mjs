@@ -47,9 +47,6 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
       await expect(card.locator('button[data-action="upgrade"]')).toBeVisible();
       await expect(card.locator('button[data-action="remove"]')).toBeVisible();
     }
-    const genericCard = page.locator('.agent-tools-generic-acp');
-    await expect(genericCard).toBeVisible();
-    await expect(genericCard.locator('button')).toHaveCount(0);
     await expect(page.locator('.agent-tools-install select[name="cli"]')).toBeVisible();
 
     // Per-agent one-click install for iCode & WorkSwarm, then remove iCode with confirmation.

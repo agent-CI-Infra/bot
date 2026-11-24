@@ -57,7 +57,8 @@ export interface ContainerHarnessLaunch {
   modelSource?: HarnessModelSource;
   modelProvider?: string;
   claudeHomeOverride?: string;
-  cli: AgentToolCli | 'container_acp';
+  /** The runner protocol: a tool-volume CLI, or `acp` for an ACP product (iCode, WorkSwarm) named by `acpProduct`. */
+  cli: AgentToolCli | 'acp';
   acpProduct?: AcpProductManifest;
   backendId?: string;
   acpLocalLeaseMs?: number;
@@ -393,8 +394,8 @@ export async function withContainerHarnessSession<T, R>(
     executable = launch.executableOverride.executable;
     executableArgs = launch.executableOverride.args ?? [];
     nodeExecutable = launch.executableOverride.nodeExecutable;
-    cliVersion = launch.executableOverride.version ?? (launch.cli === 'container_acp' ? '1' : COMPATIBLE_CLI_RANGES[launch.cli].tested);
-  } else if (launch.cli === 'container_acp') {
+    cliVersion = launch.executableOverride.version ?? (launch.cli === 'acp' ? '1' : COMPATIBLE_CLI_RANGES[launch.cli].tested);
+  } else if (launch.cli === 'acp') {
     if (!launch.acpProduct) return stop('acp_product_not_installed', 'waiting_configuration');
     const { id, version } = launch.acpProduct;
     executable = `${DEFAULT_AGENT_TOOLS_ROOT}/acp/${id}/${version}/${acpProductExecutable(id)}`;
@@ -422,7 +423,7 @@ export async function withContainerHarnessSession<T, R>(
   const leaseEpoch = Number(runRow?.lease_epoch ?? spec.runContext?.()?.lease_epoch ?? 0);
   const runId = String(boundRunId ?? randomId());
 
-  const acp = launch.cli === 'container_acp';
+  const acp = launch.cli === 'acp';
   const icode = acp && launch.acpProduct?.id === icodeProductId;
   const workswarm = acp && launch.acpProduct?.id === workswarmProductId;
   const localConfig = !acp && (launch.modelSource ?? spec.containerOptions?.modelSource) === 'local_config';
@@ -530,7 +531,7 @@ export async function withContainerHarnessSession<T, R>(
         stop(started.error, 'waiting_configuration', detail);
       }
       const reason = started?.detail || started?.error || (started?.state ? `state:${String(started.state)}` : 'startup_failed');
-      stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
+      stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.backendId ?? launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
     }
   } catch (error) {
     await Promise.allSettled([transport.reap(instanceId, false), modelGateway?.close(), dispatcher.close(), readTokens?.revoke()]);
@@ -711,7 +712,7 @@ export async function withContainerHarnessSession<T, R>(
         }
         const leaseExpired = acp && polled?.state === 'interrupted' && polled.error === 'acp_lease_expired';
         if (polled?.error && !leaseExpired) {
-          stop('execution_interrupted', 'waiting_environment', `轮询容器内 ${launch.cli} 失败：${spec.redactor.text(String(polled.detail || polled.error))}。`);
+          stop('execution_interrupted', 'waiting_environment', `轮询容器内 ${launch.backendId ?? launch.cli} 失败：${spec.redactor.text(String(polled.detail || polled.error))}。`);
         }
         if (
           polled?.state === 'superseded' ||
@@ -719,7 +720,7 @@ export async function withContainerHarnessSession<T, R>(
           (startedPid !== null && typeof polled?.pid === 'number' && polled.pid !== startedPid)
         ) {
           superseded = true;
-          stop('execution_interrupted', 'waiting_environment', `容器内 ${launch.cli} 会话已被新运行接管或进程身份不匹配。`);
+          stop('execution_interrupted', 'waiting_environment', `容器内 ${launch.backendId ?? launch.cli} 会话已被新运行接管或进程身份不匹配。`);
         }
 
         if (leaseExpired && !cancelSignaled) {

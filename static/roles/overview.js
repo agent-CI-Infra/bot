@@ -36,7 +36,7 @@ function roleBackendAvailabilityCard(state) {
   if (!containerBackends.length) return null;
   const section = card('容器内 Agent 后端可用性');
   section.dataset.testid = 'backend-availability-card';
-  section.append(note('Claude Code、Codex、iCode 和 WorkSwarm 从项目电脑的只读工具卷加载，并使用平台模型中转。容器内 ACP 的安装与版本由各产品管理。'));
+  section.append(note('Claude Code、Codex、iCode 和 WorkSwarm 从项目电脑的只读工具卷加载，并使用平台模型中转。'));
   const { table, body } = projectTable(['后端', '状态', '已安装版本', '兼容范围', '说明'], '容器内 Agent 后端状态');
   for (const backend of containerBackends) {
     const rt = backend.runtime_status;

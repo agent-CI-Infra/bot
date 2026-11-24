@@ -25,7 +25,7 @@ export const codeActions: Record<string,string> = {
   workswarm_protocol_unsupported:'请平台管理员核对 WorkSwarm 中实际安装的版本和 ACP 握手版本。',
   workswarm_model_protocol_unsupported:'请选择支持 Chat Completions 或 Anthropic Messages 的模型。',
   icode_protocol_unsupported:'请平台管理员核对 agent-tools 卷中选用的 iCode 版本，重新安装并选定受支持的官方 Linux 离线包，再点「重试」。',
-  acp_process_exited:'容器内 ACP 进程异常退出，bot 会自动重试。若反复出现，请查看本次运行日志并检查产品配置，再手动重试。',
+  acp_process_exited:'iCode 或 WorkSwarm 进程异常退出，bot 会自动重试。若反复出现，请查看本次运行日志并检查工具卷中的安装版本，再手动重试。',
   subscription_mode_not_implemented:'当前后端不支持「项目电脑内自行配置」模式；仅 Claude Code 与 Codex 支持此模式，请在「角色」页切换回「平台模型」后再试。',
   claude_local_config_missing:'该角色配置为「项目电脑内自行配置」，但项目电脑中缺少 /workspace/home/.claude/settings.json 或 /workspace/home/.claude/.credentials.json，任务不会回退到平台模型。请项目管理员在「项目设置 → 机器配置」写入配置文件后重试。',
   codex_local_config_missing:'该角色配置为「项目电脑内自行配置」，但项目电脑中缺少 /workspace/home/.codex/config.toml 或 /workspace/home/.codex/auth.json，任务不会回退到平台模型。请项目管理员在「项目设置 → 机器配置」写入配置文件后重试。',

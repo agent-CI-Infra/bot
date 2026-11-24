@@ -119,8 +119,8 @@ function roleBackendRuntimeBox(role, state) {
   const info = (state.data.backends || []).find(entry => entry.id === role.harness_ref.id);
   const rt = info?.runtime_status;
   if (!rt) return null;
-  // #1042/#1192: a driver whose install and version are managed by its own product (ACP agents shipped as Python
-  // packages in the project computer) is not a tool-volume CLI. The box states that declaration; it must not report
+  // #1042/#1192: a driver whose install and version are managed by its own product (one registered by integration
+  // code, outside the Agent tool volume) is not a tool-volume CLI. The box states that declaration; it must not report
   // the CLI missing or send anyone to the Claude Code / Codex tool volume, which cannot install such a product.
   if (rt.source === 'declaration') {
     const declaredBox = element('div', '', 'role-backend-runtime');

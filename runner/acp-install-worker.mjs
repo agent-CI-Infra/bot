@@ -36,12 +36,13 @@ export function stageAcpSource(source, target) {
   return digest.digest('hex');
 }
 
-export function buildPythonAcpProduct({
+// Builds the pinned WorkSwarm release from its verified source into a private uv environment. iCode installs from its
+// offline archive instead (scripts/install-acp-product.mjs); no other ACP product is installed (#1339).
+export function buildWorkSwarmProduct({
   root = '/opt/agent-tools',
   product,
   version,
   sourceDir,
-  presetFile,
   pythonExecutable,
   uvExecutable = 'uv',
   offline = false,
@@ -50,23 +51,15 @@ export function buildPythonAcpProduct({
     throw new Error('invalid_acp_product_args');
   }
   if (product === icodeProductId) throw new Error('icode_offline_archive_required');
-  const workswarm = product === workswarmProductId;
-  if (workswarm && (version !== workswarmRelease.version || process.platform !== 'linux' || presetFile)) {
-    throw new Error('workswarm_release_unsupported');
-  }
-  const preset = workswarm ? {
+  if (product !== workswarmProductId) throw new Error('acp_product_unsupported');
+  if (version !== workswarmRelease.version || process.platform !== 'linux') throw new Error('workswarm_release_unsupported');
+  const preset = {
     python: workswarmRelease.python,
     lock: 'uv.lock',
     source: 'https://github.com/openJiuwen-ai/jiuwenswarm/commit/' + workswarmRelease.commit,
     sourceSha256: workswarmRelease.sourceSha256,
-    launch: workswarmLaunch,
-  } : JSON.parse(readFileSync(presetFile, 'utf8'));
-  const launch = validateAcpLaunch(preset.launch);
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(preset.python ?? '') ||
-      !['uv.lock', 'requirements.txt'].includes(preset.lock) ||
-      typeof preset.source !== 'string' || !preset.source || !/^[a-f0-9]{64}$/.test(preset.sourceSha256 ?? '')) {
-    throw new Error('invalid_acp_install_preset');
-  }
+  };
+  const launch = validateAcpLaunch(workswarmLaunch);
 
   const rootReal = realpathSync(root);
   const parent = join(rootReal, 'acp', product);
@@ -105,30 +98,22 @@ export function buildPythonAcpProduct({
     const python = interpreter ?? preset.python;
     const pythonMode = interpreter ? '--no-managed-python' : '--managed-python';
     if (!interpreter) {
-      if (workswarm) {
-        const catalog = execFileSync(uvExecutable, ['python', 'list', '--only-downloads', python], { env, cwd: project, encoding: 'utf8' });
-        if (!catalog.trim()) {
-          throw new Error(`workswarm_python_unavailable: This uv catalog does not provide CPython ${python} for this platform. Use a uv build that lists it (verified with uv 0.13.9), or pass --python-executable for an existing CPython ${python}.`);
-        }
+      const catalog = execFileSync(uvExecutable, ['python', 'list', '--only-downloads', python], { env, cwd: project, encoding: 'utf8' });
+      if (!catalog.trim()) {
+        throw new Error(`workswarm_python_unavailable: This uv catalog does not provide CPython ${python} for this platform. Use a uv build that lists it (verified with uv 0.13.9), or pass --python-executable for an existing CPython ${python}.`);
       }
       uv('python', 'install', '--no-bin', preset.python);
     }
     uv('venv', pythonMode, '--no-python-downloads', '--python', python, venv);
-    if (workswarm) {
-      const dependencies = execFileSync(uvExecutable, ['export', '--frozen', '--no-dev', '--no-emit-project',
-        '--no-annotate', '--no-header', '--format', 'requirements.txt'], { env, cwd: project, encoding: 'utf8' });
-      const wheel = pathToFileURL(join(project, workswarmRelease.wheel));
-      const requirements = join(scratch, 'requirements.txt');
-      writeFileSync(requirements, dependencies + '\nworkswarm @ ' + wheel + ' --hash=sha256:' + workswarmRelease.wheelSha256 + '\n');
-      // The upstream lock includes source-only dependencies (e.g. jieba), so this runs inside the isolated installer container.
-      uv('pip', 'sync', '--no-config', '--require-hashes', '--python', join(venv, 'bin', 'python'), requirements);
-      execFileSync(join(venv, 'bin', 'python'), ['-c',
-        'from importlib.metadata import version; import sys; assert version("workswarm") == sys.argv[1]', version], { env, cwd: project });
-    } else if (preset.lock === 'uv.lock') {
-      uv('sync', '--locked', '--no-dev', '--no-editable', pythonMode, '--no-python-downloads', '--python', python);
-    } else {
-      uv('pip', 'sync', '--no-config', '--require-hashes', '--only-binary', ':all:', '--python', join(venv, 'bin', 'python'), 'requirements.txt');
-    }
+    const dependencies = execFileSync(uvExecutable, ['export', '--frozen', '--no-dev', '--no-emit-project',
+      '--no-annotate', '--no-header', '--format', 'requirements.txt'], { env, cwd: project, encoding: 'utf8' });
+    const wheel = pathToFileURL(join(project, workswarmRelease.wheel));
+    const requirements = join(scratch, 'requirements.txt');
+    writeFileSync(requirements, dependencies + '\nworkswarm @ ' + wheel + ' --hash=sha256:' + workswarmRelease.wheelSha256 + '\n');
+    // The upstream lock includes source-only dependencies (e.g. jieba), so this runs inside the isolated installer container.
+    uv('pip', 'sync', '--no-config', '--require-hashes', '--python', join(venv, 'bin', 'python'), requirements);
+    execFileSync(join(venv, 'bin', 'python'), ['-c',
+      'from importlib.metadata import version; import sys; assert version("workswarm") == sys.argv[1]', version], { env, cwd: project });
     execFileSync(join(venv, 'bin', 'python'), ['-c', `import sys; assert sys.version.split()[0] == ${JSON.stringify(preset.python)}`], { env, cwd: project });
     const manifest = {
       schema: 'bot.acp-product/1',
@@ -160,18 +145,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       'source-dir': { type: 'string' },
       'uv-bin': { type: 'string', default: 'uv' },
       'python-executable': { type: 'string' },
-      preset: { type: 'string' },
       offline: { type: 'boolean', default: false },
     },
   });
-  buildPythonAcpProduct({
+  buildWorkSwarmProduct({
     root: values.root,
     product: values.product,
     version: values.version,
     sourceDir: values['source-dir'],
     uvExecutable: values['uv-bin'],
     pythonExecutable: values['python-executable'],
-    presetFile: values.preset,
     offline: Boolean(values.offline),
   });
 }

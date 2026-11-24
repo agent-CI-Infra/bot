@@ -39,9 +39,9 @@
 | `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
 | `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持平台模型（原生直连或回环中转）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
 | `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
-| `icode`、`workswarm`、`container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
+| `icode`、`workswarm` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
 
-- **容器内短期 Git/`gh` 只读凭证（支持单仓与多仓按需签发）**：`pi`、`claude_code`、`codex`、`icode` 和 `container_acp` 均配置 `credential.useHttpPath=true`、`core.hooksPath=/dev/null` 与 `core.fsmonitor=false`，由 `runner/git-credential-bot.mjs`（解析仓库路径）与 `runner/gh-wrapper.mjs`（解析 `-R`/`--repo`、`gh api repos/...`、`gh repo`、`GH_REPO` 或当前仓库 remote）向回环凭证助手按 `(purpose, repository)` 申请并缓存短期只读安装令牌。控制面 `ScopedReadTokens` 实时校验当前会话仓库范围与 GitHub 读权限（`git` 用途仅签发 `contents: read + metadata: read`），对 PAT 仓库明确提示改用 `checkout_repository` 而不泄露长期凭据，全程经 `Redactor` 流式脱敏并在回合结束统一吊销。
+- **容器内短期 Git/`gh` 只读凭证（支持单仓与多仓按需签发）**：`pi`、`claude_code`、`codex`、`icode` 和 `workswarm` 均配置 `credential.useHttpPath=true`、`core.hooksPath=/dev/null` 与 `core.fsmonitor=false`，由 `runner/git-credential-bot.mjs`（解析仓库路径）与 `runner/gh-wrapper.mjs`（解析 `-R`/`--repo`、`gh api repos/...`、`gh repo`、`GH_REPO` 或当前仓库 remote）向回环凭证助手按 `(purpose, repository)` 申请并缓存短期只读安装令牌。控制面 `ScopedReadTokens` 实时校验当前会话仓库范围与 GitHub 读权限（`git` 用途仅签发 `contents: read + metadata: read`），对 PAT 仓库明确提示改用 `checkout_repository` 而不泄露长期凭据，全程经 `Redactor` 流式脱敏并在回合结束统一吊销。
 - **Claude Code / Codex「项目电脑内自行配置」（`model_source: 'local_config'`）**：
   - `harness_ref.model_source` 规范值为 `'gateway' | 'local_config'`（旧配置 `'subscription'` 自动归一化为 `'local_config'`）。
   - 选择 `local_config` 时，控制面与 `runner/harness-entry.mjs` **不注入**任何平台模型配置（无 `ANTHROPIC_*`、`--model`、`CODEX_RELAY_URL`、`OPENAI_*`、`BOT_NATIVE_MODEL_KEY`、`config.toml` 或 `-c model_providers.bot_direct`），同时保持每次运行独立的 `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。
@@ -72,6 +72,8 @@
 
 `process` 后端已删除（#1338）：注册表、`runner/role-worker.mjs` 和只为它服务的请求预留（`src/roles/run.ts` 的收尾预留现在只用于 Pi）一并删除，角色配置提交 `process` 由已有校验返回 `unknown_role_harness`。`text_json` 结构化输出只有 Process 读取，现在没有后端声明它：保存 `text_json` 返回 `harness_structured_output_unsupported`，角色编辑器在后端只有一种输出方式时不再显示「结构化输出方式」。旧库在启动时由 `retireProcessRoles`（`src/roles/native-to-pi.ts`，标记 `migration:1338:retire-process`）经 `moveRolesToPi` 一次性把已保存配置、冻结快照和角色实例中的 `process` 改为 `pi`；迁移的角色保留固定的模型，`text_json` 改为 `tool_call`，等待中的任务因此能在 Pi 上继续。有改动时启动日志写一行 `[migration:1338]` 计数。
 
+通用容器 ACP 后端 `container_acp` 已删除（#1339）：注册表只保留 `icode` 和 `workswarm` 两个 ACP 后端，各自运行工具卷里同名的产品，不再由 `BOT_ACP_PRODUCT` 选择；角色配置提交 `container_acp` 由已有校验返回 `unknown_role_harness`。旧库在启动时由 `retireContainerAcpRoles`（`src/roles/native-to-pi.ts`，标记 `migration:1339:retire-container-acp`）经 `moveRolesToPi` 一次性把已保存配置、冻结快照和角色实例中的 `container_acp` 和更早的 `acp`（#705）改为 `pi`，有改动时启动日志写一行 `[migration:1339]` 计数。工具卷里已安装的 `acp/container_acp` 不再被读取，也不自动删除。
+
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
 
 控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱通信，每次调用都由 manager 在容器里执行一次 runner（`docker exec`）。
@@ -101,35 +103,35 @@
   - `workswarm` 因上游 `uv.lock` 含源码包（需执行 PEP 517 构建），控制面仅下载并校验 `pyproject.toml`、`uv.lock`、`workswarm` wheel 及合并 `sourceSha256` 到 `.staging/`，随后调用 `manager` 的 `POST /v1/agent-tools/install-acp` 启动一次性隔离容器（`BOT_PROJECT_IMAGE`、`USER 10001:10001`、`ReadonlyRootfs: true`、`CapDrop: ALL`、`no-new-privileges:true`、专用外网构建网络且**仅挂载 `agent-tools` 卷**，零接触 `/keys/master.key`、`control.sqlite`、`manager.token` 与 `control` 网络）执行 `runner/acp-install-worker.mjs`。缺少隔离安装器时以 `agent_tool_isolated_installer_required` 失败关闭。
   - 运行中版本保护：`remove`、`install` 与 `prune` 均校验 `activeCliVersions`（含 Node/`uv` 运行时依赖）并返回 `409 agent_tool_version_in_use`；ACP 的 `selected` 指针在 `prune` 中受保护，单版本删除时自动切换到剩余最高合法版本或清空。
 
-### 容器内 ACP
+### ACP 后端（iCode、WorkSwarm）
 
-`container_acp` 声明工作区执行、`writer` / `observer` 角色类型，以及模型中转支持的 Chat Completions、Responses 和 Anthropic Messages 格式。配置中原有的 `acp` 标识继续按退役规则迁移。ACP 客户端由项目电脑里的 runner 启动，产品以 JSON-RPC 帧写 stdout，诊断写 stderr。客户端握手时仅声明平台实际提供的能力，文件访问和命令由产品在任务工作区执行。
+`icode` 和 `workswarm` 共用 `src/harness/acp.ts` 的 ACP 会话代码，在注册表中各是一项，声明工作区执行、`writer` / `observer` 角色类型，以及模型中转支持的格式（iCode 支持 Chat Completions、Responses 和 Anthropic Messages，WorkSwarm 不支持 Responses）。控制面按后端 id 读取工具卷 `acp/<id>/` 中选定的产品清单，以 `harness: 'acp'` 加 `acp_product` 交给 runner。ACP 客户端由项目电脑里的 runner 启动，产品以 JSON-RPC 帧写 stdout，诊断写 stderr。客户端握手时仅声明平台实际提供的能力，文件访问和命令由产品在任务工作区执行。
 
-`session/new` 和 `session/load` 均接收工作区路径与本次运行的 MCP 配置。支持 `loadSession` 且会话可读时记录 `native_resume`。其余续跑从授权的任务记录重建并记录 `rebuilt_from_task_records`。平台立即响应许可请求并记录 `permission` 事件，产品预设可提供私有请求的即时答复。未注册的请求立即收到 JSON-RPC `-32601`。
+`session/new` 和 `session/load` 均接收工作区路径与本次运行的 MCP 配置。支持 `loadSession` 且会话可读时记录 `native_resume`。其余续跑从授权的任务记录重建并记录 `rebuilt_from_task_records`。平台立即响应许可请求并记录 `permission` 事件，产品清单可提供私有请求的即时答复。未注册的请求立即收到 JSON-RPC `-32601`。
 
-HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bearer 凭据，和 stdio 共享工具清单、权限检查与提交校验。产品预设用 `{relay}`、`{token}`、`{model}` 填入模型地址、运行令牌与已解析的模型。中转请求沿用平台模型用量账本。取消时 runner 先发 `session/cancel`，随后回收整组进程。看门狗在控制面停止续租后也会执行该流程。配套进程各有回环端口、探活路径和独立运行目录，整组随运行结束。
+HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bearer 凭据，和 stdio 共享工具清单、权限检查与提交校验。产品清单用 `{relay}`、`{token}`、`{model}` 填入模型地址、运行令牌与已解析的模型。中转请求沿用平台模型用量账本。取消时 runner 先发 `session/cancel`，随后回收整组进程。看门狗在控制面停止续租后也会执行该流程。配套进程各有回环端口、探活路径和独立运行目录，整组随运行结束。
 
 #### WorkSwarm
 
-`workswarm` 复用容器 ACP 和模型邮箱，启动独立的 AgentServer 与 Gateway 并探测两个回环 WebSocket。每次运行提供独立 HOME、数据目录和三个回环端口。配套服务退出、取消、超时和租约失效由 ACP 运行回收逻辑处理。runner 核对 ACP 版本和产品版本。WorkSwarm 不支持 `session/load`，恢复时标记 `rebuilt_from_task_records`。
+`workswarm` 复用 ACP 会话和模型邮箱，启动独立的 AgentServer 与 Gateway 并探测两个回环 WebSocket。每次运行提供独立 HOME、数据目录和三个回环端口。配套服务退出、取消、超时和租约失效由 ACP 运行回收逻辑处理。runner 核对 ACP 版本和产品版本。WorkSwarm 不支持 `session/load`，恢复时标记 `rebuilt_from_task_records`。
 
 WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm 自己的 `mcp.servers` 注册受运行令牌保护的回环 MCP。WorkSwarm 在独立目录启动，禁用钩子，通过平台工具读写任务检出和执行命令。runner 准备工作目录时跳过上游配置模板合并，核对默认拒绝和平台 MCP 工具许可表后才启动配套服务。模型中转仅提供许可的任务工具，任务邮箱再次按角色权限检查。ACP 会话声明无人可交互。Gateway 自带调度器仍启动，平台不创建定时任务或配置 WorkSwarm 自带消息渠道。
 
 #### iCode
 
-`icode` 注册为独立后端，复用容器内 ACP 会话和工具转发。控制面读取选定的离线包清单，runner 在项目电脑内启动 `icode acp --approval bypass`，并核对握手版本与 HTTP MCP、会话关闭能力。每次运行写入独立 HOME 及最小配置，API 样式遵循平台选定模型，凭据字段保留运行令牌占位。仓库设置、钩子及自带 MCP 均关闭。仓库指令和 Skill 仅从可信检出按 iCode 原生方式加载，不可信检出由平台提供基准分支指令。角色权限决定是否开放原生文件读取、写入、命令和 Skill 脚本。
+`icode` 注册为独立后端，复用 ACP 会话和工具转发。控制面读取选定的离线包清单，runner 在项目电脑内启动 `icode acp --approval bypass`，并核对握手版本与 HTTP MCP、会话关闭能力。每次运行写入独立 HOME 及最小配置，API 样式遵循平台选定模型，凭据字段保留运行令牌占位。仓库设置、钩子及自带 MCP 均关闭。仓库指令和 Skill 仅从可信检出按 iCode 原生方式加载，不可信检出由平台提供基准分支指令。角色权限决定是否开放原生文件读取、写入、命令和 Skill 脚本。
 
 会话状态由 `CHRYS_SESSION_ROOT_DIR` 写入角色实例持久目录。恢复在相同工作目录用 `session/load`，依上游工作目录校验和任务记录决定恢复或重建。iCode 的 `_chrys/request_input` 按问题即时用英文告知模型无人可答，请根据任务自行判断，并设置五秒超时。结束先发 `session/close`，取消、超时或失去租约时也走有时限的会话关闭。runner 用运行实例标识回收脱离进程组的后台 Shell，并移除该次 HOME。
 
-#### 安装 Python 产品
+#### 产品清单与安装
 
-安装脚本校验源码目录摘要，用 uv 安装固定补丁版本的 Python，并按上游 `uv.lock` 或带哈希的 `requirements.txt` 安装依赖。控制面读取选定版本的清单，项目电脑从只读工具卷执行对应版本的解释器和入口。管理员操作见 [安装与维护容器内 ACP 产品](../features/deployment-and-operations.md#安装与维护容器内-acp-产品)。
+工具卷 `acp/<id>/<版本>/manifest.json` 记录产品来源、哈希和启动方式 `launch`，`acp/<id>/selected` 指向选定版本；`runner/acp-products.mjs` 的 `readAcpProduct` 校验清单并按产品核对平台固定的发行版本。iCode 从官方离线包只解出可执行文件；WorkSwarm 从固定提交的 `pyproject.toml`、`uv.lock` 和 wheel 用 uv 构建虚拟环境（`runner/acp-install-worker.mjs` 的 `buildWorkSwarmProduct`，常规由 manager 的隔离容器执行）。`scripts/install-acp-product.mjs` 只接受这两个产品，通用 Python 产品的 `--preset` 安装和 `hash-source` 已随 `container_acp` 删除（#1339）。管理员操作见 [iCode 与 WorkSwarm 说明与离线安装兜底](../features/deployment-and-operations.md#icode-与-workswarm-说明与离线安装兜底)。
 
-`preset.json` 包含 `python`、`source`、`sourceSha256`、`lock` 和 `launch`。`launch` 包含 `args`、`mcp`（`http` 或 `stdio`）、`access`、`untrustedCheckout`、`env`、`answers` 和 `sidecars`。在 `args` 与 `env` 中可使用 `{product}`、`{workspace}`、`{state}`、`{run}`、`{access}` 及模型变量。`{product}` 指向已校验的源码目录。`answers` 把私有 JSON-RPC 方法映射为即时返回值。每个配套进程声明 `name`、`args` 和 `healthPath`，用 `{port:名称}` 获取端口，自身的 `{state}`、`HOME` 和临时目录按运行隔离。
+`launch` 包含 `args`、`mcp`（`http` 或 `stdio`）、`access`、`untrustedCheckout`、`env`、`answers` 和 `sidecars`。在 `args` 与 `env` 中可使用 `{product}`、`{workspace}`、`{state}`、`{run}`、`{access}` 及模型变量。`{product}` 指向已校验的源码目录。`answers` 把私有 JSON-RPC 方法映射为即时返回值。每个配套进程声明 `name`、`args` 和 `healthPath`，用 `{port:名称}` 获取端口，自身的 `{state}`、`HOME` 和临时目录按运行隔离。
 
-`access: full` 要求当前角色具有文件写入和命令权限。使用 `access: native` 的预设须把 `{access}` 中的约束落实到产品的文件与命令配置。预设只有在能禁用不可信检出中的本地指令、钩子和 MCP 配置时才声明 `untrustedCheckout: true`。可信仓库指令由平台按现有规则提供。
+`access: full` 要求当前角色具有文件写入和命令权限。使用 `access: native` 的产品须把 `{access}` 中的约束落实到产品的文件与命令配置。产品只有在能禁用不可信检出中的本地指令、钩子和 MCP 配置时才声明 `untrustedCheckout: true`。可信仓库指令由平台按现有规则提供。
 
-安装器核验解释器版本并写入来源和哈希后，原子切换选定记录。已开始的运行保持原版本绑定。产品的安装来源可能包含 PyPI 和 Python 构建产物下载站，由安装环境提供网络访问。
+安装器核验后写入来源和哈希，再原子切换选定记录。已开始的运行保持原版本绑定。
 
 ## 4. 虚拟电脑生命周期与自动预编译镜像引擎（`manager/`、`runner/`）
 

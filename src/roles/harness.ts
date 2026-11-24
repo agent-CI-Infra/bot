@@ -18,7 +18,7 @@ import { piAdapter,piRuntime } from '../agent/pi.js';
 import type { RoleKind } from './catalog.js';
 import type { HarnessCapabilities } from './protocol.js';
 import { icodeProductId, workswarmProductId } from '../../runner/acp-products.mjs';
-import { acpHarness, containerAcpId, prepareAcp } from '../harness/acp.js';
+import { acpHarness, prepareAcp } from '../harness/acp.js';
 import { codexAppServer } from '../harness/app-server.js';
 /**
  * The capability matrix of a driver. Role configuration is checked against it before a run starts: the role kinds it can
@@ -47,11 +47,14 @@ const containerRelayApis=['openai-chat-completions','openai-responses','anthropi
 // Every built-in driver runs in the shared project computer (`isolation: 'none'`); none runs on the control plane since the
 // Process driver was removed (#1338). Container CLI drivers (Claude Code, Codex) execute inside its workspace,
 // communicating with the control plane through the task mailbox (model relay, stdio MCP `bot`, read-only GitHub token helpers).
-const containerAcp: RegisteredRoleHarness = {
- id:containerAcpId,version:'1',session:'external_session',events:'acp_v1',kinds:['writer','observer'],
+// iCode and WorkSwarm are ACP products from the tool volume and share these declarations; there is no generic ACP backend
+// (#1339), so this is not a registered driver of its own.
+const acpProduct=(id:string):RegisteredRoleHarness=>({
+ id,version:'1',session:'external_session',events:'acp_v1',kinds:['writer','observer'],
  model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:null,externalModel:false,
  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']},
-};
+});
+const workswarm=acpProduct(workswarmProductId);
 /** A registered driver: every declaration is filled in except `tool_volume`, which only tool-volume CLIs carry (#1042). */
 export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume'|'listed'|'steered_turns'>> & {tool_volume?:AgentToolCli;listed?:boolean;steered_turns?:boolean};
 // Manager (controller) and QA (evaluator) run only on Pi (#1337): no other driver declares those kinds, so role admission
@@ -61,10 +64,8 @@ export const harnesses:RegisteredRoleHarness[]=[
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},tool_volume:'codex',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- containerAcp,
- {...containerAcp,id:icodeProductId},
- {...containerAcp,id:workswarmProductId,model_api:['openai-chat-completions','anthropic-messages'],
-  capabilities:{...containerAcp.capabilities,recovery:['rebuilt_from_task_records']}},
+ acpProduct(icodeProductId),
+ {...workswarm,model_api:['openai-chat-completions','anthropic-messages'],capabilities:{...workswarm.capabilities,recovery:['rebuilt_from_task_records']}},
  // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
  {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']},steered_turns:true}];
@@ -73,7 +74,7 @@ export const steersServiceTurns=(id:string)=>harnesses.some(h=>h.id===id&&h.stee
 export const runsInTaskCheckout = (driver: RoleHarnessMetadata) => driver.environment === 'workspace' && driver.capabilities?.raw_evidence === 'task_tools';
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
 // Every driver brings its own transport: there is no control-plane tool loop to fall back to (#1257).
-const adapters=new Map<string,AdapterFactory>([['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],[workswarmProductId,spec=>acpHarness(spec,workswarmProductId)],['pi',piHarness]]);
+const adapters=new Map<string,AdapterFactory>([['codex',codexHarness],['claude_code',claudeCodeHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],[workswarmProductId,spec=>acpHarness(spec,workswarmProductId)],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
@@ -169,7 +170,8 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
 }
 export function roleHarness(id:string){
  const factory=adapters.get(id);if(!factory)throw new Error('unknown_role_harness');
- const isAcp=id===containerAcpId||id===icodeProductId||id===workswarmProductId;
+ // ACP products (iCode, WorkSwarm) read their installed tool-volume product before the run and finish their session on close.
+ const isAcp=harnesses.find(h=>h.id===id)?.events==='acp_v1';
  const createSession=<T>(spec:AgentSpec<T>,services:AgentServices)=>{
   const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
   const external=spec.cancelSignal;
