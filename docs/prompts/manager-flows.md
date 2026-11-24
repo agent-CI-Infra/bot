@@ -18,7 +18,7 @@ flowchart LR
 ```
 
 1. **Read first.** Call `get_effective_config` for the current prompt, its `revision`, `customized` and the settings, and find the chapter or chapters the change touches.
-2. **Propose and wait.** Reply with 「当前流程」 (the chapter's flowchart as it is now), 「修改后流程」 (the changed flowchart) and 变更要点: the steps and boundary rules that change, with the exact new rule text. End the turn without writing.
+2. **Propose and wait.** Reply with 「当前流程」 (the chapter's flowchart as it is now), 「修改后流程」 (the changed flowchart) and 变更要点: the steps and boundary rules that change, with the exact new rule text. When the user's goal can be achieved in more than one reasonable way or involves trade-offs (for example changing the Manager prompt vs adjusting capability ceilings, event switches, role permissions, or standing rules), explain the current background, present concrete candidate options with one recommended option, and list each option's pros and cons before asking for confirmation. End the turn without writing.
    - The control plane enforces the capability ceiling, write grants, role permissions, development basis and the merge rule whatever the prompt says. When the change needs a setting, name it and propose it separately (`project.update` for the ceiling, `manager.update` `events` or `standing_rules`, `roles.update` for permissions); never present a prompt edit as widening what the bot may do.
    - When `customized` is false, say that saving makes the prompt the project's own: it then stops following built-in updates.
    - Removing a rule stops that behavior; for example deleting the project rule under "Starting development" stops autonomous development.

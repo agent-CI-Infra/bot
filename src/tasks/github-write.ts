@@ -105,8 +105,14 @@ export const postReviewTool = fn(
           start_side: { type: 'string', enum: ['LEFT', 'RIGHT'] },
           actionable: { type: 'boolean' },
           within_goal: { type: 'boolean' },
-          requires_human_decision: { type: 'boolean' },
-          human_action: { type: 'string' },
+          requires_human_decision: {
+            type: 'boolean',
+            description: 'True when a person must decide or act. When true, explain the background in body; when more than one viable option exists, present concrete candidate options with one recommended option and each option\'s pros and cons (for a single-path action, state it directly without inventing alternatives).',
+          },
+          human_action: {
+            type: 'string',
+            description: 'When requires_human_decision is true: one concise sentence stating what a person must decide or do (and, when comparing options, your recommended option).',
+          },
           comment_id: { type: 'integer', minimum: 1 },
           selection_reason: { type: 'string' },
         },

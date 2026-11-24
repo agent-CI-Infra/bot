@@ -27,6 +27,20 @@ const tool=(name:string,description:string,properties:any,required:string[])=>({
 const summaryDescription='The public pull request description on GitHub, read by the repository\'s maintainers as written; on a revision of the bot\'s pull request it replaces the existing description. '
  +'Say what development started on (development_basis: the label and who added it, the maintainer\'s comment with its link, or the project rule, then mention the Issue\'s author as @login) and the goal you implemented; on a revision keep what the description already says about this. '
  +pullRequestSummaryRules;
+const adaptTeamText=(text:string)=>text
+ .replace(/When ready, call create_pull_request:[\s\S]*?ends development\./g,'When ready, call submit_delivery with PR metadata; framework QA and publication follow.')
+ .replace(/Call create_pull_request with\b/g,'Call submit_delivery with')
+ .replace(/\bcreate_pull_request\b/g,'submit_delivery');
+function adaptTeamPrompt(prompt:string):string{
+ try{
+  const parsed=JSON.parse(prompt);
+  if(parsed&&typeof parsed==='object'&&Array.isArray(parsed.project_instructions?.rules)){
+   return JSON.stringify({...parsed,project_instructions:{...parsed.project_instructions,rules:parsed.project_instructions.rules.map((rule:any)=>rule&&typeof rule.content==='string'?{...rule,content:adaptTeamText(rule.content)}:rule)}});
+  }
+ }catch{ /* non-JSON prompt fixture */ }
+ return adaptTeamText(prompt);
+}
+const teamMilestoneTool={...milestoneTool,function:{...milestoneTool.function,description:milestoneTool.function.description.replace(/\bcreate_pull_request\b/g,'submit_delivery')}};
 /** Existing engine remains the publisher and QA authority; team only prepares its input. */
 export async function developmentTeam(workspace:Workspace,system:string,prompt:string,publish:(id:string,args:any)=>Promise<any>,access:{read:boolean;write:boolean;shell:boolean},githubWrite?:(args:unknown)=>Promise<any>,milestone?:(args:unknown)=>Promise<any>,remote?:()=>Promise<GitHub>,explorer?:RepositoryExplorer){
  const {store,task,redactor,guard}=workspace,records=new TaskRecords(store),spaces=roleWorkspaces(workspace);
@@ -35,13 +49,14 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
   change_title:{type:'string',description:'The commit subject and pull request title: a concise description of the code change.'},labels:pullRequestLabelsSchema,media:pullRequestMediaSchema},['summary','test_command']);
  const validate=(v:any)=>{if(!v||typeof v.summary!=='string'||!v.summary.trim()||typeof v.test_command!=='string'||!v.test_command.trim())return stop('role_delivery_invalid','retry_wait');return redactor.clean(v);};
  const readTools=explorer?workspaceRepositoryTools.map(t=>({...t,function:{...t.function,description:t.function.description.replace(/\s*Call github_read_token first\./g,'')}})):[];
+ prompt=adaptTeamPrompt(prompt);
  for(let round=0;round<3;round++){
   const cmdBudget=resolveCommandTimeout(store,task,'dev',180);
-  const spec:AgentSpec<any>={store,task,redactor,guard,system:system.replace(/When ready, call create_pull_request:[\s\S]*?ends development\./,'When ready, call submit_delivery with PR metadata; framework QA and publication follow. Never call create_pull_request yourself.'),prompt:JSON.stringify({original:prompt,version_context:await versionTool(store,task,spaces.current,'read_version_context',{},remote)}),maxTurns:64,maxOutputTokens:16384,tools:[...(access.read?[tool('read_file','Read text from this shared workspace, ../notes, ../context, or /tmp',{path:{type:'string'}},['path'])]:[]),...(access.write?[tool('write_file','Write text to the repository, ../notes, or /tmp',{path:{type:'string'},content:{type:'string'}},['path','content'])]:[]),...(access.shell?[commandTool(cmdBudget.defaultSeconds,'Run verification/implementation commands without publication or credentials.',cmdBudget.maxSeconds)]:[]),submit,...versionTools,...readTools,...taskTools,...eventSubscriptionTools,...memoryTools,
+  const spec:AgentSpec<any>={store,task,redactor,guard,system:adaptTeamText(system),prompt:JSON.stringify({original:prompt,version_context:await versionTool(store,task,spaces.current,'read_version_context',{},remote)}),maxTurns:64,maxOutputTokens:16384,tools:[...(access.read?[tool('read_file','Read text from this shared workspace, ../notes, ../context, or /tmp',{path:{type:'string'}},['path'])]:[]),...(access.write?[tool('write_file','Write text to the repository, ../notes, or /tmp',{path:{type:'string'},content:{type:'string'}},['path','content'])]:[]),...(access.shell?[commandTool(cmdBudget.defaultSeconds,'Run verification/implementation commands without publication or credentials.',cmdBudget.maxSeconds)]:[]),submit,...versionTools,...readTools,...taskTools,...eventSubscriptionTools,...memoryTools,
   // Kept by runRole only for roles whose GitHub permissions write (#381).
   ...(githubWrite?withMergePolicy([githubWriteTool],autoMergePolicy(store,String(task.repository_id))):[]),
   // An Issue's development reports its milestones on the Issue's status comment (#1047).
-  ...(milestone?[milestoneTool]:[])],finish:{name:'submit_delivery',validate},finalizationTools:['submit_delivery'],validate:content=>validate(JSON.parse(content)),execute:async(name,args)=>{
+  ...(milestone?[teamMilestoneTool]:[])],finish:{name:'submit_delivery',validate},finalizationTools:['submit_delivery'],validate:content=>validate(JSON.parse(content)),execute:async(name,args)=>{
    if(versionTools.some(t=>t.function.name===name))return versionTool(store,task,spaces.current,name,args,remote);
    if(explorer&&workspaceRepositoryTools.some(t=>t.function.name===name)){const connected=await explorer.execute('github_read_token',{});return connected?.error?connected:explorer.execute(name,args);}
    if(name==='github_write'&&githubWrite)return githubWrite(args);

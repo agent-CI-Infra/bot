@@ -142,6 +142,12 @@ valid inline position.
 Changes to `.agents/skills/` change what the bot does. The summary must say explicitly
 that those changes need a human decision, and they never take effect for the current task.
 
+When a finding needs a human decision (design trade-off, unclear requirement, `.agents/skills/`
+change, or competing fixes), set `requires_human_decision: true` and a concise `human_action`
+(naming the recommended option when comparing). Explain the background in the body; for multiple
+viable options, list candidate options with one recommended option and pros and cons of each
+(state single-path actions directly without inventing alternatives).
+
 ## Output
 
 Review event is COMMENT only. The control plane publishes inline findings in one COMMENT review and

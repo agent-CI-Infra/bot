@@ -364,3 +364,61 @@ test('#1122 generic Issue task.request reconciles needs_human_label and newer de
   await settleProgress(f.h.store, dev2.id, f.github);
   assert.deepEqual(f.state.labels, ['bot-developed']);
 });
+
+test('stopped milestone renders structured candidate options with pros/cons and preserves decision text beyond the old 1500-char limit (#1306)', async t => {
+  const f = await fixture(t);
+
+  // Chinese Issue with structured options and a long human_action (>1500 chars, exceeding the previous maxText=1500 limit).
+  const zhTask = f.task();
+  startProgress(f.h.store, zhTask, { number: 5, title: '支持导出月度报表 PDF', body: '需要一个导出 PDF 按钮。' });
+  const longAction = '请维护者在下方方案中拍板，并补充验收口径：' + '详细权衡说明与兼容边界核对。'.repeat(130) + 'TAIL_MARKER_ZH';
+  assert.ok(longAction.length > 1800, 'fixture must exceed old 1500-char truncation cap');
+  const zhRec = reportMilestone(f.h.store, zhTask.id, {
+    milestone: 'stopped',
+    reason: '已核对 package.json，仓库没有 PDF 库，新增依赖未在 Issue 授权。',
+    options: [
+      { option: '方案 A：浏览器 window.print() 配合打印样式', recommended: true, pros: '零新依赖，改动小，可立即交付', cons: '文件名和分页依赖浏览器打印对话框' },
+      { option: '方案 B：引入 pdfkit 服务端生成 PDF', recommended: false, pros: '直接下载标准 PDF 文件且排版可控', cons: '需维护者批准新增依赖并配置字体' },
+    ],
+    human_action: longAction,
+  });
+  assert.deepEqual(zhRec, { recorded: true, milestone: 'stopped' });
+  f.set(zhTask.id, { status: 'failed', error_code: 'create_pull_request_required' });
+  const zhBody = renderProgress(f.row(zhTask.id), f.h.store.get('SELECT * FROM tasks WHERE id=?', zhTask.id));
+  assert.match(zhBody, /\*\*备选方案\*\*/);
+  assert.match(zhBody, /- \*\*方案 A：浏览器 window\.print\(\) 配合打印样式\*\*（推荐）：优点：零新依赖，改动小，可立即交付；缺点：文件名和分页依赖浏览器打印对话框/);
+  assert.match(zhBody, /- \*\*方案 B：引入 pdfkit 服务端生成 PDF\*\*：优点：直接下载标准 PDF 文件且排版可控；缺点：需维护者批准新增依赖并配置字体/);
+  assert.ok(zhBody.includes('TAIL_MARKER_ZH'), 'stopped human_action beyond 1500 chars must not be silently truncated');
+
+  // English Issue with structured options.
+  const enTask = f.task();
+  startProgress(f.h.store, enTask, f.issue);
+  const enRec = reportMilestone(f.h.store, enTask.id, {
+    milestone: 'stopped',
+    reason: 'Two public-API compatibility paths exist for "=" inside values.',
+    options: [
+      { option: 'Option A: split on first "=" only', recommended: true, pros: 'Backward-compatible for existing configs', cons: 'Keys still cannot contain "="' },
+      { option: 'Option B: support quoted escaping', recommended: false, pros: 'Handles arbitrary keys and values', cons: 'Changes parser contract for existing callers' },
+    ],
+    human_action: 'Pick Option A (recommended) or Option B.',
+  });
+  assert.deepEqual(enRec, { recorded: true, milestone: 'stopped' });
+  f.set(enTask.id, { status: 'failed', error_code: 'create_pull_request_required' });
+  const enBody = renderProgress(f.row(enTask.id), f.h.store.get('SELECT * FROM tasks WHERE id=?', enTask.id));
+  assert.match(enBody, /\*\*Candidate options\*\*/);
+  assert.match(enBody, /- \*\*Option A: split on first "=" only\*\* \(Recommended\): Pros: Backward-compatible for existing configs; Cons: Keys still cannot contain "="/);
+  assert.match(enBody, /- \*\*Option B: support quoted escaping\*\*: Pros: Handles arbitrary keys and values; Cons: Changes parser contract for existing callers/);
+
+  // Single-path blocker without options omits the Candidate options section cleanly.
+  const singleTask = f.task();
+  startProgress(f.h.store, singleTask, f.issue);
+  assert.deepEqual(reportMilestone(f.h.store, singleTask.id, {
+    milestone: 'stopped',
+    reason: 'The GitHub App installation lacks Workflows: Read and write.',
+    human_action: 'Grant Workflows: Read and write on the installation and retry.',
+  }), { recorded: true, milestone: 'stopped' });
+  f.set(singleTask.id, { status: 'failed', error_code: 'create_pull_request_required' });
+  const singleBody = renderProgress(f.row(singleTask.id), f.h.store.get('SELECT * FROM tasks WHERE id=?', singleTask.id));
+  assert.doesNotMatch(singleBody, /\*\*Candidate options\*\*/);
+  assert.match(singleBody, /\*\*Reason\*\*: The GitHub App installation lacks Workflows: Read and write\./);
+});

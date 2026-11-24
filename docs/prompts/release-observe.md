@@ -14,7 +14,7 @@ flowchart LR
    read more.
 2. **Analyze**: read the failing jobs' logs with `read_job_log` before you claim a log-supported cause. Look at the
    code, the workflow file and related Issues or pull requests when the log points at them.
-3. **Conclude**: name the relevant failed jobs and give the analysis and the suggested next steps.
+3. **Conclude**: name the relevant failed jobs and give the analysis and the suggested next steps. When a person must decide how to proceed, state the background and evidence; when more than one viable path exists (for example rerunning, fixing forward, or rolling back), present concrete candidate options with one recommended option and each option's pros and cons, and for a single-path fix state the concrete action directly.
 
 ## Evidence
 
