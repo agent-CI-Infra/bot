@@ -60,6 +60,8 @@ import { loginBucket } from './core/client-address.js';
 import { invokesHostedMedia, serveHostedMedia } from './github/hosted-pr-media.js';
 import { AssistantComputerService, assistantComputersApi } from './service-roles/assistant-computers.js';
 import type { GitCache } from './agent/git-cache.js';
+import { MemoryConsolidationService, type ConsolidationRunContext, type ConsolidationSubmission } from './memory/consolidation-engine.js';
+import { MemoryConsolidationApi } from './memory/consolidation-api.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -88,7 +90,9 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   /** The long-lived reclaimer started with the control plane; readiness reads its counters, never a fresh instance (#771). */
   notesReclaimer?: NotesReclaimer;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
-  schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
+  schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void;
+  consolidation?: { clock?: () => number; tickMs?: number; firstDelayMs?: number; automatic?: boolean; runner?: (ctx: ConsolidationRunContext) => Promise<ConsolidationSubmission> };
+  onConsolidation?: (service: MemoryConsolidationService) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -178,7 +182,23 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   for (const row of migrateDailyReports(schedules)) console.log(`[schedules] daily report plan ${row.schedule_id} (project ${row.project_id}): ${row.outcome}`
     + (row.channel_schedule_id ? ` to ${row.chat_type} timer ${row.channel_schedule_id}` : '') + (row.reason ? ` (${row.reason})` : ''));
   const scheduler = new Scheduler(schedules); options.onSchedules?.(scheduler);
-  const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine, 120_000, projectTools);
+  const consolidation = new MemoryConsolidationService({
+    store,
+    manager: options.projects?.manager ?? options.engine?.manager,
+    management: sharedManagement,
+    channels,
+    assistants,
+    engine: options.engine,
+    projects: options.projects,
+    clock: options.consolidation?.clock,
+    tickMs: options.consolidation?.tickMs,
+    firstDelayMs: options.consolidation?.firstDelayMs,
+    runner: options.consolidation?.runner,
+  });
+  const consolidationApi = new MemoryConsolidationApi(store, consolidation, sharedManagement, channels, assistants);
+  channels.serviceBindings.onDisabled = chatId => { consolidation.stopScope('group_assistant', chatId); };
+  options.onConsolidation?.(consolidation);
+  const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine, 120_000, projectTools, consolidation);
   const storage = options.storage ?? new StorageReport(store, options.projects?.manager);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -320,6 +340,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/locale-boot.js': ['locale-boot.js', 'text/javascript'], '/app.js': ['app.js', 'text/javascript'], '/i18n.js': ['i18n.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/feishu-setup.js': ['feishu-setup.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/schedules.js': ['schedules.js','text/javascript'], '/subscriptions.js':['subscriptions.js','text/javascript'], '/subscriptions.css':['subscriptions.css','text/css'], '/schedule-records.js':['schedule-records.js','text/javascript'], '/schedule-records.css':['schedule-records.css','text/css'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'],'/design.js':['design.js','text/javascript'], '/design.css':['design.css','text/css'], '/external.js':['external.js','text/javascript'], '/release.js':['release.js','text/javascript'], '/release.css':['release.css','text/css'], '/project.js': ['project.js', 'text/javascript'], '/manager.js': ['manager.js', 'text/javascript'], '/roles.js': ['roles.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/knowledge.js':['knowledge.js','text/javascript'], '/knowledge.css':['knowledge.css','text/css'],
+      '/memory-consolidation.js':['memory-consolidation.js','text/javascript'], '/memory-consolidation.css':['memory-consolidation.css','text/css'],
       '/channel-console.js': ['channel-console.js', 'text/javascript'], '/channel-console.css': ['channel-console.css', 'text/css'],
       '/schedules.css': ['schedules.css','text/css'],
       '/access.css': ['access.css', 'text/css'],
@@ -502,7 +523,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     if (mutation && githubIdentity && await githubIdentity.renewIfLapsed(user.id)) user = actor(store, req);
     const current = user, context = current.context!;
     if (path.startsWith('/api/channels/')) {
-      const result = await channelApi.api(context, method, url, input);
+      const result = await consolidationApi.channelApi(context, method, url, input) ?? await channelApi.api(context, method, url, input);
       if (mutation && options.channels?.longConnections !== false) channelConnections.reconcile();
       respond(res, method === 'POST' ? 201 : 200, result); return;
     }
@@ -516,7 +537,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     const taskId = /^\/api\/tasks\/([^/]+)/.exec(path)?.[1];
     if (taskId) resourceProject = store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id;
     const capability = /\/releases(?:\/|$)/.test(path) ? 'release.manage' : /\/roles(?:\/|$)/.test(path) ? 'roles.edit'
-      : /\/(?:memory|memories|knowledge|knowledge-files|knowledge-directories|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
+      : /\/(?:memory|memories|memory-consolidation|knowledge|knowledge-files|knowledge-directories|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
     // Every write and GitHub call rechecks the current grants (#521): the guard authorizes the target project, and
     // assertCurrent replays whatever else this request was authorized for once the principal has lost some authority.
     const guard = () => {
@@ -531,11 +552,11 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     };
     guard();
     if (path === '/api/agent-tools/install' || path === '/api/agent-tools/upgrade') res.setTimeout(1_200_000);
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => await consolidationApi.api(current, method, url, input) ?? identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? await taskChecksApi(store, user, method, url, options.githubUrl) ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
-    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|releases|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
+    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|memory-consolidation|releases|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     const activatedRepo = method === 'POST' ? /^\/api\/installations\/([1-9]\d*)\/activate$/.exec(path)?.[1] : undefined;
     if (activatedRepo) githubLogin.identity?.scheduleRepositoryMemberSync(activatedRepo);
@@ -559,13 +580,14 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       }
     });
     if (options.schedules?.automatic !== false) scheduler.start();
+    if (options.consolidation?.automatic !== false) consolidation.start();
     if (options.channels?.longConnections !== false) {
       channelConnections.reconcile();
       connectionTimer = setInterval(() => channelConnections.reconcile(), 1000); connectionTimer.unref();
     }
   });
   let drained:Promise<unknown>=Promise.resolve();
-  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),projectTools.stop(),scheduler.close(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
+  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),projectTools.stop(),scheduler.close(),consolidation.stop(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
   const close=server.close.bind(server);
   // The caller may close SQLite after this callback; every background consumer must have finished first.
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;

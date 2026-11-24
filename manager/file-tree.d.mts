@@ -24,4 +24,11 @@ export class FileTree {
   delete(id: string, expectedRevision: number, actor?: string): Promise<Record<string, any>>;
   restore(id: string, revision: number, expectedRevision: number, actor?: string): Promise<Record<string, any>>;
   move(id: string, path: string, expectedRevision: number, actor?: string): Promise<Record<string, any>>;
+  pruneHistory(options?: { keepVersions?: number | null; keepDays?: number | null; now?: number }): Promise<{
+    pruned_versions: number;
+    removed_blobs: number;
+    freed_bytes: number;
+    files_trimmed: number;
+    blob_gc_skipped?: boolean;
+  }>;
 }

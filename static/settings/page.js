@@ -1,5 +1,6 @@
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id); },
+  async 'memory-consolidation'(request) { return memoryConsolidationSettingsPage(request); },
   // Group assistants' and the management assistant's computers (#457): their timers and limits, each computer's resources
   // (the counterpart of the work computers' default resources), and every HOME.
   async 'assistant-computers'(request) {

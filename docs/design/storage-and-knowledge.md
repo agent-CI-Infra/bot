@@ -53,4 +53,21 @@ flowchart LR
   - 历史迁出的文件名 stem 按 UTF-8 字节截断至 ≤200 字节以适配单段 255 字节上限；仅明确的单条路径/内容校验错误（如 `400 invalid_note_path`、`invalid_note_content`、`413 payload_too_large`）写入 `project_memory_migrations`（`skipped_invalid`）避免反复重试，认证/卷归属/路由缺失（`401`/`403`/`404`）等项目级或瞬时错误保持 `failed` 可重试，且启动后台迁移重试受次数上限约束。
 - **全入口直连与写入凭据脱敏一致性**：
   - 控制台 `/api/repositories/:id/knowledge-files`、管理助手/群聊助手（`src/memory/management.ts`：`search_knowledge`、`read_knowledge`、`knowledge_versions`、`knowledge.revise`）、`TaskToolGateway`（`src/roles/gateway.ts`）与工作角色工具（`search_project_memory`、`read_project_memory`、`remember_project_memory`）统一直连 `manager/file-tree` 物理笔记卷，按项目授权边界（`knowledge.read` / `knowledge.write`）鉴权，不再维护角色受众隔离（`audience: role:<id>`）、审批流（`review`）、`supersedes` 链、`knowledge_fence` 或 `ProjectMemory.context()` 硬编码召回；旧 `/api/(repositories|projects)/:id/(memories|knowledge)*` 接口返回 `410 project_memory_api_removed`。
-  - 所有经控制面或代理写入物理笔记卷的路径（控制台 `knowledge-files` / `notes` API、`knowledge.revise`、`remember_project_memory`、存量迁出、Pi 网关及直连 `write_file("../notes/...")`）统一执行已登记凭据脱敏。
+  - 所有经控制面或代理写入物理笔记卷的路径（控制台 `knowledge-files` / `notes` API、`knowledge.revise`、`remember_project_memory`、存量迁出、夜间整理工具、Pi 网关及直连 `write_file("../notes/...")`）统一执行已登记凭据脱敏；助手 `HOME` 目录的 `~/memory/` 写入（含 live 助手电脑 `write_file`、控制台轻量记忆管理 API 与夜间整理工具）亦经 fd 锚定防符号链接逃逸校验（`O_DIRECTORY | O_NOFOLLOW` + `/proc/self/fd` 验证）并统一经 `configuredRedactor` 脱敏。
+  - **`.write-history` 历史裁剪与孤立 Blob 回收（`runner/notes.mjs`、`manager/file-tree.mjs`、`src/storage/retention.ts`）**：`POST /v1/projects/:id/file-tree/prune` 在文件锁内按 `project_notes_keep_versions`（默认 50）与 `project_notes_keep_days`（默认 30）的并集裁剪每文件历史修订（始终保留最新版本），确认全部历史索引可读后执行 fail-closed 孤立 `.write-history/blobs/` 回收；由每日 `RetentionCleanup` 与手动「立即回收」统一调度。
+
+## 5. 全平台夜间自动记忆整理引擎（`src/memory/consolidation-*.ts`）
+
+控制面内置纯后台记忆整理引擎（`MemoryConsolidationService`），以独立系统提示词（`docs/prompts/memory-consolidation.md`）统一维护三类长期记忆轨，**不进入用户定时任务，也不产生任何飞书外发消息或 GitHub 写操作**：
+
+- **三轨覆盖与隔离**：
+  1. **项目共享知识（`project`，`../notes/`）**：覆盖全部已启用项目；仅执行轻量 `workspace_init` 挂载 `../notes/`，**绝不检出默认分支代码或创建 git worktree**，避免把多分支差异误判为过时内容。提供全量分页/检索只读工具访问 `../notes/`（含版本历史）、全量历史 `tasks`、`task_history`/`task_logs`/`task_tools`/JSONL 轨迹正文（经 `traceSource` + `traceClean` + `configuredRedactor`）与 `dispatch_threads`，以及 `save_project_note` / `move_project_note` / `delete_project_note`（软删入 `.write-history` 支持控制台一键恢复）。
+  2. **飞书群聊助手私有记忆（`group_assistant`，群 `~/memory/`）**：覆盖全部启用且活跃的群绑定；经短时助手电脑运行（`egress: false`、`fileTools: 'none'`、`commands: false`），写/删工具硬性限定在 `~/memory/<subpath>`（拒绝 `~/memory` 目录本身、越界路径、敏感凭据文件名与符号链接）。全量只读检索本地消息账本（严格执行 `deleted=0`、`sensitive=0`、`retained_after` 与当前授权 `fence`）、会话摘要、本地成员缓存（零飞书 API 调用）、本群自管任务及群权限允许的项目上下文。
+  3. **个人管理助手私有记忆（`personal_assistant`，个人 `~/memory/`，跨 Web 控制台与绑定飞书私聊共享）**：覆盖全部活跃且具备助手使用资格的人类账号；全量只读检索本人非 onboarding Web 管理会话（受 `authorization_revision` 与当前租户约束）、本人已绑定且未过期的飞书私聊账本（`channel_personal_owners` 联合有效 `external_identities`）、自管任务与授权项目上下文，写/删同样硬性限定在 `~/memory/<subpath>`。
+- **固定 Pi 后端与无单次上限契约**：
+  - 整理会话固定采用 `roleHarness('pi')`（无其他后端选项），不设人工 `max_turns` / `max_tokens` / `max_wall_ms` 截断上限，依靠 Pi SDK 自动上下文压缩、`ResultSession` `/results/` 外置分页与实时 `guard()` 中止机制保障长历史自由深读。
+  - OpenAI Chat Completions 模型走控制面 `gateway` 代理（`src/agent/gateway.ts` 为 `task.kind === 'memory.consolidation'` 实施按范围独立模型鉴权，凭据不出控制面），非 Chat Completions 协议由 Pi 原生通道记录 `recordExternalModelRequest`，全部用量归入 `model_requests`。
+- **调度、让位与生命周期一致性**：
+  - 默认全局开启（`settings.memory_consolidation.enabled = true`，窗口 `02:00`–`05:00`，支持跨零点窗口与逻辑日归属），**不设增量活动门控**；按逻辑日对全部已启用范围（`enabled_override ?? global.enabled`）以确定性哈希错峰排队，受全局 `max_concurrency`（1–8）约束，单逻辑日单范围经 `UNIQUE(scope_kind, scope_id, logical_day) WHERE trigger='nightly'` 保证至多运行一次（失败不刷屏重跑，重启时 `interruptConsolidationRuns` 收口遗留 `running` 记录）。
+  - 夜间触发遇实时工作占用（项目并发满或删除中、群存在运行中回合、个人存在待处理/运行中管理消息）自动让位延后；运行中 `guard()` 持续核对范围启用状态、授权/代次/模型权限与手动停止信号。
+  - 模型优先级固定为「范围专用 → 全局默认共享模型 → 主体自有模型」，不可用或权限不覆盖时记录 `skipped`（`model_unavailable`）绝不静默切换；项目删除、群停用/连接器删除与模型删除分别级联停止在途整理并清理对应状态、历史记录或模型引用。

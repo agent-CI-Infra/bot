@@ -403,7 +403,24 @@ async function renderIdentity() {
   const advanced = element('details', '', 'fold identity-advanced');
   advanced.open = keepAdvancedOpen;
   advanced.append(element('summary', t('identity.advanced')), diagnostic, selection, identities, permissions);
-  const layout = element('div', '', 'identity-layout'); layout.append(overview, feishuSlot, advanced); panel.replaceChildren(layout);
+  const personalMemorySlot = element('div', '', 'identity-personal-memory mc-personal-stack');
+  if (typeof renderConsolidationSection === 'function' && typeof renderAssistantMemoryBrowser === 'function') {
+    const personalBrowser = renderAssistantMemoryBrowser({
+      apiBase: '/api/identity/memory-files',
+      title: '个人管理助手私有记忆（~/memory/）',
+      headingLevel: 'h2',
+      description: '控制台管理对话与本人飞书私聊共用同一份 ~/memory/ 私有记忆目录；写入内容会自动脱敏已知密钥与凭据。',
+    });
+    const personalConsolidation = renderConsolidationSection({
+      apiBase: '/api/identity/memory-consolidation',
+      title: '个人管理助手夜间记忆整理',
+      headingLevel: 'h2',
+      description: '夜间窗口内使用 Pi 后端整理本人控制台对话与绑定飞书私聊的历史记录，沉淀偏好与经验到 ~/memory/。',
+      onRunCompleted: () => personalBrowser._reloadMemoryBrowser?.(),
+    });
+    personalMemorySlot.append(personalConsolidation, personalBrowser);
+  }
+  const layout = element('div', '', 'identity-layout'); layout.append(overview, feishuSlot, advanced, personalMemorySlot); panel.replaceChildren(layout);
   const loadProvider = async () => {
     try {
       const { enabled } = await api('/api/auth/github/status'); if (!current()) return;

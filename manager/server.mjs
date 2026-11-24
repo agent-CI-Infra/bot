@@ -67,6 +67,9 @@ export function createManagerServer({ projects, token, assistants = null }) {
       }
       else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/build\/cancel$/.test(path)) result = projects.cancelBuild(path.split('/')[3]);
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
+      else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/file-tree\/prune$/.test(path)) {
+        result = await projects.pruneFileTree(path.split('/')[3], await json(req));
+      }
       else if (/^\/v1\/projects\/[1-9]\d{0,19}\/file-tree(?:\/[^/]+)?(?:\/(?:versions|restore|move))?$/.test(path)) {
         const parts=path.split('/');let id;
         try{if(parts[5]!==undefined)id=decodeURIComponent(parts[5]);}catch{throw new ManagerError('invalid_note_id',400);}

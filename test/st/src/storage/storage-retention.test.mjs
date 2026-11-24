@@ -43,7 +43,7 @@ const usage = (store, repo) => Object.fromEntries(store.all('SELECT kind,count,b
 
 test('settings default to keeping everything, validate their ranges per field, and every change is audited', t => {
   const { store } = fixture(t);
-  assert.deepEqual(retentionSettings(store), { trajectory_days: null, trajectory_days_by_project: {}, manager_payload_days: 2, workspace_finished_days: 1, workspace_failed_days: 7, webhook_payload_days: null });
+  assert.deepEqual(retentionSettings(store), { trajectory_days: null, trajectory_days_by_project: {}, manager_payload_days: 2, workspace_finished_days: 1, workspace_failed_days: 7, webhook_payload_days: null, project_notes_keep_versions: 50, project_notes_keep_days: 30 });
   const refused = (input, field) => assert.throws(() => saveRetention(store, 'admin', input), error => error.code === 'storage_retention_invalid' && error.field === field, JSON.stringify(input));
   refused({ trajectory_days: 0 }, 'trajectory_days'); refused({ trajectory_days: 3651 }, 'trajectory_days'); refused({ trajectory_days: 1.5 }, 'trajectory_days');
   refused({ manager_payload_days: null }, 'manager_payload_days'); refused({ webhook_payload_days: 6 }, 'webhook_payload_days');
@@ -182,11 +182,11 @@ test('stopping waits for a pass in progress, which ends at its next step, before
 test('the manager window follows the setting, and the manager checks it', async t => {
   const { store } = fixture(t), calls = [];
   let window = 2;
-  const manager = { async call(method, path, input) { calls.push([method, path, input]); if (method === 'GET') return { expiry: { window_days: window } }; window = input.payload_days; return {}; } };
+  const manager = { async call(method, path, input) { calls.push([method, path, input]); if (method === 'GET') return { expiry: { window_days: window } }; if (method === 'PUT' && path === '/v1/storage/retention') window = input.payload_days; return {}; } };
   const cleanup = new RetentionCleanup(store, manager, { pauseMs: 0 });
   await cleanup.run(); assert.deepEqual(calls.filter(call => call[0] === 'PUT'), [], 'already in step');
   saveRetention(store, 'admin', { manager_payload_days: 5 });
-  assert.equal((await cleanup.run()).manager_window, 5); assert.deepEqual(calls.at(-1), ['PUT', '/v1/storage/retention', { payload_days: 5 }]);
+  assert.equal((await cleanup.run()).manager_window, 5); assert.deepEqual(calls.filter(call => call[1] === '/v1/storage/retention').at(-1), ['PUT', '/v1/storage/retention', { payload_days: 5 }]);
   const failing = new RetentionCleanup(store, { call: async () => { throw new Error('manager_unavailable'); } }, { pauseMs: 0 });
   t.mock.method(console, 'error', () => {});
   assert.equal((await failing.run()).manager_window, null);

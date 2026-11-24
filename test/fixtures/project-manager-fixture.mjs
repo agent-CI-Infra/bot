@@ -25,6 +25,7 @@ export async function managerFixture(t) {
     const match = /^\/v1\/projects\/(\d+)(?:\/([\w-]+)(?:\/([^/]+))?(?:\/(versions|restore|move))?)?$/.exec(url.pathname);
     if (!match) throw new Error('fixture_manager_route:'+path);
     const [,repo,action,rawName,operation] = match, name = rawName === undefined ? undefined : decodeURIComponent(rawName);
+    if (action === 'file-tree' && name === 'prune' && method === 'POST') return await projects.pruneFileTree(repo, input);
     if (action === 'file-tree') return await projects.fileTree(repo,method,name,operation,input,Object.fromEntries(url.searchParams));
     if (action === 'files') return await projects.files(repo,method,name,operation,input,Object.fromEntries(url.searchParams));
     if (action === 'notes') return await projects.notes(repo,method,name,input);

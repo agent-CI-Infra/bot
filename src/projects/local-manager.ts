@@ -60,6 +60,16 @@ export class LocalManager implements Manager {
   }
   async call(method: string, path: string, input?: Json, timeoutMs = 90000): Promise<any> {
     const url = new URL(path, 'http://local');
+    const pruneMatch = /^\/v1\/projects\/([1-9]\d*)\/file-tree\/prune$/.exec(url.pathname);
+    if (pruneMatch && pruneMatch[1] === this.repositoryId && method === 'POST') {
+      const body = (input ?? {}) as Record<string, any>;
+      const tree = new FileTree(this.root + '/project-notes');
+      return await tree.pruneHistory({
+        keepVersions: body.keep_versions === undefined ? 50 : body.keep_versions,
+        keepDays: body.keep_days === undefined ? 30 : body.keep_days,
+        now: body.now === undefined ? Date.now() : Number(body.now),
+      });
+    }
     const fileTreeMatch = /^\/v1\/projects\/([1-9]\d*)\/file-tree(?:\/([^/]+))?(?:\/(versions|restore|move))?$/.exec(url.pathname);
     if (fileTreeMatch && fileTreeMatch[1] === this.repositoryId) {
       let id: string | undefined;

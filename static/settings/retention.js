@@ -10,10 +10,12 @@ async function retentionCard(size, count, time, refresh) {
     ['manager_payload_days', 'manager 重复正文保留天数', `默认 ${defaults.manager_payload_days} 天。控制面另存了同样的请求和结果。`],
     ['workspace_finished_days', '任务工作区：任务结束后保留天数', `默认 ${defaults.workspace_finished_days} 天；没有任务记录的目录也按这个。为打开的 PR 保留的不受影响。`],
     ['workspace_failed_days', '任务工作区：任务失败后保留天数', `默认 ${defaults.workspace_failed_days} 天。`],
-    ['webhook_payload_days', 'Webhook 投递正文保留天数（留空不过期）', `至少 ${bounds.webhook_payload_days[0]} 天：外部执行端会读最近的投递。删除后投递记录、状态和正文的 sha256 保留。`]];
+    ['webhook_payload_days', 'Webhook 投递正文保留天数（留空不过期）', `至少 ${bounds.webhook_payload_days[0]} 天：外部执行端会读最近的投递。删除后投递记录、状态和正文的 sha256 保留。`],
+    ['project_notes_keep_versions', '项目知识历史：每文件至少保留版本数（留空不过期）', `默认 ${defaults.project_notes_keep_versions ?? 50} 个版本。裁剪 ../notes/.write-history 时始终保留最新版本，并满足版本数与保留天数的并集要求，再安全清理孤立 blob。`],
+    ['project_notes_keep_days', '项目知识历史：保留天数（留空不过期）', `默认 ${defaults.project_notes_keep_days ?? 30} 天。夜间自动记忆整理产生的历史版本也按此规则裁剪。`]];
   const controls = {}, windows = element('div', '', 'storage-windows');
   for (const [key, label, help] of fields) {
-    controls[key] = number(key, settings[key], bounds[key]);
+    controls[key] = number(key, settings[key], bounds[key] || [1, 10000]);
     const group = element('div');
     group.append(field(label, controls[key]), note(help)); windows.append(group);
   }
@@ -80,9 +82,11 @@ async function retentionCard(size, count, time, refresh) {
   const history = element('div');
   function cleanupFacts(current) {
     const last = current.last_cleanup;
+    const failedTotal = (last?.trajectories?.failed ?? 0) + (last?.deliveries?.failed ?? 0) + (last?.evidence?.failed ?? 0) + (last?.commit_checks?.failed ?? 0)
+      + (last?.memory_consolidation_runs?.failed ?? 0) + (last?.project_notes?.failed ?? 0);
     return facts([
-      ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
-        + ((last.trajectories?.failed || last.deliveries?.failed || last.evidence?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.evidence?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
+      ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条，记忆整理记录 ${count(last.memory_consolidation_runs?.count ?? 0)} 条，项目知识历史 ${count(last.project_notes?.count ?? 0)} 条（${size(last.project_notes?.bytes ?? 0)}）`
+        + (failedTotal ? `；${count(failedTotal)} 项没能清理，下次再试` : '')
         + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
       ['会话记录', current.chats ? `${count(current.chats.configured)} / ${count(current.chats.chats)} 个会话设置了保留天数${current.chats.configured ? `（${current.chats.min_days}–${current.chats.max_days} 天）` : ''}；在「飞书会话」按会话设置` : '没有会话']]);
   }

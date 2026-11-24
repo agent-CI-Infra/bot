@@ -1,4 +1,5 @@
 import {pruneDispatchFailures, pruneDispatchThreads} from '../dispatch/store.js';
+import { pruneConsolidationRuns } from '../memory/consolidation-storage.js';
 import { createHash } from 'node:crypto';
 import type { Row, Store } from './database.js';
 import type { Manager } from '../projects/service.js';
@@ -32,12 +33,14 @@ export interface RetentionSettings {
   workspace_finished_days: number;
   workspace_failed_days: number;
   webhook_payload_days: number | null;
+  project_notes_keep_versions: number | null;
+  project_notes_keep_days: number | null;
 }
 export const retentionDefaults: RetentionSettings = { trajectory_days: null, trajectory_days_by_project: {}, manager_payload_days: 2, workspace_finished_days: 1,
-  workspace_failed_days: 7, webhook_payload_days: null };
+  workspace_failed_days: 7, webhook_payload_days: null, project_notes_keep_versions: 50, project_notes_keep_days: 30 };
 export const retentionBounds: Record<string, [number, number]> = { trajectory_days: [1, 3650], manager_payload_days: [1, 365], workspace_finished_days: [1, 365],
-  workspace_failed_days: [1, 365], webhook_payload_days: [7, 3650] };
-const nullable = new Set(['trajectory_days', 'webhook_payload_days']);
+  workspace_failed_days: [1, 365], webhook_payload_days: [7, 3650], project_notes_keep_versions: [1, 10000], project_notes_keep_days: [1, 3650] };
+const nullable = new Set(['trajectory_days', 'webhook_payload_days', 'project_notes_keep_versions', 'project_notes_keep_days']);
 const day = 24 * 3600_000;
 // Statuses after which a task's files are not read again by its own execution (src/projects/workspace-cleanup.ts).
 const ended = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
@@ -193,8 +196,55 @@ export class RetentionCleanup {
         }
       }
     } catch (error) { eventSubscriptions.failed = 1; this.failure('event_subscriptions', error); }
+    const memoryConsolidationRuns = { count: 0, failed: 0 };
+    try {
+      for (const row of this.store.all('SELECT id FROM repositories')) {
+        const days = trajectoryDays(settings, String(row.id)) ?? 90;
+        const before = new Date(this.now() - days * day).toISOString();
+        while (!this.stopped) {
+          const removed = pruneConsolidationRuns(this.store, before, { scope_kind: 'project', scope_id: String(row.id) });
+          memoryConsolidationRuns.count += removed;
+          if (removed < 500) break;
+          await this.pause(this.options.pauseMs ?? 20);
+        }
+      }
+      const assistantDays = settings.trajectory_days ?? 90;
+      const assistantBefore = new Date(this.now() - assistantDays * day).toISOString();
+      for (const kind of ['group_assistant', 'personal_assistant'] as const) {
+        while (!this.stopped) {
+          const removed = pruneConsolidationRuns(this.store, assistantBefore, { scope_kind: kind });
+          memoryConsolidationRuns.count += removed;
+          if (removed < 500) break;
+          await this.pause(this.options.pauseMs ?? 20);
+        }
+      }
+    } catch (error) { memoryConsolidationRuns.failed = 1; this.failure('memory_consolidation_runs', error); }
+    const projectNotes = await this.projectNotesHistory(settings);
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, channel_cards: channelCards, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, channel_cards: channelCards, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, memory_consolidation_runs: memoryConsolidationRuns, project_notes: projectNotes, manager_window: manager, last_error: this.lastError });
+  }
+
+  private async projectNotesHistory(settings: RetentionSettings): Promise<Removed & { versions: number }> {
+    const removed = { count: 0, versions: 0, bytes: 0, failed: 0 };
+    if (!this.manager || (settings.project_notes_keep_versions === null && settings.project_notes_keep_days === null)) return removed;
+    for (const { id: repo } of this.store.all('SELECT id FROM repositories ORDER BY id')) {
+      if (this.stopped) return removed;
+      try {
+        const res = await this.manager.call('POST', `/v1/projects/${repo}/file-tree/prune`, {
+          keep_versions: settings.project_notes_keep_versions,
+          keep_days: settings.project_notes_keep_days,
+          now: this.now(),
+        });
+        removed.versions += Number(res?.pruned_versions ?? 0);
+        removed.count += Number(res?.removed_blobs ?? 0);
+        removed.bytes += Number(res?.freed_bytes ?? 0);
+      } catch (error) {
+        removed.failed++;
+        this.failure(`project_notes ${repo}`, error);
+      }
+      await this.pause(this.options.pauseMs ?? 20);
+    }
+    return removed;
   }
 
   /** Tells the manager its window when it reports another; null when the manager did not answer. */
