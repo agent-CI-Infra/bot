@@ -32,6 +32,7 @@ import { serviceRolesApi } from './service-roles/api.js';
 import { migrateServiceRoleMemory } from './service-roles/memory-migration.js';
 import { trustedOrganizationsApi } from './app/trusted-organizations.js';
 import { ProjectRemoval } from './projects/removal.js';
+import { DEFAULT_PROJECT_TOOLS_ROOT, ProjectToolsService } from './projects/tools.js';
 import { listNotesOrphans, NotesReclaimer, notesOrphanIntents, orphanTrajectoryDirectories, type ReclaimReport } from './projects/reclaim.js';
 import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
@@ -71,6 +72,10 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   assistantHomes?: string;
   /** Read-only CLI tool volume manager (#705), mounted at /opt/agent-tools. */
   agentTools?: AgentToolManager;
+  /** Per-project isolated binary tool volume service (#1322), mounted at /project-tools. */
+  projectTools?: ProjectToolsService;
+  /** Optional root directory for per-project tool snapshots when projectTools instance is not passed. */
+  projectToolsDir?: string;
   installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
   /** Times requests and reports a blocked event loop with the requests in flight. */
   stalls?: StallMonitor;
@@ -147,7 +152,13 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       },
     } : {}),
   });
+  const projectTools = options.projectTools ?? new ProjectToolsService(store, {
+    root: options.projectToolsDir ?? process.env.BOT_PROJECT_TOOLS_DIR ?? (options.assistantHomes ? DEFAULT_PROJECT_TOOLS_ROOT : undefined),
+    manager: toolsManager,
+    reconcile: () => { void options.projects?.reconcile().catch(() => {}); },
+  });
   sharedManagement.assistants = assistants;
+  sharedManagement.projectTools = projectTools;
   sharedManagement.gitCache = options.gitCache ?? options.engine?.gitCache;
   sharedManagement.reconcileProjects = () => {
     void options.projects?.reconcile().catch(() => {});
@@ -167,7 +178,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   for (const row of migrateDailyReports(schedules)) console.log(`[schedules] daily report plan ${row.schedule_id} (project ${row.project_id}): ${row.outcome}`
     + (row.channel_schedule_id ? ` to ${row.chat_type} timer ${row.channel_schedule_id}` : '') + (row.reason ? ` (${row.reason})` : ''));
   const scheduler = new Scheduler(schedules); options.onSchedules?.(scheduler);
-  const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
+  const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine, 120_000, projectTools);
   const storage = options.storage ?? new StorageReport(store, options.projects?.manager);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -333,6 +344,26 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     const publicRequest = path === '/api/setup' && method === 'POST' || path === '/api/auth/login' && method === 'POST';
     let user = publicRequest ? null : actor(store, req);
     if (user && mutation && req.headers['x-csrf-token'] !== user.csrf) fail(403, 'csrf_required');
+    // Streaming binary/archive upload for per-project read-only tools volume (#1322): runs BEFORE the 1 MiB JSON buffer
+    // path so multi-GB tool packages stream straight to disk without buffering in control-plane memory.
+    const projectToolsUpload = method === 'POST' ? /^\/api\/repositories\/([1-9]\d{0,19})\/tools\/upload$/.exec(path) : null;
+    if (projectToolsUpload) {
+      if (!user) return fail(401, 'login_required');
+      if (githubIdentity && await githubIdentity.renewIfLapsed(user.id)) user = actor(store, req);
+      const uploadActor = user, uploadContext = uploadActor.context!, uploadRepoId = projectToolsUpload[1]!;
+      const uploadGuard = () => {
+        assertCurrent(uploadContext);
+        if (uploadActor.role !== 'super_admin' && !uploadActor.repositories.includes(uploadRepoId)) fail(403, 'repository_forbidden');
+        authorize(uploadContext, 'config.write', { project_id: uploadRepoId });
+      };
+      uploadGuard();
+      req.setTimeout(0);
+      res.setTimeout(0);
+      const uploaded = await store.withAuthorizationGuard(uploadGuard, () => projectTools.handleUpload(uploadActor, uploadRepoId, url, req));
+      void options.projects?.reconcile().catch(() => {});
+      respond(res, 201, uploaded);
+      return;
+    }
     let input: Json = {};
     if (mutation) {
       if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'json_required');
@@ -500,7 +531,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     };
     guard();
     if (path === '/api/agent-tools/install' || path === '/api/agent-tools/upgrade') res.setTimeout(1_200_000);
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? await taskChecksApi(store, user, method, url, options.githubUrl) ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
@@ -534,7 +565,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     }
   });
   let drained:Promise<unknown>=Promise.resolve();
-  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),scheduler.close(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
+  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),projectTools.stop(),scheduler.close(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
   const close=server.close.bind(server);
   // The caller may close SQLite after this callback; every background consumer must have finished first.
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;

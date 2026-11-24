@@ -22,6 +22,7 @@ import { installationExecutionDenied } from '../installations/archive.js';
 import { commands, commandSchema, querySchema, queries as queryNames, schedulingQueries, validate } from './catalog.js';
 import { configurationPrRemoved } from './configuration-pr.js';
 import type { AssistantComputerService } from '../service-roles/assistant-computers.js';
+import type { ProjectToolsService } from '../projects/tools.js';
 import type { GitCache } from '../agent/git-cache.js';
 import { schedulingCommands } from '../schedules/schema.js';
 import { sameRepositoryName } from './repository-name.js';
@@ -52,6 +53,8 @@ export class ManagementService {
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
   /** The conversation owners' computers (#457) used by the management assistant and group assistants. */
   assistants?: AssistantComputerService;
+  /** Per-project isolated read-only binary tool volume service (#1322). */
+  projectTools?: ProjectToolsService;
   /** Shared control-plane bare mirror cache for checkout_repository (#1279). */
   gitCache?: GitCache;
   /** Reconciles project environments after starting a repository through the management assistant or start requests. */
@@ -281,7 +284,8 @@ export class ManagementService {
       if(live?.computer)syncConsoleComputer(this.store,target.project_id,live.computer);
       const user=this.user(actor);
       const safeLive=live?.computer?{...live,computer:sanitizeComputerForActor(user,live.computer)}:live;
-      return traceClean({project_id:target.project_id,revision:this.revision({project_id:target.project_id}),environment:safeLive,url:'#/projects/'+target.project_id+'/machine'});
+      const projectTools=this.projectTools?await this.projectTools.view(target.project_id,{includeFiles:false}).catch(()=>null):null;
+      return traceClean({project_id:target.project_id,revision:this.revision({project_id:target.project_id}),environment:safeLive,...(projectTools?{project_tools:projectTools}:{}),url:'#/projects/'+target.project_id+'/machine'});
     }
     if(operation==='list_precompiled_images'){
       if(actor.project_id||confinedTenant(actor))fail(403,'forbidden');

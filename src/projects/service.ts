@@ -11,6 +11,7 @@ import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { consoleComputer, ownComputer, rememberConsoleComputer, saveConsoleComputer, syncConsoleComputer } from '../rules/service.js';
+import { activeProjectToolRevision } from './tools.js';
 import { MAX_CLI_CONFIG_BYTES } from '../../runner/cli-config.mjs';
 
 // Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
@@ -203,6 +204,13 @@ export class ProjectService {
       // The manager admits as many runner calls at once as tasks may run, never fewer than hold a claim right now.
       const parallel = Math.max(repositoryConcurrency(this.store, repo.id), Number(this.store.get('SELECT count(*) AS n FROM task_claims WHERE repository_id=?', repo.id)!.n));
       if (Number.isSafeInteger(state.parallel) && state.parallel !== parallel) await this.manager.call('PUT', `/v1/projects/${repo.id}/parallel`, { tasks: parallel }).catch(() => {});
+      // Sync desired read-only project tools revision (#1322) so manager restarts self-heal before idle rotation.
+      const desiredToolsRev = activeProjectToolRevision(this.store, repo.id);
+      const currentToolsRev = Number.isSafeInteger(state.computer?.tools_revision) ? Number(state.computer.tools_revision) : null;
+      if (state.computer && currentToolsRev !== desiredToolsRev) {
+        const synced = await this.manager.call('PUT', `/v1/projects/${repo.id}/tools`, { revision: desiredToolsRev }).catch(() => null);
+        if (synced) { state = synced; this.save(state); }
+      }
       // An enabled project's computer that failed (a lost container, a failed recovery or restart) is started again, after
       // 30 s, 1, 2, 4 … minutes (at most 30) between attempts, so it never stays down with its tasks waiting for it.
       // A failed reset is left for a person: starting the old generation is refused until it is reset again.
@@ -223,10 +231,10 @@ export class ProjectService {
         // An answered start also clears the notes-retry slot: the residue it owed is gone, or the manager no longer refuses it.
         this.notesRetries.delete(repo.id);
         if (result?.state) state = result;
-      } else if (repo.enabled && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending)) {
-        // Resource defaults changed or a deferred recovery precompiled image finished building: rebuild once no task
-        // runs on the computer. claimQueuedTask excludes repositories with a pending environment_operations row, so
-        // checking claims and recording `refresh` in one transaction leaves no race window.
+      } else if (repo.enabled && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending || state.computer?.tools_pending)) {
+        // Resource defaults changed, a deferred precompiled image finished building, or a new project tools revision was
+        // published: rebuild once no task runs on the computer. claimQueuedTask excludes repositories with a pending
+        // environment_operations row, so checking claims and recording `refresh` in one transaction leaves no race window.
         const input = { operation_id: randomId(), generation: state.generation };
         const queued = this.store.transaction(() => {
           if (this.store.get("SELECT 1 FROM task_claims WHERE repository_id=? UNION ALL SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", repo.id, repo.id)) return false;

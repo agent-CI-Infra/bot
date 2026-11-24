@@ -1052,6 +1052,34 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .role-local-config-notice>p{margin:0}
 .cli-config-editor{display:grid;gap:var(--space-3);margin-top:var(--space-4)}
 .cli-config-editor>button{justify-self:start}
+/* #1322: Per-project isolated binary tools volume card. */
+.project-tools-guidance{margin:var(--space-3) 0 var(--space-4);padding:var(--space-4);border:1px solid var(--color-info-border);border-radius:var(--radius-3);background:var(--color-info-bg);color:var(--color-text);font-size:var(--font-size-label);line-height:var(--line-height-relaxed);overflow-wrap:anywhere}
+.project-tools-guidance strong{display:block;margin-bottom:var(--space-2);color:var(--color-info)}
+.project-tools-priority-list{margin:0;padding-left:20px;display:grid;gap:var(--space-1)}
+.project-tools-badges{display:flex;flex-wrap:wrap;gap:var(--space-2);margin-bottom:var(--space-3)}
+.project-tools-badges .status{white-space:normal;max-width:100%;overflow-wrap:anywhere;height:auto}
+.project-tools-summary,.project-tools-upload,.project-tools-files,.project-tools-history{min-width:0;max-width:100%;margin-top:var(--space-4)}
+.project-tools-files,.project-tools-history{overflow-x:auto}
+.project-tools-files .project-table th,.project-tools-history .project-table th{border-bottom-color:var(--color-border)}
+.project-tools-files .project-table td,.project-tools-history .project-table td{border-bottom-color:var(--color-border)}
+.project-tools-form{display:grid;gap:var(--space-4);padding:var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-3);background:var(--color-surface-alt);min-width:0}
+.project-tools-form label{min-width:0}
+.project-tools-form input,.project-tools-form select{max-width:100%;min-width:0;box-sizing:border-box}
+.project-tools-form h4,.project-tools-files h4,.project-tools-history h4{margin:0 0 var(--space-2);font-size:var(--font-size-2);font-weight:650;color:var(--color-text)}
+.project-tools-form input[type=file]{width:100%;max-width:100%;min-width:0;padding:var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-control);background:var(--color-surface);color:var(--color-text)}
+@media (max-width: 767px){
+  .project-tools-form .field-grid{grid-template-columns:minmax(0,1fr)}
+  .project-tools-form .actions{flex-wrap:wrap}
+  .project-tools-form .actions button{flex:1 1 auto}
+}
+@media (max-width: 650px){
+  .project-tools-files .project-table thead,.project-tools-history .project-table thead{display:none}
+  .project-tools-files .project-table,.project-tools-files .project-table tbody,.project-tools-files .project-table tr,.project-tools-files .project-table td,
+  .project-tools-history .project-table,.project-tools-history .project-table tbody,.project-tools-history .project-table tr,.project-tools-history .project-table td{display:block;width:auto}
+  .project-tools-files .project-table tr,.project-tools-history .project-table tr{padding:8px 0;border-bottom:1px solid var(--color-border)}
+  .project-tools-files .project-table td,.project-tools-history .project-table td{border:0;padding:4px 0}
+  .project-tools-files .project-table td::before,.project-tools-history .project-table td::before{content:attr(data-label);display:block;font-size:var(--font-size-1);color:var(--color-text-muted);margin-bottom:2px}
+}
 @media (max-width: 600px){
   .agent-tools-actions input{flex:1 1 100%;width:100%}
 }

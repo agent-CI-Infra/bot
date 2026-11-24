@@ -156,7 +156,7 @@ test('only super administrators read and change global settings; project adminis
   const h = await harness(t, undefined, { imageTag: 'v9.9.9' }), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
   // Without a manager the default computer resources cannot be read.
-  assert.deepEqual((await admin('/api/settings')).value, { settings: { task_concurrency: 1, task_concurrency_bounds: [1, 32], computer_defaults: null, assistant_computers: null }, version: { image_tag: 'v9.9.9', source: 'image' } });
+  assert.deepEqual((await admin('/api/settings')).value, { settings: { task_concurrency: 1, task_concurrency_bounds: [1, 32], project_tools_quota_gb: 20, project_tools_quota_bounds: [1, 200], computer_defaults: null, assistant_computers: null }, version: { image_tag: 'v9.9.9', source: 'image' } });
   assert.equal((await admin('/api/settings', 'PATCH', { computer_defaults: { cpus: 1 } })).status, 503);
   // Nor are there assistant computers without a manager and the HOME volume (#457).
   assert.equal((await admin('/api/settings', 'PATCH', { assistant_computers: { idle_minutes: 5 } })).status, 503);

@@ -46,6 +46,7 @@ import { serviceBindingStorage } from '../channels/service-bindings.js';
 import { migrateNativeToPi, retireNativeProjectRoles, retireNativeServiceAssistants } from '../roles/native-to-pi.js';
 import { workspaceStorage } from '../projects/workspace-cleanup.js';
 import { worktreeStorage } from '../projects/worktrees.js';
+import { projectToolsStorage } from '../projects/tools.js';
 
 export type Row = Record<string, any>;
 export interface StoreOptions { slowSqlMs?: number; log?: (line: string) => void; now?: () => number }
@@ -315,6 +316,8 @@ export class Store {
     workspaceStorage(this);
     // The computers' shared git worktrees and which task held each when (#769).
     worktreeStorage(this);
+    // Per-project isolated read-only tool volume revisions (#1322).
+    projectToolsStorage(this);
     // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
     ceilingStorage(this);
     // One-time #1122 migration retiring work_settings, task_models and legacy work-type sections.

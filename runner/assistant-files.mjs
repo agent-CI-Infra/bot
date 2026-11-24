@@ -20,7 +20,7 @@ const MAX_ASSISTANT_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024;
 const USAGE_CACHE_TTL_MS = 15_000;
 
 function isReservedSegment(segment) {
-  return segment === '.runner-journal' || segment === '.bot-bg' || segment.startsWith('.bot-archive-') || segment.startsWith('.bot-unpack-') || segment.startsWith('.bot-usage-');
+  return segment === '.runner-journal' || segment === '.bot-bg' || segment.startsWith('.bot-archive-') || segment.startsWith('.bot-unpack-') || segment.startsWith('.bot-pack-') || segment.startsWith('.bot-usage-');
 }
 
 function resolveRoots(options = {}) {
@@ -49,6 +49,51 @@ async function target(value, create = false, { workspaceRoot, allowedRoots }) {
 function archiveStagePath(stageId, tmpRoot) {
   if (!STAGE_ID_RE.test(stageId || '')) throw new Error('invalid_stage_id');
   return resolve(tmpRoot, `.bot-archive-${stageId}.tar.gz`);
+}
+
+function archivePackPath(packId, tmpRoot) {
+  if (!STAGE_ID_RE.test(packId || '')) throw new Error('invalid_pack_id');
+  return resolve(tmpRoot, `.bot-pack-${packId}.tar.gz`);
+}
+
+async function scanPackSource(sourcePath, maxFiles, maxBytes) {
+  const info = await lstat(sourcePath);
+  if (info.isSymbolicLink()) throw new Error('unsafe_archive_symlink');
+  if (info.isFile()) {
+    if (info.size > maxBytes) throw new Error('archive_too_large');
+    return { kind: 'file', files: 1, bytes: info.size, executable: (info.mode & 0o111) !== 0 };
+  }
+  if (!info.isDirectory()) throw new Error('unsafe_archive_entry_type');
+  const realRoot = await realpath(sourcePath);
+  let files = 0;
+  let bytes = 0;
+  const stack = [realRoot];
+  while (stack.length) {
+    const current = stack.pop();
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (isReservedSegment(entry.name)) continue;
+      const full = resolve(current, entry.name);
+      const st = await lstat(full);
+      if (st.isSymbolicLink()) {
+        const linkTarget = await readlink(full);
+        if (!linkTarget || linkTarget.startsWith('/')) throw new Error('unsafe_archive_symlink');
+        const resolvedTarget = resolve(dirname(full), linkTarget);
+        if (resolvedTarget !== realRoot && !resolvedTarget.startsWith(realRoot + sep)) throw new Error('unsafe_archive_symlink');
+        files++;
+      } else if (st.isDirectory()) {
+        stack.push(full);
+      } else if (st.isFile()) {
+        files++;
+        bytes += st.size;
+      } else {
+        throw new Error('unsafe_archive_entry_type');
+      }
+      if (files > maxFiles) throw new Error('archive_too_many_files');
+      if (bytes > maxBytes) throw new Error('archive_too_large');
+    }
+  }
+  return { kind: 'directory', files, bytes, executable: false };
 }
 
 function usageCachePath(rootDir, tmpRoot) {
@@ -346,6 +391,55 @@ export async function assistantFile(input, options = {}) {
       await rm(stagePath, { force: true }).catch(() => {});
       if (stageDir) await rm(stageDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+  if (input.type === 'assistant_archive_pack') {
+    const packPath = archivePackPath(input.pack_id, tmpRoot);
+    const maxBytes = Number.isSafeInteger(input.max_bytes) && input.max_bytes > 0 ? input.max_bytes : 20 * 1024 * 1024 * 1024;
+    const located = await target(input.path, false, { workspaceRoot, allowedRoots: allowedCheckoutRoots });
+    const summary = await scanPackSource(located.path, 50_000, maxBytes);
+    const tmpVolume = (options.volume || readVolume)(tmpRoot);
+    if (tmpVolume?.full) throw new Error('ENOSPC: /tmp volume free space is below the safety reserve');
+    await rm(packPath, { force: true }).catch(() => {});
+    const tarArgs = summary.kind === 'directory'
+      ? ['-czf', packPath, '-C', located.path, '.']
+      : ['-czf', packPath, '-C', dirname(located.path), located.path.slice(dirname(located.path).length + 1)];
+    try {
+      await execFileAsync('tar', tarArgs, { timeout: 300_000, maxBuffer: 4 * 1024 * 1024 });
+      const packed = await lstat(packPath);
+      if (packed.size > maxBytes) {
+        await rm(packPath, { force: true }).catch(() => {});
+        throw new Error('archive_too_large');
+      }
+      return {
+        pack_id: input.pack_id,
+        kind: summary.kind,
+        name: located.path.split('/').filter(Boolean).at(-1) || 'tools',
+        files: summary.files,
+        uncompressed_bytes: summary.bytes,
+        size: packed.size,
+        executable: summary.executable,
+      };
+    } catch (error) {
+      await rm(packPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
+  if (input.type === 'assistant_archive_read') {
+    const packPath = archivePackPath(input.pack_id, tmpRoot);
+    const offset = input.offset ?? 0, limit = input.limit ?? chunk;
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > chunk) throw new Error('invalid_range');
+    const handle = await open(packPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error('regular_file_required');
+      const buffer = Buffer.alloc(Math.max(0, Math.min(limit, info.size - offset))), { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      return { base64: buffer.subarray(0, bytesRead).toString('base64'), offset, size: info.size };
+    } finally { await handle.close(); }
+  }
+  if (input.type === 'assistant_archive_cleanup') {
+    const packPath = archivePackPath(input.pack_id, tmpRoot);
+    await rm(packPath, { force: true }).catch(() => {});
+    return { cleaned: true };
   }
   throw new Error('unsupported_assistant_operation');
 }

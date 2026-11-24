@@ -90,6 +90,17 @@ export class LocalManager implements Manager {
         throw error;
       }
     }
+    if (method === 'GET' && url.pathname === '/v1/project-tools/mounts') return { mounts: [] };
+    const toolsMatch = /^\/v1\/projects\/([1-9]\d*)\/tools$/.exec(url.pathname);
+    if (method === 'PUT' && toolsMatch && toolsMatch[1] === this.repositoryId) {
+      const state = this.register();
+      const rev = input?.revision === null || input?.revision === undefined ? null : Number(input.revision);
+      state.computer.tools_revision = rev;
+      state.computer.applied_tools_revision = rev;
+      state.computer.tools_pending = false;
+      this.save();
+      return state;
+    }
     const output=/^\/v1\/projects\/([1-9]\d*)\/output\/([a-f0-9]{48})\?offset=(\d+)$/.exec(path);
     if(method==='GET'&&output&&output[1]===this.repositoryId){const response=await this.execute({type:'tail',operation_id:output[2],offset:Number(output[3])});if(!response.ok)fail(503,'output_unavailable');return response.result;}
     const match = /^\/v1\/projects\/([1-9]\d*)(?:\/(parallel|execute|start|stop|configure|refresh))?$/.exec(path);

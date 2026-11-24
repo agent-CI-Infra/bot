@@ -18,7 +18,7 @@ const caches = assistant ? { XDG_CACHE_HOME:'/tmp/.cache', PIP_CACHE_DIR:'/tmp/.
 export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, ...caches,
   ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
   ...(/^[a-f0-9]{48}$/.test(process.env.BOT_OPERATION_ID || '') ? { BOT_OPERATION_ID: process.env.BOT_OPERATION_ID } : {}),
-  PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:${preinstalledBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
+  PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:${preinstalledBins}:/usr/local/bin:/usr/bin:/bin${assistant ? '' : ':/opt/project-tools/bin'}`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 // timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.

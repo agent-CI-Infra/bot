@@ -50,6 +50,12 @@ export function createManagerServer({ projects, token, assistants = null }) {
       else if (req.method === 'POST' && path === '/v1/defaults/build/cancel') result = projects.cancelGlobalBuild();
       else if (req.method === 'GET' && path === '/v1/precompiled-images') result = await projects.listPrecompiledImages(assistants?.activeImages());
       else if (req.method === 'POST' && path === '/v1/precompiled-images/prune') result = await projects.prunePrecompiledImages(assistants?.activeImages(), { force: true });
+      else if (req.method === 'GET' && path === '/v1/project-tools/mounts') result = projects.activeProjectToolMounts(assistants);
+      else if (req.method === 'PUT' && /^\/v1\/projects\/[1-9]\d{0,19}\/tools$/.test(path)) {
+        const input = await json(req);
+        if (Object.keys(input).some(k => k !== 'revision')) throw new ManagerError('invalid_input', 400);
+        result = projects.setToolsRevision(path.split('/')[3], input.revision === undefined ? null : input.revision);
+      }
       else if (req.method === 'POST' && path === '/v1/agent-tools/install-acp') result = await projects.installAcpProduct(await json(req));
       else if (['GET', 'PUT', 'DELETE'].includes(req.method) && /^\/v1\/projects\/[1-9]\d{0,19}\/cli-config$/.test(path)) {
         const repoId = path.split('/')[3];

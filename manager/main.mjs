@@ -14,12 +14,15 @@ const token = readFileSync(process.env.BOT_MANAGER_TOKEN_FILE), database = proce
 const compaction = await compactDatabase(database, { log: line => console.log('[manager] ' + line) });
 const projects = new Projects({ database, docker: new Docker(),
   deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project-computer:local',
+  projectTools: process.env.BOT_PROJECT_TOOLS_DIR || null,
   results: process.env.BOT_TOOL_RESULTS_DIR || null, egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
 projects.db.prepare("INSERT INTO settings VALUES('compaction',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(compaction));
 // Assistant computers share the unified global computer defaults and precompiled image unless BOT_ASSISTANT_IMAGE overrides it.
 const assistants = new AssistantComputers({ docker: projects.docker, db: projects.db, deployment: projects.deployment, disk: projects.disk,
   allocatedMemoryMb: () => projects.busyMemoryMb(),
-  resultMount:owner=>projects.resultMount(computerResultOwner('assistant',owner)), agentTools:()=>projects.agentToolsVolume(), image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes',
+  resultMount:owner=>projects.resultMount(computerResultOwner('assistant',owner)), agentTools:()=>projects.agentToolsVolume(),
+  projectToolsMount: projects.projectToolsMount, projectToolsVolume: () => projects.projectToolsVolume(),
+  image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes',
   globalEnvironment: process.env.BOT_ASSISTANT_IMAGE ? null : () => projects.assistantGlobalEnvironment() });
 const { server, recovered } = createManagerServer({ projects, token, assistants });
 server.listen(8793, '0.0.0.0');

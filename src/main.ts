@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { Store } from './storage/database.js';
 import { createControlPlane } from './server.js';
 import { ManagerClient, ProjectService, startProjectRuntime } from './projects/service.js';
+import { DEFAULT_PROJECT_TOOLS_ROOT, ProjectToolsService } from './projects/tools.js';
 import { NotesReclaimer } from './projects/reclaim.js';
 import { TaskEngine } from './agent/engine.js';
 import { InstallationSync } from './app/installations.js';
@@ -115,8 +116,14 @@ const trajectorySweep = setInterval(() => {
 trajectorySweep.unref?.();
 try { store.trajectories.sweepOrphans(); } catch (error) { console.error('[trajectories] first orphan sweep failed:', error); }
 const retention = new RetentionCleanup(store, manager);
+const projectToolsRoot = process.env.BOT_PROJECT_TOOLS_DIR || DEFAULT_PROJECT_TOOLS_ROOT;
+const projectTools = new ProjectToolsService(store, {
+  root: existsSync(projectToolsRoot) ? projectToolsRoot : undefined,
+  manager,
+  reconcile: () => { void projects.reconcile().catch(() => {}); },
+});
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards'),
-  homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes', tools: '/opt/agent-tools', machine: process.env.BOT_HOST_STORAGE_DIR }, vacuum, retention, workspaces);
+  homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes', tools: '/opt/agent-tools', project_tools: projectToolsRoot, machine: process.env.BOT_HOST_STORAGE_DIR }, vacuum, retention, workspaces);
 const agentTools = new AgentToolManager({
   volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT,
   protectedVersions: cli => activeCliVersions(store, cli),
@@ -144,7 +151,7 @@ const agentToolsAuto = new AgentToolsAutoInstaller(agentTools, {
 });
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, installations, external, onboarding, integrations, releases, boards,
-  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage, agentTools,
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage, agentTools, projectTools,
   // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
   notesReclaimer: reclaimer,
   notesOrphanThreshold: count('BOT_NOTES_ORPHAN_THRESHOLD', 10),
@@ -168,7 +175,7 @@ server.listen(8791, '0.0.0.0', () => {
     if (res.failed && !stopping && ++migrationAttempts < 10) setTimeout(() => { if (!stopping) void runLegacyMemoryMigration(); }, 30_000).unref();
   }).catch(error => console.error('[memory] legacy migration failed:', error));
   void runLegacyMemoryMigration();
-  storage.start();modelCatalog(store).start();vacuum.start();retention.start();agentToolsAuto.start();
+  storage.start();modelCatalog(store).start();vacuum.start();retention.start();agentToolsAuto.start();projectTools.start();
 });
 // Bound HTTP draining and shutdown below compose.yaml stop_grace_period (100s) so deployments never hit Docker SIGKILL.
 const shutdownDrainMs = 5_000, shutdownLimitMs = 80_000;
@@ -182,7 +189,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   forceConnections.unref?.();
   server.close(async () => {
     clearTimeout(forceConnections);
-    const settled = await Promise.allSettled([agentToolsAuto.stop(), storage.stop(), githubRefresh.close(), modelCatalog(store).close(), installations.close(), engine.close(), external.forwarder.close(), releases.close(), boards.close(), actionsFailures.close(), migration.stop(), vacuum.stop(), retention.stop()]);
+    const settled = await Promise.allSettled([projectTools.stop(), agentToolsAuto.stop(), storage.stop(), githubRefresh.close(), modelCatalog(store).close(), installations.close(), engine.close(), external.forwarder.close(), releases.close(), boards.close(), actionsFailures.close(), migration.stop(), vacuum.stop(), retention.stop()]);
     for (const entry of settled) if (entry.status === 'rejected') console.error('[bot] shutdown step failed:', entry.reason);
     try { store.close(); } catch (error) { console.error('[bot] store close failed:', error); }
     clearTimeout(forceExit);
