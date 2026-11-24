@@ -2932,8 +2932,8 @@ async function reconcileOpenBotPullRequestsForRepo(
         });
         const hasPendingEvent = Boolean(
           store.get(
-            "SELECT 1 FROM dispatch_events WHERE repository_id=? AND thread_key=? AND state IN ('pending','dispatching') LIMIT 1",
-            repositoryId,
+            // thread_key alone: it already carries the repository id, and adding repository_id scans the repository's events (#1350).
+            "SELECT 1 FROM dispatch_events WHERE thread_key=? AND state IN ('pending','dispatching') LIMIT 1",
             tKey,
           ),
         );
