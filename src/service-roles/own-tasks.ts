@@ -14,7 +14,7 @@ export const ownTaskTools = [
     { title: { type: 'string', maxLength: 200 }, instruction }, ['title', 'instruction']),
   fn('continue_own_task', 'Continue one of your own independent tasks of this conversation with a further instruction; it sees its earlier instructions and conclusions.',
     { task_id: { type: 'string' }, instruction }, ['task_id', 'instruction']),
-  fn('list_own_tasks', 'List your own independent tasks of this conversation, newest first, with their latest conclusions.', {}),
+  fn('list_own_tasks', 'List your own independent tasks of this conversation, newest first, with their latest conclusions. Returns total and next_offset; pass offset to page older tasks.', { offset: { type: 'integer', minimum: 0 } }),
   fn('read_own_task','Read the instructions and conclusions of your own task in this conversation.',{task_id:{type:'string'}},['task_id']),
   fn('manage_own_task','Pause or cancel your own task in this conversation; continuing a paused task uses continue_own_task.',
     {task_id:{type:'string'},operation:{type:'string',enum:['pause','cancel']}},['task_id','operation']),
@@ -48,13 +48,22 @@ export class OwnTasks {
   private history(row: Row): { instruction: string; conclusion: string; at: number }[] {
     return (this.store.secrets.open(row.history, 'own-task:' + row.id) as Json).rounds as any[];
   }
-  private visible(owner: OwnTaskOwner): Row[] {
+  private visible(owner: OwnTaskOwner, limit = 20, offset = 0): Row[] {
     return this.store.all(`SELECT * FROM service_role_own_tasks WHERE owner_kind=? AND owner_id=? AND service_role_id=? AND principal_id=? AND fence=?
-      ORDER BY updated_at DESC,rowid DESC LIMIT 20`, owner.kind, owner.owner_id, owner.service_role_id, owner.principal_id, owner.fence);
+      ORDER BY updated_at DESC,rowid DESC LIMIT ? OFFSET ?`, owner.kind, owner.owner_id, owner.service_role_id, owner.principal_id, owner.fence, limit, offset);
   }
-  list(owner: OwnTaskOwner): Json {
-    return { own_tasks: this.visible(owner).map(row => ({ task_id: row.id, title: row.title, state: row.control??row.state, rounds: row.rounds, error: row.error ?? null,
-      updated_at: row.updated_at, last_conclusion: (this.history(row).at(-1)?.conclusion ?? '').slice(0, 2000) })) };
+  /** One task by id, still fenced: paging the list never decides whether a task its host names can be read or continued. */
+  private find(owner: OwnTaskOwner, id: string): Row | undefined {
+    return this.store.get(`SELECT * FROM service_role_own_tasks WHERE owner_kind=? AND owner_id=? AND service_role_id=? AND principal_id=? AND fence=? AND id=?`,
+      owner.kind, owner.owner_id, owner.service_role_id, owner.principal_id, owner.fence, id);
+  }
+  list(owner: OwnTaskOwner, offset = 0): Json {
+    const total = Number(this.store.get(`SELECT count(*) AS n FROM service_role_own_tasks WHERE owner_kind=? AND owner_id=? AND service_role_id=? AND principal_id=? AND fence=?`,
+      owner.kind, owner.owner_id, owner.service_role_id, owner.principal_id, owner.fence)?.n ?? 0);
+    const rows = this.visible(owner, 20, offset);
+    return { own_tasks: rows.map(row => ({ task_id: row.id, title: row.title, state: row.control??row.state, rounds: row.rounds, error: row.error ?? null,
+      updated_at: row.updated_at, last_conclusion: (this.history(row).at(-1)?.conclusion ?? '').slice(0, 2000) })),
+      total, next_offset: offset + rows.length < total ? offset + rows.length : null };
   }
   /** Runs one own-task tool for the host. Failures are observations for the host model; a stopped host still stops. */
   async invoke(name: string, args: unknown, host: OwnTaskHost): Promise<unknown> {
@@ -62,10 +71,15 @@ export class OwnTasks {
     const input = args as Json;
     let row: Row | undefined;
     try {
-      if (name === 'list_own_tasks') { fields(input, []); return this.list(host.owner); }
+      if (name === 'list_own_tasks') {
+        fields(input, ['offset']);
+        const offset = input.offset === undefined ? 0 : Number(input.offset);
+        if (!Number.isSafeInteger(offset) || offset < 0) return { error: 'invalid_arguments' };
+        return this.list(host.owner, offset);
+      }
       if(name==='read_own_task'||name==='manage_own_task'){
         fields(input,name==='read_own_task'?['task_id']:['task_id','operation']);
-        const own=this.visible(host.owner).find(r=>r.id===text(input.task_id,100));
+        const own=this.find(host.owner,text(input.task_id,100));
         if(!own)return {error:'own_task_not_found'};
         if(name==='read_own_task')return {task_id:own.id,title:own.title,state:own.control??own.state,history:this.history(own)};
         if(!['pause','cancel'].includes(String(input.operation)))return {error:'invalid_arguments'};
@@ -82,7 +96,7 @@ export class OwnTasks {
         row = this.store.get('SELECT * FROM service_role_own_tasks WHERE id=?', id)!;
       } else if (name === 'continue_own_task') {
         fields(input, ['task_id', 'instruction']);
-        row = this.visible(host.owner).find(r => r.id === text(input.task_id, 100));
+        row = this.find(host.owner, text(input.task_id, 100));
         if (!row) return { error: 'own_task_not_found', detail: '只能继续本会话当前可见的独立任务；授权或绑定变化后，旧的独立任务不再可见。' };
         if(row.control==='cancelled')return {error:'own_task_cancelled'};
         if (row.state === 'running') return { error: 'own_task_running' };
