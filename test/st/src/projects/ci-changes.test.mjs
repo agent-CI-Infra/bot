@@ -319,6 +319,12 @@ test('ordinary development task (open_pull_request) modifies .github/workflows/ 
     if (messages[0].content.includes('independent delivery acceptance evaluator')) {
       qaCalls++;
       message = { role: 'assistant', content: JSON.stringify({ outcome: 'pass', reason: 'ok', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true }) };
+    } else if (tools.includes('delegate_role')) {
+      const toolResults = messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const devResult = toolResults.find(r => typeof r.result_ref === 'string');
+      message = devResult
+        ? call('nominate_delivery', { result_ref: devResult.result_ref, checks_note: 'CI workflow change ready.' })
+        : call('delegate_role', { role: 'dev', purpose: 'Add .github/workflows/ci.yml and submit PR.', refs: [] });
     } else if (tools.includes('open_pull_request')) {
       devStep++;
       if (devStep === 1) {

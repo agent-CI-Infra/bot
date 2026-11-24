@@ -290,6 +290,10 @@ async function settle(store: Store, taskId: string, client: GitHub | (() => Prom
   const row = store.get('SELECT rowid,* FROM issue_development_progress WHERE task_id=?', taskId), task = store.get('SELECT * FROM tasks WHERE id=?', taskId);
   if (!row || !task) return true;
   const now = state(task), number = Number(row.number);
+  // Once a continuous multi-round task enters Round 2+ PR revisions, never mutate or regress the
+  // original Issue's labels or status comment once PR opening has been settled (or while non-PR states run).
+  const inputRound = (() => { try { return Number(JSON.parse(String(task.input || '{}')).round || 1); } catch { return 1; } })();
+  if (inputRound > 1 && (row.settled_status === 'pr_opened' || !now.pr)) return true;
   const supersededByNewer = hasNewerIssueProgress(store, row);
   const wanted = !now.pr && !now.stopped ? developingIssueLabel(String(row.label ?? '')) : null;
   // An older development settling after a newer one started on the same Issue must not remove the newer task's

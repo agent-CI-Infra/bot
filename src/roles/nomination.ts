@@ -1,10 +1,24 @@
 import type {Store,Row} from '../storage/database.js';
 import {SubmissionError} from './submission-error.js';
 
+/** History id boundary for the current round of a continuous multi-round task (0 in round 1). */
+export function roundHistoryFloor(s: Store, task: Row | string): number {
+  const inputRaw = typeof task === 'string'
+    ? s.get('SELECT input FROM tasks WHERE id=?', task)?.input
+    : (s.get('SELECT input FROM tasks WHERE id=?', task.id)?.input ?? task.input);
+  try {
+    const floor = Number(JSON.parse(String(inputRaw || '{}'))?.round_started_history_id ?? 0);
+    return Number.isSafeInteger(floor) && floor > 0 ? floor : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Read only this task and its same-project descendants; an arbitrary reference never grants access. */
 export function nominationSource(s:Store,task:Row,ref:unknown) {
- const latest=s.get("SELECT id FROM task_history WHERE task_id=? AND type='role_result' AND json_extract(data,'$.role')='dev' ORDER BY id DESC LIMIT 1",task.id);
- const reject=(reason:string,observed:Record<string,unknown>={},code='role_nomination_invalid'):never=>{throw new SubmissionError(code,{reason,submitted_ref:typeof ref==='string'?ref.slice(0,200):null,current_task:'task:'+task.id,expected:'Latest Dev role_result of this task, or an accepted descendant task result. Child results are evidence for the CURRENT parent workspace, not an automatic checkout or parent acceptance.',observed,available_result_refs:latest?['task_history:'+latest.id]:[],available_child_result_refs:s.all("SELECT c.child_id FROM task_children c JOIN tasks t ON t.id=c.child_id JOIN task_records r ON r.task_id=t.id WHERE c.parent_id=? AND t.repository_id=? AND t.status IN ('pr_opened','completed','succeeded') AND json_extract(r.acceptance,'$.outcome') IN ('pass','pass_with_issues') LIMIT 20",task.id,task.repository_id).map(r=>'task:'+r.child_id),discovery:{tool:'read_child_tasks',arguments:{}},hint:'Read the source and actual workspace/version context, decide whether to integrate or verify further, then nominate. With no stage plan, omit stage_id when delegating.'});};
+ const floor=roundHistoryFloor(s,task);
+ const latest=s.get("SELECT id FROM task_history WHERE task_id=? AND id>? AND type='role_result' AND json_extract(data,'$.role')='dev' ORDER BY id DESC LIMIT 1",task.id,floor);
+ const reject=(reason:string,observed:Record<string,unknown>={},code='role_nomination_invalid'):never=>{throw new SubmissionError(code,{reason,submitted_ref:typeof ref==='string'?ref.slice(0,200):null,current_task:'task:'+task.id,expected:'Latest Dev role_result of this task in the current round, or an accepted descendant task result. Child results are evidence for the CURRENT parent workspace, not an automatic checkout or parent acceptance.',observed,available_result_refs:latest?['task_history:'+latest.id]:[],available_child_result_refs:s.all("SELECT c.child_id FROM task_children c JOIN tasks t ON t.id=c.child_id JOIN task_records r ON r.task_id=t.id WHERE c.parent_id=? AND t.repository_id=? AND t.status IN ('pr_opened','completed','succeeded') AND json_extract(r.acceptance,'$.outcome') IN ('pass','pass_with_issues') LIMIT 20",task.id,task.repository_id).map(r=>'task:'+r.child_id),discovery:{tool:'read_child_tasks',arguments:{}},hint:'Read the source and actual workspace/version context, decide whether to integrate or verify further, then nominate. With no stage plan, omit stage_id when delegating.'});};
  if(typeof ref!=='string'||ref.length>200)return reject('invalid_reference_format');
  const history=/^task_history:(\d+)$/.exec(ref),child=/^task:([^:]+)(?::result)?$/.exec(ref);
  if(!history&&!child)return reject('invalid_reference_format');
@@ -18,6 +32,7 @@ export function nominationSource(s:Store,task:Row,ref:unknown) {
  if(row&&data.role!=='dev')return reject('role_mismatch',{task_ref:'task:'+sourceId,record_type:row.type,role:data.role});
  if(sourceId===task.id){
   if(!row)return reject('own_task_reference_requires_dev_result');
+  if(floor>0&&Number(history![1])<=floor)return reject('previous_round_result',{record_id:Number(history![1]),round_started_history_id:floor},'role_nomination_stale');
   const revision=s.get('SELECT revision FROM task_records WHERE task_id=?',task.id)!.revision;
   if(data.contract_revision!==revision)return reject('contract_revision_mismatch',{record_revision:data.contract_revision,current_revision:revision},'role_nomination_stale');
   if(ref!=='task_history:'+latest?.id)return reject('newer_dev_result_available',{},'role_nomination_stale');

@@ -42,7 +42,7 @@ test('the Docker model fixture serves checked Manager decisions and preserves ta
     facts: { review: { recommendation: 'Ready for development.' }, development: { label: 'bot-develop', labeled_by: 'maintainer', assignees: [] } },
     options: [{ id: 'offered-development', work: 'development.issue', title: 'Develop', spec: { type: 'object', kind: 'development.issue', number: 1, head: null, input: { review: { implementation_goal: 'Fix addition' } }, delivery: 'fixture-published' } }] });
   await run();
-  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='task.request' AND json_extract(input,'$.executor_role')='dev'").n, 1);
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks t JOIN task_write_grants g ON g.task_id=t.id WHERE t.kind='task.request' AND json_extract(t.input,'$.executor_role') IS NULL AND g.writes LIKE '%pull_request%'").n, 1);
   recordEvent(h.store, { repositoryId: '101', key: 'fixture-no-code', type: 'review.published', source: 'review', summary: 'No requested change', object: { type: 'issue', number: 2 },
     facts: { review: { recommendation: 'No code change requested.' }, development: { assignees: [] } },
     options: [{ id: 'declined-development', work: 'development.issue', title: 'Develop', spec: { type: 'object', kind: 'development.issue', number: 2, head: null, input: {}, delivery: null } }] });

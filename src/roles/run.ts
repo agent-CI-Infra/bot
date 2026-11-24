@@ -129,10 +129,12 @@ function rebind(s:Store,task:Row,instance:Row,resolved:Resolved,reason:'delegati
  const old=prior?JSON.parse(prior.snapshot):null;
  const removedManagement=(old?.capability?.tools??[]).filter((name:string)=>['create_task','manage_task','list_managed_tasks'].includes(name)&&!resolved.snapshot.capability.tools?.includes(name));
  const retiredGuidance=legacyGuidanceSession(instance)||old?.capability?.tools?.some((name:string)=>['read_playbook','select_playbooks'].includes(name));
- if(retiredGuidance||removedManagement.length){
-  // External/native sessions can retain old tools and catalog prompts. Rebuild this same instance from durable facts.
-  s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",storedRuntime(instance)?JSON.stringify({...storedRuntime(instance),guidance_retired:true}):null,instance.id);
-  traceEvent(s,task.id,retiredGuidance?'role_guidance_migrated':'role_tools_narrowed',{role:instance.role,instance_id:instance.id,from_snapshot:instance.snapshot_id,recovery:'rebuilt_from_task_records',...(removedManagement.length?{removed_tools:removedManagement}:{})},task.trace_run_id,'framework');
+ const harnessChanged=Boolean(instance.harness&&instance.harness!==resolved.snapshot.harness.id);
+ if(retiredGuidance||removedManagement.length||harnessChanged){
+  // External/native sessions can retain old tools/prompts or incompatible harness state. Rebuild from durable facts.
+  const nextRuntime=harnessChanged?null:(storedRuntime(instance)?JSON.stringify({...storedRuntime(instance),guidance_retired:true}):null);
+  s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",nextRuntime,instance.id);
+  traceEvent(s,task.id,retiredGuidance?'role_guidance_migrated':harnessChanged?'role_harness_changed':'role_tools_narrowed',{role:instance.role,instance_id:instance.id,from_snapshot:instance.snapshot_id,recovery:'rebuilt_from_task_records',...(harnessChanged?{from_harness:instance.harness,to_harness:resolved.snapshot.harness.id}:{}),...(removedManagement.length?{removed_tools:removedManagement}:{})},task.trace_run_id,'framework');
  }
 
  const from={snapshot_id:instance.snapshot_id??null,config_revision:instance.config_revision??null,role_revision:instance.role_revision??null,harness:instance.harness,version:JSON.parse(instance.definition).version};

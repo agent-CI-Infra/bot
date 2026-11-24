@@ -1456,7 +1456,26 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
     : undefined;
   const rootIssue = rootIssueOfBotPr(store, repositoryId, prNumber);
   const forRequests = store.hasTable('bot_pr_requests')
-    ? Number(store.get("SELECT count(DISTINCT task_id) n FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done'", repositoryId, prNumber)?.n || 0)
+    ? (() => {
+        const reqRows = store.all("SELECT task_id, created_at FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done'", repositoryId, prNumber);
+        if (!reqRows.length) return 0;
+        const contsByTask = new Map<string, { round: number; at: string }[]>();
+        if (store.hasTable('task_history')) {
+          for (const tid of new Set(reqRows.map(r => String(r.task_id || '')))) {
+            if (!tid) continue;
+            const cs = store.all("SELECT json_extract(data,'$.round') AS round, created_at FROM task_history WHERE task_id=? AND type='task_continued' ORDER BY id ASC", tid);
+            if (cs.length) contsByTask.set(tid, cs.map(c => ({ round: Number(c.round) || 2, at: String(c.created_at || '') })));
+          }
+        }
+        const distinct = new Set<string>();
+        for (const r of reqRows) {
+          const tid = String(r.task_id || ''), at = String(r.created_at || '');
+          let round = 1;
+          for (const c of contsByTask.get(tid) ?? []) if (c.at <= at) round = c.round;
+          distinct.add(`${tid}:${round}`);
+        }
+        return distinct.size;
+      })()
     : 0;
 
   const taskRows = store.hasTable('task_events')
@@ -1480,15 +1499,42 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
   let forChecksFailed = 0;
   let forConflicts = 0;
   let forPatrol = 0;
-  const allRounds = taskRows.map((t, index) => {
-    const evTypes = store.all(
-      `SELECT DISTINCT e.type FROM task_events te JOIN dispatch_events e ON e.id=te.event_id
-       WHERE te.task_id=? AND e.type IN ('pull_request.checks_failed','pull_request.conflicted','pull_request.patrol')`,
+  const rawRounds: any[] = [];
+  for (const t of taskRows) {
+    const wakeLinks = store.all(
+      `SELECT e.id AS event_id, e.type, e.created_at AS event_at, te.relation, te.created_at AS linked_at
+       FROM task_events te JOIN dispatch_events e ON e.id=te.event_id
+       WHERE te.task_id=? AND e.repository_id=?
+         AND e.type IN ('pull_request.checks_failed','pull_request.conflicted','pull_request.patrol')
+         AND (e.object_number=? OR ?=?)
+       ORDER BY te.created_at ASC, te.rowid ASC`,
       t.id,
-    ).map(r => String(r.type));
-    if (evTypes.includes('pull_request.checks_failed')) forChecksFailed++;
-    if (evTypes.includes('pull_request.conflicted')) forConflicts++;
-    if (evTypes.includes('pull_request.patrol')) forPatrol++;
+      repositoryId,
+      prNumber,
+      Number(t.object_number || 0),
+      prNumber,
+    );
+    const continuedEvents = store.hasTable('task_history')
+      ? store.all(
+          "SELECT id, data, created_at FROM task_history WHERE task_id=? AND type='task_continued' ORDER BY id ASC",
+          t.id,
+        ).map(row => {
+          let d: any = {};
+          try { d = JSON.parse(String(row.data || '{}')); } catch {}
+          return { id: Number(row.id), round: Number(d.round) || 2, event_id: d.event_id ? String(d.event_id) : null, at: String(row.created_at || '') };
+        })
+      : [];
+    const deliveries = store.hasTable('task_history')
+      ? store.all(
+          "SELECT id, data, created_at FROM task_history WHERE task_id=? AND type='delivery' ORDER BY id ASC",
+          t.id,
+        ).map(row => {
+          let d: any = null;
+          try { d = JSON.parse(String(row.data || 'null')); } catch {}
+          return { id: Number(row.id), data: d, at: String(row.created_at || '') };
+        })
+      : [];
+
     let parsedResult: any = null;
     let parsedInput: any = null;
     try { parsedResult = t.result ? JSON.parse(String(t.result)) : null; } catch { parsedResult = null; }
@@ -1496,27 +1542,80 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
     const roleRow = store.hasTable('task_origins')
       ? store.get('SELECT executor_role FROM task_origins WHERE task_id=?', t.id)
       : undefined;
-    const summaryText = parsedResult?.summary
-      ? String(parsedResult.summary)
-      : t.error_code
-        ? `Task ${t.status} (${t.error_code})`
-        : String(t.summary || '');
-    return {
-      round: index + 1,
-      task_id: String(t.id),
-      status: String(t.status),
-      role: roleRow?.executor_role ?? parsedInput?.executor_role ?? null,
-      triggers: evTypes,
-      head_sha: t.head_sha ?? null,
-      published_sha: typeof parsedResult?.sha === 'string' ? parsedResult.sha : null,
-      no_changes: parsedResult?.status === 'no_changes',
-      error_code: t.error_code ?? null,
-      goal: clip(t.summary, 240),
-      summary: clip(summaryText, 500),
-      created_at: String(t.created_at),
-      updated_at: String(t.updated_at),
-    };
-  });
+    const currentRound = Number(parsedInput?.round || 1);
+
+    // Group wake events into logical rounds: Round 1 (before any task_continued) + each continued round N (#1331).
+    const byRound = new Map<number, { types: Set<string>; startedAt: string; nextStartedAt: string | null; contId: number | null; nextContId: number | null }>();
+    for (const link of wakeLinks) {
+      let rNum = 1;
+      let startedAt = String(t.created_at);
+      let contIdx = -1;
+      const exactIdx = continuedEvents.findIndex(c => c.event_id && c.event_id === String(link.event_id));
+      if (exactIdx >= 0) {
+        contIdx = exactIdx;
+      } else {
+        const linkTime = String(link.linked_at || link.event_at || '');
+        for (let i = 0; i < continuedEvents.length; i++) {
+          if (continuedEvents[i]!.at <= linkTime) contIdx = i;
+        }
+      }
+      if (contIdx >= 0) {
+        rNum = continuedEvents[contIdx]!.round;
+        startedAt = continuedEvents[contIdx]!.at || String(link.linked_at || t.created_at);
+      }
+      const nextCont = contIdx >= 0 ? continuedEvents[contIdx + 1] : continuedEvents[0];
+      let bucket = byRound.get(rNum);
+      if (!bucket) {
+        bucket = {
+          types: new Set<string>(),
+          startedAt,
+          nextStartedAt: nextCont?.at ?? null,
+          contId: contIdx >= 0 ? continuedEvents[contIdx]!.id : null,
+          nextContId: nextCont?.id ?? null,
+        };
+        byRound.set(rNum, bucket);
+      }
+      bucket.types.add(String(link.type));
+    }
+
+    const sortedRoundNums = [...byRound.keys()].sort((a, b) => a - b);
+    for (const rNum of sortedRoundNums) {
+      const bucket = byRound.get(rNum)!;
+      const evTypes = [...bucket.types];
+      if (evTypes.includes('pull_request.checks_failed')) forChecksFailed++;
+      if (evTypes.includes('pull_request.conflicted')) forConflicts++;
+      if (evTypes.includes('pull_request.patrol')) forPatrol++;
+      const isLatestRound = rNum === currentRound || (!continuedEvents.length && rNum === 1);
+      const roundDelivery = deliveries.find(d =>
+        (bucket.contId === null || d.id > bucket.contId)
+        && (bucket.nextContId === null || d.id < bucket.nextContId),
+      );
+      const effectiveResult = roundDelivery?.data ?? (isLatestRound ? parsedResult : null);
+      const effectiveStatus = isLatestRound ? String(t.status) : (roundDelivery?.data?.pr_url ? 'pr_opened' : 'completed');
+      const summaryText = effectiveResult?.summary
+        ? String(effectiveResult.summary)
+        : (isLatestRound && t.error_code)
+          ? `Task ${t.status} (${t.error_code})`
+          : String(t.summary || '');
+      rawRounds.push({
+        task_id: String(t.id),
+        task_round: rNum,
+        status: effectiveStatus,
+        role: roleRow?.executor_role ?? parsedInput?.executor_role ?? null,
+        triggers: evTypes,
+        head_sha: t.head_sha ?? null,
+        published_sha: typeof effectiveResult?.sha === 'string' ? effectiveResult.sha : null,
+        no_changes: effectiveResult?.status === 'no_changes',
+        error_code: isLatestRound ? (t.error_code ?? null) : null,
+        goal: clip(t.summary, 240),
+        summary: clip(summaryText, 500),
+        created_at: bucket.startedAt,
+        updated_at: roundDelivery?.at ?? (isLatestRound ? String(t.updated_at) : bucket.startedAt),
+      });
+    }
+  }
+  rawRounds.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || a.task_round - b.task_round);
+  const allRounds = rawRounds.map((r, index) => ({ round: index + 1, ...r }));
 
   const sourceTask = owned?.source_task_id
     ? store.get('SELECT created_at FROM tasks WHERE id=?', owned.source_task_id)

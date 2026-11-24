@@ -805,8 +805,13 @@ test('no hard retry cap: >5 failure/conflict rounds still wake Manager with full
           reason: '维护者已留言说明为偶发网络抖动，重跑失败 workflow。',
         });
       }
+      if (userPayload.work?.continue?.length) {
+        return toolCall('mgr_cont_' + rev.for_checks_or_conflicts, 'continue_task', {
+          task_id: userPayload.work.continue[0].task_id,
+          reason: `续接同一 PR 任务进行第 ${rev.for_checks_or_conflicts + 1} 轮自动修复检查失败或冲突。`,
+        });
+      }
       return toolCall('mgr_dev_' + rev.for_checks_or_conflicts, 'create_task', {
-        role: 'dev',
         writes: ['pull_request'],
         target: { type: 'pr', number: 88 },
         brief: { goal: `Repair round ${rev.for_checks_or_conflicts + 1}`, criteria: ['Attempt fix and report honestly.'] },
@@ -814,12 +819,23 @@ test('no hard retry cap: >5 failure/conflict rounds still wake Manager with full
       });
     }
 
+    if (toolNames.includes('delegate_role')) {
+      const lastUserIdx = body.messages.findLastIndex(m => m.role === 'user');
+      const toolResults = body.messages.slice(lastUserIdx + 1).filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const delegated = [...toolResults].reverse().find(r => typeof r.result_ref === 'string');
+      if (delegated) {
+        return toolCall('tm_nom_' + Date.now(), 'nominate_delivery', { result_ref: delegated.result_ref });
+      }
+      return toolCall('tm_del_' + Date.now(), 'delegate_role', { role: 'dev', purpose: 'Diagnose and fix PR #88 wake event.', refs: [] });
+    }
+
     const promptObj = (() => { try { return JSON.parse(String(body.messages?.[1]?.content || '{}')); } catch { return {}; } })();
+    const sourcePrompt = (() => { try { return JSON.parse(String(promptObj.source_context || '{}')); } catch { return {}; } })();
     if (toolNames.includes('rerun_failed_run')) {
       const hasRerunResult = body.messages.some(m => m.role === 'tool' && String(m.content).includes('rerun_requested'));
       if (!hasRerunResult) {
         return toolCall('wk_rerun', 'rerun_failed_run', {
-          run_id: promptObj.wake_event?.check?.workflow_run_id || 8107,
+          run_id: promptObj.wake_event?.check?.workflow_run_id || sourcePrompt.wake_event?.check?.workflow_run_id || 8107,
           job_ids: [8807],
           reason: 'Transient failure confirmed by maintainer',
           evidence: ['ETIMEDOUT connecting to fixture registry'],
@@ -828,7 +844,7 @@ test('no hard retry cap: >5 failure/conflict rounds still wake Manager with full
       return toolCall('wk_report_rerun', 'submit_report', { summary: 'Triggered rerun for workflow run.', artifacts: [] });
     }
     return toolCall('wk_report', 'submit_report', {
-      summary: `Attempted diagnosis in ${promptObj.task?.contract?.goal || 'round'}; external fixture service still unreachable.`,
+      summary: `Attempted diagnosis in ${promptObj.task?.contract?.goal || promptObj.contract?.goal || 'round'}; external fixture service still unreachable.`,
       artifacts: [],
     });
   });
@@ -951,6 +967,13 @@ test('continue_task merges mid-run conflict & check failure into running task, r
         brief: { goal: 'Fix failed check and any base conflict on PR #88', criteria: ['Pass node --test calc.test.mjs and update PR #88.'] },
         reason: '派 dev 修复 PR #88 的检查失败并合并主干冲突。',
       });
+    }
+
+    if (toolNames.includes('delegate_role')) {
+      const toolResults = body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const delegated = [...toolResults].reverse().find(r => typeof r.result_ref === 'string');
+      if (delegated) return toolCall('tm_nom_cont', 'nominate_delivery', { result_ref: delegated.result_ref });
+      return toolCall('tm_del_cont', 'delegate_role', { role: 'dev', purpose: 'Fix PR #88 checks and merge conflicts.', refs: [] });
     }
 
     workerTurn++;
@@ -1224,6 +1247,12 @@ test('conflict-base import fails closed on skipped base blobs, resolves >4-hop b
         reason: '派 dev 解决 6 跳基线冲突。',
       });
     }
+    if (toolNames.includes('delegate_role')) {
+      const toolResults = body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const delegated = [...toolResults].reverse().find(r => typeof r.result_ref === 'string');
+      if (delegated) return toolCall('tm_nom_6hop', 'nominate_delivery', { result_ref: delegated.result_ref });
+      return toolCall('tm_del_6hop', 'delegate_role', { role: 'dev', purpose: 'Resolve 6-hop conflict on PR #88.', refs: [] });
+    }
     devTurn++;
     if (devTurn === 1) {
       // Verify the 6-hop history was imported into the workspace git store so `hop1-only.mjs` is readable from `bot-conflict-base`.
@@ -1403,6 +1432,13 @@ test('workspace_verify_merge rejects unmerged index & conflict markers while all
         brief: { goal: 'Rebuild PR #88 cleanly on top of latest main as a single linear commit without stray files', criteria: ['Pass node --test calc.test.mjs and update PR #88.'] },
         reason: '派 dev 变基到最新 main 并清理多余文件。',
       });
+    }
+
+    if (toolNames.includes('delegate_role')) {
+      const toolResults = body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const delegated = [...toolResults].reverse().find(r => typeof r.result_ref === 'string');
+      if (delegated) return toolCall('tm_nom_rebase', 'nominate_delivery', { result_ref: delegated.result_ref });
+      return toolCall('tm_del_rebase', 'delegate_role', { role: 'dev', purpose: 'Rebase PR #88 cleanly onto latest main.', refs: [] });
     }
 
     turn++;

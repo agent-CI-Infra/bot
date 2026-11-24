@@ -274,7 +274,7 @@ export class Publisher {
     if(candidate.publication_identity!==identity){candidate.publication_identity=identity;delete candidate.created_commit_sha;delete candidate.remote_sha;delete candidate.branch_confirmed;delete candidate.published_tree_sha;save();}
     if(candidate.created_commit_sha){
       const current=await observe(),actual=current?.object?.sha;
-      if(actual===candidate.created_commit_sha){candidate.remote_sha=actual;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:actual,observed_at:new Date().toISOString()};save();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(current),operationId(this.task.id+':'+key));publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:actual,tree_sha:expected});return actual;}
+      if(actual===candidate.created_commit_sha){candidate.remote_sha=actual;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:actual,observed_at:new Date().toISOString()};save();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(current),operationId(this.scope+':'+key));publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:actual,tree_sha:expected});return actual;}
       if(candidate.branch_confirmed || actual && actual!==candidate.expected_sha || !actual && candidate.expected_sha)stop('branch_head_changed','needs_replan','Publication branch differs from the expected head. Query read_publication_context; choose investigation, coordination, integration or help.');
     }
     const pushBranch=async(writeToken?:string)=>{
@@ -376,7 +376,7 @@ export class Publisher {
       if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head',`PR #${candidate.pr_number} 尚未更新到提交 ${sha}，当前 head=${pr?.head.sha||'未知'}。`);
       const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
       const content=this.pullRequestText(candidate,Number(source?.object_number||this.task.object_number));
-      const updateKey='pr-update:'+sha+':'+operationId(JSON.stringify(content)) ,marker=this.marker(updateKey),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
+      const updateKey='pr-update:'+sha+':'+operationId(JSON.stringify(content)) ,marker=this.marker(updateKey),originMarker=this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request' ORDER BY rowid ASC LIMIT 1",owned!.source_task_id)?.marker||'',payload={...content,body:content.body+'\n\n'+originMarker+'\n\n'+marker};
       await this.effect(updateKey,'pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
         const current=await this.github.object('review.pr',pr.number);assertOwnedPR(owned,current,this.github.actorId,this.task.repository_id);
         return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
