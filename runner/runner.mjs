@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { workspace as workspaceTool } from './workspace.mjs';
 import { command } from './command.mjs';
+import { commandFailure } from './command-policy.mjs';
 import { execFile } from 'node:child_process';
 import { ownership, operationOwnership, isRunner, tasksRoot } from './ownership.mjs';
 import { pruneJournal } from './journal.mjs';
@@ -172,7 +173,7 @@ if (request.type === 'journal_clear' && assistant) {
   else {
     await save(request.operation_id, { state: 'running' });
     try { result = { ok: true, result: await execute(request) }; }
-    catch(error) { result = failedFull(request, error) ?? { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
+    catch(error) { result = failedFull(request, error) ?? commandFailure(error) ?? { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
     await save(request.operation_id, { state: 'completed', result });
     // Small output is in the journal JSON. A preview does not replace the complete output: retain its file for the
     // control plane's streaming copy and for idempotent retries; journal pruning removes it with the other records.

@@ -254,3 +254,41 @@ test('#1121 review: a configured timeout keeps the entry description of QA, requ
   // A description without the timeout sentences is kept whole.
   assert.ok(retimeCommandTool({ function: { description: 'Custom shell.' } }, null, 600).function.description.startsWith('Custom shell. Without timeout_seconds'));
 });
+
+// #1320 review: the transport bound counts the JSON-encoded request, so escaping (quotes, newlines) counts again on top
+// of the command's own byte length. A command inside the declared 64 KiB could therefore be refused by the manager as
+// runner_request_too_large while the turn only saw execution_interrupted and restarted. These tests pin the named answer.
+function transportWorkspace(t, call) {
+  const root = mkdtempSync(join(tmpdir(), 'bot-command-transport-')), store = new Store(':memory:', randomBytes(32));
+  t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
+  store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('101','fixture/commands','o','a')");
+  store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,?,?,?,?,?,?,?,?)',
+    't', '101', 'task.request', 'running', 'transport fixture', '{}', 1, 1, randomBytes(24).toString('hex'));
+  const manager = { call };
+  const workspace = new Workspace(store, manager, store.get("SELECT * FROM tasks WHERE id='t'"), new Redactor(), async () => {}, () => {});
+  return { store, manager, workspace };
+}
+
+test('a command inside the byte limit whose JSON request exceeds the transport limit is refused by name', async t => {
+  const { runnerRequestLimit } = await import('../../../../dist/agent/command.js');
+  const f = transportWorkspace(t, async () => { throw new Error('the manager must not be asked to carry a request that cannot arrive'); });
+  // Both commands are 65535 UTF-8 bytes, inside the declared 64 KiB command limit, but JSON escaping pushes the request
+  // past the 95 KiB transport bound: 32767 quotes become 32767 more bytes, 65535 newlines 65535 more.
+  const commands = ['"'.repeat(32767) + 'x'.repeat(32768), '\n'.repeat(65535)];
+  for (const [index, command] of commands.entries()) {
+    assert.equal(Buffer.byteLength(command), 65535);
+    const result = await f.workspace.call('transport-' + index, { type: 'workspace_command', command, timeout_ms: 10000 });
+    assert.equal(result.error, 'runner_request_too_large');
+    assert.equal(result.limit, runnerRequestLimit);
+    assert.ok(Number.isSafeInteger(result.length) && result.length > runnerRequestLimit, String(result.length));
+    assert.match(String(result.detail), /script file/);
+  }
+});
+
+test('a runner answer that names the command limit keeps its limit and length in the tool result', async t => {
+  const answer = { ok: false, error: 'command_too_long', limit: 65536, length: 70000, detail: 'The command is 70000 bytes; the limit is 65536 bytes.' };
+  const f = transportWorkspace(t, async () => answer);
+  const result = await f.workspace.call('over', { type: 'workspace_command', command: 'x'.repeat(70000), timeout_ms: 10000 });
+  assert.deepEqual([result.error, result.limit, result.length], ['command_too_long', 65536, 70000]);
+});

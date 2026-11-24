@@ -15,6 +15,7 @@ import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.j
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
 import { sanitizeAgentPollTrajectory } from '../../runner/image-budget.mjs';
 import { MAX_ARTIFACT_COMPRESSED_BYTES } from '../../runner/artifact-zip.mjs';
+import { requestTooLarge } from '../../runner/command-policy.mjs';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -99,20 +100,31 @@ export class Workspace {
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
     const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
-    const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
-    operations.delete(id);operations.set(id,input.request);
-    try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
-    catch(error){
-      const code=error instanceof HttpError?error.code:null,what=`${request.type}${request.path?' '+request.path:''}`;
-      // The manager's data disk is full: wait for space (#671). A repeated call whose stored result the manager removed
-      // after its retention window cannot be answered: a new attempt runs with new operation ids.
-      if(code==='disk_full')return stop('disk_full','waiting_environment',`manager 的数据盘空间不足，调用未完成：${what}`);
-      if(code==='operation_result_expired')return stop('operation_result_expired','waiting_environment',`manager 中这次调用的结果已过保留期被删除：${what}`);
-      if(code==='invalid_runner_request')return stop('invalid_runner_request','failed',`Manager rejected runner request: ${what}`);
-      return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${what}`);
+    // A request the transport cannot carry is answered by name here, before the call (#1320 review): the manager's 413
+    // runner_request_too_large used to become execution_interrupted and a restart attempt, so the model never saw the
+    // refusal. The predicate and the bound are the manager's own (runner/command-policy.mjs), and JSON escaping counts in
+    // the size, so a command inside the declared byte limit can still be refused when it is dense in quotes or newlines.
+    const transport=requestTooLarge(input);
+    if(transport)response={ok:false,...transport};
+    else{
+      const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
+      operations.delete(id);operations.set(id,input.request);
+      try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
+      catch(error){
+        const code=error instanceof HttpError?error.code:null,what=`${request.type}${request.path?' '+request.path:''}`;
+        if(code==='runner_request_too_large')response={ok:false,...(requestTooLarge(input)??{error:code})};
+        else{
+          // The manager's data disk is full: wait for space (#671). A repeated call whose stored result the manager removed
+          // after its retention window cannot be answered: a new attempt runs with new operation ids.
+          if(code==='disk_full')return stop('disk_full','waiting_environment',`manager 的数据盘空间不足，调用未完成：${what}`);
+          if(code==='operation_result_expired')return stop('operation_result_expired','waiting_environment',`manager 中这次调用的结果已过保留期被删除：${what}`);
+          if(code==='invalid_runner_request')return stop('invalid_runner_request','failed',`Manager rejected runner request: ${what}`);
+          return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${what}`);
+        }
+      }
+      finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}
     }
-    finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}
-    let result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
+    let result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{}),...(Number.isSafeInteger(response.limit)?{limit:response.limit}:{}),...(Number.isSafeInteger(response.length)?{length:response.length}:{})});
     if(request.type==='workspace_command'&&scope)result=await commandResult(result,id,async offset=>this.manager.call('GET',`/v1/projects/${this.task.repository_id}/output/${id}?offset=${offset}`),
       new ResultSession(this.store,scope,()=>projectResultOwner(this.task.repository_id),this.guard));
     // A repeated call replays this result: it is on disk before the row points to it.
