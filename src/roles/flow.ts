@@ -474,12 +474,30 @@ function buildHistoryStepsForRun(
     if (data?.call_id) observationsByCall.set(String(data.call_id), { row, data });
   }
 
-  let hasNativeTools = false;
+  // A run with native tool rows already lists every call as its own step, so a harness `role_run_event` tool call
+  // would duplicate it; its model messages must still appear (#1207).
+  const hasNativeTools = events.some(row => row.type === 'tool_started' && !!parseJson(row.data));
   for (const row of events) {
     const data = parseJson(row.data);
-    if (!data) continue;
+    if (!data) {
+      // A body over 64 KiB is not shipped with the task detail: keep a placeholder step that reads it on demand.
+      if (row.type === 'role_run_event' || row.type === 'model_request') {
+        steps.push({
+          id: `hist:${row.id}`,
+          kind: 'event',
+          tool: null,
+          created_at: row.created_at,
+          status: 'ok',
+          source_ref: `task_history:${row.id}`,
+          arguments: null,
+          output: null,
+          body_omitted: true,
+          oversize: true,
+        });
+      }
+      continue;
+    }
     if (row.type === 'tool_started') {
-      hasNativeTools = true;
       const callId = String(data.call_id ?? row.id);
       const name = String(data.name ?? 'tool');
       const obs = observationsByCall.get(callId);
@@ -492,14 +510,42 @@ function buildHistoryStepsForRun(
         created_at: row.created_at,
         status: !obs ? 'running' : isError ? 'error' : 'ok',
         source_ref: obs ? `task_history:${obs.row.id}` : `task_history:${row.id}`,
+        input_source: `task_history:${row.id}`,
+        output_source: obs ? `task_history:${obs.row.id}` : null,
         arguments: allowPrivate ? safe(data.arguments ?? {}) : null,
         output: allowPrivate && obsPayload !== null ? safe(obsPayload) : null,
         body_omitted: !allowPrivate,
       });
-    } else if (row.type === 'role_run_event' && !hasNativeTools) {
+    } else if (row.type === 'model_request') {
+      // #1207: the recorded request/response pair is this step's input and output. Their bodies stay in the
+      // trajectory and are read through their own sources, so a prompt is never sliced into the list payload.
+      const requestId = String(data.request_id ?? '');
+      const state = String(data.state ?? '');
+      const requestSource = typeof data.request_source === 'string' ? data.request_source
+        : requestId ? `model_requests:${requestId}:request` : null;
+      const responseSource = typeof data.response_source === 'string' ? data.response_source
+        : requestId ? `model_requests:${requestId}:response` : null;
+      steps.push({
+        id: `hist:${row.id}`,
+        kind: 'model',
+        tool: null,
+        created_at: row.created_at,
+        status: state === 'received' ? 'ok' : 'error',
+        source_ref: `task_history:${row.id}`,
+        input_source: allowPrivate ? requestSource : null,
+        output_source: allowPrivate ? responseSource : null,
+        input_omitted: true,
+        output_omitted: true,
+        model: row.model_name ? String(row.model_name) : null,
+        arguments: null,
+        output: null,
+        body_omitted: !allowPrivate,
+      });
+    } else if (row.type === 'role_run_event') {
       const evType = String(data.type ?? '');
       const evData = data.data && typeof data.data === 'object' ? data.data : {};
       if (evType === 'tool_call' && evData.harness_event === 'tool') {
+        if (hasNativeTools) continue;
         steps.push({
           id: `hist:${row.id}`,
           kind: 'tool',
@@ -507,11 +553,16 @@ function buildHistoryStepsForRun(
           created_at: row.created_at,
           status: evData.status === 'failed' ? 'error' : 'ok',
           source_ref: `task_history:${row.id}`,
+          input_source: `task_history:${row.id}`,
+          output_source: `task_history:${row.id}`,
           arguments: allowPrivate && evData.input !== undefined ? safe(evData.input) : null,
           output: allowPrivate && evData.output !== undefined ? safe(evData.output) : null,
           body_omitted: !allowPrivate,
         });
       } else if (evType === 'message' && typeof evData.text === 'string' && evData.text.trim()) {
+        const text = String(safe(evData.text));
+        // The visible text is a preview; the row keeps the whole message and is read on demand when it was cut.
+        const truncated = text.length > 6000;
         steps.push({
           id: `hist:${row.id}`,
           kind: 'model',
@@ -519,8 +570,11 @@ function buildHistoryStepsForRun(
           created_at: row.created_at,
           status: 'ok',
           source_ref: `task_history:${row.id}`,
+          input_missing: true,
           arguments: null,
-          output: allowPrivate ? String(safe(evData.text)).slice(0, 6000) : null,
+          output: allowPrivate ? text.slice(0, 6000) : null,
+          output_truncated: allowPrivate && truncated,
+          output_source: allowPrivate && truncated ? `task_history:${row.id}` : null,
           body_omitted: !allowPrivate,
         });
       }
@@ -595,9 +649,10 @@ export function taskRoleTrace(store: Store, task: Record<string, any>, access?: 
           taskId,
         );
         const stepRows = store.all(
-          `SELECT id,task_id,type,run_id,created_at,CASE WHEN length(data)<=65536 THEN data END AS data
+          `SELECT id,task_id,type,run_id,created_at,CASE WHEN length(data)<=65536 THEN data END AS data,
+             (SELECT m.model_name FROM model_requests m WHERE m.id=json_extract(task_history.data,'$.request_id')) AS model_name
            FROM task_history WHERE task_id=?
-           AND type IN ('tool_started','tool_observation','role_run_event')
+           AND type IN ('tool_started','tool_observation','role_run_event','model_request')
            ORDER BY id DESC LIMIT 500`,
           taskId,
         );

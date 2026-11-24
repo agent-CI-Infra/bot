@@ -1002,6 +1002,24 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   background: #fcfdfe;
   min-width: 0;
 }
+/* #1207: an expanded step states which part is its input and which is its output. */
+.step-io { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.step-io-block {
+  padding: 8px 10px;
+  border: 1px solid #e8eef2;
+  border-radius: 8px;
+  background: #fff;
+  min-width: 0;
+}
+.step-io-title {
+  margin: 0 0 6px;
+  font-size: var(--font-size-1);
+  font-weight: 600;
+  color: #475569;
+}
+.step-io-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.step-io-body pre { max-height: 360px; overflow: auto; }
+.step-io-note, .step-io-missing { margin: 0; font-size: var(--font-size-1); }
 
 /* Collapsed-by-default Archive & Audit Drawer */
 .task-archive-fold {
