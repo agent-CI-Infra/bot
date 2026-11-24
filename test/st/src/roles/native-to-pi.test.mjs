@@ -1,7 +1,8 @@
 // #1255: Pi is the default backend of the management assistant, group assistants and project roles. A database from before
 // it moves what it saved as Native to Pi once at start-up; every other backend stays. #1337: the management assistant, group
 // assistants, Manager and QA run only on Pi, and what was saved for them on another backend moves to Pi once.
-// #1338: the Process backend is gone, and what was saved on it moves to Pi once when the store opens.
+// #1338: the Process backend is gone, and what was saved on it moves to Pi once when the store opens. #1339: so is the
+// generic container ACP.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -11,7 +12,7 @@ import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { resolveRole, roleConfiguration } from '../../../../dist/roles/definition.js';
-import { migrateNativeToPi, pinAssistantsToPi, retireNativeProjectRoles, retireNativeServiceAssistants, retireProcessRoles } from '../../../../dist/roles/native-to-pi.js';
+import { migrateNativeToPi, pinAssistantsToPi, retireContainerAcpRoles, retireNativeProjectRoles, retireNativeServiceAssistants, retireProcessRoles } from '../../../../dist/roles/native-to-pi.js';
 import { rolePool } from '../../../../dist/roles/pool.js';
 import { managementAssistant, serviceRole, updateServiceRole } from '../../../../dist/service-roles/roles.js';
 
@@ -329,4 +330,52 @@ test('Process is gone (#1338): opening a database saved before it moves its Proc
   assert.deepEqual(JSON.parse(s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot).roles.harnesses, { test: 'pi' });
   assert.deepEqual({ ...s.get("SELECT harness,session FROM role_instances WHERE id='ri-test'") }, { harness: 'pi', session: '[]' });
   assert.ok(s.get("SELECT 1 FROM settings WHERE key='migration:1338:retire-process'"));
+});
+
+test('the generic container ACP is gone (#1339): roles saved on it, or on the older acp, move to Pi once when the store opens; the API refuses it', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'container-acp-retired-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let s = new Store(path, key);
+  s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
+  for (const id of repos) s.run('INSERT INTO repositories VALUES(?,?,?,?)', id, 'fixture/' + id, 'o', 'a');
+  // Saved before #1339 (the API no longer takes container_acp): Dev on container_acp next to the tester on iCode; a legacy
+  // configuration naming container_acp and the older acp (#705); frozen task configurations and role instances.
+  put(s, 'kept', { roles: [{ role_id: 'test', harness_ref: { id: 'icode' } }] });
+  const onContainerAcp = value => ({ ...value, roles: value.roles.map(role => role.role_id === 'dev' ? { ...role, harness_ref: { id: 'container_acp', version: '1' } } : role) });
+  save(s, 'kept', onContainerAcp(stored(s, 'kept')));
+  s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { reviewer: 'container_acp', test: 'acp', dev: 'codex' } }));
+  const frozen = { 't-kept': ['kept', { roles: stored(s, 'kept') }], 't-legacy': ['legacy', { roles: { enabled: true, harnesses: { reviewer: 'container_acp', dev: 'codex' } } }] };
+  for (const [task, [repo, snapshot]] of Object.entries(frozen)) {
+    s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES(?,?,'task.request','waiting','frozen','{}',1,1)", task, repo);
+    s.run("INSERT INTO task_execution_configs(task_id,revision,snapshot,created_at) VALUES(?,1,?,'then')", task, JSON.stringify(snapshot));
+  }
+  for (const [id, task, role, harness] of [['ri-dev', 't-kept', 'dev', 'container_acp'], ['ri-old', 't-legacy', 'test', 'acp'], ['ri-icode', 't-kept', 'test', 'icode']])
+    s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,session,harness_state,updated_at) VALUES(?,?,?,'{}',?,'[\"old\"]','{\"turn\":3}','then')", id, task, role, harness);
+  const before = stored(s, 'kept').revision;
+  s.run("DELETE FROM settings WHERE key='migration:1339:retire-container-acp'");
+  s.close();
+
+  // The next start moves them from the Store itself.
+  s = new Store(path, key); t.after(() => s.close());
+  assert.deepEqual(harnessOf(s, 'kept'), { manager: 'pi', dev: 'pi', test: 'icode', reviewer: 'pi', ux: 'pi', qa: 'pi' });
+  assert.deepEqual([stored(s, 'kept').revision, stored(s, 'kept').updated_by], [before + 1, 'migration:1339']);
+  assert.deepEqual(stored(s, 'legacy').harnesses, { reviewer: 'pi', test: 'pi', dev: 'codex' });
+  const snapshot = task => JSON.parse(s.get('SELECT snapshot FROM task_execution_configs WHERE task_id=?', task).snapshot).roles;
+  assert.deepEqual(snapshot('t-kept').roles.map(role => [role.role_id, role.harness_ref.id]), Object.entries(harnessOf(s, 'kept')));
+  assert.deepEqual(snapshot('t-legacy').harnesses, { reviewer: 'pi', dev: 'codex' });
+  const instance = id => ({ ...s.get('SELECT harness,session,harness_state FROM role_instances WHERE id=?', id) });
+  assert.deepEqual([instance('ri-dev'), instance('ri-old'), instance('ri-icode')],
+    [{ harness: 'pi', session: '[]', harness_state: '{}' }, { harness: 'pi', session: '[]', harness_state: '{}' }, { harness: 'icode', session: '["old"]', harness_state: '{"turn":3}' }]);
+
+  // It says what it moved, and only once: with the marker set, a later start leaves a role on container_acp alone.
+  save(s, 'kept', onContainerAcp(stored(s, 'kept')));
+  s.run("DELETE FROM settings WHERE key='migration:1339:retire-container-acp'");
+  const lines = [];
+  retireContainerAcpRoles(s, line => lines.push(line));
+  assert.deepEqual(lines, ['[migration:1339] container ACP retired: 1 roles in 1 projects, 0 frozen task configurations, 0 role instances moved to Pi']);
+  save(s, 'kept', onContainerAcp(stored(s, 'kept')));
+  retireContainerAcpRoles(s, line => lines.push(line));
+  assert.equal(lines.length, 1);
+  assert.equal(stored(s, 'kept').roles.find(role => role.role_id === 'dev').harness_ref.id, 'container_acp');
+  assert.throws(() => put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'container_acp' } }] }), error => error.code === 'unknown_role_harness');
 });

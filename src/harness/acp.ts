@@ -1,6 +1,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
-import { icodeProductId, readAcpProduct, workswarmProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
+import { readAcpProduct, workswarmProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
+import { AGENT_PRODUCT_MAP } from '../../runner/agent-products.mjs';
 import { TaskError, stop } from '../agent/common.js';
 import type { RuntimeModel } from '../agent/model.js';
 import type { AgentSpec } from '../agent/runtime.js';
@@ -11,7 +12,6 @@ import { DEFAULT_AGENT_TOOLS_ROOT } from './agent-tools.js';
 import { withContainerHarnessSession, type RunningContainerHarness } from './container-session.js';
 import type { HarnessEvent } from './session.js';
 
-export const containerAcpId = 'container_acp';
 const maxOutputBytes = 8 * 1024 * 1024;
 
 function deferred<T>() {
@@ -21,20 +21,21 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-export async function prepareAcp<T>(spec: AgentSpec<T>, backend = containerAcpId): Promise<AcpProductManifest> {
-  const id = backend === icodeProductId || backend === workswarmProductId ? backend : process.env.BOT_ACP_PRODUCT ?? containerAcpId;
+// iCode and WorkSwarm speak ACP through the same session code below; each backend runs the tool-volume product of its own
+// id (#1339: there is no generic ACP backend choosing a product from the deployment).
+export async function prepareAcp<T>(spec: AgentSpec<T>, backend: string): Promise<AcpProductManifest> {
   let product: AcpProductManifest;
   try {
-    product = readAcpProduct(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, id);
+    product = readAcpProduct(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, backend);
   } catch (error) {
-    return stop('acp_product_not_installed', 'waiting_configuration', `无法读取容器 ACP 产品版本（${(error as NodeJS.ErrnoException).code ?? (error as Error).message}）。`);
+    return stop('acp_product_not_installed', 'waiting_configuration', `无法读取 ${AGENT_PRODUCT_MAP.get(backend)?.name ?? backend} 的已安装版本（${(error as NodeJS.ErrnoException).code ?? (error as Error).message}）。`);
   }
   spec.harnessPreparation = product;
   spec.harnessBinding = { harness_revision: `${backend}:${product.id}@${product.version}:${contentHash(product)}`, cli_version: product.version };
   return product;
 }
 
-export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): NonNullable<AgentSpec<T>['adapter']> {
+export function acpHarness<T>(spec: AgentSpec<T>, backend: string): NonNullable<AgentSpec<T>['adapter']> {
   return async () => {
     const product = spec.harnessPreparation as AcpProductManifest | undefined ?? await prepareAcp(spec, backend);
     const access = spec.harnessAccess;
@@ -105,7 +106,7 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend = containerAcpId): Non
       return await withContainerHarnessSession(workswarm
         ? { ...spec, containerOptions: { ...spec.containerOptions, keepRawTools: true } }
         : spec, {
-        cli: containerAcpId, backendId: backend, acpProduct: product, primaryModel: model, model: model.model,
+        cli: 'acp', backendId: backend, acpProduct: product, primaryModel: model, model: model.model,
         resume: rebuilding, sessionId: resumeId, sessionKey: spec.harnessSessionKey ?? spec.roleRun?.instance_id,
         manualCancel: cancel,
       }, signal, onData, async session => {

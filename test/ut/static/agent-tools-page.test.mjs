@@ -106,7 +106,8 @@ test('the tool volume category shows the volume, each CLI, every manifest and a 
   // so the note must not promise that every unreadable version survives (#740 review F3).
   assert.match(text(section(panel, '清理旧版本')), /清单读不到的残留平时会被清理/);
 
-  // #1260: Every registered third-party agent has install/upgrade/remove buttons; generic container_acp is read-only with no buttons; Pi is not listed as a managed card.
+  // #1260: Every registered third-party agent has install/upgrade/remove buttons; Pi is not listed as a managed card, and
+  // since #1339 there is no generic container ACP card either.
   for (const title of ['Claude Code', 'Codex', 'iCode', 'WorkSwarm']) {
     const card = section(panel, title);
     assert.ok(card, `${title} card exists`);
@@ -115,9 +116,8 @@ test('the tool volume category shows the volume, each CLI, every manifest and a 
       assert.ok(actions.includes(act), `${title} has ${act} button`);
     }
   }
-  const genericAcp = section(panel, '容器内 ACP（通用）');
-  assert.ok(genericAcp, 'generic container_acp explanatory card exists');
-  assert.equal(genericAcp.querySelectorAll('button').length, 0, 'generic container_acp has no install/upgrade/delete buttons');
+  assert.equal(section(panel, '容器内 ACP（通用）'), undefined, 'no generic container ACP card');
+  assert.doesNotMatch(text(panel), /BOT_ACP_PRODUCT|容器内 ACP/);
   assert.equal(section(panel, 'Pi'), undefined, 'built-in Pi is not a tool-volume card');
   assert.match(text(volume), /0\.13\.9/);
   assert.match(text(volume), /启动自动安装/);

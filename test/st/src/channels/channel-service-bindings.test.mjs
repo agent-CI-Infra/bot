@@ -155,7 +155,7 @@ test('binding needs a Feishu-bound maintainer in the group with config.write ove
   await assert.rejects(bindings.configure(actor, chat.id, { ...input, scope: { kind: 'repositories', repositories: ['101', '201'] } }), { code: 'capability_forbidden' });
   await assert.rejects(bindings.configure(actor, chat.id, { ...input, scope: { kind: 'organization', organization: tenant } }), { code: 'capability_forbidden' });
   // A group assistant runs only on Pi (#1337).
-  for (const harness of ['container_acp', 'codex', 'claude_code']) await assert.rejects(bindings.configure(actor, chat.id, { ...input, harness }), { code: 'unknown_role_harness' });
+  for (const harness of ['icode', 'codex', 'claude_code']) await assert.rejects(bindings.configure(actor, chat.id, { ...input, harness }), { code: 'unknown_role_harness' });
   await assert.rejects(bindings.configure(actor, chat.id, { ...input, scope: { kind: 'repositories', repositories: [] } }), { code: 'channel_service_scope_invalid' });
   assert.equal(h.store.get('SELECT count(*) n FROM channel_service_bindings').n, 0);
   const bound = await bindings.configure(actor, chat.id, { ...input, harness: 'pi' });

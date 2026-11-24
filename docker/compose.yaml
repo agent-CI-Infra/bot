@@ -35,7 +35,6 @@ services:
       BOT_DATABASE_PATH: /data/control.sqlite
       BOT_TOOL_RESULTS_DIR: /tool-results
       BOT_PROJECT_TOOLS_DIR: /project-tools
-      BOT_ACP_PRODUCT: "${BOT_ACP_PRODUCT:-container_acp}"
       BOT_AGENT_TOOLS_AUTO_INSTALL: "${BOT_AGENT_TOOLS_AUTO_INSTALL:-1}"
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token

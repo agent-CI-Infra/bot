@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -17,7 +17,8 @@ import { withContainerHarnessSession } from '../../../../dist/harness/container-
 import { agentBackends } from '../../../../dist/roles/backends.js';
 import { resolveRole } from '../../../../dist/roles/definition.js';
 import { roleKind } from '../../../../dist/roles/catalog.js';
-import { roleHarness } from '../../../../dist/roles/harness.js';
+import { harnesses, registerRoleHarness, roleHarness } from '../../../../dist/roles/harness.js';
+import { acpHarness } from '../../../../dist/harness/acp.js';
 import { SubmissionError } from '../../../../dist/roles/submission-error.js';
 import { serviceRolesApi } from '../../../../dist/service-roles/api.js';
 import { Store } from '../../../../dist/storage/database.js';
@@ -26,49 +27,35 @@ import { configureWorkSwarm } from '../../../../runner/workswarm.mjs';
 import { configureICode, icodeAnswer } from '../../../../runner/icode.mjs';
 import { writeICodeProduct } from '../../../fixtures/icode-product.mjs';
 
-const id = 'container_acp';
-const uvAvailable = spawnSync('uv', ['--version']).status === 0;
+// The shared ACP session code runs iCode and WorkSwarm, which both need a project computer. These tests drive it in local
+// mode through a test-only product registered like them but unlisted (#1339: there is no generic ACP backend to use).
+const id = 'acp_fixture';
+registerRoleHarness({ ...harnesses.find(driver => driver.id === 'icode'), id, listed: false }, spec => acpHarness(spec, id));
 const exec = promisify(execFile);
 const runner = resolve('runner/runner.mjs');
 const hash = content => createHash('sha256').update(content).digest('hex');
 const newId = () => randomBytes(24).toString('hex');
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object' } } });
 
-function fixtureInstaller(root) {
-  const [python, version] = execFileSync('python3', ['-c', 'import sys; assert sys.version_info >= (3, 11); print(sys.executable); print(sys.version.split()[0])'], { encoding: 'utf8' }).trim().split('\n');
-  const sourcePath = 'test/fixtures/acp-product';
-  const source = resolve(sourcePath);
-  const sourceSha256 = hash(readdirSync(source).sort().map(name => JSON.stringify([name, hash(readFileSync(join(source, name)))]) + '\n').join(''));
+// Writes the fixture product as an installed ACP product: test/fixtures/acp-product/fixture.py run by this machine's Python.
+function writeAcpFixture(root, version = '1.0.0') {
+  const [python, pythonVersion] = execFileSync('python3', ['-c', 'import sys; assert sys.version_info >= (3, 11); print(sys.executable); print(sys.version.split()[0])'], { encoding: 'utf8' }).trim().split('\n');
   const launch = {
     args: ['{product}/fixture.py', 'agent'], mcp: 'http', access: 'native', untrustedCheckout: false,
     env: { FIXTURE_RUN: '{run}', FIXTURE_MODEL_URL: '{relay}', FIXTURE_MODEL_TOKEN: '{token}', FIXTURE_MODEL: '{model}' },
     answers: { '_fixture/input': { answer: 'unattended' } },
     sidecars: [{ name: 'fixture', args: ['{product}/fixture.py', 'sidecar', '{port:fixture}'], healthPath: '/ready' }],
   };
-  const tools = join(root, 'tools');
-  mkdirSync(tools);
-  const env = { ...process.env };
-  if (!uvAvailable) {
-    const bin = join(root, 'bin');
-    mkdirSync(bin);
-    writeFileSync(join(bin, 'uv'), readFileSync(resolve('test/fixtures/acp-uv.mjs')), { mode: 0o755 });
-    env.PATH = [bin, dirname(process.execPath), env.PATH].filter(Boolean).join(':');
-  }
-  const call = (action, productVersion, args = []) => spawnSync(process.execPath, [resolve('scripts/install-acp-product.mjs'),
-    action, '--root', tools, '--product', id, '--version', productVersion, ...args], { env, encoding: 'utf8' });
-  const install = (productVersion, overrides = {}) => {
-    const preset = join(root, 'preset.json');
-    writeFileSync(preset, JSON.stringify({ python: version, lock: 'uv.lock', source: sourcePath, sourceSha256, launch, ...overrides }));
-    return call('install', productVersion, ['--source', source, '--preset', preset, '--offline', '--python-executable', python]);
-  };
-  return { tools, install, call, sourceSha256, lockSha256: hash(readFileSync(join(source, 'uv.lock'))), python: realpathSync(python) };
-}
-
-function installFixture(root) {
-  const installation = fixtureInstaller(root);
-  const result = installation.install('1.0.0');
-  assert.equal(result.status, 0, result.stderr);
-  return installation.tools;
+  const tools = join(root, 'tools'), product = join(tools, 'acp', id), directory = join(product, version);
+  const interpreter = realpathSync(python), fixtureSource = readFileSync(resolve('test/fixtures/acp-product/fixture.py'));
+  mkdirSync(join(directory, 'venv', 'bin'), { recursive: true });
+  mkdirSync(join(directory, 'source'));
+  writeFileSync(join(directory, 'source', 'fixture.py'), fixtureSource);
+  symlinkSync(interpreter, join(directory, 'venv', 'bin', 'python'));
+  writeFileSync(join(directory, 'manifest.json'), JSON.stringify({ schema: 'bot.acp-product/1', id, version, python: pythonVersion, interpreter,
+    source: 'test/fixtures/acp-product', sourceSha256: hash(fixtureSource), lockSha256: hash(fixtureSource), launch }));
+  writeFileSync(join(product, 'selected'), version + '\n');
+  return tools;
 }
 
 async function fixture(t) {
@@ -103,7 +90,7 @@ async function fixture(t) {
     store.close();
     rmSync(root, { recursive: true, force: true });
   });
-  const tools = installFixture(root);
+  const tools = writeAcpFixture(root);
   const prior = process.env.BOT_AGENT_TOOLS_DIR;
   process.env.BOT_AGENT_TOOLS_DIR = tools;
   t.after(() => { if (prior === undefined) delete process.env.BOT_AGENT_TOOLS_DIR; else process.env.BOT_AGENT_TOOLS_DIR = prior; });
@@ -158,32 +145,38 @@ async function noProcesses(rundir) {
   await waitFor(() => pids.every(pid => !alive(pid)));
 }
 
-test('ACP installer verifies inputs and switches the selected version after a successful install', t => {
+test('the ACP installer takes only iCode and WorkSwarm, and selects or removes their installed versions', t => {
   const root = mkdtempSync(join(tmpdir(), 'acp-install-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const { tools, install, call, sourceSha256, lockSha256, python } = fixtureInstaller(root);
-  const product = join(tools, 'acp', id);
-  const selected = () => readAcpProduct(tools, id);
+  const tools = join(root, 'tools'), source = join(root, 'source');
+  mkdirSync(tools);
+  mkdirSync(source);
+  const { product, directory, manifest } = writeICodeProduct(tools);
+  // A second pinned iCode release, only in the installer subprocess: the production release map stays unchanged.
+  const other = '0.0.1', products = pathToFileURL(resolve('runner/acp-products.mjs')).href;
+  cpSync(directory, join(product, other), { recursive: true });
+  writeFileSync(join(product, other, 'manifest.json'), JSON.stringify({ ...manifest, version: other }));
+  const release = ['--import', 'data:text/javascript,' + encodeURIComponent(`import { icodeReleases } from ${JSON.stringify(products)};\n` +
+    `icodeReleases.set(${JSON.stringify(other)}, icodeReleases.get(${JSON.stringify(icodeTestedVersion)}));`)];
+  const call = (action, productId, version, args = []) => spawnSync(process.execPath, [...release, resolve('scripts/install-acp-product.mjs'),
+    action, '--root', tools, '--product', productId, '--version', version, ...args], { encoding: 'utf8' });
+  const selected = () => readFileSync(join(product, 'selected'), 'utf8').trim();
   const success = result => assert.equal(result.status, 0, result.stderr);
-  success(install('1.0.0'));
-  const first = selected();
-  assert.deepEqual([first.version, first.sourceSha256, first.lockSha256, first.interpreter], ['1.0.0', sourceSha256, lockSha256, python]);
 
-  for (const [preset, error] of [[{ sourceSha256: '0'.repeat(64) }, /acp_source_hash_mismatch/], [{ python: '0.0.0' }, /AssertionError/]]) {
-    const failed = install('1.0.1', preset);
-    assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, error);
-    assert.deepEqual(selected(), first);
-    assert.ok(!existsSync(join(product, '1.0.1')));
-  }
+  // The generic Python product path is gone: no other product, no preset, no source hashing.
+  for (const action of ['install', 'select', 'remove']) assert.match(call(action, 'container_acp', '1.0.0', ['--source', source]).stderr, /acp_product_unsupported/);
+  assert.match(call('install', 'workswarm', workswarmRelease.version, ['--source', source, '--preset', join(root, 'preset.json')]).stderr, /Unknown option '--preset'/);
+  const hashSource = spawnSync(process.execPath, [resolve('scripts/install-acp-product.mjs'), 'hash-source', '--source', source], { encoding: 'utf8' });
+  assert.match(hashSource.stderr, /Expected install, select or remove/);
+  assert.deepEqual(readdirSync(join(tools, 'acp')).sort(), ['icode']);
 
-  success(install('1.0.1'));
-  assert.equal(selected().version, '1.0.1');
-  assert.match(call('remove', '1.0.1').stderr, /acp_product_version_selected/);
-  success(call('select', '1.0.0'));
-  success(call('remove', '1.0.1'));
-  assert.deepEqual(selected(), first);
-  assert.deepEqual(readdirSync(product).sort(), ['1.0.0', 'selected']);
+  success(call('select', 'icode', other));
+  assert.equal(selected(), other);
+  assert.match(call('remove', 'icode', other).stderr, /acp_product_version_selected/);
+  success(call('select', 'icode', icodeTestedVersion));
+  success(call('remove', 'icode', other));
+  assert.equal(readAcpProduct(tools, 'icode').version, icodeTestedVersion);
+  assert.deepEqual(readdirSync(product).sort(), [icodeTestedVersion, 'selected']);
 });
 
 test('iCode installs only the executable from a verified offline archive and preserves an existing selection on rejection', t => {
@@ -325,12 +318,12 @@ for (const mode of ['wrong-protocol', 'wrong-version', 'no-http', 'no-close']) {
   });
 }
 
-test('ACP role kinds are declared in project configuration and refused for service roles', () => {
+test('iCode and WorkSwarm are the ACP backends: their role kinds are declared in project configuration and refused for service roles', () => {
   const store = new Store(':memory:', randomBytes(32));
   try {
     const backends = agentBackends();
     const actor = { id: 'admin', role: 'super_admin' };
-    for (const backend of [id, 'icode']) {
+    for (const backend of ['icode', 'workswarm']) {
       const metadata = backends.find(item => item.id === backend);
       for (const role of ['dev', 'test', 'reviewer', 'ux', 'custom']) assert.ok(metadata.kinds.includes(roleKind(role)));
       for (const role of ['manager', 'qa']) {
@@ -340,9 +333,10 @@ test('ACP role kinds are declared in project configuration and refused for servi
       assert.deepEqual(metadata.supported_model_sources, ['gateway']);
       assert.throws(() => serviceRolesApi(store, actor, 'PATCH', '/api/service-roles/management-assistant', { expected_revision: 1, harness: backend }), /unknown_role_harness/);
     }
-    assert.equal(backends.find(item => item.id === id).runtime_status.source, 'declaration');
     assert.equal(backends.find(item => item.id === 'icode').runtime_status.source, 'tool_volume');
-    assert.throws(() => roleHarness('acp'), /unknown_role_harness/);
+    // The generic container ACP backend (#1339), the older ACP backend (#705) and the unlisted test product are not offered.
+    assert.deepEqual(backends.filter(item => harnesses.find(driver => driver.id === item.id)?.events === 'acp_v1').map(item => item.id).sort(), ['icode', 'workswarm']);
+    for (const retired of ['container_acp', 'acp']) assert.throws(() => roleHarness(retired), /unknown_role_harness/);
   } finally { store.close(); }
 });
 
@@ -395,7 +389,7 @@ for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires', 'f
       let renew = true;
       const deliver = f.spec.roleWorkspace.deliver;
       f.spec.roleWorkspace.deliver = request => deliver(renew ? request : { ...request, lease_heartbeat: false });
-      const ran = withContainerHarnessSession(f.spec, { cli: id, acpProduct: product, model: 'acp-model', acpLocalLeaseMs: 4000 },
+      const ran = withContainerHarnessSession(f.spec, { cli: 'acp', backendId: id, acpProduct: product, model: 'acp-model', acpLocalLeaseMs: 4000 },
         controller.signal, () => {}, async session => {
           await waitFor(() => f.runs().some(run => existsSync(join(run, 'session.json'))));
           await session.writeStdin(JSON.stringify({ text: 'hold' }) + '\n');

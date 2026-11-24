@@ -130,3 +130,24 @@ export function retireProcessRoles(s: Store, log: (line: string) => void = line 
     log(`[migration:1338] Process retired: ${counts.roles} roles in ${counts.projects} projects, ${counts.tasks} frozen task configurations, ${counts.instances} role instances moved to Pi`
       + (counts.unusable ? `; ${counts.unusable} of those roles pin a model profile Pi cannot use and wait for configuration` : ''));
 }
+
+/**
+ * The generic container ACP backend is gone (#1339): only iCode and WorkSwarm run ACP products. Once, at start-up, every
+ * role saved on `container_acp`, or still on the older `acp` (#705), moves to Pi through moveRolesToPi: saved
+ * configurations, frozen task configurations and role instances, so a waiting or reopened task continues on Pi. The role
+ * API refuses `container_acp` afterwards as an unregistered backend. A product installed under `acp/container_acp` on the
+ * Agent tool volume is left in place; nothing reads it any more.
+ */
+export function retireContainerAcpRoles(s: Store, log: (line: string) => void = line => console.log(line)) {
+  const marker = 'migration:1339:retire-container-acp';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  const retired = ['container_acp', 'acp'];
+  const counts = s.transaction(() => {
+    const moved = moveRolesToPi(s, 'migration:1339', retired, (_role, backend) => retired.includes(backend));
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+    return moved;
+  });
+  if (counts.roles || counts.tasks || counts.instances)
+    log(`[migration:1339] container ACP retired: ${counts.roles} roles in ${counts.projects} projects, ${counts.tasks} frozen task configurations, ${counts.instances} role instances moved to Pi`
+      + (counts.unusable ? `; ${counts.unusable} of those roles pin a model profile Pi cannot use and wait for configuration` : ''));
+}

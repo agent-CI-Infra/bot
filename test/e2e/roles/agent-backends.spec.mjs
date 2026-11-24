@@ -63,20 +63,12 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await expect(fixedPi()).toHaveCount(0);
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
-      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'container_acp', 'icode', 'workswarm']);
+      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'icode', 'workswarm']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
       for (const backend of ['pi', 'claude_code', 'codex']) expect(await optionDisabled(backend)).toBe(false);
     }
     await goRolePage(page, { role: 'dev' });
     const acpPicker = page.getByLabel('dev Agent 后端', { exact: true });
-    await acpPicker.selectOption('container_acp');
-    await expect(page.getByTestId('backend-runtime-status')).toContainText('平台网关（按角色配置解析）');
-    await expect(page.getByLabel('dev 模型来源', { exact: true })).toHaveCount(0);
-    for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: 900 });
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await acpPicker.evaluate(el => el.scrollIntoView({ block: 'center' }));
-    }
     await acpPicker.selectOption('workswarm');
     const swarmStatus = page.getByTestId('backend-runtime-status');
     await expect(swarmStatus).toContainText('WorkSwarm');

@@ -19,7 +19,6 @@ const names: Record<string, string> = {
   pi: 'Pi',
   claude_code: 'Claude Code',
   codex: 'Codex',
-  container_acp: '容器内 ACP',
   [icodeProductId]: 'iCode',
   [workswarmProductId]: 'WorkSwarm',
 };
@@ -383,7 +382,7 @@ function acpReleaseStatus(id: typeof icodeProductId | typeof workswarmProductId,
 }
 
 // #1042: a driver that declares `environment: 'workspace'` and task tools runs inside the project computer, but its
-// install path is the product's own (ACP agents shipped as Python packages). Nothing in the console inspects that path
+// install path is its own (a driver registered by integration code, outside the Agent tool volume). Nothing in the console inspects that path
 // yet, so its readiness row states exactly that instead of leaving the backend without any status.
 function declaredRuntimeStatus(h: RegisteredRoleHarness): BackendRuntimeStatus {
   return {

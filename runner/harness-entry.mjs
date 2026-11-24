@@ -197,7 +197,7 @@ try {
   await rename(agentDir + '/harness.json.tmp', agentDir + '/harness.json');
 
   const harness = rawConfig.harness;
-  const acp = harness === 'container_acp';
+  const acp = harness === 'acp';
   const productId = rawConfig.acp_product?.id;
   const icode = acp && productId === icodeProductId;
   workswarm = acp && productId === workswarmProductId;

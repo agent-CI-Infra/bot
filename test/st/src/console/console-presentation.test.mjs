@@ -137,8 +137,8 @@ test('task run history uses the executed snapshot and does not borrow the curren
 // A role as GET /api/repositories/:id/roles returns it.
 const role = (role_id, kind, harness, version = '1') => ({ role_id, kind, enabled: true, name: role_id, responsibility: '', persona_prompt: '', revision: 1, model_profile_ref: null, skill_bundle_ref: null,
   harness_ref: { id: harness, version }, permissions: {computer:'deny'}, environment_profile_ref: { id: 'env', version: '1' }, budget_policy_ref: { id: 'entry-default', version: '1' }, output_schema_ref: { id: 'out', version: '1' } });
-// Agent backends as GET /api/repositories/:id/roles lists them, including the worker-only ACP declaration.
-const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['process', 'Process', '1', all], ['claude_code', 'Claude Code', '2.1.319', all], ['codex', 'Codex', '1', all], ['container_acp', '容器内 ACP', '1', ['writer', 'observer']]]
+// Agent backends as GET /api/repositories/:id/roles lists them, including the worker-only iCode.
+const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['process', 'Process', '1', all], ['claude_code', 'Claude Code', '2.1.319', all], ['codex', 'Codex', '1', all], ['icode', 'iCode', '1', ['writer', 'observer']]]
   .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null, ...(['claude_code', 'codex'].includes(id) ? { supported_model_sources: ['gateway', 'subscription'], runtime_status: { ready: false, status: 'unavailable', volume_root: '/opt/agent-tools', volume_present: true, cli_installed: false, compatible_range: id === 'claude_code' ? '>=2.1.0 <3.0.0' : '>=0.166.0 <1.0.0', tested_version: id === 'claude_code' ? '2.1.319' : '0.166.0', installed_versions: [], compatible_versions: [], incompatible_versions: [], selected_version: null, node_version: null, config_override: false, model_relay_ready: true, model_count: 1, resolved_model: { id: 'm1', name: 'fixture-model', source: 'project' }, connectivity: { state: 'untested', source: null, model_id: 'm1', model_name: 'fixture-model', checked_at: null, http_status: null, error: null, detail: null }, reason_code: 'cli_not_installed', reason: `工具卷 /opt/agent-tools 中尚未安装 ${name} CLI。` } } : {}) }));
 const roleData = (config, { workflow = 'development.issue', configured = true } = {}) => ({ configuration: config, configured, revision: config.revision, workflow, backends, recommended_backend: 'pi', harnesses: backends.filter(b => b.available).map(({ id, version, kinds }) => ({ id, version, kinds })),
   models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: { source: 'project', name: 'fixture-model' } })) });
@@ -207,8 +207,8 @@ test('role form edits backends without a JSON editor, and marks the draft dirty'
   assert.equal(picker(manager,'manager').value,'pi');
   assert.equal(picker(dev,'dev').value,'process');
   assert.equal(picker(reviewer,'reviewer').value,'codex');
-  assert.ok(!picker(manager,'manager').children.some(option=>option.value==='container_acp'));
-  assert.ok(!picker(dev,'dev').children.find(option=>option.value==='container_acp').disabled);
+  assert.ok(!picker(manager,'manager').children.some(option=>option.value==='icode'));
+  assert.ok(!picker(dev,'dev').children.find(option=>option.value==='icode').disabled);
   assert.ok(!picker(dev,'dev').children.find(option=>option.value==='claude_code').disabled);
   assert.ok(!picker(dev,'dev').children.find(option=>option.value==='codex').disabled);
   assert.doesNotMatch(text(dev.form),/能力策略|policy@|配置（JSON）|修改配置/);

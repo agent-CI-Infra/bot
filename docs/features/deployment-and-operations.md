@@ -64,7 +64,6 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 非 Compose 启动时可指定的控制面工具卷目录。标准 Compose 固定在 `/opt/agent-tools` 挂载该卷，项目电脑只读挂载 |
 | `BOT_PROJECT_TOOLS_DIR` | `/project-tools` | 按项目隔离的只读二进制工具卷目录（标准 Compose 由控制面可写挂载、`manager` 只读校验并按子路径挂入项目/群助手容器） |
 | `BOT_AGENT_TOOLS_AUTO_INSTALL` | `1` | 设为 `0` 关闭控制面启动时后台自动安装工具卷默认版本（仅由 `src/main.ts` 触发；设为 `0` 后仍可在控制台按 Agent 手动安装） |
-| `BOT_ACP_PRODUCT` | `container_acp` | 可在 Compose 的 `.env` 中设置。控制面按此标识从工具卷读取产品及其选定版本 |
 | `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
 | `BOT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | 空 | 未在向导保存 GitHub 登录配置时的部署级 OAuth 默认值 |
@@ -119,14 +118,14 @@ docker compose up -d
 - **停写一致备份**：备份前先停止 `bot` 和 `manager`，保持 `control.sqlite`、`trajectories/`、`channel-resources/`、`bot-keys`、`internal-keys`、`manager-data`、`assistant-homes` 与 `project-tools` 来自同一次停写。
 - **知识卷恢复（`note_move_uncertain`）**：若项目知识文件因异常移动进入 `note_move_uncertain` 只读保护，切勿手工删除 `.write-history` 里的 pending journal、改 file ID 或直接降级镜像。标准恢复步骤：① 停止该项目的任务派发、项目电脑与访问该卷的 manager 操作；② 对当前整个笔记卷（含 `.write-history`、历史索引与 blob）做只读备份；③ 选取移动前停写状态下生成的整卷备份，在同版 manager/runner 隔离环境中验证目录、正文与历史可读；④ 在停写状态下用验证过的完整备份替换原卷（备份后的新增改动对照第 ② 步通过正常保存接口补录）；⑤ 恢复同版服务并验证读正常后再开放写入。
 - **全局存储与按天数清理（「全局设置 → 存储」）**：超级管理员可查看整机/Launchpad/项目空间占比，配置轨迹文件、manager 重复正文（默认 2 天）、已完成/失败任务工作区（默认 1 天 / 7 天）和 Webhook 正文的保留天数，并按需触发「立即回收」；项目电脑区域同步列出各未结束任务当前持有的工作区目录数（区分在用与待清理目录），便于定位长时间循环的任务；飞书群聊与私聊记录的保留天数及手工清理在「飞书会话」页（`#/conversations`）按会话配置（仅超管），存储页做汇总展示。
-- **Agent CLI 工具卷（「全局设置 → Agent CLI 工具卷」）**：仅超管可用，统一管理除内置 Pi 外的所有第三方容器 Agent（`Claude Code`、`Codex`、`iCode`、`WorkSwarm`；通用 `container_acp` 仅做只读说明展示）：
+- **Agent CLI 工具卷（「全局设置 → Agent CLI 工具卷」）**：仅超管可用，统一管理除内置 Pi 外的所有第三方容器 Agent（`Claude Code`、`Codex`、`iCode`、`WorkSwarm`）：
   - **启动自动安装**：控制面启动时（`src/main.ts`）会在后台无阻塞检查工具卷，对尚未安装兼容版本且未被手动删除的 Agent 自动下载并校验 SHA-256 安装默认版本；失败原因与指数退避重试时间持久化保存在工具卷 `.state.json`，设置 `BOT_AGENT_TOOLS_AUTO_INSTALL=0` 可关闭自动安装。
   - **按 Agent 安装 / 升级 / 删除**：页面按 Agent 分别提供「安装」「升级」「删除」按钮及按版本删除入口。运行中任务或角色会话正在使用的版本（含 Node/`uv` 运行时）受保护，修改或删除会返回 `409 agent_tool_version_in_use`；整项删除或删除最后一个版本会写入「已手动删除」标记，重启后不再自动重装，手动点击「安装」可恢复启用。
   - **WorkSwarm 隔离构建**：控制面下载并校验 `pyproject.toml`、`uv.lock` 与官方 wheel 摘要后，委托 `manager` 启动一次性隔离容器（仅挂载 `agent-tools` 卷，不接触主密钥、数据库或 `control` 网络）使用工具卷中的 `uv` 构建 Python 3.13.18 虚拟环境。
 
-### 容器内 ACP 产品说明与离线安装兜底
+### iCode 与 WorkSwarm 说明与离线安装兜底
 
-常规部署可直接通过启动自动安装或在「全局设置 → Agent CLI 工具卷」一键安装/升级/删除 iCode 与 WorkSwarm；离线或无外网环境仍可使用 `scripts/install-acp-product.mjs` 作为兜底脚本。
+常规部署可直接通过启动自动安装或在「全局设置 → Agent CLI 工具卷」一键安装/升级/删除 iCode 与 WorkSwarm；离线或无外网环境仍可使用 `scripts/install-acp-product.mjs` 作为兜底脚本。这个脚本只接受 `icode` 和 `workswarm`。
 
 #### iCode
 
@@ -163,13 +162,9 @@ node scripts/install-acp-product.mjs select --product workswarm --version 0.2.9
 
 项目「角色配置」中可选 WorkSwarm，并查看已安装和当前选用版本。模型使用 Chat Completions 或 Anthropic Messages。容器内运行时会核对 ACP 握手报告版本。Gateway 0.1.0 启动时会启动定时调度器，平台不预置定时任务，Gateway 的创建接口仍可用且新建任务默认启用。
 
-#### 通用 Python 产品（`container_acp`）
+#### 通用容器 ACP 已删除
 
-通用 `container_acp` 不对应固定上游发行包，在工具卷管理页仅以只读说明展示，继续通过 `scripts/install-acp-product.mjs` 离线维护：
-
-1. 在与项目电脑架构和系统兼容的独立 Linux 安装环境中，准备 `uv`、可信产品源码或发行包内容，以及固定 Python 补丁版本和依赖锁的预设。以可写方式将本部署的 `agent-tools` 卷挂载到 `/opt/agent-tools`。项目电脑使用同一卷的只读挂载。
-2. 用 `node scripts/install-acp-product.mjs hash-source --source ./product-source` 核对预设中固定的源码摘要，再运行 `node scripts/install-acp-product.mjs install --product container_acp --version 1.0.0 --source ./product-source --preset ./preset.json` 安装并选定该版本。预设字段与锁文件格式见 [ACP 产品安装设计](../design/agent-and-harness-runtime.md#安装-python-产品)。
-3. 用 `node scripts/install-acp-product.mjs select --product container_acp --version 1.0.0` 切换到已安装版本。新的运行读取选定版本，在途运行继续使用已绑定版本。只有在确认旧版本已取消选定且没有在途运行使用它后，才运行 `node scripts/install-acp-product.mjs remove --product container_acp --version <旧版本>` 清理。
+通用的「容器内 ACP」后端（`container_acp`）已删除（#1339），ACP 产品只保留 iCode 和 WorkSwarm。控制面不再读取 `BOT_ACP_PRODUCT`，可从 `.env` 中删除；安装脚本也不再提供通用 Python 产品的 `--preset` 安装和 `hash-source`。升级后选过 `container_acp` 的角色改为 Pi，启动日志写一行 `[migration:1339]` 计数。工具卷里已安装的 `/opt/agent-tools/acp/container_acp` 不再被读取，也不会被自动删除；确认不再需要后，在可写挂载 `agent-tools` 卷的容器中删除该目录即可。
 
 ## 5. 故障排查速查
 
