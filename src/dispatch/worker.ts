@@ -60,9 +60,12 @@ export class Dispatcher {
       pruneFiltered(this.store);
     }
     const now = Date.now();
+    // A thread key already starts with its repository id (`threadKey`), so the thread lookups here filter by thread_key alone:
+    // adding repository_id made SQLite read every earlier event of the repository through dispatch_events_repository
+    // instead of the covering dispatch_events_thread index, 3–4.5 s per tick in production (#1350).
     const due = this.store.all(
       `SELECT * FROM dispatch_events e WHERE ((e.state='pending' AND e.next_run_at<=?) OR (e.state='dispatching' AND e.lease_until<?))
-       AND NOT (e.thread_key IS NOT NULL AND EXISTS (SELECT 1 FROM dispatch_events p WHERE p.repository_id=e.repository_id AND p.thread_key=e.thread_key
+       AND NOT (e.thread_key IS NOT NULL AND EXISTS (SELECT 1 FROM dispatch_events p WHERE p.thread_key=e.thread_key
          AND p.state IN ('pending','dispatching')
          AND (p.created_at<e.created_at OR (p.created_at=e.created_at AND p.rowid<e.rowid))))
        AND NOT (e.object_number IS NOT NULL AND EXISTS (SELECT 1 FROM dispatch_events p WHERE p.repository_id=e.repository_id AND p.object_type=e.object_type
@@ -81,9 +84,9 @@ export class Dispatcher {
       if (
         event.thread_key &&
         this.store.get(
-          `SELECT 1 FROM dispatch_events WHERE repository_id=? AND thread_key=? AND state IN ('pending','dispatching')
+          `SELECT 1 FROM dispatch_events WHERE thread_key=? AND state IN ('pending','dispatching')
            AND (created_at<? OR (created_at=? AND rowid<(SELECT rowid FROM dispatch_events WHERE id=?)))`,
-          event.repository_id, event.thread_key, event.created_at, event.created_at, event.id,
+          event.thread_key, event.created_at, event.created_at, event.id,
         )
       ) continue;
       if (

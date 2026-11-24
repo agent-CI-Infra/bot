@@ -7,6 +7,8 @@ import { queries } from '../../../../dist/app/queries.js';
 import { deliveryResult } from '../../../../dist/review/delivery.js';
 import { pruneRejectedArchive, rejectedArchiveState, rejectedAudit } from '../../../../dist/app/delivery-audit.js';
 import { ProjectService } from '../../../../dist/projects/service.js';
+import { Dispatcher } from '../../../../dist/dispatch/worker.js';
+import { pruneDispatchThreads } from '../../../../dist/dispatch/store.js';
 import { readFileSync } from 'node:fs';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
@@ -152,4 +154,52 @@ test("one task's logs are read through task_logs_task, never by scanning task_lo
   assert.ok(recent, 'the computer detail reads its recent commands');
   assert.match(plan(recent), /^SCAN l\b/, plan(recent));
   assert.doesNotMatch(plan(recent), /TEMP B-TREE/, plan(recent));
+});
+
+// Production (#1350): the dispatch worker's thread lookups also filtered by repository_id. SQLite then read them through
+// dispatch_events_repository(repository_id,created_at) and visited every earlier event of the repository, 3–4.5 s per tick;
+// the tick runs every 2 s and after each decided event, so v0.4.12's control plane stayed unhealthy. A thread key starts
+// with its repository id, so thread_key alone selects the same rows through the covering dispatch_events_thread index.
+test('dispatch thread lookups read the thread index instead of every earlier event of the repository', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  const at = i => new Date(Date.parse('2026-11-24T00:00:00Z') + i * 1000).toISOString();
+  const insert = store.db.prepare(`INSERT INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,summary,facts,options,state,thread_key,created_at)
+    VALUES(?,?,?,?,'github',?,?,'','{}','[]',?,?,?)`);
+  store.transaction(() => {
+    // As in production: many decided events of the repository before the few that wait.
+    for (let i = 0; i < 2000; i++) insert.run(`old${i}`, 'r1', `old${i}`, 'issue_comment.created', 'issue', i % 50 + 1, 'decided', `r1:issue:${i % 50 + 1}`, at(i));
+    insert.run('other', 'r2', 'other', 'issue_comment.created', 'issue', 7, 'pending', 'r2:issue:7', at(2999));
+    insert.run('issue', 'r1', 'issue', 'issue_comment.created', 'issue', 7, 'pending', 'r1:issue:7', at(3000));
+    // The bot PR of Issue 7 shares its thread: only the thread lookup holds it back, the object lookup does not.
+    insert.run('pr', 'r1', 'pr', 'pull_request.updated', 'pr', 88, 'pending', 'r1:issue:7', at(3001));
+    insert.run('push', 'r1', 'push', 'push', null, null, 'pending', 'r1:event:push', at(3002));
+    for (const [key, number] of [['r1:issue:7', 7], ['r1:issue:3', 3]])
+      store.run("INSERT INTO dispatch_threads(thread_key,repository_id,object_type,object_number,updated_at) VALUES(?,'r1','issue',?,?)", key, number, at(0));
+  });
+  const seen = [], claimed = [], all = store.all.bind(store), get = store.get.bind(store), run = store.run.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  // Claims are refused, so the tick only shows which events it would start, without deciding them.
+  store.run = (sql, ...args) => {
+    if (/^UPDATE dispatch_events SET state='dispatching'/.test(sql)) { claimed.push(args[2]); return { changes: 0 }; }
+    seen.push(sql); return run(sql, ...args);
+  };
+  new Dispatcher(store, async () => assert.fail('no event is decided')).tick();
+  const pruned = pruneDispatchThreads(store, 'r1', at(10_000));
+  store.all = all; store.get = get; store.run = run;
+  assert.deepEqual(claimed.sort(), ['issue', 'other', 'push'], 'each thread starts its oldest waiting event; the bot PR waits for its Issue');
+  assert.equal(pruned, 1);
+  assert.deepEqual(all('SELECT thread_key FROM dispatch_threads').map(row => row.thread_key), ['r1:issue:7'], 'a thread with waiting events is kept');
+
+  const plan = sql => all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
+  // The open bot PR patrol only runs inside the GitHub reconcile loop; its lookup is read from the compiled module.
+  const patrol = [...readFileSync(new URL('../../../../dist/review/bot-pr-wake.js', import.meta.url), 'utf8')
+    .matchAll(/"(SELECT [^"]*FROM dispatch_events WHERE [^"]*thread_key=\?[^"]*)"/g)].map(match => match[1]);
+  assert.equal(patrol.length, 1, patrol.join('\n'));
+  const lookups = [...new Set(seen.filter(sql => /FROM dispatch_events\b[^)]*\bthread_key=/.test(sql))), ...patrol];
+  assert.equal(lookups.length, 4, `tick, its per-event recheck, thread pruning and the patrol:\n${lookups.join('\n')}`);
+  for (const sql of lookups) {
+    assert.match(plan(sql), /USING COVERING INDEX dispatch_events_thread \(thread_key=\? AND state=\?\)/, `${sql}\n${plan(sql)}`);
+    assert.doesNotMatch(plan(sql), /dispatch_events_repository|dispatch_events_object \(repository_id=\?\)/, `${sql}\n${plan(sql)}`);
+  }
 });

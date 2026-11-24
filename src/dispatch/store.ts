@@ -121,6 +121,9 @@ export function botPullRequestsOfIssue(store: Store, repositoryId: string, issue
  * - Bot PR opened from a root Issue: linked back to `<repo>:issue:<rootIssue>` so Issue + bot PR share one Manager thread!
  * - Standalone PR: `<repo>:pr:<number>`
  * - Domain events: `<repo>:release:<version>`, `<repo>:actions:<workflow>`, `<repo>:schedule:<id>`
+ *
+ * Every key starts with its repository id, so lookups of a thread's events filter by thread_key alone and reach the
+ * dispatch_events_thread index (#1350).
  */
 export function threadKey(store: Store, event: Record<string, any>): string {
   if (typeof event.thread_key === 'string' && event.thread_key) return event.thread_key;
@@ -1507,7 +1510,7 @@ export function pruneDispatchThreads(store: Store, repositoryId: string, before:
       `DELETE FROM dispatch_threads WHERE rowid IN (
         SELECT dt.rowid FROM dispatch_threads dt
         WHERE dt.repository_id=? AND dt.updated_at<?
-          AND NOT EXISTS (SELECT 1 FROM dispatch_events e WHERE e.repository_id=dt.repository_id AND e.thread_key=dt.thread_key AND e.state IN ('pending','dispatching'))
+          AND NOT EXISTS (SELECT 1 FROM dispatch_events e WHERE e.thread_key=dt.thread_key AND e.state IN ('pending','dispatching'))
           AND (dt.active_task_id IS NULL OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=dt.active_task_id AND t.status IN (${activeMarks},'waiting_pr_head')))
           AND (dt.object_number IS NULL OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.repository_id=dt.repository_id AND t.object_number=dt.object_number AND t.status IN (${activeMarks},'waiting_pr_head')))
         ORDER BY dt.updated_at LIMIT ?
