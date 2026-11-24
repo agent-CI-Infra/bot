@@ -379,3 +379,113 @@ test('#1285: parent detail aggregates blocked children and derives recovery from
   assert.equal(mixed.structured.progress.blocked_children, null);
   assert.equal(mixed.error_cause.cause, 'task_changed');
 });
+
+test('#1326: task.request PR APIs expose lightweight target without raw input, resolve bot PR & root Issue pre-push, and sync PR checks', async t => {
+  const sha = 'f'.repeat(40);
+  const ghServer = createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/user') return res.end(JSON.stringify({ id: 99, login: 'bot-user' }));
+    if (url.pathname === '/repositories/101') {
+      return res.end(JSON.stringify({ id: 101, full_name: 'fixture/project-101', default_branch: 'main', owner: { id: 10, login: 'fixture' }, permissions: { admin: false, push: true, pull: true } }));
+    }
+    if (url.pathname === `/repos/fixture/project-101/commits/${sha}/check-runs`) {
+      return res.end(JSON.stringify({
+        check_runs: [{ id: 501, name: 'unit', status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/501' }],
+      }));
+    }
+    if (url.pathname === `/repos/fixture/project-101/commits/${sha}/status`) {
+      return res.end(JSON.stringify({ state: 'success', statuses: [] }));
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  ghServer.listen(0, '127.0.0.1');
+  await once(ghServer, 'listening');
+  t.after(() => new Promise(r => ghServer.close(r)));
+
+  const h = await harness(t, undefined, store => ({
+    engine: new TaskEngine(store, { call: async () => null }),
+    githubUrl: `http://127.0.0.1:${ghServer.address().port}`,
+  }));
+  const { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+
+  // Root Issue task (task.request targeting Issue #1237) + registered bot PR #1325
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,phase,created_at,updated_at) VALUES('t-orig-1237','101','task.request','pr_opened','Implement #1237',1237,?,'done','2026-11-24T08:00:00Z','2026-11-24T08:10:00Z')",
+    JSON.stringify({ target: { type: 'issue', number: 1237 } }),
+  );
+  h.store.run(
+    "INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id,revisions) VALUES('101',1325,'pr-1325','99','101','bot/issue-1237',?,'t-orig-1237',1)",
+    sha,
+  );
+  h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','issue',1237,'Root issue title','open',0,'2026-11-24T08:00:00Z')");
+  h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','pr',1325,'fix(#1237): bot pr','open',0,'2026-11-24T08:10:00Z')");
+
+  // Running task.request targeting bot PR #1325 with large input (no result, no development_candidates yet)
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,head_sha,input,phase,created_at,updated_at) VALUES('t-revise-1325','101','task.request','running','P1','Address comments',1325,?,?,'model','2026-11-24T09:00:00Z','2026-11-24T09:05:00Z')",
+    sha,
+    JSON.stringify({
+      target: { type: 'pr', number: 1325, ref: sha },
+      bot_pr: { number: 1325, head: { ref: 'bot/issue-1237', sha }, state: 'open', draft: false },
+      context_files: { 'large.txt': 'secret-free-padding'.repeat(200) },
+    }),
+  );
+  h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-dev-1325','t-revise-1325','execution',1,1,'2026-11-24T09:01:00Z','running','{}','{}','dev')");
+
+  // Queued task.request targeting non-bot PR #1400 + a malformed-input sibling row
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,input,phase,created_at,updated_at) VALUES('t-queued-1400','101','task.request','queued','P2','Check PR',1400,?,'queued','2026-11-24T09:02:00Z','2026-11-24T09:02:00Z')",
+    JSON.stringify({ target: { type: 'pr', number: 1400 } }),
+  );
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,input,phase,created_at,updated_at) VALUES('t-bad-input','101','task.request','queued','P2','Broken json','{malformed','queued','2026-11-24T09:03:00Z','2026-11-24T09:03:00Z')",
+  );
+
+  // 1. Task detail API returns lightweight `target` (never raw `input`) + pre-push `external.pull_request` + root `external.issue`
+  const detail = await admin('/api/tasks/t-revise-1325');
+  assert.equal(detail.status, 200);
+  const task = detail.value.task;
+  assert.deepEqual(task.target, { type: 'pr', number: 1325, ref: sha });
+  assert.equal('input' in task, false);
+  assert.equal(task.external.pull_request.number, 1325);
+  assert.equal(task.external.pull_request.branch, 'bot/issue-1237');
+  assert.equal(task.external.pull_request.head_sha, sha);
+  assert.equal(task.external.pull_request.url, 'https://github.com/fixture/project-101/pull/1325');
+  assert.equal(task.external.issue.number, 1237);
+  assert.equal(task.external.issue.title, 'Root issue title');
+  assert.equal(task.external.actions.head_sha, sha);
+
+  // 2. Task list API (`flow=1`) exposes `target` + `external` cleanly and isolates malformed JSON row
+  const list = await admin('/api/tasks?repository_id=101&flow=1');
+  assert.equal(list.status, 200);
+  const byId = Object.fromEntries(list.value.tasks.map(row => [row.id, row]));
+  assert.deepEqual(byId['t-revise-1325'].target, { type: 'pr', number: 1325, ref: sha });
+  assert.equal('input' in byId['t-revise-1325'], false);
+  assert.equal(byId['t-revise-1325'].external.pull_request.number, 1325);
+  assert.equal(byId['t-revise-1325'].external.issue.number, 1237);
+  assert.deepEqual(byId['t-queued-1400'].target, { type: 'pr', number: 1400 });
+  assert.equal(byId['t-queued-1400'].external.pull_request.number, 1400);
+  assert.equal(byId['t-queued-1400'].external.issue, null);
+  assert.equal(byId['t-bad-input'].target, null);
+
+  // 3. Live check sync endpoint resolves head_sha for pre-push task.request PR task
+  const synced = await admin('/api/tasks/t-revise-1325/checks?sync=1');
+  assert.equal(synced.status, 200);
+  assert.equal(synced.value.synced, true);
+  assert.equal(synced.value.actions.head_sha, sha);
+  assert.equal(synced.value.actions.total, 1);
+  assert.equal(synced.value.actions.passed, 1);
+
+  // 4. Role board exposes lightweight `target` on running and queued entries
+  const board = await admin('/api/repositories/101/role-board');
+  assert.equal(board.status, 200);
+  const devRole = board.value.roles.find(r => r.role === 'dev');
+  const mgrRole = board.value.roles.find(r => r.role === 'manager');
+  const runningEntry = devRole.running.find(r => r.task_id === 't-revise-1325');
+  const queuedEntry = mgrRole.ready.find(r => r.task_id === 't-queued-1400');
+  assert.deepEqual(runningEntry.target, { type: 'pr', number: 1325, ref: sha });
+  assert.deepEqual(queuedEntry.target, { type: 'pr', number: 1400 });
+});

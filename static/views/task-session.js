@@ -421,10 +421,11 @@ function renderTaskHeader(task, detail = null) {
   }
 
   const realSummary = task.summary && task.summary !== task.id ? String(task.summary) : '';
-  $('task-title').textContent = task.object_number == null
+  const objNum = taskObjectNumber(task);
+  $('task-title').textContent = objNum == null
     ? objectLabel(task)
     : realSummary
-      ? (realSummary.includes('#' + task.object_number) ? realSummary : `${objectLabel(task)} · ${realSummary}`)
+      ? (realSummary.includes('#' + objNum) ? realSummary : `${objectLabel(task)} · ${realSummary}`)
       : `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
 
   const badges = $('task-badges');
@@ -591,10 +592,12 @@ function renderTaskSummaryBody(task, detail) {
   const extBar = $('task-external-bar');
   if (extBar) {
     const ext = task.external || {};
+    const isPr = isPrTask(task);
+    const fallbackNum = taskObjectNumber(task);
     const subs = Array.isArray(detail?.event_subscriptions) ? detail.event_subscriptions : [];
     const sourceDelivery = task.structured?.contract?.source?.delivery_id || task.source_delivery_id || null;
     const originText = task.origin && typeof taskOriginCaption === 'function' ? taskOriginCaption(task.origin) : '';
-    const extSig = JSON.stringify([ext, subs, detail?.can_manage, task.status, sourceDelivery, originText, githubUrl(task)]);
+    const extSig = JSON.stringify([ext, subs, detail?.can_manage, task.status, sourceDelivery, originText, githubUrl(task), isPr, fallbackNum]);
     if (extBar.dataset.signature !== extSig) {
       extBar.dataset.signature = extSig;
       extBar.replaceChildren();
@@ -606,9 +609,9 @@ function renderTaskSummaryBody(task, detail) {
         const text = `#${ext.issue.number}${ext.issue.title ? ' · ' + clipText(ext.issue.title, 44) : ''}`;
         issueItem.append(ext.issue.url ? link(ext.issue.url, text, 'task-ext-link') : element('span', text, 'task-ext-value'));
         if (ext.issue.state) issueItem.append(badge(ext.issue.state === 'closed' ? '已关闭' : 'Open', ext.issue.state === 'closed' ? '' : 'success'));
-      } else if (task.object_number && !String(task.kind || '').endsWith('.pr')) {
+      } else if (fallbackNum && !isPr) {
         const fbUrl = githubUrl(task);
-        issueItem.append(fbUrl ? link(fbUrl, `#${task.object_number}`, 'task-ext-link') : element('span', `#${task.object_number}`, 'task-ext-value'));
+        issueItem.append(fbUrl ? link(fbUrl, `#${fallbackNum}`, 'task-ext-link') : element('span', `#${fallbackNum}`, 'task-ext-value'));
       } else {
         issueItem.append(element('span', '未关联 Issue', 'muted'));
       }
@@ -624,9 +627,9 @@ function renderTaskSummaryBody(task, detail) {
         const prTone = pr.state === 'merged' ? 'success' : pr.draft ? 'warning' : pr.state === 'open' ? 'info' : '';
         const prText = pr.state === 'merged' ? '已合入' : pr.draft ? 'Draft' : pr.state === 'closed' ? '已关闭' : 'Open';
         prItem.append(badge(prText, prTone));
-      } else if (task.object_number && String(task.kind || '').endsWith('.pr')) {
+      } else if (fallbackNum && isPr) {
         const fbUrl = githubUrl(task);
-        prItem.append(fbUrl ? link(fbUrl, `PR #${task.object_number}`, 'task-ext-link') : element('span', `PR #${task.object_number}`, 'task-ext-value'));
+        prItem.append(fbUrl ? link(fbUrl, `PR #${fallbackNum}`, 'task-ext-link') : element('span', `PR #${fallbackNum}`, 'task-ext-value'));
       } else {
         prItem.append(element('span', '尚未创建 PR', 'muted'));
       }

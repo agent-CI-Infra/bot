@@ -11,6 +11,7 @@ import { concurrencyBounds, defaultConcurrency, repositoryConcurrency } from '..
 import { waitForReviewSatisfied } from '../tasks/readiness.js';
 import { taskGroupSQL } from '../app/project-activity.js';
 import { attributeCapacityWaitingRole, attributeControllerQueuedRole } from './flow.js';
+import { parseTaskTargetMeta, taskTargetSelectSQL } from '../tasks/external-links.js';
 
 // #228 / #952: read-only projection of per-role occupancy, configured capacity limits, and genuinely attributable queues
 // (default Manager controller entries, uniquely attributable stage-policy queues, and #283 role_capacity waits).
@@ -94,7 +95,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
   const now = Date.now();
 
   const queued = store.all(
-    `SELECT id,kind,phase,summary,priority,object_number,created_at,updated_at,input FROM tasks
+    `SELECT id,kind,phase,summary,priority,object_number,created_at,updated_at,input,${taskTargetSelectSQL()} AS target_meta FROM tasks
      WHERE repository_id=? AND status='queued' AND next_run_at<=? ORDER BY created_at,id LIMIT ?`,
     repositoryId, now, queueScanLimit + 1,
   );
@@ -125,7 +126,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
 
   // #283: tasks waiting in retry_wait explicitly due to `role_capacity` belong to that role's slot wait queue.
   const capacityWaiting = store.all(
-    `SELECT id,kind,phase,summary,priority,object_number,created_at,updated_at FROM tasks
+    `SELECT id,kind,phase,summary,priority,object_number,created_at,updated_at,${taskTargetSelectSQL()} AS target_meta FROM tasks
      WHERE repository_id=? AND status='retry_wait' AND error_code='role_capacity' ORDER BY updated_at,created_at,id LIMIT ?`,
     repositoryId, queueScanLimit + 1,
   );
@@ -151,7 +152,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
 
   // Active child worker runs per task so Role View knows when Manager has handed the active baton to a worker.
   const allRunning = store.all(
-    `SELECT r.id AS run_id,r.task_id,r.role,r.role_instance_id,r.started_at,t.object_number,t.kind,t.summary,t.priority,t.phase
+    `SELECT r.id AS run_id,r.task_id,r.role,r.role_instance_id,r.started_at,t.object_number,t.kind,t.summary,t.priority,t.phase,${taskTargetSelectSQL('t.input')} AS target_meta
      FROM task_runs r JOIN tasks t ON t.id=r.task_id
      WHERE t.repository_id=? AND r.status='running' AND r.role IS NOT NULL ORDER BY r.started_at,r.id`,
     repositoryId,
@@ -181,6 +182,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
       run_id: run.run_id,
       task_id: run.task_id,
       object_number: run.object_number,
+      target: parseTaskTargetMeta(run.target_meta),
       kind: run.kind,
       summary: run.summary ?? '',
       priority: run.priority ?? 'P2',
@@ -196,6 +198,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
       ...capTasks.map((task, idx) => ({
         task_id: task.id,
         object_number: task.object_number,
+        target: parseTaskTargetMeta(task.target_meta),
         kind: task.kind,
         summary: task.summary ?? '',
         priority: task.priority ?? 'P2',
@@ -206,6 +209,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
       ...queuedMine.map(entry => ({
         task_id: entry.task.id,
         object_number: entry.task.object_number,
+        target: parseTaskTargetMeta(entry.task.target_meta),
         kind: entry.task.kind,
         summary: entry.task.summary ?? '',
         priority: entry.task.priority ?? 'P2',

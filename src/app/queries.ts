@@ -18,7 +18,7 @@ import { explainFailure } from '../agent/failures.js';
 import { taskGroupSQL } from './project-activity.js';
 import { rejectedArchiveState } from './delivery-audit.js';
 import { listBrowserEvidence } from '../browser/evidence.js';
-import { attachExternalLinks } from '../tasks/external-links.js';
+import { attachExternalLinks, parseTaskTargetMeta, taskTargetSelectSQL } from '../tasks/external-links.js';
 import { attachTaskRoleFlows, taskRoleTrace } from '../roles/flow.js';
 import { taskEventSubscriptionsDetail } from '../tasks/event-subscriptions.js';
 
@@ -53,10 +53,14 @@ function faultCause(log:Record<string,any>){
   if(!String(log.content).startsWith('{"type":"fault"'))return log;
   try{const value=JSON.parse(log.content);return {...log,cause:explainFailure(value.code,value.state,value.detail,value.retry_cycle_started_at)};}catch{return log;}
 }
+const safeResult = (raw: unknown) => {
+  if (!raw || typeof raw !== 'string') return null;
+  try { return JSON.parse(raw); } catch { return null; }
+};
 const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.repository_id,full_name:row.full_name,kind:row.kind,status:row.status,summary:row.summary,priority:row.priority,queue_seq:row.queue_seq,
-  object_number:row.object_number,head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
+  object_number:row.object_number,target:parseTaskTargetMeta(row.target_meta),head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
   error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
-  retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
+  retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:safeResult(row.result),created_at:row.created_at,updated_at:row.updated_at});
 
 
 function detailState(store:Store,id:string){
@@ -68,8 +72,10 @@ function detailHistory(store:Store,id:string){
  const rows=store.all('SELECT id,type,created_at,run_id FROM task_history WHERE task_id=? ORDER BY id DESC LIMIT 51',id),more=rows.length>50;rows.splice(50);rows.reverse();
  return {history:rows.map(h=>({...h,event_id:'task_history:'+h.id,source_ref:'task_history:'+h.id})),history_page:{has_older:more,events_url:'/api/tasks/'+id+'/events',limit:50}};
 }
+const publicTaskColumns='id,repository_id,kind,status,summary,priority,queue_seq,object_number,head_sha,source_task_id,generation,phase,error_code,retry_count,retry_cycle_started_at,next_run_at,attempt,result,created_at,updated_at';
 const pushedSha="(SELECT json_extract(data,'$.remote_sha') FROM development_candidates WHERE task_id=tasks.id) AS pushed_sha";
 const repositoryName='(SELECT full_name FROM repositories WHERE id=tasks.repository_id) AS full_name';
+const taskTargetMeta=`${taskTargetSelectSQL()} AS target_meta`;
 const faultDetail="(SELECT json_extract(content,'$.detail') FROM task_logs WHERE task_id=tasks.id AND json_valid(content) AND json_extract(content,'$.type')='fault' AND json_extract(content,'$.code')=tasks.error_code ORDER BY rowid DESC LIMIT 1)";
 export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   const path = url.pathname, repo = url.searchParams.get('repository_id');
@@ -145,7 +151,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       const completedCount=flowRequested ? Number(store.get(`SELECT COUNT(*) AS n FROM tasks WHERE ${[...clauses,completedGroupSQL].join(' AND ')}`,...args)?.n ?? 0) : undefined;
       const selectedClauses=[...clauses];
       if(selected && selected!=='all') selectedClauses.push(taskListGroups[selected]!);
-      const rows=store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset);
+      const rows=store.all(`SELECT ${publicTaskColumns},${repositoryName},${pushedSha},${taskTargetMeta},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset);
       const origins = taskOriginsForDisplay(store, rows.map(row => row.id), true);
       const baseTasks = withTaskMetrics(store, rows.map(row => ({ ...publicTask(row), origin: origins.get(row.id) ?? null })));
       const tasks=flowRequested ? attachTaskRoleFlows(store,attachExternalLinks(store,baseTasks)) : baseTasks;
@@ -159,7 +165,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if(trace){const row=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,trace[1]!,...filter.args);if(!row)fail(404,'task_not_found');return taskTrace(store,trace[1]!,url,trace[2]!,user.context?{actor:user.context}:undefined) as any;}
   const task = /^\/api\/tasks\/([^/]+)(\/logs)?$/.exec(path);
   if (task) {
-    const row = store.get(`SELECT *,${repositoryName},${pushedSha},${faultDetail} AS error_detail FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
+    const row = store.get(`SELECT *,${repositoryName},${pushedSha},${taskTargetMeta},${faultDetail} AS error_detail FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
     if (!row) return fail(404, 'task_not_found');
     if (task[2]) {
       const limit = Number(url.searchParams.get('limit') ?? 100), after = url.searchParams.get('after'), before = url.searchParams.get('before');
