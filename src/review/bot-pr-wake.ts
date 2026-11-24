@@ -1444,6 +1444,52 @@ function collectHumanComments(store: Store, repositoryId: string, prNumber: numb
 }
 
 /**
+ * The tasks a bot PR was woken for, selected by the PR alone (#1353). The three wake types are recorded by this module
+ * with `object: { type: 'pr', number }` (`recordEvent` stores `object_type`/`object_number` from it), so
+ * `object_type='pr'` keeps exactly the rows the earlier `(e.object_number=? OR t.object_number=?)` selected.
+ *
+ * The previous single statement joined every task and every event of the repository through the cross-table `OR`:
+ * `board_task_object (repository_id=?)` × `dispatch_events_object (repository_id=?)` took 3.5 s per call on a repository
+ * with 5k tasks and 13k events. Both halves of the `OR` are now index-driven branches that `UNION` to the same deduplicated
+ * task ids: the PR's wake events through `dispatch_events_object` → `task_events_event`, and the PR's own tasks through
+ * `board_task_object`/`board_task_latest` → their linked events.
+ *
+ * Every join is a `CROSS JOIN` because SQLite does not reorder the tables on either side of one, so the join order
+ * these statements rely on is fixed by the SQL instead of by the planner version: the event branch reads the PR's events
+ * and then their task links, the task branch reads the PR's tasks, their task links by `task_id`, and each event by its
+ * primary key, and the outer `CROSS JOIN tasks t` keeps `w`'s few ids as the loop with the task row as a primary-key
+ * lookup. Without the pinning, SQLite 3.50.4 joined `dispatch_events` before `task_events` in the task branch, i.e. it
+ * read every event of the repository once per task of the PR. The pinning fixes that order, not the index choice: within
+ * it the planner still picks the index (with ANALYZE statistics it may, for example, prefer `board_task_cover` or scan
+ * `task_events`), and that choice stays PR-driven.
+ *
+ * The task branch only exists to keep the row set identical to the earlier `OR` statement: a task numbered for the PR is
+ * returned even when its linked wake events belong to another PR. It cannot change the counted rounds, because `wakeLinks`
+ * compares `object_number`, which this projection does not select (`Number(t.object_number || 0)` is 0), so only the PR's
+ * own events produce a round.
+ */
+export const BOT_PR_WAKE_TASK_ROWS_SQL = `
+  SELECT t.id,t.kind,t.status,t.summary,t.head_sha,t.error_code,t.input,t.result,t.created_at,t.updated_at
+  FROM (
+    SELECT te.task_id AS task_id
+    FROM dispatch_events e
+    CROSS JOIN task_events te ON te.event_id=e.id
+    WHERE e.repository_id=? AND e.object_type='pr' AND e.object_number=?
+      AND e.type IN ('pull_request.checks_failed','pull_request.conflicted','pull_request.patrol')
+    UNION
+    SELECT te.task_id AS task_id
+    FROM tasks s
+    CROSS JOIN task_events te ON te.task_id=s.id
+    CROSS JOIN dispatch_events e ON e.id=te.event_id
+    WHERE s.repository_id=? AND s.object_number=?
+      AND e.repository_id=?
+      AND e.type IN ('pull_request.checks_failed','pull_request.conflicted','pull_request.patrol')
+  ) w
+  CROSS JOIN tasks t
+  WHERE t.id=w.task_id AND t.repository_id=?
+  ORDER BY t.created_at ASC, t.rowid ASC`;
+
+/**
  * Computes comprehensive, untruncated-count revision history facts for a bot PR (#1167):
  * - how many times this PR was previously revised due to check failures or merge conflicts (no hard retry cap)
  * - per-round task outcome summaries (`rounds`)
@@ -1480,19 +1526,13 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
 
   const taskRows = store.hasTable('task_events')
     ? store.all(
-        `SELECT DISTINCT t.id,t.kind,t.status,t.summary,t.head_sha,t.error_code,t.input,t.result,t.created_at,t.updated_at
-         FROM tasks t
-         JOIN task_events te ON te.task_id=t.id
-         JOIN dispatch_events e ON e.id=te.event_id
-         WHERE t.repository_id=?
-           AND e.repository_id=?
-           AND e.type IN ('pull_request.checks_failed','pull_request.conflicted','pull_request.patrol')
-           AND (e.object_number=? OR t.object_number=?)
-         ORDER BY t.created_at ASC, t.rowid ASC`,
-        repositoryId,
+        BOT_PR_WAKE_TASK_ROWS_SQL,
         repositoryId,
         prNumber,
+        repositoryId,
         prNumber,
+        repositoryId,
+        repositoryId,
       )
     : [];
 
