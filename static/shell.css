@@ -44,7 +44,7 @@
 /* #750: one dark palette, declared twice on purpose. The media query is the system preference and stays in force only
    while the reader has no manual choice (`:not([data-theme="light"])`); the attribute block is the manual override and
    is written by /theme-boot.js before the first stylesheet paints. Both blocks declare the same colour tokens as the
-   light :root — test/console-tokens.test.mjs fails when one of them drifts. */
+   light :root — test/ut/static/theme.test.mjs fails when one of them drifts. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
