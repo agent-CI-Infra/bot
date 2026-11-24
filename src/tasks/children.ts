@@ -90,10 +90,18 @@ export function attachChild(s:Store,parent:string,child:string){
 }
 export function childTaskContext(s:Store,parent:string,after?:number){
  const cursor=after??s.get('SELECT after_event_id FROM task_child_waits WHERE parent_id=?',parent)?.after_event_id??0;
- const children=s.all(`SELECT t.id,t.summary,t.status,t.phase,t.error_code,t.result,r.revision,r.candidate,r.acceptance,r.completed,r.next_action
+ const children=s.all(`SELECT t.id,t.summary,t.status,t.phase,t.error_code,t.input,t.result,r.revision,r.candidate,r.acceptance,r.completed,r.next_action
  FROM task_children c JOIN tasks t ON t.id=c.child_id JOIN task_records r ON r.task_id=t.id WHERE c.parent_id=? ORDER BY c.created_at,c.child_id`,parent).map(t=>{
-  const candidate=JSON.parse(t.candidate||'null');return {id:t.id,summary:t.summary,status:t.status,phase:t.phase,reason:t.error_code,revision:t.revision,
-   progress:{completed:JSON.parse(t.completed),next_action:t.next_action},result:JSON.parse(t.result||'null'),acceptance:JSON.parse(t.acceptance||'null'),
+  const candidate=JSON.parse(t.candidate||'null');
+  const childInput=JSON.parse(t.input||'{}');
+  const childResult=JSON.parse(t.result||'null');
+  const target=childInput?.target_meta??childInput?.target??null;
+  const baseBranch=typeof childInput?.base_branch==='string'&&childInput.base_branch.trim()?childInput.base_branch.trim():null;
+  const prUrl=typeof childResult?.pr_url==='string'&&childResult.pr_url.trim()?childResult.pr_url.trim():null;
+  const delivery=typeof childResult?.delivery==='string'?childResult.delivery:typeof childInput?.delivery==='string'?childInput.delivery:(prUrl?'pull_request':null);
+  return {id:t.id,summary:t.summary,status:t.status,phase:t.phase,reason:t.error_code,revision:t.revision,
+   target,base_branch:baseBranch,delivery,pr_url:prUrl,
+   progress:{completed:JSON.parse(t.completed),next_action:t.next_action},result:childResult,acceptance:JSON.parse(t.acceptance||'null'),
    candidate:candidate?{id:candidate.id,artifacts:candidate.artifacts.map(({kind,reference,version}:any)=>({kind,reference,version}))}:null,
    record_ref:'task:'+t.id,query_tool:'read_managed_task'};
  });

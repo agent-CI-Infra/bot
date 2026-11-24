@@ -208,7 +208,7 @@ test('a development that stops without a pull request takes the developing label
   const f = await fixture(t);
   const cases = [
     // The agent's own reason wins; else the summary of an unchanged tree; else the control plane's stop.
-    [{ status: 'completed', result: JSON.stringify({ status: 'no_changes', summary: 'The change needs a decision on the file format.' }) }, null, /\*\*Status\*\*: Stopped[\s\S]*The change needs a decision on the file format\./, true],
+    [{ status: 'completed', result: JSON.stringify({ status: 'no_changes', summary: 'The change needs a decision on the file format.' }) }, null, /\*\*Status\*\*: Ended \(no pull request\)[\s\S]*The change needs a decision on the file format\./, true],
     [{ status: 'failed', error_code: 'create_pull_request_required' }, { milestone: 'stopped', reason: 'Two designs fit; a maintainer must pick one.', human_action: 'Choose escaping or splitting at the first "=".' },
       /\*\*Reason\*\*: Two designs fit; a maintainer must pick one\.[\s\S]*\*\*What a person needs to do\*\*: Choose escaping/, true],
     [{ status: 'cancelled', error_code: 'object_closed_or_draft' }, null, /The Issue was closed, so the development was cancelled\./, false],

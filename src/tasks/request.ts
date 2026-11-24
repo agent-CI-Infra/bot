@@ -36,6 +36,7 @@ import { memoryTools, memoryTool } from '../memory/project.js';
 import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
 import { relatedDeliveryIndex, relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { observation, boundedCandidate } from './evidence.js';
+import { buildDeliveryContext, checkWorkspaceHeadDrift, resolveExpectedWorkspaceHead } from './delivery-context.js';
 import { checkpoint, restoreCheckpoint } from './checkpoint.js';
 import type { Store, Row } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
@@ -402,11 +403,11 @@ export async function runRequest(
     return gh;
   };
   let progressStarted = false;
-  const beginIssueProgress = async (issueObj?: any) => {
+  const beginIssueProgress = async (issueObj?: any, branchOptions?: { baseBranch?: string; defaultBranch?: string }) => {
     if (progressStarted || !issueProgressActive()) return;
     progressStarted = true;
     if (task.object_number == null && Number.isSafeInteger(targetSpec?.number)) update({ object_number: Number(targetSpec!.number) });
-    startProgress(store, task, issueObj ?? input.object);
+    startProgress(store, task, issueObj ?? input.object, branchOptions);
     await settleProgress(store, String(task.id), connectProgressClient).catch(() => false);
   };
 
@@ -533,15 +534,50 @@ export async function runRequest(
             targetContextFiles['bot_pr.json'] = JSON.stringify(pr, null, 2);
           }
         }
+        const issueHasPrWrite = (grantedWrites(store, task.id) ?? []).includes('pull_request') || software();
         if (!targetSha && !input.snapshot_sha && !inheritedBase) {
-          targetSha = (await github.ref(baseBranch))?.object?.sha;
-          if (!targetSha && !input.bot_pr && baseBranch !== github.defaultBranch) {
-            baseBranch = github.defaultBranch;
-            mirrorRefs.add(`refs/heads/${baseBranch}`);
+          const requestedRef = typeof targetSpec.ref === 'string' && targetSpec.ref.trim() ? targetSpec.ref.trim() : null;
+          if (requestedRef) {
+            const branchCandidate = requestedRef.replace(/^refs\/heads\//, '');
+            const branchRef = requestedRef.startsWith('refs/tags/') ? null : await github.ref(branchCandidate);
+            if (branchRef?.object?.sha) {
+              baseBranch = branchCandidate;
+              mirrorRefs.add(`refs/heads/${baseBranch}`);
+              targetSha = String(branchRef.object.sha);
+              if (/^[a-f0-9]{40}$/i.test(targetSha)) baseRefSha = targetSha.toLowerCase();
+              // Security boundary: repository skills/AGENTS.md/CLAUDE.md only come from the trusted base branch.
+              if (baseBranch === (policyBase || github.defaultBranch)) trustedSkillSha = targetSha;
+            } else if (requestedRef.startsWith('refs/heads/')) {
+              stop('target_branch_not_found', 'waiting_configuration', `目标分支 ${branchCandidate} 不存在或无法读取。`);
+            } else {
+              const isHexSha = /^[a-f0-9]{40}$/i.test(requestedRef);
+              const lookupRef = requestedRef.replace(/^refs\/tags\//, '');
+              const commitObj = isHexSha
+                ? { sha: requestedRef }
+                : await github.request('GET', github.path('/commits/' + encodeURIComponent(lookupRef)), undefined, true).catch(() => null);
+              if (commitObj?.sha) {
+                if (issueHasPrWrite) {
+                  stop(
+                    'target_ref_not_branch',
+                    'waiting_configuration',
+                    `目标 ref "${requestedRef}" 是提交或标签而不是分支，不能作为开 PR 的目标基线分支；请指定远端分支名。`,
+                  );
+                }
+                targetSha = String(commitObj.sha);
+              } else {
+                stop('target_branch_not_found', 'waiting_configuration', `目标分支 ${branchCandidate} 不存在或无法读取。`);
+              }
+            }
+          } else {
             targetSha = (await github.ref(baseBranch))?.object?.sha;
+            if (!targetSha && !input.bot_pr && baseBranch !== github.defaultBranch) {
+              baseBranch = github.defaultBranch;
+              mirrorRefs.add(`refs/heads/${baseBranch}`);
+              targetSha = (await github.ref(baseBranch))?.object?.sha;
+            }
+            if (!input.bot_pr) trustedSkillSha = targetSha ?? null;
+            if (!baseRefSha && /^[a-f0-9]{40}$/i.test(String(targetSha || ''))) baseRefSha = String(targetSha).toLowerCase();
           }
-          if (!input.bot_pr) trustedSkillSha = targetSha ?? null;
-          if (!baseRefSha && /^[a-f0-9]{40}$/i.test(String(targetSha || ''))) baseRefSha = String(targetSha).toLowerCase();
         } else {
           targetSha ??= input.snapshot_sha || inheritedBase;
         }
@@ -554,12 +590,14 @@ export async function runRequest(
           title: issue.title,
           state: issue.state,
           base_ref: baseBranch,
+          ...(targetSpec.ref?.trim() ? { ref: targetSpec.ref.trim() } : {}),
+          ...(baseRefSha ? { base_sha: baseRefSha } : {}),
           bot_login: github.actorLogin || null,
           ...(input.bot_pr ? { bot_pr_number: input.bot_pr.number, bot_pr_head_sha: input.bot_pr.head?.sha ?? null, bot_pr_branch: input.bot_pr.head?.ref ?? null } : {}),
         };
         input.object = issue;
         if (task.object_number == null) update({ object_number: Number(issue.number) });
-        await beginIssueProgress(issue);
+        await beginIssueProgress(issue, { baseBranch, defaultBranch: github.defaultBranch });
       } else if (targetSpec?.type === 'branch' && typeof targetSpec.ref === 'string') {
         const refName = targetSpec.ref.replace(/^refs\/heads\//, '');
         const branchRef = await github.ref(refName);
@@ -592,10 +630,7 @@ export async function runRequest(
 
       if (!targetSha) stop('repository_has_no_commit', 'waiting_configuration');
       // Repository skills come strictly from the trusted base branch (never an external PR head or untrusted branch/commit).
-      let trustedSkillBranch =
-        (targetSpec?.type === 'issue' && input.bot_pr?.base?.ref ? String(input.bot_pr.base.ref).trim() : '') ||
-        policyBase ||
-        github.defaultBranch;
+      let trustedSkillBranch = policyBase || github.defaultBranch;
       mirrorRefs.add(`refs/heads/${trustedSkillBranch}`);
       if (trustedSkillSha === undefined) {
         trustedSkillSha =
@@ -679,6 +714,8 @@ export async function runRequest(
         source_tree: snapshot.source_tree_sha,
         skipped_files: snapshot.skipped_files,
         base_branch: baseBranch,
+        default_branch: github.defaultBranch,
+        workspace_base_head_sha: (snapshot as any).local_sha || resolvedSha,
         checkout_trusted: checkoutTrusted,
         trusted_agents_md: trustedAgentsMd,
         trusted_claude_md: trustedClaudeMd,
@@ -897,12 +934,12 @@ export async function runRequest(
           return redactor.clean(value);
         };
         let checkedMedia: { selection: string; files: CandidateMedia['media'] } | undefined;
-        const validatePullRequestCandidate = async (value: any, reuseChecked = false) => {
+        const validatePullRequestCandidate = async (value: any, reuseChecked = false, existingSnapshot?: any) => {
           const { paths } = planPullRequestMedia(value.summary, value.media);
           const selection = JSON.stringify(paths);
           const needMedia = paths.length > 0 && !(reuseChecked && checkedMedia?.selection === selection);
           if (!needMedia) return;
-          const snapshot = await spaces.current.artifact(`request:candidate:${randomId()}`);
+          const snapshot = existingSnapshot ?? await spaces.current.artifact(`request:candidate:${randomId()}`);
           const baseline = blobValue(store, input.snapshot_files) ?? [];
           assertMediaOutsideCode(paths, snapshot.files, baseline);
           checkedMedia = { selection, files: await collectPullRequestMedia(spaces.current, paths) };
@@ -940,6 +977,7 @@ export async function runRequest(
                 : 'Your result is delivered through submit_delivery, not published to GitHub.'
           } ${writable ? 'You may implement in this task checkout.' : 'Do not modify tracked source files.'} Read ../context/*.json and ../notes if present. Keep conclusions concise and cite actual verification.${eventSubscriptionInstructions} ${taskRecordInstructions}${repoSkillIndex.length ? skillBoundary : ''}`,
           prompt: JSON.stringify({
+            delivery_context: buildDeliveryContext(store, task),
             ...((generic ? effective().includes('pull_request') : software()) ? { ci_changes: ciChanges } : {}),
             ...(input.target_meta ? { target: input.target_meta } : targetSpec ? { target: targetSpec } : {}),
             ...(input.behavior_changes?.length ? { behavior_changes: input.behavior_changes } : {}),
@@ -1084,12 +1122,32 @@ export async function runRequest(
               }
               const labels = await checkPullRequestLabels(github, validated.labels, ownLabels(store, task.repository_id));
               if ('error' in labels) return stop('pull_request_labels_refused', 'retry_wait', labels.message + ' Refused: ' + JSON.stringify(labels.refused));
-              await validatePullRequestCandidate(validated);
+              const expectedWorkspaceHead = resolveExpectedWorkspaceHead(task, input);
+              let preflightSnap: any = null;
+              if (expectedWorkspaceHead && !verifiedConflictMerge && !input.integration) {
+                preflightSnap = await spaces.current.artifact(`request:candidate:${randomId()}`);
+                const drift = checkWorkspaceHeadDrift(expectedWorkspaceHead, preflightSnap?.head_sha);
+                if (drift.drifted) {
+                  const branchName = input.base_branch || github.defaultBranch;
+                  return stop(
+                    'workspace_head_drifted',
+                    'retry_wait',
+                    JSON.stringify({
+                      error: 'workspace_head_drifted',
+                      expected_head_sha: drift.expected_head_sha,
+                      workspace_head_sha: drift.workspace_head_sha,
+                      base_branch: branchName,
+                      message: `Workspace HEAD (${drift.workspace_head_sha!.slice(0, 12)}) diverged from the task's recorded publication baseline (${drift.expected_head_sha!.slice(0, 12)} on branch '${branchName}'). Publishing from another branch/commit would open a PR with cross-branch diff against '${branchName}'. Restore HEAD to ${drift.expected_head_sha} and apply only your intended changes before calling open_pull_request, or call submit_report if the task targeted the wrong base branch.`,
+                    }),
+                  );
+                }
+              }
+              await validatePullRequestCandidate(validated, false, preflightSnap ?? undefined);
               return { ...delivered, labels: labels.labels };
             },
           },
           repairInvalid: error =>
-            error instanceof TaskError && ['pull_request_labels_refused', 'pull_request_media_invalid', 'delivery_refused', 'review_inline_out_of_diff', 'conflict_not_integrated'].includes(error.code) ? error.detail : undefined,
+            error instanceof TaskError && ['pull_request_labels_refused', 'pull_request_media_invalid', 'delivery_refused', 'review_inline_out_of_diff', 'conflict_not_integrated', 'workspace_head_drifted'].includes(error.code) ? error.detail : undefined,
           finalizationTools: (deliveryTools.filter(t => ['submit_report', 'open_pull_request', 'post_review', 'submit_delivery'].includes(t.function.name)))
             .map(t => t.function.name)
             .concat(writable ? ['write_file', 'record_progress'] : []),
@@ -1201,6 +1259,10 @@ export async function runRequest(
             implementation_goal: before.contract.goal,
             base_sha: candidateBaseSha,
             base_branch: input.base_branch,
+            expected_head_sha: resolveExpectedWorkspaceHead(task, input),
+            ...(typeof snapshot.head_sha === 'string' ? { head_sha: snapshot.head_sha } : {}),
+            ...(typeof snapshot.head_matches_baseline === 'boolean' ? { head_matches_baseline: snapshot.head_matches_baseline } : {}),
+            ...(verifiedConflictMerge ? { conflict_resolved: true } : {}),
             branch,
             owner_task_id: ownerTaskId,
             expected_sha: input.bot_pr?.head?.sha ?? null,
@@ -1239,7 +1301,7 @@ export async function runRequest(
             { kind: 'report', reference: `task:${task.id}:report`, version: sha(JSON.stringify(result)), content: result },
             ...(code
               ? [{ kind: 'code', reference: `task:${task.id}:candidate`, version: snapshot.tree_sha, content: { ...code, files: code.files.map(({ base64: _b, ...f }: any) => f) } }]
-              : [{ kind: 'files', reference: `workspace:${task.workspace_id}`, version: snapshot.tree_sha, content: { files: snapshot.files, local_sha: snapshot.local_sha, base_sha: task.head_sha } }]),
+              : [{ kind: 'files', reference: `workspace:${task.workspace_id}`, version: snapshot.tree_sha, content: { files: snapshot.files, local_sha: snapshot.local_sha, base_sha: task.head_sha, expected_head_sha: resolveExpectedWorkspaceHead(task, input), ...(typeof snapshot.head_sha === 'string' ? { head_sha: snapshot.head_sha } : {}), ...(typeof snapshot.head_matches_baseline === 'boolean' ? { head_matches_baseline: snapshot.head_matches_baseline } : {}) } }]),
           ],
           [...evidence, ...policyEvidence],
           result,

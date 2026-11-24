@@ -57,11 +57,11 @@ const decisionTools = [
         type: 'object',
         additionalProperties: false,
         required: ['type'],
-        description: 'Optional checkout target; defaults to this event\'s Issue or PR.',
+        description: 'Optional checkout target; defaults to this event\'s Issue or PR. For type:"issue", pass ref:"<branch>" when developing or investigating against a non-default target branch (open_pull_request will open the PR against that branch; if an open bot PR already exists for the Issue, its base/head are kept).',
         properties: {
           type: { type: 'string', enum: ['issue', 'pr', 'branch', 'commit'] },
           number: { type: 'integer', minimum: 1 },
-          ref: { type: 'string', maxLength: 256 },
+          ref: { type: 'string', maxLength: 256, description: 'Branch name, tag, or commit SHA. For type:"issue" with pull_request write, must be an existing remote branch name (used as checkout baseline and PR base branch); bare commit SHAs/tags are accepted only for read-only/diagnostic tasks.' },
         },
       },
       work: {

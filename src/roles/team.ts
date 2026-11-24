@@ -14,11 +14,13 @@ import type { AgentSpec } from '../agent/runtime.js';
 import { randomId } from '../core/security.js';
 import { sha,stop,TaskError } from '../agent/common.js';
 import { traceEvent,traceSource } from '../tasks/trace.js';
-import { grantView } from '../tasks/grants.js';
+import { effectiveWrites,grantView } from '../tasks/grants.js';
 import { sourcePolicies } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTools,taskRecordInstructions } from '../tasks/record-tools.js';
 import { publicationDecision } from '../tasks/publication.js';
+import { buildDeliveryContext,summarizeFileChanges,type ChangeSummary } from '../tasks/delivery-context.js';
+import { blobValue } from '../storage/payloads.js';
 import { runRole,roleConfig,roleInstance,type RoleRunOptions } from './run.js';
 import { findingsSchema,nominationSchema } from './catalog.js';
 import { UnsupportedCapabilityError } from './role-run.js';
@@ -62,6 +64,33 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
  const delegationProblem=(args:any):[string,any]|null=>!args||typeof args!=='object'||Object.keys(args).some(k=>!['role','purpose','refs'].includes(k))?['delegation_scope_invalid',{fields:args&&typeof args==='object'?Object.keys(args):null}]
   :!workers.includes(args.role)?['delegation_not_allowed',{requested_role:typeof args.role==='string'?args.role.slice(0,64):null}]:null;
  let executed:string|undefined;
+ const parseTaskInput=()=>{try{return JSON.parse(String(s.get('SELECT input FROM tasks WHERE id=?',task.id)?.input??task.input??'{}'));}catch{return {};}};
+ const deliveryContext=(()=>{try{const parsed=JSON.parse(spec.prompt);if(parsed?.delivery_context)return parsed.delivery_context;}catch{}return buildDeliveryContext(s,task);})();
+ let latestCandidateChanges:ChangeSummary|undefined;
+ const baselineSnapshotFiles=()=>{const inp=parseTaskInput();const files=blobValue(s,inp?.snapshot_files);return Array.isArray(files)?files:null;};
+ const refreshCandidateChanges=async():Promise<ChangeSummary|undefined>=>{
+  const baseline=baselineSnapshotFiles();
+  if(!baseline)return undefined;
+  if(environment.workspace){
+   try{
+    const snap=await environment.workspace.artifact('team:changes:'+randomId());
+    if(Array.isArray(snap?.files)){latestCandidateChanges=summarizeFileChanges(snap.files,baseline);return latestCandidateChanges;}
+   }catch{/* workspace may not be bound or mock may omit files */}
+  }
+  const cand=records.get(task.id).candidate;
+  const filesArtifact=cand?.artifacts.find(a=>a.kind==='code'||a.kind==='files')?.content as any;
+  if(Array.isArray(filesArtifact?.files)){latestCandidateChanges=summarizeFileChanges(filesArtifact.files,baseline);return latestCandidateChanges;}
+  return latestCandidateChanges;
+ };
+ const persistedChangedFilesCount=():number|undefined=>{
+  if(latestCandidateChanges)return latestCandidateChanges.total;
+  const baseline=baselineSnapshotFiles();
+  if(!baseline)return undefined;
+  const cand=records.get(task.id).candidate;
+  const filesArtifact=cand?.artifacts.find(a=>a.kind==='code'||a.kind==='files')?.content as any;
+  if(Array.isArray(filesArtifact?.files))return summarizeFileChanges(filesArtifact.files,baseline).total;
+  return undefined;
+ };
  // What a Dev result would publish (#1106). The Manager sees the developer's text where it decides on nomination, in its
  // input and in delegate_role's answer, so it can keep it unchanged instead of writing its own.
  const devText=(ref?:string|null)=>{
@@ -69,7 +98,8 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
   const row=ref?id?s.get("SELECT id,data FROM task_history WHERE id=? AND task_id=? AND type='role_result'",Number(id),task.id):undefined
    :s.get("SELECT id,data FROM task_history WHERE task_id=? AND type='role_result' AND json_extract(data,'$.role')='dev' ORDER BY id DESC LIMIT 1",task.id);
   const result=row?JSON.parse(row.data).result:null;
-  return typeof result?.summary==='string'?{ref:'task_history:'+row!.id,summary:result.summary,...(typeof result.change_title==='string'?{change_title:result.change_title}:{})}:undefined;
+  const changedCount=typeof result?.changed_files_count==='number'?result.changed_files_count:persistedChangedFilesCount();
+  return typeof result?.summary==='string'?{ref:'task_history:'+row!.id,summary:result.summary,...(typeof result.change_title==='string'?{change_title:result.change_title}:{}),...(typeof result.delivery==='string'?{delivery:result.delivery}:{}),...(changedCount!==undefined?{changed_files_count:changedCount}:{})}:undefined;
  };
  const devReturn=(ref:string|null|undefined)=>{const {ref:_ref,...text}=devText(ref)??{ref:null};return text;};
  // Which entry point ran under which configuration revision: the task keeps its id, contract, candidate and history.
@@ -118,21 +148,66 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
  // publication; the defer decision records the disposition it came from once, after runRole returns.
  let dispositionTrace:string[]=[];
  const managerTools=[...children,disposition,...(spec.tools??[]).filter(t=>eventSubscriptionTools.some(e=>e.function.name===t.function.name)),...(spec.tools??[]).filter(t=>versionTools.some(v=>v.function.name===t.function.name)),...managerWrite,priority,relation,delegate,...(environment.withRole?[parallel]:[]),nominate,readRecord,...taskTools.filter(t=>!coordinationTools.some(c=>c.function.name===t.function.name)),...coordinationTools,...(choosing?workspaceTools:[])];
- const managerSpec:AgentSpec<T>={...spec,guard:async()=>{await spec.guard();},candidateSnapshot:undefined,adapter:undefined,session:undefined,pi:undefined,onTurnEnd:turn=>{dispositionTrace=[traceEvent(s,task.id,'manager_observation',turn,task.trace_run_id,'role:'+controller)];return {manager_disposition:{action:'continue',reason:turn.text||'Harness turn ended without a delivery nomination; retained for the next coordination turn.',delay_seconds:30}} as T;},system:'Task Manager. '+priorityInstructions+' '+taskRecordInstructions,prompt:JSON.stringify({...(choosing?{workspace:{...workspaceContext(worktreePlan!),instruction:controllerWorkspaceInstructions}}:{}),...(subscriptionCtx?{event_subscriptions:subscriptionCtx}:{}),version_context:(()=>{try{return JSON.parse(spec.prompt).version_context;}catch{return undefined;}})(),integration:(()=>{try{return JSON.parse(spec.prompt).integration;}catch{return undefined;}})(),late_scheduled_runs:(()=>{try{return JSON.parse(spec.prompt).late_scheduled_runs;}catch{return undefined;}})(),...(reviewUpdates?{review_updates:reviewUpdates()}:{}),task_id:task.id,task_ref:'task:'+task.id,contract_ref:'contract:revision:'+records.get(task.id).revision,contract:records.get(task.id).contract,...(generic?{writes:grantView(s,task,sourcePolicies(s,task),[config.roles.find(r=>r.role_id===controller)?.permissions].filter(Boolean) as any[])}:{}),current_state:records.context(task.id),roles:pool.filter(r=>workers.includes(r.role_id)||r.kind==='evaluator').map(r=>({id:r.role_id,name:r.name,responsibility:r.responsibility,kind:r.kind,revision:r.revision,harness:r.harness_ref.id,delegable:workers.includes(r.role_id)})),recent_results:s.all("SELECT id,type FROM task_history WHERE task_id=? AND type IN ('role_result','acceptance') ORDER BY id DESC LIMIT 12",task.id).map(r=>({ref:'task_history:'+r.id,type:r.type})),latest_dev_result:devText(),candidate_participation:candidateParticipation(s,task.id)}),tools:managerTools,maxTurns:32,finish:{name:'nominate_delivery',names:['nominate_delivery','finish_coordination'],validate:async(args,name)=>{
+ const managerSpec:AgentSpec<T>={...spec,guard:async()=>{await spec.guard();},candidateSnapshot:undefined,adapter:undefined,session:undefined,pi:undefined,onTurnEnd:turn=>{dispositionTrace=[traceEvent(s,task.id,'manager_observation',turn,task.trace_run_id,'role:'+controller)];return {manager_disposition:{action:'continue',reason:turn.text||'Harness turn ended without a delivery nomination; retained for the next coordination turn.',delay_seconds:30}} as T;},system:'Task Manager. '+priorityInstructions+' '+taskRecordInstructions,prompt:JSON.stringify({...(choosing?{workspace:{...workspaceContext(worktreePlan!),instruction:controllerWorkspaceInstructions}}:{}),...(subscriptionCtx?{event_subscriptions:subscriptionCtx}:{}),delivery_context:deliveryContext,version_context:(()=>{try{return JSON.parse(spec.prompt).version_context;}catch{return undefined;}})(),integration:(()=>{try{return JSON.parse(spec.prompt).integration;}catch{return undefined;}})(),late_scheduled_runs:(()=>{try{return JSON.parse(spec.prompt).late_scheduled_runs;}catch{return undefined;}})(),...(reviewUpdates?{review_updates:reviewUpdates()}:{}),task_id:task.id,task_ref:'task:'+task.id,contract_ref:'contract:revision:'+records.get(task.id).revision,contract:records.get(task.id).contract,...(generic?{writes:grantView(s,task,sourcePolicies(s,task),[config.roles.find(r=>r.role_id===controller)?.permissions].filter(Boolean) as any[])}:{}),current_state:records.context(task.id),roles:pool.filter(r=>workers.includes(r.role_id)||r.kind==='evaluator').map(r=>({id:r.role_id,name:r.name,responsibility:r.responsibility,kind:r.kind,revision:r.revision,harness:r.harness_ref.id,delegable:workers.includes(r.role_id)})),recent_results:s.all("SELECT id,type FROM task_history WHERE task_id=? AND type IN ('role_result','acceptance') ORDER BY id DESC LIMIT 12",task.id).map(r=>({ref:'task_history:'+r.id,type:r.type})),latest_dev_result:devText(),candidate_participation:candidateParticipation(s,task.id)}),tools:managerTools,maxTurns:32,finish:{name:'nominate_delivery',names:['nominate_delivery','finish_coordination'],validate:async(args,name)=>{
   if(name==='finish_coordination'){if(!['continue','wait','needs_help'].includes(args?.action)||typeof args.reason!=='string'||!args.reason.trim()||args.action==='needs_help'&&(!args.help_from?.trim()||!args.resume_condition?.trim())||args.action==='wait'&&!args.resume_condition?.trim())return stop('role_result_invalid','retry_wait','Provide action/reason; wait needs resume_condition, needs_help also needs help_from.');const value={action:args.action,reason:args.reason,help_from:args.help_from,resume_condition:args.resume_condition,delay_seconds:Math.max(5,Math.min(86400,Number(args.delay_seconds)||30))};dispositionTrace=[traceEvent(s,task.id,'manager_disposition',value,task.trace_run_id,'role:manager')];return {manager_disposition:value} as T;}
 
   const source=nominationSource(s,task,args?.result_ref);
   if(args.supporting_refs!==undefined&&(!Array.isArray(args.supporting_refs)||args.supporting_refs.length>20))throw new SubmissionError('role_nomination_invalid',{reason:'invalid_supporting_refs',expected:'An array of at most 20 references',submitted_ref:args.result_ref});
   const supporting=(args?.supporting_refs??[]).map((ref:unknown)=>nominationSource(s,task,ref));
   if(JSON.parse(task.input||'{}').integration&&source.own){const run=s.get("SELECT r.attempt FROM task_history h JOIN task_runs r ON r.id=h.run_id WHERE h.task_id=? AND 'task_history:'||h.id=?",task.id,args.result_ref);if(run?.attempt!==task.attempt)throw new SubmissionError('role_nomination_stale',{reason:'integration_attempt_mismatch',submitted_ref:args.result_ref,expected_attempt:task.attempt,observed_attempt:run?.attempt??null,discovery:{tool:'read_version_context',arguments:{}}});}
-  const nominated={...source.result,...(args.summary?{summary:args.summary}:{}),...(args.change_title?{change_title:args.change_title}:{})};
-  if(source.own)await environment.validateOwnNomination?.(nominated);
-  // Another task's result never saw this review's updates: without the stamp the entry's validation adds, it covers what
-  // the round started with (src/review/sessions.ts).
-  const result=source.own?nominated:reviewUpdates?{...await validateNominationResult(spec,nominated),updates_through:undefined}:await validateNominationResult(spec,nominated);
+  const requestedDelivery=args?.delivery;
+  if(requestedDelivery!==undefined){
+   if(!generic)throw new SubmissionError('role_nomination_invalid',{reason:'delivery_not_applicable',submitted_ref:args.result_ref,hint:'The delivery parameter is only supported on generic tasks.'});
+   if(!['pull_request','review','report'].includes(requestedDelivery))throw new SubmissionError('role_nomination_invalid',{reason:'invalid_delivery_mode',submitted_ref:args.result_ref,expected:['pull_request','review','report']});
+   const effective=effectiveWrites(s,task,sourcePolicies(s,task));
+   if(requestedDelivery==='pull_request'&&!effective.includes('pull_request'))throw new SubmissionError('role_nomination_invalid',{reason:'delivery_not_granted',requested_delivery:'pull_request',effective_writes:effective,submitted_ref:args.result_ref,hint:'Parent task does not hold the pull_request write grant. Nominate with delivery:"report" or grant pull_request first.'});
+   if(requestedDelivery==='review'&&!effective.includes('review'))throw new SubmissionError('role_nomination_invalid',{reason:'delivery_not_granted',requested_delivery:'review',effective_writes:effective,submitted_ref:args.result_ref,hint:'Parent task does not hold the review write grant.'});
+  }
+  const deliveryTool=(d:'pull_request'|'review'|'report')=>d==='pull_request'?'open_pull_request':d==='review'?'post_review':'submit_report';
+  let nominated:any={...source.result,...(args.summary?{summary:args.summary}:{}),...(args.change_title?{change_title:args.change_title}:{})};
+  let result:any;
+  if(source.own){
+   if(generic&&requestedDelivery&&requestedDelivery!==source.result?.delivery){
+    result=await validateNominationResult(spec,nominated,deliveryTool(requestedDelivery));
+   }else{
+    await environment.validateOwnNomination?.(nominated);
+    result=nominated;
+   }
+  }else{
+   let targetTool:string|undefined;
+   if(generic){
+    const childPrUrl=typeof source.result?.pr_url==='string'&&source.result.pr_url.trim()?source.result.pr_url.trim():null;
+    const childPrNumber=Number.isSafeInteger(Number(source.result?.pr_number))&&Number(source.result.pr_number)>0?Number(source.result.pr_number):null;
+    const parentContract=records.get(task.id).contract;
+    let targetDelivery:'pull_request'|'review'|'report';
+    if(requestedDelivery){
+     targetDelivery=requestedDelivery;
+    }else if(childPrUrl){
+     targetDelivery='report';
+    }else if(parentContract?.endpoint==='reviewable_pull_request'){
+     throw new SubmissionError('role_nomination_invalid',{reason:'child_nomination_requires_explicit_delivery',submitted_ref:args.result_ref,parent_endpoint:'reviewable_pull_request',child_task_id:source.source_task_id,child_has_pr:false,hint:'Child results do not auto-import code files into the parent workspace. Implement or integrate code in this parent workspace via dev and nominate that Dev result, or pass delivery:"pull_request" if the parent workspace already holds the tested candidate, or pass delivery:"report" explicitly to conclude without opening a pull request.'});
+    }else if(parentContract?.endpoint==='review'){
+     targetDelivery='review';
+    }else{
+     targetDelivery='report';
+    }
+    if(childPrUrl&&targetDelivery==='report'){
+     const childEntry={task_id:source.source_task_id,pr_number:childPrNumber,pr_url:childPrUrl,...(typeof source.result?.branch==='string'?{branch:source.result.branch}:{})};
+     const prevList=Array.isArray(nominated.child_pull_requests)?nominated.child_pull_requests:[];
+     nominated={...nominated,child_pull_requests:prevList.some((p:any)=>p?.pr_url===childPrUrl)?prevList:[...prevList,childEntry]};
+    }
+    targetTool=deliveryTool(targetDelivery);
+   }
+   // Another task's result never saw this review's updates: without the stamp the entry's validation adds, it covers what
+   // the round started with (src/review/sessions.ts).
+   const validated=await validateNominationResult(spec,nominated,targetTool);
+   result=reviewUpdates?{...validated,updates_through:undefined}:validated;
+  }
   // What the Manager nominated with (#1250): who produced results for the candidate, and its own note on the checks.
   const checksNote=typeof args.checks_note==='string'&&args.checks_note.trim()?spec.redactor.text(args.checks_note.trim()).slice(0,2000):undefined;
-  traceEvent(s,task.id,'delivery_nominated',{result_ref:args.result_ref,sources:[source,...supporting].map(({source_task_id,source_ref,provenance})=>({task_id:source_task_id,ref:source_ref,...provenance})),candidate_scope:'current_parent_workspace',qa_required:true,candidate_participation:candidateParticipation(s,source.source_task_id)??null,...(checksNote?{checks_note:checksNote}:{})},task.trace_run_id,'role:manager',[source.source_ref,...supporting.map((r:any)=>r.source_ref)]);return result as T;
+  const nomSummary=typeof result?.summary==='string'&&result.summary.trim()?spec.redactor.text(result.summary.trim()).slice(0,2000):undefined;
+  const nomTitle=typeof result?.change_title==='string'&&result.change_title.trim()?spec.redactor.text(result.change_title.trim()).slice(0,300):undefined;
+  traceEvent(s,task.id,'delivery_nominated',{result_ref:args.result_ref,is_child_task:!source.own,...(typeof result?.delivery==='string'?{delivery:result.delivery}:{}),...(nomTitle?{change_title:nomTitle}:{}),...(nomSummary?{summary:nomSummary}:{}),sources:[source,...supporting].map(({source_task_id,source_ref,provenance})=>({task_id:source_task_id,ref:source_ref,...provenance})),candidate_scope:'current_parent_workspace',qa_required:true,candidate_participation:candidateParticipation(s,source.source_task_id)??null,...(checksNote?{checks_note:checksNote}:{})},task.trace_run_id,'role:manager',[source.source_ref,...supporting.map((r:any)=>r.source_ref)]);return result as T;
  }},finalizationTools:['nominate_delivery','finish_coordination'],validate:()=>stop('role_nomination_required','retry_wait'),
   screen:(name,args)=>{const problem=name==='delegate_role'?delegationProblem(args):null;if(problem)denied(problem[0],problem[1],args);},
   execute:async(name,args)=>{
@@ -163,17 +238,19 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
    const assignment=existing?.id??randomId();
    const handoff=existing?null:traceEvent(s,task.id,'role_handoff',{assignment_id:assignment,role:args.role,purpose:args.purpose,refs:args.refs,revision},task.trace_run_id,'role:manager',args.refs);
    const role=args.role,dev=role==='dev';
+   const observerChanges=!dev?await refreshCandidateChanges():undefined;
    // Worker roles share the entry's inspection, GitHub read, memory and command tools; only executor delivery/finishing tools stay exclusive to dev.
    // runRole filters offered tools again against the role's own permissionSnapshot (#381, #1121).
    const devExclusive=new Set(['submit_delivery','submit_report','open_pull_request','post_review','create_pull_request','report_development_milestone','rerun_failed_run','subscribe_event','cancel_event_subscription',...(generic?['github_write']:[])]);
    const narrow=dev?spec.tools??[]:(environment.observerTools??spec.tools??[]).filter(t=>!devExclusive.has(t.function.name)&&!t.function.name.startsWith('finish_'));
-   const roleSpec:AgentSpec<any>={...spec,candidateSnapshot:dev?(environment.writerSnapshot??environment.snapshot??spec.candidateSnapshot):undefined,onRun:id=>{environment.bindRun?.(id);spec.onRun?.(id);},adapter:undefined,pi:undefined,tools:[...narrow,readRecord,...(dev?[]:[findings])],system:dev?spec.system:'Inspect the candidate in the shared task workspace (reusing existing dependencies, build caches and test artifacts when present). Do not modify tracked source files or claim unexecuted checks.',prompt:JSON.stringify({task_id:task.id,contract:records.get(task.id).contract,purpose:args.purpose,refs:args.refs,handoff_ref:handoff,previous_acceptance:records.get(task.id).acceptance,source_context:dev?spec.prompt:undefined}),execute:commonExecute,finish:dev?spec.finish:{name:'submit_role_result',validate:validateFindings},finalizationTools:dev?spec.finalizationTools:['submit_role_result'],validate:dev?spec.validate:content=>validateFindings(JSON.parse(content))};
+   const roleSpec:AgentSpec<any>={...spec,candidateSnapshot:dev?(environment.writerSnapshot??environment.snapshot??spec.candidateSnapshot):undefined,onRun:id=>{environment.bindRun?.(id);spec.onRun?.(id);},adapter:undefined,pi:undefined,tools:[...narrow,readRecord,...(dev?[]:[findings])],system:dev?spec.system:'Inspect the candidate in the shared task workspace (reusing existing dependencies, build caches and test artifacts when present). Do not modify tracked source files or claim unexecuted checks.',prompt:JSON.stringify({task_id:task.id,contract:records.get(task.id).contract,delivery_context:deliveryContext,...(observerChanges?{candidate_changes:observerChanges}:{}),purpose:args.purpose,refs:args.refs,handoff_ref:handoff,previous_acceptance:records.get(task.id).acceptance,source_context:dev?spec.prompt:undefined}),execute:commonExecute,finish:dev?spec.finish:{name:'submit_role_result',validate:validateFindings},finalizationTools:dev?spec.finalizationTools:['submit_role_result'],validate:dev?spec.validate:content=>validateFindings(JSON.parse(content))};
    // Create the persistent instance before linking the assignment. runRole reuses it.
    const executor=dev?environment.executor:undefined,instance=roleInstance(s,task,role,executor?.harness,!!executor);
    if(!existing)s.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,?)',assignment,task.id,instance.id,revision,sourceVersion,'pending',inputKey,null);
    s.run("UPDATE role_assignments SET status='running' WHERE id=?",assignment);
    try{const result=await runRole({...roleSpec,task:dev?task:{...task},prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{entryExecutor:!!executor,prepare:executor?.prepare??environment.worker,...(dev?{snapshot:environment.snapshot}:{})});
    s.run("UPDATE role_assignments SET status='completed',result_ref=? WHERE id=?",result.reference,assignment);if(executor)executed=result.reference;
+   if(dev)await refreshCandidateChanges();
    return {result_ref:result.reference,instance_id:result.instance_id,...(dev?devReturn(result.reference):{}),candidate_participation:candidateParticipation(s,task.id),...(dev&&reviewUpdates?{review_updates:reviewUpdates()}:{})};}catch(error){
     // A run whose lease was taken over no longer owns the assignment: the current run decides its status.
     if((error as any)?.code!=='lease_epoch_stale')s.run("UPDATE role_assignments SET status='failed' WHERE id=? AND status='running'",assignment);const admission=error instanceof UnsupportedCapabilityError?error.observation:undefined;

@@ -6,6 +6,7 @@ import { memoryTools, memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
 import { relatedDeliveryIndex, relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { readEvidence, previousVerificationEvidence, boundedCandidate } from './evidence.js';
+import { buildDeliveryHandoff, checkWorkspaceHeadDrift, resolveExpectedWorkspaceHead } from './delivery-context.js';
 import { genericTask, softwareRequest } from './pull-request.js';
 import type { Store, Row } from '../storage/database.js';
 import { Workspace } from '../agent/workspace.js';
@@ -96,7 +97,20 @@ const preflightMaxBytes = 262144;
 const conflictMarker = (text: string) => /^(?:<<<<<<< |>>>>>>> )/m.test(text) && /^=======\r?$/m.test(text);
 const privateKeyBlock = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/;
 
-export async function deterministicCandidateIssues(store: Store, _task: Row, workspace: Workspace, candidate: any, redactor: Redactor): Promise<string[]> {
+/**
+ * Whether a repository-relative path is a test/spec file eligible to hold synthetic private key fixtures.
+ * Only exempts the generic `privateKeyBlock` text heuristic; `dirtyPathPattern` and `redactor.contains` stay strict.
+ */
+export function isTestFixturePath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const segments = normalized.split('/');
+  const base = segments.at(-1) ?? '';
+  if (segments.slice(0, -1).some(seg => /^(?:tests?|__tests__|specs?)$/i.test(seg))) return true;
+  if (/(?:\.test\.|\.spec\.|^test_|_test\.[^/]+$)/i.test(base)) return true;
+  return false;
+}
+
+export async function deterministicCandidateIssues(store: Store, task: Row, workspace: Workspace, candidate: any, redactor: Redactor): Promise<string[]> {
   const issues: string[] = [];
   const serializedClaims = JSON.stringify(candidate.claims ?? '');
   if (redactor.contains(Buffer.from(serializedClaims))) {
@@ -110,6 +124,18 @@ export async function deterministicCandidateIssues(store: Store, _task: Row, wor
     }
     if (artifact.kind === 'code' && artifact.content && !(artifact.content as any).no_changes) {
       const content = artifact.content as any;
+      const expectedHead = content.expected_head_sha ?? resolveExpectedWorkspaceHead(task) ?? content.base_sha ?? null;
+      const drift = checkWorkspaceHeadDrift(expectedHead, content.head_sha, {
+        conflictResolved: Boolean(content.conflict_resolved),
+        rebased: Boolean(content.rebase),
+        integration: Boolean(content.integration),
+      });
+      if (drift.drifted) {
+        const branchNote = content.base_branch ? ` on branch '${content.base_branch}'` : '';
+        issues.push(
+          `Workspace HEAD (${drift.workspace_head_sha!.slice(0, 12)}) drifted away from the task's recorded publication baseline (${drift.expected_head_sha!.slice(0, 12)}${branchNote}). Do not switch branches with git checkout; restore HEAD to ${drift.expected_head_sha} and apply only intended changes, or request a task targeting the desired branch.`,
+        );
+      }
       const baseline = new Map<string, string>();
       for (const entry of Array.isArray(content.snapshot_files) ? content.snapshot_files : []) {
         if (entry?.path && entry?.sha) baseline.set(String(entry.path), String(entry.sha));
@@ -143,7 +169,7 @@ export async function deterministicCandidateIssues(store: Store, _task: Row, wor
         if (text === null) continue;
         if (conflictMarker(text)) issues.push(`Unresolved Git merge conflict markers found in ${filePath}.`);
         if (redactor.contains(Buffer.from(text))) issues.push(`Registered secret/credential leaked in ${filePath}.`);
-        else if (!/^test\/|\.test\.|\.spec\./.test(filePath) && privateKeyBlock.test(text)) issues.push(`Private key block found in ${filePath}.`);
+        else if (!isTestFixturePath(filePath) && privateKeyBlock.test(text)) issues.push(`Private key block found in ${filePath}.`);
       }
     }
   }
@@ -293,6 +319,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
         system: acceptanceSystem,
         prompt: JSON.stringify({
           checklist: gatekeeperChecklist,
+          delivery_handoff: buildDeliveryHandoff(store, task, candidate, typeof (snapshot as any)?.head_sha === 'string' ? (snapshot as any).head_sha : null),
           contract: record.contract,
           requirements_instruction: acceptanceRequirements(record.contract.completeness),
           scope_differences: record.scope_differences.map(d => ({ ...d, version_matches_candidate: candidate.artifacts.some(a => a.version === d.source_version) })),
