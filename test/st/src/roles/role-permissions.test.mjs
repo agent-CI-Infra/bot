@@ -115,7 +115,7 @@ test('own-task controls are isolated by conversation, principal and authorizatio
   const s=new Store(':memory:',Buffer.alloc(32,2));t.after(()=>s.close());
   const tasks=new OwnTasks(s),owner={service_role_id:'repository-assistant',kind:'channel',owner_id:'chat-a',principal_id:'binding-a',fence:'v1'};
   assert.equal(permitsTool(fullPermissions(),'read_role_memory'),false);
-  const host={owner,system:'Scope',tools:()=>[],check(){},redact:v=>v,clean:v=>v,execute(){throw Error('Unexpected tool');},request:async()=>({value:{choices:[{message:{content:'Verified conclusion'}}]}})};
+  const host={owner,system:'Scope',tools:()=>[],check(){},redact:v=>v,execute(){throw Error('Unexpected tool');},run:async()=>'Verified conclusion'};
   const own=await tasks.invoke('start_own_task',{title:'Own question',instruction:'Think it through'},host);
   assert.equal((await tasks.invoke('read_own_task',{task_id:own.task_id},host)).history[0].conclusion,'Verified conclusion');
   for(const changed of [{owner_id:'chat-b'},{principal_id:'binding-b'},{fence:'v2'}]){

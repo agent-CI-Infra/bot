@@ -517,15 +517,14 @@ test('a group assistant works a side question in its own task with the same tool
   assert.deepEqual(hidden.own_tasks, []); assert.equal(refused.error, 'own_task_not_found');
 });
 
-// One tool batch sharing one result budget is the native loop's (#333). A steering driver (Pi, here the scripted driver)
-// bounds each result by itself; its session's compaction and result files replace that budget (#1253). The Native half
-// goes with the native loop in #1257.
-for (const native of [true, false]) test(`a group assistant reads ten repositories with one tool call each in a single step; ${native ? 'on Native large results share one bounded budget' : 'each result is bounded by itself'} (#333)`, async t => {
+// One model message may make many tool calls at once (#333). Each result is bounded by itself; the session's compaction and
+// result files keep the conversation within the model's context (#1253).
+test('a group assistant reads ten repositories with one tool call each in a single step; each result is bounded by itself (#333)', async t => {
   const f = await fixture(t), ids = ['101', '102', '103', '104', '105', '106', '107', '108', '109', '110'];
   for (const id of ids.slice(2)) await repository(f.admin, f.a.id, id);
   f.h.store.run("UPDATE repositories SET full_name='agent-test-zone/admin-fixture-'||id,owner_id='10' WHERE id<>'201'");
   await shareAssistantModel(f);
-  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ids }, ...(native ? { harness: 'native' } : {}) }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ids } }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
   assert.equal(bound.value.reachable.length, 10);
   // Every repository has many open PRs with long Chinese titles: each result alone is larger than its share.
   for (const id of ids) f.gh.state.pulls['admin-fixture-' + id] = Array.from({ length: 60 }, (_, n) => ({ number: n + 1, title: '修复跨仓库并发查询时的上下文膨胀问题'.repeat(8), state: 'open' }));
@@ -543,25 +542,15 @@ for (const native of [true, false]) test(`a group assistant reads ten repositori
   await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('各有 60 个未关闭的 PR')));
   const turn = f.h.store.get('SELECT * FROM channel_service_turns ORDER BY created_at DESC LIMIT 1');
   assert.equal(turn.state, 'completed'); assert.equal(turn.tool_calls, 11);
-  // Every repository was read once; the second request answers all eleven calls, each within the shared budget.
+  // Every repository was read once; the second request answers all eleven calls.
   for (const id of ids) assert.ok(f.gh.state.requests.some(r => r.path === `/repos/${repo(id)}/pulls`), id);
   const second = bodies[1], tools = second.messages.filter(m => m.role === 'tool');
   assert.deepEqual(tools.map(m => m.tool_call_id), ['call-projects', ...ids.map(id => 'call-pulls-' + id)]);
   assert.equal(JSON.parse(tools[0].content).projects.length, 10);
-  if (!native) {
-    for (const message of tools.slice(1)) {
-      assert.ok(Buffer.byteLength(message.content) <= 256 * 1024 + 512, 'each result is bounded by itself');
-      assert.equal(JSON.parse(message.content).truncated, undefined, 'a result within its own bound is whole');
-    }
-    return;
-  }
   for (const message of tools.slice(1)) {
-    const result = JSON.parse(message.content);
-    assert.equal(result.truncated, true); assert.match(result.notice, /read_tool_result/); assert.ok(result.file); assert.match(result.fields.repository, /admin-fixture-1\d\d$/);
-    assert.ok(Buffer.byteLength(message.content) <= 256 * 1024 / 10 + 512, 'each large result gets an equal share of the batch');
+    assert.ok(Buffer.byteLength(message.content) <= 256 * 1024 + 512, 'each result is bounded by itself');
+    assert.equal(JSON.parse(message.content).truncated, undefined, 'a result within its own bound is whole');
   }
-  assert.ok(tools.reduce((sum, m) => sum + Buffer.byteLength(m.content), 0) <= 256 * 1024 + 11 * 512, 'the batch stays within its budget');
-  assert.ok(Buffer.byteLength(JSON.stringify(second)) < 384 * 1024, 'the follow-up request stays well inside the model context');
 });
 
 test('a group timer hands work to the Manager like a message would; the task is linked to the group and its result returns there (#330)', async t => {
@@ -865,6 +854,8 @@ test('upgrading from pre-#1249 migrates role permissions, model, prompt and harn
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.assistant_migrated'").n, 2);
   const views = (await f.admin('/api/channels/service-bindings')).value.bindings, view = chat => views.find(b => b.chat_id === chat);
   assert.deepEqual([view(chatB.id).github_level, view(chatB.id).task_mode, view(chatB.id).permissions.project_memory], ['read', 'none', 'none']);
+  // Saved on Native before the upgrade: Native is gone (#1257), so the group runs on Pi.
+  assert.equal(view(chatB.id).harness, 'pi');
   assert.match(view(chatB.id).prompt, /由本群的权限档位决定/);
   assert.deepEqual([view(f.chat.id).level, view(f.chat.id).model_id, view(f.chat.id).harness, view(f.chat.id).permissions.legacy_delegation_controls],
     ['custom', f.assistantModel.id, 'pi', 'allow']);

@@ -51,7 +51,7 @@
 
 ### 默认后端
 
-项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的读写缺省值和新建库的列默认值，以及控制台新建表单。升级库的这两列保留加列时的 `DEFAULT 'native'`（`ALTER TABLE ... ADD COLUMN` 只在加列时执行一次），但所有写入都显式给出后端，列默认值不影响行为。`native` 仍可手动选择，冻结在任务里的配置快照不改写。
+项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的读写缺省值和新建库的列默认值，以及控制台新建表单。升级库的这两列保留加列时的 `DEFAULT 'native'`（`ALTER TABLE ... ADD COLUMN` 只在加列时执行一次），但所有写入都显式给出后端，列默认值不影响行为。服务助手已不能选 `native`（#1257，见下文）；项目角色仍可手动选择，冻结在任务里的配置快照不改写。
 
 旧库在启动时由 `migrateNativeToPi`（`src/roles/native-to-pi.ts`，标记 `migration:1255:native-to-pi`）在一个事务里一次性改写，并在启动日志写一行计数：
 
@@ -59,7 +59,9 @@
 - 群绑定：`native` → `pi`，revision 不变：它属于群的授权围栏，后端不改变群能做什么。
 - 项目角色：V2 配置里的 `native` 角色改为 `pi`，生成新配置版本（`updated_by: migration:1255`）；旧格式配置里写明 `native` 的条目改为 `pi`。角色覆写的模型要求 `text_json` 输出时 Pi 用不了，保持 `native` 并计入日志。
 
-新库启动时迁移无事可做、直接记下标记，所以之后手动选的 `native` 不会被改写。
+新库启动时迁移无事可做、直接记下标记，所以之后手动选的 `native` 项目角色不会被改写。
+
+服务助手不再有 `native` 后端（#1257）：服务角色和群绑定的可选后端只剩 `pi`、`codex`、`claude_code`（`serviceHarnesses`，`src/service-roles/roles.ts`），提交 `native` 由已有校验返回 `unknown_role_harness`。`migration:1255` 之后手动选成 `native` 的残留值，由 `retireNativeServiceAssistants`（`src/roles/native-to-pi.ts`）在每次启动时改为 `pi`：服务角色递增 revision，群绑定 revision 不变，有改动时启动日志写 `[migration:1257]` 计数。没有任何写入能再存回 `native`，所以首次启动之后它什么也找不到。
 
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
 
@@ -71,13 +73,13 @@
 
 ### 服务助手回合（`src/harness/service-session.ts`）
 
-管理助手和群聊助手选用非 Native 后端时，整轮由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`。声明了 `steered_turns` 的后端（生产中只有 Pi）按 Native 循环的语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它，改为得到 `finish` 工具）：
+管理助手和群聊助手的每一轮都由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`；控制面里没有服务助手自己的工具循环。独立任务（`start_own_task`，`src/service-roles/own-tasks.ts`）同样经宿主的 `run` 在同一后端上另开会话。声明了 `steered_turns` 的后端（生产中只有 Pi）按对话语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它，改为得到 `finish` 工具）：
 
 - **回答文字**：Pi 用普通文字作答，不提供 `finish` 工具。经网关时，控制面模型请求的逐 token 回调转出文字；直连时，runner 把流式文字（约 200 ms 一批的 `text_delta`）和 Pi 自身的重试（`model_retry`）写入事件流，控制面转给会话，`text_delta` 不进会话日志。
 - **回合中的新消息**：会话启动前取到的消息随配置（`steer`）在提示词之后作为单独的用户消息发出；此后在每批工具调用结束的回合边界（runner 的 `finishTurn` → `boundary('turn')`）取新消息并 `session.steer()`。最终回答之后不再并入。模型输出文字时暂停并入，带工具调用的响应结束后恢复。
 - **编辑后重启**：回合边界、每次经控制面的工具调用和会话结束时比较来源版本。版本变了就结束当前会话：旧版本下经控制面的工具调用不执行，答复不采用（Pi 自带的 `read`/`edit`/`write`/`bash` 直接在助手电脑上运行，不经这道检查）；清空会话绑定，用重建的上下文开新会话，已并入的消息重新提供。跨轮续接的会话在来源版本变化后也不再续接。
 - **保持安静**：允许安静的轮次里，`stay_silent` 是会话的结束工具；被拒绝（例如 `reply_required`）时作为观察返回模型，回合继续。
-- **工具被拒**：经控制面的工具返回 400/403/404/409/413/415 时，错误作为观察交回模型，回合继续；被拒的调用不执行。401 和内部失败结束本轮。管理助手的 Native 循环仍按 #533 只交回 400/404/413/415 和版本冲突的 409。
+- **工具被拒**：经控制面的工具返回 400/403/404/409/413/415 时，错误作为观察交回模型，回合继续；被拒的调用不执行。401 和内部失败结束本轮。
 - **执行进度**（#1296）：`ServiceTurnControl.progress` 接收会话自己的进度。`serviceHarnessTurn` 把 Pi 的 harness 事件（`src/roles/harness.ts` 经 `onHarnessEvent` 转出的原生工具 `tool` 开始/结束、runner 仅为服务回合写的 `model_start` 与 `compaction`，以及 `image_recovery`）交给 `serviceProgressReader`（`src/harness/service-progress.ts`），再加上编辑后重启的提示。进度只带有界字段：命令首行或路径（≤160 字符）、耗时（runner 的 `duration_ms`，旧 runner 取控制面看到开始的时间）、bash 的退出码和输出末尾（≤5 行、≤300 字符）；这些文本经回合与部署的已知值（含编码形式）、令牌格式规则（`publicText`）和按名称识别的命令行凭据规则清洗。调用方用 `ProgressBudget` 限频：每轮先允许 30 步，之后每 2 秒 1 步，每轮最多 300 步；工具开始被放行时它的结束一定写入，被跳过的调用计数后作为一条提示写出。进度读取或写入出错不影响回合。
 - **邮箱清理**：新会话写入配置时，runner 清除上一进程没答复的工具、令牌和模型请求，新会话不会把它们当成自己的请求。
 
@@ -143,7 +145,7 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 
 ### 助手电脑（`manager/assistant-computers.mjs`）
 
-- **按归属按需创建、临时磁盘卷与全局镜像对齐**：Native 回合仅在需要执行命令或访问 `/tmp`/`/workspace` 时启动短时容器（纯列举与读写 HOME 由控制面经 `O_NOFOLLOW` 与 `/proc/self/fd` 边界核验直通服务，`list_files`/`read_file`/`write_file`/`delete_file` 统一支撑 `~/memory/` 助手私有记忆文件）；容器默认直接继承全局默认环境与全局预编译镜像（默认 16 GB 内存；单容器统一按宿主机内存 75% 安全上限收紧并拒绝保存超限值，预留 25% 给宿主机与控制面，`/info` 异常或返回缺失字段且无缓存时均保守回退至 4 GB / 2 核；项目电脑的 Docker `--memory` 为单容器 cgroup 突发上限而非常驻物理内存预留，空闲 `ready` 项目容器仅运行 `idle.mjs` 约占 ~7.5 MiB RSS，因此多仓部署的 `register`/`recover`/`start` 不按空闲项目上限之和拒启；并发忙碌助手容器按 `2×` 安全上限即 `1.5×` 宿主机内存严格扣除当前处于 `busy` 执行态的项目电脑内存做准入排队，无无条件保底绕过，既避免活跃构建与助手叠加挤爆内存，也防止多仓空闲容器饿死助手；`/workspace` 与 `/tmp` 各默认 20 GB 应用层软限额，项目电脑 `/tmp` 保持默认 4 GB 内存型 `tmpfs` 并受容器生效内存上限约束），全局默认更新后空闲容器在下一回合平滑切换。为避免大仓库检出与构建产物挤占容器 16 GB cgroup 内存上限（禁用 swap），助手电脑的 `/workspace` 与 `/tmp` 采用随容器生命周期自动创建、随容器销毁/`remove`/`recover`/`shutdown` 彻底回收的命名临时磁盘卷（标记 `department.bot.kind=assistant-workspace` / `assistant-tmp`），通过环境变量注入 `BOT_WORKSPACE_LIMIT_MB` / `BOT_TMP_LIMIT_MB` 应用层软限额（`runner/assistant-files.mjs` 以短时缓存计数加增量更新避免逐块全盘遍历，并在覆盖解包时计入峰值占用），并接入 `manager/disk.mjs` `DiskGuard`（数据盘低于安全预留时先回收空闲助手临时卷，仍不足则拒绝创建与写入返回 `disk_full`）及 `runner/disk.mjs`（同时监测 `/workspace` 与 `/tmp`）写保护，继续保持 `ReadonlyRootfs: true`、`cap_drop: [ALL]` 与无特权隔离边界。控制面 `GitCache.archive` 以流式字节上限（256 MiB）和解包前 tree 大小校验硬截断超大归档，防止写爆控制面卷。
+- **按归属按需创建、临时磁盘卷与全局镜像对齐**：服务助手每一轮都在会话归属的短时容器里运行，回合一开始就申请（经控制面的 `list_files`/`read_file`/`write_file`/`delete_file` 纯列举与读写 HOME 不经容器，由控制面经 `O_NOFOLLOW` 与 `/proc/self/fd` 边界核验直通服务，统一支撑 `~/memory/` 助手私有记忆文件）；容器默认直接继承全局默认环境与全局预编译镜像（默认 16 GB 内存；单容器统一按宿主机内存 75% 安全上限收紧并拒绝保存超限值，预留 25% 给宿主机与控制面，`/info` 异常或返回缺失字段且无缓存时均保守回退至 4 GB / 2 核；项目电脑的 Docker `--memory` 为单容器 cgroup 突发上限而非常驻物理内存预留，空闲 `ready` 项目容器仅运行 `idle.mjs` 约占 ~7.5 MiB RSS，因此多仓部署的 `register`/`recover`/`start` 不按空闲项目上限之和拒启；并发忙碌助手容器按 `2×` 安全上限即 `1.5×` 宿主机内存严格扣除当前处于 `busy` 执行态的项目电脑内存做准入排队，无无条件保底绕过，既避免活跃构建与助手叠加挤爆内存，也防止多仓空闲容器饿死助手；`/workspace` 与 `/tmp` 各默认 20 GB 应用层软限额，项目电脑 `/tmp` 保持默认 4 GB 内存型 `tmpfs` 并受容器生效内存上限约束），全局默认更新后空闲容器在下一回合平滑切换。为避免大仓库检出与构建产物挤占容器 16 GB cgroup 内存上限（禁用 swap），助手电脑的 `/workspace` 与 `/tmp` 采用随容器生命周期自动创建、随容器销毁/`remove`/`recover`/`shutdown` 彻底回收的命名临时磁盘卷（标记 `department.bot.kind=assistant-workspace` / `assistant-tmp`），通过环境变量注入 `BOT_WORKSPACE_LIMIT_MB` / `BOT_TMP_LIMIT_MB` 应用层软限额（`runner/assistant-files.mjs` 以短时缓存计数加增量更新避免逐块全盘遍历，并在覆盖解包时计入峰值占用），并接入 `manager/disk.mjs` `DiskGuard`（数据盘低于安全预留时先回收空闲助手临时卷，仍不足则拒绝创建与写入返回 `disk_full`）及 `runner/disk.mjs`（同时监测 `/workspace` 与 `/tmp`）写保护，继续保持 `ReadonlyRootfs: true`、`cap_drop: [ALL]` 与无特权隔离边界。控制面 `GitCache.archive` 以流式字节上限（256 MiB）和解包前 tree 大小校验硬截断超大归档，防止写爆控制面卷。
 - **Harness 回合提前申请**：Pi、Codex、Claude Code 的服务助手回合整轮都在助手电脑上运行，所以回合一开始就调用 `AssistantComputer.warm()`，与上下文拼装、权限核对同时申请电脑。它按 Harness 运行环境的语义申请（同 `sessionWorkspace`，不要求 `run_command`）；首次使用与它共用同一次 HOME 准备和容器申请；申请失败不记住，首次使用会再遇到并报告；回合在申请完成前结束时，电脑一到手就归还。容量满时排队提示与原来相同。
 - **生命周期与 HOME 代次**：运行中每 30 秒续期，回合结束回收进程后空闲默认 30 分钟销毁（同一人或同一群隔几分钟再问时直接复用；设置只保存管理员改过的值，旧版本连同默认值存下的 5 分钟及旧默认资源值 2048 MB / 512 MB 在升级时改为跟随新默认），单台最长存活 4 小时，达到并发上限淘汰最久空闲容器；归属的仓库范围收缩或更换绑定/角色时推进 HOME 代次并封存旧代次，超过软容量上限（默认 5 GB）自动降为只读提示清理。
 - **必需组件提示**：有服务助手或启用的群绑定用 Pi、Codex 或 Claude Code 时，助手电脑不可用（控制面没配 manager、控制面没挂 `assistant-homes`、manager 不响应、manager 没挂 `assistant-homes`）会在控制面启动时写一条 `[assistant-computers]` 警告日志；控制台在这些后端的选择旁（`GET /api/assistant-computers/status`）和「助手电脑」设置页给出原因。

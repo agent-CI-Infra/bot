@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { managementFixture, query, command, settled } from '../../../fixtures/management-fixture.mjs';
-import { nativeServiceAssistants } from '../../../fixtures/native-roles.mjs';
 import { managerSection, repository } from '../../../fixtures/helpers.mjs';
 import { resolveActor, resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 import { ManagementService } from '../../../../dist/management/service.js';
@@ -296,12 +295,10 @@ test('management and the roles console share V2 configuration, revision errors a
   assert.equal(invalid.status,400);assert.equal(invalid.value.error,'unknown_role_harness');assert.equal(invalid.value.field,'roles.manager.harness_ref.id');
 });
 
-// One tool batch sharing one result budget is the native loop's (#333). A steering driver (Pi, here the scripted driver)
-// bounds each result by itself; its session's compaction and result files replace that budget (#1253). The Native half
-// goes with the native loop in #1257.
-for(const native of [true,false])test(`one model message may query ten projects at once; unknown tools and malformed arguments come back to the model and ${native?'on Native large results share one bounded budget':'each result is bounded by itself'} (#333)`,async t=>{
+// One model message may make many tool calls at once (#333). Each result is bounded by itself; the session's compaction and
+// result files keep the conversation within the model's context (#1253).
+test('one model message may query ten projects at once; unknown tools and malformed arguments come back to the model and each result is bounded by itself (#333)',async t=>{
   const {h,admin,a,requests,modelState}=await managementFixture(t);
-  if(native)nativeServiceAssistants(h.store);
   for(const id of ['103','104','105','106','107','108','109'])await repository(admin,a.id,id);
   const projects=h.store.all('SELECT id FROM repositories ORDER BY id').map(r=>r.id),time=new Date().toISOString();assert.equal(projects.length,10);
   // Twenty failed tasks with long Chinese summaries per project: every list_tasks result is larger than its share.
@@ -324,13 +321,7 @@ for(const native of [true,false])test(`one model message may query ten projects 
   const second=requests.at(-1),tools=second.messages.filter(m=>m.role==='tool'),seen=Object.fromEntries(tools.map(m=>[m.tool_call_id,JSON.parse(m.content)]));
   assert.equal(tools.length,13);
   assert.equal(seen['call-unknown'].error,'tool_not_allowed');assert.equal(seen['call-broken'].error,'invalid_arguments');assert.equal(seen['call-invalid'].error,'invalid_management_arguments');
-  if(!native){
-    for(const id of projects){assert.equal(seen['call-'+id].truncated,undefined,id);assert.ok(Buffer.byteLength(tools.find(m=>m.tool_call_id==='call-'+id).content)<=256*1024+512,id);}
-    return;
-  }
-  for(const id of projects){assert.equal(seen['call-'+id].truncated,true,id);assert.ok(Buffer.byteLength(tools.find(m=>m.tool_call_id==='call-'+id).content)<=256*1024/10+512,id);}
-  assert.ok(tools.reduce((sum,m)=>sum+Buffer.byteLength(m.content),0)<=256*1024+13*512,'the batch stays within its budget');
-  assert.ok(Buffer.byteLength(JSON.stringify(second))<384*1024,'the follow-up request stays well inside the model context');
+  for(const id of projects){assert.equal(seen['call-'+id].truncated,undefined,id);assert.ok(Buffer.byteLength(tools.find(m=>m.tool_call_id==='call-'+id).content)<=256*1024+512,id);}
 });
 
 test('long earlier answers stay bounded in the history the management assistant continues from (#333)',async t=>{

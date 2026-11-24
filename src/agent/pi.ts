@@ -25,7 +25,7 @@ const pollWait = 3000;
  */
 export interface PiConversation { resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string, recovery?: string): Promise<{prompt?: string, messages?: string[]}> }
 /**
- * A service assistant's turn (#1253): the control plane's side of what the native loop does around each model request.
+ * A service assistant's turn (#1253): the control plane's side of the conversation around each model request.
  * `steer` gives the messages to send after the prompt, read just before the session starts; `boundary` answers each turn
  * boundary between tool batches with more of them. `text` hears the answer as it is written (from the gateway's stream, or
  * from the runner with a direct connection), `responded` each model response ending, with or without tool calls, and

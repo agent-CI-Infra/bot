@@ -144,7 +144,7 @@ test('shared model deletion preview includes management assistant, group binding
   assert.equal((await admin('/api/onboarding/model', 'POST', { model_id: shared.id })).status, 201);
   // Seed a group binding referencing this shared model directly (#1249).
   h.store.run("INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,display_name,created_at,last_received_at) VALUES('chat-1','feishu','cli_1','t1','oc_1','group','conn-1','研发值班群',0,0)");
-  h.store.run("INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,enabled,revision,model_id,prompt,harness,created_at,updated_at) VALUES('bind-1','chat-1','group-assistant','repositories','p-bind-1','admin','admin',1,1,?,'','native',0,0)", shared.id);
+  h.store.run("INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,enabled,revision,model_id,prompt,harness,created_at,updated_at) VALUES('bind-1','chat-1','group-assistant','repositories','p-bind-1','admin','admin',1,1,?,'','pi',0,0)", shared.id);
   const detail = (await admin(`/api/models/${shared.id}`)).value.model;
   assert.deepEqual(detail.used_by, []); assert.equal(detail.onboarding_default, true);
   assert.deepEqual(detail.role_used_by.map(role => [role.type, role.repository_id, role.role_id, role.name]), [

@@ -1,9 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { managementFixture, settled, toolResults } from '../../../fixtures/management-fixture.mjs';
-import { nativeServiceAssistants } from '../../../fixtures/native-roles.mjs';
-import { HttpError } from '../../../../dist/core/security.js';
-import * as agentModule from '../../../../dist/management/agent.js';
 
 // Local model protocol fixtures verify transport/service behavior; they do not measure model language quality.
 const respond = (res, message) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); };
@@ -16,9 +13,8 @@ async function web(f, content, client = f.admin) {
 }
 const toolMessages = body => body.messages.filter(m => m.role === 'tool');
 
-// #533: a tool that answers 404/409 is the assistant's to correct, not the end of the user's turn. On the native loop only
-// an unrecoverable status (401/403 and anything else, including an internal failure) ends the turn with its code; a
-// steering driver returns refusals too (below).
+// #533: a tool that answers 404/409 is the assistant's to correct, not the end of the user's turn. Refusals come back to
+// the model too (below); 401 and internal failures still end the turn.
 test('a recoverable tool status returns the tool result to the model and the turn continues', async t => {
   const f = await managementFixture(t);
   f.modelState.respond = async (body, res) => {
@@ -53,57 +49,32 @@ test('a conflicting command revision also returns to the model instead of ending
   assert.equal(JSON.parse(toolMessages(f.requests[1])[0].content).error, 'management_revision_conflict');
 });
 
-// A refusal (403) or a business-state 409 (#533, maintainers' decision on #1256): on a steering driver (Pi, here the scripted
-// driver) it comes back to the model as an observation and the turn continues; the native loop ends the turn with its
-// code. Either way the refused call does nothing. The Native half goes with the native loop in #1257.
-for (const native of [true, false]) {
-  test(`an authorization refusal ${native ? 'ends the turn with its code on Native' : 'comes back to the model and the turn continues'}`, async t => {
-    const f = await managementFixture(t), member = await f.member('recovery-refused', { repository_ids: ['102'] });
-    if (native) nativeServiceAssistants(f.h.store);
-    f.modelState.respond = async (body, res) => {
-      if (!toolResults(body).length) return call(res, 'get_task', { project_id: '101', task_id: 'blocked' });
-      reply(res, '你没有项目 101 的访问权限。');
-    };
-    const w = await web(f, '看看 101 的那个任务', member.client);
-    assert.ok(w.history.events.some(e => e.type === 'tool_error' && e.data.error === 'capability_forbidden'));
-    if (native) {
-      assert.equal(w.history.messages[0].state, 'failed');
-      assert.equal(f.requests.length, 1, 'a 403 is never handed back to the model as an observation');
-      return;
-    }
-    assert.equal(w.history.messages[0].state, 'completed', w.history.messages[0].error);
-    assert.equal(JSON.parse(toolMessages(f.requests[1])[0].content).error, 'capability_forbidden');
-    assert.match(w.history.events.find(e => e.type === 'reply').data.text, /没有项目 101 的访问权限/);
-  });
+// A refusal (403) or a business-state 409 (#533, maintainers' decision on #1256) comes back to the model as an observation
+// and the turn continues. The refused call does nothing.
+test('an authorization refusal comes back to the model and the turn continues', async t => {
+  const f = await managementFixture(t), member = await f.member('recovery-refused', { repository_ids: ['102'] });
+  f.modelState.respond = async (body, res) => {
+    if (!toolResults(body).length) return call(res, 'get_task', { project_id: '101', task_id: 'blocked' });
+    reply(res, '你没有项目 101 的访问权限。');
+  };
+  const w = await web(f, '看看 101 的那个任务', member.client);
+  assert.ok(w.history.events.some(e => e.type === 'tool_error' && e.data.error === 'capability_forbidden'));
+  assert.equal(w.history.messages[0].state, 'completed', w.history.messages[0].error);
+  assert.equal(JSON.parse(toolMessages(f.requests[1])[0].content).error, 'capability_forbidden');
+  assert.match(w.history.events.find(e => e.type === 'reply').data.text, /没有项目 101 的访问权限/);
+});
 
-  test(`a business-state 409 ${native ? 'ends the turn with its code on Native' : 'comes back to the model and the turn continues'}`, async t => {
-    const f = await managementFixture(t);
-    if (native) nativeServiceAssistants(f.h.store);
-    f.h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'");
-    const before = f.h.store.get("SELECT count(*) n FROM management_commands").n;
-    f.modelState.respond = async (body, res) => {
-      if (!toolResults(body).length) return respond(res, { role: 'assistant', content: null, tool_calls: [{ id: 'fixture-disabled', type: 'function', function: { name: 'management_command', arguments: JSON.stringify({ operation: 'manager.update', target: { project_id: '101' }, arguments: { prompt: '新的默认提示词' }, expected_revision: 'stale-anchor' }) } }] });
-      reply(res, '项目 101 已停用，需要先启用。');
-    };
-    const w = await web(f, '把提示词改掉');
-    assert.ok(w.history.events.some(e => e.type === 'tool_error' && e.data.error === 'project_disabled'));
-    assert.equal(f.h.store.get("SELECT count(*) n FROM management_commands").n, before, 'the refused command records nothing');
-    if (native) {
-      assert.equal(w.history.messages[0].state, 'failed');
-      assert.equal(f.requests.length, 1, 'a business-state 409 is not handed back to the model');
-      return;
-    }
-    assert.equal(w.history.messages[0].state, 'completed', w.history.messages[0].error);
-    assert.equal(JSON.parse(toolMessages(f.requests[1])[0].content).error, 'project_disabled');
-  });
-}
-
-test('the recoverable set is 400/404/413/415 plus a stale revision conflict, never another 409', () => {
-  assert.equal(typeof agentModule.recoverableToolStatus, 'function');
-  for (const status of [400, 404, 413, 415]) assert.equal(agentModule.recoverableToolStatus(new HttpError(status, 'x')), true, String(status));
-  assert.equal(agentModule.recoverableToolStatus(new HttpError(409, 'management_revision_conflict')), true);
-  for (const code of ['onboarding_request_closed', 'project_disabled', 'installation_unavailable', 'installation_scope_changed', 'account_credentials_revoked'])
-    assert.equal(agentModule.recoverableToolStatus(new HttpError(409, code)), false, code);
-  for (const status of [401, 403, 402, 405, 500, 502]) assert.equal(agentModule.recoverableToolStatus(new HttpError(status, 'x')), false, String(status));
-  assert.equal(agentModule.recoverableToolStatus(new Error('management_tool_failed')), false);
+test('a business-state 409 comes back to the model and the turn continues', async t => {
+  const f = await managementFixture(t);
+  f.h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'");
+  const before = f.h.store.get("SELECT count(*) n FROM management_commands").n;
+  f.modelState.respond = async (body, res) => {
+    if (!toolResults(body).length) return respond(res, { role: 'assistant', content: null, tool_calls: [{ id: 'fixture-disabled', type: 'function', function: { name: 'management_command', arguments: JSON.stringify({ operation: 'manager.update', target: { project_id: '101' }, arguments: { prompt: '新的默认提示词' }, expected_revision: 'stale-anchor' }) } }] });
+    reply(res, '项目 101 已停用，需要先启用。');
+  };
+  const w = await web(f, '把提示词改掉');
+  assert.ok(w.history.events.some(e => e.type === 'tool_error' && e.data.error === 'project_disabled'));
+  assert.equal(f.h.store.get("SELECT count(*) n FROM management_commands").n, before, 'the refused command records nothing');
+  assert.equal(w.history.messages[0].state, 'completed', w.history.messages[0].error);
+  assert.equal(JSON.parse(toolMessages(f.requests[1])[0].content).error, 'project_disabled');
 });

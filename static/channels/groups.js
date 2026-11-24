@@ -3,7 +3,7 @@ const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已
 // Pi is the default backend (#1255): a new group starts on it, and only another backend is shown as a badge or opens the
 // advanced settings.
 const defaultGroupHarness = 'pi';
-const groupHarnessOptions = [['pi', 'Pi（推荐）'], ['native', 'Native（兼容）'], ['codex', 'Codex'], ['claude_code', 'Claude Code']];
+const groupHarnessOptions = [['pi', 'Pi（推荐）'], ['codex', 'Codex'], ['claude_code', 'Claude Code']];
 const groupHarnessName = id => groupHarnessOptions.find(([key]) => key === id)?.[1] || id;
 // Group binding permissions are split into three orthogonal dimensions (#1206): GitHub, project tasks, and platform capabilities.
 const githubLevelOptions = [
@@ -337,7 +337,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   for (const [id, label] of groupHarnessOptions) { const opt = element('option', label); opt.value = id; harnessSelect.append(opt); }
   harnessSelect.value = defaultGroupHarness;
   const harnessDetails = element('details', '', 'fold feishu-guide-details');
-  const computerWarning = harnessComputerWarning(harnessSelect);
+  const computerWarning = harnessComputerWarning();
   harnessDetails.append(element('summary', '高级设置：Agent 后端'), field('Agent 后端', harnessSelect));
 
   const assistantPresetBar = element('div', '', 'feishu-preset-bar');
@@ -348,7 +348,6 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     promptInput.value = source.prompt || '';
     harnessSelect.value = source.harness || defaultGroupHarness;
     if (harnessSelect.value !== defaultGroupHarness) harnessDetails.open = true;
-    computerWarning.refresh();
     preferredModelId = source.model_id || '';
     updateModelOptions();
   }, 'quiet');
@@ -366,8 +365,8 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     copyRow,
   );
   assistantFieldset.append(field('助手模型', modelSelect), modelWarning, modelHint, assistantPresetBar, field('提示词与职责说明', promptInput), harnessDetails,
-    // Outside the folded section: the default backend needs an assistant computer too, so a group set up with the defaults
-    // still learns that its turns would fail.
+    // Outside the folded section: every backend needs an assistant computer, so a group set up with the defaults still
+    // learns that its turns would fail.
     computerWarning);
   form.append(assistantFieldset);
 
@@ -413,7 +412,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     participation.value = current?.participation || 'mentions';
     promptInput.value = current ? (current.prompt || '') : '';
     harnessSelect.value = current?.harness || defaultGroupHarness;
-    harnessDetails.open = harnessSelect.value !== defaultGroupHarness; computerWarning.refresh();
+    harnessDetails.open = harnessSelect.value !== defaultGroupHarness;
     preferredModelId = current ? (current.model_id || '') : '';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;

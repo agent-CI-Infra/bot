@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, w
 import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { AssistantComputerService, ownerId } from '../../../../dist/service-roles/assistant-computers.js';
-import { serviceRoleStorage } from '../../../../dist/service-roles/roles.js';
 import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
 
 const gib = 1024 ** 3;
@@ -309,12 +308,11 @@ test('the status of assistant computers and the start-up warning for assistants 
   assert.deepEqual(await new AssistantComputerService(f.store, f.manager).status(), { available: false, reason: 'assistant_homes_missing' });
   const down = new AssistantComputerService(f.store, { call: async () => { throw new Error('connect ECONNREFUSED'); } }, f.homes);
   assert.deepEqual(await down.status(), { available: false, reason: 'manager_unavailable' });
-  // Nobody runs on a harness (the management assistant set to Native by hand): nothing to warn about.
-  serviceRoleStorage(f.store);
-  f.store.run("UPDATE service_roles SET harness='native' WHERE id='management-assistant'");
+  // Nobody enabled (no group bound, the management assistant turned off): nothing to warn about.
+  f.store.run("UPDATE service_roles SET enabled=0 WHERE id='management-assistant'");
   assert.equal(await down.warnIfRequired(log), null);
-  // Pi, the default since #1255.
-  f.store.run("UPDATE service_roles SET harness='pi' WHERE id='management-assistant'");
+  // The management assistant on Pi, the default since #1255; every backend needs a computer since Native is gone (#1257).
+  f.store.run("UPDATE service_roles SET enabled=1 WHERE id='management-assistant'");
   assert.equal(await f.service.warnIfRequired(log), null, 'available: no warning');
   assert.match(await down.warnIfRequired(log), /the management assistant \(pi\) run on a harness that needs an assistant computer for every turn, but assistant computers are unavailable \(manager_unavailable\)/);
   // The manager without the HOME volume.

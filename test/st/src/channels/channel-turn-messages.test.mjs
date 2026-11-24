@@ -69,28 +69,6 @@ test('a text preamble followed by a tool call resumes admission and incorporates
   assert.equal(f.service.turnMessages.replyEvent(row(f, initial).message_id).message_id, newer.event.message.message_id);
 });
 
-test('an empty model answer closes admission at its finish marker before delayed usage or platform work (#458)', async t => {
-  // The native loop closes admission at the stream's finish marker; Pi closes it when the whole response has arrived, and
-  // a message admitted meanwhile returns to the queue when the turn finishes. Removed with the native loop in #1257.
-  const f = await channelFixture(t); await repositoryAssistant(f); f.groupHarness = 'native'; f.chat = await boundGroup(f);
-  const finished = gate(t), trailer = gate(t); let calls = 0;
-  const binding = f.service.serviceBindings.get(f.chat.id);
-  await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
-    scope: { kind:'repositories', repositories:['101'] }, participation:'all', enabled:true, expected_revision:binding.revision });
-  observeOutput(f,finished);
-  f.modelState.respond = async (_body,res) => {
-    calls++;
-    if (calls > 1)return say(res,'新问题在下一回合处理');
-    res.writeHead(200,{'Content-Type':'text/event-stream'});chunk(res,{},'stop');
-    await trailer.wait;res.end('data: '+JSON.stringify({choices:[],usage:{prompt_tokens:10,completion_tokens:0}})+'\n\ndata: [DONE]\n\n');
-  };
-  const quiet = inGroup('未提及且允许保持安静');quiet.event.message.mentions=[];
-  const initial = await post(f.h,f.id,quiet);await finished.wait;
-  const extra = await post(f.h,f.id,inGroup('结束之后的新问题'));
-  assert.equal(row(f,extra).state,'queued');assert.equal(calls,1);trailer.release();
-  await done(f,initial);await done(f,extra);assert.equal(calls,2);
-});
-
 test('verified self mentions stay distinct from ambient participation and same-name other targets (#458, #460)', async t => {
   const f = await group(t), held = gate(t); let executing = false, calls = 0;
   const binding = f.service.serviceBindings.get(f.chat.id);

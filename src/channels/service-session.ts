@@ -5,11 +5,9 @@ import { ResultSession, assistantResultOwner, resultScope, readToolResult } from
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { runAgent } from '../agent/runtime.js';
-import { boundedBatch, chatContextBytes, requestLimit, textRequestBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
 import { ReadTokens } from '../agent/read-token.js';
-import { traceClean } from '../tasks/trace.js';
 import { conversationHistoryTools } from '../roles/conversation.js';
 import { permitsTool, githubReadScopes, githubWriteAllowed, type RolePermissions } from '../roles/permissions.js';
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
@@ -342,10 +340,10 @@ export class ChannelServiceSessions {
     const resultFiles=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>assistantResultOwner(ownerId({kind:'group',subject:chat.id,tenant:String(chat.installation_tenant??'')})),check,redactor.values,()=>computing&&permitsTool(permissions(),'run_command'));
     const execute=(name:string,args:unknown,key:string)=>resultFiles.execute(name,args,()=>executeRaw(name,args,key),false);
     try {
-      // A harness turn runs on the group's computer: start taking it now, while names, history and the summary are read
-      // (#1254). Inside the try, so the finally below gives it back whatever ends the turn.
-      if (binding.harness && binding.harness !== 'native') computers?.warm();
-      let sourceVersion = this.ledger.sourceVersion(chat.id);
+      // The turn runs on the group's computer: start taking it now, while names, history and the summary are read (#1254).
+      // Inside the try, so the finally below gives it back whatever ends the turn.
+      computers?.warm();
+      const sourceVersion = this.ledger.sourceVersion(chat.id);
       const history = true;
       const recent = history ? this.ledger.recent(chat.id, 40, scope, fence, true) : [];
       const connector = this.store.get('SELECT bot_open_id,app_name FROM channel_connectors WHERE id=?', chat.connector_id)!;
@@ -413,30 +411,20 @@ export class ChannelServiceSessions {
         system, prompt: JSON.stringify({request:turn.request,recent_tool_results:resultFiles.recent()}), tools: turn.allowSilence ? [...availableTools(), staySilentTool] : availableTools(),
         adapter: async (services) => {
           const {request}=services;
-          ownHost = { results: resultFiles, owner: { service_role_id: roleId, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
-            tools: () => availableTools().filter(t => t.function.name !== feishuCardToolName), request:async(body,label)=>{
-              media?.addImages(body.messages as any[]);
-              media?.fitRequest(body);
-              try { return await request(body,label); }
-              catch (error) {
-                if (!media?.recoverModelError(error, body.messages as any[])) throw error;
-                check();
-                return await request(body, label + ':image-recovery');
-              }
-            }, execute, check,
-            redact: value => redactor.text(value), clean: value => redactor.clean(value) };
-          const harness = binding.harness && binding.harness !== 'native' ? String(binding.harness) : null;
+          const harness = String(binding.harness ?? 'pi');
           const harnessRole = { id: roleId, harness, revision: binding.revision, permissions: JSON.stringify(granted) };
-          // A harness runs the tools itself; each call is still a step of this turn, as in the loop below.
-          const harnessTurn = (spec: Partial<import('../agent/runtime.js').AgentSpec<unknown>>, control?: ServiceTurnControl) => {
-            if (harness) ownHost!.run = async input => serviceHarnessTurn({ ...turnSpec, system: input.system, prompt: input.prompt, tools: input.tools, guard: input.check, execute: async (name, args) => input.execute(name, args, 'harness:' + randomId()) } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence + ':' + input.scope, media);
-            return serviceHarnessTurn({ ...turnSpec, ...spec, execute: async (name: string, args: unknown) => {
+          // An own task works its question through on the same driver, in a session of its own (#312).
+          ownHost = { owner: { service_role_id: roleId, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
+            tools: () => availableTools().filter(t => t.function.name !== feishuCardToolName), execute, check, redact: value => redactor.text(value),
+            run: async input => serviceHarnessTurn({ ...turnSpec, system: input.system, prompt: input.prompt, tools: input.tools, guard: input.check, execute: async (name, args) => input.execute(name, args, 'harness:' + randomId()) } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence + ':' + input.scope, media) };
+          // The harness runs the tools itself; each call is still a step of this turn.
+          const harnessTurn = (spec: Partial<import('../agent/runtime.js').AgentSpec<unknown>>, control?: ServiceTurnControl) =>
+            serviceHarnessTurn({ ...turnSpec, ...spec, execute: async (name: string, args: unknown) => {
               event('tool_call', name);
               try { const result = await execute(name, args, 'harness:' + randomId()) as Json; event(result?.error ? 'tool_error' : 'tool_result', name); return result; }
               catch (error) { event('tool_error', name); throw error; }
             } } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence, media, control);
-          };
-          if (harness && !steersServiceTurns(harness)) { reply = await harnessTurn({}); return; }
+          if (!steersServiceTurns(harness)) { reply = await harnessTurn({}); return; }
           // Model context is bounded: older local messages are folded into a rolling summary; originals stay searchable.
           // Folding waits for a batch, so a busy group does not pay a summary request before every answer, and it is only
           // an aid: a summary the model cannot produce keeps the earlier one and never fails the answer.
@@ -503,88 +491,21 @@ export class ChannelServiceSessions {
               event(silent.error ? 'tool_error' : 'tool_result', staySilentName); return silent;
             } catch (error) { event('tool_error', staySilentName); throw error; }
           };
-          if (harness) {
-            // A steering driver (Pi) gets the context the loop below starts from, and works the turn the same way (#1253).
-            // Pi's native tool calls and model steps join the turn's steps (#1296), by name as every step is, while the turn runs.
-            const budget = new ProgressBudget(); let progressing = true;
-            const piSteps = (step: ServiceProgress) => {
-              if (!progressing || step.kind === 'notice' || this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'running' || !budget.admit(step)) return;
-              if (step.kind === 'model_step') event('model_start');
-              else event(step.kind === 'tool_started' ? 'tool_call' : step.state === 'failed' ? 'tool_error' : 'tool_result', step.name);
-            };
-            try {
-              reply = redactor.text(await harnessTurn({ prompt: seed }, { incoming, merged: batch => { mustReply ||= batch.direct; },
-                source: { version: () => this.ledger.sourceVersion(chat.id), prompt: rebuilt, seen: sourceVersion }, ...(turn.allowSilence ? { silence: quiet } : {}), progress: piSteps }));
-            } finally { progressing = false; }
-            check(); incoming?.finish();
-            if (silence === undefined && !reply.trim() && !media?.attachments.length && !cardTurn.staged && mustReply) return fail(502, 'conversation_reply_invalid');
-            return;
-          }
-          const messages: any[] = [{ role: 'system', content: system }, { role: 'user', content: seed }];
-          // Results share a budget per batch and older ones fold away, so many parallel calls stay within the model's context.
-          const transcript = new ToolTranscript(messages, chatContextBytes, resultFiles.preserve);
-          // No step limit (#435): the turn ends with an answer without tool calls, when it is stopped (console, recalled source,
-          // changed binding or fence) or when the service role's budget runs out before a model request.
-          for (let step = 0; ; step++) {
-            check();
-            if (this.ledger.sourceVersion(chat.id) !== sourceVersion) {
-              sourceVersion = this.ledger.sourceVersion(chat.id);
-              messages.splice(1,messages.length-1,{role:'user',content:rebuilt()});
-              incoming?.refresh?.();
-            }
-            media?.addImages(messages);
-            const tools = [...availableTools(),
-              ...turn.allowSilence ? [staySilentTool] : []], body = { messages, tools, tool_choice: 'auto' };
-            transcript.fit(body);
-            const added = incoming?.take(Math.max(0,Math.min(chatContextBytes,requestLimit-textRequestBytes(body)-128)));
-            // A merged message that verifiably mentions the assistant needs an answer, like the same message on its own would.
-            if (added) { messages.push({ role: 'user', content: JSON.stringify(added.content) }); mustReply ||= added.direct; }
-            transcript.fit(body);
-            media?.fitRequest(body);
-            event('model_start');
-            const onDelta = async (delta?: any) => { if (delta?.content) incoming?.pause(); };
-            const onFinish = async (reason: string) => { if (!['tool_calls','function_call'].includes(reason)) incoming?.pause(); };
-            let response;
-            try {
-              response = await request(body, 'turn:' + step, onDelta, onFinish);
-            } catch (error) {
-              if (!media?.recoverModelError(error, messages)) throw error;
-              check();
-              transcript.fit(body);
-              response = await request(body, 'turn:' + step + ':image-recovery', onDelta, onFinish);
-            }
-            const { value } = response;
-            event('model_done');
-            if (this.ledger.sourceVersion(chat.id) !== sourceVersion) { incoming?.resume(); continue; }
-            const message = value?.choices?.[0]?.message;
-            if (!message) return fail(502, 'service_model_invalid');
-            const calls = message.tool_calls ?? [];
-            if (toolCallsProblem(calls)) return fail(502, 'service_model_invalid');
-            if (!calls.length) {
-              if (message.content !== null && message.content !== undefined && typeof message.content !== 'string') return fail(502, 'service_model_invalid');
-              check();
-              incoming?.finish();
-              reply = redactor.text(String(message.content ?? ''));
-              if (!reply.trim() && !media?.attachments.length && !cardTurn.staged && mustReply) return fail(502, 'conversation_reply_invalid');
-              return;
-            }
-            incoming?.resume();
-            messages.push(traceClean(message));
-            const results: unknown[] = [];
-            // Unparsable arguments reach execute as null and come back to the model as invalid_arguments.
-            for (const call of calls) {
-              if (call.function.name === staySilentName) { results.push(quiet(toolArguments(call))); continue; }
-              event('tool_call', call.function.name);
-              try {
-                const result = redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id));
-                results.push(result); event((result as Json)?.error ? 'tool_error' : 'tool_result', call.function.name);
-              } catch (error) { event('tool_error', call.function.name); throw error; }
-            }
-            boundedBatch(results, undefined, resultFiles.preserve, calls.map((call:any)=>call.function.name)).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
-            // stay_silent ends the turn after its batch like a final answer would, with nothing to send: any text written
-            // with it and any selected attachment are dropped. Messages that arrive now return to the queue (see finish).
-            if (silence !== undefined) { check(); incoming?.finish(); return; }
-          }
+          // A steering driver (Pi) streams its answer, merges messages that arrive meanwhile, starts again after an edit and may
+          // end through stay_silent (#1253). Its own tool calls and model steps join the turn's steps (#1296), by name as every
+          // step is, while the turn runs.
+          const budget = new ProgressBudget(); let progressing = true;
+          const piSteps = (step: ServiceProgress) => {
+            if (!progressing || step.kind === 'notice' || this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'running' || !budget.admit(step)) return;
+            if (step.kind === 'model_step') event('model_start');
+            else event(step.kind === 'tool_started' ? 'tool_call' : step.state === 'failed' ? 'tool_error' : 'tool_result', step.name);
+          };
+          try {
+            reply = redactor.text(await harnessTurn({ prompt: seed }, { incoming, merged: batch => { mustReply ||= batch.direct; },
+              source: { version: () => this.ledger.sourceVersion(chat.id), prompt: rebuilt, seen: sourceVersion }, ...(turn.allowSilence ? { silence: quiet } : {}), progress: piSteps }));
+          } finally { progressing = false; }
+          check(); incoming?.finish();
+          if (silence === undefined && !reply.trim() && !media?.attachments.length && !cardTurn.staged && mustReply) return fail(502, 'conversation_reply_invalid');
         } };
       await runAgent(turnSpec);
       check();

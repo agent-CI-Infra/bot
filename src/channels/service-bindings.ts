@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
-import { defaultGroupAssistantPrompt, defaultSharedModel, groupAssistant, managementAssistant, modelGaps, modelServes, repositoryAssistant, serviceRole } from '../service-roles/roles.js';
+import { defaultGroupAssistantPrompt, defaultSharedModel, groupAssistant, managementAssistant, modelGaps, modelServes, repositoryAssistant, serviceHarnesses, serviceRole } from '../service-roles/roles.js';
 import { githubResources, groupPermissionItems, groupTaskModes, normalizePermissions, permissionItems, permitsManagement, retiredPermissionItems, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
@@ -21,7 +21,6 @@ import { chatProfile } from './profiles.js';
 /** Bot replies of a binding are scoped to it in the local ledger, so another binding or project never reads them back. */
 export const bindingScope = (id: string) => 'binding:' + id;
 const participations = ['mentions', 'questions', 'all'];
-const harnesses = ['native', 'pi', 'codex', 'claude_code'] as const;
 const terminal = (error: unknown) => error instanceof HttpError && error.status < 500;
 function optionalText(value: unknown, max: number, field: string): string {
   if (typeof value !== 'string' || value.length > max || value.includes('\0')) return fail(400, 'invalid_field', field);
@@ -148,7 +147,7 @@ function migrateInlineAssistant(store: Store): void {
       const role = store.hasTable('service_roles') ? store.get('SELECT * FROM service_roles WHERE id=?', binding.service_role_id) : undefined;
       const prompt = [String(role?.responsibility ?? '').trim(), String(role?.prompt ?? '').trim()].filter(Boolean).join('\n\n');
       const modelId = role?.model_id ?? null;
-      const harness = role?.harness && (harnesses as readonly string[]).includes(String(role.harness)) ? String(role.harness) : 'pi';
+      const harness = role?.harness && serviceHarnesses.includes(String(role.harness)) ? String(role.harness) : 'pi';
       store.run('UPDATE channel_service_bindings SET model_id=?,prompt=?,harness=? WHERE id=? AND prompt IS NULL',
         modelId, prompt, harness, binding.id);
       store.audit('system', 'channel.service_binding.assistant_migrated', binding.id);
@@ -522,7 +521,7 @@ export class ChannelServiceBindings {
     const prompt = input.prompt !== undefined ? optionalText(input.prompt, 35000, 'prompt') : String(previous?.prompt ?? '');
     // As for a service role, a backend the request names must be one the console offers; an omitted one keeps the saved one.
     const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'pi');
-    if (input.harness !== undefined && !(harnesses as readonly string[]).includes(harness)) fail(400, 'unknown_role_harness', 'harness');
+    if (input.harness !== undefined && !serviceHarnesses.includes(harness)) fail(400, 'unknown_role_harness', 'harness');
     const permissions = this.levelInput(input, previous);
     const previewScope = this.scopeInput(actor, input.scope, chat);
     const resolveModel = (scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): string | null => {
@@ -651,7 +650,7 @@ export class ChannelServiceBindings {
     return { bindings: bindings.map(b => { const governs = this.governs(actor, b);
       return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_view: platform || !!this.canView(actor, b.chat_id),
         can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
-      models, default_model_id: defaultModelId, default_prompt: defaultGroupAssistantPrompt, harnesses: [...harnesses],
+      models, default_model_id: defaultModelId, default_prompt: defaultGroupAssistantPrompt, harnesses: [...serviceHarnesses],
       levels: bindingLevels.map(level => ({ id: level, permissions: levelPermissions(level) })),
       github_levels: bindingGithubLevels.map(level => ({ id: level, permissions: githubLevelPermissions(level) })),
       default_permissions: levelPermissions('read'),

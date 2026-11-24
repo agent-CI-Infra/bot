@@ -163,7 +163,7 @@ test('re-saving a pre-#1249 legacy binding keeps its assistant HOME generation a
   // Simulate a pre-#1249 binding referencing legacy repository-assistant.
   const now = new Date().toISOString();
   f.h.store.run(`INSERT OR REPLACE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,harness)
-    VALUES('repository-assistant',1,1,'仓库问答助手','legacy','',?,?,NULL,1,?,?,'native')`,
+    VALUES('repository-assistant',1,1,'仓库问答助手','legacy','',?,?,NULL,1,?,?,'pi')`,
     f.assistantModel.id, JSON.stringify({ github: 'read' }), now, now);
   f.h.store.run("UPDATE channel_service_bindings SET service_role_id='repository-assistant' WHERE chat_id=?", chat.id);
   // First turn creates HOME generation 1 under legacy service_role_id='repository-assistant'.

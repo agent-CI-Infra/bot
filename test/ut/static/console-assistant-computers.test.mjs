@@ -100,26 +100,19 @@ test('a manager without the HOME volume is an alert on the category (#1254)', as
   assert.match(alert.textContent, /manager 没有挂载 assistant-homes 卷，建不了助手电脑/);
 });
 
-test('next to an Agent backend choice other than Native, a deployment without assistant computers is said once, with the reason (#1254)', async () => {
+test('next to the Agent backend choice, a deployment without assistant computers is said with the reason (#1254)', async () => {
   let reads = 0, status = { available: false, reason: 'assistant_homes_unavailable' };
   const page = loadConsole(scripts, (_method, path) => {
     if (path === '/api/assistant-computers/status') { reads++; return [200, status]; }
     throw new Error('Unexpected request: ' + path);
   });
-  page.run("var select = document.createElement('select'); select.value = 'native'; var warning = harnessComputerWarning(select);");
+  // Every backend (Pi, Codex, Claude Code) runs its turns on an assistant computer: the status is read once, whatever is chosen.
+  page.run('var warning = harnessComputerWarning();');
   await settle();
-  // Native needs no computer: nothing is read or shown.
-  assert.deepEqual([reads, page.run('warning.hidden')], [0, true]);
-  page.run("select.value = 'pi'; select.listeners.change[0]();"); await settle();
-  assert.equal(page.run('warning.hidden'), false);
-  assert.match(page.run('warning.textContent'), /助手电脑现在不可用（manager 没有挂载 assistant-homes 卷）。Pi、Codex 和 Claude Code 的每一轮都要在助手电脑上运行/);
-  // An editor that sets the choice itself refreshes it; the status is read once.
-  page.run("select.value = 'native'; warning.refresh();");
-  assert.equal(page.run('warning.hidden'), true);
-  page.run("select.value = 'codex'; warning.refresh();");
   assert.deepEqual([reads, page.run('warning.hidden')], [1, false]);
+  assert.match(page.run('warning.textContent'), /助手电脑现在不可用（manager 没有挂载 assistant-homes 卷）。Pi、Codex 和 Claude Code 的每一轮都要在助手电脑上运行/);
   // Available: nothing to say.
   status = { available: true };
-  page.run("var other = document.createElement('select'); other.value = 'claude_code'; var quiet = harnessComputerWarning(other);"); await settle();
+  page.run('var quiet = harnessComputerWarning();'); await settle();
   assert.deepEqual([reads, page.run('quiet.hidden')], [2, true]);
 });
