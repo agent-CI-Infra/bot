@@ -20,10 +20,14 @@ test('the console serves a favicon without a 404', async (t) => {
 
 test('console eyebrows are complete Chinese phrases, not English labels', () => {
   const sources = ['static/shell.js', 'static/workspace.js', 'static/task-create.js'].map(path => readFileSync(path, 'utf8')).join('\n');
+  const dictionary = readFileSync('static/i18n.js', 'utf8');
   for (const label of ['NEEDS ATTENTION', 'PROJECT OVERVIEW', 'NEW TASK']) assert.equal(sources.includes(label), false, label);
   assert.match(sources, /element\('p', '工作区', 'eyebrow'\)/);
   assert.match(sources, /element\('p', '需要关注', 'eyebrow'\)/);
   assert.match(sources, /'项目工作台视图'/);
-  assert.match(sources, /element\('p', '新任务', 'eyebrow'\)/);
+  // #527: the new-task eyebrow is a dictionary phrase now, so the page reads it through t() and the Chinese-interface
+  // phrase itself has to stay a complete Chinese label in the zh-CN dictionary rather than an English one.
+  assert.match(sources, /element\('p', t\('taskCreate\.eyebrow'\), 'eyebrow'\)/);
+  assert.match(dictionary, /'taskCreate\.eyebrow': '新任务'/);
   assert.doesNotMatch(sources, /element\('p', 'WORKSPACE', 'eyebrow'\)/);
 });
