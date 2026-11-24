@@ -51,14 +51,16 @@ function knowledgeSection() {
   };
   expandPath(state.directory);
   const status = element('div', '', 'knowledge-status'), workspace = element('div', '', 'knowledge-layout');
-  status.setAttribute('role', 'alert'); root.append(status, workspace);
+  status.setAttribute('role', 'alert');
+  const consolidationSlot = element('div');
+  root.append(consolidationSlot, status, workspace);
   let epoch = 0, listing = null, results = null, selected = null, versions = null, busy = false, editing = false, conflict = null;
   const live = token => root.isConnected && knowledgeIdentity() === owner && current?.id === repo && current.section === 'knowledge' && token === epoch;
   const url = id => endpoint + '/' + encodeURIComponent(id);
   const locationText = path => path || '全部文件';
   const fileBytes = value => value == null ? '大小未知' : value < 1024 ? value + ' B' : bytes(value);
   
-  const actor = value => value ? value === 'filesystem' ? '文件系统变更' : value === 'user:'+me.actor?.principal_id ? (userDisplayName(me) || '当前用户') : value : '修改人未提供';
+  const actor = value => value ? value === 'filesystem' ? '文件系统变更' : (typeof formatConsolidationActor === 'function' && formatConsolidationActor(value)) || (value === 'user:'+me.actor?.principal_id ? (userDisplayName(me) || '当前用户') : value) : '修改人未提供';
   const write = () => listing?.can_write === true;
   const routeState = () => {
     const next = new URLSearchParams(); if (state.directory) next.set('directory', state.directory); if (state.query) next.set('query', state.query);
@@ -413,6 +415,25 @@ function knowledgeSection() {
       catch (error) { failure(error, saveNewFile, token, 'write'); } finally { busy = false; submit.disabled = false; }
     }
     form.addEventListener('submit', event => { event.preventDefault(); void saveNewFile(); }); main.append(crumbs(), form); root.dataset.scene = 'preview'; renderPanes(main); knowledgeEditor = { root, draft }; body.focus();
+  }
+  if (typeof renderKnowledgeConsolidationBar === 'function') {
+    consolidationSlot.replaceChildren(renderKnowledgeConsolidationBar({
+      repoId: repo,
+      onOpenProjectFile: async file => {
+        if (file?.id) {
+          await openFile(file.id, null, { trash: file.action === 'deleted', query: '' });
+          if (selected) await historyView();
+        } else if (file?.path) {
+          state.query = file.path;
+          state.trash = file.action === 'deleted';
+          state.file = null;
+          state.screen = 'directory';
+          routeState();
+          await loadDirectory();
+        }
+      },
+      onRefreshFiles: () => void refresh(),
+    }));
   }
   draw(); void refresh(); return [root];
 }

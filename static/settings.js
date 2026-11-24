@@ -18,4 +18,5 @@
  * settings/github-app.js
  * settings/models.js
  * settings/service-roles.js
+ * settings/memory-consolidation.js
  */

@@ -6,9 +6,14 @@ import { dropUninstalledIntegrations } from './integrations.js';
 import { type ProjectService } from './service.js';
 import { type ProjectToolsService } from './tools.js';
 import { removeBrowserEvidence } from '../browser/evidence.js';
+import { deleteConsolidationScope, releaseConsolidationModels } from '../memory/consolidation-storage.js';
 
 // The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
 export interface RunningTasks { working(repositoryId: string): Promise<unknown>[] }
+export interface RunningConsolidations {
+  stopScope(scopeKind: 'project', scopeId: string): unknown;
+  workingForProject(repositoryId: string): Promise<unknown>[];
+}
 const finished = "('succeeded','pr_opened','completed','cancelled','superseded','failed')";
 
 // Removes everything that belongs only to this repository, children before parents (no foreign key cascades on delete).
@@ -71,6 +76,12 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
       }
     }
   }
+  // Clear consolidation model references pointing at this project's own models, and remove the project's consolidation state/runs.
+  if (store.hasTable('models')) {
+    const projectModels = store.all('SELECT id FROM models WHERE repository_id=?', id).map(row => String(row.id));
+    releaseConsolidationModels(store, projectModels, 'system');
+  }
+  deleteConsolidationScope(store, 'project', id);
   for (const [sql, count] of statements) {
     const table = /^(?:DELETE FROM|UPDATE) (\w+)/.exec(sql)![1]!;
     if (store.hasTable(table)) store.run(sql, ...Array<string>(count).fill(id));
@@ -87,7 +98,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
 // Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.
 export class ProjectRemoval {
   constructor(readonly store: Store, readonly installations?: InstallationSync, readonly projects?: ProjectService, readonly engine?: RunningTasks,
-    readonly settleMs = 120_000, readonly projectTools?: ProjectToolsService) {}
+    readonly settleMs = 120_000, readonly projectTools?: ProjectToolsService, readonly consolidation?: RunningConsolidations) {}
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     // The legacy local removal endpoint must also remove the environment and notes, rather than only database rows.
     const local = /^\/api\/projects\/([1-9]\d*)$/.exec(url.pathname);
@@ -144,6 +155,7 @@ export class ProjectRemoval {
           new Date().toISOString(), id);
         this.store.audit(user.id, 'repository.deleting', id, id);
       });
+      this.consolidation?.stopScope('project', id);
       // Stopping the computer also interrupts the command a running task is waiting for.
       await this.projects?.removeEnvironment(id, this.settleMs);
       if (!await this.settled(id)) fail(409, 'tasks_still_stopping');
@@ -154,10 +166,10 @@ export class ProjectRemoval {
       finally { this.store.db.exec('ROLLBACK TO project_removal_check; RELEASE project_removal_check'); }
       // A deletion still refused at this point (a task that started again, or one the engine reported as working before
       // the settle wait finished) must fail while the project, its notes and its evidence are all still there.
-      if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
+      if (this.working(id).length) fail(409, 'tasks_still_stopping');
       const taskIds = this.store.all('SELECT id FROM tasks WHERE repository_id=?', id).map(row => String(row.id));
       const removed = this.store.transaction(() => {
-        if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
+        if (this.working(id).length) fail(409, 'tasks_still_stopping');
         deleteProjectRecords(this.store, id, { files: false });
         this.store.audit(user.id, 'repository.deleted', id, id);
         return { deleted: true, repository_id: id, registered: true };
@@ -180,10 +192,13 @@ export class ProjectRemoval {
       return removed;
     } finally { this.projects?.endRemoval(id); }
   }
+  private working(id: string): Promise<unknown>[] {
+    return [...(this.engine?.working(id) || []), ...(this.consolidation?.workingForProject(id) || [])];
+  }
   private async settled(id: string): Promise<boolean> {
-    const work = this.engine?.working(id) || []; if (!work.length) return true;
+    const work = this.working(id); if (!work.length) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([Promise.allSettled(work), new Promise(resolve => { timer = setTimeout(resolve, this.settleMs); })]); clearTimeout(timer);
-    return !this.engine!.working(id).length;
+    return !this.working(id).length;
   }
 }

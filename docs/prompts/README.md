@@ -5,6 +5,7 @@
 - `src/rules/service.ts` 读取 `labels.md`、`issue-review.md`、`pr-review.md`、`issue-development.md`、`release-observe.md` 作为内置默认规则；
 - `src/dispatch/settings.ts` 读取 `manager-dispatch.md`（未自定义项目默认的完整 Manager 分派提示词）与 `manager-flows.md`（管理助手讲解/修改流程指引，不可覆盖）；
 - `src/management/onboarding.ts` 读取 `onboarding.md`（管理助手仓库接入指引，不可覆盖）；
+- `src/memory/consolidation-engine.ts` 读取 `memory-consolidation.md`（全平台夜间自动记忆整理内置提示词，固定由 Pi 后端执行，不可覆盖）；
 - `src/actions/analysis.ts` 与 `src/actions/late-schedules.ts` 分别读取 `actions-failures.md` 与 `late-schedules.md`（不可覆盖）。
 
 ## 文件对应
@@ -21,6 +22,7 @@
 | [`actions-failures.md`](actions-failures.md) | Actions 失败运行排查、查重与提报指引 |
 | [`late-schedules.md`](late-schedules.md) | 定时 workflow 长期延迟时的优化推荐及 `workflow_dispatch` 改造示例（见[定时任务](../features/schedules-and-notifications.md#2-项目定时任务)） |
 | [`onboarding.md`](onboarding.md) | 管理助手仓库接入指引（只读分析 → 仓库画像与提问 → 启动/申请启动 → 应用配置） |
+| [`memory-consolidation.md`](memory-consolidation.md) | 全平台夜间自动记忆整理提示词（自由深读全量历史、多分支并存不误删、去重纠偏与允许删除、维护 `INDEX.md`、零外部副作用） |
 
 ## 覆盖与边界
 

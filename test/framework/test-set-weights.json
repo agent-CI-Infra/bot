@@ -153,6 +153,8 @@
   "manager-skills": 3.807,
   "manager-trajectories": 0.995,
   "mcp-bridge": 0.498,
+  "memory-consolidation": 10.5,
+  "memory-consolidation-unit": 2.5,
   "metrics": 4.651,
   "model-catalog": 7.982,
   "model-connection": 0.349,

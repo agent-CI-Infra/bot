@@ -8,6 +8,7 @@ import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
 import { tenantName } from './applications.js';
 import { chatProfile } from './profiles.js';
+import { deleteConsolidationScope } from '../memory/consolidation-storage.js';
 
 // A group binding owns one project scope (a whole organization or chosen repositories), the group's own permission level,
 // and its assistant configuration: model, prompt and Agent harness (#849, #1206, #1249). The scope is held as scoped_grants
@@ -249,6 +250,7 @@ export function bindingPermissions(binding: Row): RolePermissions {
 interface Reachable { id: string; full_name: string; private: boolean; enabled: boolean }
 
 export class ChannelServiceBindings {
+  onDisabled?: (chatId: string) => void;
   constructor(readonly store: Store, readonly employees: ChannelEmployees) {}
   get(chat: string): Row | undefined { return this.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat); }
   active(chat: string): Row | undefined { return this.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=? AND enabled=1', chat); }
@@ -581,15 +583,18 @@ export class ChannelServiceBindings {
   private disable(actor: ActorContext, binding: Row | undefined, expected: number): Json {
     if (!binding) return fail(404, 'channel_service_binding_not_found');
     if (!this.manageable(actor, binding)) fail(403, 'channel_service_binding_forbidden');
-    return this.store.transaction(() => {
+    const result = this.store.transaction(() => {
       assertCurrent(actor);
       if (!this.store.run('UPDATE channel_service_bindings SET enabled=0,revision=revision+1,updated_at=? WHERE id=? AND revision=?', Date.now(), binding.id, expected).changes) fail(409, 'channel_revision_conflict', 'expected_revision');
       this.store.run('UPDATE principals SET active=0 WHERE id=?', binding.principal_id);
       invalidate(this.store, binding.principal_id, 'channel_service_binding_disabled');
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', binding.chat_id);
+      deleteConsolidationScope(this.store, 'group_assistant', String(binding.chat_id));
       this.store.audit(actor.principal_id, 'channel.service_binding.disabled', binding.id);
       return this.view(this.get(binding.chat_id)!);
     });
+    this.onDisabled?.(String(binding.chat_id));
+    return result;
   }
   private usage(chatId: string): Json {
     const total = this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,sum(cached_input_tokens) cached_input_tokens,

@@ -5,6 +5,7 @@ import { fail, fields, object, randomId, text, type Json } from '../core/securit
 import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
 import { permissionItems, fullPermissions, normalizePermissions, type RolePermissions } from '../roles/permissions.js';
+import { releaseConsolidationModels } from '../memory/consolidation-storage.js';
 
 // Platform assistant outside project work: the console/personal management assistant (#1249).
 // Group chat assistants now store their model, prompt and harness directly on each group binding (channel_service_bindings);
@@ -78,6 +79,7 @@ export function releaseModel(store: Store, modelId: string, userId: string): voi
       store.audit(userId, 'channel.service_binding.model_cleared', row.id);
     }
   }
+  releaseConsolidationModels(store, [modelId], userId);
 }
 
 export function serviceRole(store: Store, id: string): Row | undefined {

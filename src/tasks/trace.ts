@@ -108,6 +108,9 @@ export function traceEvent(store:Store,taskId:string,type:string,data:any,runId?
     const event=store.get('SELECT * FROM dispatch_events WHERE id=?',eventId!);
     if(event)return store.trajectories.append(dispatchScope(String(event.repository_id),String(event.id),Number(attempt??event.attempts)),'event',randomId(),{type,data:traceClean(data),actor,caused_by:causedBy});
   }
+  if(typeof taskId==='string'&&taskId.startsWith('consolidation:')){
+    return 'consolidation_event:'+taskId.slice(14);
+  }
   const service=store.hasTable('service_harness_sessions')?store.get('SELECT id FROM service_harness_sessions WHERE turn_id=?',taskId):null;
   if(service){const event=store.run('INSERT INTO service_harness_events(session_id,type,payload,created_at) VALUES(?,?,?,?)',service.id,type,store.secrets.seal({data:traceClean(data),actor,caused_by:causedBy},'service-harness:'+service.id),Date.now());return 'service_harness_event:'+event.lastInsertRowid;}
   if (!store.get('SELECT 1 FROM tasks WHERE id=?',taskId) && store.hasTable('role_conversation_turns') && store.get('SELECT 1 FROM role_conversation_turns WHERE id=?',taskId)) {

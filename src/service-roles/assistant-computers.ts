@@ -1,5 +1,6 @@
 import {Workspace} from '../agent/workspace.js';
 import {Redactor} from '../agent/common.js';
+import { configuredRedactor } from '../core/redaction.js';
 import { commandResult, assistantResultOwner } from '../agent/tool-results.js';
 import { chmod, lstat, mkdir, open, readdir, readlink, realpath, rm, statfs, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -80,10 +81,46 @@ const homeBounds: Record<string, [number, number]> = { home_limit_gb: [1, 1024],
 const managerKeys = ['idle_minutes', 'max_containers', 'max_lifetime_minutes', 'cpus', 'memory_mb', 'pids', 'tmp_mb', 'workspace_mb', 'egress'];
 
 /** HOME paths below the generation directory: no empty, '.' or '..' segment; null for the HOME root itself. */
+const MEMORY_CONTROL_CHAR = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+const MEMORY_SENSITIVE_PATH = /(^|\/)(?:\.env(?:\.[^/]*)?|\.git|\.ssh|\.aws|credentials(?:\.(?!ts$|tsx$|js$|mjs$|cjs$|jsx$|py$|md$|mdx$|html$|css$|scss$|vue$|svelte$|rs$|go$|java$|kt$|rb$|php$|sh$)[^/]*)?|id_(?:rsa|ed25519)|[^/]+\.(?:pem|key))(?:\/|$)/i;
+
 function homeRelative(value: string): string | null {
   const parts = value.split('/').filter(p => p && p !== '.');
   if (parts.some(p => p === '..') || parts.length > 64) fail(400, 'invalid_path');
   return parts.length ? parts.join('/') : null;
+}
+/** Whether a HOME-relative path targets a file inside `~/memory/`. */
+export function isMemorySubpath(rel: string | null): boolean {
+  return typeof rel === 'string' && rel.startsWith('memory/') && rel.length > 'memory/'.length;
+}
+/**
+ * Validates and normalizes a path constrained strictly to `~/memory/<relative>` (accepts `~/memory/...`,
+ * `/home/assistant/memory/...`, `memory/...`, or a bare relative path inside `~/memory/` when `allowBare` is true).
+ * Refuses `~/memory` itself, traversal segments, control characters and credential/key paths.
+ */
+export function normalizeAssistantMemoryPath(value: unknown, { allowBare = false } = {}): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw || raw.length > 1024 || raw.includes('\\') || MEMORY_CONTROL_CHAR.test(raw)) fail(400, 'invalid_memory_path');
+  let rel: string | null = null;
+  if (raw === '~' || raw === assistantHome || raw.startsWith('~/') || raw.startsWith(assistantHome + '/')) {
+    rel = homeRelative(raw.startsWith('~') ? raw.slice(1) : raw.slice(assistantHome.length));
+  } else if (raw.startsWith('/')) {
+    fail(400, 'memory_path_forbidden');
+  } else if (raw === 'memory' || raw.startsWith('memory/')) {
+    rel = homeRelative(raw);
+  } else if (allowBare) {
+    const inner = homeRelative(raw);
+    rel = inner ? 'memory/' + inner : null;
+  } else {
+    fail(400, 'memory_path_forbidden');
+  }
+  if (!isMemorySubpath(rel)) fail(400, 'memory_path_forbidden');
+  const inner = rel!.slice('memory/'.length);
+  if (inner.split('/').some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase()) || Buffer.byteLength(part) > 255)) {
+    fail(400, 'invalid_memory_path');
+  }
+  if (MEMORY_SENSITIVE_PATH.test(inner)) fail(400, 'memory_sensitive_path');
+  return rel!;
 }
 type Location = { home: true; rel: string | null; display: string } | { home: false; path: string; display: string };
 function locate(value: unknown): Location {
@@ -164,19 +201,84 @@ export class AssistantHomes {
   touch(owner: string): void { this.store.run('UPDATE assistant_homes SET active_at=? WHERE owner=?', Date.now(), owner); }
   // Opens a HOME file and proves, from the open descriptor, that it is a regular file inside the generation directory: a
   // symlink placed by a command anywhere on the path cannot lead the control plane into another owner's data.
-  private async inside(directory: string, handle: Awaited<ReturnType<typeof open>>): Promise<void> {
-    const actual = await readlink(`/proc/self/fd/${handle.fd}`), base = await realpath(directory).catch(() => '\0');
+  private async inside(base: string, handle: Awaited<ReturnType<typeof open>>): Promise<void> {
+    const actual = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => '');
     if (!actual.startsWith(base + '/')) { await handle.close(); fail(400, 'invalid_path'); }
     if (!(await handle.stat()).isFile()) { await handle.close(); fail(400, 'regular_file_required'); }
   }
+  /** Traverses HOME parent directories via O_DIRECTORY|O_NOFOLLOW fds so concurrent symlink swaps cannot escape. */
+  private async openParentDir(
+    directory: string,
+    rel: string,
+    { create = false, allowMissing = false }: { create?: boolean; allowMissing?: boolean } = {},
+  ): Promise<{ base: string; parent: Awaited<ReturnType<typeof open>>; leaf: string } | null> {
+    const base = await realpath(directory).catch(err => {
+      if (allowMissing && (err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      return fail(400, create ? 'file_not_writable' : 'file_not_found');
+    });
+    if (!base) return null;
+    const parts = rel.split('/');
+    const leaf = parts.pop()!;
+    const openSegment = async (target: string, mayCreate: boolean, mayMiss: boolean): Promise<Awaited<ReturnType<typeof open>> | null> => {
+      const attempt = () => open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      let handle: Awaited<ReturnType<typeof open>>;
+      try {
+        handle = await attempt();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' && mayCreate) {
+          await mkdir(target).catch(err => { if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') fail(400, 'file_not_writable'); });
+          handle = await attempt().catch(err => {
+            const c = (err as NodeJS.ErrnoException)?.code;
+            return fail(400, c === 'ELOOP' || c === 'ENOTDIR' ? 'invalid_path' : 'file_not_writable');
+          });
+        } else if (code === 'ENOENT' && mayMiss) {
+          return null;
+        } else {
+          return fail(400, code === 'ELOOP' || code === 'ENOTDIR' ? 'invalid_path' : code === 'ENOENT' ? 'file_not_found' : 'file_not_readable');
+        }
+      }
+      const actual = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => '');
+      if (actual !== base && !actual.startsWith(base + '/')) {
+        await handle.close();
+        fail(400, 'invalid_path');
+      }
+      return handle;
+    };
+    let current = await openSegment(base, false, false);
+    if (!current) return fail(400, 'file_not_found');
+    try {
+      for (const part of parts) {
+        const next = await openSegment(`/proc/self/fd/${current.fd}/${part}`, create, allowMissing);
+        if (!next) {
+          await current.close();
+          return null;
+        }
+        const prev = current;
+        current = next;
+        await prev.close();
+      }
+      return { base, parent: current, leaf };
+    } catch (error) {
+      await current.close().catch(() => {});
+      throw error;
+    }
+  }
   async read(directory: string, rel: string | null, limit: number): Promise<{ data: Buffer; size: number }> {
     if (!rel) return fail(400, 'regular_file_required');
-    const handle = await open(`${directory}/${rel}`, constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => fail(400, error.code === 'ELOOP' ? 'invalid_path' : error.code === 'ENOENT' ? 'file_not_found' : 'file_not_readable'));
-    await this.inside(directory, handle);
+    const resolved = await this.openParentDir(directory, rel);
+    if (!resolved) return fail(400, 'file_not_found');
     try {
-      const size = (await handle.stat()).size, data = Buffer.alloc(Math.min(size, limit)), { bytesRead } = await handle.read(data, 0, data.length, 0);
-      return { data: data.subarray(0, bytesRead), size };
-    } finally { await handle.close(); }
+      const handle = await open(`/proc/self/fd/${resolved.parent.fd}/${resolved.leaf}`, constants.O_RDONLY | constants.O_NOFOLLOW)
+        .catch(error => fail(400, error.code === 'ELOOP' ? 'invalid_path' : error.code === 'ENOENT' ? 'file_not_found' : error.code === 'EISDIR' ? 'regular_file_required' : 'file_not_readable'));
+      await this.inside(resolved.base, handle);
+      try {
+        const size = (await handle.stat()).size, data = Buffer.alloc(Math.min(size, limit)), { bytesRead } = await handle.read(data, 0, data.length, 0);
+        return { data: data.subarray(0, bytesRead), size };
+      } finally { await handle.close(); }
+    } finally {
+      await resolved.parent.close();
+    }
   }
   /** Lists a HOME directory without starting a container, holding open directory fds so concurrent symlink swaps cannot escape. */
   async list(directory: string, rel: string | null, recursive = false, maxEntries = 200): Promise<{ exists: boolean; entries: Json[]; truncated: boolean }> {
@@ -256,31 +358,46 @@ export class AssistantHomes {
   }
   async write(directory: string, rel: string | null, data: Buffer): Promise<void> {
     if (!rel) return fail(400, 'regular_file_required');
-    // Parent directories one by one, refusing a symlink on the way; the file is truncated only after its descriptor is proven
-    // to be inside this HOME.
-    const parts = rel.split('/');
-    for (let i = 1; i < parts.length; i++) {
-      const path = `${directory}/${parts.slice(0, i).join('/')}`, info = await lstat(path).catch(() => null);
-      if (!info) await mkdir(path).catch(error => { if (error.code !== 'EEXIST') fail(400, 'file_not_writable'); });
-      else if (!info.isDirectory()) fail(400, 'invalid_path');
+    const resolved = await this.openParentDir(directory, rel, { create: true });
+    if (!resolved) return fail(400, 'file_not_writable');
+    try {
+      const handle = await open(`/proc/self/fd/${resolved.parent.fd}/${resolved.leaf}`, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o644)
+        .catch(error => fail(400, error.code === 'ELOOP' ? 'invalid_path' : error.code === 'EISDIR' ? 'regular_file_required' : 'file_not_writable'));
+      await this.inside(resolved.base, handle);
+      try { await handle.truncate(0); await handle.write(data, 0, data.length, 0); }
+      catch (error) { fail(400, (error as NodeJS.ErrnoException).code === 'ENOSPC' ? 'assistant_computer_disk_full' : 'file_not_writable'); }
+      finally { await handle.close(); }
+    } finally {
+      await resolved.parent.close();
     }
-    const handle = await open(`${directory}/${rel}`, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o644).catch(error => fail(400, error.code === 'ELOOP' ? 'invalid_path' : 'file_not_writable'));
-    await this.inside(directory, handle);
-    try { await handle.truncate(0); await handle.write(data, 0, data.length, 0); }
-    catch (error) { fail(400, (error as NodeJS.ErrnoException).code === 'ENOSPC' ? 'assistant_computer_disk_full' : 'file_not_writable'); }
-    finally { await handle.close(); }
   }
-  /** Removes a HOME entry directly. Only safe while no process can change this HOME (the caller checks the computer). */
+  /** Writes a UTF-8 memory file strictly under `~/memory/`, automatically redacting configured credentials first. */
+  async writeMemoryText(directory: string, rel: string, content: string): Promise<{ path: string; bytes: number }> {
+    const normalized = normalizeAssistantMemoryPath(rel);
+    if (typeof content !== 'string' || content.includes('\0') || Buffer.byteLength(content) > 256 * 1024) fail(400, 'invalid_memory_content');
+    const redacted = configuredRedactor(this.store).text(content);
+    const data = Buffer.from(redacted, 'utf8');
+    await this.write(directory, normalized, data);
+    return { path: '~/' + normalized, bytes: data.length };
+  }
+  /** Removes a HOME entry directly via an fd-anchored parent handle so symlink swaps cannot escape. */
   async remove(directory: string, rel: string | null): Promise<Json> {
     if (!rel) return fail(400, 'invalid_path');
-    const parent = rel.includes('/') ? `${directory}/${rel.slice(0, rel.lastIndexOf('/'))}` : directory;
-    const real = await realpath(parent).catch(() => null), base = await realpath(directory).catch(() => fail(400, 'file_not_found'));
-    if (real === null) return { deleted: false };
-    if (real !== base && !real.startsWith(base + '/')) fail(400, 'invalid_path');
-    const path = `${real}/${rel.split('/').at(-1)}`, info = await lstat(path).catch(() => null);
-    if (!info) return { deleted: false };
-    await (info.isDirectory() ? rm(path, { recursive: true, force: true }) : unlink(path)).catch(() => fail(400, 'file_not_deletable'));
-    return { deleted: true, directory: info.isDirectory() };
+    const resolved = await this.openParentDir(directory, rel, { allowMissing: true });
+    if (!resolved) return { deleted: false };
+    try {
+      const target = `/proc/self/fd/${resolved.parent.fd}/${resolved.leaf}`;
+      const info = await lstat(target).catch(() => null);
+      if (!info) return { deleted: false };
+      if (info.isSymbolicLink()) {
+        await unlink(target).catch(() => fail(400, 'file_not_deletable'));
+        return { deleted: true, directory: false };
+      }
+      await (info.isDirectory() ? rm(target, { recursive: true, force: true }) : unlink(target)).catch(() => fail(400, 'file_not_deletable'));
+      return { deleted: true, directory: info.isDirectory() };
+    } finally {
+      await resolved.parent.close();
+    }
   }
   /** Bytes on disk and files of a directory tree, without following symlinks; bounded in time. */
   async usage(directory: string, budgetMs = 60_000): Promise<{ bytes: number; files: number; complete: boolean }> {
@@ -668,7 +785,10 @@ export class AssistantComputer {
     }
     if (name === 'write_file') {
       if (typeof args.content !== 'string' || args.content.length > 48000 || args.content.includes('\0')) fail(400, 'invalid_field', 'content');
-      await this.store(where, Buffer.from(args.content as string));
+      const content = where.home && isMemorySubpath(where.rel)
+        ? configuredRedactor(this.service.store).text(args.content as string)
+        : (args.content as string);
+      await this.store(where, Buffer.from(content));
       return { path: where.display, written: true, ...this.notice() };
     }
     if (name !== 'delete_file') fail(403, 'tool_not_allowed');

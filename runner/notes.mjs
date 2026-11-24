@@ -245,6 +245,82 @@ export class Notes {
   async read(name) { const file = await this.file(name);if(file.binary)throw new Error('unsupported_note_format'); if (file.deleted) throw Object.assign(new Error('ENOENT: note_not_found'), { code: 'ENOENT' }); return { content: file.content }; }
   async write(name, content) { await this.saveFile(name, content, undefined, 'workspace', { createParent: true }); return { written: true }; }
   async delete(name) { await this.removeFile(name); return { deleted: true }; }
+  /**
+   * Prunes old revisions in `.write-history/*.json` and unreferenced blobs in `.write-history/blobs/`.
+   * Keeps the latest revision of every file, every revision within the latest `keepVersions` revisions,
+   * and every revision newer than `keepDays` days. Fails closed on blob GC if any history index cannot be parsed.
+   */
+  async pruneHistory({ keepVersions = 50, keepDays = 30, now = Date.now() } = {}) {
+    if (keepVersions === null && keepDays === null) return { pruned_versions: 0, removed_blobs: 0, freed_bytes: 0, files_trimmed: 0 };
+    if (keepVersions !== null && (!Number.isSafeInteger(keepVersions) || keepVersions < 1)) throw new Error('invalid_notes_retention');
+    if (keepDays !== null && (!Number.isSafeInteger(keepDays) || keepDays < 1)) throw new Error('invalid_notes_retention');
+    await this.directory();
+    return this.withLock(async check => {
+      await this.historyRoot();
+      const entries = await withNoteDirectory(this.root, '.write-history', path => readdir(path), { internal: true, canonicalRoot: this.canonicalRoot });
+      const cutoff = keepDays === null ? null : now - keepDays * 86_400_000;
+      const referenced = new Set();
+      let prunedVersions = 0, filesTrimmed = 0, unreadableIndex = false;
+      for (const entry of entries) {
+        if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
+        let parsed = null;
+        try {
+          parsed = await withNoteParent(this.root, '.write-history/' + entry, async target => {
+            const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+            try {
+              if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history');
+              return { target, value: JSON.parse(await handle.readFile('utf8')) };
+            } finally { await handle.close(); }
+          }, { internal: true, canonicalRoot: this.canonicalRoot });
+        } catch {
+          unreadableIndex = true;
+          continue;
+        }
+        const versions = parsed?.value?.versions;
+        if (!Array.isArray(versions) || !versions.length) continue;
+        const total = versions.length;
+        const kept = versions.filter((v, idx) => {
+          if (idx === total - 1) return true;
+          if (keepVersions !== null && idx >= total - keepVersions) return true;
+          if (cutoff !== null) {
+            const ts = Date.parse(String(v?.created_at || ''));
+            if (!Number.isFinite(ts) || ts >= cutoff) return true;
+          }
+          return false;
+        });
+        if (kept.length < total) {
+          parsed.value.versions = kept;
+          await this.atomic(this.root + '/.write-history/' + entry, JSON.stringify(parsed.value), check);
+          prunedVersions += total - kept.length;
+          filesTrimmed++;
+        }
+        for (const v of kept) {
+          if (typeof v?.sha256 === 'string' && /^[a-f0-9]{64}$/.test(v.sha256)) referenced.add(v.sha256);
+        }
+      }
+      let removedBlobs = 0, freedBytes = 0;
+      if (!unreadableIndex) {
+        const blobs = await withNoteDirectory(this.root, '.write-history/blobs', path => readdir(path), { internal: true, canonicalRoot: this.canonicalRoot });
+        for (const sha of blobs) {
+          if (!/^[a-f0-9]{64}$/.test(sha) || referenced.has(sha)) continue;
+          try {
+            await withNoteParent(this.root, '.write-history/blobs/' + sha, async (target, parent) => {
+              const info = await lstat(target);
+              if (!info.isFile()) return;
+              await check();
+              await unlink(target);
+              await parent.sync();
+              removedBlobs++;
+              freedBytes += info.size;
+            }, { internal: true, canonicalRoot: this.canonicalRoot });
+          } catch (error) {
+            if (error?.code !== 'ENOENT') throw error;
+          }
+        }
+      }
+      return { pruned_versions: prunedVersions, removed_blobs: removedBlobs, freed_bytes: freedBytes, files_trimmed: filesTrimmed, blob_gc_skipped: unreadableIndex };
+    });
+  }
 }
 
 export { locked as withNotesLock };

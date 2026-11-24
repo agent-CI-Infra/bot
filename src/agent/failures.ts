@@ -54,6 +54,8 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'capability_ceiling','capability_ceiling_lowered',
     // The workflow assistant's run was stopped by the person who started it.
     'assistant_cancelled',
+    // A nightly memory consolidation run was stopped or cancelled while running.
+    'consolidation_stopped','consolidation_cancelled',
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
     'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired',
     // A role at its concurrency limit: nothing ran, so the queue retries it without spending an attempt.

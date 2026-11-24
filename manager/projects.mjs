@@ -818,6 +818,29 @@ export class Projects {
       }
     });
   }
+  async pruneFileTree(repo, input = {}) {
+    this.validate(repo);
+    if (Object.keys(input).some(k => !['keep_versions', 'keep_days', 'now'].includes(k))) throw new ManagerError('invalid_input', 400);
+    const keepVersions = input.keep_versions === undefined ? 50 : input.keep_versions;
+    const keepDays = input.keep_days === undefined ? 30 : input.keep_days;
+    const now = input.now === undefined ? Date.now() : Number(input.now);
+    if (keepVersions !== null && (!Number.isSafeInteger(keepVersions) || keepVersions < 1 || keepVersions > 10000)) throw new ManagerError('invalid_input', 400);
+    if (keepDays !== null && (!Number.isSafeInteger(keepDays) || keepDays < 1 || keepDays > 3650)) throw new ManagerError('invalid_input', 400);
+    if (!Number.isFinite(now)) throw new ManagerError('invalid_input', 400);
+    return this.lock(repo, async () => {
+      const dir = this.notesRoot + '/' + repo;
+      const info = await lstat(dir).catch(() => null);
+      if (!info?.isDirectory()) return { pruned_versions: 0, removed_blobs: 0, freed_bytes: 0, files_trimmed: 0 };
+      const tree = new FileTree(dir);
+      try {
+        return await tree.pruneHistory({ keepVersions, keepDays, now });
+      } catch (error) {
+        if (error instanceof ManagerError) throw error;
+        if (/^(?:invalid_notes|notes_)/.test(String(error?.message || ''))) throw new ManagerError(error.message, 400);
+        throw error;
+      }
+    });
+  }
   labels(repo, generation, kind) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo,
     'department.bot.generation': String(generation), 'department.bot.kind': kind }; }
   async agentToolsVolume() {

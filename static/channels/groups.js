@@ -369,6 +369,25 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   submitActions.append(save, button('取消', onClose, 'quiet'));
   form.append(ownership, status, submitActions);
 
+  const memoryWrap = element('div', '', 'mc-group-extra');
+  const renderGroupMemoryExtras = current => {
+    memoryWrap.replaceChildren();
+    if (!current || typeof renderConsolidationSection !== 'function' || typeof renderAssistantMemoryBrowser !== 'function') return;
+    const browser = renderAssistantMemoryBrowser({
+      apiBase: '/api/channels/chats/' + current.chat_id + '/memory-files',
+      title: '群聊助手私有记忆（~/memory/）',
+      headingLevel: 'h3',
+      description: '浏览、编辑或删除该群聊助手的长期私有记忆文件；写入内容会自动脱敏已知密钥与凭据。',
+    });
+    const consolidation = renderConsolidationSection({
+      apiBase: '/api/channels/chats/' + current.chat_id + '/memory-consolidation',
+      title: '本群夜间自动记忆整理',
+      headingLevel: 'h3',
+      description: '夜间窗口内使用 Pi 后端整理本群本地消息账本、摘要、成员缓存、自管任务与授权项目上下文，并沉淀到本群 ~/memory/。',
+      onRunCompleted: () => browser._reloadMemoryBrowser?.(),
+    });
+    memoryWrap.append(consolidation, browser);
+  };
   let expected = 0;
   const unavailable = !chats.size || !data.projects.length && !data.organizations.length;
   const showScope = () => {
@@ -409,6 +428,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     refreshCopySources();
     showProfile(); applyRepoVisibility(); showScope();
     updateModelOptions({ autoSelectDefault: !current });
+    renderGroupMemoryExtras(current);
   };
   for (const control of [repositoriesKind, organizationKind]) control.addEventListener('change', showScope);
   chat.addEventListener('change', fill);
@@ -436,7 +456,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
 
   if (!chats.size) section.append(note('尚无可选择的群。请先完成个人绑定，在机器人已加入的目标群发一条消息，再刷新本页。'));
   if (!data.projects.length && !data.organizations.length) section.append(note('当前没有可配置的仓库。个人绑定不会增加项目权限。'));
-  section.append(form);
+  section.append(form, memoryWrap);
 
   if (targetChatId && [...chat.options].some(o => o.value === targetChatId)) chat.value = targetChatId;
   else if (!targetChatId) {

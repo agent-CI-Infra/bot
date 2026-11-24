@@ -134,4 +134,7 @@ export class FileTree {
     notePath(path);
     return this.run(async ctx=>{const row=this.row(ctx,id);await ctx.catalog.beginMove(row.id,path,expectedRevision,actor,ctx.check);return publicFile(row,await ctx.notes.file(row.path));});
   }
+  pruneHistory({keepVersions=50,keepDays=30,now=Date.now()}={}){
+    return new Notes(this.root).pruneHistory({keepVersions,keepDays,now});
+  }
 }

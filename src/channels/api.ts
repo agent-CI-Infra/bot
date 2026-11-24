@@ -5,6 +5,7 @@ import { ChannelService } from './service.js';
 import { FEISHU_SCOPES, FeishuAdapter } from './feishu.js';
 import { applicationConsole, applicationOrganizations, applicationVisible, canAddApplication, canManageApplication, platformManager, tenantName } from './applications.js';
 import { ChannelConsole } from './console.js';
+import { deleteConsolidationScope } from '../memory/consolidation-storage.js';
 
 const applicationForbidden = () => fail(403, 'channel_application_forbidden');
 
@@ -331,7 +332,8 @@ export class ChannelApi {
       if (!current) return fail(404, 'channel_connector_not_found');
       if (!canManageApplication(actor, current)) return applicationForbidden();
       if (input.expected_revision !== current.revision) fail(409, 'channel_revision_conflict');
-      return store.transaction(() => {
+      const disabledChats: string[] = [];
+      const result = store.transaction(() => {
         const saved = store.get('SELECT * FROM channel_connectors WHERE id=?', current.id);
         if (!saved) return fail(404, 'channel_connector_not_found');
         if (!canManageApplication(actor, saved)) return applicationForbidden();
@@ -344,7 +346,9 @@ export class ChannelApi {
             store.run('UPDATE channel_service_bindings SET enabled=0,revision=revision+1,updated_at=? WHERE id=?', now, binding.id);
             store.run('UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL', now, binding.principal_id);
             store.run('UPDATE principals SET active=0,authorization_revision=authorization_revision+1 WHERE id=?', binding.principal_id);
+            disabledChats.push(chatId);
           }
+          deleteConsolidationScope(store, 'group_assistant', chatId);
           for (const grant of store.all('SELECT id,principal_id FROM channel_employee_grants WHERE chat_id=?', chatId)) {
             store.run('UPDATE channel_employee_grants SET enabled=0,revision=revision+1 WHERE id=?', grant.id);
             store.run('UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND revoked_at IS NULL', now, grant.principal_id);
@@ -374,6 +378,8 @@ export class ChannelApi {
         store.audit(actor.principal_id, 'channel.connector.deleted', saved.id);
         return { deleted: true, connector_id: saved.id };
       });
+      for (const chatId of disabledChats) this.service.serviceBindings.onDisabled?.(chatId);
+      return result;
     }
     if (!match) return fail(404, 'channel_endpoint_not_found');
     const c = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
