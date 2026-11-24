@@ -16,7 +16,7 @@ async function upstream(t) {
   const requests = [], ids = Array.from({ length: 250 }, (_, i) => `model-${String(249 - i).padStart(3, '0')}`);
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
-    const request = { method: req.method, path: req.url, authorization: req.headers.authorization, body: raw ? JSON.parse(raw) : null }; requests.push(request);
+    const request = { method: req.method, path: req.url, authorization: req.headers.authorization, ...(req.headers['x-api-key'] ? { apiKey: req.headers['x-api-key'] } : {}), body: raw ? JSON.parse(raw) : null }; requests.push(request);
     res.setHeader('Content-Type', 'application/json');
     const echoed = req.headers.authorization?.slice(7);
     if (req.url.startsWith('/echo/')) { res.statusCode = 401; res.end(JSON.stringify({ error: { message: `Incorrect API key provided: ${echoed}` } })); return; }
@@ -33,7 +33,8 @@ async function upstream(t) {
 
 test('a model URL resolves to the same chat and list addresses everywhere, without adding or removing /v1', async t => {
   const h = await harness(t), { admin } = await setup(h);
-  const resolve = async value => (await admin('/api/models/endpoints?api_url=' + encodeURIComponent(value))).value;
+  const read = async (value, type) => (await admin('/api/models/endpoints?' + new URLSearchParams({ api_url: value, ...(type ? { interface_type: type } : {}) }))).value;
+  const resolve = async (value, type) => { const { chat_url, models_url, has_v1 } = await read(value, type); return { chat_url, models_url, has_v1 }; };
   const v1 = { chat_url: 'https://example.com/v1/chat/completions', models_url: 'https://example.com/v1/models', has_v1: true };
   for (const value of ['https://example.com/v1', 'https://example.com/v1/', 'https://example.com/v1/chat/completions', 'https://example.com/v1/chat/completions/'])
     assert.deepEqual(await resolve(value), v1, value);
@@ -43,6 +44,16 @@ test('a model URL resolves to the same chat and list addresses everywhere, witho
   assert.equal((await resolve('https://v1')).has_v1, false);
   assert.equal((await admin('/api/models/endpoints?api_url=' + encodeURIComponent('ftp://example.com/v1'))).status, 400);
   assert.equal((await admin('/api/models/endpoints')).status, 400);
+  // Another interface resolves to its own route (#1332); "auto" infers from the URL alone and says why.
+  assert.deepEqual(await resolve('https://example.com/v1', 'openai-responses'), { chat_url: 'https://example.com/v1/responses', models_url: 'https://example.com/v1/models', has_v1: true });
+  assert.deepEqual(await resolve('https://example.com', 'openai-responses'), { chat_url: 'https://example.com/v1/responses', models_url: 'https://example.com/v1/models', has_v1: true });
+  assert.deepEqual(await resolve('https://example.com/api', 'openai-responses'), { chat_url: 'https://example.com/api/responses', models_url: 'https://example.com/api/models', has_v1: false });
+  assert.deepEqual(await resolve('https://example.com', 'anthropic-messages'), { chat_url: 'https://example.com/v1/messages', models_url: 'https://example.com/v1/models', has_v1: true });
+  assert.deepEqual(await resolve('https://example.com/v1/chat/completions', 'openai-chat-completions'), v1);
+  assert.deepEqual(await read('https://example.com/v1', 'openai-responses'), { chat_url: 'https://example.com/v1/responses', models_url: 'https://example.com/v1/models', has_v1: true, interface_type: 'openai-responses', source: 'manual' });
+  assert.deepEqual(await read('https://example.com/v1/responses', 'auto'), { chat_url: 'https://example.com/v1/responses', models_url: 'https://example.com/v1/models', has_v1: true, interface_type: 'openai-responses', source: 'url' });
+  assert.equal((await read('https://example.com/v1')).source, 'default');
+  assert.equal((await admin('/api/models/endpoints?api_url=https://example.com/v1&interface_type=grpc')).value.error, 'invalid_model_interface');
   // Saved models carry the same resolution, and saving a URL without /v1 is still allowed.
   const saved = await admin('/api/models', 'POST', { api_url: 'https://example.com', api_key: testPassword(), model_name: 'plain' });
   assert.equal(saved.status, 201); assert.deepEqual(saved.value.model.endpoints, await resolve('https://example.com'));
@@ -184,8 +195,9 @@ test('another model of a provider reuses a saved key of the same scope, which is
   for (const [client, body] of [[member, { repository_id: '101', key_from: shared.id }], [member, { repository_id: '101', key_from: other.id }], [admin, { repository_id: null, key_from: added.value.model.id }]])
     assert.deepEqual((await client('/api/models', 'POST', { ...body, model_name: 'model-006' })).value, { error: 'model_not_found' });
   assert.equal((await member('/api/models', 'POST', { repository_id: '202', key_from: other.id, model_name: 'model-006' })).status, 403);
-  // The URL and key come from the source only.
-  for (const extra of [{ api_key: 'sk-other' }, { api_url: fake.origin + '/v1' }])
+  // The URL, key, provider and interface come from the source only; the new model joins the source's provider.
+  assert.equal(added.value.model.provider_name, own.provider_name);
+  for (const extra of [{ api_key: 'sk-other' }, { api_url: fake.origin + '/v1' }, { provider_name: 'elsewhere' }, { interface_type: 'openai-responses' }])
     assert.deepEqual((await admin('/api/models', 'POST', { repository_id: null, key_from: shared.id, model_name: 'model-006', ...extra })).value, { error: 'invalid_model_source' });
   const sharedAdded = await admin('/api/models', 'POST', { repository_id: null, key_from: shared.id, model_name: 'model-006' });
   assert.equal(sharedAdded.status, 201); await admin(`/api/models/${sharedAdded.value.model.id}/test`, 'POST', {});
@@ -276,14 +288,17 @@ test('plain HTTP model URLs are limited to this machine on every write and befor
   const inherited = await admin('/api/models', 'POST', { repository_id: '101', key_from: source.id, model_name: 'child' });
   assert.deepEqual(inherited.value, { error: 'insecure_api_url', field: 'api_url' });
   assert.equal(rows(), before, 'no model is inserted from an insecure source URL');
-  // PATCH is the other write path: the same rule refuses a public http address and keeps the stored one.
+  // The provider PATCH is the other write path (an address belongs to the whole provider, #1332): the same rule refuses
+  // a public http address and keeps the stored one. A single model cannot change its address at all.
   const patchable = h.store.get("SELECT * FROM models WHERE repository_id='101' ORDER BY updated_at LIMIT 1");
-  const patched = await admin(`/api/models/${patchable.id}`, 'PATCH', { version: patchable.version, api_url: 'http://example.com/v1' });
+  const members = h.store.all('SELECT id,version FROM models WHERE repository_id=? AND provider_name IS ?', '101', patchable.provider_name);
+  const patched = await admin(`/api/models/${patchable.id}/provider`, 'PATCH', { versions: members, api_url: 'http://example.com/v1' });
   assert.deepEqual(patched.value, { error: 'insecure_api_url', field: 'api_url' });
   assert.equal(h.store.get('SELECT api_url FROM models WHERE id=?', patchable.id).api_url, patchable.api_url, 'the refused PATCH changes nothing');
+  assert.deepEqual((await admin(`/api/models/${patchable.id}`, 'PATCH', { version: patchable.version, api_url: 'https://example.com/v1' })).value, { error: 'unknown_field' });
   // The batch provider path is a transaction: a refused URL must insert none of its models.
   const beforeProvider = rows();
-  const provider = await admin('/api/models/provider', 'POST', { repository_id: '101', api_url: 'http://example.com/v1', api_key: key, model_names: ['a', 'b'] });
+  const provider = await admin('/api/models/provider', 'POST', { repository_id: '101', name: 'plain', api_url: 'http://example.com/v1', api_key: key, model_names: ['a', 'b'] });
   assert.deepEqual(provider.value, { error: 'insecure_api_url', field: 'api_url' });
   assert.equal(rows(), beforeProvider, 'the provider transaction inserted nothing');
   // Endpoints, listing and testing take unsaved URLs, so they get the same rule and send nothing.
@@ -311,4 +326,18 @@ test('a probe never follows a redirect away from the address the key was meant f
     assert.equal(result.ok, false, path); assert.equal(result.error, 'upstream_redirect', path); assert.equal(result.status, 302, path);
   }
   assert.equal(fake.requests.length, calls, 'the redirect target is never contacted with the key');
+});
+
+test('probes call the interface the form chose, with the header that interface uses (#1332)', async t => {
+  const h = await harness(t), { admin } = await setup(h), fake = await upstream(t), key = testPassword();
+  const sent = () => { const { path, authorization, apiKey } = fake.requests.at(-1); return { path, authorization, apiKey }; };
+  const probe = interface_type => admin('/api/models/test', 'POST', { api_url: fake.origin + '/v1', api_key: key, model_name: 'model-001', interface_type });
+  await probe('anthropic-messages'); assert.deepEqual(sent(), { path: '/v1/messages', authorization: undefined, apiKey: key });
+  await probe('openai-responses'); assert.deepEqual(sent(), { path: '/v1/responses', authorization: 'Bearer ' + key, apiKey: undefined });
+  assert.equal((await probe('auto')).value.ok, true); assert.deepEqual(sent(), { path: '/v1/chat/completions', authorization: 'Bearer ' + key, apiKey: undefined });
+  // A saved Messages provider: the model's own test uses it, and "auto" in an edit form probes what auto would choose.
+  const [model] = (await admin('/api/models/provider', 'POST', { name: 'messages', api_url: fake.origin + '/v1', api_key: key, model_names: ['model-002'], interface_type: 'anthropic-messages' })).value.models;
+  assert.deepEqual([model.protocol.interface_type, model.protocol.auth_header, model.endpoints.chat_url], ['anthropic-messages', 'x-api-key', fake.origin + '/v1/messages']);
+  await admin(`/api/models/${model.id}/test`, 'POST', {}); assert.deepEqual(sent(), { path: '/v1/messages', authorization: undefined, apiKey: key });
+  await admin(`/api/models/${model.id}/upstream`, 'POST', { interface_type: 'auto' }); assert.deepEqual(sent(), { path: '/v1/models', authorization: 'Bearer ' + key, apiKey: undefined });
 });

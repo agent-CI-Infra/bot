@@ -49,7 +49,8 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     await save.click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中', { exact: true })).toBeVisible();
-    await expect(binding.getByText('Project 101 model', { exact: true })).toBeVisible();
+    // The binding names the model's provider too (#1332): a model created alone is named after its host.
+    await expect(binding.getByText('Project 101 model · 127.0.0.1:9', { exact: true })).toBeVisible();
     await expect(binding).toContainText('先给结论，再列出处。');
     expect(h.store.get('SELECT scope,model_id,prompt,harness FROM channel_service_bindings')).toEqual({ scope: 'repositories', model_id: projectModel.id, prompt: '先给结论，再列出处。', harness: 'pi' });
     // The default backend gets no badge.

@@ -606,7 +606,7 @@ export class ChannelServiceBindings {
     const permissions = this.permissions(binding);
     const reach = binding.enabled ? this.reach(binding) : { projects: [], paused: [] };
     if (state === 'active' && !reach.projects.length) { state = 'paused'; error = 'channel_service_scope_paused'; }
-    const modelRow = binding.model_id ? this.store.get('SELECT id,model_name,api_url,api_key,repository_id FROM models WHERE id=?', binding.model_id) : undefined;
+    const modelRow = binding.model_id ? this.store.get('SELECT id,provider_name,model_name,api_url,api_key,repository_id FROM models WHERE id=?', binding.model_id) : undefined;
     // A model no longer authorized to a project in scope stops the group's answers until someone changes the model or scope.
     const gaps = binding.enabled && binding.model_id ? modelGaps(this.store, binding.model_id, scopeProjects(this.store, binding.principal_id)).map(p => p.full_name) : [];
     if (state === 'active' && gaps.length) { state = 'paused'; error = 'channel_service_model_unavailable'; }
@@ -614,7 +614,7 @@ export class ChannelServiceBindings {
     const username = (principal: string) => this.store.get('SELECT username FROM users WHERE id=?', principal)?.username ?? null;
     return { id: binding.id, chat_id: binding.chat_id, chat: { id: binding.chat_id, chat_id: chat?.chat_id ?? null, organization: chat?.owner_tenant || null, ...chatProfile(this.store, binding.chat_id) },
       model_id: binding.model_id ?? null,
-      model: modelRow ? { id: modelRow.id, model_name: modelRow.model_name, api_url: modelRow.api_url, key_configured: !!modelRow.api_key, project_id: modelRow.repository_id ?? null } : null,
+      model: modelRow ? { id: modelRow.id, provider_name: modelRow.provider_name ?? null, model_name: modelRow.model_name, api_url: modelRow.api_url, key_configured: !!modelRow.api_key, project_id: modelRow.repository_id ?? null } : null,
       prompt: String(binding.prompt ?? ''),
       harness: String(binding.harness ?? 'pi'),
       usage: this.usage(binding.chat_id),
@@ -648,7 +648,7 @@ export class ChannelServiceBindings {
         const authorized = m.repository_id !== null ? [String(m.repository_id)]
           : m.restricted ? this.store.all('SELECT repository_id FROM model_projects WHERE model_id=?', m.id).map(r => String(r.repository_id)).filter(id => configurable.has(id))
             : null;
-        return { id: m.id, model_name: m.model_name, api_url: m.api_url, key_configured: m.api_key !== null,
+        return { id: m.id, provider_name: m.provider_name ?? null, model_name: m.model_name, api_url: m.api_url, key_configured: m.api_key !== null,
           project_id: m.repository_id ?? null, all_projects: m.repository_id === null && !m.restricted, authorized_projects: authorized };
       });
     const fallbackModel = defaultSharedModel(this.store);

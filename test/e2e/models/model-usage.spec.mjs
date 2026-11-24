@@ -14,12 +14,12 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
     const host = 'http://127.0.0.1:9/v1';
-    const created = (await admin('/api/models/provider', 'POST', { repository_id: '101', api_url: host, api_key: 'sk-usage-fixture', model_names: ['deepseek-chat', 'glm-5'] })).value.models;
+    const created = (await admin('/api/models/provider', 'POST', { repository_id: '101', name: 'usage', api_url: host, api_key: 'sk-usage-fixture', model_names: ['deepseek-chat', 'glm-5'] })).value.models;
     const priced = created.find(model => model.model_name === 'deepseek-chat'), unpriced = created.find(model => model.model_name === 'glm-5');
     assert.equal((await admin('/api/models/' + priced.id, 'PATCH', { version: priced.version, pricing: { currency: 'USD', input_per_million: 1, output_per_million: 2, cache_per_million: 0.5 } })).status, 200);
     // A deployment-shared model that two projects select as their default: the usage line has to name both projects,
     // because deletion clears those project-default selections.
-    const shared = (await admin('/api/models/provider', 'POST', { repository_id: null, api_url: 'http://127.0.0.1:8/v1', api_key: testPassword(), model_names: ['shared-model'] })).value.models[0];
+    const shared = (await admin('/api/models/provider', 'POST', { repository_id: null, name: 'shared', api_url: 'http://127.0.0.1:8/v1', api_key: testPassword(), model_names: ['shared-model'] })).value.models[0];
     assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 200);
     assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { model_id: shared.id })).status, 200);
 
@@ -75,7 +75,7 @@ test('使用位置只列调用者可见的项目', async () => {
   try {
     const { admin } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
-    const shared = (await admin('/api/models/provider', 'POST', { repository_id: null, api_url: 'http://127.0.0.1:8/v1', api_key: testPassword(), model_names: ['shared-model'] })).value.models[0];
+    const shared = (await admin('/api/models/provider', 'POST', { repository_id: null, name: 'shared', api_url: 'http://127.0.0.1:8/v1', api_key: testPassword(), model_names: ['shared-model'] })).value.models[0];
     assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 200);
     assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { model_id: shared.id })).status, 200);
     const member = testPassword();

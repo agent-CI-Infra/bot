@@ -74,7 +74,7 @@ function roleModelPicker(role, state, redraw) {
   const localConfig = isRoleLocalConfigSource(role.harness_ref?.model_source);
   const external = !!backend?.externalModel;
   const defaultLabel = localConfig ? '模型由项目电脑内的配置决定' : external ? 'Agent 自带模型' : '继承项目默认模型';
-  const select = roleSelect(role.role_id + ' 模型', localConfig ? '' : (role.model_profile_ref?.model_id || ''), [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.shared ? '（共享）' : '')])], id => {
+  const select = roleSelect(role.role_id + ' 模型', localConfig ? '' : (role.model_profile_ref?.model_id || ''), [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.provider_name ? ' · ' + model.provider_name : '') + (model.shared ? '（共享）' : '')])], id => {
     markRoleDirty(state);
     role.model_profile_ref = id ? { model_id: id, api: backend?.model_api?.[0] || 'openai-chat-completions', tool_calls: true, structured_output: backend?.structured_output?.includes('tool_call') ? 'tool_call' : backend?.structured_output?.[0] || 'tool_call' } : null;
   });

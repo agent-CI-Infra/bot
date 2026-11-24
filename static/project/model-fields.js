@@ -1,16 +1,21 @@
-// Fields of an unsaved model: URL with its resolved addresses, key, name with an optional pick from the upstream list.
+// Fields of an unsaved model, saved as a provider of its own: the provider's name (blank: the server names it after the
+// host, adding -2, -3 … when taken) and interface, URL with its resolved addresses, key, name with an optional pick from
+// the upstream list.
 function modelFields(repositoryId) {
+  const provider = input('provider_name', '', { maxLength: 100, placeholder: '留空则用地址主机名，重名时自动加序号' }), protocol = interfaceSelect(), protocolHint = element('p', '', 'muted provider-protocol-hint');
   const url = input('api_url', '', { type: 'url', required: true, placeholder: 'https://example.com/v1' }), key = input('api_key', '', { type: 'password', required: true, autocomplete: 'new-password' });
   const name = input('model_name', '', { required: true, maxLength: 200 }), picker = document.createElement('select'), pick = field('从上游列表选用', picker);
   const preview = element('div', '', 'endpoint-preview'), result = probeResult(), actions = element('div', '', 'actions probe-actions');
   preview.setAttribute('aria-live', 'polite'); pick.hidden = true;
   picker.addEventListener('change', () => { if (picker.value) name.value = picker.value; });
-  // A changed address or key makes earlier upstream answers stale.
+  // A changed address, interface or key makes earlier upstream answers stale.
   const stale = () => { result.dataset.request = String(Number(result.dataset.request || 0) + 1); result.replaceChildren(); pick.hidden = true; picker.replaceChildren(); };
-  watchEndpoint(url, preview, stale);
-  key.addEventListener('input', stale);
+  const hint = value => { protocolHint.textContent = protocol.value !== 'auto' ? `使用 ${interfaceName(protocol.value)}（手动）。` : value ? `自动推断：${protocolText(value)}${value.source === 'url' ? '，地址已指明接口' : '；目录里有记录的模型按目录推断'}。` : '自动推断：填写地址后显示。'; };
+  const refresh = watchEndpoint(url, preview, stale, () => protocol.value, hint);
+  protocol.addEventListener('change', () => { stale(); hint(null); refresh(0); });
+  key.addEventListener('input', stale); hint(null);
   const missing = labels => () => { const empty = labels.filter(([el]) => !el.value.trim()).map(([, label]) => label); return empty.length ? `先填写${empty.join('、')}` : ''; };
-  const target = () => ({ repository_id: repositoryId, api_url: url.value.trim(), api_key: key.value });
+  const target = () => ({ repository_id: repositoryId, api_url: url.value.trim(), api_key: key.value, interface_type: protocol.value });
   actions.append(
     probeButton('获取模型列表', result, () => api('/api/models/upstream', 'POST', target()), value => {
       if (!value.ok) return listOutcome(value);
@@ -19,7 +24,7 @@ function modelFields(repositoryId) {
       return [...listOutcome(value).slice(0, 1), note('可以在「从上游列表选用」中选择，也可以在「模型名」里直接填写列表外的名字。')];
     }, missing([[url, '接口 URL'], [key, 'API Key']])),
     probeButton('测试模型', result, () => api('/api/models/test', 'POST', { ...target(), model_name: name.value.trim() }), testOutcome, missing([[url, '接口 URL'], [key, 'API Key'], [name, '模型名']])));
-  return [field('接口 URL', url), note(modelUrlRule), preview, field('API Key', key), field('模型名', name), pick, actions, result];
+  return [field('供应商名称', provider), field('接口 URL', url), note(modelUrlRule), field('接口协议', protocol), protocolHint, preview, field('API Key', key), field('模型名', name), pick, actions, result];
 }
 
 // #1078: this row is a live region, and a reader announces any child-node change inside it — including the same words

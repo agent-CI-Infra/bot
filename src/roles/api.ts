@@ -33,8 +33,8 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json,cliC
     // A "follow the defaults" revision stores no roles: it shows the defaults of the current version.
     return {configuration:Array.isArray(old!.roles)?old:roleConfiguration(s,repo,old)};}
    const current=roleConfiguration(s,repo),workflow=url.searchParams.get('workflow')||'development.issue';
-   const models=s.all(`SELECT m.id,m.model_name,m.api_url,m.version,m.updated_at,m.repository_id FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))) ORDER BY m.model_name,m.id`,repo,repo)
-    .map(m=>({id:m.id,name:m.model_name,host:host(m.api_url),version:m.version,profile_hash:modelProfileHash(m),shared:m.repository_id==null,connectivity:modelConnectivity(s,repo,m)}));
+   const models=s.all(`SELECT m.id,m.provider_name,m.model_name,m.api_url,m.version,m.updated_at,m.repository_id FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))) ORDER BY m.model_name,m.id`,repo,repo)
+    .map(m=>({id:m.id,name:m.model_name,provider_name:m.provider_name??null,host:host(m.api_url),version:m.version,profile_hash:modelProfileHash(m),shared:m.repository_id==null,connectivity:modelConnectivity(s,repo,m)}));
    const source=cachedRuleFiles(s,repo);
    const preview=current.roles.filter(r=>r.enabled).map(r=>{try{const {id,snapshot}=resolveRole(s,repo,r.role_id,workflow,{persist:false});return {role:r.role_id,snapshot_id:id,model:snapshot.model,harness:snapshot.harness,skills:snapshot.skills&&{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash}};}catch(error){if(error instanceof TaskError)return {role:r.role_id,error:error.code,detail:error.detail??null};throw error;}});
    // The editable sources of the current bundles, so a console edit can resave them unchanged.

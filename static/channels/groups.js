@@ -258,7 +258,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   const modelSelect = document.createElement('select'); modelSelect.name = 'binding_model'; modelSelect.setAttribute('aria-label', '助手模型');
   const modelWarning = element('p', '', 'endpoint-warning feishu-model-warning'); modelWarning.hidden = true;
   const modelHint = note('');
-  const modelCaption = m => `${m.model_name} · ${hostOf(m.api_url)}${m.project_id ? '（项目专属）' : '（共享）'}${m.key_configured ? '' : '（Key 已撤销）'}`;
+  const modelCaption = m => `${modelChoiceName(m)}${m.project_id ? '（项目专属）' : '（共享）'}${m.key_configured ? '' : '（Key 已撤销）'}`;
   const selectedScopeProjects = () => {
     if (organizationKind.checked) return data.projects.filter(p => p.organization === organization.value);
     return [...boxes].filter(([, control]) => control.checked && control.closest('label').dataset.orgHidden !== '1')
@@ -356,7 +356,7 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
   const refreshCopySources = () => {
     const others = data.bindings.filter(b => b.chat_id !== chat.value && (b.model_id || b.prompt || (b.harness && b.harness !== defaultGroupHarness)));
     copySourceSelect.replaceChildren();
-    for (const b of others) copySourceSelect.add(new Option(`${channelChatName(b.chat)}${b.model ? ' · ' + b.model.model_name : ''}`, b.chat_id));
+    for (const b of others) copySourceSelect.add(new Option(`${channelChatName(b.chat)}${b.model ? ' · ' + modelChoiceName(b.model) : ''}`, b.chat_id));
     copyRow.hidden = !others.length;
   };
   assistantPresetBar.append(
@@ -481,7 +481,7 @@ function buildGroupBindingsList(data) {
     const mainRow = element('div', '', 'feishu-row-main'), info = element('div', '', 'feishu-row-info'), actions = element('div', '', 'actions feishu-row-actions');
     const titleWrap = element('div', '', 'feishu-row-title'), groupName = element('strong', channelChatName(b.chat));
     const stateBadge = element('span', bindingStates[b.state] || b.state, bindingStateBadgeClass(b.state));
-    const modelLabel = b.model ? `${b.model.model_name}${b.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置模型';
+    const modelLabel = b.model ? `${modelChoiceName(b.model)}${b.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置模型';
     const modelBadge = element('span', modelLabel, b.model?.key_configured ? 'feishu-binding-badge' : 'feishu-binding-badge feishu-binding-badge-warning');
     titleWrap.append(groupName, stateBadge, modelBadge);
     if (b.harness && b.harness !== defaultGroupHarness) titleWrap.append(element('span', groupHarnessName(b.harness), 'feishu-binding-badge feishu-binding-badge-info'));

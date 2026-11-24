@@ -55,7 +55,7 @@ function startRequestCard(request, models, reload) {
     const form = document.createElement('form'); form.className = 'start-request-decision';
     const model = document.createElement('select'); model.name = 'model';
     model.append(new Option('部署默认的接入模型', ''));
-    for (const m of models) model.append(new Option(m.model_name + (m.onboarding_default ? '（接入默认）' : ''), m.id));
+    for (const m of models) model.append(new Option(modelChoiceName(m) + (m.onboarding_default ? '（接入默认）' : ''), m.id));
     const level = document.createElement('select'); level.name = 'level';
     for (const [value, caption] of projectCeilingOptions) level.append(new Option(caption, value, false, value === (summary.capability_ceiling || 'comment')));
     const trust = document.createElement('input'); trust.type = 'checkbox'; trust.name = 'trust';

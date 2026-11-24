@@ -6,6 +6,9 @@
 .provider-head { padding:16px 20px; gap:10px; background:var(--color-surface-alt,#f8fafc); border-color:var(--color-border,#dce3ed); }
 .provider-title { display:flex; flex-direction:column; gap:5px; }
 .provider-title strong { font-size:16px; color:var(--color-text,#17243b); }
+/* The provider's name with its interface on one line; badges in the column keep their own width. */
+.provider-name { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; min-width:0; overflow-wrap:anywhere; }
+.provider-title > .badge { align-self:flex-start; }
 .provider-title .muted { overflow-wrap:anywhere; font-size:12px; }
 .provider-count { white-space:nowrap; }
 .provider-group .history { margin:0; padding:0; }

@@ -23,7 +23,7 @@ test('a provider probe that never answers is reported as a timeout, not as an un
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
-    const group = (await admin('/api/models/provider', 'POST', { repository_id: '101', api_url: origin + '/v1', api_key: testPassword(), model_names: ['alpha'] })).value.models;
+    const group = (await admin('/api/models/provider', 'POST', { repository_id: '101', name: 'slow', api_url: origin + '/v1', api_key: testPassword(), model_names: ['alpha'] })).value.models;
     const before = (await admin('/api/models')).value.models;
     await page.goto(h.admin + '/#/projects/101/model');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');

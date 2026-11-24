@@ -153,6 +153,10 @@ test('modelProtocol resolves interface_type and auth_header from manual override
   assert.equal(modelProtocol(store,{api_url:'https://api.openai.com/v1',model_name:'gpt-5-codex'}).interface_type,'openai-responses');
   saveModelMetadata(store,'m',{interface_type:'anthropic-messages',auth_header:'bearer'});
   assert.deepEqual(modelProtocol(store,model),{interface_type:'anthropic-messages',auth_header:'bearer',source:'manual',override:{interface_type:'anthropic-messages',auth_header:'bearer'}});
+  // A manual interface decides the automatic header: the catalog's Bearer belongs to its Chat Completions entry (#1332).
+  saveModelMetadata(store,'m',{interface_type:'anthropic-messages',auth_header:null});
+  assert.deepEqual([modelProtocol(store,model).auth_header,modelProtocol(store,model,{interface_type:null}).auth_header],['x-api-key','bearer']);
+  saveModelMetadata(store,'m',{interface_type:'openai-responses'});assert.equal(modelProtocol(store,model).auth_header,'bearer');
   saveModelMetadata(store,'m',{interface_type:'auto',auth_header:null});
   assert.equal(modelProtocol(store,model).source,'catalog');
   assert.throws(()=>saveModelMetadata(store,'m',{interface_type:'unknown-wire'}),{code:'invalid_model_interface'});

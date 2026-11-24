@@ -10,17 +10,21 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   requests.push({url:req.url,key:req.headers.authorization});res.setHeader('Content-Type','application/json');
   if(req.url.endsWith('/models'))res.end(JSON.stringify({data:['alpha','beta','gamma'].map(id=>({id}))}));
   else if(req.url.endsWith('/chat/completions'))res.end(JSON.stringify({choices:[{message:{content:'ok'}}]}));
+  else if(req.url.endsWith('/responses'))res.end(JSON.stringify({output_text:'ok',status:'completed'}));
   else{res.statusCode=404;res.end('{}');}
  });upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
  const origin=`http://127.0.0.1:${upstream.address().port}`,h=await harness(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  try{
   const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const ownKey=testPassword(),sharedKey=testPassword(),rotated=testPassword();
-  const create=async(repo,url,names,key)=>(await admin('/api/models/provider','POST',{repository_id:repo,api_url:origin+url,api_key:key,model_names:names})).value.models;
-  const own=await create('101','/v1',['beta'],ownKey);await create('101','/other/v1',['delta'],testPassword());await create(null,'/v1',['alpha'],sharedKey);
+  const create=async(repo,name,url,names,key)=>(await admin('/api/models/provider','POST',{repository_id:repo,name,api_url:origin+url,api_key:key,model_names:names})).value.models;
+  const own=await create('101','own','/v1',['beta'],ownKey);await create('101','own-other','/other/v1',['delta'],testPassword());await create(null,'shared','/v1',['alpha'],sharedKey);
   await admin('/api/repositories/101/policy','PATCH',{model_id:own[0].id});
   await page.goto(h.admin+'/#/projects/101/model');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
   await openModelCatalog(page);
+  // Pickers name the provider of each model, so the same model name under two providers stays distinguishable (#1332).
+  const picker=page.getByRole('combobox',{name:'默认模型',exact:true});
+  await expect(picker.locator('option')).toContainText(['beta · own · 本项目专属','delta · own-other · 本项目专属','alpha · shared · 部署共享']);
   const ownCard=page.locator('.side-card').filter({has:page.getByRole('heading',{name:'本项目专属模型',exact:true})}),dialog=page.locator('#provider-edit');
   await expect(ownCard.locator('.provider-group')).toHaveCount(2);await expect(ownCard.getByRole('button',{name:'获取模型列表',exact:true})).toHaveCount(0);await expect(ownCard.getByRole('button',{name:/修改 URL|更换 Key|撤销 Key/})).toHaveCount(0);
   const group=ownCard.locator('.provider-group').first();await group.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
@@ -33,12 +37,22 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   // The same editor is used in global settings, with no per-model connection/list actions.
   await page.goto(h.admin+'/#/settings/models');const shared=page.locator('.side-card').filter({has:page.getByRole('heading',{name:'部署共享模型',exact:true})});await expect(shared.locator('.provider-group')).toHaveCount(1);
   await shared.getByRole('button',{name:'新增供应商',exact:true}).click();await expect(dialog.getByRole('heading',{name:'新增供应商',exact:true})).toBeVisible();await expect(dialog.getByRole('button',{name:'获取模型列表',exact:true})).toHaveCount(1);
-  await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/other/v1');await dialog.getByLabel('API Key',{exact:true}).fill(sharedKey);await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await dialog.getByRole('button',{name:'beta',exact:true}).click();await dialog.getByRole('button',{name:'gamma',exact:true}).click();
+  // The same address as the provider "shared" is allowed under another name, with its own interface (#1332). The name
+  // follows the host until typed, and Responses changes the addresses the form shows and probes.
+  const providerName=dialog.getByLabel('名称',{exact:true});await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/v1');await expect(providerName).toHaveValue(new URL(origin).host);
+  await expect(dialog.locator('.provider-protocol-hint')).toContainText('自动推断：Chat Completions（默认）');
+  await dialog.getByRole('combobox',{name:'接口协议',exact:true}).selectOption('openai-responses');await expect(dialog.locator('.provider-protocol-hint')).toHaveText('全部模型使用 Responses（手动），之后加入的模型也使用它。');
+  await dialog.getByText('查看实际请求地址',{exact:true}).click();await expect(dialog.locator('.endpoint-preview')).toContainText(origin+'/v1/responses');
+  await providerName.fill('shared');await dialog.getByLabel('API Key',{exact:true}).fill(sharedKey);await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await dialog.getByRole('button',{name:'beta',exact:true}).click();await dialog.getByRole('button',{name:'gamma',exact:true}).click();
+  expect(requests.at(-1).url).toBe('/v1/models');
   // Enter in the filter only filters: with the URL, Key and models filled in, it must not create the provider.
   const filter=dialog.getByLabel('筛选上游模型',{exact:true});await filter.fill('gam');await filter.press('Enter');
   await expect(dialog.locator('.model-chips').first().getByRole('button')).toHaveText(['gamma ✓']);await expect(shared.locator('.provider-group')).toHaveCount(1);await filter.fill('');
-  await page.setViewportSize({width:1440,height:1000});await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(shared.locator('.provider-group')).toHaveCount(2);
-  const added=shared.locator('.provider-group').filter({hasText:origin+'/other/v1'});await added.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
+  await page.setViewportSize({width:1440,height:1000});await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(dialog.getByRole('alert')).toHaveText('同一范围内已有同名供应商，请换一个名称。');
+  await providerName.fill('shared-responses');await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(shared.locator('.provider-group')).toHaveCount(2);
+  const added=shared.locator('.provider-group').filter({hasText:'shared-responses'});
+  await expect(added.locator('.provider-title')).toContainText('接口 Responses');await expect(added.locator('.model-protocol')).toHaveText(['接口 Responses（手动）','接口 Responses（手动）']);
+  await expect(shared.locator('.provider-group').filter({hasText:'shared'}).first().locator('.model-protocol')).toHaveText(['接口 Chat Completions（默认）']);await added.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
   await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/new/v1');await dialog.getByLabel('API Key（留空保持不变）',{exact:true}).fill(rotated);await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await expect(dialog.getByRole('status')).toContainText('返回 3 个模型');expect(requests.at(-1).key).toBe('Bearer '+rotated);expect(requests.at(-1).url).toBe('/new/v1/models');
   await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await page.route('**/api/models/*/provider',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"storage_unavailable"}'}));await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(dialog.getByRole('alert')).toContainText('storage_unavailable');await expect(dialog.getByLabel('接口 URL',{exact:true})).toHaveValue(origin+'/new/v1');await page.unroute('**/api/models/*/provider');

@@ -553,7 +553,7 @@ async function openActivation(row, after) {
   activationTarget = { row, after }; const form = $('activation-form'), select = form.elements.model_id;
   $('activation-title').textContent = '启动 ' + row.full_name; $('activation-error').textContent = ''; form.reset(); select.replaceChildren();
   const models = (await api('/api/models')).models.filter(m => m.repository_id === null || m.repository_id === row.id);
-  for (const m of models) select.add(new Option(`${m.model_name} · ${m.repository_id ? '本仓库专属' : '部署共享'}${m.key_configured ? '' : '（Key 已撤销）'}`, m.id));
+  for (const m of models) select.add(new Option(`${modelChoiceName(m)} · ${m.repository_id ? '本仓库专属' : '部署共享'}${m.key_configured ? '' : '（Key 已撤销）'}`, m.id));
   select.add(new Option('暂不选择（任务会等待模型配置）', ''));
   // #850: the project's capability ceiling is chosen here and changed later in 「监听与触发」; starting reviews by default.
   const ceiling = form.elements.capability_ceiling, detail = $('activation-ceiling-detail');
