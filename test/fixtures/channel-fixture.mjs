@@ -152,14 +152,13 @@ export async function boundGroup(f, projects = ['101'], chat = 'oc_group', clien
   const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', {
     scope: { kind: 'repositories', repositories: projects },
     ...(f.groupModelId !== undefined ? { model_id: f.groupModelId } : {}),
-    ...(f.groupHarness ? { harness: f.groupHarness } : {}),
     enabled: true,
     expected_revision: revision,
     ...(f.groupPermissions ? { permissions: f.groupPermissions } : {}),
   });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
-  // The scripted test driver unless the test chose a backend (#1256; scripted-roles.mjs).
-  if (!f.groupHarness) scriptedGroup(f.h.store, row.id);
+  // The scripted test driver (#1256; scripted-roles.mjs).
+  scriptedGroup(f.h.store, row.id);
   return row;
 }
 /** A project notification destination for a chat, registered for the client's user as a project's schedule panel does when that
