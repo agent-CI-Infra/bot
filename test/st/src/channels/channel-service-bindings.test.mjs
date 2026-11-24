@@ -273,6 +273,33 @@ test('an app without a member-reading scope refuses the binding with an actionab
   assert.equal(bound.status, 200, JSON.stringify(bound.value)); assert.equal(bound.value.state, 'active');
 });
 
+test('binding a group reads its Feishu name once; a failed lookup keeps the binding and a later edit fills the missing name (#1360)', async t => {
+  const f = await fixture(t), { h, chat, wire } = f, named = () => h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name;
+  const put = input => f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', input);
+  const scope = { kind: 'repositories', repositories: ['101', '102'] };
+  // The app may lack the scope to read chat details: Feishu refuses, and the binding is saved without a name.
+  wire.state.chatCode = 99991672;
+  const refused = await f.bind();
+  assert.equal(refused.status, 200, JSON.stringify(refused.value));
+  assert.deepEqual([refused.value.enabled, refused.value.state, refused.value.chat.display_name, named()], [true, 'active', '', '']);
+  assert.equal(wire.state.chatRequests.length, 1);
+  // A lookup that fails outright (the connection drops) leaves the edit saved as well.
+  wire.state.chatCode = 0; wire.state.chatGate = { then: (_resolve, reject) => reject(new Error('fixture_network_down')) };
+  const dropped = await f.setLevel('read');
+  assert.deepEqual([dropped.revision, dropped.chat.display_name, named()], [2, '', '']); assert.equal(wire.state.chatRequests.length, 2);
+  // The next edit while the group still has no name reads it, and the answer already carries it.
+  wire.state.chatGate = null; wire.state.chatName = 'DM开发群';
+  const edited = await f.setLevel('read');
+  assert.deepEqual([edited.revision, edited.chat.display_name, named()], [3, 'DM开发群', 'DM开发群']); assert.equal(wire.state.chatRequests.length, 3);
+  // A named group is not looked up again on each edit; binding it again after a disable reads its current name.
+  wire.state.chatName = 'DM开发群（新）';
+  assert.equal((await f.setLevel('read')).revision, 4); assert.equal(wire.state.chatRequests.length, 3); assert.equal(named(), 'DM开发群');
+  assert.equal((await put({ enabled: false, expected_revision: 4 })).value.state, 'disabled');
+  const rebound = await put({ scope, enabled: true, expected_revision: 5 });
+  assert.equal(rebound.status, 200, JSON.stringify(rebound.value));
+  assert.equal(rebound.value.chat.display_name, 'DM开发群（新）'); assert.equal(wire.state.chatRequests.length, 4);
+});
+
 test('other roles\' tasks follow the binding\'s items: read lists progress, write pauses through the management service, revocation refuses the next call', async t => {
   const f = await fixture(t); assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings');
@@ -666,7 +693,7 @@ test('explicit group and private requests change another author’s Issue metada
     };
     const row = await done(f, await post(f.h, f.id, issueEvent('给 #12 加 bug 标签，指派给 alice')));
     assert.equal(row.state, 'completed', row.error);
-    assert.match(system, /explicit request in this (group|Feishu private chat or console conversation)/i);
+    assert.match(system, /explicit request in this (group|conversation)/i);
     const writes = f.h.store.all("SELECT path,actor FROM github_writes WHERE state='sent' ORDER BY path")
       .filter(w => JSON.parse(w.actor).kind === kind);
     assert.deepEqual(writes.map(w => w.path), ['/issues/12/assignees', '/issues/12/labels']);

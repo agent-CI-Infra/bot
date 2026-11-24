@@ -367,13 +367,16 @@ test('a project offers chats directly as destinations and registers a chosen one
     return client('/api/management/commands', 'POST', { operation: 'notification.register', target: { project_id: '101' }, expected_revision: revision, idempotency_key: key,
       source_conversation: 'destination-test', source_message: key, arguments: { subscription: { name: 'Failures ' + key, destination_id: destination, events: ['task.failed'], projects: ['101'], aggregate_ms: 60000, timezone: 'UTC', enabled: true } } });
   };
-  assert.deepEqual((await offered(admin)).map(d => [d.id, d.type, d.chat_id]), [['chat:' + own.id, 'p2p', own.chat_id]]);
+  // Each chat comes with its name (#1360); one nobody has read yet is null, never left out.
+  assert.deepEqual((await offered(admin)).map(d => ({ ...d })), [{ id: 'chat:' + own.id, type: 'p2p', chat_id: own.chat_id, name: null }]);
+  h.store.run("UPDATE external_identities SET display_name='张小明' WHERE principal_id=? AND provider='feishu'", f.principal);
+  assert.deepEqual((await offered(admin)).map(d => [d.id, d.type, d.chat_id, d.name]), [['chat:' + own.id, 'p2p', own.chat_id, '张小明']]);
   // Saving with a chosen chat registers it once for this chat, project and registrant, and sends nothing.
   const sent = wire.sent.length, first = await save(admin, 'chat:' + own.id, 'first'), second = await save(admin, 'chat:' + own.id, 'second');
   assert.equal(first.value.state, 'succeeded', JSON.stringify(first.value));
   const id = first.value.result.subscription.spec.destination_id;
   assert.match(id, /^[a-f0-9]{48}$/); assert.equal(second.value.result.subscription.spec.destination_id, id, 'one registration per chat, project and registrant');
-  assert.deepEqual((await offered(admin)).map(d => d.id), [id], 'a registered chat is listed once, by its registration');
+  assert.deepEqual((await offered(admin)).map(d => [d.id, d.name]), [[id, '张小明']], 'a registered chat is listed once, by its registration and with its name');
   await f.service.tick(); assert.equal(wire.sent.length, sent);
   // Someone else's private chat is neither offered nor accepted, even for a member with the project.
   const member = await f.member('destination-member', { repository_ids: ['101'] }); bindFixture(h, f.id, member.id, 'ou_member');
@@ -381,9 +384,10 @@ test('a project offers chats directly as destinations and registers a chosen one
   assert.match(JSON.stringify((await save(member.client, 'chat:' + own.id, 'member')).value), /channel_destination_forbidden/);
   // A group is offered for the projects its enabled binding reaches; its registration is not tied to a speaker.
   const groupChat = await boundGroup(f, ['101']);
-  assert.ok((await offered(admin)).some(d => d.id === 'chat:' + groupChat.id && d.type === 'group'));
+  assert.ok((await offered(admin)).some(d => d.id === 'chat:' + groupChat.id && d.type === 'group' && d.name === '项目讨论群'), 'a group by the name read when it was bound');
   assert.ok(!(await offered(admin, '102')).some(d => d.id === 'chat:' + groupChat.id), 'outside the binding scope the group is not offered');
   const groupDestination = (await save(admin, 'chat:' + groupChat.id, 'group')).value.result.subscription.spec.destination_id;
+  assert.equal((await offered(admin)).find(d => d.id === groupDestination)?.name, '项目讨论群');
   const payload = h.store.secrets.open(h.store.get('SELECT payload FROM channel_outbox WHERE id=?', groupDestination).payload, 'channel-outbox:' + groupDestination);
   assert.equal(payload.event.chat_type, 'group'); assert.equal(payload.event.actor_id, ''); assert.ok(payload.protection.binding_id);
   // The separate registration endpoints are gone.

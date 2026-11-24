@@ -11,6 +11,7 @@
   - `POST /api/management/commands`：写操作必须携带闭合 Schema 参数、`expected_revision`（冲突返回 `409 management_revision_conflict`）、操作者范围唯一 `idempotency_key` 与来源会话/消息引用；保存持久化回执（`succeeded` / `failed` / `unknown`）和变更 diff，支持按命令 ID 对账恢复。
 - **无审批直执行**：授权范围内的管理命令（含 `task.create`）直接执行并记审计，不设额外的控制台二次确认卡片拦截；历史请求中的 `workflow_changes` 布尔字段平滑兼容忽略。
 - **仓库接入归一**：管理助手原生覆盖已安装未启动仓库（`pending_repositories`）的只读探索与 `start_repository` 工具（超管或受信任组织管理员直接启动并同轮配置，未受信任组织落库 `onboarding_requests` 待超管审批）。
+- **回合来源**：`ManagementAgent.context()` 按当前消息自己的 `source_message` 判断来源并写入 `message_source`：`feishu:` 前缀为 `feishu_private_chat`，`schedule:` 前缀为 `timer`，其余为网页控制台输入的 `web_console`；历史中的每一轮也带自己的 `source`。名字由渠道层的 `sourceNames` 补充：私聊对象的飞书名字为 `chat_name`，定时任务为 `timer_name` 与结果发往私聊的 `chat_name`，未知时为 `null`。Pi 回合在消息被编辑后重建上下文时走同一个 `context()`，来源随之保留。
 - **流式持久会话**：对话事件经 `GET /api/management/conversations/:id/events?stream=1` 以 NDJSON 推送，支持断线续读不重发、随时停止及首轮自动生成标题；对话上下文按 `authorization_revision` 隔离，降权后隐藏旧权限记录。
 
 ## 2. 助手配置与共享运行时能力（`src/service-roles/`）

@@ -5,12 +5,13 @@ import { login } from '../helpers/channel-console-login.mjs';
 for (const width of [1440, 390]) test(`Feishu names identify private chats and groups with enterprise context at ${width}px`, async ({ page }) => {
   const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
+    // Binding the group reads its name (#1360).
+    f.wire.state.chatName = '基础设施讨论群';
     await boundGroup(f); const mine = await privateChat(f);
     const tenant = f.h.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', '101').tenant_id;
     f.h.store.run("UPDATE channel_connectors SET app_name='研发助手',tenant_name='示例企业',owner_tenant=? WHERE id=?", tenant, f.id);
     f.h.store.run("UPDATE external_identities SET external_tenant='install-tenant' WHERE principal_id=?", f.principal);
     f.h.store.run("UPDATE channel_personal_owners SET actor_tenant='install-tenant' WHERE chat_id=?", mine.id);
-    f.wire.state.chatName = '基础设施讨论群';
     await page.setViewportSize({ width, height: 1000 }); await login(page, f, '#/conversations');
     const list = page.getByLabel('可查看的飞书会话');
     await expect(list.getByRole('link', { name: /群聊 · 基础设施讨论群/ })).toBeVisible();
@@ -48,9 +49,10 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
 test('a refused Feishu name is read once, not on every redraw, and the button still retries it', async ({ page }) => {
   const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
+    // The lookup when binding (#1360) is refused as well, so the group is bound without a name.
+    f.wire.state.chatCode = 99991672;
     await boundGroup(f);
     f.h.store.run("UPDATE channel_connectors SET app_name='研发助手',tenant_name='示例企业' WHERE id=?", f.id);
-    f.wire.state.chatCode = 99991672;
     await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '#/identity/feishu');
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding).toContainText('暂时无法读取名称。');

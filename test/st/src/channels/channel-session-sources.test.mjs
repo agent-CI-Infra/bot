@@ -29,7 +29,11 @@ for(const personal of [false,true]) {
       if(calls===1)return say(res,reply);
       if(calls===2){waiting.release();await release.wait;return say(res,'依赖旧正文的迟到回答');}
       const text=JSON.stringify(body);
-      if(personal)assert.ok(!text.includes('old-source-unique'),text);
+      if(personal){
+        assert.ok(!text.includes('old-source-unique'),text);
+        // The context rebuilt for the new attempt still says where its message came from (#1360).
+        assert.deepEqual(JSON.parse(body.messages[1].content).message_source,{kind:'feishu_private_chat',chat_name:null});
+      }
       else {
         const prompt=JSON.parse(body.messages[1].content);
         const recent=prompt.context.recent_messages;

@@ -29,6 +29,7 @@ import { cardText, markdownPosts } from './format.js';
 import { applyInteractiveCardAction, ChannelInteractiveCards, FeishuCardTurn, renderFeishuCard, type StagedFeishuCard } from './cards.js';
 import { asksForHelp, assistantMessage, ChannelTurnMessages } from './turn-messages.js';
 import { ChannelMembers } from './members.js';
+import { chatProfile } from './profiles.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
 const privateMessageText = (content: string) => content.length > 14000 ? content.slice(0, 14000)
@@ -156,6 +157,18 @@ export class ChannelService {
       return {...context,history,source_updates:this.ledger.sourceUpdates(chat.id),write_receipts:{
         management:store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',conversation,String(context.source_message)),
         github:store.hasTable('github_writes')?store.all('SELECT key,method,path,state,status,html_url FROM github_writes WHERE scope=?',`management:${conversation}:${context.source_message}`):[]}};
+    };
+    // The names behind a message's source (#1360): the Feishu name of the person in the private chat and, for a timer, its
+    // name and the private chat its result goes to. A name nobody has read yet is null; the source kind holds without it.
+    const chatName=(id:unknown)=>(id?String(chatProfile(store,String(id)).display_name??''):'')||null;
+    management.sourceNames=(conversation,source)=>{
+      if(source.startsWith('schedule:')){
+        const timer=store.get("SELECT s.name,s.chat_id FROM channel_schedule_runs r JOIN channel_schedules s ON s.id=r.schedule_id WHERE r.id=? AND s.kind='personal'",source.slice(9));
+        return {timer_name:timer?.name??null,chat_name:chatName(timer?.chat_id)};
+      }
+      const row=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',source.replace(/^feishu:/,''),conversation);
+      const event=row?this.turnMessages.event(row):undefined;
+      return {chat_name:chatName(event&&store.get('SELECT id FROM channel_chats WHERE connector_id=? AND chat_id=?',event.connector_id,event.chat_id)?.id)};
     };
     management.mediaTurn=(actor,conversation,input,computers,guard,imageInput)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
