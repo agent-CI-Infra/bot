@@ -4,7 +4,7 @@ import { TaskError } from '../agent/common.js';
 import { captureTaskConfiguration, taskPermissions } from '../tasks/configuration.js';
 import { TaskRecords } from '../tasks/service.js';
 import { enqueue, enqueueRefusal } from '../review/queue.js';
-import { refreshBotPrWakeFacts } from '../review/bot-pr-wake.js';
+import { recordBotPrDispatchOutcome, refreshBotPrWakeFacts } from '../review/bot-pr-wake.js';
 import { continueFinishedReview } from '../review/continuation.js';
 import { enqueueEventTask } from '../tasks/event-adapters.js';
 import { covers, projectCeiling, type Ceiling } from '../projects/ceiling.js';
@@ -1158,7 +1158,8 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
       const headMove = task.kind === 'task.request' && input.target?.type === 'pr' && pushedHead && pushedHead !== task.head_sha
         ? { move_to_sha: pushedHead, target: { ...input.target, ref: pushedHead } }
         : {};
-      const conflictBase = merge.data?.wake_type === 'pull_request.conflicted' && typeof merge.data?.base_sha === 'string' && /^[a-f0-9]{40}$/.test(merge.data.base_sha)
+      const conflictBase = (merge.data?.wake_type === 'pull_request.conflicted' || (merge.data?.wake_type === 'pull_request.patrol' && merge.data?.is_conflicted === true))
+        && typeof merge.data?.base_sha === 'string' && /^[a-f0-9]{40}$/.test(merge.data.base_sha)
         ? { conflict_base_sha: merge.data.base_sha, ...(typeof merge.data.base_ref === 'string' ? { conflict_base_ref: merge.data.base_ref } : {}) }
         : {};
       const wakeEvents = merge.data?.wake_type
@@ -1181,6 +1182,11 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
   if (isIssueDev && task.status === 'waiting_permission' && task.error_code === 'development_not_approved' && event.type === 'issue.labeled' && facts.development?.label
     && store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL WHERE id=? AND status='waiting_permission'", taskId).changes) {
     log(store, taskId, { type: 'resumed', reason: 'development_label_added', event_id: event.id, detail: `开发标签重新加上（${String(facts.label ?? facts.development.label)}），Manager 续接，开发继续。` });
+  }
+  if (event.type === 'pull_request.patrol'
+    && ['retry_wait', 'waiting_environment', 'waiting_configuration', 'waiting_permission'].includes(String(task.status))
+    && store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL,updated_at=? WHERE id=? AND status IN ('retry_wait','waiting_environment','waiting_configuration','waiting_permission')", new Date().toISOString(), taskId).changes) {
+    log(store, taskId, { type: 'resumed', reason: 'bot_pr_patrol', event_id: event.id, detail: `内部巡检确认环境或状态已变化，Manager 续接并恢复排队：${decision.reason}` });
   }
 }
 
@@ -1283,6 +1289,7 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
         current.id,
       );
       appendDispatchThread(store, current, { ...checked, rule: decision.rule ?? checked.rule ?? null }, created, continued, now);
+      recordBotPrDispatchOutcome(store, current, { ...checked, rule: decision.rule ?? checked.rule ?? null }, created, continued, now);
       return { created, continued };
     });
   } catch (error) {

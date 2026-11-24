@@ -59,3 +59,19 @@ test('new development goes to the team with an independent review; only trivial 
   assert.match(flow, /basis -->\|是\| team\["团队开发：dev、<br>独立 reviewer，<br>行为改动加 test<br>（小改只派 dev）"\]/);
   assert.match(flow, /talk -->\|派 dev 修订或重跑\| pr/);
 });
+
+test('built-in Manager prompt defines internal pull_request.patrol boundaries and re-evaluation on environment changes (#1316)', () => {
+  const flat = text.replace(/\s+/g, ' ');
+  for (const phrase of [
+    'pull_request.patrol',
+    'never trigger external chat notifications',
+    'facts.changes_since_last_check',
+    'facts.environment_changes',
+    'workflow_changes_not_confirmed',
+    'unresolved `CHANGES_REQUESTED`',
+    '`ignore_event` silently without commenting',
+    'post one concise comment on the PR explaining the background and recommending closure only if you have not already explained it',
+  ]) {
+    assert.ok(flat.includes(phrase), `missing patrol contract phrase: ${phrase}`);
+  }
+});

@@ -19,12 +19,14 @@ flowchart TD
 ```
 
 - **确定性线程键**：
-  - 根 Issue 及其关联的 bot PR 共用 `<repo>:issue:<issueNumber>`（使 Issue 检视、开发、bot PR 检查失败 `pull_request.checks_failed` 与合并冲突 `pull_request.conflicted` 唤醒在同一上下文中闭环决策）；
+  - 根 Issue 及其关联的 bot PR 共用 `<repo>:issue:<issueNumber>`（使 Issue 检视、开发、bot PR 检查失败 `pull_request.checks_failed`、合并冲突 `pull_request.conflicted` 与内部巡检 `pull_request.patrol` 在同一上下文中闭环决策）；
   - 独立 PR 使用 `<repo>:pr:<prNumber>`；
   - Actions 失败、发版本与定时检查归入各自确定性线程。
 - **串行决策与常设规则**：同一 `thread_key` 严格串行处理并维护滚动摘要；例行事件优先命中无模型开销的 `standing_rules`（永不自动启动开发），需要判断的事件交由 Manager 使用内置六大场景或项目自定义提示词处理。
 - **开发依据硬核验**：创建开发任务时，控制面在 `create_task` 入口强制校验 `basis`（`label` / `maintainer_request` / `project_rule`）并持久化记录，同时提供结构化认领事实（指派人、关联 PR、近期评论）供 Manager 判断，不依赖脆弱正则。
-- **Bot PR 防自循环与后台巡检**：通过 `bot_pull_requests` 归属表与真实发布记录/actor 身份识别 bot 自有 PR（不轻信公开可伪造注释），过滤自身打开与推送事件；`BotPrWakeScanner` 结合 Webhook 检测检查失败（按 `(pr, head_sha, run_or_suite_id, attempt)` 聚合）与合并冲突（按 `(pr, head_sha, base_sha)` 单次去重），运行中收到的晚到事件在任务收尾或失败时自动回交 Manager。
+- **Bot PR 防自循环、内部定期巡检与冲突防空烧**：通过 `bot_pull_requests` 归属表与真实发布记录/actor 身份识别 bot 自有 PR（不轻信公开可伪造注释），过滤自身打开与推送事件；`BotPrWakeScanner` 结合 Webhook 检测检查失败（按 `(pr, head_sha, run_or_suite_id, attempt)` 聚合）与合并冲突（按 `(pr, head_sha, base_sha)` 单次去重），运行中收到的晚到事件在任务收尾或失败时自动回交 Manager。同时，`bot_pr_states` 持久化每个未合入 open bot PR 的巡检元数据（`last_patrol_at`、`last_patrol_event_at`、`patrol_env_fingerprint`、`patrol_env_summary`、`patrol_head_sha`、`patrol_base_sha`、`patrol_status` 及冲突抑制字段 `conflict_suppressed_*`）：
+  - **纯内部低频巡检（`pull_request.patrol`）**：复用扫描器的只读 GitHub 查询与限流保护，按配置周期（默认 `BOT_PR_PATROL_INTERVAL_MS` 6 小时、同 PR 冷却 `BOT_PR_PATROL_COOLDOWN_MS` 24 小时；环境/权限/能力指纹变化可绕过冷却及时复核）检查无活跃任务且无待决分派事件的非草稿 open bot PR；仅在命中明确变化信号（`environment_or_policy_changed`、`base_moved` + `checks_failed` / `conflicted`、`unresolved_changes_requested`、`stalled_task`）时向对象 Manager 线程投递 `source='control_plane'` 的 `pull_request.patrol` 事件（并附带 `changes_since_last_check` 与 `environment_changes`），对纯绿灯待人工合入 PR 仅刷新本地时间戳，零模型调用、零 GitHub 评论。全程严格停留在控制面内部，不写入 `schedule_events` / `notification_outbox` 且绝不触发飞书或任何外部通知渠道。
+  - **抑制 `dirty` 冲突高频空烧**：当 Manager 对某 bot PR 的 `pull_request.conflicted`（或带冲突标记的 `pull_request.patrol`）在当前 `head_sha` 下明确 `ignore` 后，控制面在 `applyDecision` 内原子记录 `(head_sha, env_fingerprint, suppressed_at)` 抑制标记；在 `head_sha` 未变、环境/权限指纹未变且无新人类评论/评审前，60 秒扫描与主干推进 Webhook 不再随 `main` 每次前进重复投递 `pull_request.conflicted`，改为等待人类信号、环境变化或长冷却周期后经低频内部巡检复核；同时兼容 `github_app` 与 `bot_account` 双账号形态识别自身评论避免误解抑。
 
 ## 2. 通用任务引擎、队列与恢复（`src/tasks/`）
 
