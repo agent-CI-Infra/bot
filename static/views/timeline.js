@@ -126,40 +126,58 @@ function summarizeLogStep(log, index) {
   let value; try { value = JSON.parse(log.content); } catch { value = { type: 'raw' }; }
   const args = value.arguments || {}, result = value.result || {};
   const timeText = log.created_at ? timestamp(log.created_at).slice(11, 19) : '';
-  let caption = '', badgeNode = null, bodyNodes = [], defaultOpen = false;
+  let caption = '', badgeNode = null, bodyNodes = [], defaultOpen = false, io = null;
 
   if (value.type === 'tool' && value.name === 'run_command' || value.type === 'command') {
     const cmd = value.type === 'command' ? value : { command: args.command, ...result };
     caption = `执行命令 ${clipText(cmd.command || '', 72)}`;
     badgeNode = exitBadge(cmd);
-    bodyNodes.push(element('pre', '$ ' + (cmd.command || ''), 'command'));
-    if (cmd.output) bodyNodes.push(element('pre', String(cmd.output), 'output'));
+    io = {
+      input: { nodes: [element('pre', '$ ' + (cmd.command || ''), 'command')] },
+      output: { nodes: cmd.output ? [element('pre', String(cmd.output), 'output')] : [] },
+    };
   } else if (value.type === 'tool' && value.name === 'read_file') {
     const bytes = result.error || ((result.bytes ?? new TextEncoder().encode(result.content || '').length) + ' 字节');
     caption = `读取文件 ${args.path || ''}`;
     badgeNode = element('span', String(bytes), 'step-fold-stat');
-    if (result.content) bodyNodes.push(element('pre', String(result.content), 'output'));
-    else bodyNodes.push(element('p', `${args.path || ''} · ${bytes}`, 'muted'));
+    io = {
+      input: { nodes: args.path ? [element('pre', args.path, 'command')] : [] },
+      output: { nodes: result.content ? [element('pre', String(result.content), 'output')] : [] },
+    };
   } else if (value.type === 'tool' && value.name === 'write_file') {
     const bytes = (args.bytes ?? new TextEncoder().encode(args.content || '').length) + ' 字节';
     caption = `写入文件 ${args.path || ''}`;
     badgeNode = element('span', bytes, 'step-fold-stat');
-    bodyNodes.push(element('p', `写入路径：${args.path || '未知'}（${bytes}）`, 'muted'));
+    io = {
+      input: { nodes: [element('p', `写入路径：${args.path || '未知'}（${bytes}）`, 'muted')] },
+      output: { nodes: [] },
+    };
   } else if (value.type === 'tool_start') {
     const act = stepToolLabels[value.name] || value.name;
     caption = `${act} ${clipText(value.path || value.command || '', 64)}`.trim();
-    bodyNodes.push(element('p', `开始调用工具 ${value.name}：${value.path || value.command || value.name}`, 'muted'));
+    io = {
+      input: { nodes: [element('p', `开始调用工具 ${value.name}：${value.path || value.command || value.name}`, 'muted')] },
+      output: { nodes: [] },
+    };
   } else if (value.type === 'model') {
     const snippet = value.content ? clipText(String(value.content).replace(/\s+/g, ' ').trim(), 68) : '';
     const callCount = Array.isArray(value.tool_calls) ? value.tool_calls.length : 0;
     caption = snippet ? `模型输出：${snippet}` : `模型推理（发起 ${callCount} 项工具调用）`;
     if (callCount) badgeNode = element('span', `${callCount} 项调用`, 'step-fold-stat');
-    if (value.content) bodyNodes.push(element('p', value.content, 'say'));
+    io = { input: { nodes: [], missing: true }, output: { nodes: [] } };
+    if (value.content) io.output.nodes.push(element('p', value.content, 'say'));
     if (callCount) {
       const calls = element('div', '', 'calls');
       for (const call of value.tool_calls) calls.append(element('span', toolCaption(call), 'call'));
-      bodyNodes.push(calls);
+      io.output.nodes.push(calls);
     }
+  } else if (value.type === 'tool' && (args.command || args.path)) {
+    // A tool line without a dedicated renderer still separates what was passed from what came back.
+    caption = `${stepToolLabels[value.name] || ('工具 ' + value.name)}`;
+    io = {
+      input: { nodes: [element('pre', JSON.stringify(args, null, 2), 'output')] },
+      output: { nodes: Object.keys(result).length ? [element('pre', JSON.stringify(result, null, 2), 'output')] : [] },
+    };
   } else if (value.type === 'fault') {
     defaultOpen = true;
     const cause = log.cause;
@@ -198,11 +216,69 @@ function summarizeLogStep(log, index) {
     bodyNodes.push(element('pre', typeof log.content === 'string' ? log.content : JSON.stringify(log.content, null, 2), 'output'));
   }
 
-  return { key: `log:${log.id}`, index, caption, timeText, badgeNode, bodyNodes, defaultOpen, sourceRef: null, bodyOmitted: false };
+  return { key: `log:${log.id}`, index, caption, timeText, badgeNode, bodyNodes, io, defaultOpen, sourceRef: null, bodyOmitted: false, at: log.created_at || null };
+}
+
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map(part => typeof part === 'string' ? part : part && typeof part === 'object' ? (part.text ?? part.content ?? '') : '').filter(Boolean).join('\n');
+  if (content && typeof content === 'object') return typeof content.text === 'string' ? content.text : JSON.stringify(content, null, 2);
+  return '';
+}
+
+// #1207: the recorded request body is the prompt that was actually sent. Render its messages readably; unknown
+// shapes stay raw JSON so nothing is invented.
+function requestPromptText(data) {
+  const lines = [];
+  if (data && data.system !== undefined) lines.push('系统提示\n' + contentText(data.system));
+  const messages = Array.isArray(data && data.messages) ? data.messages : Array.isArray(data && data.input) ? data.input : [];
+  for (const message of messages) {
+    const text = contentText(message && (message.content ?? message.text));
+    if (!text.trim()) continue;
+    const role = message && message.role;
+    const label = role === 'user' ? '用户消息' : role === 'assistant' ? '模型回复' : role === 'system' ? '系统提示' : (role || '消息');
+    lines.push(label + '\n' + text);
+  }
+  return lines.length ? lines.join('\n\n') : JSON.stringify(data, null, 2);
+}
+
+function responseText(data) {
+  const completion = data && Array.isArray(data.choices) ? data.choices[0] : null;
+  const choice = completion && (completion.message ? completion.message.content : completion.text);
+  if (typeof choice === 'string' && choice) return choice;
+  if (data && Array.isArray(data.content)) {
+    const text = data.content.filter(part => part && part.type === 'text').map(part => part.text).filter(Boolean).join('');
+    if (text) return text;
+  }
+  if (data && Array.isArray(data.output)) {
+    const text = data.output.map(item => Array.isArray(item && item.content) ? item.content.map(part => part && part.text || '').join('') : '').join('\n');
+    if (text.trim()) return text;
+  }
+  return JSON.stringify(data, null, 2);
+}
+
+function stepSourceText(ref, value) {
+  // Task-history sources arrive as a snapshot envelope; model request bodies may arrive raw.
+  let data = value;
+  if (data && typeof data === 'object' && data.schema_version === 1 && 'data' in data) data = data.data;
+  if (typeof ref === 'string' && ref.startsWith('model_requests:')) return ref.endsWith(':request') ? requestPromptText(data) : responseText(data);
+  const payload = data && typeof data === 'object' && data.data && typeof data.data === 'object' ? data.data : data;
+  if (payload && typeof payload.text === 'string' && payload.text) return payload.text;
+  if (payload && typeof payload.content === 'string' && payload.content) return payload.content;
+  if (payload && typeof payload.output === 'string' && payload.output) return payload.output;
+  if (payload && payload.observation && payload.observation.data && typeof payload.observation.data.content === 'string') return payload.observation.data.content;
+  return JSON.stringify(data, null, 2);
+}
+
+function jsonPreview(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 }
 
 function summarizeHistoryStep(item, index) {
-  const label = stepToolLabels[item.tool] || (item.kind === 'model' ? '模型消息' : item.tool || '执行步骤');
+  const modelRequest = item.kind === 'model' && !!item.input_source;
+  const label = modelRequest
+    ? (item.model ? `模型请求 · ${item.model}` : '模型请求')
+    : stepToolLabels[item.tool] || (item.kind === 'model' ? '模型消息' : item.tool || '执行步骤');
   const args = item.arguments && typeof item.arguments === 'object' ? item.arguments : null;
   let argHint = '';
   if (args) {
@@ -222,12 +298,38 @@ function summarizeHistoryStep(item, index) {
   const badgeNode = badge(statusText, tone);
 
   const bodyNodes = [];
-  if (args && Object.keys(args).length) {
-    bodyNodes.push(element('p', '调用参数', 'muted'), element('pre', JSON.stringify(args, null, 2), 'output'));
-  }
-  if (item.output !== null && item.output !== undefined) {
-    const outText = typeof item.output === 'string' ? item.output : JSON.stringify(item.output, null, 2);
-    bodyNodes.push(element('p', '返回结果', 'muted'), element('pre', outText, 'output'));
+  let io = null;
+  if (modelRequest) {
+    // The prompt and the answer are read from their own sources on expand; the step itself keeps no copy.
+    io = {
+      input: { nodes: [], source: item.input_source, omitted: true },
+      output: { nodes: [], source: item.output_source || null, omitted: !!item.output_source },
+    };
+  } else if (item.kind === 'model' && !item.body_omitted) {
+    io = {
+      input: { nodes: [], missing: true },
+      output: {
+        nodes: typeof item.output === 'string' ? [element('pre', item.output, 'output')] : [],
+        source: item.output_source || null,
+        truncated: !!item.output_truncated,
+      },
+    };
+  } else if (item.kind === 'tool' && !item.body_omitted) {
+    io = {
+      input: args && Object.keys(args).length
+        ? { nodes: [element('pre', JSON.stringify(args, null, 2), 'output')], source: item.input_source || null }
+        : { nodes: [], missing: true },
+      output: item.output !== null && item.output !== undefined
+        ? { nodes: [element('pre', jsonPreview(item.output), 'output')], source: item.output_source || null, truncated: !!item.output_truncated }
+        : { nodes: [], source: item.output_source || null },
+    };
+  } else {
+    if (args && Object.keys(args).length) {
+      bodyNodes.push(element('p', '调用参数', 'muted'), element('pre', JSON.stringify(args, null, 2), 'output'));
+    }
+    if (item.output !== null && item.output !== undefined) {
+      bodyNodes.push(element('p', '返回结果', 'muted'), element('pre', jsonPreview(item.output), 'output'));
+    }
   }
   return {
     key: item.id,
@@ -236,8 +338,10 @@ function summarizeHistoryStep(item, index) {
     timeText,
     badgeNode,
     bodyNodes,
+    io,
     defaultOpen: false,
     sourceRef: item.source_ref || null,
+    at: item.created_at || null,
     bodyOmitted: !!item.body_omitted,
   };
 }
@@ -257,7 +361,27 @@ function createInnerStepFold(task, spec, foldState) {
   summary.append(left, right);
 
   const body = element('div', '', 'step-fold-body');
-  if (spec.bodyNodes.length) {
+  const lazy = [];
+  if (spec.io) {
+    const ioBox = element('div', '', 'step-io');
+    for (const [title, section] of [['这一步的输入', spec.io.input], ['这一步的输出', spec.io.output]]) {
+      if (!section) continue;
+      const block = element('section', '', 'step-io-block');
+      block.append(element('h4', title, 'step-io-title'));
+      const slot = element('div', '', 'step-io-body');
+      if (section.missing) slot.append(element('p', '这一步没有留下输入记录。', 'muted step-io-missing'));
+      else if (section.nodes.length) slot.append(...section.nodes);
+      if (section.source && (section.omitted || section.truncated)) {
+        slot.append(element('p', section.truncated ? '预览已截断，展开后读取留下的全文。' : '展开后按当前授权读取全文…', 'muted step-io-note'));
+        lazy.push({ section, slot });
+      } else if (!slot.childElementCount) {
+        slot.append(element('p', '没有记录。', 'muted'));
+      }
+      block.append(slot);
+      ioBox.append(block);
+    }
+    body.append(ioBox);
+  } else if (spec.bodyNodes.length) {
     body.append(...spec.bodyNodes);
   } else if (spec.bodyOmitted && spec.sourceRef) {
     body.append(element('p', '展开后按当前授权读取原始记录…', 'muted'));
@@ -265,19 +389,30 @@ function createInnerStepFold(task, spec, foldState) {
     body.append(element('p', '该步骤无额外正文输出。', 'muted'));
   }
 
+  const cache = new Map();
+  const readSource = ref => {
+    if (!cache.has(ref)) {
+      cache.set(ref, api(`/api/tasks/${encodeURIComponent(task.id)}/source?ref=${encodeURIComponent(ref)}`)
+        .then(res => stepSourceText(ref, res?.source ?? res)));
+    }
+    return cache.get(ref);
+  };
   let loadedSource = false;
   details.addEventListener('toggle', () => {
     foldState.inner.set(spec.key, details.open);
-    if (details.open && spec.bodyOmitted && spec.sourceRef && !loadedSource) {
+    if (!details.open) return;
+    for (const { section, slot } of lazy) {
+      if (section.loaded) continue;
+      section.loaded = true;
+      readSource(section.source)
+        .then(text => { slot.replaceChildren(element('p', '以上是留下的全文。', 'muted step-io-note'), element('pre', text, 'output')); })
+        .catch(err => { slot.replaceChildren(element('p', '无法读取全文：' + readErrorText(err), 'muted')); });
+    }
+    if (spec.bodyOmitted && spec.sourceRef && !spec.io && !loadedSource) {
       loadedSource = true;
-      api(`/api/tasks/${encodeURIComponent(task.id)}/source?ref=${encodeURIComponent(spec.sourceRef)}`)
-        .then(res => {
-          const data = res?.source?.data ?? res?.source ?? res;
-          body.replaceChildren(element('pre', JSON.stringify(data, null, 2), 'output'));
-        })
-        .catch(err => {
-          body.replaceChildren(element('p', '无法读取步骤原始正文：' + readErrorText(err), 'muted'));
-        });
+      readSource(spec.sourceRef)
+        .then(text => { body.replaceChildren(element('pre', text, 'output')); })
+        .catch(err => { body.replaceChildren(element('p', '无法读取步骤原始正文：' + readErrorText(err), 'muted')); });
     }
   });
 
@@ -326,10 +461,24 @@ function renderRoleRunTimeline(task, logs, roleRuns, container) {
 
     const stepSpecs = [];
     if (hasRichLogs) {
-      filteredLogs.forEach((l, idx) => stepSpecs.push(summarizeLogStep(l, idx + 1)));
+      // #1207: a recorded model_request pair is the authoritative input+output step for a request. When the run
+      // has them, the log-only model line would repeat its output with no input, so it is replaced by that step.
+      const requestSteps = historySteps.filter(s => s.kind === 'model' && s.input_source);
+      filteredLogs.forEach(l => {
+        if (requestSteps.length) {
+          let value; try { value = JSON.parse(l.content); } catch {}
+          if (value?.type === 'model') return;
+        }
+        stepSpecs.push(summarizeLogStep(l, stepSpecs.length + 1));
+      });
+      for (const hs of requestSteps) stepSpecs.push(summarizeHistoryStep(hs, stepSpecs.length + 1));
       // Append final role_result / acceptance step from history if not already in logs
       for (const hs of historySteps.filter(s => ['role_result', 'nomination', 'acceptance'].includes(s.kind))) {
         stepSpecs.push(summarizeHistoryStep(hs, stepSpecs.length + 1));
+      }
+      if (requestSteps.length) {
+        stepSpecs.sort((a, b) => (Date.parse(a.at || '') || 0) - (Date.parse(b.at || '') || 0));
+        stepSpecs.forEach((spec, idx) => { spec.index = idx + 1; });
       }
     } else {
       // Combine lifecycle/fault logs (if any) + normalized history tool/protocol steps
@@ -395,7 +544,7 @@ function renderRoleRunTimeline(task, logs, roleRuns, container) {
       if (stepSpecs.length) {
         const stepToolbar = element('div', '', 'role-step-toolbar');
         stepToolbar.append(
-          element('span', `执行步骤（共 ${stepSpecs.length} 步，点击单步展开输出详情）`, 'muted'),
+          element('span', `执行步骤（共 ${stepSpecs.length} 步，点击单步展开输入与输出）`, 'muted'),
           button('展开本棒步骤', () => {
             for (const el of body.querySelectorAll('details.step-fold')) {
               el.open = true;
