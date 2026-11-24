@@ -12,6 +12,7 @@ import {waitForCoordinatedTasks,coordinationContext,resumeCoordinatedTasks,coord
 import {runTeam} from '../../../../dist/roles/team.js';
 import {TaskEngine} from '../../../../dist/agent/engine.js';
 import {Redactor} from '../../../../dist/agent/common.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 const call=(name,a,id='c')=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(a)}}]});
 const verdict={outcome:'pass',reason:'Fixed candidate independently verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
@@ -20,7 +21,7 @@ async function setup(t,handler){
  const dir=mkdtempSync(join(tmpdir(),'coordination-')),key=randomBytes(32),path=join(dir,'db');let s=new Store(path,key);
  s.run("INSERT INTO accounts VALUES('acc','acc','github_app','1','{}','now')");for(const repo of ['r','other'])s.run('INSERT INTO repositories VALUES(?,?,?,?)',repo,'fixture/'+repo,'o','acc');
  for(const [id,repo] of [['a','r'],['b','r'],['independent','r'],['foreign','other']]){s.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input) VALUES(?,?,'task.request','running','model',?,'{}')",id,repo,id);new TaskRecords(s).contract(id,{goal:'Preserve '+id,scope:['planned.ts'],criteria:['No data loss'],endpoint:'artifact'});}
- s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'native'}}));
+ s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'scripted'}}));
  const server=createServer(async(req,res)=>{try{let raw='';for await(const c of req)raw+=c;const message=await handler(JSON.parse(raw));res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));}catch(e){console.error(e.stack);res.writeHead(500);res.end(JSON.stringify({error:String(e)}));}});server.listen(0,'127.0.0.1');await once(server,'listening');
  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','r','http://127.0.0.1:'+server.address().port+'/v1','fixture',s.secrets.seal({value:'test'},'model:m'),'now');s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('r','m',1,1)");
  t.after(()=>{s.close();server.closeAllConnections();server.close();rmSync(dir,{recursive:true,force:true});});

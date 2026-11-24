@@ -19,6 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { beginModelRequest,finishModelRequest,externalModelRecorder } from '../../../../dist/metrics/accounting.js';
 import { instanceUsage, activeCliVersions } from '../../../../dist/roles/role-run.js';
 import { interruptRuns } from '../../../../dist/tasks/trace.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 async function fixture(t,harness,budget,stall=false){
   const store=new Store(':memory:',Buffer.alloc(32,8)),root=mkdtempSync(join(tmpdir(),'role-conversation-')),manager=new LocalManager('101',root),requests=[];
@@ -48,7 +49,7 @@ async function fixture(t,harness,budget,stall=false){
   const source={id:'one-logical-conversation',source_message:'source-1',caller,request:'Read the local context',guard(){},fence:()=>current,context:()=>({fixture_mode:'conversation',messages:[{content:'Local context'}]}),query:()=>({messages:[]}),summary:()=>({state:'none'})};
   return {store,requests,started,releaseStall,conversations,source,respond:handler=>{response=handler;},next:()=>({...source,source_message:'source-2',caller:roleTaskCaller(store,'101','reviewer',{actor,conversation_id:source.id,source_message:'source-2',guard(){}})}),change:()=>{current='changed';}};
 }
-for(const harness of ['native','process','pi'])test(`generic conversation uses the configured ${harness} harness without a business task or fake writer`,async t=>{
+for(const harness of ['process','pi'])test(`generic conversation uses the configured ${harness} harness without a business task or fake writer`,async t=>{
   const f=await fixture(t,harness),result=await f.conversations.run(f.source);
   assert.equal(result.message,'A source-bound response');assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
   const turn=f.store.get('SELECT * FROM role_conversation_turns');assert.equal(turn.role_id,'reviewer');assert.equal(turn.state,'completed');
@@ -99,7 +100,7 @@ test('legacy task role instances and assignment foreign keys survive the nullabl
   t.after(()=>{store.close();rmSync(root,{recursive:true,force:true});});
   store.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");store.run("INSERT INTO repositories VALUES('101','fixture/upgrade','10','a')");
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('old-task','101','task.request','paused','Old task','{}')");
-  store.run("INSERT INTO role_instances(id,task_id,role,definition,harness,session,updated_at) VALUES('old-role','old-task','reviewer','{}','native','[\"old session\"]','now')");
+  store.run("INSERT INTO role_instances(id,task_id,role,definition,harness,session,updated_at) VALUES('old-role','old-task','reviewer','{}','process','[\"old session\"]','now')");
   store.run("INSERT INTO role_assignments(id,task_id,instance_id,revision,status,input_ref) VALUES('old-assignment','old-task','old-role',1,'completed','original-source')");store.close();
   const db=new DatabaseSync(file),sql=db.prepare("SELECT sql FROM sqlite_schema WHERE name='role_instances'").get().sql,
     columns=db.prepare('PRAGMA table_info(role_instances)').all().map(r=>'"'+r.name+'"').join(',');
@@ -113,7 +114,7 @@ test('legacy task role instances and assignment foreign keys survive the nullabl
 });
 test('conversation limits honor configured values beyond the default reply limit and preserve default output',async t=>{
   for(const budget of [undefined,{id:'bounded',max_turns:200,max_output_tokens:32768}]){
-    const f=await fixture(t,'native',budget);
+    const f=await fixture(t,'scripted',budget);
     f.source.compact={input:{messages:[]},commit(){}};
     let replies=0;
     f.respond(body=>{
@@ -127,22 +128,22 @@ test('conversation limits honor configured values beyond the default reply limit
 });
 
 test('a metered one-request budget admits its final response and does not admit another billable request',async t=>{
-  const f=await fixture(t,'native',{id:'metered',max_model_requests:1});
+  const f=await fixture(t,'scripted',{id:'metered',max_model_requests:1});
   assert.equal((await f.conversations.run(f.source)).message,'A source-bound response');
   const source=f.next();
   await assert.rejects(f.conversations.run(source),{code:'role_budget_exhausted'});assert.equal(f.requests.length,1);
 });
 test('a legacy monetary cap is ignored even when conversation pricing is unknown',async t=>{
-  const f=await fixture(t,'native',{id:'metered',max_cost:{currency:'USD',amount:1}});
+  const f=await fixture(t,'scripted',{id:'metered',max_cost:{currency:'USD',amount:1}});
   await f.conversations.run(f.source);assert.equal(f.requests.length,1);
 });
 test('cumulative wall budget survives a new conversational turn',async t=>{
-  const f=await fixture(t,'native',{id:'metered',max_wall_seconds:60});await f.conversations.run(f.source);
+  const f=await fixture(t,'scripted',{id:'metered',max_wall_seconds:60});await f.conversations.run(f.source);
   f.store.run('UPDATE role_conversation_turns SET created_at=updated_at-61000');
   await assert.rejects(f.conversations.run(f.next()),{code:'role_budget_exhausted'});assert.equal(f.requests.length,1);
 });
 test('main-instance budgets exclude independent task runs while conversation invoices include both',async t=>{
-  const f=await fixture(t,'native',{id:'metered',max_model_requests:2});await f.conversations.run(f.source);
+  const f=await fixture(t,'scripted',{id:'metered',max_model_requests:2});await f.conversations.run(f.source);
   f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('independent','101','task.request','paused','Independent task','{}')");
   const id=beginModelRequest(f.store,{id:'independent',repository_id:'101',conversation_id:f.source.id,active_role:'reviewer',source_message:'child-source'},'child-inference',{id:'m',model:'fixture',pricing:null});finishModelRequest(f.store,id,{prompt_tokens:1,completion_tokens:1},200);
   assert.equal((await f.conversations.run(f.next())).message,'A source-bound response');
@@ -150,12 +151,12 @@ test('main-instance budgets exclude independent task runs while conversation inv
   assert.equal(f.store.get('SELECT count(*) n FROM model_requests WHERE conversation_id=?',f.source.id).n,3);
 });
 test('reply replay remains bound to the original principal even if an adapter reuses its content fence',async t=>{
-  const f=await fixture(t,'native');await f.conversations.run(f.source);
+  const f=await fixture(t,'scripted');await f.conversations.run(f.source);
   const actor=knowledgeActor(f.store,'another-reader','101',['tasks.read','knowledge.read']),caller=roleTaskCaller(f.store,'101','reviewer',{actor,conversation_id:f.source.id,source_message:f.source.source_message,guard(){}});
   await assert.rejects(f.conversations.run({...f.source,caller}),{code:'conversation_source_mismatch'});assert.equal(f.requests.length,1);
 });
 test('external receipts reconcile unknown Codex turns across recovery and never bill cumulative provider updates twice',async t=>{
-  const f=await fixture(t,'native'),task={id:'receipt-fixture',kind:'role.conversation',repository_id:'101',conversation_id:f.source.id,active_role:'reviewer',source_message:'source-1'},
+  const f=await fixture(t,'scripted'),task={id:'receipt-fixture',kind:'role.conversation',repository_id:'101',conversation_id:f.source.id,active_role:'reviewer',source_message:'source-1'},
     first=externalModelRecorder(f.store,task,'first-run','codex','persistent-instance'),turn={threadId:'thread_with_underscore',turnId:'remote-turn'};
   first.event({type:'turn',phase:'started',...turn});const pending=f.store.get('SELECT * FROM model_requests');assert.equal(pending.input_tokens,null);
   const usage={type:'usage',source:'codex_app_server',...turn,delta:{input_tokens:100,output_tokens:10},thread_total:{input:100,output:10,total:110}};
@@ -169,7 +170,7 @@ test('external receipts reconcile unknown Codex turns across recovery and never 
   assert.ok(f.store.all('SELECT cost FROM model_requests').every(r=>r.cost===null));
 });
 test('wall budget aborts a blocked model before its first byte',{timeout:40000},async t=>{
-  const f=await fixture(t,'native',{id:'metered',max_wall_seconds:60},true);
+  const f=await fixture(t,'scripted',{id:'metered',max_wall_seconds:60},true);
   // Only advance the budget heartbeat; HTTP, cancellation and the database still use their real paths.
   t.mock.timers.enable({apis:['setInterval']});
   const work=f.conversations.run(f.source);let settled=false;

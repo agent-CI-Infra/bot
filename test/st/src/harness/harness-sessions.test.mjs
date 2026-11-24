@@ -86,7 +86,7 @@ test('effective access is prepared from one permission definition and respects e
 
 test('public driver sessions keep updated native bindings between sends and reject an already-cancelled run',async()=>{
  const {roleHarness,registerRoleHarness}=await import('../../../../dist/roles/harness.js');
- registerRoleHarness({...roleHarness('native'),id:'binding_probe'},spec=>async()=>{await spec.guard();const turn=(spec.harnessState.value.turn??0)+1;spec.harnessState.save({turn});return turn;});
+ registerRoleHarness({...roleHarness('process'),id:'binding_probe'},spec=>async()=>{await spec.guard();const turn=(spec.harnessState.value.turn??0)+1;spec.harnessState.save({turn});return turn;});
  const s=new Store(':memory:',randomBytes(32));try{
  s.run("INSERT INTO accounts VALUES('a','test','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/probe','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','101','task.request','running','session probe','{}')");
  const spec={store:s,task:s.get("SELECT * FROM tasks WHERE id='t'"),redactor:new Redactor(),guard:async()=>{},system:'test',prompt:'test'};

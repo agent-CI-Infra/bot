@@ -3,6 +3,9 @@ import { taskPermissions } from '../../dist/tasks/configuration.js';
 import { selectedModel } from '../../dist/agent/model.js';
 import { Redactor } from '../../dist/agent/common.js';
 import { runAgent } from '../../dist/agent/runtime.js';
+import { roleHarness } from '../../dist/roles/harness.js';
+import { resultSpec } from '../../dist/agent/tool-results.js';
+import { scriptedHarness } from './scripted-driver.mjs';
 import { workspaceProfile } from '../../dist/agent/profiles.js';
 import { ReadTokens } from '../../dist/agent/read-token.js';
 import { RepositoryExplorer } from '../../dist/agent/exploration.js';
@@ -40,8 +43,11 @@ export const observationAgent = (store, apiUrl) => async ({ task, input, target 
   const permissions = taskPermissions(store, task), profile = workspaceProfile('release.observe', target.context, permissions);
   const tokens = new ReadTokens(store, store.get('SELECT * FROM repositories WHERE id=?', task.repository_id), redactor, guard, apiUrl, permissions.github), explorer = new RepositoryExplorer(tokens, redactor, guard);
   try {
-    const value = await runAgent({ store, task, redactor, guard, system: profile.system, prompt: JSON.stringify(target.context), tools: profile.tools, maxTurns: 16,
+    // The observation agent's tool exchange runs on the in-process scripted driver (#1257: runAgent needs a transport).
+    // resultSpec first, as runAgent would: results over their bound are saved as files before the driver sees them.
+    const spec = resultSpec({ store, task, redactor, guard, system: profile.system, prompt: JSON.stringify(target.context), tools: profile.tools, maxTurns: 16,
       execute: (name, args) => explorer.execute(name, args), validate: content => JSON.parse(content) });
+    const value = await runAgent({ ...spec, adapter: roleHarness(scriptedHarness).adapter(spec) });
     return { ...value, read_logs: explorer.logs };
   } finally { await tokens.revoke(); }
 };

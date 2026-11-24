@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { randomId } from '../core/security.js';
-import { runTools } from '../agent/runtime.js';
 import { managedSession } from '../harness/session.js';
 import { claudeCodeHarness } from './claude-code.js';
 import { createTaskToolDispatcher } from './task-tools.js';
@@ -115,7 +114,6 @@ export const harnesses:RegisteredRoleHarness[]=[
  {...containerAcp,id:icodeProductId},
  {...containerAcp,id:workswarmProductId,model_api:['openai-chat-completions','anthropic-messages'],
   capabilities:{...containerAcp.capabilities,recovery:['rebuilt_from_task_records']}},
- {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
  // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
@@ -125,7 +123,8 @@ export const harnesses:RegisteredRoleHarness[]=[
 export const steersServiceTurns=(id:string)=>harnesses.some(h=>h.id===id&&h.steered_turns===true);
 export const runsInTaskCheckout = (driver: RoleHarnessMetadata) => driver.environment === 'workspace' && driver.capabilities?.raw_evidence === 'task_tools';
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],[workswarmProductId,spec=>acpHarness(spec,workswarmProductId)],['pi',piHarness]]);
+// Every driver brings its own transport: there is no control-plane tool loop to fall back to (#1257).
+const adapters=new Map<string,AdapterFactory>([['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],[workswarmProductId,spec=>acpHarness(spec,workswarmProductId)],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
@@ -220,7 +219,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  };
 }
 export function roleHarness(id:string){
- if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);
+ const factory=adapters.get(id);if(!factory)throw new Error('unknown_role_harness');
  const isAcp=id===containerAcpId||id===icodeProductId||id===workswarmProductId;
  const createSession=<T>(spec:AgentSpec<T>,services:AgentServices)=>{
   const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
@@ -235,7 +234,7 @@ export function roleHarness(id:string){
     harnessState:{value:nativeState,save:value=>{nativeState=value;spec.harnessState?.save(value);}},
     guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};
    const guarded={...services,guard:wrapped.guard};
-   const running=factory?factory(wrapped)(guarded):runTools(wrapped,guarded);
+   const running=factory(wrapped)(guarded);
    if(isAcp)activeAcp=running;
    return running;
   },emit,async()=>{external?.removeEventListener('abort',cancel);await activeAcp?.catch(()=>{});});

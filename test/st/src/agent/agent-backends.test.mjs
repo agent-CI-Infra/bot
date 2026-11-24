@@ -21,6 +21,7 @@ import { Workspace } from '../../../../dist/agent/workspace.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { writeICodeProduct } from '../../../fixtures/icode-product.mjs';
+import '../../../fixtures/scripted-driver.mjs';
 
 const tool = (name, properties = {}, required = []) => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'c_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -64,7 +65,7 @@ test('new roles default to Pi; general backends preserve role authority and cont
   const f = await fixture(t, () => call('finish', {}));
   const config = f.put({ roles: [{ role_id: 'security' }] });
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
-  for (const backend of ['native', 'process', 'pi']) {
+  for (const backend of ['process', 'pi']) {
     const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: backend } })) });
     assert.ok(saved.roles.every(r => r.harness_ref.id === backend));
     assert.equal(saved.roles.find(r => r.role_id === 'manager').permissions.delegation, 'allow');
@@ -114,16 +115,16 @@ test('non-entry Pi reserves four of sixteen requests and refuses closed explorat
 
 test('explicit role models on active roles do not require an unrelated project default', async t => {
   const f = await fixture(t, () => call('submit_acceptance', verdict));
-  f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'native' }, model_profile_ref: { model_id: 'm' } }, { role_id: 'qa', harness_ref: { id: 'native' }, model_profile_ref: { model_id: 'm' } }] });
+  f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'scripted' }, model_profile_ref: { model_id: 'm' } }, { role_id: 'qa', harness_ref: { id: 'scripted' }, model_profile_ref: { model_id: 'm' } }] });
   f.s.run("UPDATE policies SET model_id=NULL WHERE repository_id='101'");
   assert.equal(roleExecutionModel(f.s, f.task, 'manager').id, 'm');
   assert.equal(roleExecutionModel(f.s, f.task, 'qa').id, 'm');
   new TaskRecords(f.s).submit('t', [{ kind: 'report', reference: 'report', version: 'v1', content: 'baseline' }], [], {});
   assert.equal((await evaluateDelivery(f.s, f.task, f.workspace, f.redactor, f.guard)).outcome, 'pass');
-  assert.deepEqual(f.s.all("SELECT role,harness FROM task_runs WHERE role IS NOT NULL").map(r => [r.role, r.harness]), [['qa', 'native']]);
+  assert.deepEqual(f.s.all("SELECT role,harness FROM task_runs WHERE role IS NOT NULL").map(r => [r.role, r.harness]), [['qa', 'scripted']]);
 });
 
-test('real Pi workers and fresh QA use controlled tools and a fixed candidate under a Native Manager', { skip, timeout: 180000 }, async t => {
+test('real Pi workers and fresh QA use controlled tools and a fixed candidate under an in-process Manager', { skip, timeout: 180000 }, async t => {
   let devRef;
   const f = await fixture(t, body => {
     const system = text(body.messages[0].content), names = (body.tools ?? []).map(t => t.function.name), done = observations(body);
@@ -147,7 +148,7 @@ test('real Pi workers and fresh QA use controlled tools and a fixed candidate un
     if (!called(body, 'run_command')) return call('run_command', { command: "node -e \"if(require('fs').readFileSync('report.md','utf8').trim()!=='baseline')process.exit(1)\"" });
     return call('finish', { summary: 'Report implemented' });
   });
-  f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] });
+  f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'scripted' } }] });
   await f.workspace.call('init', { type: 'workspace_init' });
   const init = await f.workspace.call('git-init', { type: 'workspace_command', command: 'git init -q && git config user.name Fixture && git config user.email fixture@example.invalid && git commit --allow-empty -qm baseline' });
   assert.equal(init.exit_code, 0);
@@ -160,7 +161,7 @@ test('real Pi workers and fresh QA use controlled tools and a fixed candidate un
       return space.call(key, name === 'read_file' ? { type: 'workspace_read', path: args.path } : { type: 'workspace_command', command: args.command });
     } }, { ...spaces });
   assert.equal(result.summary, 'Report implemented'); assert.ok(devRef);
-  assert.deepEqual(f.s.all('SELECT role,harness FROM role_instances ORDER BY role').map(r => [r.role, r.harness]), [['dev', 'pi'], ['manager', 'native'], ['reviewer', 'pi'], ['test', 'pi']]);
+  assert.deepEqual(f.s.all('SELECT role,harness FROM role_instances ORDER BY role').map(r => [r.role, r.harness]), [['dev', 'pi'], ['manager', 'scripted'], ['reviewer', 'pi'], ['test', 'pi']]);
   const snapshot = await f.workspace.artifact('candidate');
   const records = new TaskRecords(f.s);
   records.submit('t', [{ kind: 'files', reference: 'report', version: snapshot.tree_sha, content: snapshot }], [], { summary: result.summary });
@@ -201,7 +202,7 @@ test('startup migration retires ACP bindings across role settings, role_instance
   first.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES('t-legacy','102','task.request','running','Legacy','{}',1,1,'ws2')");
   first.run(
     "INSERT INTO task_execution_configs(task_id,revision,snapshot,created_at) VALUES('t-legacy',1,?,'now')",
-    JSON.stringify({ roles: { enabled: true, harnesses: { dev: 'acp', qa: 'native' } } }),
+    JSON.stringify({ roles: { enabled: true, harnesses: { dev: 'acp', qa: 'process' } } }),
   );
   // Simulate pre-migration upgraded DB where retire-acp-backend may or may not have run yet.
   first.run("DELETE FROM settings WHERE key IN ('migration:705:retire-acp-backend','migration:705:retire-acp-task-configs')");
@@ -219,7 +220,7 @@ test('startup migration retires ACP bindings across role settings, role_instance
   assert.equal(frozenV2.roles.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'codex');
   assert.ok(frozenV2.roles.revision >= migratedRoles.revision);
   const frozenLegacy = JSON.parse(reopened.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t-legacy'").snapshot);
-  assert.deepEqual(frozenLegacy.roles.harnesses, { dev: 'pi', qa: 'native' });
+  assert.deepEqual(frozenLegacy.roles.harnesses, { dev: 'pi', qa: 'process' });
   assert.match(explainFailure('cli_not_installed', 'waiting_environment').action, /POST \/api\/agent-tools\/install/);
 });
 

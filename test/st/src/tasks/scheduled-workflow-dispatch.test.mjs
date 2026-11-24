@@ -17,6 +17,7 @@ import { roleApi } from '../../../../dist/roles/api.js';
 import { runRequest } from '../../../../dist/tasks/request.js';
 import { createManagedTask, eventTaskCaller } from '../../../../dist/tasks/management.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
+import '../../../fixtures/scripted-driver.mjs';
 
 // #1072: a project scheduled task (a report request whose contract names the schedule) starts a workflow on time. The run
 // link GitHub returns lands in the task record, and the task's context carries the late-schedule recommendation.
@@ -54,7 +55,7 @@ async function fixture(t, respond, app = false) {
   // The comment ceiling is enough to start a workflow.
   store.run("INSERT INTO policies(repository_id,model_id,enabled,capability_ceiling) VALUES('101','m',1,'comment')");
   roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true,
-    controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' } })) });
+    controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'scripted' } })) });
   const environment = await manager.call('PUT', '/v1/projects/101');
   const insert = () => {
     store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id,claim_token,head_sha) VALUES(?,?,?,?,?,?,?,?,?,?,?)', 't', '101', 'task.request', 'running', 'Start Nightly',

@@ -17,6 +17,7 @@ import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { developmentTeam } from '../../../../dist/roles/development.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { roleAssignmentContext, workspaceProfile } from '../../../../dist/agent/profiles.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 const receipts = body => body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(typeof m.content === 'string' ? m.content : m.content.map(c => c.text ?? '').join('')));
@@ -39,7 +40,7 @@ async function fixture(t, respond, options = {}) {
   const environment = await manager.call('PUT', '/v1/projects/101');
   store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,?,?,?,?,?,?,?,?)', 't', '101', 'development.issue', 'running', 'text fixture', '{}', 1, environment.generation, randomBytes(24).toString('hex'));
   new TaskRecords(store).contract('t', { goal: 'Say delivered', scope: ['fixture.txt'], criteria: ['The file says delivered'], endpoint: 'reviewable_pull_request' });
-  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { development: true } }, roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' } })) });
+  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { development: true } }, roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'scripted' } })) });
   const task = store.get("SELECT * FROM tasks WHERE id='t'"), workspace = new Workspace(store, manager, task, new Redactor(), async () => {}, () => {});
   await workspace.call('init', { type: 'workspace_init' });
   await workspace.write('seed-write', 'fixture.txt', Buffer.from('baseline\n'));

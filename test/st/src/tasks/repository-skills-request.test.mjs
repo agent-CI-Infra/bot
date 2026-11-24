@@ -825,7 +825,7 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-p
     },
     'reviewer',
     undefined,
-    'native',
+    'scripted',
   );
   const inflightPromptStr = JSON.stringify(seen.inflightRolePrompt);
   assert.ok(

@@ -8,17 +8,15 @@ import { githubReadScopes, githubWriteAllowed, permitsTool } from '../roles/perm
 import type { Store } from '../storage/database.js';
 import { dispatchScope } from '../storage/trajectories.js';
 import { Redactor, TaskError } from '../agent/common.js';
-import { requestModel } from '../agent/gateway.js';
 import { selectedModel } from '../agent/model.js';
 import { ReadTokens } from '../agent/read-token.js';
 import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
-import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
-import { traceClean } from '../tasks/trace.js';
 import { githubWrite, githubWriteTool, earlierWrites } from '../github/write.js';
 import { autoMergePolicy, mergeBoundary } from '../github/merge-policy.js';
 import { effectiveManagerPrompt, managerPrompt, saveManager } from './settings.js';
 import { normalizeSavedRule, ruleActions, standingRules } from './rules.js';
 import { HttpError } from '../core/security.js';
+import { SubmissionError } from '../roles/submission-error.js';
 import { legacyKindName } from '../projects/legacy-kinds.js';
 import { RuleService, projectLabels, resolveRules, ruleErrors, trustedCachedRuleFiles } from '../rules/service.js';
 import {
@@ -438,112 +436,49 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   const task = { id: null, repository_id: repositoryId, kind: 'manager.dispatch', trajectory };
   const resultFiles = new ResultSession(store, trajectory, () => projectResultOwner(repositoryId), guard, redactor.values);
   const execute = (name: string, args: unknown) => resultFiles.execute(name, args, () => executeRaw(name, args), false);
-  const transcript = new ToolTranscript(messages, chatContextBytes, resultFiles.preserve);
-  let corrected = false, refusals = 0;
+  let refusals = 0;
 
   try {
-    if (role.harness_ref.id !== 'native') {
-      return await runDispatchHarness(
-        {
-          resultSession: resultFiles,
-          store,
-          task,
-          model,
-          redactor,
-          guard,
-          system: messages[0].content,
-          prompt: messages[1].content,
-          tools: offered(),
-          ...(canReadRepositorySkills() && skillState.bundleFiles.length ? { harnessResources: skillState.bundleFiles.map(({ path, content }) => ({ path, content })) } : {}),
-          execute,
-          finish: {
-            name: decisionNames[0]!,
-            names: decisionNames,
-            validate: async (args, name) => {
-              const { decision, refused, basis } = await assess(toDecision(name ?? null, args));
-              if (!refused) return { ...decision, model: model.model, basis };
-              recordRefusal(store, String(event.id), { ...refused, tool: 'create_task' });
-              if (++refusals >= maxRefusals) {
-                return { decision: 'ignore', option_ids: [], reason: `控制面拒绝了 Manager 选的工作：${refused.reason}`.slice(0, 1000), model: model.model };
-              }
-              throw new InvalidDecision(refused.code, refused.reason);
-            },
-          },
-          repairInvalid: error => (error instanceof InvalidDecision ? error.message : undefined),
-        },
-        role,
-        event,
-        manager,
-      );
-    }
-    for (let step = 0; step < maxSteps; step++) {
-      await guard();
-      const last = step === maxSteps - 1, tools = last ? decisionTools : offered();
-      const body: any = { messages, tools, tool_choice: last ? 'required' : 'auto' };
-      transcript.fit(body);
-      const { value } = await requestModel({ store, task, model, redactor, body, requestId: `${event.id}:${event.attempts}:${step}`, maxOutputTokens: 4096, guard });
-      const message = value?.choices?.[0]?.message, calls: any[] = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
-      if (toolCallsProblem(calls)) throw new TaskError('dispatch_model_invalid', 'failed', 'Manager 返回的工具调用格式无效。');
-      const call = calls.find((c: any) => decisionNames.includes(c?.function?.name)), others = calls.filter(c => c !== call);
-      const results: unknown[] = [];
-      for (const c of others) results.push(redactor.clean(await execute(String(c.function.name), toolArguments(c))));
-      const answer = () =>
-        boundedBatch(results, undefined, resultFiles.preserve, others.map(c => c.function.name)).forEach((result, i) =>
-          messages.push({ role: 'tool', tool_call_id: others[i].id, content: JSON.stringify(result) }),
-        );
-      if (call || !calls.length) {
-        let args: any = null;
-        try {
-          args = JSON.parse(call ? call.function.arguments || '{}' : String(message?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, ''));
-        } catch { args = null; }
-        live();
-        try {
-          const raw = toDecision(call ? String(call.function.name) : null, args), { decision, refused, basis } = await assess(raw);
-          if (!refused) return { ...decision, model: model.model, basis };
-          recordRefusal(store, String(event.id), { ...refused, tool: 'create_task' });
-          if (++refusals >= maxRefusals || last) {
-            return { decision: 'ignore', option_ids: [], reason: `控制面拒绝了 Manager 选的工作：${refused.reason}`.slice(0, 1000), model: model.model };
-          }
-          messages.push(traceClean(message));
-          answer();
-          if (call) {
-            messages.push({
-              role: 'tool',
-              tool_call_id: call.id,
-              content: JSON.stringify({
-                error: refused.code,
-                created: false,
-                work: refused.work,
-                reason: refused.reason,
-                ...(refused.task_id ? { task_id: refused.task_id } : {}),
-                instruction: 'Nothing was created and the event keeps this refusal. Answer the person with github_write when they asked for this work (explain the background and blocker, plus concrete candidate options with one recommended option and their pros and cons when multiple viable options exist; state the required action directly for a single-path blocker), then call ignore_event; or create other work, or continue a running task.',
-              }),
+    // The Manager's configured driver works the decision (#1257: there is no control-plane loop of its own).
+    return await runDispatchHarness(
+      {
+        resultSession: resultFiles,
+        store,
+        task,
+        model,
+        redactor,
+        guard,
+        system: messages[0].content,
+        prompt: messages[1].content,
+        tools: offered(),
+        ...(canReadRepositorySkills() && skillState.bundleFiles.length ? { harnessResources: skillState.bundleFiles.map(({ path, content }) => ({ path, content })) } : {}),
+        execute,
+        finish: {
+          name: decisionNames[0]!,
+          names: decisionNames,
+          validate: async (args, name) => {
+            const { decision, refused, basis } = await assess(toDecision(name ?? null, args));
+            if (!refused) return { ...decision, model: model.model, basis };
+            recordRefusal(store, String(event.id), { ...refused, tool: 'create_task' });
+            if (++refusals >= maxRefusals) {
+              return { decision: 'ignore', option_ids: [], reason: `控制面拒绝了 Manager 选的工作：${refused.reason}`.slice(0, 1000), model: model.model };
+            }
+            // The refusal and what to do next, as facts the Manager decides from.
+            throw new SubmissionError(refused.code, {
+              created: false, work: refused.work, reason: refused.reason, ...(refused.task_id ? { task_id: refused.task_id } : {}),
+              instruction: 'Nothing was created and the event keeps this refusal. Answer the person with github_write when they asked for this work (explain the background and blocker, plus concrete candidate options with one recommended option and their pros and cons when multiple viable options exist; state the required action directly for a single-path blocker), then call ignore_event; or create other work, or continue a running task.',
             });
-          } else {
-            messages.push({ role: 'user', content: `Refused: ${refused.code}: ${refused.reason} Decide again with create_task, continue_task or ignore_event.` });
-          }
-          continue;
-        } catch (error) {
-          if (!(error instanceof InvalidDecision) || corrected) throw error;
-          corrected = true;
-          if (call) {
-            messages.push(traceClean(message));
-            answer();
-            messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: error.code, message: error.message }) });
-          } else {
-            messages.push({ role: 'assistant', content: String(message?.content ?? '') }, { role: 'user', content: `Decide with create_task, continue_task or ignore_event. ${error.message}` });
-          }
-          continue;
-        }
-      }
-      messages.push(traceClean(message));
-      answer();
-    }
+          },
+        },
+        repairInvalid: error => (error instanceof InvalidDecision ? error.message : undefined),
+      },
+      role,
+      event,
+      manager,
+    );
   } finally {
     store.trajectories.close(trajectory.key);
     await tokens.revoke();
   }
-  throw new TaskError('dispatch_decision_invalid', 'failed');
 }
 
-const maxSteps = 16;

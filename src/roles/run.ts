@@ -230,8 +230,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
-  // External CLIs own their turn semantics; only these three loops share the request-based finalization reserve.
-  const reservedBackend=['native','process','pi'].includes(harness),configuredTurns=bounded?.max_turns??spec.maxTurns,limitTurns=configuredTurns??32;
+  // External CLIs own their turn semantics; only these two loops share the request-based finalization reserve.
+  const reservedBackend=['process','pi'].includes(harness),configuredTurns=bounded?.max_turns??spec.maxTurns,limitTurns=configuredTurns??32;
   const availableTurns=reservedBackend&&cumulative&&budget.max_model_requests!==null?Math.min(limitTurns,budget.max_model_requests-instanceUsage(s,instance.id).model_requests):limitTurns;
   if(spec.finish&&reservedBackend&&availableTurns<=finalizationReserve(availableTurns))stop('role_budget_exhausted','waiting_configuration',`${role}：剩余 ${availableTurns} 次请求不足以保留至少一轮工作和收尾，运行尚未启动。`);
   const live:Live={bound:null,exhausted:null,tools:0};
@@ -370,7 +370,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   wrapped.harnessState={value:qaState,save:value=>s.run('UPDATE role_instances SET harness_state=?,updated_at=? WHERE id=?',JSON.stringify(spec.redactor.clean(value)),new Date().toISOString(),instance!.id)};
   if(driver.externalModel)wrapped.modelTrace={source:'external_harness',model:'unknown'};
   await driver.prepare?.(wrapped);
-  // The driver decides the transport; the native driver is the control-plane tool loop.
+  // The driver decides the transport.
   wrapped.adapter=driver.adapter?.(wrapped);
   const prepared:PreparedRun<T>={protocol:roleRunProtocol.id,operation_id:operationId,role,...(assignment?{assignment}:{}),scope,spec,wrapped,instance,resolved,recovery_start:recover,admission,candidate,budget,live,env:{release,snapshot:options.snapshot},inputRef:ref,released:false};
   Object.defineProperty(prepared,'executionRun',{get:()=>executionRun});

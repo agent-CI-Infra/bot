@@ -110,7 +110,7 @@ test('deletion rolls every change back when its audit fails, and an unused model
 
 async function saveRole(client, repo, modelId, { expected_revision = 0, enabled = true, name = 'Role-only reviewer' } = {}) {
   const result = await client(`/api/repositories/${repo}/roles`, 'PUT', { expected_revision, enabled: false, roles: [{
-    role_id: 'reviewer', name, enabled, persona_prompt: 'Private role prompt', harness_ref: { id: 'native' },
+    role_id: 'reviewer', name, enabled, persona_prompt: 'Private role prompt', harness_ref: { id: 'process' },
     model_profile_ref: modelId === null ? null : { model_id: modelId, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }
   }] });
   assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value.configuration.revision;

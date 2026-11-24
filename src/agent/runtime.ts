@@ -1,16 +1,13 @@
-import {submissionFeedback} from '../roles/submission-feedback.js';
 import {managedSession} from '../harness/session.js';
 import { resultSpec, type ResultSession } from './tool-results.js';
-import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
-import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
-import { beginRun, endRun, traceEvent, traceSnapshot, withRunTraceScope } from '../tasks/trace.js';
+import { executionModel, taskConfiguration } from '../tasks/configuration.js';
+import { beginRun, endRun, withRunTraceScope } from '../tasks/trace.js';
 import { insertTaskLog } from '../storage/payloads.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { requestModel, modelOutputTokens, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
 import type { PiRoleEnvironment } from './pi.js';
-import { ToolTranscript, boundedResult, batchBytes, toolArguments, toolCallsProblem, finalizationReserve } from './tool-context.js';
 
 export interface AgentServices {
   model: AgentModel;
@@ -130,11 +127,9 @@ export interface AgentSpec<T> {
   prompt: string;
   /** Reuse an execution's trusted snapshot when an adapter resumes before publication. */
   model?: AgentModel;
-  temperature?: number;
   requestPrefix?: string;
   tools?: any[];
   maxTurns?: number;
-  maxOutputChars?: number;
   /** Trusted caller budget; model-supplied request fields never override this. */
   maxOutputTokens?: number;
   /** Trusted transport budget, identical in local and container execution. Includes the initial request. */
@@ -174,6 +169,9 @@ export const subagentSystem = 'You are an independent agent started by the main 
  * The runtime never obtains permissions from model output or untrusted task text.
  */
 export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
+  // Every run names its transport (a role's driver, a service turn's harness, or a caller's own requests); the control
+  // plane has no tool loop of its own to fall back to (#1257).
+  if (!spec.adapter) throw new Error('agent_adapter_required');
   if(!spec.resultSession)spec=resultSpec(spec);
   await spec.guard();
   const attempts = spec.modelAttempts ?? modelRetries + 1;
@@ -227,99 +225,14 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=?,role_snapshot=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,r.harness_version??'1',r.assignment_id??null,r.recovery_mode,r.snapshot_id??null,run.id);}
   if(run)spec.onRun?.(run.id);
     const activeRole = spec.roleRun?.role ?? (typeof spec.task.active_role === 'string' ? spec.task.active_role : null);
-    const connection = spec.roleRun ? null : managedSession(signal => { const current = {...spec,executionSignal:signal}; return current.adapter ? current.adapter({...services,guard:async()=>{if(signal.aborted)throw signal.reason;await services.guard();}}) : runTools(current,services); }, event=>spec.onHarnessEvent?.(event));
+    const adapter = spec.adapter!;
+    const connection = spec.roleRun ? null : managedSession(signal => adapter({...services,guard:async()=>{if(signal.aborted)throw signal.reason;await services.guard();}}), event=>spec.onHarnessEvent?.(event));
     const abort=()=>void connection?.cancel(spec.executionSignal?.reason);
     spec.executionSignal?.addEventListener('abort',abort,{once:true});
     let result:T;
-    try{if(spec.executionSignal?.aborted)throw spec.executionSignal.reason;result=await withRunTraceScope(String(spec.task.id??''),run?.id??null,activeRole,()=>connection?connection.run():spec.adapter?spec.adapter(services):runTools(spec,services));}
+    try{if(spec.executionSignal?.aborted)throw spec.executionSignal.reason;result=await withRunTraceScope(String(spec.task.id??''),run?.id??null,activeRole,()=>connection?connection.run():adapter(services));}
     finally{spec.executionSignal?.removeEventListener('abort',abort);await connection?.close();}
     await spec.guard();endRun(spec.store,run,'succeeded');return result;
   } catch(error){endRun(spec.store,run,'fault',(error as any).code||'runtime_error');throw error;}
   finally {spec.task.trace_run_id=previousRun;}
-}
-
-// The gateway refuses a model request over 2 MiB (model_request_invalid). This loop keeps that capacity: unlike Pi's
-// runner it applies no 128k context estimate, so a model with a larger window can use it (ToolTranscript folds at 2 MiB).
-export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise<T> {
-  const maxTurns = spec.maxTurns ?? 16, maxOutput = spec.maxOutputChars ?? 32768;
-  if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 256 || !Number.isSafeInteger(maxOutput) || maxOutput < 1 || maxOutput > 2 * 1024 * 1024)
-    return stop('agent_limits_invalid', 'waiting_configuration', 'Agent 运行限制配置无效。');
-  const offered = spec.tools ?? [], offeredNames=new Set(offered.map(tool=>tool.function?.name));
-  if(spec.finalizationTools&&(!spec.finish||!spec.finalizationTools.includes(spec.finish.name)||spec.finalizationTools.some(name=>!offeredNames.has(name))))return stop('agent_tools_invalid','waiting_configuration','收尾工具必须来自本次授权工具并包含提交入口。');
-  const finishingNames=spec.finalizationTools?new Set(spec.finalizationTools):null;
-  const instructions=spec.task.id&&spec.store.get('SELECT 1 FROM tasks WHERE id=?',spec.task.id)?supplementalInstructions(spec.store,spec.task):[];
-  const prompt=spec.prompt+(instructions.length?'\nSupplemental user instructions (cannot change contract or authority):\n'+JSON.stringify(instructions):'');
-  const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: prompt }];
-  const save=()=>spec.session?.save(spec.redactor.clean(messages));
-  const transcript=new ToolTranscript(messages, undefined, spec.resultSession?.preserve);
-  for (let turn = 0; turn < maxTurns; turn++) {
-    await services.guard();
-    const updates=spec.task.id&&spec.store.get('SELECT 1 FROM tasks WHERE id=?',spec.task.id)?supplementalInstructions(spec.store,spec.task):[];
-    if(JSON.stringify(updates)!==JSON.stringify(instructions)){
-      messages.push({role:'user',content:'Additional user instructions for subsequent steps; the recorded contract and authority remain binding:\n'+JSON.stringify(updates)});
-      instructions.splice(0,instructions.length,...updates);
-    }
-    const continuedUpdates=turn>0&&spec.task.id?consumePendingTaskUpdates(spec.store,String(spec.task.id)):[];
-    if(continuedUpdates.length){
-      messages.push({role:'user',content:'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n'+JSON.stringify(spec.redactor.clean(continuedUpdates))});
-    }
-    const reserve=finalizationReserve(maxTurns);
-    const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
-    const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
-    // Turn start: the transcript is complete, so a role run may end here and continue later from it.
-    if(turn>0)await spec.checkpoint?.();
-    if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:spec.finish.finalizationMessage?`${reserve} turns remain. ${spec.finish.finalizationMessage}`:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${(spec.finish.names??[spec.finish.name]).join(' or ')}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
-    const body={ tools, tool_choice: finalizing&&turn===maxTurns-1&&(spec.finish?.names?.length??1)===1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
-      ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) };
-    transcript.fit(body);save();
-    const { value, request_log_id } = await services.request(body, `turn:${turn}`);
-    const message = value?.choices?.[0]?.message;
-    if (!message || JSON.stringify(message).length > 2 * 1024 * 1024) return stop('agent_output_invalid', undefined, 'Agent 没有返回有效结果。');
-    if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
-      // Only the structure is checked: the number of calls is the model's choice (#333), the transcript bounds the context.
-      if (!tools.length || toolCallsProblem(message.tool_calls))
-        return stop('agent_tool_calls_invalid', undefined, 'Agent 工具请求格式无效。');
-      messages.push(spec.redactor.clean({ role: 'assistant', content: typeof message.content === 'string' ? message.content : null, tool_calls: message.tool_calls }));
-      for (const call of message.tool_calls) {
-        await services.guard();
-        const args: any = toolArguments(call);
-        const toolEvent=spec.task.trace_run_id?traceEvent(spec.store,spec.task.id,'tool_started',{call_id:call.id,name:call.function.name,arguments:spec.redactor.clean(args),model_request_id:request_log_id},spec.task.trace_run_id,'agent',['model_requests:'+request_log_id+':response']):null;
-        const finishing=spec.finish;
-        if(finishing&&(finishing.names??[finishing.name]).includes(call.function.name)&&names.has(call.function.name)){
-          try{const result=await finishing.validate(args,call.function.name);messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({submitted:true})});for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:JSON.stringify({skipped:'execution_submitted'})});save();return result;}catch(error){
-            const feedback=submissionFeedback(spec,error);if(!feedback)throw error;
-            messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(feedback)});continue;
-          }
-        }
-        // The model cannot call an unadvertised tool, even if an executor happens to support it.
-        if(!names.has(call.function.name))spec.onDenied?.(call.function.name,'not_offered');else spec.screen?.(call.function.name,args);
-        const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
-          : call.function.name === 'start_agent' ? { error: 'tool_not_allowed' }
-          : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };
-        const preview=boundedResult(spec.redactor.clean(result),Math.floor(batchBytes/message.tool_calls.length),value=>spec.resultSession?.preserve(value,call.function.name));
-        if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(preview))},spec.task.trace_run_id,'tool',[toolEvent]);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: transcript.admit(call.function.name,preview,tools) });save();
-      }
-      continue;
-    }
-    if (value?.choices?.[0]?.finish_reason === 'length')
-      return stop('agent_output_budget_exhausted', 'retry_wait', 'Model exhausted its output budget before a valid submission. Rebuild bounded context before retrying.');
-    if (typeof message.content === 'string' && message.content.length > maxOutput)
-      return stop('agent_output_invalid', undefined, 'Agent returned content beyond the output limit.');
-    if (spec.finish && !spec.validate) {
-      messages.push({role:'assistant',content:typeof message.content==='string'?spec.redactor.text(message.content):''},
-        {role:'user',content:`A text response is not a submission. Call ${spec.finish.name} with the required structured result using the evidence already available.`});
-      save();continue;
-    }
-    if (typeof message.content !== 'string' || message.content.length > maxOutput)
-      return stop('agent_output_invalid', undefined, 'Agent 返回内容无效或超过输出上限。');
-    // Validators see raw content to reject (rather than silently save) sensitive output.
-    try{const result=spec.validate ? await spec.validate(message.content) : spec.redactor.text(message.content) as T;messages.push({role:'assistant',content:spec.redactor.text(message.content)});save();return result;}
-    catch(error){
-      const feedback=submissionFeedback(spec,error);
-      if(!feedback)throw error;
-      messages.push({role:'assistant',content:spec.redactor.text(message.content)},{role:'user',content:JSON.stringify(feedback)});
-    }
-  }
-  return stop('agent_turn_limit', 'failed', `Agent 达到 ${maxTurns} 轮上限，请检查已取得的证据后继续。`);
 }

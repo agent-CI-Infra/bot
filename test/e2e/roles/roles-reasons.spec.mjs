@@ -11,7 +11,7 @@ async function prepared(page) {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     const model = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Role fixture model', api_url: 'http://127.0.0.1:9/v1', api_key: testPassword() })).value.model;
     const initial = (await admin('/api/repositories/101/roles')).value;
-    const result = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: initial.revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' } }] });
+    const result = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: initial.revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'process' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' } }] });
     expect(result.status).toBe(200);
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();

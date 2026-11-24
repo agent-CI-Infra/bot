@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
-import { migrateNativeToPi, retireNativeServiceAssistants } from '../../../../dist/roles/native-to-pi.js';
+import { migrateNativeToPi, retireNativeProjectRoles, retireNativeServiceAssistants } from '../../../../dist/roles/native-to-pi.js';
 import { rolePool } from '../../../../dist/roles/pool.js';
 import { managementAssistant, serviceRole, updateServiceRole } from '../../../../dist/service-roles/roles.js';
 
@@ -31,6 +31,14 @@ function fixture(t) {
   t.after(() => s.close());
   return s;
 }
+// A V2 configuration whose `roleId` was saved on Native, as a database from before #1257 holds it: saved through the API on
+// another backend (the API no longer takes Native), then stored with Native in its place.
+function saveNative(s, repo, roleId) {
+  put(s, repo, { roles: [{ role_id: roleId, harness_ref: { id: 'process' } }] });
+  const value = stored(s, repo);
+  save(s, repo, { ...value, roles: value.roles.map(role => role.role_id === roleId ? { ...role, harness_ref: { id: 'native', version: '1' } } : role) });
+}
+const textJsonProfile = { model_id: 'm', name: 'fixture', profile_hash: 'x', version: 1, api: 'openai-chat-completions', tool_calls: true, structured_output: 'text_json' };
 // What a database from before #1255 held: rows saved as Native next to other backends.
 function oldData(s) {
   s.run("UPDATE service_roles SET harness='native',revision=3 WHERE id=?", managementAssistant);
@@ -42,14 +50,13 @@ function oldData(s) {
       VALUES(?,?,'group-assistant','repositories',?,'admin','admin',4,NULL,'',?,1,1)`, id, 'chat-' + id, 'principal-' + id, harness);
   }
   // v2: dev chose Native, reviewer Codex.
-  put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
+  saveNative(s, 'v2', 'dev');
   const v2 = stored(s, 'v2');
   save(s, 'v2', { ...v2, roles: v2.roles.map(role => role.role_id === 'reviewer' ? { ...role, harness_ref: { id: 'codex', version: '1' } } : role) });
   // kept: QA on Native with a model profile that answers in text_json, which Pi cannot take.
-  put(s, 'kept', { roles: [{ role_id: 'qa', harness_ref: { id: 'native' } }] });
+  saveNative(s, 'kept', 'qa');
   const kept = stored(s, 'kept');
-  save(s, 'kept', { ...kept, roles: kept.roles.map(role => role.role_id === 'qa'
-    ? { ...role, model_profile_ref: { model_id: 'm', name: 'fixture', profile_hash: 'x', version: 1, api: 'openai-chat-completions', tool_calls: true, structured_output: 'text_json' } } : role) });
+  save(s, 'kept', { ...kept, roles: kept.roles.map(role => role.role_id === 'qa' ? { ...role, model_profile_ref: textJsonProfile } : role) });
   // legacy: from before RoleDefinitionV2, the manager named Native, dev Codex, an own role and the rest unnamed.
   s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'native', dev: 'codex' }, roles: [{ id: 'security', prompt: '' }] }));
   // defaults saved its own configuration and then restored the recommended one, which already runs Pi.
@@ -114,11 +121,11 @@ test('a new database starts on Pi: the management assistant, a legacy configurat
   assert.equal(s.get('SELECT dflt_value FROM pragma_table_info(?) WHERE name=?', 'channel_service_bindings', 'harness').dflt_value, "'pi'");
   s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: false, harnesses: {} }));
   assert.deepEqual(new Set(Object.values(harnessOf(s, 'legacy'))), new Set(['pi']));
-  // A configuration saved as Native after start-up is a choice and is not migrated.
-  put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
   const lines = [];
   migrateNativeToPi(s, line => lines.push(line));
-  assert.deepEqual([harnessOf(s, 'v2').dev, lines], ['native', []]);
+  assert.deepEqual(lines, []);
+  // Native can no longer be chosen (#1257): the role API refuses it.
+  assert.throws(() => put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] }), error => error.code === 'unknown_role_harness');
 });
 
 test('Native is gone for service assistants (#1257): one still saved on it moves to Pi at every start, the API refuses it', t => {
@@ -153,4 +160,49 @@ test('Native is gone for service assistants (#1257): one still saved on it moves
   // Native can no longer be chosen.
   assert.throws(() => updateServiceRole(s, 'admin', managementAssistant, { expected_revision: role(managementAssistant).revision, harness: 'native' }),
     error => error.status === 400 && error.code === 'unknown_role_harness');
+});
+
+test('Native is gone for project roles (#1257): saved configurations, frozen task configurations and role instances move once, text_json roles to Process', t => {
+  const s = fixture(t);
+  // Saved after #1255's migration: dev chosen as Native by hand, QA kept on Native for its text_json model profile, and a
+  // legacy configuration naming Native for the manager.
+  saveNative(s, 'v2', 'dev');
+  saveNative(s, 'kept', 'qa');
+  const kept = stored(s, 'kept');
+  save(s, 'kept', { ...kept, roles: kept.roles.map(role => role.role_id === 'qa' ? { ...role, model_profile_ref: textJsonProfile } : role) });
+  s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'native', dev: 'codex' } }));
+  // Tasks froze those configurations; their role instances ran on Native.
+  const frozen = { 't-v2': ['v2', { roles: stored(s, 'v2') }], 't-kept': ['kept', { roles: stored(s, 'kept') }], 't-legacy': ['legacy', { roles: { enabled: true, harnesses: { qa: 'native', dev: 'codex' } } }] };
+  for (const [task, [repo, snapshot]] of Object.entries(frozen)) {
+    s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES(?,?,'task.request','pr_opened','frozen','{}',1,1)", task, repo);
+    s.run("INSERT INTO task_execution_configs(task_id,revision,snapshot,created_at) VALUES(?,1,?,'then')", task, JSON.stringify(snapshot));
+  }
+  for (const [id, task, role] of [['ri-dev', 't-v2', 'dev'], ['ri-qa', 't-kept', 'qa'], ['ri-legacy', 't-legacy', 'qa'], ['ri-codex', 't-legacy', 'dev']])
+    s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,session,harness_state,updated_at) VALUES(?,?,?,'{}',?,'[\"old\"]','{\"turn\":3}','then')", id, task, role, role === 'dev' && task === 't-legacy' ? 'codex' : 'native');
+  const revision = repo => stored(s, repo).revision, before = { v2: revision('v2'), kept: revision('kept') };
+  s.run("DELETE FROM settings WHERE key='migration:1257:retire-native-roles'");
+  const lines = [];
+  retireNativeProjectRoles(s, line => lines.push(line));
+
+  // Saved configurations: a new revision for V2, the legacy map in place.
+  assert.deepEqual([harnessOf(s, 'v2').dev, harnessOf(s, 'kept').qa, stored(s, 'legacy').harnesses], ['pi', 'process', { manager: 'pi', dev: 'codex' }]);
+  assert.deepEqual([revision('v2') - before.v2, revision('kept') - before.kept, stored(s, 'v2').updated_by], [1, 1, 'migration:1257']);
+  assert.equal(s.get("SELECT actor FROM role_config_revisions WHERE repository_id='kept' AND revision=?", revision('kept')).actor, 'migration:1257');
+  // Frozen task configurations resume on the same backends.
+  const snapshot = task => JSON.parse(s.get('SELECT snapshot FROM task_execution_configs WHERE task_id=?', task).snapshot).roles;
+  assert.equal(snapshot('t-v2').roles.find(role => role.role_id === 'dev').harness_ref.id, 'pi');
+  assert.equal(snapshot('t-kept').roles.find(role => role.role_id === 'qa').harness_ref.id, 'process');
+  assert.ok(snapshot('t-v2').revision > before.v2);
+  assert.deepEqual(snapshot('t-legacy').harnesses, { qa: 'pi', dev: 'codex' });
+  // Role instances follow their task's role and start again from task records; others stay as they are.
+  const instance = id => ({ ...s.get('SELECT harness,session,harness_state FROM role_instances WHERE id=?', id) });
+  assert.deepEqual([instance('ri-dev'), instance('ri-qa'), instance('ri-legacy')].map(row => row.harness), ['pi', 'process', 'pi']);
+  assert.ok([instance('ri-dev'), instance('ri-qa'), instance('ri-legacy')].every(row => row.session === '[]' && row.harness_state === '{}'));
+  assert.deepEqual(instance('ri-codex'), { harness: 'codex', session: '["old"]', harness_state: '{"turn":3}' });
+  assert.deepEqual(lines, ['[migration:1257] Native retired: 3 roles in 3 projects (1 to Process for text_json output, the rest to Pi), 3 frozen task configurations, 3 role instances']);
+  assert.deepEqual(s.all("SELECT resource_id,repository_id FROM audit WHERE user_id='migration:1257' AND action='roles.native_retired' ORDER BY repository_id").map(row => [row.resource_id, row.repository_id]),
+    [[String(revision('kept')), 'kept'], ['0', 'legacy'], [String(revision('v2')), 'v2']]);
+  // Once: nothing runs again.
+  retireNativeProjectRoles(s, line => lines.push(line));
+  assert.equal(lines.length, 1);
 });

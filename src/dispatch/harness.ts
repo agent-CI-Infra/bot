@@ -16,7 +16,7 @@ export async function runDispatchHarness<T>(spec:AgentSpec<T>,role:Row,event:Row
  const store=spec.store,backend=role.harness_ref.id,driver=roleHarness(backend),inProject=driver.environment!=='control_plane';
  let environment:any=null;
  if(inProject){
-  if(!manager)return stop('harness_environment_required','waiting_environment','The configured event Manager Harness requires a project runtime; no Native fallback was used.');
+  if(!manager)return stop('harness_environment_required','waiting_environment','The configured event Manager Harness requires a project runtime.');
   environment=await manager.call('GET','/v1/projects/'+event.repository_id);
   if(!environment)environment=await manager.call('PUT','/v1/projects/'+event.repository_id);
   if(!['ready','busy'].includes(environment?.state))return stop('environment_not_ready','waiting_environment');

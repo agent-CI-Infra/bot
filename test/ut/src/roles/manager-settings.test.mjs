@@ -23,7 +23,7 @@ function task(s,id,kind) {
 for (const format of ['default','legacy','v2']) test(`${format} projects use Manager for new work without changing event sources or saved authority`,t=>{
   const s=fixture(t);
   let original;
-  if(format==='legacy') original={enabled:false,harnesses:{manager:'native',dev:'native'},roles:[]};
+  if(format==='legacy') original={enabled:false,harnesses:{manager:'process',dev:'process'},roles:[]};
   if(format==='v2') {
     original=saveConfiguration(s,'r',{expected_revision:0,roles:[{role_id:'manager',permissions:{github_issues:'read',github_contents:'none'}},{role_id:'dev',budget_policy_ref:{id:'bounded',max_turns:6,max_output_tokens:512}}]},'owner');
     original={...original,enabled:false,controller:{role:'manager',entries:Object.fromEntries(entries.map(e=>[e,false]))}};

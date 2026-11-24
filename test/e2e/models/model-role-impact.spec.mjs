@@ -12,7 +12,7 @@ async function prepared(page, shared = false) {
     expect(created.status).toBe(201); const model = created.value.model;
     if (shared) expect((await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: ['101'] })).status).toBe(200);
     const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: false, roles: [{
-      role_id: 'reviewer', name: 'Release reviewer', enabled: false, harness_ref: { id: 'native' },
+      role_id: 'reviewer', name: 'Release reviewer', enabled: false, harness_ref: { id: 'process' },
       model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }
     }] }); expect(saved.status, JSON.stringify(saved.value)).toBe(200);
     if (shared) expect((await admin('/api/onboarding/model', 'POST', { model_id: model.id })).status).toBe(201);

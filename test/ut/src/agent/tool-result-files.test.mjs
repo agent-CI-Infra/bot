@@ -46,7 +46,7 @@ test('revocation while a result streams leaves no readable file or metadata',asy
 });
 
 import { ResultSession, commandResult, resultOwner } from '../../../../dist/agent/tool-results.js';
-import { boundedBatch, ToolTranscript } from '../../../../dist/agent/tool-context.js';
+import { boundedResult } from '../../../../dist/agent/tool-context.js';
 
 for (const running of [false,true]) test(`${running?'background startup snapshots':'command files'} survive context folding, replay without source reads, and retain a bounded head and tail`,async t=>{
   const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
@@ -62,10 +62,8 @@ for (const running of [false,true]) test(`${running?'background startup snapshot
   if(running){assert.match(result.notice,/startup snapshot/);assert.equal(result.log_path,preview.log_path);}
   const count=reads;
   assert.equal((await session.execute('run_command',{},()=>commandResult(preview,'op',()=>assert.fail('must replay')))).file,result.file);
-  const [small]=boundedBatch([result],8192);assert.equal(small.file,result.file);assert.match(small.tail,/ERROR_AT_END/);assert.match(small.head,/HEAD/);assert.ok(Buffer.byteLength(JSON.stringify(small))<=8192);
-  const messages=[{role:'tool',content:JSON.stringify(small)},{role:'assistant',content:'later'}];new ToolTranscript(messages,1).fit({messages});
-  const folded=JSON.parse(messages[0].content);assert.equal(folded.elided,true);assert.equal(folded.file,result.file);assert.match(folded.notice,/read_tool_result/);
-  if(running)assert.match(folded.notice,/startup snapshot/);
+  const small=boundedResult(result,8192);assert.equal(small.file,result.file);assert.match(small.tail,/ERROR_AT_END/);assert.match(small.head,/HEAD/);assert.ok(Buffer.byteLength(JSON.stringify(small))<=8192);
+  assert.match(small.notice,/read_tool_result/);if(running)assert.match(small.notice,/startup snapshot/);
   let position=0,restored='';
   for(;;){const part=await session.execute('read_tool_result',{file:result.file,position,length:65536},()=>assert.fail('must not execute'));restored+=part.content;if(part.eof)break;position=part.next_position;}
   assert.equal(restored,text.replaceAll(secrets[0],'[REDACTED]'));assert.equal(reads,count);
@@ -96,21 +94,17 @@ test('editing and recalling source messages preserves results while authorizatio
   const current=await save('new');assert.equal((await session.read({file:current.file})).content,'complete');
 });
 
-test('non-command JSON keeps its tail and can be restored after batch compression and later elision',async t=>{
+test('non-command JSON keeps its tail and can be restored after it is cut to a preview',async t=>{
   const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
   const scope=store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'});
   const session=new ResultSession(store,scope,()=> 'project-a',()=>{},['secret-with-"quotes']);
   const value={issues:Array.from({length:10000},(_,i)=>({number:i,body:'中😀 secret-with-"quotes'})),last_error:'ERROR_AT_END'};
-  const [small,large]=boundedBatch([{ok:true},value],20000,session.preserve);
-  assert.deepEqual(small,{ok:true});assert.match(large.tail,/ERROR_AT_END/);assert.equal(large.encoding,'utf-8');assert.ok(large.expires_at);
+  assert.deepEqual(boundedResult({ok:true},20000,session.preserve),{ok:true});
+  const large=boundedResult(value,20000,session.preserve);assert.match(large.tail,/ERROR_AT_END/);assert.equal(large.encoding,'utf-8');assert.ok(large.expires_at);
   assert.equal(store.get('SELECT count(*) n FROM tool_result_files').n,1);
   let content='',position=0;
   for(;;){const page=await session.read({file:large.file,position,length:32767});content+=page.content;if(page.eof)break;position=page.next_position;}
   assert.deepEqual(JSON.parse(content),JSON.parse(JSON.stringify(value).replaceAll('secret-with-\\"quotes','[REDACTED]')));
-  const messages=[{role:'tool',content:JSON.stringify({later:'x'.repeat(100000)})},{role:'assistant',content:'next'}];
-  new ToolTranscript(messages,1000,session.preserve).fit({messages});
-  const folded=JSON.parse(messages[0].content);assert.equal(folded.elided,true);assert.ok(folded.file);
-  assert.match((await session.read({file:folded.file,length:32})).content,/later/);
 });
 
 test('result expiry removes bytes, returns expired and preserves computer ownership across scopes',async t=>{

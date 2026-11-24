@@ -1035,7 +1035,6 @@ export async function runRequest(
           ]),
           requestPrefix: `execution:${execution}:`,
           maxTurns: 64,
-          maxOutputChars: 60000,
           ...(generic ? { grants: offeredNow } : {}),
           finish: {
             name: generic ? (ownRole === 'reviewer' && effective().includes('review') ? 'post_review' : 'submit_report') : 'submit_delivery',

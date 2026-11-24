@@ -35,26 +35,17 @@ async function fixture(t) {
   return { store, spec, requests, respond(fn) { respond = fn; } };
 }
 const tool = { type: 'function', function: { name: 'inspect', description: 'Read only.', parameters: { type: 'object', properties: {}, additionalProperties: false } } };
-const call = name => ({ id: 'call', type: 'function', function: { name, arguments: '{}' } });
+// runAgent needs a transport (#1257): these tests of its gateway and lifecycle send one request and answer its text.
+const ask = spec => ({ adapter: async services => (await services.request({ messages: [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }] }, 'turn:0')).value?.choices?.[0]?.message?.content, ...spec });
 
 test('generic agent records repository usage and does not require a synthetic tasks row', async t => {
   const f = await fixture(t);
-  assert.equal(await runAgent(f.spec), 'done');
+  assert.equal(await runAgent(ask(f.spec)), 'done');
   const row = f.store.get('SELECT * FROM model_requests');
   assert.equal(row.task_id, null); assert.equal(row.repository_id, 'r'); assert.match(row.request_id, /custom.analysis:domain-run/);
   assert.equal(row.input_tokens, 5); assert.equal(row.output_tokens, 2); assert.equal(row.state, 'received');
   assert.equal(f.requests[0].stream, true);
   assert.equal(Object.hasOwn(f.requests[0], 'temperature'), false);
-});
-test('generic agent allowlist denies invented tools, redacts tool output and validates results', async t => {
-  const f = await fixture(t); let turn = 0, invoked = 0;
-  f.respond(() => ({ choices: [{ message: ++turn === 1 ? { tool_calls: [call('publish_release')] } : turn === 2 ? { tool_calls: [call('inspect')] } : { content: '{"ok":true}' } }] }));
-  const result = await runAgent({ ...f.spec, tools: [tool], execute: async () => { invoked++; return { text: 'secret-model-key' }; }, validate: content => JSON.parse(content) });
-  assert.deepEqual(result, { ok: true }); assert.equal(invoked, 1);
-  const messages = f.requests[2].messages;
-  assert.ok(messages.some(message => message.role === 'tool' && message.content.includes('tool_not_allowed')));
-  assert.ok(messages.some(message => message.role === 'tool' && message.content.includes('REDACTED')));
-  assert.ok(!JSON.stringify(f.requests).includes('secret-model-key'));
 });
 test('adapter cannot expand tool set and models stay fixed throughout an invocation', async t => {
   const f = await fixture(t);
@@ -79,12 +70,10 @@ test('revoked model access stops a pinned run before the next provider request',
   } }), error => error.code === 'model_not_available');
   assert.equal(f.requests.length, 1);
 });
-test('generic loop has a turn limit and records provider failures', async t => {
+test('a provider failure is recorded without the model key', async t => {
   const f = await fixture(t);
-  f.respond(() => ({ choices: [{ message: { tool_calls: [call('inspect')] } }] }));
-  await assert.rejects(runAgent({ ...f.spec, tools: [tool], maxTurns: 1, execute: async () => ({ ok: true }) }), error => error.code === 'agent_turn_limit');
   f.respond(() => ({ status: 503, body: { message: 'secret-model-key unavailable' } }));
-  await assert.rejects(runAgent({ ...f.spec, modelAttempts: 1 }), error => error.code === 'model_http_503' && !error.detail.includes('secret-model-key'));
+  await assert.rejects(runAgent(ask({ ...f.spec, modelAttempts: 1 })), error => error.code === 'model_http_503' && !error.detail.includes('secret-model-key'));
   assert.equal(f.store.get("SELECT count(*) n FROM model_requests WHERE state='http_error'").n, 1);
 });
 
@@ -93,7 +82,7 @@ test('SSE guard failures retain cancellation and changed-attempt semantics', asy
     const f = await fixture(t); let streamed = false;
     const failure = new HttpError(409, code);
     f.respond(() => { streamed = true; return { sse: 'data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: 'partial' } }] }) + '\n\ndata: [DONE]\n\n' }; });
-    await assert.rejects(runAgent({ ...f.spec, guard: async () => { if (streamed) throw failure; } }), error => error === failure);
+    await assert.rejects(runAgent(ask({ ...f.spec, guard: async () => { if (streamed) throw failure; } })), error => error === failure);
     assert.equal(f.store.get('SELECT state FROM model_requests').state, 'guard_failed');
   }
 });
@@ -167,9 +156,9 @@ test('concurrent role models isolate messages and bill the actual models at thei
     await bothStarted;
     return {choices:[{message:{content:body.model}}],usage:{prompt_tokens:5,completion_tokens:2}};
   });
-  const result = await Promise.all([['reviewer', 'review.pr'], ['dev', 'development.issue']].map(([role, label]) => runAgent({
+  const result = await Promise.all([['reviewer', 'review.pr'], ['dev', 'development.issue']].map(([role, label]) => runAgent(ask({
     ...f.spec, model: selectedModel(f.store, 'r', role), task:{...f.spec.task,id:label,kind:'task.request'}, redactor:new Redactor(), prompt:label
-  })));
+  }))));
   assert.deepEqual(result,['fixture','coding-model']);
   for (const request of f.requests) {
     assert.equal(request.messages.length,2);
@@ -190,7 +179,7 @@ test('mapping changes affect future runs while a pinned run rechecks credential 
   }}),{code:'model_not_configured'});
   assert.equal(f.requests.length,2);
   assert.ok(f.requests.every(request=>request.model==='fixture'));
-  await assert.rejects(runAgent(f.spec),{code:'model_not_configured'});
+  await assert.rejects(runAgent(ask(f.spec)),{code:'model_not_configured'});
   assert.equal(f.requests.length,2);
 });
 
@@ -262,115 +251,33 @@ test('workspace development keeps publication tools and write capabilities after
   assert.ok(!config.tools.some(tool=>tool.function.name==='finish_review'));
 });
 
-test('bounded delivery execution reserves turns to save and submit without claiming acceptance',async t=>{
- const f=await fixture(t);let saved=false;
- const submit={type:'function',function:{name:'submit_delivery',description:'Hand a report to acceptance',parameters:{type:'object',properties:{},additionalProperties:false}}};
- f.respond(body=>{
-  const deadline=body.messages.some(m=>m.role==='user'&&m.content.includes('turns left in this attempt'));
-  return {choices:[{message:{tool_calls:[call(deadline&&saved?'submit_delivery':'inspect')]}}]};
- });
- const result=await runAgent({...f.spec,tools:[tool,submit],maxTurns:4,finish:{name:'submit_delivery',validate:()=>({submitted:true})},execute:async()=>{
-  if(f.requests.at(-1).messages.some(m=>m.role==='user'&&m.content.includes('turns left in this attempt')))saved=true;
-  return {artifact_saved:saved};
- }});
- assert.deepEqual(result,{submitted:true});assert.ok(saved);assert.equal(f.requests.length,4);
- assert.equal(f.requests[0].messages.length,2);assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
- assert.ok(f.requests.at(-1).messages.some(m=>m.role==='user'&&m.content.includes('independent acceptance')));
-});
-
-test('delivery finalization closes exploration and requests an honest structured handoff within the existing budget',async t=>{
- const f=await fixture(t);let invoked=0;
- const submit={type:'function',function:{name:'submit_delivery',description:'Submit remaining gaps',parameters:{type:'object',properties:{},additionalProperties:false}}};
- f.respond(body=>({choices:[{message:{tool_calls:[call(body.tool_choice?.function?.name||'inspect')]}}]}));
- const value=await runAgent({...f.spec,tools:[tool,submit],maxTurns:4,finish:{name:'submit_delivery',validate:()=>({submitted:true,gaps:['Execution budget reached; independent acceptance must assess completeness']})},finalizationTools:['submit_delivery'],execute:async()=>{invoked++;return {observed:true};}});
- assert.equal(invoked,2);assert.equal(f.requests.length,4);assert.deepEqual(f.requests[2].tools.map(t=>t.function.name),['submit_delivery']);
- assert.ok(f.requests[3].messages.some(m=>m.role==='tool'&&m.content.includes('tool_not_allowed')));
- assert.equal(f.requests[3].tool_choice.function.name,'submit_delivery');assert.equal(value.submitted,true);assert.equal(value.gaps.length,1);assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
-});
-
 for (const status of [429, 503]) test('container-default model transport recovers HTTP '+status+' within a trusted finite budget', async t => {
   const f = await fixture(t); let attempts = 0;
   f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('domain-run','r','custom.analysis','running','retry test')");
   f.respond(() => ++attempts < 3 ? { status, body: { error: 'transient' } } : { choices: [{ message: { content: 'recovered' } }] });
-  assert.equal(await runAgent(f.spec), 'recovered');
+  assert.equal(await runAgent(ask(f.spec)), 'recovered');
   assert.equal(attempts, 3);
   assert.equal(f.store.get("SELECT count(*) n FROM task_logs WHERE json_extract(content,'$.type')='model_retry'").n, 2);
 });
 test('transport retry budget is bounded and permanent errors are never retried', async t => {
   const f = await fixture(t);
-  for (const modelAttempts of [0, 7, 1.5]) await assert.rejects(runAgent({ ...f.spec, modelAttempts }), e => e.code === 'agent_limits_invalid');
+  for (const modelAttempts of [0, 7, 1.5]) await assert.rejects(runAgent(ask({ ...f.spec, modelAttempts })), e => e.code === 'agent_limits_invalid');
   assert.equal(f.requests.length, 0);
   f.respond(() => ({ status: 503, body: { error: 'transient' } }));
-  await assert.rejects(runAgent({ ...f.spec, modelAttempts: 2 }), e => e.code === 'model_http_503' && e.detail.endsWith('（已自动重试 1 次仍失败）'));
+  await assert.rejects(runAgent(ask({ ...f.spec, modelAttempts: 2 })), e => e.code === 'model_http_503' && e.detail.endsWith('（已自动重试 1 次仍失败）'));
   assert.equal(f.requests.length, 2);
   f.respond(() => ({ status: 401, body: { error: 'unauthorized' } }));
-  await assert.rejects(runAgent(f.spec), e => e.code === 'model_authentication_failed');
+  await assert.rejects(runAgent(ask(f.spec)), e => e.code === 'model_authentication_failed');
   assert.equal(f.requests.length, 3);
 });
 
 test('trace retains actual sanitized model I/O and immutable run configuration without private reasoning', async t => {
   const f=await fixture(t);f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('domain-run','r','task.request','running','trace input')");
   f.respond(()=>({choices:[{message:{content:'public result',reasoning_content:'PRIVATE_REASONING_SENTINEL'}}],usage:{prompt_tokens:5,completion_tokens:2}}));
-  assert.equal(await runAgent({...f.spec,prompt:'source input',requestPrefix:'acceptance:trace:'}), 'public result');
+  assert.equal(await runAgent(ask({...f.spec,prompt:'source input',requestPrefix:'acceptance:trace:'})), 'public result');
   const run=f.store.get('SELECT * FROM task_runs'),request=f.store.get('SELECT * FROM model_requests');assert.equal(run.kind,'acceptance');assert.equal(run.status,'succeeded');assert.equal(request.run_id,run.id);
   assert.equal(request.request_snapshot,null);const input=JSON.parse(modelSnapshot(f.store,request,'request')),output=JSON.parse(modelSnapshot(f.store,request,'response'));assert.ok(input.complete&&output.complete);assert.equal(input.data.messages[1].content,'source input');assert.equal(output.data.choices[0].message.content,'public result');assert.doesNotMatch(JSON.stringify(output),/PRIVATE_REASONING_SENTINEL/);
   f.store.run("UPDATE models SET model_name='later-config' WHERE id='m'");assert.equal(JSON.parse(run.config_snapshot).data.model.name,'fixture');assert.doesNotMatch(run.config_snapshot,/secret-model-key/);
-});
-
-test('mandatory finish rejects plain text bypass and accepts the subsequent structured submission',async t=>{
- const f=await fixture(t);let turn=0;
- f.respond(()=>({choices:[{message:++turn===1?{content:''}:{tool_calls:[call('submit')]}}]}));
- const submit={...tool,function:{...tool.function,name:'submit'}};
- const result=await runAgent({...f.spec,tools:[submit],maxTurns:3,finish:{name:'submit',validate:a=>({ok:true})}});
- assert.deepEqual(result,{ok:true});assert.equal(f.requests.length,2);
-});
-test('output budget exhaustion is explicit and never becomes a successful empty result',async t=>{
- const f=await fixture(t);f.respond(()=>({choices:[{message:{content:''},finish_reason:'length'}]}));
- await assert.rejects(runAgent({...f.spec,tools:[{...tool,function:{...tool.function,name:'submit'}}],finish:{name:'submit',validate:a=>a}}),e=>e.code==='agent_output_budget_exhausted');
-});
-// The gateway's request limit; the control-plane loop applies no 128k context estimate.
-const fitsGateway=body=>Buffer.byteLength(JSON.stringify(body))<=2*1024*1024;
-const toolReplies=body=>body.messages.filter(message=>message.role==='tool').map(message=>JSON.parse(message.content));
-test('a tool result no request can hold is preserved as a file and the agent continues',async t=>{
-  // Production: one read_file of a 1.87 MB context file made the next request exceed 2 MiB and failed the task.
-  const f=await fixture(t);let turn=0;
-  f.respond(()=>({choices:[{message:++turn===1?{tool_calls:[call('inspect')]}:{content:'done'}}]}));
-  const result=await runAgent({...f.spec,tools:[tool],execute:async()=>({content:'x'.repeat(2200000)})});
-  assert.equal(result,'done');assert.equal(f.requests.length,2);
-  const [reply]=toolReplies(f.requests[1]);
-  assert.ok(reply.file);assert.ok(reply.bytes>2200000);assert.match(reply.notice,/read_tool_result/);
-  assert.ok(f.requests.every(fitsGateway));
-});
-test('earlier tool results are elided, oldest first, when the conversation outgrows the request limits',async t=>{
-  // Each result fits on its own; sixteen of them are 2.4 MB, which the gateway would refuse.
-  const f=await fixture(t);let turn=0;
-  f.respond(()=>({choices:[{message:++turn<=16?{tool_calls:[{...call('inspect'),id:'call'+turn}]}:{content:'done'}}]}));
-  let n=0;const result=await runAgent({...f.spec,tools:[tool],maxTurns:20,execute:async()=>({content:String.fromCharCode(64+(++n)).repeat(150000)})});
-  assert.equal(result,'done');assert.equal(f.requests.length,17);
-  assert.ok(f.requests.every(fitsGateway),'every request fits the gateway');
-  const replies=toolReplies(f.requests.at(-1)),elided=replies.findIndex(reply=>!reply.elided);
-  assert.equal(replies.length,16);assert.ok(elided>=1,'the oldest results are elided');
-  assert.ok(replies.slice(0,elided).every(reply=>reply.result_characters>150000)&&replies.slice(elided).every(reply=>!reply.elided),'only a prefix of the oldest results is elided');
-  assert.equal(replies.at(-1).content,'P'.repeat(150000),'the latest result is kept');
-});
-test('a request still over 2 MiB without any tool result to elide stops as agent_context_too_large before reaching the gateway',async t=>{
-  const f=await fixture(t);
-  await assert.rejects(runAgent({...f.spec,prompt:'p'.repeat(2200000)}),error=>error.code==='agent_context_too_large');
-  assert.equal(f.requests.length,0);
-});
-test('a prompt and results within 2 MiB are sent unchanged, for models with a window over 128k',async t=>{
-  const f=await fixture(t);
-  assert.equal(await runAgent({...f.spec,prompt:'p'.repeat(600000)}),'done');assert.equal(f.requests.length,1);
-});
-test('the default loop runs any number of tool calls in one message and still refuses duplicate or malformed ids (#333)',async t=>{
-  const f=await fixture(t);let turn=0,invoked=0;
-  f.respond(()=>({choices:[{message:++turn===1?{tool_calls:Array.from({length:12},(_,n)=>({...call('inspect'),id:'call_'+n}))}:{content:'done'}}]}));
-  assert.equal(await runAgent({...f.spec,tools:[tool],execute:async()=>({n:++invoked,content:'x'.repeat(40000)})}),'done');
-  assert.equal(invoked,12);const batch=toolReplies(f.requests[1]);assert.deepEqual(batch.map(reply=>reply.n),Array.from({length:12},(_,n)=>n+1));assert.ok(batch.every(reply=>reply.file));assert.ok(batch.reduce((n,reply)=>n+Buffer.byteLength(JSON.stringify(JSON.stringify(reply))),0)<=256*1024);
-  for(const tool_calls of [[call('inspect'),call('inspect')],[{...call('inspect'),id:''}],[{...call('inspect'),function:{name:'inspect',arguments:{}}}]]){
-    const g=await fixture(t);g.respond(()=>({choices:[{message:{tool_calls}}]}));
-    await assert.rejects(runAgent({...g.spec,tools:[tool],execute:async()=>({})}),error=>error.code==='agent_tool_calls_invalid');
-  }
 });
 
 test('a model request that gets no response is retried five times by default, with growing waits, before the run fails', async t => {
@@ -379,7 +286,7 @@ test('a model request that gets no response is retried five times by default, wi
   assert.deepEqual([1, 2, 3, 4, 5].map(modelRetryDelay), [1, 3, 9, 27, 60]);
   // The connection drops without a response five times; the sixth request answers.
   f.respond(() => ++sent <= 5 ? { drop: true } : { choices: [{ message: { content: 'recovered after five retries' } }] });
-  assert.equal(await runAgent({ ...f.spec, onModelRetry: retry => { retries.push(retry); } }), 'recovered after five retries');
+  assert.equal(await runAgent(ask({ ...f.spec, onModelRetry: retry => { retries.push(retry); } })), 'recovered after five retries');
   assert.equal(f.requests.length, 6);
   assert.deepEqual(retries.map(r => [r.retry, r.retries, r.code, r.delay_ms]), [1, 2, 3, 4, 5].map(n => [n, 5, 'model_unavailable', modelRetryDelay(n)]));
   assert.match(retries[0].detail, /请求失败：/);
@@ -391,7 +298,7 @@ test('a model request that gets no response is retried five times by default, wi
   for (const row of failed) assert.match(JSON.parse(modelSnapshot(f.store, row, 'response')).data.detail, /网络错误|连接/);
   // Six failures in a row end the run, and the failure says it was retried.
   sent = 0; f.respond(() => ({ drop: true }));
-  await assert.rejects(runAgent(f.spec), e => e.code === 'model_unavailable' && e.state === 'retry_wait' && e.detail.endsWith('（已自动重试 5 次仍失败）'));
+  await assert.rejects(runAgent(ask(f.spec)), e => e.code === 'model_unavailable' && e.state === 'retry_wait' && e.detail.endsWith('（已自动重试 5 次仍失败）'));
   assert.equal(f.requests.length, 12);
 });
 
@@ -401,7 +308,7 @@ test('a stopped run does not wait out a retry delay', async t => {
   f.respond(() => ({ status: 503, body: { error: 'busy' } }));
   const started = Date.now();
   // The stop arrives while the first retry would wait a minute; the wait ends at once and the guard reports the stop.
-  await assert.rejects(runAgent({ ...f.spec, executionSignal: controller.signal, onModelRetry: () => { controller.abort(); },
-    guard: async () => { if (controller.signal.aborted) throw Object.assign(new Error('stopped'), { code: 'run_stopped' }); } }), e => e.code === 'run_stopped');
+  await assert.rejects(runAgent(ask({ ...f.spec, executionSignal: controller.signal, onModelRetry: () => { controller.abort(); },
+    guard: async () => { if (controller.signal.aborted) throw Object.assign(new Error('stopped'), { code: 'run_stopped' }); } })), e => e.code === 'run_stopped');
   assert.ok(Date.now() - started < 5000); assert.equal(f.requests.length, 1);
 });

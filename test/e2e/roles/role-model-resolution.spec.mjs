@@ -14,8 +14,8 @@ async function prepared(page) {
     }
     expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: models[0].id })).status).toBe(200);
     const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: false, roles: [
-      { role_id: 'dev', enabled: true, harness_ref: { id: 'native' } },
-      { role_id: 'reviewer', enabled: true, harness_ref: { id: 'native' }, model_profile_ref: { model_id: models[1].id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' } }
+      { role_id: 'dev', enabled: true, harness_ref: { id: 'process' } },
+      { role_id: 'reviewer', enabled: true, harness_ref: { id: 'process' }, model_profile_ref: { model_id: models[1].id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' } }
     ] }); expect(saved.status, JSON.stringify(saved.value)).toBe(200);
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();

@@ -20,6 +20,7 @@ import { agentLoop } from '../../../../dist/agent/loop.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { runRequest } from '../../../../dist/tasks/request.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
+import '../../../fixtures/scripted-driver.mjs';
 
 const sdk = existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json');
 const skipPi = !sdk && process.env.BOT_REQUIRE_PI !== '1' ? 'Pi SDK not installed' : false;
@@ -51,7 +52,7 @@ async function fixture(t, backend, kind, respond) {
   store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,?,?,?,?,?,?,?,?)', 't', '101', kind, 'running', 'command fixture', '{}', 1, environment.generation, randomBytes(24).toString('hex'));
   const records = new TaskRecords(store);
   records.contract('t', { goal: 'Observe commands', scope: ['fixture'], criteria: ['Use actual observations'], endpoint: 'report' });
-  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa', 'reviewer'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'manager' ? 'native' : backend } })) });
+  roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), { expected_revision: 0, enabled: true, controller: { entries: { review: true, development: true, request: true } }, roles: ['manager', 'dev', 'qa', 'reviewer'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'manager' ? 'scripted' : backend } })) });
   const task = store.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {}, workspace = new Workspace(store, manager, task, redactor, guard, log => logs.push(log));
   await workspace.call('init', { type: 'workspace_init' });
   await workspace.write('seed-write', 'fixture.txt', Buffer.from('baseline'));
@@ -96,9 +97,9 @@ test('command timeouts validate configuration and explicit values, clamp with a 
   assert.match(commandTool(120).function.parameters.properties.keep_background.description, /log_path/);
 });
 
-// Cover every backend adapter (native, process, pi) on single-role QA and team-delegated development, while covering
+// Cover every backend adapter (process, pi) on single-role QA and team-delegated development, while covering
 // all four workflow entry points (QA, development, request, observer) without repeating a full 3x4 Cartesian matrix.
-for (const backend of ['native', 'process', 'pi']) {
+for (const backend of ['process', 'pi']) {
   test(`independent QA forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'task.request', body => nextCommand(body) ?? call('submit_acceptance', pass));
     f.records.submit('t', [{ kind: 'report', reference: 'report.md', version: 'v1', content: 'observed' }], [], {});
@@ -106,7 +107,7 @@ for (const backend of ['native', 'process', 'pi']) {
     assertCommands(f, 120);
   });
 }
-for (const backend of ['native', 'pi']) {
+for (const backend of ['process', 'pi']) {
   test(`role development forwards timeout and background options (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
     const f = await fixture(t, backend, 'development.issue', body => {
       if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
@@ -119,8 +120,8 @@ for (const backend of ['native', 'pi']) {
     assertCommands(f, 180);
   });
 }
-test('request execution forwards timeout and background options (native)', { timeout: 90000 }, async t => {
-  const f = await fixture(t, 'native', 'task.request', body => {
+test('request execution forwards timeout and background options (scripted driver)', { timeout: 90000 }, async t => {
+  const f = await fixture(t, 'scripted', 'task.request', body => {
     if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
       const ref = receipts(body).find(r => r.result_ref)?.result_ref;
       return ref ? call('nominate_delivery', { result_ref: ref }) : call('delegate_role', { role: 'dev', purpose: 'Observe commands', refs: [] });
@@ -144,8 +145,8 @@ test('request execution forwards timeout and background options (native)', { tim
   assert.equal(f.store.get("SELECT status FROM tasks WHERE id='t'").status, 'completed');
   assertCommands(f, 180);
 });
-test('observer delegation forwards timeout and background options (native)', { timeout: 90000 }, async t => {
-  const f = await fixture(t, 'native', 'review.issue', body => {
+test('observer delegation forwards timeout and background options (scripted driver)', { timeout: 90000 }, async t => {
+  const f = await fixture(t, 'scripted', 'review.issue', body => {
     if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
       const refs = receipts(body).filter(r => r.result_ref).map(r => r.result_ref);
       return refs.length === 0 ? call('delegate_role', { role: 'dev', purpose: 'Inspect', refs: [] }) : refs.length === 1 ? call('delegate_role', { role: 'reviewer', purpose: 'Observe', refs }) : call('nominate_delivery', { result_ref: refs[0] });
@@ -158,14 +159,14 @@ test('observer delegation forwards timeout and background options (native)', { t
 });
 
 test('kept background service remains accessible to later task commands', async t => {
-  const f = await fixture(t, 'native', 'task.request', () => call('submit_acceptance', pass));
+  const f = await fixture(t, 'scripted', 'task.request', () => call('submit_acceptance', pass));
   const start = await runCommand(f.workspace, 'start', { command: `node -e 'const fs=require("node:fs"),s=require("node:http").createServer((q,r)=>r.end("ready"));s.listen(0,"127.0.0.1",()=>fs.writeFileSync("port",String(s.address().port)))' > service.log 2>&1`, keep_background: true, timeout_seconds: 400 }, 120);
   assert.equal(start.running, true);
   const read = await runCommand(f.workspace, 'read', { command: `node -e 'fetch("http://127.0.0.1:"+require("node:fs").readFileSync("port","utf8")).then(r=>r.text()).then(console.log)'` }, 120);
   assert.equal(read.exit_code, 0); assert.equal(read.output.trim(), 'ready');
 });
 
-for(const backend of ['native','process','pi'])test(`QA consumes a complete large command result by read-only pagination (${backend})`,{skip:backend==='pi'&&skipPi,timeout:90000},async t=>{
+for(const backend of ['process','pi'])test(`QA consumes a complete large command result by read-only pagination (${backend})`,{skip:backend==='pi'&&skipPi,timeout:90000},async t=>{
   let observed;
   const f=await fixture(t,backend,'task.request',body=>{
     const results=receipts(body),command=results.find(r=>r.file&&r.exit_code===0);
@@ -187,7 +188,7 @@ for(const backend of ['native','process','pi'])test(`QA consumes a complete larg
 
 // #1047: a development under the project team reports its milestones like a single executor: the dev role is offered the
 // tool, and each report goes to the control plane's handler (which writes the Issue's status comment).
-for (const backend of ['native', 'pi']) test(`role development offers the dev role the milestone tool and hands each report to the control plane (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
+for (const backend of ['process', 'pi']) test(`role development offers the dev role the milestone tool and hands each report to the control plane (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
   const reported = [];
   const f = await fixture(t, backend, 'development.issue', body => {
     if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
@@ -207,7 +208,7 @@ for (const backend of ['native', 'pi']) test(`role development offers the dev ro
 test('#1121 configurable project and role command_timeout_seconds budgets override default 180s/120s and raise the timeout ceiling', async t => {
   const { management } = await import('../../../../dist/app/management.js');
   const bodies = [];
-  const f = await fixture(t, 'native', 'development.issue', body => {
+  const f = await fixture(t, 'scripted', 'development.issue', body => {
     bodies.push(body);
     if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
       const done = receipts(body).filter(r => r.result_ref || r.findings_ref || r.observation_ref);
@@ -229,7 +230,7 @@ test('#1121 configurable project and role command_timeout_seconds budgets overri
   const currentRoles = roleApi(f.store, actor, 'GET', new URL('http://local/api/repositories/101/roles'), {}).configuration;
   roleApi(f.store, actor, 'PUT', new URL('http://local/api/repositories/101/roles'), {
     expected_revision: currentRoles.revision,
-    roles: [{ role_id: 'reviewer', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', command_timeout_seconds: 1200 } }],
+    roles: [{ role_id: 'reviewer', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'bounded', command_timeout_seconds: 1200 } }],
   });
   const result = await developmentTeam(f.workspace, 'Implement', '{}', async () => ({ pr: { number: 1 } }), { read: true, write: true, shell: true });
   assert.equal(result.pr.number, 1);
