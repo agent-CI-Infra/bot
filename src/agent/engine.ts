@@ -25,7 +25,7 @@ import { assertManagedExecution } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery, shouldRunQa, skipQa } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
-import { blobValue, insertTaskLog, loadDevelopmentCandidate, logContent, saveDevelopmentCandidate, storedInput, stripPublishedCandidateBodies } from '../storage/payloads.js';
+import { blobValue, insertTaskLog, loadDevelopmentCandidate, loadDevelopmentCandidateMeta, logContent, saveDevelopmentCandidate, storedInput, stripPublishedCandidateBodies } from '../storage/payloads.js';
 import { diskFull, floorBytes } from '../storage/disk.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
@@ -473,12 +473,12 @@ export class TaskEngine {
         const contract=inputNow.contract||{goal,scope:[development?String(goal):task.kind],criteria:[development?'Implement the recorded goal and approved findings; mandatory project verification must pass.':'Deliver the requested result, supported by verifiable evidence; do not invent observations.'],endpoint:development?'reviewable_pull_request':'report',source:{kind:task.kind,object_number:task.object_number,delivery_id:task.source_delivery_id},completeness:'derived_from_source'};
         if(before.contract.completeness==='unspecified'||before.contract.completeness==='legacy_unknown')records.contract(id,contract);
         const version=artifact.tree_sha||sha(JSON.stringify(artifact));
-        const compact=(value:any)=>({...value,...(value.files?{files:value.files.map(({base64,...file}:any)=>file)}:{})});
+        const compact=(value:any)=>({...value,...(Array.isArray(value.files)?{files:value.files.map(({base64,...file}:any)=>file)}:{})});
         if(artifact.status==='no_changes')artifact={...artifact,source_ref:sourceRef(this.store,task)};
         const artifacts=[{kind:artifact.tree_sha?'code':'report',reference:`task:${id}:candidate`,version,content:redactor.clean(compact(artifact))}];
         // A task's final report delivers its intermediate PR too. Do not drop the code or its residual findings.
         if(!artifact.tree_sha){
-          const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),code=saved?JSON.parse(saved.data):null;
+          const code=loadDevelopmentCandidate(this.store,id);
           if(code?.published){artifacts.push({kind:'code',reference:code.published.html_url,version:code.published_tree_sha||code.tree_sha,content:redactor.clean(compact(code))});
             evidence=[...evidence,{source:'policy_validation',version:code.tree_sha,verified:code.validation?.source==='policy',result:code.validation}];}
         }
@@ -745,7 +745,7 @@ export class TaskEngine {
         if(development&&input.integration)await restoreCheckpoint(this.store,task,workspace,ref.object.sha);
         if(development&&input.integration&&!input.integration.conflicts?.length&&!investigateRetry&&!['return','insufficient_evidence'].includes(records.get(id).acceptance?.outcome)){
           // Clean three-way integration needs verification, not a fresh development loop.
-          const integration=input.integration,prior=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+          const integration=input.integration,prior=loadDevelopmentCandidateMeta(this.store,id)!;
           const artifact=await workspace.artifact('integration-artifact:'+integration.id+':'+ref.object.sha);
           const command=String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim();
           const validation=command?{...await workspace.call('integration-tests:'+integration.id+':'+ref.object.sha,{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'}:{command:'',source:'policy',skipped:true};

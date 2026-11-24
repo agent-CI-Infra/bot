@@ -70,5 +70,6 @@ export async function readRelatedArtifact(store: Store, task: Row, workspace: Wo
  const result=await reader.call('related:'+source.row.id+':'+source.candidate.id+':'+args.path,{type:'workspace_read',path:args.path,sha:source.snapshot.local_sha});
  if(typeof result.content!=='string')return {...result,...binding,blob_sha:file.sha};
  const content=result.content.slice(offset,offset+length),next=offset+content.length;
+ if(result.truncated)return {...result,content,...binding,blob_sha:file.sha,offset,total_characters:result.content.length,total_bytes:result.size??null,truncated:true,next_offset:next<result.content.length?next:null,complete:false};
  return {...result,content,...binding,blob_sha:file.sha,offset,total_characters:result.content.length,next_offset:next<result.content.length?next:null,complete:next>=result.content.length};
 }

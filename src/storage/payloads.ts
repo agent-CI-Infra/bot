@@ -182,6 +182,22 @@ export function loadDevelopmentCandidate(store: Store, taskId: string): any {
   return candidate;
 }
 
+/**
+ * Reads only the lightweight metadata of a development candidate without loading externalized blobs.
+ * Strips raw `{ $blob }` placeholders from file-array keys so metadata-only callers can never treat a blob ref as an array.
+ */
+export function loadDevelopmentCandidateMeta(store: Store, taskId: string): any {
+  const row = store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
+  if (!row?.data) return null;
+  const candidate = JSON.parse(String(row.data));
+  if (!candidate || typeof candidate !== 'object') return candidate;
+  for (const key of candidateBlobKeys) {
+    const raw = candidate[key];
+    if (raw && typeof raw === 'object' && typeof raw.$blob === 'string') delete candidate[key];
+  }
+  return candidate;
+}
+
 /** Drops inline base64 file bodies from a confirmed-published candidate while keeping its path/sha/mode manifest. */
 export function stripPublishedCandidateBodies(store: Store, taskId: string, candidate: Record<string, any>, repositoryId?: string): void {
   if (!Array.isArray(candidate?.files) || !candidate.files.some((f: any) => typeof f?.base64 === 'string')) return;

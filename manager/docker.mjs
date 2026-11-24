@@ -2,6 +2,8 @@ import http from 'node:http';
 import { posix } from 'node:path';
 import { hostname } from 'node:os';
 
+const defaultMaxResponseBytes = 4 * 1024 * 1024;
+
 export class ManagerError extends Error {
   constructor(code, status = 409) { super(code); this.status = status; }
 }
@@ -21,13 +23,14 @@ export class Docker {
     const self = await this.request('GET', `/containers/${encodeURIComponent(hostname())}/json`);
     return self?.Mounts?.find(m => m.Type === 'volume' && m.Destination === destination)?.Name || null;
   }
-  request(method, path, body, raw = false, timeout = 90000, maxBytes = 0) {
+  request(method, path, body, raw = false, timeout = 90000, maxBytes = defaultMaxResponseBytes) {
+    const limit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : defaultMaxResponseBytes;
     return new Promise((resolve, reject) => {
       const bytes = body === undefined ? null : Buffer.from(JSON.stringify(body));
       const req = http.request({ socketPath: this.socketPath, path: '/v1.47' + path, method,
         headers: bytes ? { 'Content-Type': 'application/json', 'Content-Length': bytes.length } : {} }, res => {
         const chunks = []; let size = 0;
-        res.on('data', b => { size += b.length; if (maxBytes > 0 && size > maxBytes) req.destroy(new Error('docker_response_too_large')); else chunks.push(b); });
+        res.on('data', b => { size += b.length; if (size > limit) req.destroy(new Error('docker_response_too_large')); else chunks.push(b); });
         res.on('end', () => {
           if (res.statusCode === 404) { resolve(null); return; }
           if (res.statusCode >= 300) {
