@@ -65,6 +65,8 @@ function createMultiBranchGitHub() {
   refs.set('main', mainSha);
   refs.set('release/v2', releaseSha);
   refs.set('bot/issue-9', existingPrHeadSha);
+  // PR #100 claims this head, so the ref must really exist: a delivery that reuses it has to see the branch.
+  refs.set('bot/issue-10', existingPrHeadSha);
   tags.set('v1.0.0', tagSha);
 
   const server = createServer(async (req, res) => {
@@ -115,8 +117,10 @@ function createMultiBranchGitHub() {
     }
     if (sub === '/git/refs' && req.method === 'POST') {
       const name = String(body.ref || '').replace(/^refs\/heads\//, '');
+      state.refWrites.push({ ref: body.ref, sha: body.sha, created: !refs.has(name) });
+      // Real GitHub answers 422 instead of moving a branch that already exists.
+      if (refs.has(name)) return send({ message: 'Reference already exists', documentation_url: 'https://docs.github.com/rest/git/refs#create-a-reference' }, 422);
       refs.set(name, body.sha);
-      state.refWrites.push({ ref: body.ref, sha: body.sha });
       return send({ ref: body.ref, object: { sha: body.sha } }, 201);
     }
     const refPatch = /^\/git\/refs\/heads\/(.+)$/.exec(sub);
@@ -248,6 +252,13 @@ test('Issue target.ref selects non-default base branch while keeping trusted ski
         const fileContent = toolMsgs.find(r => typeof r.content === 'string')?.content ?? '';
         message = call('submit_report', { summary: `Checked out: ${fileContent.trim()}`, artifacts: [] });
       }
+    } else if (mode === 'deliver') {
+      if (!devPromptSeen) devPromptSeen = JSON.parse(msgs[1].content);
+      if (!names.includes('run_command')) {
+        message = call('run_command', { command: 'printf "issue-10-release-v2-fixed\\n" > app.txt' });
+      } else {
+        message = call('open_pull_request', { summary: 'Fix Issue #10 on release/v2', change_title: 'fix: issue 10 on release v2', artifacts: [{ path: 'app.txt', description: 'fixed app.txt' }] });
+      }
     } else if (mode === 'existing_bot_pr') {
       devPromptSeen = JSON.parse(msgs[1].content);
       message = call('submit_report', { summary: `Base=${devPromptSeen.delivery_context.base_branch} Sha=${devPromptSeen.delivery_context.base_sha}`, artifacts: [] });
@@ -369,7 +380,7 @@ test('Issue target.ref selects non-default base branch while keeping trusted ski
   assert.equal(t4.status, 'completed', JSON.stringify({ status: t4.status, error: t4.error_code, detail: t4.error_detail }));
   assert.match(JSON.parse(t4.result).summary, /tag-v1-version/);
 
-  // 5. Existing open bot_pr on the Issue takes precedence over target.ref
+  // 5. With no branch named, an existing open bot_pr on the Issue is still continued (#1314 keeps this unchanged)
   mode = 'existing_bot_pr';
   devPromptSeen = null;
   gh.state.prs.push({
@@ -393,12 +404,97 @@ test('Issue target.ref selects non-default base branch while keeping trusted ski
   );
   const t5 = await runTask({
     request: 'Continue Issue #9',
-    target: { type: 'issue', number: 9, ref: 'main' },
+    target: { type: 'issue', number: 9 },
     writes: ['pull_request'],
     contract: { goal: 'Continue', scope: ['app.txt'], criteria: ['ok'], endpoint: 'reviewable_pull_request' },
   });
   assert.equal(t5.status, 'completed', JSON.stringify({ status: t5.status, error: t5.error_code, detail: t5.error_detail }));
-  assert.equal(JSON.parse(t5.input).base_branch, 'release/v2', 'existing open bot_pr base.ref takes precedence over target.ref');
+  assert.equal(JSON.parse(t5.input).base_branch, 'release/v2', 'an existing open bot_pr is continued when the task names no branch');
   assert.equal(JSON.parse(t5.input).snapshot_sha, gh.shas.existingPrHeadSha, 'existing open bot_pr head.sha takes precedence');
   assert.equal(devPromptSeen.delivery_context.pr_number, 99);
+
+  // 6. An explicit branch on the Issue wins over an existing open bot_pr on another branch (#1314, #290 gap 2)
+  //    and really delivers: a PR is opened on release/v2 from a per-baseline branch, PR #100 keeps its base/head.
+  mode = 'deliver';
+  devPromptSeen = null;
+  const prsBefore = gh.state.prs.length;
+  gh.state.prs.push({
+    id: 9010,
+    number: 100,
+    state: 'open',
+    title: 'Existing main PR',
+    body: 'Existing',
+    html_url: 'https://github.invalid/fixture/repo/pull/100',
+    head: { ref: 'bot/issue-10', sha: gh.shas.existingPrHeadSha, repo: { id: 101 } },
+    base: { ref: 'main', sha: gh.shas.mainSha },
+    user: { id: 999 },
+  });
+  store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,created_at,updated_at) VALUES('prev-issue-10','101','task.request','pr_opened','prev',?,10,'2026-01-01','2026-01-01')",
+    JSON.stringify({ target: { type: 'issue', number: 10 } }),
+  );
+  store.run(
+    "INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('101',100,'9010','999','101','bot/issue-10',?,'prev-issue-10')",
+    gh.shas.existingPrHeadSha,
+  );
+  store.run(
+    "INSERT INTO bot_branches(repository_id,branch,task_id) VALUES('101','bot/issue-10','prev-issue-10')",
+  );
+  const t6 = await runTask({
+    request: 'Fix Issue #10 on release/v2',
+    target: { type: 'issue', number: 10, ref: 'refs/heads/release/v2' },
+    writes: ['pull_request'],
+    contract: { goal: 'Fix on release/v2', scope: ['app.txt'], criteria: ['ok'], endpoint: 'reviewable_pull_request' },
+  });
+  assert.equal(t6.status, 'pr_opened', JSON.stringify({ status: t6.status, error: t6.error_code, detail: t6.error_detail }));
+  const t6Input = JSON.parse(t6.input);
+  assert.equal(t6Input.base_branch, 'release/v2', 'the branch the task names wins over the existing PR base');
+  assert.equal(t6Input.snapshot_sha, gh.shas.releaseSha);
+  assert.equal(devPromptSeen.delivery_context.base_branch, 'release/v2');
+  assert.equal(devPromptSeen.delivery_context.pr_number, undefined, 'the default-branch PR is not taken over');
+  const opened = gh.state.prs.slice(prsBefore).filter(p => p.number !== 100);
+  assert.equal(opened.length, 1, 'exactly one new PR is opened on the named baseline');
+  assert.equal(opened[0].base.ref, 'release/v2', 'the new PR targets release/v2');
+  assert.equal(opened[0].head.ref, 'bot/issue-10-release-v2', 'the publication branch is derived from the baseline, not the branch PR #100 owns');
+  const unchanged = gh.state.prs.find(p => p.number === 100);
+  assert.equal(unchanged.base.ref, 'main', 'PR #100 keeps its base');
+  assert.equal(unchanged.head.ref, 'bot/issue-10', 'PR #100 keeps its head branch');
+  assert.equal(unchanged.head.sha, gh.shas.existingPrHeadSha, 'PR #100 keeps its head commit');
+  assert.equal(gh.state.refWrites.some(w => w.ref === 'refs/heads/bot/issue-10'), false, 'the branch PR #100 owns is never moved');
+  assert.ok(gh.state.refWrites.some(w => w.ref === 'refs/heads/bot/issue-10-release-v2' && w.created), 'the per-baseline branch is created');
+
+  // 7. Naming the branch the existing PR already targets still reuses that PR (the `===` arm of the gate).
+  mode = 'existing_bot_pr';
+  devPromptSeen = null;
+  gh.state.prs.push({
+    id: 9011,
+    number: 101,
+    state: 'open',
+    title: 'Existing main PR for #11',
+    body: 'Existing',
+    html_url: 'https://github.invalid/fixture/repo/pull/101',
+    head: { ref: 'bot/issue-11', sha: gh.shas.existingPrHeadSha, repo: { id: 101 } },
+    base: { ref: 'main', sha: gh.shas.mainSha },
+    user: { id: 999 },
+  });
+  store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,created_at,updated_at) VALUES('prev-issue-11','101','task.request','pr_opened','prev',?,11,'2026-01-01','2026-01-01')",
+    JSON.stringify({ target: { type: 'issue', number: 11 } }),
+  );
+  store.run(
+    "INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('101',101,'9011','999','101','bot/issue-11',?,'prev-issue-11')",
+    gh.shas.existingPrHeadSha,
+  );
+  const t7 = await runTask({
+    request: 'Continue Issue #11 on the branch it already targets',
+    target: { type: 'issue', number: 11, ref: 'refs/heads/main' },
+    writes: ['pull_request'],
+    contract: { goal: 'Continue on main', scope: ['app.txt'], criteria: ['ok'], endpoint: 'reviewable_pull_request' },
+  });
+  assert.equal(t7.status, 'completed', JSON.stringify({ status: t7.status, error: t7.error_code, detail: t7.error_detail }));
+  const t7Input = JSON.parse(t7.input);
+  assert.equal(t7Input.base_branch, 'main');
+  assert.equal(t7Input.snapshot_sha, gh.shas.existingPrHeadSha, 'the named branch equals the PR base, so its head is checked out');
+  assert.equal(devPromptSeen.delivery_context.pr_number, 101, 'an open PR on the named branch is still reused');
+  assert.equal(devPromptSeen.delivery_context.base_branch, 'main');
 });

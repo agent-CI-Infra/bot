@@ -505,38 +505,48 @@ export async function runRequest(
         ]);
         baseBranch = policyBase || github.defaultBranch;
         mirrorRefs.add(`refs/heads/${baseBranch}`);
-        // If a bot PR already exists for this Issue and we are revising it, check out its head.
-        const ownedIssuePr = (grantedWrites(store, task.id) ?? []).includes('pull_request')
-          ? store.get(
-              `SELECT b.* FROM bot_pull_requests b JOIN tasks t ON t.id=b.source_task_id
-               WHERE b.repository_id=? AND t.object_number=?
-               AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue')
-               ORDER BY b.number DESC LIMIT 1`,
-              task.repository_id,
-              targetSpec.number!,
-            )
-          : undefined;
-        if (ownedIssuePr && !input.bot_pr) {
-          const pr = await github.request('GET', github.path(`/pulls/${ownedIssuePr.number}`), undefined, true);
-          if (pr && pr.state === 'open') {
-            input.bot_pr = pr;
-            baseBranch = pr.base?.ref || baseBranch;
-            mirrorRefs.add(`refs/heads/${baseBranch}`);
-            mirrorRefs.add(`refs/pull/${ownedIssuePr.number}/head`);
-            if (pr.head?.ref) mirrorRefs.add(`refs/heads/${pr.head.ref}`);
-            const baseRefObj = await github.ref(baseBranch).catch(() => null);
-            baseRefSha = /^[a-f0-9]{40}$/i.test(String(baseRefObj?.object?.sha || ''))
-              ? String(baseRefObj.object.sha).toLowerCase()
-              : /^[a-f0-9]{40}$/i.test(String(pr.base?.sha || ''))
-                ? String(pr.base.sha).toLowerCase()
-                : undefined;
-            targetSha = pr.head.sha;
-            targetContextFiles['bot_pr.json'] = JSON.stringify(pr, null, 2);
-          }
+        const requestedRef = typeof targetSpec.ref === 'string' && targetSpec.ref.trim() ? targetSpec.ref.trim() : null;
+        // A branch the task names is a delivery target of its own: an open PR for the same Issue on another branch is a
+        // different target, so it must not be taken over and silently move the base (#1314, #290).
+        const requestedBranch = requestedRef && !requestedRef.startsWith('refs/tags/') && !/^[a-f0-9]{40}$/i.test(requestedRef.replace(/^refs\/heads\//, ''))
+          ? requestedRef.replace(/^refs\/heads\//, '')
+          : null;
+        // If a bot PR already exists for this Issue and we are revising it, check out its head. The newest open PR is
+        // continued, except that a branch the task names selects the open PR on that baseline: adopting a PR on another
+        // baseline would move the delivery back to a branch this task explicitly did not ask for (#1314, #290 gap 2).
+        const issuePrNumbers = (grantedWrites(store, task.id) ?? []).includes('pull_request')
+          ? store
+              .all(
+                `SELECT b.number FROM bot_pull_requests b JOIN tasks t ON t.id=b.source_task_id
+                 WHERE b.repository_id=? AND t.object_number=?
+                 AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue')
+                 ORDER BY b.number DESC LIMIT 20`,
+                task.repository_id,
+                targetSpec.number!,
+              )
+              .map(row => Number(row.number))
+          : [];
+        for (const issuePrNumber of issuePrNumbers) {
+          if (input.bot_pr) break;
+          const pr = await github.request('GET', github.path(`/pulls/${issuePrNumber}`), undefined, true);
+          if (!pr || pr.state !== 'open') continue;
+          if (requestedBranch && pr.base?.ref !== requestedBranch) continue;
+          input.bot_pr = pr;
+          baseBranch = pr.base?.ref || baseBranch;
+          mirrorRefs.add(`refs/heads/${baseBranch}`);
+          mirrorRefs.add(`refs/pull/${issuePrNumber}/head`);
+          if (pr.head?.ref) mirrorRefs.add(`refs/heads/${pr.head.ref}`);
+          const baseRefObj = await github.ref(baseBranch).catch(() => null);
+          baseRefSha = /^[a-f0-9]{40}$/i.test(String(baseRefObj?.object?.sha || ''))
+            ? String(baseRefObj.object.sha).toLowerCase()
+            : /^[a-f0-9]{40}$/i.test(String(pr.base?.sha || ''))
+              ? String(pr.base.sha).toLowerCase()
+              : undefined;
+          targetSha = pr.head.sha;
+          targetContextFiles['bot_pr.json'] = JSON.stringify(pr, null, 2);
         }
         const issueHasPrWrite = (grantedWrites(store, task.id) ?? []).includes('pull_request') || software();
         if (!targetSha && !input.snapshot_sha && !inheritedBase) {
-          const requestedRef = typeof targetSpec.ref === 'string' && targetSpec.ref.trim() ? targetSpec.ref.trim() : null;
           if (requestedRef) {
             const branchCandidate = requestedRef.replace(/^refs\/heads\//, '');
             const branchRef = requestedRef.startsWith('refs/tags/') ? null : await github.ref(branchCandidate);
@@ -1235,10 +1245,21 @@ export async function runRequest(
           const media = checkedMedia?.selection === JSON.stringify(paths) ? checkedMedia.files : await collectPullRequestMedia(workspace, paths);
           const command = String(store.get('SELECT test_command FROM policies WHERE repository_id=?', task.repository_id)?.test_command || '').trim();
           const validation = command ? { ...(await workspace.call(`request:${execution}:tests`, { type: 'workspace_command', command, timeout_ms: null })), command, source: 'policy' } : { command: result.test_command ?? null, source: 'agent', skipped: true };
-          const defaultBranchName = targetSpec?.type === 'issue' && Number.isSafeInteger(targetSpec.number) ? `bot/issue-${targetSpec.number}` : 'bot/task-' + task.id;
-          const branch = input.bot_pr?.head?.ref || defaultBranchName;
+          // A delivery on a non-default baseline publishes on its own branch, so it neither reuses nor is blocked by the
+          // branch an open PR on another baseline already owns. The name follows from the delivery target alone.
+          const baselineBranchName = (issueNumber: number) => {
+            const base = String(input.base_branch || '').trim();
+            const defaultBase = String(input.default_branch || github.defaultBranch || '');
+            if (!base || base === defaultBase) return `bot/issue-${issueNumber}`;
+            const slug = base.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'base';
+            return `bot/issue-${issueNumber}-${slug}`;
+          };
+          const defaultBranchName = targetSpec?.type === 'issue' && Number.isSafeInteger(targetSpec.number) ? baselineBranchName(targetSpec.number!) : 'bot/task-' + task.id;
+          const adoptedBranch = input.bot_pr?.head?.ref;
+          const branch = adoptedBranch || defaultBranchName;
           const existingBranchOwner = store.get('SELECT task_id FROM bot_branches WHERE repository_id=? AND branch=?', task.repository_id, branch)?.task_id;
-          const ownerTaskId = existingBranchOwner ? String(existingBranchOwner) : String(task.id);
+          // A reused PR keeps the task that owns its branch; a fresh per-baseline branch belongs to the task publishing it.
+          const ownerTaskId = adoptedBranch && existingBranchOwner ? String(existingBranchOwner) : String(task.id);
           const candidateBaseSha = input.bot_pr && verifiedConflictMerge && verifiedConflictMerge.baseSha !== input.bot_pr.head?.sha
             ? verifiedConflictMerge.baseSha
             : task.head_sha;
@@ -1272,7 +1293,13 @@ export async function runRequest(
             validation,
             no_changes: snapshot.tree_sha === input.snapshot_tree && !verifiedConflictMerge?.gitMerged && !candidateRebase,
           };
-          store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING', task.repository_id, branch, ownerTaskId);
+          if (adoptedBranch) {
+            store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING', task.repository_id, branch, ownerTaskId);
+          } else {
+            // The per-baseline branch is deterministic, so a stale row from an earlier delivery on the same baseline must
+            // not keep the current delivery from owning the branch it is about to publish.
+            store.run('INSERT INTO bot_branches(repository_id,branch,task_id) VALUES(?,?,?) ON CONFLICT(repository_id,branch) DO UPDATE SET task_id=excluded.task_id', task.repository_id, branch, ownerTaskId);
+          }
           saveDevelopmentCandidate(store, task.id, code, String(task.repository_id));
           policyEvidence = [{ source: 'policy_validation', version: snapshot.tree_sha, verified: validation.source === 'policy' && !validation.error && validation.exit_code === 0 && !validation.timed_out, result: validation }];
         }
