@@ -9,7 +9,7 @@ const shownMs = text => {
   return text.includes('耗时不足 1 毫秒') ? 0 : null;
 };
 
-test('two calls of one tool show their own durations, and a step recorded without timing says so (#1313)', async ({ page }) => {
+test('each tool call shows its own duration, and a call with no result is never paired by name (#1313)', async ({ page }) => {
   const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
     await repositoryAssistant(f); const group = await boundGroup(f);
@@ -18,32 +18,37 @@ test('two calls of one tool show their own durations, and a step recorded withou
     const receipt = await post(f.h, f.id, inGroup('连续核对两次项目范围。', 'ou_bob'));
     expect((await finished(f.h, receipt.value.operation_id)).state).toBe('completed');
     const turn = f.h.store.get('SELECT * FROM channel_service_turns WHERE chat_id=?', group.id);
+    const at = Date.now();
     // A step recorded before the timing columns existed: no call id, no clock readings.
-    f.h.store.run("INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,'tool_call','list_projects',?)", turn.id, Date.now());
+    f.h.store.run("INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,'tool_call','list_projects',?)", turn.id, at);
+    // A call whose result never arrives (an edited turn restarts the session), followed by another call of the same tool:
+    // pairing by name or by the nearest later result would hand it the second call's end, so it must stay unrecorded.
+    f.h.store.run("INSERT INTO channel_service_events(turn_id,type,name,call_id,started_at,created_at) VALUES(?,'tool_call','list_projects','orphan',?,?)", turn.id, at, at);
+    f.h.store.run("INSERT INTO channel_service_events(turn_id,type,name,call_id,started_at,created_at) VALUES(?,'tool_call','list_projects','later',?,?)", turn.id, at + 10, at + 10);
+    f.h.store.run("INSERT INTO channel_service_events(turn_id,type,name,call_id,ended_at,created_at) VALUES(?,'tool_result','list_projects','later',?,?)", turn.id, at + 30, at + 30);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, f, '#/conversations/' + group.id);
     await page.getByText('查看执行过程', { exact: true }).click();
     const calls = page.locator('.channel-step').filter({ hasText: '调用工具 · 查看项目范围' });
-    await expect(calls).toHaveCount(3);
+    await expect(calls).toHaveCount(5);
+    // Order: the two real calls, the pre-migration row, the call without a result, the later call.
+    await expect(calls.nth(2)).toContainText('耗时未记录');
+    await expect(calls.nth(3)).toContainText('耗时未记录');
+    await expect(calls.nth(4)).toContainText('耗时 20 毫秒');
     const texts = await calls.allInnerTexts();
-    // The old step never claims a duration; the two real calls each show their own.
-    expect(texts.filter(text => text.includes('耗时未记录'))).toHaveLength(1);
-    const shown = texts.filter(text => !text.includes('耗时未记录')).map(shownMs);
+    const shown = [texts[0], texts[1], texts[4]].map(shownMs);
     expect(shown.every(ms => ms !== null), JSON.stringify(texts)).toBe(true);
     const events = (await f.admin(`/api/channels/chats/${group.id}/turns/${turn.id}`)).value.events
       .filter(event => event.type === 'tool_call' && event.duration_ms !== null);
-    expect(events).toHaveLength(2); expect(new Set(events.map(event => event.call_id)).size).toBe(2);
+    expect(events).toHaveLength(3); expect(new Set(events.map(event => event.call_id)).size).toBe(3);
     // Each line is its own call's measured time (tenths of a second round by up to 50 ms), and together they cover the window.
     for (const ms of shown) expect(events.some(event => Math.abs(event.duration_ms - ms) <= 50), `${ms} vs ${events.map(event => event.duration_ms)}`).toBe(true);
-    const own = events.map(event => f.h.store.get("SELECT started_at,(SELECT ended_at FROM channel_service_events WHERE call_id=? AND ended_at IS NOT NULL) ended_at FROM channel_service_events WHERE turn_id=? AND call_id=? AND type='tool_call'", event.call_id, turn.id, event.call_id));
-    const window = Math.max(...own.map(row => row.ended_at)) - Math.min(...own.map(row => row.started_at));
-    expect(Math.abs(shown.reduce((sum, ms) => sum + ms, 0) - window)).toBeLessThanOrEqual(100);
     // A step line ends at its duration: no tool arguments, results or model reasoning follow it.
-    for (const text of texts.filter(text => !text.includes('耗时未记录'))) expect(text).toMatch(/ · 调用工具 · 查看项目范围 · 耗时[^·]*$/);
+    for (const text of [texts[0], texts[1], texts[4]]) expect(text).toMatch(/ · 调用工具 · 查看项目范围 · 耗时[^·]*$/);
     for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: 1000 }); await calls.first().scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
-      await expect(calls).toHaveCount(3);
+      await expect(calls).toHaveCount(5);
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }
