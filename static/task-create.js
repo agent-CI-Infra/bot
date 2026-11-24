@@ -11,6 +11,22 @@ function taskCreationError(value) {
   if (known.includes(code)) return t(key);
   return code || t('taskCreate.error_unknown_status');
 }
+// #527: this page's failure sentences come from the dictionary for the same reason static/settings/installations.js
+// builds its own: the console's readErrorText answers in the console's Chinese source prose, which an English sentence
+// cannot carry. A kind this page can name is a dictionary phrase; anything else keeps the status and — only when it is a
+// short ASCII identifier — the service's code, never its prose.
+function taskCreationRequestError(err) {
+  const name = err && err.name, message = err?.message || '';
+  if (name === 'AbortError') return t('taskCreate.request_error.cancelled');
+  if (err instanceof TypeError || name === 'TypeError' || /failed to fetch|networkerror|network error|load failed|network request failed/i.test(message))
+    return t('taskCreate.request_error.network');
+  if (err && err.code === 'response_not_json')
+    return t(err.status >= 200 && err.status < 300 ? 'taskCreate.request_error.unreadable' : 'taskCreate.request_error.gateway', { status: err.status });
+  if (err && err.code === 'authorization_changed') return t('taskCreate.request_error.authorization_changed');
+  const code = typeof err?.code === 'string' && /^[A-Za-z0-9._:-]{1,64}$/.test(err.code) ? ' · ' + err.code : '';
+  if (err && err.status) return t('taskCreate.request_error.status', { status: err.status, code });
+  return t('taskCreate.request_error.unknown');
+}
 async function renderNewTask(request) {
   const page = $('console-page'), owner = me.id, address = location.hash;
   if (taskCreationOwner !== owner) { taskCreationDrafts.clear(); taskCreationOwner = owner; }
@@ -76,7 +92,7 @@ async function renderNewTask(request) {
         note(result.task_creation?.allowed ? t('taskCreate.allowed') : taskCreationError(result.task_creation?.reason || t('taskCreate.reason_unknown'))));
     } catch (err) {
       if (!alive() || version !== contextVersion) return;
-      if (!revoked(err)) contextBody.replaceChildren(consoleState(t('taskCreate.context_failed'), readErrorText(err), { tone: 'error' }));
+      if (!revoked(err)) contextBody.replaceChildren(consoleState(t('taskCreate.context_failed'), taskCreationRequestError(err), { tone: 'error' }));
     } finally { if (alive() && version === contextVersion) sync(); }
   }
   function showReceipt() {
@@ -96,7 +112,7 @@ async function renderNewTask(request) {
       note(t('taskCreate.receipt_id', { id: receipt.id })));
     if (receipt.state === 'succeeded' && typeof receipt.result?.id === 'string') {
       receiptBox.append(note(t('taskCreate.task_id', { id: receipt.result.id })), button(t('taskCreate.view_task'), async () => {
-        try { await openTask(receipt.result.id); } catch (err) { if (alive()) feedback.textContent = readErrorText(err); }
+        try { await openTask(receipt.result.id); } catch (err) { if (alive()) feedback.textContent = taskCreationRequestError(err); }
       }), button(t('taskCreate.another_task'), () => { taskCreationDrafts.delete(id); void renderNewTask(++renderVersion); }, 'quiet'));
     } else if (receipt.state === 'failed' || receipt.state === 'rejected') {
       receiptBox.append(note(taskCreationError(receipt.result?.error || receipt.state)), button(t('taskCreate.back_to_draft'), async () => {
@@ -107,7 +123,7 @@ async function renderNewTask(request) {
       const refresh = button(t('taskCreate.refresh_receipt'), async () => {
         refresh.disabled = true;
         try { const result = await api('/api/management/commands/' + receipt.id); draft.receipt = result; if (alive()) showReceipt(); }
-        catch (err) { if (alive() && !revoked(err)) feedback.textContent = readErrorText(err); }
+        catch (err) { if (alive() && !revoked(err)) feedback.textContent = taskCreationRequestError(err); }
         finally { refresh.disabled = false; }
       }, 'quiet'); receiptBox.append(refresh);
     }
@@ -124,9 +140,9 @@ async function renderNewTask(request) {
       // A definitive pre-command rejection permits editing. An uncertain earlier attempt keeps its original key.
       if (!replay && err.status >= 400 && err.status < 500 && !/idempotency_conflict/.test(err.message)) {
         draft.envelope = null;
-        draft.error = t('taskCreate.retry_after_context', { error: readErrorText(err) });
+        draft.error = t('taskCreate.retry_after_context', { error: taskCreationRequestError(err) });
         if (alive() && !revoked(err)) await readContext();
-      } else { draft.uncertain = true; draft.error = t('taskCreate.retry_same_submission', { error: readErrorText(err) }); if (alive()) revoked(err); }
+      } else { draft.uncertain = true; draft.error = t('taskCreate.retry_same_submission', { error: taskCreationRequestError(err) }); if (alive()) revoked(err); }
     }
     finally { draft.sending = false; draft.update?.(); }
   }
