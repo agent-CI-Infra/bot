@@ -677,6 +677,13 @@ const i18nMessages = {
     'taskCreate.error.task_pull_request_forbidden': '项目或执行角色未获代码与 PR 写入权限，请核对配置。',
     'taskCreate.error.task_software_disabled': '项目尚未启用普通任务的软件交付，请核对工作类型与开发设置。',
     'taskCreate.error.capability_ceiling': '项目能力上限不是「可开发并开 PR」，不能交付代码；请项目管理员在「项目设置 → 监听与触发」调整。',
+    'taskCreate.request_error.cancelled': '请求已取消',
+    'taskCreate.request_error.network': '网络连接失败，请稍后重试',
+    'taskCreate.request_error.gateway': '{status} · 入口网关返回了错误页面，没有带回具体原因。请稍后重试；持续出现时请管理员查看服务日志。',
+    'taskCreate.request_error.unreadable': '{status} · 服务返回了无法识别的内容，请刷新页面后重试。',
+    'taskCreate.request_error.authorization_changed': '权限已变化，请刷新页面后按当前权限重试。',
+    'taskCreate.request_error.status': '{status}{code}',
+    'taskCreate.request_error.unknown': '请求失败',
   },
   en: {
     'meta.title': 'launchpad Admin',
@@ -1350,6 +1357,13 @@ const i18nMessages = {
     'taskCreate.error.task_pull_request_forbidden': 'The project or the execution role lacks code and PR write permission; check the configuration.',
     'taskCreate.error.task_software_disabled': 'Software delivery for ordinary tasks is not enabled for this project; check the work type and development settings.',
     'taskCreate.error.capability_ceiling': 'The project capability ceiling is not "develop and open a PR", so code cannot be delivered; a project administrator must change it under Project settings → Listeners and triggers.',
+    'taskCreate.request_error.cancelled': 'Request cancelled',
+    'taskCreate.request_error.network': 'The network request failed, try again shortly',
+    'taskCreate.request_error.gateway': '{status} · The gateway answered with an error page and no specific reason. Try again shortly; if it persists, ask an administrator to read the service log.',
+    'taskCreate.request_error.unreadable': '{status} · The service answered with content that could not be read; reload the page and try again.',
+    'taskCreate.request_error.authorization_changed': 'Permissions changed; reload the page and retry under the current permissions.',
+    'taskCreate.request_error.status': '{status}{code}',
+    'taskCreate.request_error.unknown': 'The request failed',
   }
 };
 
