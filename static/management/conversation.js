@@ -479,6 +479,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
           for (const message of page.messages) messages.set(message.id, message);
           for (const row of page.events) event(row);
           const pending = page.messages.find(message => ['pending', 'running'].includes(message.state));
+          // The idle controls can shrink the feed after the reader has already returned to the bottom.
+          const atLatest = followOutput && !unseenOutput && feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 1;
           active = pending?.id ?? null; historyReady = !page.has_more; updateBusy();
           if (page.has_more) continue;
           for (const message of page.messages) {
@@ -487,6 +489,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
           }
           if (pending) showStatus('处理中 · 可以继续写草稿，离开助手页后仍会继续');
           else showStatus('就绪 · 操作结果可在执行进展中核对');
+          if (atLatest) scrollOutput(true);
           if (!pending && !page.title_pending) break;
           streamController = new AbortController();
           const response = await fetch(endpoint + '/conversations/' + id + '/events?stream=1&after=' + cursor, { signal: streamController.signal });
