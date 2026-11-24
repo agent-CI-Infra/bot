@@ -466,7 +466,7 @@ function modelRequestStepStatus(state: string): 'ok' | 'error' | 'unknown' {
   return 'unknown';
 }
 
-/** Builds normalized per-run step summaries for non-`task_logs` harnesses (`process`, `claude_code`, `codex`, and runs recorded on the retired `native`) while enforcing memory ACLs. */
+/** Builds normalized per-run step summaries for non-`task_logs` harnesses (`claude_code`, `codex`, and runs recorded on the retired `native` and `process`) while enforcing memory ACLs. */
 function buildHistoryStepsForRun(
   store: Store,
   _repoId: string,

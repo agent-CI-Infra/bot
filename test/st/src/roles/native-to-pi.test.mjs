@@ -1,7 +1,7 @@
 // #1255: Pi is the default backend of the management assistant, group assistants and project roles. A database from before
 // it moves what it saved as Native to Pi once at start-up; every other backend stays. #1337: the management assistant, group
 // assistants, Manager and QA run only on Pi, and what was saved for them on another backend moves to Pi once.
-// #1338: the Process backend is gone, and what was saved on it moves to Pi once.
+// #1338: the Process backend is gone, and what was saved on it moves to Pi once when the store opens.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -307,4 +307,26 @@ test('Process is gone (#1338): roles saved on it move to Pi once, text_json answ
   retireProcessRoles(s, line => lines.push(line));
   assert.equal(lines.length, 1);
   assert.throws(() => put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] }), error => error.code === 'unknown_role_harness');
+});
+
+test('Process is gone (#1338): opening a database saved before it moves its Process roles to Pi', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'process-retired-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let s = new Store(path, key);
+  // A legacy configuration, a frozen task configuration and a role instance on Process, as a database from before #1338
+  // holds them: its one-time marker is not there yet.
+  s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
+  s.run("INSERT INTO repositories VALUES('legacy','fixture/legacy','o','a')");
+  s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { test: 'process', dev: 'codex' } }));
+  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t','legacy','task.request','waiting','frozen','{}',1,1)");
+  s.run("INSERT INTO task_execution_configs(task_id,revision,snapshot,created_at) VALUES('t',1,?,'then')", JSON.stringify({ roles: { enabled: true, harnesses: { test: 'process' } } }));
+  s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,session,harness_state,updated_at) VALUES('ri-test','t','test','{}','process','[\"old\"]','{}','then')");
+  s.run("DELETE FROM settings WHERE key='migration:1338:retire-process'");
+  s.close();
+  // The next start runs the migration from the Store itself.
+  s = new Store(path, key); t.after(() => s.close());
+  assert.deepEqual(stored(s, 'legacy').harnesses, { test: 'pi', dev: 'codex' });
+  assert.deepEqual(JSON.parse(s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot).roles.harnesses, { test: 'pi' });
+  assert.deepEqual({ ...s.get("SELECT harness,session FROM role_instances WHERE id='ri-test'") }, { harness: 'pi', session: '[]' });
+  assert.ok(s.get("SELECT 1 FROM settings WHERE key='migration:1338:retire-process'"));
 });
