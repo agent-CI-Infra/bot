@@ -14,7 +14,7 @@ launchpad 是一个基于 **Node.js 22.13+ / TypeScript** 的多账号 GitHub �
 - `src/main.ts`、`src/server.ts`：控制面启动与统一业务端口（`8791`）路由分派。
 - `src/app/`、`src/identity/`、`src/installations/`：账号、OAuth 登录、安装档案同步、成员缓存与统一授权（`ActorContext`）。
 - `src/dispatch/`、`src/tasks/`、`src/review/`、`src/actions/`、`src/releases/`：单对象持久 Manager 线程、通用任务引擎（`task.request`）、检视与开发交付、Actions 失败排查、手动发版本。
-- `src/agent/`、`src/roles/`、`src/harness/`、`src/github/`：共享 Agent 运行时、`bot.role-run/1` 协议、多后端 Harness（`pi`、`process`、`claude_code`、`codex`）、受控 `github_write` 与只读探索。
+- `src/agent/`、`src/roles/`、`src/harness/`、`src/github/`：共享 Agent 运行时、`bot.role-run/1` 协议、多后端 Harness（`pi`、`claude_code`、`codex`）、受控 `github_write` 与只读探索。
 - `src/management/`、`src/service-roles/`、`src/channels/`、`src/schedules/`：统一管理服务、服务角色、飞书应用连接与本地消息账本、持久化定时与通知订阅。
 - `src/storage/`、`src/memory/`、`src/projects/`、`src/external/`、`src/public-board/`：SQLite/轨迹/Blob 存储、项目知识、项目电脑网关、外部执行端与公开看板托管。
 - `manager/`、`runner/`、`docker/`：受管 Docker 生命周期、容器内命令/文件/MCP/模型中转协议、四镜像构建与 Compose 编排。
