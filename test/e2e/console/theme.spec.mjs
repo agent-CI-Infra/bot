@@ -377,7 +377,9 @@ test('#750 dark theme keeps the task detail, project head and project page reada
         // The current tab keeps --color-brand-text (views.css:1058/:1105) while the hover rule supplies the fill.
         ['.workbench-tab[aria-current=page]', 'rgb(150, 180, 255)'],
       ]) {
-        await page.locator(selector).hover();
+        // The strip renders several non-current tabs (`main` added a third view), so the hover targets the first one;
+        // `colours()` reads the first match too, which keeps the hovered node and the measured node the same.
+        await page.locator(selector).first().hover();
         await page.waitForTimeout(250);
         const hovered = (await colours(page, [selector]))[0];
         rendered(hovered, `tab hover ${selector} ${width}`);
@@ -476,7 +478,7 @@ test('#750 dark theme keeps the task detail, project head and project page reada
         ['.workbench-tab:not([aria-current=page])', 'rgba(255, 255, 255, 0.7)', 'rgb(23, 36, 59)'],
         ['.workbench-tab[aria-current=page]', 'rgb(255, 255, 255)', 'rgb(36, 93, 224)'],
       ]) {
-        await page.locator(selector).hover();
+        await page.locator(selector).first().hover();
         await page.waitForTimeout(250);
         const hovered = (await colours(page, [selector]))[0];
         rendered(hovered, `light tab hover ${selector} ${width}`);
@@ -695,7 +697,10 @@ const PIN_TABLE = [
   ['confirm', '.confirm-actions', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(246, 249, 250)'], 'rgb(85, 104, 138)', 'rgb(227, 234, 240)'],
   ['confirm', '.confirm-status.error', ['rgb(255, 156, 156)', 'rgb(22, 29, 39)'], ['rgb(160, 43, 49)', 'rgb(255, 255, 255)']],
   ['task', '.step-fold-body', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(252, 253, 254)'], 'rgb(85, 104, 138)', 'rgb(241, 245, 249)'],
-  ['task', '.step-fold-body .muted', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(252, 253, 254)']],
+  // #1207 put the step input/output sections inside `.step-fold-body`; the first `.muted` in that body is the
+  // section note, and `.step-io-block` is the nearest painted ancestor (white in light, `--color-surface-alt` in
+  // dark). The row therefore pins that card, not the fold body it used to sit on.
+  ['task', '.step-fold-body .muted', ['rgb(163, 179, 199)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(255, 255, 255)']],
   ['task', '.step-fold-stat', ['rgb(163, 179, 199)', 'rgb(22, 29, 39)'], ['rgb(51, 65, 85)', 'rgb(241, 245, 249)']],
   ['confirm', '.confirm-status.progress', ['rgb(168, 198, 245)', 'rgb(22, 29, 39)'], ['rgb(44, 87, 145)', 'rgb(255, 255, 255)']],
   ['task', '.step-fold-body pre.output', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(245, 248, 250)']],
