@@ -507,6 +507,22 @@ test('the project computer accepts the control plane\'s three-way integration ca
  assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
 });
 
+// An ACP session (iCode, WorkSwarm) renews its local lease with every poll (src/harness/container-session.ts). The
+// whitelist lacked lease_heartbeat, so a real manager refused the first poll and every run ended at once with
+// "轮询容器内 icode 失败：runner_operation_failed"; LocalManager's passthrough hid it, so this goes through validateCall.
+test('the project computer passes an ACP session poll that renews its lease, and only that call', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const poll = { type: 'workspace_harness_poll', workspace_id: 'a'.repeat(48), offset: 0, instance_id: 'b'.repeat(48), wait_ms: 250,
+    known_tool_ids: [], known_token_ids: [], known_model_ids: [], lease_heartbeat: true };
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: poll });
+  assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).lease_heartbeat], ['workspace_harness_poll', true]);
+  const count = f.docker.runs.length;
+  for (const request of [{ ...poll, lease_heartbeat: false }, { ...poll, lease_heartbeat: 'yes' },
+    { type: 'workspace_harness_interrupt', workspace_id: 'a'.repeat(48), mode: 'kill', instance_id: 'b'.repeat(48), lease_heartbeat: true }])
+    await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request }), /invalid_runner_request/, JSON.stringify(request));
+  assert.equal(f.docker.runs.length, count);
+});
+
 test('the project computer accepts conflict import and merge check calls through validateCall', async t => {
   const f = fixture(t); await f.projects.register('101');
   const workspace = 'a'.repeat(48), base = 'b'.repeat(40), head = 'c'.repeat(40), tree = 'd'.repeat(40);
