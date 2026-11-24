@@ -257,7 +257,7 @@ test('Issue target.ref selects non-default base branch while keeping trusted ski
       if (!driftedOnce) {
         driftedOnce = true;
         // Simulate an agent erroneously switching HEAD to another commit inside the worktree!
-        message = call('run_command', { command: 'git checkout -q -b rogue && printf "rogue\\n" > app.txt && git commit -qam rogue' });
+        message = call('run_command', { command: 'git checkout -q -b rogue && printf "rogue\\n" > app.txt && git -c user.name=bot -c user.email=bot@example.invalid -c commit.gpgsign=false commit -qam rogue' });
       } else if (!names.includes('open_pull_request')) {
         message = call('open_pull_request', { summary: 'Attempt on drifted HEAD', change_title: 'fix: release v2', artifacts: [{ path: 'app.txt', description: 'updated' }] });
       } else if (!restoredBase) {
