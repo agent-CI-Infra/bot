@@ -123,7 +123,7 @@ export const codeActions: Record<string,string> = {
   ...Object.fromEntries(['bot_rule_too_large','invalid_bot_rule_file','invalid_bot_label','invalid_bot_computer','unsafe_bot_rule'].map(code=>[code,'仓库的 .bot/ 规则文件已不再读取（规则已迁入 Manager 提示词、项目设置和机器配置），点「重试」即可继续。'])),
   invalid_skill_file:'.agents/skills/ 下的文件必须是普通文件（不能是符号链接或子模块）：修正后提交到默认分支，再点「重试」。',
   unsafe_skill_file:'.agents/skills/ 下包含符号链接：换成普通文件后提交，再点「重试」。',
-  too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md（共最多 256 个文件）：合并或删掉一些，提交到默认分支后点「重试」。',
+  too_many_bot_skills:'.agents/skills/ 下最多 256 个技能文件：合并或删掉一些，提交到默认分支后点「重试」。',
   skill_file_too_large:'.agents/skills/ 下单文件最多 512 KiB、总计最多 1 MiB：精简体积后提交到默认分支，再点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
   capability_ceiling:'项目能力上限不够这一步（详情写明需要的档位），任务已停下，已有改动保留。需要时由项目管理员在「项目设置 → 监听与触发」调高上限后点「重试」。',

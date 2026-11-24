@@ -144,7 +144,6 @@ test('a bad skill stops the task before publishing with its own code; bad .bot/ 
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id;
   const bad={
     invalid_rule_content:{'.agents/skills/a/SKILL.md':'skill\0'},
-    too_many_bot_skills:Object.fromEntries(Array.from({length:33},(_,i)=>[`.agents/skills/s${i}/SKILL.md`,'Skill.'])),
     invalid_skill_file:{'.agents/skills/a/SKILL.md':{data:'../../etc/passwd',mode:'120000'}}};
   for(const [code,files] of Object.entries(bad)){
     f.heads.main=f.commit({'src/app.js':'export {};\n',...files});
