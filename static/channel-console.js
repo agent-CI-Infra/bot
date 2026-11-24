@@ -105,6 +105,13 @@ const channelToolLabels = { list_projects: '查看项目范围', list_project_ta
   // Pi's own tools on the assistant's computer (#1296).
   bash: '在电脑上执行命令', read: '读取电脑文件', write: '写入电脑文件', edit: '修改电脑文件', grep: '在电脑上搜索', find: '在电脑上查找文件', ls: '查看电脑目录' };
 const channelTime = value => timestamp(typeof value === 'number' ? value : Date.parse(value));
+// A tool call's own measured duration (#1313). A step without one — recorded before the timing columns existed — says so
+// instead of reading as zero, and a sub-millisecond call never renders as "0 秒".
+const stepDuration = event => {
+  if (!Object.hasOwn(event, 'duration_ms')) return '';
+  if (event.duration_ms === null || event.duration_ms === undefined) return ' · 耗时未记录';
+  return event.duration_ms < 1 ? ' · 耗时不足 1 毫秒' : event.duration_ms < 1000 ? ` · 耗时 ${event.duration_ms} 毫秒` : ` · 耗时 ${(event.duration_ms / 1000).toFixed(1)} 秒`;
+};
 async function renderChannelConsole(request) {
   const page = $('console-page'), owner = me, address = location.hash, root = element('div', '', 'channel-console');
   const alive = () => renderVersion === request && me === owner && location.hash === address && root.isConnected && root.contains(thread);
@@ -348,7 +355,7 @@ async function renderChannelConsole(request) {
     try {
       const result = await api(`/api/channels/chats/${selected}/turns/${turn}?after=${after}`); if (!alive() || !target.isConnected) return;
       if (!after) target.replaceChildren();
-      for (const event of result.events) target.append(element('p', `${channelTime(event.created_at)} · ${channelStepLabels[event.type] || event.type}${event.name ? ' · ' + (channelToolLabels[event.name] || event.name) : ''}`, 'channel-step'));
+      for (const event of result.events) target.append(element('p', `${channelTime(event.created_at)} · ${channelStepLabels[event.type] || event.type}${event.name ? ' · ' + (channelToolLabels[event.name] || event.name) : ''}${stepDuration(event)}`, 'channel-step'));
       if (result.coverage === 'legacy_steps_unavailable') target.append(note('这轮执行发生在步骤记录启用前，没有可补写的执行步骤。'));
       if (result.has_more) { const next = button('更多执行步骤', async () => { next.remove(); await readSteps(turn, target, result.next_after); }, 'quiet'); target.append(next); }
     } catch (err) { failRead(target, err, () => readSteps(turn, target, after)); }

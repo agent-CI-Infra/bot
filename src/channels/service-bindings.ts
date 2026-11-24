@@ -120,6 +120,12 @@ export function serviceBindingStorage(store: Store): void {
   // Why a turn failed beyond its code, for example a model that sent nothing for 90 seconds through every retry.
   if (!store.all('PRAGMA table_info(channel_service_turns)').some(c => c.name === 'error_detail'))
     store.db.exec('ALTER TABLE channel_service_turns ADD COLUMN error_detail TEXT');
+  // Step identity and timing (#1313): a call and its result share a call id, and each side keeps the clock reading taken
+  // when it was written. Steps recorded before this migration keep NULL in all three and read as unrecorded.
+  const eventCols = store.all('PRAGMA table_info(channel_service_events)').map(c => c.name);
+  if (!eventCols.includes('call_id')) store.db.exec('ALTER TABLE channel_service_events ADD COLUMN call_id TEXT');
+  if (!eventCols.includes('started_at')) store.db.exec('ALTER TABLE channel_service_events ADD COLUMN started_at INTEGER');
+  if (!eventCols.includes('ended_at')) store.db.exec('ALTER TABLE channel_service_events ADD COLUMN ended_at INTEGER');
   // Bindings from before #424 are owned by their configurer.
   if (!store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'owner_id'))
     store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''");

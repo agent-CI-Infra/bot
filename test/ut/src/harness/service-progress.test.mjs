@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Redactor } from '../../../../dist/agent/common.js';
-import { maskCommandCredentials, progressText, serviceProgressReader, ProgressBudget } from '../../../../dist/harness/service-progress.js';
+import { CallIdentities, maskCommandCredentials, progressText, serviceProgressReader, ProgressBudget } from '../../../../dist/harness/service-progress.js';
 
 // A Pi turn's progress (#1296) is shown to people: credentials written out on a command line never reach it.
 test('credentials named on a command line are masked, and ordinary commands are left alone', () => {
@@ -83,4 +83,14 @@ test('the progress budget allows a burst, then one step per interval, at most a 
   assert.equal(budget.admit(end('f')), true);
   assert.equal(budget.admit({ kind: 'notice', notice: 'compacting' }), true, 'notices are rare and always pass');
   assert.equal(budget.skipped(), 2);
+});
+
+// #1313: the console pairs a tool call with its own result by an identity made per invocation. Pi may reuse its own
+// call id in a later step of the same turn, so that id must never become the pairing key.
+test('a reused Pi call id still gets one console identity per invocation', () => {
+  let n = 0; const ids = new CallIdentities(() => 'call-' + ++n);
+  const first = ids.start('pi-1'); assert.equal(ids.finish('pi-1'), first);
+  const second = ids.start('pi-1'); assert.notEqual(second, first, 'the same Pi id must not reconnect two invocations');
+  assert.equal(ids.finish('pi-1'), second);
+  const orphan = ids.finish('pi-unknown'); assert.ok(orphan && orphan !== first && orphan !== second, 'a finish without a start gets its own identity');
 });
