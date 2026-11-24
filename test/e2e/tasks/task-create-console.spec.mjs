@@ -249,8 +249,6 @@ test('code PR task creation has no workflow_changes checkbox and submits cleanly
 // hardcoded Chinese (static/task-create.js). An English console must show none of them in the page body; the console
 // shell around it is a different slice, so the reading is scoped to #console-page. Three layouts are read because the
 // form and the execution-context card stack differently below 1024.
-const han = /[\u4e00-\u9fff]/;
-
 test('English 界面：新建任务页整页不再出现中文，三个视口都不溢出', async ({ page }) => {
   const f = await fixture(), errors = [];
   page.on('pageerror', err => errors.push(err.message));
