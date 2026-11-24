@@ -258,10 +258,18 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await page.getByRole('button', { name: '发送指令', exact: true }).click();
     await expect.poll(() => f.h.store.get("SELECT COUNT(*) AS n FROM task_history WHERE task_id='t-952' AND type='supplemental_instruction'").n).toBe(1);
 
+    // Continuing a paused task is a queue position, not a badge: the task leaves `paused` and keeps the
+    // `queue_seq` it held before the pause (#1318). The badge is transient here — the engine may claim the
+    // resumed task, and this fixture's legacy `development.issue` row ends in `waiting_permission`, before the
+    // page ever renders `待执行` — so the durable state is asserted on the store instead.
+    const queueSeq = f.h.store.get("SELECT queue_seq FROM tasks WHERE id='t-952'").queue_seq;
     await detail.getByRole('button', { name: '暂停', exact: true }).click();
     await expect(detail.locator('#task-badges')).toContainText('已暂停');
     await detail.getByRole('button', { name: '重试', exact: true }).click();
-    await expect(detail.locator('#task-badges')).toContainText('待执行');
+    await expect.poll(() => f.h.store.get("SELECT status FROM tasks WHERE id='t-952'").status).not.toBe('paused');
+    const resumed = f.h.store.get("SELECT status,queue_seq FROM tasks WHERE id='t-952'");
+    expect(['queued', 'running', 'waiting_permission']).toContain(resumed.status);
+    expect(resumed.queue_seq).toBe(queueSeq);
 
     // Narrow 390px responsive check across Task Detail, Task View, and Role View + zero inline style CSP check
     await page.setViewportSize({ width: 390, height: 844 });
