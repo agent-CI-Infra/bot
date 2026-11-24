@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
+import { nativeServiceAssistants } from '../../../fixtures/native-roles.mjs';
 import { feishuMarkdown, markdownPosts, postText } from '../../../../dist/channels/format.js';
 import { MediaTurn, artifactBytes, channelResourcePath, incomingFiles, inboundBytes, mediaPermission, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
 import { saveModelMetadata } from '../../../../dist/models/catalog.js';
@@ -293,6 +294,8 @@ test('long private input is read from the ledger and a long rich reply reaches F
 
 test('a provider refusing image input recovers gracefully in the same turn with stripped images, rewritten tool results and actionable guidance',async t=>{
   const f=await channelFixture(t);f.wire.state.resources.set('img_no_vision',{data:png,mime:'image/png'});
+  // The native loop's own image recovery, removed with it in #1257; Pi's is covered by multimodal-harness.
+  nativeServiceAssistants(f.h.store);
   let resourceId='', recoveryRequest=null;
   f.modelState.respond=async(body,res)=>{
     const seen=results(body);
@@ -613,6 +616,8 @@ test('large images over 2 MiB serialized request pass directly without folding t
 
 test('preflight fitRequest and HTTP 413 provider rejections strip oversized images and keep the turn running', async t => {
   const f = await channelFixture(t), chat = await privateChat(f);
+  // The native loop's own request fitting, removed with it in #1257; Pi's is covered by multimodal-harness.
+  nativeServiceAssistants(f.h.store);
   const event = f.service.adapter(f.service.connector(f.id)).normalize(envelope('', {
     message: { chat_id: 'oc_private', message_type: 'post', content: JSON.stringify({ zh_cn: { content: [[{ tag: 'img', image_key: 'img_small' }, { tag: 'img', image_key: 'img_huge' }]] } }) },
   }));
@@ -709,6 +714,8 @@ test('import_message_resource -> computer processing -> view_workspace_image clo
   const f = await channelFixture(t), m = await assistantManager(t);
   const assistants = new AssistantComputerService(f.h.store, m.manager, m.homes);
   f.service.management.service.assistants = assistants;
+  // The native loop's own image tool results, removed with it in #1257; Pi's are covered by multimodal-harness.
+  f.groupHarness = 'native';
   // Re-wire group binding with computer write/read/command permissions.
   const chat = await group(f);
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);

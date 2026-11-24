@@ -10,6 +10,9 @@ import { channelFixture, transport, connector, envelope, post, until, finished, 
 
 // Private chats are the management assistant and groups are their bound service role (#312): no message text is a command.
 const read = (project = '101', task = 'blocked') => ['management_query', { operation: 'get_task', target: { project_id: project, task_id: task }, arguments: {} }];
+// A refused tool call comes back to the model and the turn completes (maintainers' decision on #1256): the message state and
+// the refused call's code.
+const refusal = (h, receipt) => { const outcome = managementOutcome(h, receipt.value.operation_id); return [outcome.message, outcome.refused]; };
 const readNamed = (done, context) => { const m = /(\d+)\/(\w+)/.exec(String(context.request)); return read(m[1], m[2]); };
 const ask = (project = '101', task = 'blocked') => `看看 ${project}/${task} 任务的进展`;
 const noProjects = '当前账户没有可访问的项目';
@@ -167,7 +170,7 @@ test('local accounts bind without GitHub configuration and Feishu access follows
   const allowed = await post(h, id, message('101'));
   assert.equal((await finished(h, allowed.value.operation_id)).state, 'completed');
   const denied = await post(h, id, message('201')); await finished(h, denied.value.operation_id);
-  assert.equal(managementOutcome(h, denied.value.operation_id).error, 'capability_forbidden');
+  assert.deepEqual(refusal(h, denied), ['completed', 'capability_forbidden']);
   assert.equal((await admin('/api/project-admin-assignments', 'PUT', { user_id: local.id, repository_ids: [], organization_ids: [] })).status, 200);
   const revokedAccess = await post(h, id, message('101'));
   assert.equal((await finished(h, revokedAccess.value.operation_id)).state, 'completed'); assert.equal(managementOutcome(h, revokedAccess.value.operation_id).error, null);
@@ -294,7 +297,7 @@ test('one global connection serves authorized projects in different organization
     const r = await send(project, task); assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
   }
   const denied = await send('102', 'blocked'); await finished(h, denied.value.operation_id);
-  assert.equal(managementOutcome(h, denied.value.operation_id).error, 'capability_forbidden');
+  assert.deepEqual(refusal(h, denied), ['completed', 'capability_forbidden']);
   const event = service.adapter(service.connector(id)).normalize(envelope(ask(), { sender: { sender_id: { open_id: 'ou_multi' } } }));
   const actor = await service.actor(event);
   assert.equal(actor.tenant_id, null); authorize(actor, 'tasks.read', { project_id: '201' });
@@ -315,7 +318,7 @@ test('one global connection serves authorized projects in different organization
   h.store.run('DELETE FROM project_admin_assignments WHERE user_id=? AND repository_id=?', member.id, '201');
   invalidate(h.store, member.id, 'test-project-revoked');
   const revoked = await send('201', 'foreign'); await finished(h, revoked.value.operation_id);
-  assert.equal(managementOutcome(h, revoked.value.operation_id).error, 'capability_forbidden');
+  assert.deepEqual(refusal(h, revoked), ['completed', 'capability_forbidden']);
   assert.equal((await admin('/api/channels/setup')).value.connectors.length, 1);
 });
 
@@ -331,7 +334,7 @@ test('an identity bound through an organization app acts only inside that organi
   assert.equal(managementOutcome(h, allowed.value.operation_id).error, null);
   // The member administers 201 too, but not through this organization's app.
   const foreign = await send('201', 'foreign'); await finished(h, foreign.value.operation_id);
-  assert.equal(managementOutcome(h, foreign.value.operation_id).error, 'tenant_forbidden');
+  assert.deepEqual(refusal(h, foreign), ['completed', 'tenant_forbidden']);
   const conversation = h.store.get('SELECT c.* FROM channel_sessions s JOIN management_conversations c ON c.id=s.conversation_id WHERE s.principal_id=?', member.id);
   assert.equal(conversation.scope, 'tenant:github.com:10');
   const actor = await service.actor(service.adapter(service.connector(id)).normalize(envelope(ask(), { sender: { sender_id: { open_id: 'ou_org_member' } } })));

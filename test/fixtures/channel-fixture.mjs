@@ -1,6 +1,7 @@
 import { createCipheriv, createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { managementFixture, toolResults } from './management-fixture.mjs';
+import { scriptedGroup } from './scripted-roles.mjs';
 import { digest, randomId } from '../../dist/core/security.js';
 import { FEISHU_SCOPES } from '../../dist/channels/feishu.js';
 import { resolvePrincipalActor } from '../../dist/identity/authorization.js';
@@ -151,13 +152,14 @@ export async function boundGroup(f, projects = ['101'], chat = 'oc_group', clien
   const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', {
     scope: { kind: 'repositories', repositories: projects },
     ...(f.groupModelId !== undefined ? { model_id: f.groupModelId } : {}),
-    // Native unless the test chose a backend (#1255; native-roles.mjs).
-    harness: f.groupHarness ?? 'native',
+    ...(f.groupHarness ? { harness: f.groupHarness } : {}),
     enabled: true,
     expected_revision: revision,
     ...(f.groupPermissions ? { permissions: f.groupPermissions } : {}),
   });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
+  // The scripted test driver unless the test chose a backend (#1256; scripted-roles.mjs).
+  if (!f.groupHarness) scriptedGroup(f.h.store, row.id);
   return row;
 }
 /** A project notification destination for a chat, registered for the client's user as a project's schedule panel does when that
@@ -186,11 +188,14 @@ export function scriptedModel(f, steps) {
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
   };
 }
-/** A private message's management outcome: the inbox row, its management message state and the error event code, if any. */
+/** A private message's management outcome: the inbox row, its management message state, the error event code and the code
+ * of its last refused tool call (`refused`), if any. */
 export function managementOutcome(h, inbox) {
   const row = h.store.get('SELECT * FROM channel_inbox WHERE id=?', inbox), message = row?.message_id ? h.store.get('SELECT * FROM management_messages WHERE id=?', row.message_id) : null;
-  const error = message ? h.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1", message.id) : null;
-  return { state: row?.state, error: row?.error ?? (error ? JSON.parse(error.data).error : null), message: message?.state ?? null, input: message ? JSON.parse(message.input) : null };
+  const last = type => message ? h.store.get('SELECT data FROM management_events WHERE message_id=? AND type=? ORDER BY sequence DESC LIMIT 1', message.id, type) : null;
+  const error = last('error'), refused = last('tool_error');
+  return { state: row?.state, error: row?.error ?? (error ? JSON.parse(error.data).error : null), refused: refused ? JSON.parse(refused.data).error : null,
+    message: message?.state ?? null, input: message ? JSON.parse(message.input) : null };
 }
 /** A group's model must serve every project in its scope (#849): authorize the shared fixture model to every fixture project,
  * as a deployment authorizes its shared model to the projects it starts. Call again after adding projects. */

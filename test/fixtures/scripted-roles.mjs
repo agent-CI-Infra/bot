@@ -10,3 +10,29 @@ export const scriptedHarnesses = () => Object.fromEntries(rolePool.map(role => [
 export function scriptedRoles(store, repositoryId) {
   store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'roles:' + repositoryId, JSON.stringify({ enabled: false, harnesses: scriptedHarnesses() }));
 }
+
+// Service assistants on the scripted driver (#1256). Their turns run through serviceHarnessTurn like those on Pi, which
+// opens a session workspace on the owner's assistant computer. The scripted driver runs in the test process and uses no
+// workspace, so the turn's computer lends an empty one instead; the computer tools themselves are unchanged (unavailable
+// without assistant computers, as before). Tests of Pi service turns install computers of their own.
+export function scriptedServiceAssistants(store) {
+  store.run("UPDATE service_roles SET harness=? WHERE id='management-assistant'", scriptedHarness);
+}
+/** Puts the group bound in chat `chatId` (a channel_chats id) on the scripted driver. Only a test registers it, so the
+ * binding API, which offers the production backends, does not take it: a test saves the binding, then switches it here. */
+export function scriptedGroup(store, chatId) {
+  store.run('UPDATE channel_service_bindings SET harness=? WHERE chat_id=?', scriptedHarness, chatId);
+}
+export function lendSessionWorkspaces(assistants) {
+  const turn = assistants.turn.bind(assistants);
+  assistants.turn = options => {
+    const computer = turn(options);
+    computer.sessionWorkspace = async () => ({ manager: undefined, async release() {}, async call() { throw new Error('computer_not_configured'); } });
+    return computer;
+  };
+}
+/** Control-plane options (an object or a function of the store) with the lending above, keeping the caller's onChannels. */
+export const withLentSessionWorkspaces = options => store => {
+  const extra = typeof options === 'function' ? options(store) : options;
+  return { ...extra, onChannels: service => { lendSessionWorkspaces(service.management.service.assistants); extra.onChannels?.(service); } };
+};

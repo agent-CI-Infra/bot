@@ -15,7 +15,7 @@
 | **Live (`test/live/`)** | 独立 `node --test` | 真实外部服务（GitHub、飞书、外部模型）或本机 CLI 实况探针（`*.live.test.mjs`）。 | 禁止进入默认并行池。 |
 | **Framework (`test/framework/`)** | 基础设施 | 测试集发现（`test-plan.mjs`）、并发调度（`test-sets.mjs`）、回环网络守卫（`test-network-guard.mjs`）、双分片汇总与权重计算（`unit-shards.mjs`）。 | 业务断言。 |
 
-进程内用假模型驱动角色与任务机制的 ST 用例，把项目角色配置为只在测试进程注册的脚本化驱动 `scripted`（`test/fixtures/scripted-driver.mjs`，由 `scripted-roles.mjs` 写入角色配置）。它自带模型与工具往返（与 `process` 驱动的 worker 循环相同），不经过控制面的 Native 工具循环。生产进程不注册它；它以不列出（`listed: false`）的方式注册，所以即使在长期存活的测试进程（如 Playwright worker）里，角色编辑器和 Agent 后端列表也不会出现它。
+进程内用假模型驱动角色与任务机制的 ST 用例，把项目角色配置为只在测试进程注册的脚本化驱动 `scripted`（`test/fixtures/scripted-driver.mjs`，由 `scripted-roles.mjs` 写入角色配置）。它自带模型与工具往返，不经过控制面的 Native 工具循环：角色运行与 `process` 驱动的 worker 循环相同；服务助手的一轮与 Pi 相同。管理助手和群聊助手的夹具（`management-fixture`、`channel-fixture`、`onboarding-fixture`）也让服务助手使用它。它和 Pi 一样声明 `steered_turns`，在进程内按 Pi 的服务回合协议运行：工具经 harness 工具分发器执行，回合中的新消息在工具批次之间并入，回答流式输出，来源被编辑后重启，`stay_silent` 结束安静的轮次。会话工作区由夹具借给它一个空工作区。真实 Pi 会话由 `service-turn-pi`、`pi-service-assistants` 覆盖。生产进程不注册它；它以不列出（`listed: false`）的方式注册，所以即使在长期存活的测试进程（如 Playwright worker）里，角色编辑器和 Agent 后端列表也不会出现它。
 
 ## 并行执行、资源隔离与 CI 分片
 

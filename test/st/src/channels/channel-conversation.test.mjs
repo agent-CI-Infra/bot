@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, inGroup, envelope, post, until, shareAssistantModel, scriptedModel } from '../../../fixtures/channel-fixture.mjs';
+import { scriptedGroup } from '../../../fixtures/scripted-roles.mjs';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 import { HttpError } from '../../../../dist/core/security.js';
@@ -15,11 +16,13 @@ async function fixture(t,participation='mentions'){
   const f=await channelFixture(t),{h}=f;
   await shareAssistantModel(f);
   roleApi(h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:false,
-    roles:[{role_id:'reviewer',harness_ref:{id:'native'},permissions:{task_management:'write',delegation:'deny',commands:'deny',conversation_history:'read'}}]});
+    roles:[{role_id:'reviewer',permissions:{task_management:'write',delegation:'deny',commands:'deny',conversation_history:'read'}}]});
   const discovery=inGroup('Discover this group','ou_alice');discovery.event.message.mentions=[];await post(h,f.id,discovery);
   const chat=h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
-  const bound=await f.admin('/api/channels/chats/'+chat.id+'/service-binding','PUT',{model_id:f.assistantModel.id,scope:{kind:'repositories',repositories:['101']},participation,harness:'native',enabled:true,expected_revision:0});
+  const bound=await f.admin('/api/channels/chats/'+chat.id+'/service-binding','PUT',{model_id:f.assistantModel.id,scope:{kind:'repositories',repositories:['101']},participation,enabled:true,expected_revision:0});
   assert.equal(bound.status,200,JSON.stringify(bound.value));
+  // The scripted test driver, as the in-process fixture model needs (#1256).
+  scriptedGroup(h.store,chat.id);
   f.modelState.respond=async(body,res)=>say(res,'Recorded local answer');
   return {...f,chat};
 }
@@ -224,7 +227,7 @@ test('one bound private chat stays continuous across projects, threads and dates
   const f=await fixture(t);
   const model=(await f.admin('/api/models','POST',{repository_id:'102',model_name:'Private second project',api_url:f.h.store.get('SELECT api_url FROM models WHERE id=?',f.model.id).api_url,api_key:'fixture-second-model-key'})).value.model;
   await f.admin('/api/repositories/102/policy','PATCH',{model_id:model.id});
-  roleApi(f.h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/102/roles'),{expected_revision:0,enabled:false,roles:[{role_id:'reviewer',harness_ref:{id:'native'}}]});
+  roleApi(f.h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/102/roles'),{expected_revision:0,enabled:false,roles:[{role_id:'reviewer'}]});
   const first=await post(f.h,f.id,envelope('/chat /project 101 private-first-fact'));const a=await complete(f,first);assert.equal(a.state,'completed',a.error);
   const second=envelope('/chat /project 102 compare with the previous private fact');second.event.message.thread_id='private-another-thread';
   const b=await complete(f,await post(f.h,f.id,second));assert.equal(b.state,'completed',b.error);assert.equal(a.conversation_id,b.conversation_id);assert.notEqual(a.conversation_id,f.chat.id);

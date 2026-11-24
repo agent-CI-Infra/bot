@@ -96,11 +96,14 @@ test('read-only and out-of-scope tool calls fail identically in Web and personal
   const f=await channelFixture(t),member=await f.member('read-only-personal',{repository_ids:['101']});bindFixture(f.h,f.id,member.id,'ou_reader');
   f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?',JSON.stringify(['tasks.read']),member.id);
   const overrides={sender:{sender_id:{open_id:'ou_reader'}}};
-  const w=await web(f,'暂停任务',member.client),i=await im(f,'暂停任务',overrides);assert.equal(i.row.state,'failed');
+  // A refusal comes back to the assistant, which answers from it (maintainers' decision on #1256): both turns complete.
+  const w=await web(f,'暂停任务',member.client),i=await im(f,'暂停任务',overrides);assert.equal(i.row.state,'completed',i.row.error);
   assert.ok(w.history.events.some(e=>e.type==='tool_error'&&e.data.error==='capability_forbidden'));
   assert.ok(f.h.store.get("SELECT 1 FROM management_events WHERE message_id=? AND type='tool_error' AND data LIKE '%capability_forbidden%'",i.row.message_id));
-  f.modelState.respond=async(body,res)=>call(res,'get_task',{project_id:'201',task_id:'foreign'});
-  const outside=await im(f,'读取未授权项目',overrides);assert.equal(outside.row.state,'failed');
+  await sent(f,'没有完成：capability_forbidden');
+  f.modelState.respond=async(body,res)=>observation(body).length?reply(res,'没有完成：'+observation(body)[0].error):call(res,'get_task',{project_id:'201',task_id:'foreign'});
+  const outside=await im(f,'读取未授权项目',overrides);assert.equal(outside.row.state,'completed',outside.row.error);
+  assert.ok(f.h.store.get("SELECT 1 FROM management_events WHERE message_id=? AND type='tool_error'",outside.row.message_id));
   const webOutside=await web(f,'读取未授权项目',member.client);assert.ok(webOutside.history.events.some(e=>e.type==='tool_error'));
   assert.equal(f.h.store.get('SELECT count(*) n FROM management_commands WHERE source_message LIKE \'feishu:%\' OR source_message=\'fixture-web\'').n,0);
   assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
@@ -259,8 +262,9 @@ test('the management assistant works a side question in its own task with the us
   const result=first.history.events.find(e=>e.type==='tool_result'&&e.data.name==='start_own_task').data.result;
   assert.equal(result.state,'completed');assert.match(result.conclusion,/可访问的项目有 \d+ 个/);
   assert.match(first.history.events.find(e=>e.type==='reply').data.text,/结论：可访问的项目有/);
-  // Inside the own task: the same management tools, no own-task tools, a context of its own.
-  assert.deepEqual(ownBodies[0].tools.map(t=>t.function.name),['read_tool_result','management_query','management_command','start_repository','github_read','github_search','read_job_log','read_skill','github_write']);
+  // Inside the own task: the same management tools, no own-task tools, a context of its own; on a harness the turn ends
+  // with finish (serviceHarnessTurn gives an own task no steering).
+  assert.deepEqual(ownBodies[0].tools.map(t=>t.function.name),['read_tool_result','management_query','management_command','start_repository','github_read','github_search','read_job_log','read_skill','github_write','finish']);
   assert.equal(JSON.parse(ownBodies[0].messages[1].content).instruction,'数一数我能访问几个项目');
   const row=f.h.store.get('SELECT * FROM service_role_own_tasks');
   assert.equal(row.owner_kind,'management');assert.equal(row.owner_id,first.conversation);assert.equal(row.service_role_id,'management-assistant');

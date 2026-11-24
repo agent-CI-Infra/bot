@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { isTitleRequest, replyWithTitle, settled } from './management-fixture.mjs';
+import { scriptedServiceAssistants } from './scripted-roles.mjs';
 import { session } from '../../dist/app/auth.js';
 
 export const client = (f, credentials) => async (path, method = 'GET', body) => {
@@ -81,11 +82,12 @@ export async function say(byWho, conversation, content) {
   assert.equal(sent.status, 201, JSON.stringify(sent.value));
   return { id: sent.value.id, history: await settled(byWho, conversation, sent.value.id) };
 }
-/** Gives the management assistant a shared model served by `model`. */
-export async function assistantModel(admin, model, name = 'Assistant fixture') {
-  const shared = (await admin('/api/models', 'POST', { model_name: name, api_url: model.url, api_key: 'fixture-provider-key' })).value.model;
-  const role = (await admin('/api/service-roles')).value.service_roles.find(r => r.id === 'management-assistant');
-  // The fixture model answers in process: Native, not the default Pi (#1255; native-roles.mjs).
-  await admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, model_id: shared.id, harness: 'native' });
+/** Gives the management assistant of fixture `f` (its `admin` and `h`) a shared model served by `model`. */
+export async function assistantModel(f, model, name = 'Assistant fixture') {
+  const shared = (await f.admin('/api/models', 'POST', { model_name: name, api_url: model.url, api_key: 'fixture-provider-key' })).value.model;
+  const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'management-assistant');
+  await f.admin('/api/service-roles/management-assistant', 'PATCH', { expected_revision: role.revision, model_id: shared.id });
+  // The fixture model answers in process: the scripted test driver, not the default Pi (#1256; scripted-roles.mjs).
+  scriptedServiceAssistants(f.h.store);
   return shared;
 }

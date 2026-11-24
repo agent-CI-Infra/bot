@@ -66,7 +66,7 @@ test('a trusted organization administrator starts an unstarted repository and ap
     }
     return [{ role: 'assistant', content: '仓库已启动并完成策略、约定、标签与每日巡检配置（`npm test` 待首次运行验证）。' }];
   });
-  await assistantModel(admin, model);
+  await assistantModel(f, model);
 
   // Trust organization 10 at comment ceiling; start_repository upgrades ceiling to develop after activation.
   assert.equal((await admin('/api/trusted-organizations/10', 'PUT', { capability_ceiling: 'comment' })).status, 200);
@@ -96,7 +96,7 @@ test('a trusted organization administrator starts an unstarted repository and ap
 test('a super administrator starts an untrusted-organization repository immediately; non-super-admins cannot pass super-admin flags (#1133)', async t => {
   const f = await identityFixture(t, { github: true }), { h, admin, state } = f;
   installed(f, '104'); state.accessible = ['104']; repositoryRoutes(f);
-  const shared = await assistantModel(admin, await provider(t, context => {
+  const shared = await assistantModel(f, await provider(t, context => {
     const text = String(context.request?.content ?? context.request ?? '');
     if (text.includes('越权参数')) {
       return [call(0, ['start_repository', { action: 'start', repository: '104', trust_organization: true }]), { role: 'assistant', content: '失败。' }];
@@ -143,7 +143,7 @@ test('CI workflow task.create executes directly without console confirmation car
     }
     return [{ role: 'assistant', content: '已直接创建修改 .github/workflows/ci.yml 的开发 PR 任务。' }];
   });
-  await assistantModel(admin, model);
+  await assistantModel(f, model);
 
   // Project member with tasks.write (no config.write) can directly create a CI development task when project ceiling is develop.
   const memberPassword = testPassword();

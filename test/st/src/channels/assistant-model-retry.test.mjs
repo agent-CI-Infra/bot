@@ -22,8 +22,9 @@ test('a group turn whose model request gets no response is retried and still ans
   await until(() => sent(f).some(s => s.includes('十个仓库的 Issue 汇总如下')));
   const turn = f.h.store.get('SELECT * FROM channel_service_turns');
   assert.equal(turn.state, 'completed'); assert.equal(turn.error_detail, null);
+  // The step the session reports as it starts its request (#1296), then the two retries of that request.
   assert.deepEqual(f.h.store.all("SELECT type FROM channel_service_events WHERE turn_id=? AND type LIKE 'model_%' ORDER BY sequence", turn.id).map(e => e.type),
-    ['model_start', 'model_retry', 'model_retry', 'model_done']);
+    ['model_start', 'model_retry', 'model_retry']);
   assert.equal(f.h.store.get("SELECT count(*) n FROM model_requests WHERE state='transport_error'").n, 2);
 });
 

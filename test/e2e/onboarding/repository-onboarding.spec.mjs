@@ -82,7 +82,7 @@ for (const width of [1440, 390]) test(`在 ${width} 宽度下通过管理助手�
     // Zero started projects for this GitHub user: only unstarted installed repository 103 in an untrusted organization.
     installed(f, '103'); f.state.accessible = ['103'];
     const routes = repositoryRoutes(f);
-    await assistantModel(f.admin, await provider(t, script));
+    await assistantModel(f, await provider(t, script));
     Object.assign(f.state, { owner: false, permission: 'admin' });
 
     await page.setViewportSize(viewport);

@@ -3,6 +3,7 @@ import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { openProjectDanger } from '../helpers/open-basic-folds.mjs';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../../fixtures/channel-fixture.mjs';
+import { scriptedGroup } from '../../fixtures/scripted-roles.mjs';
 import { TaskEngine } from '../../../dist/agent/engine.js';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
@@ -85,7 +86,8 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     const thread = page.getByRole('region', { name: '当前飞书会话' });
     await expect(page.getByLabel('消息与执行时间线')).toContainText('大家先核对当前的项目范围。');
     await page.getByText('查看执行过程', { exact: true }).click();
-    await expect(page.locator('.channel-step')).toContainText(['开始执行', '请求模型', '模型已返回', '调用工具 · 查看项目范围', '工具已返回 · 查看项目范围', '请求模型', '模型已返回', '本轮完成']);
+    // The steps a group turn records on Pi (here the scripted driver): each model request as it starts, no separate return.
+    await expect(page.locator('.channel-step')).toContainText(['开始执行', '请求模型', '调用工具 · 查看项目范围', '工具已返回 · 查看项目范围', '请求模型', '本轮完成']);
     await page.getByText('本轮生成的回答', { exact: true }).click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('根据群里的讨论，先核对项目证据。');
     await expect(page.getByLabel('会话派生任务')).toContainText('项目任务');
@@ -302,9 +304,10 @@ for (const type of ['text', 'post']) test(`a mention-only ${type} message remain
     await post(f.h, f.id, question);
     const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
     expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', {
-      // Native: the fixture model answers in process (#1255).
-      model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, harness: 'native', enabled: true, expected_revision: 0
+      model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0
     })).status).toBe(200);
+    // The scripted test driver: the fixture model answers in process (#1256).
+    scriptedGroup(f.h.store, chat.id);
     scriptedModel(f, [(done, input) => {
       expect(input.request).toBe('@LaunchPad-Test');
       expect(input.context.bot_identity.name).toBe('LaunchPad-Test');

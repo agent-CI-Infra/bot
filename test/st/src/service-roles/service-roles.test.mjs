@@ -211,15 +211,17 @@ test('the full management role cannot lend computer execution to a read-only ope
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'computer',type:'function',function:{name:'run_command',arguments:JSON.stringify({command:'printf computer-check'})}}]}}]}));
   };
   const denied=await web(f,'执行检查',reader.client);
-  assert.equal(denied.message.state,'completed');assert.equal(assistant.docker.created||0,0);
+  // A harness turn runs on the reader's own computer (#1254), but it offers no computer tool and runs no command there.
+  assert.equal(denied.message.state,'completed');assert.deepEqual(assistant.commands,[]);
   assert.ok(!readerTools.includes('run_command')&&!readerTools.includes('list_files')&&!readerTools.includes('write_file'));
   assert.deepEqual(readerObservation,{error:'tool_not_allowed'});
-  assert.equal(f.h.store.get('SELECT count(*) n FROM assistant_homes').n,0);
   const allowed=await web(f,'执行检查');
   assert.equal(allowed.message.state,'completed',JSON.stringify(allowed.events));
   assert.deepEqual(assistant.commands.map(c=>c.command),['printf computer-check']);
   assert.equal(JSON.parse(JSON.stringify(allowed.events.find(e=>e.type==='tool_result').data.result)).output,'computer-check');
-  // The turn releases its computer after the message is completed (in its finally): it then waits idle for the person's next turn.
-  assert.deepEqual(await until(()=>[...assistant.computers.leases.values()].map(l=>l.state),states=>states.join()==='idle'),['idle']);
+  // The turn releases its computer after the message is completed (in its finally): it then waits idle for the person's next
+  // turn. Only this person's: the reader's turn may still be giving back the computer it started to take (#1254).
+  const readerHome=()=>f.h.store.get('SELECT owner FROM assistant_homes WHERE subject=?',reader.id)?.owner;
+  assert.deepEqual(await until(()=>[...assistant.computers.leases.entries()].filter(([owner])=>owner!==readerHome()).map(([,lease])=>lease.state),states=>states.join()==='idle'),['idle']);
   assert.equal(f.h.store.get('SELECT count(*) n FROM role_conversation_operations').n,0);
 });
