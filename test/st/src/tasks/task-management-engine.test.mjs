@@ -15,6 +15,7 @@ import { server as github } from '../../../fixtures/agent-server.mjs';
 import { knowledgeActor } from '../../../fixtures/knowledge-fixture.mjs';
 import { authorize } from '../../../../dist/identity/authorization.js';
 import { taskTraceAccess } from '../../../../dist/memory/access.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 const pass = { outcome: 'pass', reason: 'Controlled fixture: inspected the supplied report candidate', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true };
 
@@ -40,8 +41,8 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
   store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,0)");
   roleApi(store, { id: 'operator', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), {
     expected_revision: 0, enabled: false, roles: [
-      { role_id: 'reviewer', harness_ref: { id: 'native' }, permissions: { task_management: 'write', delegation: 'deny' } },
-      { role_id: 'qa', harness_ref: { id: 'native' } }
+      { role_id: 'reviewer', harness_ref: { id: 'scripted' }, permissions: { task_management: 'write', delegation: 'deny' } },
+      { role_id: 'qa', harness_ref: { id: 'scripted' } }
     ]
   });
   const commands = new TaskCommands(store), engine = new TaskEngine(store, manager, gh + '/github');

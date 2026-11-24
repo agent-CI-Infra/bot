@@ -12,6 +12,7 @@ import { roleApi } from '../../../../dist/roles/api.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 const pass={outcome:'pass',reason:'Read the actual fixed candidate and its policy evidence',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 // A task a legacy group employee created before #312 keeps its scheduler, QA, publication and group notification.
@@ -26,8 +27,8 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
     f.h.store.run("UPDATE tasks SET status='cancelled'");
     f.h.store.run("UPDATE policies SET capability_ceiling=?,development_enabled=?,test_command=?,work_settings=? WHERE repository_id='101'",software?'develop':'comment',software?1:0,software?'node --input-type=module -e "import { verified } from \'./feature.mjs\'; if(verified!==true)process.exit(1)"':'',JSON.stringify({'task.request':{writes:software?['code','pull_request']:[]}}));
     roleApi(f.h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:false,roles:[
-      {role_id:role,harness_ref:{id:'native'},permissions:{task_management:'write',delegation:'deny',...(software?{}:{commands:'deny'})}},
-      {role_id:'qa',harness_ref:{id:'native'}}]});
+      {role_id:role,harness_ref:{id:'scripted'},permissions:{task_management:'write',delegation:'deny',...(software?{}:{commands:'deny'})}},
+      {role_id:'qa',harness_ref:{id:'scripted'}}]});
     const discovery=inGroup('Discover for actual execution');discovery.event.message.mentions=[];await post(f.h,f.id,discovery);
     const chat=f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
     await f.service.employees.configure(resolvePrincipalActor(f.h.store,f.principal,null,'101'),chat.id,{project_id:'101',role_id:role,capabilities:['tasks.read','tasks.manage_own','knowledge.read'],enabled:true,expected_revision:0});

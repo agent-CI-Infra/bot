@@ -16,6 +16,7 @@ import { runRole } from '../../../../dist/roles/run.js';
 import { taskGithubWrite } from '../../../../dist/tasks/github-write.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { recordEvent, applyDecision } from '../../../../dist/dispatch/store.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 function fixture(t) {
   const s = new Store(':memory:', Buffer.alloc(32, 2)); t.after(() => s.close());
@@ -29,7 +30,7 @@ function fixture(t) {
     const def = config.roles.find(r => r.role_id === role); Object.assign(def, extra); def.permissions = updatePermissions(def.permissions,permissions);
     s.run("INSERT INTO settings VALUES('roles:r',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(config));
   };
-  save('reviewer', { computer: 'deny', github_issues:'read',github_pull_requests:'read', task_management:'write', delegation: 'deny', github: 'read' }, { harness_ref: { id: 'native', version: config.roles.find(r => r.role_id === 'reviewer').harness_ref.version } });
+  save('reviewer', { computer: 'deny', github_issues:'read',github_pull_requests:'read', task_management:'write', delegation: 'deny', github: 'read' }, { harness_ref: { id: 'scripted', version: 'test' } });
   const commands = new TaskCommands(s), caller = (source = {}) => roleTaskCaller(s, 'r', 'reviewer', { conversation_id: 'chat-a', source_message: 'message-a', guard() {}, ...source });
   const create = (c = caller(), request = 'Inspect the logs', extra = {}) => {const result=commands.tool(c, 'create_task', { request, criteria: ['Report actual observations'], ...extra });if(result.error)throw Object.assign(new Error(result.error),{code:result.error});return result;};
   return { s, config, save, commands, caller, create };
@@ -221,14 +222,15 @@ test('an explicitly authorized role creates owned work but recovers from a refus
   s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r',?,'fixture',?,'now')", 'http://127.0.0.1:' + server.address().port + '/v1', s.secrets.seal({ value: 'fixture-provider-key' }, 'model:m'));
   s.run("UPDATE policies SET model_id='m' WHERE repository_id='r'");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('parent','r','task.request','running','parent')");
-  save('reviewer', {delegation:'allow'}, { harness_ref: { id: 'native', version: '1' } });
+  save('reviewer', {delegation:'allow'}, { harness_ref: { id: 'scripted', version: 'test' } });
   const task = s.get("SELECT * FROM tasks WHERE id='parent'");
   await runRole({ store: s, task, redactor: new Redactor(), guard: async () => {}, system: 'Inspect', prompt: '{}', maxTurns: 4,
-    tools: [{ type: 'function', function: { name: 'finish', parameters: { type: 'object' } } }], finish: { name: 'finish', validate: v => v } }, 'reviewer', undefined, 'native');
+    tools: [{ type: 'function', function: { name: 'finish', parameters: { type: 'object' } } }], finish: { name: 'finish', validate: v => v } }, 'reviewer', undefined, 'scripted');
   const child = s.get("SELECT * FROM task_origins WHERE source_task_id='parent'");
   assert.equal(child.source_role, 'reviewer'); assert.equal(child.executor_role, 'reviewer'); assert.ok(child.source_run_id);
   assert.equal(s.get('SELECT status FROM tasks WHERE id=?', child.task_id).status, 'paused');
-  assert.ok(offered.every(names => names.includes('create_task') && !names.includes('delegate_role')));
+  // The last turns offer only the finishing tool (the finalization reserve); delegate_role is never offered.
+  assert.ok(offered[0].includes('create_task') && offered.every(names => !names.includes('delegate_role')));
   assert.ok(observations.some(value=>value.error==='task_not_owned'&&value.instruction.includes('refused')));
   assert.equal(s.get("SELECT status FROM tasks WHERE id='parent'").status,'running');
   assert.equal(s.get("SELECT status FROM task_runs WHERE task_id='parent'").status,'succeeded');

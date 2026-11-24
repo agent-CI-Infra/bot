@@ -1,3 +1,4 @@
+import '../../../fixtures/scripted-driver.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -153,8 +154,8 @@ async function createSubscriptionFixture(t, modelHandler) {
       expected_revision: roleConfiguration(h.store, '101').revision,
       enabled: true,
       roles: [
-        { role_id: 'manager', harness_ref: { id: 'native' } },
-        { role_id: 'test', harness_ref: { id: 'native' } },
+        { role_id: 'manager', harness_ref: { id: 'scripted' } },
+        { role_id: 'test', harness_ref: { id: 'scripted' } },
       ],
     },
     'fixture',

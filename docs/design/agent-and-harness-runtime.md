@@ -35,7 +35,6 @@
 | 后端 | 运行位置 | 关键设计要点 |
 | --- | --- | --- |
 | `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
-| `native` | 控制面进程内 | 内置标准工具循环与 `ToolTranscript` 折叠；只剩项目角色可选，服务助手不再提供（#1257）。 |
 | `process` | 独立 Node 子进程 | 隔离事件循环、JSON-line RPC 通信，不继承控制面环境变量与凭据。 |
 | `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持平台模型（原生直连或回环中转）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
 | `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
@@ -51,7 +50,7 @@
 
 ### 默认后端
 
-项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的读写缺省值和新建库的列默认值，以及控制台新建表单。升级库的这两列保留加列时的 `DEFAULT 'native'`（`ALTER TABLE ... ADD COLUMN` 只在加列时执行一次），但所有写入都显式给出后端，列默认值不影响行为。服务助手已不能选 `native`（#1257，见下文）；项目角色仍可手动选择，冻结在任务里的配置快照不改写。
+项目角色、管理助手和群聊助手的默认后端都是 `pi`：推荐配置（`defaultRoles`）、旧格式角色配置里没写后端的角色（`src/roles/pool.ts`）、`service_roles.harness` 与 `channel_service_bindings.harness` 的读写缺省值和新建库的列默认值，以及控制台新建表单。升级库的这两列保留加列时的 `DEFAULT 'native'`（`ALTER TABLE ... ADD COLUMN` 只在加列时执行一次），但所有写入都显式给出后端，列默认值不影响行为。`native` 后端已删除（#1257，见下文）。
 
 旧库在启动时由 `migrateNativeToPi`（`src/roles/native-to-pi.ts`，标记 `migration:1255:native-to-pi`）在一个事务里一次性改写，并在启动日志写一行计数：
 
@@ -59,9 +58,12 @@
 - 群绑定：`native` → `pi`，revision 不变：它属于群的授权围栏，后端不改变群能做什么。
 - 项目角色：V2 配置里的 `native` 角色改为 `pi`，生成新配置版本（`updated_by: migration:1255`）；旧格式配置里写明 `native` 的条目改为 `pi`。角色覆写的模型要求 `text_json` 输出时 Pi 用不了，保持 `native` 并计入日志。
 
-新库启动时迁移无事可做、直接记下标记，所以之后手动选的 `native` 项目角色不会被改写。
+新库启动时迁移无事可做、直接记下标记。
 
-服务助手不再有 `native` 后端（#1257）：服务角色和群绑定的可选后端只剩 `pi`、`codex`、`claude_code`（`serviceHarnesses`，`src/service-roles/roles.ts`），提交 `native` 由已有校验返回 `unknown_role_harness`。`migration:1255` 之后手动选成 `native` 的残留值，由 `retireNativeServiceAssistants`（`src/roles/native-to-pi.ts`）在每次启动时改为 `pi`：服务角色递增 revision，群绑定 revision 不变，有改动时启动日志写 `[migration:1257]` 计数。没有任何写入能再存回 `native`，所以首次启动之后它什么也找不到。
+`native` 后端已删除（#1257）：控制面里不再有自己的工具循环，`runAgent` 必须带适配器（缺少时抛出 `agent_adapter_required`），每个注册的后端都自带传输。角色配置提交 `native` 由已有校验返回 `unknown_role_harness`；`text_json` 结构化输出仍保留，`process` 支持它。
+
+- 服务助手：服务角色和群绑定的可选后端只剩 `pi`、`codex`、`claude_code`（`serviceHarnesses`，`src/service-roles/roles.ts`），提交 `native` 由已有校验返回 `unknown_role_harness`。`migration:1255` 之后手动选成 `native` 的残留值，由 `retireNativeServiceAssistants`（`src/roles/native-to-pi.ts`）在每次启动时改为 `pi`：服务角色递增 revision，群绑定 revision 不变，有改动时启动日志写 `[migration:1257]` 计数。没有任何写入能再存回 `native`，所以首次启动之后它什么也找不到。
+- 项目角色：`retireNativeProjectRoles`（标记 `migration:1257:retire-native-roles`）在一个事务里一次性改写 `migration:1255` 之后剩下的 `native`：已保存配置里的 V2 角色（生成新配置版本，`updated_by: migration:1257`）和旧格式 `harnesses` 条目、冻结在 `task_execution_configs` 里的任务配置快照（照 #705 退役 ACP 的做法，等待中或重新唤醒的任务能继续运行），以及 `role_instances`（取其任务迁移后的角色后端，否则 `pi`，并清空 `session` 与 `harness_state`，下次运行从任务记录重建）。角色覆写的模型要求 `text_json` 输出时改为 `process`，其余改为 `pi`；有改动时启动日志写一行 `[migration:1257]` 计数。
 
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
 

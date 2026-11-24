@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { Dispatcher } from '../../../../dist/dispatch/worker.js';
 import { roleConfiguration, saveConfiguration } from '../../../../dist/roles/definition.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 const alice = { type: 'User', login: 'alice', id: 5 };
 const issue = { number: 5, state: 'open', title: 'Parser drops the last line', body: 'CRLF files lose their last line.', user: { id: 5, login: 'alice' }, labels: [] };
@@ -23,7 +24,7 @@ function decisionCall(decision, id) {
 async function fixture(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
-  saveConfiguration(h.store,'101',{expected_revision:roleConfiguration(h.store,'101').revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:'native'}}]},'fixture');
+  saveConfiguration(h.store,'101',{expected_revision:roleConfiguration(h.store,'101').revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:'scripted'}}]},'fixture');
   const requests = [], state = { decide: null, status: 200 };
   const provider = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);

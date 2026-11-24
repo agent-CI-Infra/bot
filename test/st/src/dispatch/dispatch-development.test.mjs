@@ -127,7 +127,7 @@ test('a maintainer\'s request in a comment starts development with the comment a
     refusal = results[0]; return toolCall('ignore_event', { reason: '评论人不是维护者，不能作为开发依据' }, 'c2');
   };
   assert.equal(f.comment(78, 'mallory', 'NONE', '@bot please implement this for me.', 'outsider-comment'), 1); await f.run();
-  assert.equal(refusal.error, 'development_basis_not_maintainer'); assert.match(refusal.reason, /mallory/);
+  assert.equal(refusal.code, 'development_basis_not_maintainer'); assert.match(refusal.reason, /mallory/);
   assert.equal(tasks(f.h).filter(isDevTask).length, 1);
   assert.equal(JSON.parse(events(f.h).at(-1).refusals)[0].code, 'development_basis_not_maintainer');
 });
@@ -145,7 +145,7 @@ test('a rule of the Manager prompt is a basis only while the prompt says it, and
     return toolCall('create_task', { work: ['development'], reason: '按项目规则开发', basis: { kind: 'project_rule', passage: rule }, brief: { goal: 'Keep the last CRLF line.', criteria: ['A CRLF test'] } }, 'c3');
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'rule-opened'); await f.run();
-  assert.deepEqual(seen.map(r => r.error), ['development_basis_required', 'development_basis_invalid']);
+  assert.deepEqual(seen.map(r => r.code), ['development_basis_required', 'development_basis_invalid']);
   const development = tasks(f.h).find(isDevTask), basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
   assert.equal(basis.kind, 'project_rule'); assert.equal(basis.passage, rule); assert.match(basis.prompt_revision, /^revision:/);
   // The task details show the basis.

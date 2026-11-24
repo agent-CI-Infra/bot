@@ -67,7 +67,7 @@ test('saved built-in roles take the new default permissions once; settings and c
   s.run("INSERT INTO repositories VALUES('r','fixture/r','10','a')");
   const config=roleConfiguration(s,'r');delete config.legacy;config.revision=4;
   const role=id=>config.roles.find(r=>r.role_id===id);
-  role('dev').permissions=updatePermissions(role('dev').permissions,{github_issues:'write',github_contents:'write'});role('dev').harness_ref={id:'native',version:'pinned'};role('dev').persona_prompt='Keep my persona.';
+  role('dev').permissions=updatePermissions(role('dev').permissions,{github_issues:'write',github_contents:'write'});role('dev').harness_ref={id:'process',version:'pinned'};role('dev').persona_prompt='Keep my persona.';
   role('manager').permissions=updatePermissions(role('manager').permissions,{github_issues:'none',delegation:'deny'});
   config.roles.push({...role('reviewer'),role_id:'auditor',permissions:updatePermissions(role('reviewer').permissions,{github_issues:'write'})});
   s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify(config));
@@ -77,7 +77,7 @@ test('saved built-in roles take the new default permissions once; settings and c
   const after=roleConfiguration(s,'r'),find=id=>after.roles.find(r=>r.role_id===id);
   assert.equal(after.revision,5);assert.equal(after.updated_by,'migration:381');
   assert.deepEqual(find('dev').permissions,defaultPermissions('dev','writer'));assert.deepEqual(find('manager').permissions,defaultPermissions('manager','controller'));
-  assert.deepEqual([find('dev').harness_ref,find('dev').persona_prompt],[{id:'native',version:'pinned'},'Keep my persona.']);
+  assert.deepEqual([find('dev').harness_ref,find('dev').persona_prompt],[{id:'process',version:'pinned'},'Keep my persona.']);
   assert.equal(find('dev').revision,role('dev').revision+1);
   assert.equal(find('auditor').permissions.github_issues,'write','a custom role keeps its saved permissions');
   assert.equal(s.get("SELECT actor FROM role_config_revisions WHERE repository_id='r' AND revision=5").actor,'migration:381');

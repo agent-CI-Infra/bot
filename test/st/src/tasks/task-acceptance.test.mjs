@@ -127,10 +127,12 @@ test('failed verifier preparation is released and leaves no passing decision',as
 
 test('only a trusted runtime budget can raise provider output tokens; model request fields remain bounded',async t=>{
  const {runAgent}=await import('../../../../dist/agent/runtime.js');
+ // One request through the run's services, which apply the trusted output budget (#1257: runAgent needs a transport).
+ const ask=async services=>(await services.request({messages:[{role:'user',content:'Return the result'}]},'turn:0')).value;
  const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
- await runAgent({store:f.h.store,task:f.task,redactor:new Redactor(),guard:async()=>{},system:'Return JSON',prompt:'Return the result',maxOutputTokens:16384});
+ await runAgent({store:f.h.store,task:f.task,redactor:new Redactor(),guard:async()=>{},system:'Return JSON',prompt:'Return the result',maxOutputTokens:16384,adapter:ask});
  assert.equal(f.requests.at(-1).max_completion_tokens,16384);
- await assert.rejects(runAgent({store:f.h.store,task:f.task,redactor:new Redactor(),guard:async()=>{},system:'Return JSON',prompt:'Return result',maxOutputTokens:32769}),{code:'agent_limits_invalid'});
+ await assert.rejects(runAgent({store:f.h.store,task:f.task,redactor:new Redactor(),guard:async()=>{},system:'Return JSON',prompt:'Return result',maxOutputTokens:32769,adapter:ask}),{code:'agent_limits_invalid'});
 });
 
 test('a missing current policy proof runs deterministic verification and returns a real failed check without model approval',async t=>{

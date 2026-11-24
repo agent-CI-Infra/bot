@@ -7,13 +7,14 @@ import {TaskRecords} from '../../../../dist/tasks/service.js';
 import {assessFollowups} from '../../../../dist/tasks/followups.js';
 import {Redactor} from '../../../../dist/agent/common.js';
 import {configureModelRetry} from '../../../../dist/agent/runtime.js';
+import '../../../fixtures/scripted-driver.mjs';
 const call=(name,args)=>({role:'assistant',tool_calls:[{id:'tool',type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 const residual={key:'e2e-documentation',description:'A stale E2E absence claim remains',evidence:'docs/known-issues.md versus package.json',impact:'Documentation ambiguity only',conditions:'Reading the inherited known-issues header',workaround:'Use package.json as the tooling authority',delivery_impact:'Does not block delivered functionality',nonblocking_reason:'All required product behavior and tests pass',goal:'Fix this specific stale E2E claim',criteria:['The absence claim agrees with actual scripts']};
 const verdict={outcome:'pass_with_issues',reason:'Core is verified',gaps:[],residuals:[residual],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 async function fixture(t,respond){
  const s=new Store(':memory:',Buffer.alloc(32,5));t.after(()=>s.close());s.run("INSERT INTO accounts VALUES('a','test','bot_account',NULL,'{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/repo','o','a')");
  for(const id of ['parent','existing'])s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES(?,'r','task.request','queued',?,'{}')",id,id);
- s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'native'}}));
+ s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'scripted'}}));
  const requests=[];const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw);requests.push(body);try{const message=await respond(body,requests.length);res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:200,completion_tokens:80}}));}catch(e){res.writeHead(502);res.end('{}');}});server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close();});
  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r',?,'fixture',?,'now')",'http://127.0.0.1:'+server.address().port+'/v1',s.secrets.seal({value:'test'},'model:m'));s.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('r','m',1)");
  const records=new TaskRecords(s);records.contract('parent',{goal:'Verified delivery',scope:['docs'],criteria:['Evidence checked'],endpoint:'artifact',source:{}});const candidate=records.submit('parent',[{kind:'report',reference:'report.md',version:'v1'}],[],{});

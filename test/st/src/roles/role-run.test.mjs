@@ -72,7 +72,7 @@ test('protocol schemas: three candidate kinds with fixed versions; RunContext re
     { kind: 'artifact', ref: 'candidate:x', revision: 'latest', content_hash: hash('c') }, { kind: 'no_changes', ref: 'task_history:9', source_ref: 'commit:' + sha('d') }, { kind: 'pr', ref: 'pr:1' }])
     assert.throws(() => validateCandidateRef(bad), { code: 'role_run_protocol_invalid' });
   const ctx = { protocol: 'bot.role-run/1', task_id: 't', assignment_id: 'a1', run_id: 'r1', tenant_id: 'account:a', project_id: 'r', principal_ref: 'installation:a', source_ref: 'contract:revision:1', candidate_ref: null,
-    configuration_snapshot_ref: 'role_snapshots:' + hash('f'), lease_epoch: 1, contract_revision: 1, policy_revision: 'writer@1', role_revision: 'dev@1:config:0', harness_revision: 'native@1', skill_revisions: [], model_revision: 'project:m@1:x',
+    configuration_snapshot_ref: 'role_snapshots:' + hash('f'), lease_epoch: 1, contract_revision: 1, policy_revision: 'writer@1', role_revision: 'dev@1:config:0', harness_revision: 'process@1', skill_revisions: [], model_revision: 'project:m@1:x',
     budget: { policy_ref: 'entry-default@x', accounting: 'per_run', max_turns: null, max_output_tokens: null, max_total_tokens: null, max_model_requests: null, max_tool_calls: null, max_wall_ms: null, max_concurrency: 1, max_cost: null } };
   assert.equal(validateRunContext(ctx).run_id, 'r1');assert.equal(Object.hasOwn(validateRunContext(ctx).budget,'max_cost'),false);
   assert.throws(() => validateRunContext({ ...ctx, api_key: 'x' }), { detail: 'api_key' });
@@ -112,7 +112,7 @@ test('a live authority change discards the physical transcript before resuming t
   const instance = f.s.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");
   f.s.run('UPDATE role_instances SET session=?,harness_state=?,runtime=? WHERE id=?',
     JSON.stringify([{ role: 'user', content: 'obsolete-authority-transcript' }]), '{"session_id":"obsolete-session"}', 'obsolete-runtime', instance.id);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, permissions: { project_memory: 'none' } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, permissions: { project_memory: 'none' } }] });
   await runRole(f.spec, 'dev');
   assert.ok(!JSON.stringify(requests.at(-1).messages).includes('obsolete-authority-transcript'));
   const resumed = f.s.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");
@@ -187,7 +187,7 @@ test('the gateway fences other tasks and guessed ids while sharing same-task rol
   f.s.run("INSERT INTO project_memory_versions VALUES('hist-1',1,?,'user:owner','hist','now')", JSON.stringify({ body: 'HISTORICAL_TRACE_NOTE', status: 'active' }));
   f.s.run("INSERT INTO project_memories VALUES('hist-foreign','other','hist',1,?,'now')", JSON.stringify({ body: 'FOREIGN_TRACE_NOTE', status: 'active' }));
   f.s.run("INSERT INTO project_memory_versions VALUES('hist-foreign',1,?,'user:owner','hist','now')", JSON.stringify({ body: 'FOREIGN_TRACE_NOTE', status: 'active' }));
-  f.s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('dev-i','t','dev','{}','native','now'),('rev-i','t','reviewer','{}','native','now')");
+  f.s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('dev-i','t','dev','{}','process','now'),('rev-i','t','reviewer','{}','process','now')");
   const dev = bound(f.s, { instance: 'dev-i' }), reviewer = bound(f.s, { role: 'reviewer', scope: 'assign-r', instance: 'rev-i' });
   f.s.run("INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)", hash('9'), 'r', 'dev', 1, 1, JSON.stringify({ schema: 2, legacy: true, role_id: 'dev', kind: 'writer', capability: { id: 'writer', version: 'x', tools: null } }), 'now');
   f.s.run('UPDATE task_runs SET role_snapshot=? WHERE id IN (?,?)', hash('9'), dev.run.id, reviewer.run.id);
@@ -331,14 +331,14 @@ test('configured per-run limits replace entry defaults while omitted fields reta
     const f = await fixture(t, () => call('finish', {})), spec = { ...f.spec, maxTurns: undefined, ...entry };
     let prepared = await roleRuns.prepare(spec, 'dev');
     assert.equal(prepared.wrapped.maxTurns, spec.maxTurns); assert.equal(prepared.wrapped.maxOutputTokens, spec.maxOutputTokens);
-    f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_turns: 200, max_output_tokens: 32768 } }] });
+    f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'bounded', max_turns: 200, max_output_tokens: 32768 } }] });
     prepared = await roleRuns.prepare(spec, 'dev');
     assert.equal(prepared.wrapped.maxTurns, 200); assert.equal(prepared.wrapped.maxOutputTokens, 32768);
   }
   const f = await fixture(t, () => call('finish', {}));
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_output_tokens: 32768 } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'bounded', max_output_tokens: 32768 } }] });
   assert.equal((await roleRuns.prepare(f.spec, 'dev')).wrapped.maxTurns, 8);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_turns: 200 } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'bounded', max_turns: 200 } }] });
   assert.equal((await roleRuns.prepare({ ...f.spec, maxOutputTokens: 16384 }, 'dev')).wrapped.maxOutputTokens, 16384);
 });
 
@@ -375,7 +375,7 @@ test('process reserves four of sixteen turns and requires submission on the last
   assert.equal(result.result.summary,'bounded result');assert.equal(requests,16);
 });
 
-for(const harness of ['native','process','pi'])test(`${harness} refuses two remaining metered requests before starting a run`,async t=>{
+for(const harness of ['process','pi'])test(`${harness} refuses two remaining metered requests before starting a run`,async t=>{
   let requests=0;
   const f=await fixture(t,()=>{requests++;return call('finish',{summary:'must not run'});});
   f.put({roles:[{role_id:'dev',harness_ref:{id:harness},budget_policy_ref:{id:'metered',max_turns:16,max_model_requests:2}}]});
@@ -395,14 +395,14 @@ test('a configured 200-turn run reserves its last eight turns and sends the conf
     assert.match(body.messages.at(-1).content, /8 turns left/);
     return call('finish', { summary: 'done' });
   });
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_turns: 200, max_output_tokens: 32768 } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'bounded', max_turns: 200, max_output_tokens: 32768 } }] });
   assert.equal((await runRole({ ...f.spec, modelAttempts: 1, finalizationTools: ['finish'], tools: [tool('read_file'), tool('finish')], execute: async () => ({ fixture: true }) }, 'dev')).result.summary, 'done');
   assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, 193);
 });
 
 test('metered max_turns limits each run independently of the cumulative model request count', async t => {
   const f = await fixture(t, () => call('finish', { summary: 'done' }));
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'metered', max_turns: 32, max_model_requests: 1000 } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'metered', max_turns: 32, max_model_requests: 1000 } }] });
   await runRole(f.spec, 'dev');
   const instance = f.s.get("SELECT id FROM role_instances WHERE role='dev'"), original = f.s.get('SELECT id FROM model_requests');
   const seed = (count, prefix) => f.s.run(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<?)
@@ -418,7 +418,7 @@ test('metered max_turns limits each run independently of the cumulative model re
 
 test('a metered budget spans recoveries, attempts and assignments of the role: exhaustion cancels, keeps a checkpoint and refuses to restart; unknown usage is never zero', async t => {
   const f = await fixture(t, () => call('read_task_record', { ref: 'task:t' }), { usage: turn => turn === 2 ? {} : { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } } });
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'metered', max_model_requests: 3, max_total_tokens: 100000 } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' }, budget_policy_ref: { id: 'metered', max_model_requests: 3, max_total_tokens: 100000 } }] });
   await assert.rejects(runRole(f.spec, 'dev', 'assign-b'), { code: 'role_budget_exhausted' });
   const run = f.s.get("SELECT * FROM task_runs WHERE role='dev'");
   assert.equal(run.stop_reason, 'role_budget_exhausted');

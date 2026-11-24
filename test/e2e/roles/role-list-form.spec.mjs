@@ -45,7 +45,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(crumb).toHaveText('← 角色列表');
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Developer', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
-    await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
+    await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('process');
     await (await promptEditor(page, '角色提示词')).fill('先读复现，再改代码。');
     const save = consoleSave(page);
     await expect(save).toBeVisible();

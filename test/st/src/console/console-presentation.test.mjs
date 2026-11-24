@@ -137,11 +137,11 @@ test('task run history uses the executed snapshot and does not borrow the curren
 const role = (role_id, kind, harness, version = '1') => ({ role_id, kind, enabled: true, name: role_id, responsibility: '', persona_prompt: '', revision: 1, model_profile_ref: null, skill_bundle_ref: null,
   harness_ref: { id: harness, version }, permissions: {computer:'deny'}, environment_profile_ref: { id: 'env', version: '1' }, budget_policy_ref: { id: 'entry-default', version: '1' }, output_schema_ref: { id: 'out', version: '1' } });
 // Agent backends as GET /api/repositories/:id/roles lists them, including the worker-only ACP declaration.
-const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['native', 'Native', '1', all], ['process', 'Process', '1', all], ['claude_code', 'Claude Code', '2.1.319', all], ['codex', 'Codex', '1', all], ['container_acp', '容器内 ACP', '1', ['writer', 'observer']]]
+const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['process', 'Process', '1', all], ['claude_code', 'Claude Code', '2.1.319', all], ['codex', 'Codex', '1', all], ['container_acp', '容器内 ACP', '1', ['writer', 'observer']]]
   .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null, ...(['claude_code', 'codex'].includes(id) ? { supported_model_sources: ['gateway', 'subscription'], runtime_status: { ready: false, status: 'unavailable', volume_root: '/opt/agent-tools', volume_present: true, cli_installed: false, compatible_range: id === 'claude_code' ? '>=2.1.0 <3.0.0' : '>=0.166.0 <1.0.0', tested_version: id === 'claude_code' ? '2.1.319' : '0.166.0', installed_versions: [], compatible_versions: [], incompatible_versions: [], selected_version: null, node_version: null, config_override: false, model_relay_ready: true, model_count: 1, resolved_model: { id: 'm1', name: 'fixture-model', source: 'project' }, connectivity: { state: 'untested', source: null, model_id: 'm1', model_name: 'fixture-model', checked_at: null, http_status: null, error: null, detail: null }, reason_code: 'cli_not_installed', reason: `工具卷 /opt/agent-tools 中尚未安装 ${name} CLI。` } } : {}) }));
 const roleData = (config, { workflow = 'development.issue', configured = true } = {}) => ({ configuration: config, configured, revision: config.revision, workflow, backends, recommended_backend: 'pi', harnesses: backends.filter(b => b.available).map(({ id, version, kinds }) => ({ id, version, kinds })),
   models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: { source: 'project', name: 'fixture-model' } })) });
-const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'codex'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native')];
+const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'process'), role('test', 'observer', 'process'), role('reviewer', 'observer', 'codex'), role('ux', 'observer', 'process'), role('qa', 'evaluator', 'process')];
 const entries = { development: true, request: true, review: false, actions: false };
 // The page's draft is the configuration the server sends, defaults included (#1068).
 function rolesDraft(data) {
@@ -204,7 +204,7 @@ test('role form edits backends without a JSON editor, and marks the draft dirty'
   const reviewer=roleForm(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}), 'reviewer');
   const picker=(view,id)=>view.form.querySelectorAll('select').find(select=>select.getAttribute('aria-label')===id+' Agent 后端');
   assert.equal(picker(manager,'manager').value,'pi');
-  assert.equal(picker(dev,'dev').value,'native');
+  assert.equal(picker(dev,'dev').value,'process');
   assert.equal(picker(reviewer,'reviewer').value,'codex');
   assert.ok(!picker(manager,'manager').children.some(option=>option.value==='container_acp'));
   assert.ok(!picker(dev,'dev').children.find(option=>option.value==='container_acp').disabled);
@@ -234,12 +234,12 @@ test('a role\'s permissions show what differs from its defaults and fold the res
 });
 test('role form shows the backends the server sends; a project on the defaults says it follows them, a custom one offers restoring them', () => {
   const backend = view => view.form.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value;
-  const custom={schema:2,revision:3,enabled:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
-  assert.equal(backend(roleForm(roleData(custom),'manager')),'native');
+  const custom={schema:2,revision:3,enabled:true,controller:{role:'manager',entries},roles:team('process'),skills:[]};
+  assert.equal(backend(roleForm(roleData(custom),'manager')),'process');
   // The server defines the recommended configuration (#1068); the page no longer changes a backend on its own.
   const defaults={schema:2,revision:0,enabled:true,follows_default:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]};
   assert.equal(backend(roleForm(roleData(defaults,{configured:false}),'manager')),'pi');
-  assert.equal(backend(roleForm(roleData({...defaults,roles:team('native')},{configured:false}),'manager')),'native');
+  assert.equal(backend(roleForm(roleData({...defaults,roles:team('process')},{configured:false}),'manager')),'process');
   const list=rolesPage(roleData(defaults,{configured:false}));
   assert.equal(list.cards[0].querySelector('[data-role-version]').textContent,'正在使用默认配置，内置默认更新时自动跟随。');
   assert.match(text(list.table.querySelector('tr[data-role=manager]')), /已启用 · 默认配置/);
@@ -287,7 +287,7 @@ test('independent QA started by development and review delivery is named in the 
   await p.admin('/api/repositories/101/policy', 'PATCH', { model_id: fixture.id });
   // QA's backend is beside the point here and its verification checkout is a stub, so QA runs in process.
   const roles = (await p.admin('/api/repositories/101/roles')).value;
-  assert.equal((await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, roles: [{ role_id: 'qa', harness_ref: { id: 'native' } }] })).status, 200);
+  assert.equal((await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, roles: [{ role_id: 'qa', harness_ref: { id: 'process' } }] })).status, 200);
   const cases = [['dev-qa', 'development.issue', { kind: 'code', reference: 'task:dev-qa:candidate', version: 'tree0123456789abcdef', content: { tree_sha: 'tree0123456789abcdef' } }],
     ['review-qa', 'review.issue', { kind: 'report', reference: 'task:review-qa:candidate', version: 'report0123456789', content: { summary: 'Review report' } }]];
   for (const [id, kind, artifact] of cases) {
@@ -410,7 +410,7 @@ test('review and Actions summaries offer only Dev on its backend in the entry; d
   assert.equal(execution(processDev, 'review.issue'),
     '只委派 Developer，使用这个入口的工具和工作区，后端 Process');
   const older = JSON.parse(p.h.store.get("SELECT value FROM settings WHERE key='roles:101'").value), dev = older.roles.find(r => r.role_id === 'dev');
-  delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
+  delete dev.entry_harness_source; dev.harness_ref = { id: 'process', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
   const kept = (await p.admin('/api/repositories/101/roles')).value.configuration;
   assert.equal(execution(kept, 'actions.failures'),
     '只委派 Developer，使用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，该角色的后端选择改变后才换）');

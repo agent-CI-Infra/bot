@@ -9,7 +9,7 @@
 | 层级与目录 | 执行器 | 适用范围 | 不应放入的内容 |
 | --- | --- | --- | --- |
 | **UT (`test/ut/`)** | `node --test`（`test-sets.mjs`） | 纯函数、算法、状态机、协议解析、安全边界单测；前端文案/词典/错误格式化/分页/轮询退避状态机（在 `test/ut/static/` 通过 `loadConsole` 毫秒级验证）；跨文件架构红线守卫（如设计令牌、原始错误文案清扫）。 | 需要真实多模块 SQLite 协同或真实浏览器布局引擎才能验证的逻辑。 |
-| **ST (`test/st/`)** | `node --test`（`test-sets.mjs`） | 进程内控制面集成测试：真实 SQLite + 本地 HTTP API + 本地假 GitHub/模型/飞书夹具 + 多 Harness 协议（Native / Process / Pi / Claude Code / Codex / ACP）、权限边界、恢复与状态机。 | 真实外网访问、真实 Docker 镜像操作；与前端渲染强绑定的交互。 |
+| **ST (`test/st/`)** | `node --test`（`test-sets.mjs`） | 进程内控制面集成测试：真实 SQLite + 本地 HTTP API + 本地假 GitHub/模型/飞书夹具 + 多 Harness 协议（Process / Pi / Claude Code / Codex / ACP，以及只在测试进程注册的脚本化驱动 `scripted`）、权限边界、恢复与状态机。 | 真实外网访问、真实 Docker 镜像操作；与前端渲染强绑定的交互。 |
 | **E2E (`test/e2e/`)** | Playwright Chromium | **用户视角的完整端到端主流程**（真实导航、登录/登出/会话切换、跨页流转、表单提交与持久化回显）以及**依赖真实浏览器渲染引擎的布局与可访问性验证**（多视口溢出、表格折叠、`elementFromPoint` 遮挡、焦点迁移、实时区语义）。 | 已在 `test/ut/static/` 覆盖的纯文案/错误码/时间格式矩阵；为单个微回归新开独立文件重复走一遍后端与登录冷启动。 |
 | **Docker (`test/docker/`)** | 独立脚本（`npm run test:*:docker`） | 真实容器隔离、只读根文件系统、降权用户、预装软件、部署与恢复验收。 | 不并入日常 `npm test` 单元测试池。 |
 | **Live (`test/live/`)** | 独立 `node --test` | 真实外部服务（GitHub、飞书、外部模型）或本机 CLI 实况探针（`*.live.test.mjs`）。 | 禁止进入默认并行池。 |
@@ -51,7 +51,7 @@
 ### 4. 主动规避四类慢测试反模式
 - **多秒真实 `waitForTimeout` 死等**：轮询间隔、退避重试与超时提示在 E2E 中应使用 Playwright `page.clock.install()` + `page.clock.runFor(...)`（配合 `waitForResponse` 等显式事件同步，防止异步竞态），或下沉到 `test/ut/static/` 用受控时钟验证；不得用 5–15 秒真实睡眠硬等定时器触发。
 - **大循环串行 HTTP 造数**：需要数十/上百条前置数据时（如跨页分页、超出目录首屏上限），通过单次 `store.transaction(...)` 批量写入 SQLite，而非在 `for` 循环中串行发上百次 HTTP 请求与 fsync。
-- **无收益的后端 × 入口完整笛卡尔积**：多 Harness 后端（`native`、`process`、`pi` 等）与多业务入口组合测试时，采用覆盖矩阵——所有业务入口都在轻量 `native` 上验证接线与契约，重型后端（尤其需冷启动真实 SDK 的 `pi`）只覆盖有差异的代表性入口（如单角色与团队委派各一），不盲目铺满全乘积。
+- **无收益的后端 × 入口完整笛卡尔积**：多 Harness 后端（`process`、`pi` 等）与多业务入口组合测试时，采用覆盖矩阵——所有业务入口都在轻量的脚本化驱动（`test/fixtures/scripted-driver.mjs`）上验证接线与契约，重型后端（尤其需冷启动真实 SDK 的 `pi`）只覆盖有差异的代表性入口（如单角色与团队委派各一），不盲目铺满全乘积。
 - **与行为测试重复的易碎源码正则**：跨文件架构红线守卫（如禁止直接插值 `err.message`、设计令牌单源声明、工作流超时上限）属于高价值静态检查；但针对单文件局部实现细节（具体变量名、三元表达式写法）的正则断言若已有同文件真实 DOM/行为测试覆盖，应直接移除，避免重构即误报。
 
 ### 5. 定期保鲜 CI 分片权重

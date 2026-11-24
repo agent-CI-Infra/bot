@@ -77,8 +77,8 @@ async function prepared(page) {
   // metered resource budget; legacy monetary values are accepted but omitted on save.
   const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true,
     skills: [{ id: 'skills_1', source: { type: 'inline', files: [{ path: 'guide.md', content: 'fixture' }] } }],
-    // Native, which offers two structured output modes to switch between (Pi, the default, offers one).
-    roles: [{ ...editable, harness_ref: { id: 'native' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
+    // Process, which offers two structured output modes to switch between (Pi, the default, offers one).
+    roles: [{ ...editable, harness_ref: { id: 'process' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
       budget_policy_ref: { id: 'metered', max_tool_calls: 5, max_cost: { amount: 1, currency: 'USD' } } }] });
   expect(saved.status).toBe(200);
   expect(saved.value.configuration.roles.find(role=>role.role_id==='dev').budget_policy_ref.max_cost).toBeUndefined();

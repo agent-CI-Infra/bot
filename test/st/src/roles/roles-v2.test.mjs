@@ -30,6 +30,7 @@ import { planWorktree } from '../../../../dist/projects/worktrees.js';
 import { environment } from '../../../../runner/command.mjs';
 import { git } from '../../../fixtures/git-server.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import '../../../fixtures/scripted-driver.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const call = (name, args, id = 'c' + randomBytes(3).toString('hex')) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -56,10 +57,10 @@ async function fixture(t, handler) {
   s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,review_enabled) VALUES('r','m',1,1,1)");
   t.after(() => new Promise(resolve => { s.close(); server.close(resolve); server.closeAllConnections(); }));
   const task = s.get("SELECT * FROM tasks WHERE id='t'");
-  // These existing scenarios explicitly exercise Native workers; new-backend defaults have separate coverage.
+  // These scenarios run their workers on the in-process scripted driver; new-backend defaults have separate coverage.
   const put = body => {
     const given = body.roles ?? [], ids = ['dev', 'test', 'reviewer', 'ux', 'qa'];
-    const roles = [...ids.map(role_id => ({ role_id, harness_ref: { id: 'native' }, ...given.find(r => r.role_id === role_id) })), ...given.filter(r => !ids.includes(r.role_id))];
+    const roles = [...ids.map(role_id => ({ role_id, harness_ref: { id: 'scripted' }, ...given.find(r => r.role_id === role_id) })), ...given.filter(r => !ids.includes(r.role_id))];
     return roleApi(s, admin, 'PUT', rolesUrl, { expected_revision: roleApi(s, admin, 'GET', rolesUrl, {}).revision, enabled: true, ...body, roles }).configuration;
   };
   return { s, records, task, requests, put, spec: { store: s, task, redactor: new Redactor(), guard: async () => {}, system: 'Task execution', prompt: '{}', tools: [tool('finish')], finish: { name: 'finish', validate: v => v }, maxTurns: 8 } };
@@ -137,7 +138,7 @@ test('flat permissions filter actual tools and a later grant cannot widen an exi
   assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('search_project_memory'));
 });
 
-for (const harness of ['native','process','pi']) test(`${harness} workers keep task reads and recover from unoffered management calls`, async t => {
+for (const harness of ['process','pi']) test(`${harness} workers keep task reads and recover from unoffered management calls`, async t => {
   for (const role of ['dev','reviewer','test','ux','security']) await t.test(role, async t => {
     const refused = ['create_task','manage_task','list_managed_tasks'];
     const f = await fixture(t, body => {
@@ -286,7 +287,7 @@ test('two roles resolve different supported models, pinned skills and harnesses;
   assert.equal(repo.source.commit, 'b'.repeat(40)); assert.equal(repo.files[0].path, '.agents/skills/sec/SKILL.md'); assert.match(repo.files[0].sha256, /^[a-f0-9]{64}$/);
   const reviewer = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot, tester = resolveRole(f.s, 'r', 'test', 'task.request').snapshot;
   assert.deepEqual([reviewer.model.id, reviewer.model.source, reviewer.harness.id, reviewer.skills.id], ['m2', 'role', 'process', 'review-kit']);
-  assert.deepEqual([tester.model.id, tester.model.source, tester.harness.id, tester.skills.id], ['m', 'project', 'native', 'repo-sec']);
+  assert.deepEqual([tester.model.id, tester.model.source, tester.harness.id, tester.skills.id], ['m', 'project', 'scripted', 'repo-sec']);
   assert.notEqual(reviewer.skills.content_hash, tester.skills.content_hash);
   // Retired task_models overrides are ignored; only role profile and project default model apply (#1122).
   f.s.run(`UPDATE policies SET task_models='{"development.issue":"m3"}' WHERE repository_id='r'`);
@@ -570,7 +571,7 @@ test('review under the controller keeps its task, executor, tools and completion
   f.put({ controller: { entries: { development: true, request: true, review: false, actions: false } } });
   const again = await run();
   assert.equal(again.result.summary, 'Short summary.');
-  assert.equal(f.s.get("SELECT harness FROM role_instances WHERE task_id='rv' AND role='dev'").harness, 'native');
+  assert.equal(f.s.get("SELECT harness FROM role_instances WHERE task_id='rv' AND role='dev'").harness, 'scripted');
   assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv' AND role='manager'").n, 2);
 });
 
@@ -593,22 +594,22 @@ for (const saved of [false, true]) for (const kind of ['review.pr', 'actions.fai
   assert.equal(f.s.get("SELECT value FROM settings WHERE key='roles:r'")?.value, before);
 });
 
-test('a review entry honors Native worker and Manager selections instead of forcing Pi', async t => {
-  const finish = { summary: 'Native review.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
+test('a review entry honors the chosen worker and Manager backends instead of forcing Pi', async t => {
+  const finish = { summary: 'Chosen review.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
   const script = controllerScript();
   const f = await fixture(t, body => isController(body) ? script(body)
     : body.messages.some(m => m.tool_calls?.some(c => c.function.name === 'write_file')) ? call('finish_review', finish)
     : call('write_file', { path: 'source.ts', content: 'unapproved edit' }));
-  f.put({ controller: { entries: { review: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }, { role_id: 'dev', harness_ref: { id: 'native' } }] });
-  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,attempt,generation) VALUES('native-review','r','review.pr','running','review',4,'{}',1,1)");
-  const task = { ...f.s.get("SELECT * FROM tasks WHERE id='native-review'"), workspace_id: 'b'.repeat(48) };
-  const workspace = new Workspace(f.s, { call: async () => { throw new Error('Native review must not start a Pi session'); } }, task, f.spec.redactor, async () => {}, () => {});
-  assert.equal((await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, 'Native review.');
-  assert.deepEqual(f.s.all("SELECT role,harness FROM task_runs WHERE task_id='native-review' ORDER BY rowid").map(r => [r.role, r.harness]), [['manager', 'native'], ['dev', 'native']]);
+  f.put({ controller: { entries: { review: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'scripted' } }, { role_id: 'dev', harness_ref: { id: 'scripted' } }] });
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,attempt,generation) VALUES('chosen-review','r','review.pr','running','review',4,'{}',1,1)");
+  const task = { ...f.s.get("SELECT * FROM tasks WHERE id='chosen-review'"), workspace_id: 'b'.repeat(48) };
+  const workspace = new Workspace(f.s, { call: async () => { throw new Error('a review on the chosen backend must not start a Pi session'); } }, task, f.spec.redactor, async () => {}, () => {});
+  assert.equal((await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, 'Chosen review.');
+  assert.deepEqual(f.s.all("SELECT role,harness FROM task_runs WHERE task_id='chosen-review' ORDER BY rowid").map(r => [r.role, r.harness]), [['manager', 'scripted'], ['dev', 'scripted']]);
   assert.ok(f.requests.some(body => JSON.stringify(body.messages).includes('review_repository_write_forbidden')));
 });
 
-for (const kind of ['review.pr', 'actions.failures']) test(`Native ${kind} writes notes through the runner and returns tool errors without faulting`, async t => {
+for (const kind of ['review.pr', 'actions.failures']) test(`${kind} on the chosen backend writes notes through the runner and returns tool errors without faulting`, async t => {
   const finish = { summary: 'Notes saved safely.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
   const steps = [
     ['write_file', { path: '../notes/review-notes.md', content: 'Review notes.' }],
@@ -622,9 +623,9 @@ for (const kind of ['review.pr', 'actions.failures']) test(`Native ${kind} write
     const step = steps[results(body.messages).length];
     return step ? call(...step) : call(kind === 'review.pr' ? 'finish_review' : 'finish_analysis', finish);
   });
-  f.put({ controller: { entries: { review: true, actions: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] });
+  f.put({ controller: { entries: { review: true, actions: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'scripted' } }] });
   f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('notes','r',?,'running','notes','{}',1,1)", kind);
-  const root = await mkdtemp(join(tmpdir(), 'native-entry-notes-')), requests = [];
+  const root = await mkdtemp(join(tmpdir(), 'entry-notes-')), requests = [];
   t.after(() => rm(root, { recursive: true, force: true }));
   const manager = { async call(_method, _path, input) {
     requests.push(input.request);
@@ -642,7 +643,7 @@ for (const kind of ['review.pr', 'actions.failures']) test(`Native ${kind} write
     { type: 'workspace_write', path: '../notes/review-notes.md', offset: 0, final: true, mode: '100644' },
     { type: 'workspace_write', path: '../notes/../src/x', offset: 0, final: true, mode: '100644' }
   ]);
-  assert.deepEqual(f.s.all("SELECT role,harness,status FROM task_runs WHERE task_id='notes' ORDER BY rowid").map(r => [r.role, r.harness, r.status]), [['manager', 'native', 'succeeded'], ['dev', 'native', 'succeeded']]);
+  assert.deepEqual(f.s.all("SELECT role,harness,status FROM task_runs WHERE task_id='notes' ORDER BY rowid").map(r => [r.role, r.harness, r.status]), [['manager', 'scripted', 'succeeded'], ['dev', 'scripted', 'succeeded']]);
   await assert.rejects(readFile(join(root, 'src/x')), { code: 'ENOENT' });
 });
 
@@ -656,7 +657,7 @@ function installOldV2(f) {
   delete config.follows_default;
   for (const role of config.roles) {
     role.revision = 1; delete role.entry_harness_source;
-    const harness = harnesses.find(h => h.id === (role.role_id === 'manager' ? 'pi' : 'native'));
+    const harness = harnesses.find(h => h.id === (role.role_id === 'manager' ? 'pi' : 'scripted'));
     role.harness_ref = { id: harness.id, version: harness.version };
   }
   const raw = JSON.stringify(config);
@@ -680,13 +681,13 @@ test('old V2 review/Actions entries keep Pi through reads and identical saves; o
   const script = controllerScript(), f = await fixture(t, body => isController(body) ? script(body) : call(body.tools.some(t => t.function.name === 'finish_review') ? 'finish_review' : 'finish_analysis', finish));
   const raw = installOldV2(f), harness = snapshot => [snapshot.harness.id, snapshot.harness.source];
   // Neither a configuration read nor running either entry writes back a migration.
-  assert.equal(roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles.find(r => r.role_id === 'dev').harness_ref.id, 'native');
+  assert.equal(roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles.find(r => r.role_id === 'dev').harness_ref.id, 'scripted');
   for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'old-' + kind, kind))), ['pi', 'entry_executor']);
   assert.equal(f.s.get("SELECT value FROM settings WHERE key='roles:r'").value, raw);
   assert.equal(f.s.get('SELECT count(*) n FROM role_config_revisions').n, 1);
   // Development, ordinary RoleRun and QA resolution still use their own saved backend.
-  for (const role of ['dev', 'qa']) assert.deepEqual(harness(resolveRole(f.s, 'r', role, 'development.issue').snapshot), ['native', 'role']);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
+  for (const role of ['dev', 'qa']) assert.deepEqual(harness(resolveRole(f.s, 'r', role, 'development.issue').snapshot), ['scripted', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' } }] });
   assert.equal(roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles.find(r => r.role_id === 'dev').entry_harness_source, undefined);
   assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'echoed'))), ['pi', 'entry_executor']);
   // Omitting harness_ref is also an unchanged choice.
@@ -696,8 +697,8 @@ test('old V2 review/Actions entries keep Pi through reads and identical saves; o
   for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-' + kind, kind))), ['process', 'role']);
   f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
   assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'repeated'))), ['process', 'role']);
-  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
-  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-native'))), ['native', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'scripted' } }] });
+  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-scripted'))), ['scripted', 'role']);
 });
 
 test('a running old V2 review keeps its Pi binding on the next delegation; explicit role apply can adopt a changed backend', async t => {
@@ -739,12 +740,13 @@ test('backend selection is independent of role; container CLIs use gateway relay
   assert.equal(localResolved.model.id, 'codex:local_config');
   assert.equal(localResolved.model.key, '');
   assert.equal(localResolved.snapshot.model.source, 'local_config');
-  // Non-CLI backends (e.g., native) reject local_config / subscription model_source.
+  // Non-CLI backends (e.g., process) reject local_config / subscription model_source.
   assert.throws(
-    () => put({ expected_revision: 2, roles: [{ role_id: 'reviewer', harness_ref: { id: 'native', model_source: 'local_config' } }] }),
+    () => put({ expected_revision: 2, roles: [{ role_id: 'reviewer', harness_ref: { id: 'process', model_source: 'local_config' } }] }),
     e => e.code === 'subscription_mode_not_implemented',
   );
-  assert.equal(harnesses.filter(h => ['claude_code', 'codex', 'pi', 'native', 'process'].includes(h.id)).length, 5);
+  assert.equal(harnesses.filter(h => ['claude_code', 'codex', 'pi', 'process'].includes(h.id)).length, 4);
+  assert.equal(harnesses.some(h => h.id === 'native'), false, 'Native is no longer registered (#1257)');
 });
 
 test('cancelling a Pi session ends the control-plane wait with harness_cancelled; the next run is rebuilt, never native_resume', async t => {
@@ -812,7 +814,7 @@ test('explicit V2 apply continues a pinned task at a checkpoint and keeps the ap
 });
 
 for (const action of ['continue','wait','needs_help']) test(`Manager can finish ${action} without nominating or publishing`,async t=>{
- const f=await fixture(t,()=>call('finish_coordination',{action,reason:'Investigation is complete; no delivery intended',help_from:'project owner',resume_condition:'CI account budget restored',delay_seconds:30}));f.put({roles:[{role_id:'manager',harness_ref:{id:'native'}}]});
+ const f=await fixture(t,()=>call('finish_coordination',{action,reason:'Investigation is complete; no delivery intended',help_from:'project owner',resume_condition:'CI account budget restored',delay_seconds:30}));f.put({roles:[{role_id:'manager',harness_ref:{id:'scripted'}}]});
  await assert.rejects(runTeam(f.spec,{prepare:async()=>{}}),error=>error.code===(action==='needs_help'?'manager_needs_help':'manager_deferred')&&error.state===(action==='needs_help'?'needs_help':'retry_wait'));
  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='manager_disposition'").n,1);
@@ -820,7 +822,7 @@ for (const action of ['continue','wait','needs_help']) test(`Manager can finish 
 });
 
 test('Manager final reserved turn still permits non-delivery disposition instead of forcing nomination',async t=>{
- const f=await fixture(t,(body,n)=>n<32?call('read_task_history',{limit:1}):call('finish_coordination',{action:'continue',reason:'Preserve investigation and continue later',delay_seconds:30}));f.put({roles:[{role_id:'manager',harness_ref:{id:'native'}}]});
+ const f=await fixture(t,(body,n)=>n<32?call('read_task_history',{limit:1}):call('finish_coordination',{action:'continue',reason:'Preserve investigation and continue later',delay_seconds:30}));f.put({roles:[{role_id:'manager',harness_ref:{id:'scripted'}}]});
  await assert.rejects(runTeam(f.spec,{prepare:async()=>{}}),e=>e.code==='manager_deferred');
  assert.equal(f.requests.at(-1).tool_choice,'auto');assert.ok(f.requests.at(-1).tools.some(t=>t.function.name==='finish_coordination'));
  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
@@ -901,7 +903,7 @@ test('an old live Pi session is rejected before any provider request, allowing n
 
 test('pre-snapshot role instances rebuild obsolete guidance while preserving task and role identity', async t => {
   const f = await fixture(t, body => { assert.ok(!JSON.stringify(body.messages).includes('Discover optional playbooks')); return call('finish', { summary: 'continued' }); });
-  f.s.run("INSERT INTO settings VALUES('roles:r',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'native' } }));
+  f.s.run("INSERT INTO settings VALUES('roles:r',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'scripted' } }));
   const instance = roleInstance(f.s, f.task, 'manager');
   const old = JSON.parse(instance.definition); old.prompt += ' Discover optional playbooks.';
   f.s.run("UPDATE role_instances SET snapshot_id=NULL,definition=?,session=?,sequence=1 WHERE id=?", JSON.stringify(old), JSON.stringify([{ role: 'user', content: 'playbook_catalog: obsolete' }]), instance.id);

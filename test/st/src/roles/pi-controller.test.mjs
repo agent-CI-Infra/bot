@@ -25,6 +25,7 @@ import { persistentCliStateWorkspaceId } from '../../../../dist/harness/containe
 import { eventWork } from '../../../../dist/tasks/event-adapters.js';
 import { releaseStorage } from '../../../../dist/releases/storage.js';
 import '../../../../dist/releases/notes.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 // The real Pi SDK (runner/node_modules) in a real runner workspace, driven by the control plane through the task mailbox.
 // CI installs the runner dependencies and sets BOT_REQUIRE_PI=1, so a missing SDK fails there instead of skipping.
@@ -51,7 +52,7 @@ async function entryFixture(t, kind, respond, controlled = false) {
   if (controlled) {
     authorizeKnowledgeTask(store);
     roleApi(store, { id: 'admin', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'),
-      { expected_revision: 0, enabled: true, controller: { entries: { review: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] });
+      { expected_revision: 0, enabled: true, controller: { entries: { review: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'scripted' } }] });
   }
   // Recording a new contract invalidates the old workspace; the engine allocates its replacement afterwards.
   store.run("UPDATE tasks SET workspace_id=?,generation=? WHERE id='t'", randomBytes(24).toString('hex'), environment.generation);

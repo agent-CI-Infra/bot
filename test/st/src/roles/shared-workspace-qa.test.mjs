@@ -18,6 +18,7 @@ import { ReadTokens } from '../../../../dist/agent/read-token.js';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
+import '../../../fixtures/scripted-driver.mjs';
 
 const call = (name, args) => ({
   role: 'assistant',
@@ -196,7 +197,7 @@ test('#1121 dev -> test -> reviewer -> qa share one task workspace, read precedi
   roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), {
     expected_revision: 0,
     enabled: true,
-    roles: ['manager', 'dev', 'test', 'reviewer', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' } })),
+    roles: ['manager', 'dev', 'test', 'reviewer', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'scripted' } })),
   });
 
   const task = store.get("SELECT * FROM tasks WHERE id='t1'");

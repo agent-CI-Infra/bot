@@ -23,6 +23,7 @@ import { runTeam } from '../../../../dist/roles/team.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { SubmissionError } from '../../../../dist/roles/submission-error.js';
 import { Redactor } from '../../../../dist/agent/common.js';
+import '../../../fixtures/scripted-driver.mjs';
 import { renderProgress, reportMilestone, startProgress } from '../../../../dist/review/progress.js';
 import { applyDecision, recordEvent } from '../../../../dist/dispatch/store.js';
 import { workspace as runnerWorkspace } from '../../../../runner/workspace.mjs';
@@ -307,7 +308,7 @@ test('runTeam enforces nomination delivery semantics, child PR aggregation, and 
   roleApi(store, { id: 'owner', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'), {
     expected_revision: 0,
     enabled: true,
-    roles: ['manager', 'dev', 'reviewer', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' } })),
+    roles: ['manager', 'dev', 'reviewer', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'scripted' } })),
   });
 
   const call = (name, args) => ({

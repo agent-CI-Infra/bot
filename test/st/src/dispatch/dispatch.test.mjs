@@ -229,7 +229,7 @@ test('a Manager that cannot be reached is waited out; a decision that stays inva
   f.h.store.run('UPDATE dispatch_events SET attempts=7,next_run_at=0');
   await f.run();
   [event] = events(f.h);
-  assert.equal(event.state, 'pending'); assert.equal(JSON.parse(event.error).code, 'dispatch_continuation_unavailable'); assert.equal(tasks(f.h).length, 0);
+  assert.equal(event.state, 'pending'); assert.equal(JSON.parse(event.error).code, 'agent_turn_limit'); assert.equal(tasks(f.h).length, 0);
   f.state.decide = input => ({ decision: 'create', option_ids: [input.work.create[0].id], reason: '恢复后检视' });
   assert.equal((await f.admin(`/api/repositories/101/dispatch/${event.id}/retry`, 'POST', {})).status, 201);
   await f.run();
@@ -409,7 +409,7 @@ test('work the project does not allow is shown with its reason; creating it is r
       assert.match(body.messages[0].content, /Restricted actions right now[\s\S]*development/);
       return toolCall('create_task', { work: ['development'], reason: '尝试直接开发', brief: { goal: 'Fix CRLF', criteria: ['Test CRLF'] } }, 'c1');
     }
-    assert.equal(results[0].error, 'capability_ceiling'); assert.equal(results[0].created, false); assert.match(results[0].instruction, /Nothing was created/);
+    assert.equal(results[0].code, 'capability_ceiling'); assert.equal(results[0].created, false); assert.match(results[0].instruction, /Nothing was created/);
     return toolCall('create_task', { work: ['review'], reason: '上限不允许开发，改为检视' }, 'c2');
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'refused-dev');
@@ -436,7 +436,7 @@ test('a development the object already has is refused with that task, and the Ma
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'labeled', label: { name: 'bot-develop' }, sender: { ...alice, type: 'User' }, issue: { ...issue, labels: [{ name: 'bot-develop' }] } }, 'labeled-again');
   await f.run();
-  assert.equal(refusal.error, 'development_active'); assert.equal(refusal.task_id, 'dev-running');
+  assert.equal(refusal.code, 'development_active'); assert.equal(refusal.task_id, 'dev-running');
   const event = events(f.h).find(e => e.type === 'issue.labeled');
   assert.equal(event.decision, 'ignore'); assert.equal(tasks(f.h).length, 1);
   assert.deepEqual(JSON.parse(event.refusals).map(r => [r.code, r.task_id]), [['development_active', 'dev-running']]);
@@ -466,7 +466,7 @@ test('dispatch survives more than eight invalid decisions, reports 3/6/9, and gi
  assert.equal(detail.recovery.failures.length,8);assert.deepEqual(detail.recovery.reports.map(r=>r.attempt),[9,6,3]);assert.equal(detail.event.attempts,10);
  const older=(await f.admin('/api/repositories/101/dispatch/'+event.id+'?failure_before='+detail.recovery.next_before_attempt)).value;assert.deepEqual(older.recovery.failures.map(r=>r.attempt),[2,1]);assert.equal(older.recovery.next_before_attempt,null);assert.equal((await f.admin('/api/repositories/101/dispatch/'+event.id+'?failure_before=nope')).status,400);
  await f.dispatcher.close();const recovered=new Dispatcher(f.h.store);t.after(()=>recovered.close());
- f.state.decide=input=>{assert.equal(input.recovery.failures[0].attempt,10);assert.equal(input.recovery.failures[0].error.code,'dispatch_continuation_unavailable');return {decision:'ignore',option_ids:[],reason:'Manager chooses no work after reviewing current facts'};};
+ f.state.decide=input=>{assert.equal(input.recovery.failures[0].attempt,10);assert.equal(input.recovery.failures[0].error.code,'agent_turn_limit');return {decision:'ignore',option_ids:[],reason:'Manager chooses no work after reviewing current facts'};};
  f.h.store.run('UPDATE dispatch_events SET next_run_at=0 WHERE id=?',event.id);recovered.tick();await recovered.idle();
  assert.equal(events(f.h)[0].state,'decided');assert.equal(events(f.h)[0].decision,'ignore');assert.equal(declined,1,'only an actual Manager decision ends the owning work');
  assert.equal(f.h.store.get('SELECT count(*) n FROM dispatch_failures WHERE event_id=?',event.id).n,10);

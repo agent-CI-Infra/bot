@@ -13,6 +13,7 @@ import {assessRetryReport} from '../../../../dist/roles/retries.js';
 import {Redactor} from '../../../../dist/agent/common.js';
 import {workspace as runnerWorkspace} from '../../../../runner/workspace.mjs';
 import {randomWorkspaceId} from '../../../fixtures/helpers.mjs';
+import '../../../fixtures/scripted-driver.mjs';
 
 function setup(t,path=':memory:'){
  const s=new Store(path,Buffer.alloc(32,4));t.after(()=>s.close());
@@ -44,7 +45,7 @@ test('retry reports are persisted at 3/6/9, survive a new Store/session/SHA, and
 const call=(name,args)=>({role:'assistant',tool_calls:[{id:Math.random().toString(36).slice(2),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 for(const action of ['continue_retry','investigate'])test(`Native Manager reads retained failure evidence then chooses ${action}`,async t=>{
  const f=setup(t);for(let n=1;n<=3;n++)recordRetryFailure(f.s,f.task,action==='investigate'?{group:'merge_checks',occurrence:'head:'+n,code:'pull_request_checks_failed',detail:JSON.stringify({sha:'a'.repeat(40),check_runs:[{id:123,name:'Install packages',status:'completed',conclusion:'failure'}]})}:failure(n));const report=pendingRetryReport(f.s,'t');
- f.s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'native'}}));
+ f.s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'scripted'}}));
  const requests=[];const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);requests.push(body);
   const input=JSON.parse(body.messages[1].content);if(action==='investigate')assert.ok(body.tools.some(t=>t.function.name==='read_ci_evidence'));
   const message=requests.length===1?call('read_task_record',{ref:report.failure_ref}):action==='investigate'&&requests.length===2?call('read_task_record',{ref:input.ci_evidence_refs.at(-1)}):call('submit_retry_decision',{action,reason:'Read the retained failure and choose the next action'});

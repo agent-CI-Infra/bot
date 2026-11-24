@@ -455,7 +455,7 @@ function canReadPrivateRunEvents(access: MemoryAccess | undefined, repoId: strin
   try { memoryAuthorize(access, repoId, true); return true; } catch { return false; }
 }
 
-/** Builds normalized per-run step summaries for non-`task_logs` harnesses (`native` Manager/QA, `claude_code`, `codex`) while enforcing memory ACLs. */
+/** Builds normalized per-run step summaries for non-`task_logs` harnesses (`process`, `claude_code`, `codex`, and runs recorded on the retired `native`) while enforcing memory ACLs. */
 function buildHistoryStepsForRun(
   store: Store,
   _repoId: string,

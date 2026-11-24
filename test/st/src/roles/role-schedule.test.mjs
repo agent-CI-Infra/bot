@@ -12,6 +12,7 @@ import { saveConfiguration } from '../../../../dist/roles/definition.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { traceEvent, beginRun } from '../../../../dist/tasks/trace.js';
 import { latestRoleCandidate } from '../../../../dist/roles/schedule.js';
+import '../../../fixtures/scripted-driver.mjs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: randomBytes(4).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -45,7 +46,7 @@ async function fixture(t, { roles = [], file = ':memory:', handler } = {}) {
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt) VALUES('t','r','development.issue','running','stages','{}',1)");
   const records = new TaskRecords(s);
   records.contract('t', { goal: 'stages', scope: ['fixture'], criteria: ['verified'], endpoint: 'code' });
-  const native = ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' }, ...roles.find(r => r.role_id === role_id) }));
+  const native = ['manager', 'dev', 'test', 'reviewer', 'ux', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'scripted' }, ...roles.find(r => r.role_id === role_id) }));
   saveConfiguration(s, 'r', { expected_revision: 0, enabled: true, roles: native }, 'owner');
   captureTaskConfiguration(s, 't');
   const spec = () => ({ store: s, task: s.get("SELECT * FROM tasks WHERE id='t'"), redactor: new Redactor(), guard: async () => {}, system: 'Execution', prompt: '{}', tools: [tool('finish')], finish: { name: 'finish', validate: v => v }, maxTurns: 4 });

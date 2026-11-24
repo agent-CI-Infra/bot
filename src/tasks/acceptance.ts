@@ -340,10 +340,9 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
         }),
         tools,
         requestPrefix: `acceptance:${evaluationId}:`,
-        // Up to 3 inspection turns + submit_acceptance (+ 2 finalization reserve turns on native/process/pi).
+        // Up to 3 inspection turns + submit_acceptance (+ 2 finalization reserve turns on process/pi).
         maxTurns: 6,
         harnessTurnLimit: 5,
-        maxOutputChars: 16000,
         finish: {
           name: 'submit_acceptance',
           validate: validateDecision,

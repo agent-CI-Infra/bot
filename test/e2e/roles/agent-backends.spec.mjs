@@ -57,9 +57,9 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
       const acp = ['dev', 'test', 'reviewer', 'ux'].includes(role) ? ['container_acp', 'icode', 'workswarm'] : [];
-      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', ...acp, 'native', 'process']);
+      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', ...acp, 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
-      for (const backend of ['pi', 'native', 'process']) expect(await optionDisabled(backend)).toBe(false);
+      for (const backend of ['pi', 'process']) expect(await optionDisabled(backend)).toBe(false);
       // Harness selection is independent of controller/worker role.
       for (const backend of ['claude_code', 'codex']) {
         expect(await optionDisabled(backend)).toBe(false);
@@ -108,7 +108,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'manager' });
-    await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('native');
+    await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('process');
     await goRolePage(page, { role: 'reviewer' });
     await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('codex');
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
@@ -147,14 +147,14 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value;
-    expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('native');
+    expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('process');
     expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.id).toBe('codex');
     expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.model_source).toBeUndefined();
     expect(saved.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id).toBe('claude_code');
     expect(saved.configuration.roles.find(r => r.role_id === 'qa').harness_ref.id).toBe('pi');
     await page.reload();
     await goRolePage(page, { role: 'manager' });
-    await expect(page.getByRole('combobox', { name: 'manager Agent 后端', exact: true })).toHaveValue('native');
+    await expect(page.getByRole('combobox', { name: 'manager Agent 后端', exact: true })).toHaveValue('process');
     await goRolePage(page, { role: 'reviewer' });
     await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('codex');
     await expect(page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true })).toHaveValue('gateway');
@@ -230,13 +230,13 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     // Load an unmarked old V2 definition: the UI always resubmits its saved harness id.
     const old = JSON.parse(h.store.get("SELECT value FROM settings WHERE key='roles:101'").value);
     const dev = old.roles.find(r => r.role_id === 'dev');
-    delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' };
+    delete dev.entry_harness_source; dev.harness_ref = { id: 'codex', version: '1' };
     h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(old));
     await page.reload();
     await goRolePage(page, { role: 'dev' });
     const warning = page.getByText('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', { exact: true });
     await expect(warning).toBeVisible();
-    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('native');
+    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('codex');
     // No-op save is not offered: the bar only shows「保存」when the draft differs from the server (#567).
     await expect(consoleSave(page)).toBeHidden();
     await expect(warning).toBeVisible();
