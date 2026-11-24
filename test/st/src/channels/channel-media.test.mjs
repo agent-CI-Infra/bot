@@ -4,15 +4,14 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
-import { nativeServiceAssistants } from '../../../fixtures/native-roles.mjs';
 import { feishuMarkdown, markdownPosts, postText } from '../../../../dist/channels/format.js';
 import { MediaTurn, artifactBytes, channelResourcePath, incomingFiles, inboundBytes, mediaPermission, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
 import { saveModelMetadata } from '../../../../dist/models/catalog.js';
-import { imageRequestLimit, requestLimit } from '../../../../dist/agent/tool-context.js';
-import { TaskError } from '../../../../dist/agent/common.js';
+import { requestLimit } from '../../../../dist/agent/tool-context.js';
 import { ChannelService } from '../../../../dist/channels/service.js';
 import { AssistantComputerService } from '../../../../dist/service-roles/assistant-computers.js';
 import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
+import { lendSessionWorkspaces } from '../../../fixtures/scripted-roles.mjs';
 import { digest } from '../../../../dist/core/security.js';
 import { RetentionCleanup } from '../../../../dist/storage/retention.js';
 
@@ -290,37 +289,6 @@ test('long private input is read from the ledger and a long rich reply reaches F
   const parts=f.wire.sent.map(s=>s.content.zh_cn.content[0][0].text);
   assert.ok(parts.length>5);assert.equal(parts.join('\n\n'),feishuMarkdown(output)+'\n\n[登录后台查看](https://console.example.test/#/management)');
   assert.ok(f.wire.sent.every(s=>s.msg_type==='post'));
-});
-
-test('a provider refusing image input recovers gracefully in the same turn with stripped images, rewritten tool results and actionable guidance',async t=>{
-  const f=await channelFixture(t);f.wire.state.resources.set('img_no_vision',{data:png,mime:'image/png'});
-  // The native loop's own image recovery, removed with it in #1257; Pi's is covered by multimodal-harness.
-  nativeServiceAssistants(f.h.store);
-  let resourceId='', recoveryRequest=null;
-  f.modelState.respond=async(body,res)=>{
-    const seen=results(body);
-    if(!seen.length)return call(res,'list_message_resources',{});
-    if(seen.length===1){resourceId=seen[0].resources[0].resource_id;return call(res,'view_message_image',{resource_id:resourceId});}
-    const hasImage=body.messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url'));
-    if(hasImage){
-      res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'This model accepts text only'}}));
-      return;
-    }
-    recoveryRequest=body;
-    return say(res,'当前模型不支持直接看图，我没有查看到这张图片。');
-  };
-  const event=envelope('',{message:{message_type:'image',content:'{"image_key":"img_no_vision"}'}}),receipt=await post(f.h,f.id,event),source=receipt.value.operation_id;
-  assert.equal((await finished(f.h,source)).state,'completed');await delivered(f,source);
-  assert.ok(recoveryRequest,'turn continues with a stripped recovery request');
-  assert.equal(recoveryRequest.messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url')),false,'images are stripped on retry');
-  const toolResult=results(recoveryRequest)[1];
-  assert.equal(toolResult.image_input,'rejected_by_provider','prior view_message_image result is rewritten');
-  assert.equal(toolResult.image_omitted,true);
-  const recoveryNotice=String(recoveryRequest.messages.at(-1).content);
-  assert.ok(recoveryNotice.includes('This model accepts text only'),'includes provider error summary');
-  assert.ok(recoveryNotice.includes(resourceId),'includes resource_id');
-  assert.ok(recoveryNotice.includes('image/png')&&recoveryNotice.includes(String(png.length)),'includes format and byte size');
-  assert.ok(JSON.stringify(f.wire.sent).includes('当前模型不支持直接看图'));
 });
 
 test('encrypted file storage seals bytes with AAD and SHA-256, keeps SQLite clean, and reads legacy channel_resource_data rows', async t => {
@@ -614,108 +582,12 @@ test('large images over 2 MiB serialized request pass directly without folding t
   assert.match(unsupportedObservation?.detail ?? '', /image_input=false/);
 });
 
-test('preflight fitRequest and HTTP 413 provider rejections strip oversized images and keep the turn running', async t => {
-  const f = await channelFixture(t), chat = await privateChat(f);
-  // The native loop's own request fitting, removed with it in #1257; Pi's is covered by multimodal-harness.
-  nativeServiceAssistants(f.h.store);
-  const event = f.service.adapter(f.service.connector(f.id)).normalize(envelope('', {
-    message: { chat_id: 'oc_private', message_type: 'post', content: JSON.stringify({ zh_cn: { content: [[{ tag: 'img', image_key: 'img_small' }, { tag: 'img', image_key: 'img_huge' }]] } }) },
-  }));
-  f.service.ledger.accept(event);
-  const turn = localTurn(f, chat, event);
-  const resources = (await turn.execute('list_message_resources', {})).resources;
-  const smallId = resources.find(r => r.name === 'image-1').resource_id;
-  const hugeId = resources.find(r => r.name === 'image-2').resource_id;
-  const smallPng = Buffer.concat([png, Buffer.alloc(1024, 1)]);
-  const bigPng = Buffer.concat([png, Buffer.alloc(120 * 1024, 2)]);
-  f.wire.state.resources.set('img_small', { data: smallPng, mime: 'image/png' });
-  f.wire.state.resources.set('img_huge', { data: bigPng, mime: 'image/png' });
-
-  const r1 = await turn.execute('view_message_image', { resource_id: smallId });
-  const r2 = await turn.execute('view_message_image', { resource_id: hugeId });
-  const messages = [
-    { role: 'system', content: 'sys' },
-    { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'view_message_image', arguments: '{}' } }, { id: 'c2', type: 'function', function: { name: 'view_message_image', arguments: '{}' } }] },
-    { role: 'tool', tool_call_id: 'c1', content: JSON.stringify(r1) },
-    { role: 'tool', tool_call_id: 'c2', content: JSON.stringify(r2) },
-  ];
-  turn.addImages(messages);
-  const body = { messages };
-  // Enforce a small preflight limit so the larger image is stripped while the smaller image remains.
-  assert.equal(turn.fitRequest(body, 20 * 1024), true);
-  const imgMsg = messages.at(-1);
-  assert.equal(imgMsg.content.filter(p => p.type === 'image_url').length, 1);
-  assert.equal(JSON.parse(messages[2].content).image_input, 'next_model_request');
-  assert.equal(JSON.parse(messages[3].content).image_input, 'stripped_before_request');
-  assert.ok(imgMsg.content[0].text.includes(hugeId));
-
-  // Single-image size above imageRequestLimit returns structured recovery immediately without base64 blow-up.
-  const giantPng = Buffer.concat([png, Buffer.alloc(Math.floor(imageRequestLimit * 0.8), 3)]);
-  f.wire.state.resources.set('img_giant', { data: giantPng, mime: 'image/png' });
-  const giantEv = f.service.adapter(f.service.connector(f.id)).normalize(envelope('', { message: { chat_id: 'oc_private', message_type: 'image', content: '{"image_key":"img_giant"}' } }));
-  f.service.ledger.accept(giantEv);
-  const giantTurn = localTurn(f, chat, giantEv);
-  const giantId = (await giantTurn.execute('list_message_resources', {})).resources[0].resource_id;
-  const giantRes = await giantTurn.execute('view_message_image', { resource_id: giantId });
-  assert.equal(giantRes.error, 'image_input_too_large');
-  assert.equal(giantRes.resource_id, giantId);
-  assert.match(giantRes.recovery, /import_message_resource/);
-
-  // Provider HTTP 413 in a real turn triggers recovery and completes cleanly.
-  f.wire.state.resources.set('img_413', { data: smallPng, mime: 'image/png' });
-  let saw413Recovery = false;
-  f.modelState.respond = async (reqBody, res) => {
-    const obs = results(reqBody);
-    if (!obs.length) return call(res, 'list_message_resources', {});
-    if (obs.length === 1) return call(res, 'view_message_image', { resource_id: obs[0].resources[0].resource_id });
-    if (reqBody.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url'))) {
-      res.writeHead(413, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'Request Entity Too Large' } }));
-      return;
-    }
-    saw413Recovery = String(reqBody.messages.at(-1).content).includes('model_http_413') && results(reqBody)[1].image_input === 'rejected_by_provider';
-    return say(res, '图片超出模型请求上限，已收到恢复提示。');
-  };
-  const ev413 = envelope('', { message: { message_type: 'image', content: '{"image_key":"img_413"}' } });
-  const rc413 = await post(f.h, f.id, ev413);
-  assert.equal((await finished(f.h, rc413.value.operation_id)).state, 'completed');
-  assert.equal(saw413Recovery, true);
-
-  // Direct unit coverage for gateway-preflight model_request_invalid recovery across both resource and workspace images.
-  const stubComputer = { importFile: async () => ({ written: true }), exportFile: async () => ({ data: smallPng, name: 'cropped.png' }) };
-  const invalidTurn = new MediaTurn(f.service.media, chat.id, event.message_id, () => {}, stubComputer, () => {}, undefined, 'fixture-fence');
-  const resImg = await invalidTurn.execute('view_message_image', { resource_id: smallId });
-  const wsImg = await invalidTurn.execute('view_workspace_image', { path: '/tmp/cropped.png' });
-  const invalidMessages = [
-    { role: 'system', content: 'sys' },
-    {
-      role: 'assistant', content: null,
-      tool_calls: [
-        { id: 'ci1', type: 'function', function: { name: 'view_message_image', arguments: '{}' } },
-        { id: 'ci2', type: 'function', function: { name: 'view_workspace_image', arguments: '{}' } },
-      ],
-    },
-    { role: 'tool', tool_call_id: 'ci1', content: JSON.stringify(resImg) },
-    { role: 'tool', tool_call_id: 'ci2', content: JSON.stringify(wsImg) },
-  ];
-  invalidTurn.addImages(invalidMessages);
-  assert.equal(invalidTurn.recoverModelError(new TaskError('model_request_invalid', 'failed', '含图请求内容超过 20 MiB 上限'), invalidMessages), true);
-  assert.equal(invalidMessages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url')), false, 'all inline images stripped on model_request_invalid');
-  assert.equal(JSON.parse(invalidMessages[2].content).image_input, 'rejected_by_provider');
-  assert.equal(JSON.parse(invalidMessages[2].content).image_omitted, true);
-  assert.equal(JSON.parse(invalidMessages[3].content).image_input, 'rejected_by_provider');
-  assert.equal(JSON.parse(invalidMessages[3].content).image_omitted, true);
-  const invalidNotice = String(invalidMessages.at(-1).content);
-  assert.ok(invalidNotice.includes('model_request_invalid') && invalidNotice.includes(smallId) && invalidNotice.includes('/tmp/cropped.png'), 'recovery notice carries error code, resource_id and workspace path');
-  assert.equal(invalidTurn.recoverModelError(new TaskError('model_request_invalid', 'failed', 'retry error without images'), invalidMessages), false, 'second call without inline images does not loop');
-});
-
 test('import_message_resource -> computer processing -> view_workspace_image closes the loop and enforces path/symlink/fence boundaries', async t => {
   const f = await channelFixture(t), m = await assistantManager(t);
   const assistants = new AssistantComputerService(f.h.store, m.manager, m.homes);
+  // The scripted driver works the turn in an empty session workspace (scripted-roles.mjs); the computer's tools are real.
+  lendSessionWorkspaces(assistants);
   f.service.management.service.assistants = assistants;
-  // The native loop's own image tool results, removed with it in #1257; Pi's are covered by multimodal-harness.
-  f.groupHarness = 'native';
   // Re-wire group binding with computer write/read/command permissions.
   const chat = await group(f);
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);

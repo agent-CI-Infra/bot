@@ -43,7 +43,7 @@ import { taskManagementStorage } from '../tasks/management.js';
 import { conversationStorage } from '../roles/conversation-storage.js';
 import { serviceRoleStorage } from '../service-roles/roles.js';
 import { serviceBindingStorage } from '../channels/service-bindings.js';
-import { migrateNativeToPi } from '../roles/native-to-pi.js';
+import { migrateNativeToPi, retireNativeServiceAssistants } from '../roles/native-to-pi.js';
 import { workspaceStorage } from '../projects/workspace-cleanup.js';
 import { worktreeStorage } from '../projects/worktrees.js';
 
@@ -302,8 +302,10 @@ export class Store {
     serviceRoleStorage(this);
     // Group bindings reference service roles and migrate legacy group employees once (#312).
     serviceBindingStorage(this);
-    // Native service roles, group bindings and project roles move to Pi once (#1255), after all three tables exist.
+    // Native service roles, group bindings and project roles move to Pi once (#1255), after all three tables exist; a service
+    // assistant left on Native moves at every start, since Native is gone for them (#1257).
     migrateNativeToPi(this);
+    retireNativeServiceAssistants(this);
     scheduleStorage(this);
     // GitHub owners whose repository administrators start their own repositories (#848).
     trustedOrganizationStorage(this);

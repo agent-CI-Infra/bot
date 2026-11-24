@@ -16,6 +16,8 @@ export const groupAssistant = 'group-assistant';
 export const defaultGroupAssistantPrompt = '查询 GitHub Issue 和 PR、解释代码仓；能否写入和派活由本群的权限配置决定。';
 
 const now = () => new Date().toISOString();
+/** The backends a service assistant may run on (#1257: Native is gone); a group binding offers the same ones. */
+export const serviceHarnesses: readonly string[] = ['pi', 'codex', 'claude_code'];
 export const serviceItems = permissionItems;
 /** What the repository assistant granted before #849; bindings migrated from it read as the read level. */
 export const repositoryAssistantPermissions: RolePermissions = normalizePermissions({ github: 'read' });
@@ -141,7 +143,7 @@ function roleModel(store: Store, value: unknown, project: string | null): string
 const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled', 'harness'];
 /** Field values for an insert or update; `current` is the stored row when editing. */
 function definition(store: Store, input: Json, current?: Row, project?: string | null) {
-  if(input.harness!==undefined&&!['native','pi','codex','claude_code'].includes(String(input.harness)))fail(400,'unknown_role_harness','harness');
+  if(input.harness!==undefined&&!serviceHarnesses.includes(String(input.harness)))fail(400,'unknown_role_harness','harness');
   const builtin = !!current?.builtin, fixed = current?.id === managementAssistant;
   if (input.permissions !== undefined && fixed) {
     const given=object(input.permissions),full=fullPermissions();

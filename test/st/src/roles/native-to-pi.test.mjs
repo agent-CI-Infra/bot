@@ -3,12 +3,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { roleConfiguration } from '../../../../dist/roles/definition.js';
-import { migrateNativeToPi } from '../../../../dist/roles/native-to-pi.js';
+import { migrateNativeToPi, retireNativeServiceAssistants } from '../../../../dist/roles/native-to-pi.js';
 import { rolePool } from '../../../../dist/roles/pool.js';
-import { managementAssistant, serviceRole } from '../../../../dist/service-roles/roles.js';
+import { managementAssistant, serviceRole, updateServiceRole } from '../../../../dist/service-roles/roles.js';
 
 const repos = ['v2', 'kept', 'legacy', 'defaults'];
 const admin = { id: 'admin', role: 'project_admin', repositories: repos };
@@ -96,7 +99,7 @@ test('migration #1255: Native service roles, group bindings and project roles mo
     ['service_role.native_to_pi', managementAssistant, null],
   ]);
 
-  // It runs once: Native chosen by hand afterwards stays.
+  // It runs once: Native chosen by hand afterwards stays for it (a service assistant moves at start-up since #1257, below).
   s.run("UPDATE service_roles SET harness='native' WHERE id='custom-native'");
   migrateNativeToPi(s, line => lines.push(line));
   assert.equal(role('custom-native').harness, 'native');
@@ -116,4 +119,38 @@ test('a new database starts on Pi: the management assistant, a legacy configurat
   const lines = [];
   migrateNativeToPi(s, line => lines.push(line));
   assert.deepEqual([harnessOf(s, 'v2').dev, lines], ['native', []]);
+});
+
+test('Native is gone for service assistants (#1257): one still saved on it moves to Pi at every start, the API refuses it', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'native-retired-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let s = new Store(path, key);
+  // Saved on Native after #1255's migration, while it could still be chosen by hand, next to other backends.
+  s.run("UPDATE service_roles SET harness='native',revision=3 WHERE id=?", managementAssistant);
+  for (const [id, harness] of [['custom-native', 'native'], ['custom-codex', 'codex']])
+    s.run("INSERT INTO service_roles(id,builtin,enabled,name,harness,revision,created_at,updated_at) VALUES(?,0,1,?,?,2,'then','then')", id, id, harness);
+  for (const [id, harness] of [['g-native', 'native'], ['g-claude', 'claude_code']]) {
+    s.run("INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,created_at,last_received_at) VALUES(?,'feishu','app','tenant',?,'group','connector',1,1)", 'chat-' + id, 'oc-' + id);
+    s.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,revision,model_id,prompt,harness,created_at,updated_at)
+      VALUES(?,?,'group-assistant','repositories',?,'admin','admin',4,NULL,'',?,1,1)`, id, 'chat-' + id, 'principal-' + id, harness);
+  }
+  s.close();
+  // The next start moves them: a service role under a new revision, a binding keeping its own (its fence).
+  s = new Store(path, key); t.after(() => s.close());
+  const role = id => ({ ...s.get('SELECT harness,revision FROM service_roles WHERE id=?', id) });
+  assert.deepEqual([role(managementAssistant), role('custom-native'), role('custom-codex')],
+    [{ harness: 'pi', revision: 4 }, { harness: 'pi', revision: 3 }, { harness: 'codex', revision: 2 }]);
+  const binding = id => ({ ...s.get('SELECT harness,revision FROM channel_service_bindings WHERE id=?', id) });
+  assert.deepEqual([binding('g-native'), binding('g-claude')], [{ harness: 'pi', revision: 4 }, { harness: 'claude_code', revision: 4 }]);
+  assert.deepEqual(s.all("SELECT action,resource_id FROM audit WHERE user_id='migration:1257' ORDER BY action,resource_id").map(row => [row.action, row.resource_id]),
+    [['channel.service_binding.native_retired', 'g-native'], ['service_role.native_retired', 'custom-native'], ['service_role.native_retired', managementAssistant]]);
+  // It says what it moved; with nothing left it says nothing.
+  s.run("UPDATE service_roles SET harness='native' WHERE id='custom-native'");
+  const lines = [];
+  retireNativeServiceAssistants(s, line => lines.push(line));
+  retireNativeServiceAssistants(s, line => lines.push(line));
+  assert.deepEqual(lines, ['[migration:1257] Native retired: 1 service roles and 0 group bindings moved to Pi']);
+  // Native can no longer be chosen.
+  assert.throws(() => updateServiceRole(s, 'admin', managementAssistant, { expected_revision: role(managementAssistant).revision, harness: 'native' }),
+    error => error.status === 400 && error.code === 'unknown_role_harness');
 });

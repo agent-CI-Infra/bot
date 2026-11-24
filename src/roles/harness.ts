@@ -87,7 +87,7 @@ export interface RoleHarnessMetadata {id:string;version:string;session:string;ev
  capabilities?:HarnessCapabilities;
  /** false: the driver runs where a configuration names it, but no backend listing (role editor, agent backends) offers it. */
  listed?:boolean;
- /** The driver works a service assistant's turn as the native loop does (#1253): it takes serviceHarnessTurn's steering
+ /** The driver works a service assistant's turn as a conversation (#1253): it takes serviceHarnessTurn's steering
   *  (`pi.service`: messages merged during the turn, the streamed answer), restarts after an edit and answers in text,
   *  ending silently only through stay_silent. The other drivers get a `finish` tool and no steering. */
  steered_turns?:boolean}

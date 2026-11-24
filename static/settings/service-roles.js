@@ -34,11 +34,11 @@ function serviceRoleCard(view, initial, level = 'h2') {
     modelSelect.value = role.model_id ?? '';
 
     const harnessSelect = document.createElement('select'); harnessSelect.name = 'harness';
-    for (const [id, label] of [['pi', 'Pi（推荐）'], ['native', 'Native（兼容）'], ['codex', 'Codex'], ['claude_code', 'Claude Code']]) {
+    for (const [id, label] of [['pi', 'Pi（推荐）'], ['codex', 'Codex'], ['claude_code', 'Claude Code']]) {
       const option = element('option', label); option.value = id; harnessSelect.append(option);
     }
     harnessSelect.value = role.harness ?? 'pi';
-    const computerWarning = harnessComputerWarning(harnessSelect);
+    const computerWarning = harnessComputerWarning();
     const grid = permissionEditor(structuredClone(role.permissions), view.items, () => {}, '', true);
     nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field('Agent 后端', harnessSelect), computerWarning, field('模型（部署共享模型）', modelSelect), grid], '保存', async () => {
       const change = { expected_revision: role.revision, harness: harnessSelect.value, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };

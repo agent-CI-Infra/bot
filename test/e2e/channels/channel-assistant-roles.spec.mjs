@@ -54,7 +54,7 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     expect(h.store.get('SELECT scope,model_id,prompt,harness FROM channel_service_bindings')).toEqual({ scope: 'repositories', model_id: projectModel.id, prompt: '先给结论，再列出处。', harness: 'pi' });
     // The default backend gets no badge.
     await expect(binding.locator('.feishu-binding-badge-info')).toHaveCount(0);
-    // Now bind the second group across both 101 and 102 with a shared model, copying prompt from the first group and picking Native by hand.
+    // Now bind the second group across both 101 and 102 with a shared model, copying prompt from the first group and picking Codex by hand.
     await page.getByRole('link', { name: '创建群绑定', exact: true }).click();
     await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check();
     await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).check();
@@ -66,14 +66,14 @@ for (const width of [1440, 390]) test(`a project administrator configures a grou
     const backend = page.getByLabel('Agent 后端', { exact: true });
     await expect(backend).toBeVisible();
     await expect(backend).toHaveValue('pi');
-    await expect(backend.locator('option')).toHaveText(['Pi（推荐）', 'Native（兼容）', 'Codex', 'Claude Code']);
-    await backend.selectOption('native');
-    // Native runs in the control plane: no assistant computer, no warning.
-    await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeHidden();
+    // Native is gone (#1257): every backend offered runs on an assistant computer, so the warning stays.
+    await expect(backend.locator('option')).toHaveText(['Pi（推荐）', 'Codex', 'Claude Code']);
+    await backend.selectOption('codex');
+    await expect(page.locator('#feishu-group-editor').getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeVisible();
     await save.click();
     await expect(page.getByRole('article', { name: '群聊助手绑定' })).toHaveCount(2);
     await expect(page.getByRole('article', { name: '群聊助手绑定' }).last()).toContainText('Shared team model');
-    await expect(page.getByRole('article', { name: '群聊助手绑定' }).last().locator('.feishu-binding-badge-info')).toHaveText('Native（兼容）');
+    await expect(page.getByRole('article', { name: '群聊助手绑定' }).last().locator('.feishu-binding-badge-info')).toHaveText('Codex');
     // Project Settings -> Roles no longer displays a separate 群助手角色 view.
     await page.goto(h.admin + '/#/projects/101/roles');
     await expect(page.locator('[data-testid="role-assistant-roles-link"]')).toHaveCount(0);

@@ -30,10 +30,11 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     await expect(backend.locator('option[value=container_acp], option[value=icode], option[value=workswarm]')).toHaveCount(0);
     const captureBackend = async state => { for (const width of [1440, 390]) { await page.setViewportSize({ width, height: 900 }); await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);  } await page.setViewportSize({ width: 1440, height: 1000 }); };
     await captureBackend('before-save');
-    // Native can still be chosen by hand; it runs in the control plane and needs no assistant computer.
-    await assistant.getByRole('combobox', { name: 'Agent 后端', exact: true }).selectOption('native');
+    // Native is gone (#1257): every backend offered runs on an assistant computer, so the warning stays whichever is chosen.
+    await expect(backend.locator('option')).toHaveText(['Pi（推荐）', 'Codex', 'Claude Code']);
+    await backend.selectOption('codex');
     await expect(assistant.locator('.endpoint-warning').filter({ hasText: '不会改用其他模型' })).toHaveCount(1);
-    await expect(assistant.getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeHidden();
+    await expect(assistant.getByRole('status').filter({ hasText: '助手电脑现在不可用' })).toBeVisible();
     await expect(assistant.getByRole('button', { name: '删除角色' })).toHaveCount(0);
 
     // Choose the shared model and save.
@@ -42,10 +43,10 @@ test('全局设置的管理助手页查看和修改管理助手，旧服务角�
     await assistant.getByRole('button', { name: '保存', exact: true }).click();
     await expect(assistant).toContainText('已保存'); await expect(assistant).toContainText('Shared assistant · 127.0.0.1:9');
     await expect(assistant).not.toContainText('预算上限');
-    expect(h.store.get("SELECT harness FROM service_roles WHERE id='management-assistant'").harness).toBe('native');
+    expect(h.store.get("SELECT harness FROM service_roles WHERE id='management-assistant'").harness).toBe('codex');
     expect(h.store.get("SELECT model_id,budget FROM service_roles WHERE id='management-assistant'")).toEqual({ model_id: shared.id, budget: null });
     await page.goto(h.admin + '/#/settings/management-assistant');
-    await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toHaveValue('native');
+    await expect(assistant.getByRole('combobox', { name: 'Agent 后端', exact: true })).toHaveValue('codex');
     await captureBackend('saved-reloaded');
 
     // Stale revision conflict is reported without overwriting.

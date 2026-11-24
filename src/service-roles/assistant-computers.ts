@@ -326,10 +326,10 @@ export class AssistantHomes {
 }
 
 type FenceResolver = (row: Row) => string | null;
-/** The assistants configured with a harness other than native: the management assistant and enabled group bindings. */
+/** The assistants that run on a harness, and so need a computer for every turn: the enabled management assistant and group bindings. */
 export function harnessAssistants(store: Store): string[] {
-  const management = store.hasTable('service_roles') ? store.get("SELECT harness FROM service_roles WHERE id='management-assistant' AND enabled=1 AND harness<>'native'") : undefined;
-  const groups = store.hasTable('channel_service_bindings') ? Number(store.get("SELECT count(*) n FROM channel_service_bindings WHERE enabled=1 AND harness<>'native'")!.n) : 0;
+  const management = store.hasTable('service_roles') ? store.get("SELECT harness FROM service_roles WHERE id='management-assistant' AND enabled=1") : undefined;
+  const groups = store.hasTable('channel_service_bindings') ? Number(store.get('SELECT count(*) n FROM channel_service_bindings WHERE enabled=1')!.n) : 0;
   return [...(management ? [`the management assistant (${management.harness})`] : []), ...(groups ? [`${groups} group assistant binding${groups > 1 ? 's' : ''}`] : [])];
 }
 /** The control plane's side of assistant computers: the manager calls, the background sweeps and the console view. */
