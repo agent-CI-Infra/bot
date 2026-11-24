@@ -54,7 +54,8 @@ import { actionsFailurePrompt } from '../actions/analysis.js';
 import { lateSchedules } from '../actions/late-schedules.js';
 import { milestoneTool, milestoneToolName, reportMilestone, settleProgress, startProgress } from '../review/progress.js';
 import { repositoryLabels } from '../review/labels.js';
-import { continuationContext } from '../review/continuation.js';
+import { continuationContext, developmentContinuationContext } from '../review/continuation.js';
+import { claimWorktree, heldBy, releaseWorktrees, taskWorktree, worktreeMoved } from '../projects/worktrees.js';
 import { pendingReviewUpdates } from '../review/sessions.js';
 import { carryRevisionRequests } from '../review/development.js';
 import { carryUnconsumedTaskUpdates } from '../review/bot-pr-wake.js';
@@ -298,15 +299,28 @@ export async function runRequest(
   // Without a named executor role the entry runs the Manager team. That includes a Task frozen before the Manager
   // switches were retired (b45c5224) with its entry still off: it is resolved like the retired switches, so no entry
   // runs a bare tool loop (#1256).
-  const ownRole = origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null);
+  const generic = genericTask(task);
+  const hasPrWrite = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request'));
+  // Without a named executor role—or whenever the task holds pull_request write authority (#1331)—the entry runs the
+  // unified Task Manager team (`runTeam`), eliminating the single-role `dev` development fork.
+  // A legacy self-executing role caller without `delegation: 'allow'` (for example a group employee pinned to itself)
+  // keeps its own executor role to honor `assertTaskRole`'s delegation boundary.
+  const nonDelegatingSelfRole = Boolean(
+    origin?.source_kind === 'role' &&
+    origin.executor_role &&
+    origin.executor_role === origin.source_role &&
+    (() => { try { return JSON.parse(String(origin.permissions || '{}')).delegation !== 'allow'; } catch { return true; } })(),
+  );
+  const ownRole = hasPrWrite && !nonDelegatingSelfRole
+    ? null
+    : (origin?.executor_role || (typeof input.executor_role === 'string' && input.executor_role ? input.executor_role : null));
 
   // #532: this entry's own limits follow the same budget configuration as every other entry — the executing role's
   // `budget_policy_ref` when it is `bounded` or `metered` — and keep today's entry defaults only when nothing is
   // configured. The command timeout keeps its role → project → default order inside resolveCommandTimeout.
   const budgetRole = () => ownRole ?? 'dev';
   const commandBudget = () => resolveCommandTimeout(store, task, budgetRole(), 180);
-  const generic = genericTask(task);
-  const entry = task.kind === 'task.development' || (generic && (grantedWrites(store, task.id) ?? []).includes('pull_request')) ? 'development' : 'request';
+  const entry = hasPrWrite ? 'development' : 'request';
   const software = () => softwareRequest(task);
   const reviewDelivery = () => generic && input.delivery === 'review';
   if (software() && (!generic || ['acceptance', 'publish'].includes(String(task.phase)))) assertRequestPullRequest(store, task);
@@ -395,6 +409,7 @@ export async function runRequest(
   const issueProgressActive = () =>
     targetSpec?.type === 'issue' &&
     Number.isSafeInteger(targetSpec.number) &&
+    Number(input.round || 1) <= 1 &&
     effectiveWrites(store, task, sourcePolicies(store, task)).includes('pull_request');
 
   const connectProgressClient = async () => {
@@ -422,12 +437,45 @@ export async function runRequest(
     const targetContextFiles: Record<string, string> = {};
     let targetSummaryMeta: Record<string, any> | undefined;
 
-    if (!task.workspace_id || !task.generation || !task.head_sha || input.move_to_sha) {
+    const roundNumber = Number(input.round || 1);
+    const needsRoundPrepare = roundNumber > 1 && String(task.phase || 'prepare') === 'prepare';
+    const ownedTaskPr = store.hasTable('bot_pull_requests')
+      ? store.get('SELECT number FROM bot_pull_requests WHERE repository_id=? AND source_task_id=? ORDER BY number DESC LIMIT 1', task.repository_id, task.id)
+      : undefined;
+    const pinnedBotPrNumber =
+      Number.isSafeInteger(Number(input.pr_number)) && Number(input.pr_number) > 0
+        ? Number(input.pr_number)
+        : ownedTaskPr
+          ? Number(ownedTaskPr.number)
+          : null;
+
+    if (!task.workspace_id || !task.generation || !task.head_sha || input.move_to_sha || needsRoundPrepare) {
       let environment = await manager.call('GET', '/v1/projects/' + task.repository_id);
       if (!environment) environment = await manager.call('PUT', '/v1/projects/' + task.repository_id);
       if (!environment || !['ready', 'busy'].includes(environment.state)) stop('environment_not_ready', 'waiting_environment');
+      const previousWorkspaceId = task.workspace_id ? String(task.workspace_id) : null;
+      const previousGeneration = task.generation != null ? Number(task.generation) : null;
+      const canReuseWorkspace = Boolean(
+        needsRoundPrepare &&
+        previousWorkspaceId &&
+        previousGeneration !== null &&
+        previousGeneration === Number(environment.generation),
+      );
       if (!task.workspace_id || !task.generation) {
         update({ generation: environment.generation, workspace_id: randomId() });
+      } else if (needsRoundPrepare && previousGeneration !== Number(environment.generation)) {
+        releaseWorktrees(store, String(task.id), 'generation_changed');
+        update({ generation: environment.generation, workspace_id: randomId() });
+        log({
+          type: 'workspace_reuse_fallback',
+          round: roundNumber,
+          previous_workspace_id: previousWorkspaceId,
+          previous_generation: previousGeneration,
+          generation: environment.generation,
+          workspace_id: task.workspace_id,
+          reason: 'generation_changed',
+          detail: `项目电脑已重建（generation ${previousGeneration} -> ${environment.generation}），第 ${roundNumber} 轮降级为新建工作区 ${String(task.workspace_id).slice(0, 12)}。`,
+        });
       }
 
       let targetSha: string | undefined;
@@ -437,6 +485,45 @@ export async function runRequest(
       const policyBase = String(capturedPolicy?.base_branch || '').trim();
       let baseBranch = github.defaultBranch;
       const mirrorRefs = new Set<string>([`refs/heads/${github.defaultBranch}`]);
+
+      const loadOwnedBotPrFacts = async (prNum: number, contextPrefix: '' | 'pr_' = 'pr_') => {
+        const pr = await github.request('GET', github.path(`/pulls/${prNum}`), undefined, true);
+        if (!pr || pr.state !== 'open') return null;
+        const [files, prComments, prReviews, prReviewComments] = await Promise.all([
+          github.pages(github.path(`/pulls/${prNum}/files`)).catch(() => []),
+          github.pages(github.path(`/issues/${prNum}/comments`)).catch(() => []),
+          github.pages(github.path(`/pulls/${prNum}/reviews`)).catch(() => []),
+          github.pages(github.path(`/pulls/${prNum}/comments`)).catch(() => []),
+        ]);
+        prDiffFiles = files;
+        input.bot_pr = pr;
+        input.pr_number = prNum;
+        baseBranch = pr.base?.ref || baseBranch;
+        mirrorRefs.add(`refs/heads/${baseBranch}`);
+        mirrorRefs.add(`refs/pull/${prNum}/head`);
+        if (pr.head?.ref) mirrorRefs.add(`refs/heads/${pr.head.ref}`);
+        const baseRefObj = await github.ref(baseBranch).catch(() => null);
+        baseRefSha = /^[a-f0-9]{40}$/i.test(String(baseRefObj?.object?.sha || ''))
+          ? String(baseRefObj.object.sha).toLowerCase()
+          : /^[a-f0-9]{40}$/i.test(String(pr.base?.sha || ''))
+            ? String(pr.base.sha).toLowerCase()
+            : undefined;
+        targetSha = pr.head.sha;
+        const behaviorChanges = files
+          .filter((f: any) => behaviorPath(String(f.filename ?? '')) || (f.previous_filename && behaviorPath(String(f.previous_filename))))
+          .map((f: any) => String(f.filename));
+        const workflowFiles = [...new Set(files.flatMap((f: any) =>
+          [f?.filename, f?.previous_filename].filter(isWorkflowPath).map(String),
+        ))].sort();
+        if (behaviorChanges.length) input.behavior_changes = behaviorChanges;
+        if (workflowFiles.length) input.workflow_files = workflowFiles;
+        targetContextFiles['bot_pr.json'] = JSON.stringify(pr, null, 2);
+        targetContextFiles[`${contextPrefix}files.json`] = JSON.stringify(files, null, 2);
+        targetContextFiles[`${contextPrefix}comments.json`] = JSON.stringify(prComments, null, 2);
+        targetContextFiles['reviews.json'] = JSON.stringify(prReviews, null, 2);
+        targetContextFiles['review_comments.json'] = JSON.stringify(prReviewComments, null, 2);
+        return { pr, files, behaviorChanges };
+      };
 
       if (targetSpec?.type === 'pr' && Number.isSafeInteger(targetSpec.number)) {
         const pr = await github.object('review.pr', targetSpec.number!);
@@ -511,23 +598,30 @@ export async function runRequest(
         const requestedBranch = requestedRef && !requestedRef.startsWith('refs/tags/') && !/^[a-f0-9]{40}$/i.test(requestedRef.replace(/^refs\/heads\//, ''))
           ? requestedRef.replace(/^refs\/heads\//, '')
           : null;
-        // If a bot PR already exists for this Issue and we are revising it, check out its head. The newest open PR is
-        // continued, except that a branch the task names selects the open PR on that baseline: adopting a PR on another
-        // baseline would move the delivery back to a branch this task explicitly did not ask for (#1314, #290 gap 2).
+        // If a bot PR already exists for this Issue and we are revising it, check out its head. When this continuous task
+        // already owns a PR (round > 1 or recorded source_task_id), pin strictly to THAT PR so #1314 multi-baseline PRs
+        // on the same Issue never cross-contaminate. Otherwise select the newest open PR matching any requested branch.
         const issuePrNumbers = (grantedWrites(store, task.id) ?? []).includes('pull_request')
-          ? store
-              .all(
-                `SELECT b.number FROM bot_pull_requests b JOIN tasks t ON t.id=b.source_task_id
-                 WHERE b.repository_id=? AND t.object_number=?
-                 AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue')
-                 ORDER BY b.number DESC LIMIT 20`,
-                task.repository_id,
-                targetSpec.number!,
-              )
-              .map(row => Number(row.number))
+          ? pinnedBotPrNumber
+            ? [pinnedBotPrNumber]
+            : store
+                .all(
+                  `SELECT b.number FROM bot_pull_requests b JOIN tasks t ON t.id=b.source_task_id
+                   WHERE b.repository_id=? AND t.object_number=?
+                   AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue')
+                   ORDER BY b.number DESC LIMIT 20`,
+                  task.repository_id,
+                  targetSpec.number!,
+                )
+                .map(row => Number(row.number))
           : [];
         for (const issuePrNumber of issuePrNumbers) {
-          if (input.bot_pr) break;
+          if (input.bot_pr && !(needsRoundPrepare && issuePrNumber === pinnedBotPrNumber)) break;
+          if (needsRoundPrepare && issuePrNumber === pinnedBotPrNumber) {
+            const loaded = await loadOwnedBotPrFacts(issuePrNumber, 'pr_');
+            if (loaded) break;
+            continue;
+          }
           const pr = await github.request('GET', github.path(`/pulls/${issuePrNumber}`), undefined, true);
           if (!pr || pr.state !== 'open') continue;
           if (requestedBranch && pr.base?.ref !== requestedBranch) continue;
@@ -624,17 +718,41 @@ export async function runRequest(
         targetSha = String(commitObj.sha);
         targetSummaryMeta = { type: 'commit', sha: targetSha };
       } else {
-        if (software() && input.integration) {
-          const integrationBranch = input.bot_pr?.base?.ref || github.defaultBranch;
-          targetSha = (await github.ref(integrationBranch))?.object?.sha;
-          if (integrationBranch === ((input.bot_pr?.base?.ref ? String(input.bot_pr.base.ref).trim() : '') || policyBase || github.defaultBranch)) {
-            trustedSkillSha = targetSha ?? null;
+        if (needsRoundPrepare && pinnedBotPrNumber && hasPrWrite) {
+          const loaded = await loadOwnedBotPrFacts(pinnedBotPrNumber, '');
+          if (loaded) {
+            const labels = await github.pages(github.path('/labels')).catch(() => []);
+            targetContextFiles['object.json'] = JSON.stringify(loaded.pr, null, 2);
+            targetContextFiles['repository_labels.json'] = JSON.stringify(repositoryLabels(labels), null, 2);
+            targetSummaryMeta = {
+              type: 'pr',
+              number: loaded.pr.number,
+              title: loaded.pr.title,
+              head_sha: loaded.pr.head?.sha,
+              head_ref: loaded.pr.head?.ref,
+              base_ref: baseBranch,
+              ...(baseRefSha ? { base_sha: baseRefSha } : {}),
+              ...(loaded.pr.mergeable !== undefined ? { mergeable: loaded.pr.mergeable } : {}),
+              changed_files: loaded.files.length,
+              bot_login: github.actorLogin || null,
+              ...(loaded.behaviorChanges.length ? { behavior_changes: loaded.behaviorChanges } : {}),
+            };
+            input.object = loaded.pr;
           }
-        } else if (!input.snapshot_sha && !inheritedBase) {
-          targetSha = (await github.ref(github.defaultBranch))?.object?.sha;
-          if (!policyBase || policyBase === github.defaultBranch) trustedSkillSha = targetSha ?? null;
-        } else {
-          targetSha = input.snapshot_sha || inheritedBase;
+        }
+        if (!targetSha) {
+          if (software() && input.integration) {
+            const integrationBranch = input.bot_pr?.base?.ref || github.defaultBranch;
+            targetSha = (await github.ref(integrationBranch))?.object?.sha;
+            if (integrationBranch === ((input.bot_pr?.base?.ref ? String(input.bot_pr.base.ref).trim() : '') || policyBase || github.defaultBranch)) {
+              trustedSkillSha = targetSha ?? null;
+            }
+          } else if (!input.snapshot_sha && !inheritedBase) {
+            targetSha = (await github.ref(github.defaultBranch))?.object?.sha;
+            if (!policyBase || policyBase === github.defaultBranch) trustedSkillSha = targetSha ?? null;
+          } else {
+            targetSha = input.snapshot_sha || inheritedBase;
+          }
         }
       }
 
@@ -715,7 +833,75 @@ export async function runRequest(
           throw error;
         }
       }
-      const snapshot = (mirror ? await workspace.bind(github, resolvedSha, mirror, conflictExtraCommits, 'write') : null) || (await workspace.prepare(github, resolvedSha, mirror));
+      let snapshot: any = null;
+      if (canReuseWorkspace) {
+        const repoId = String(task.repository_id);
+        let held = taskWorktree(store, task);
+        if (!held && store.hasTable('worktree_bindings') && store.hasTable('worktrees')) {
+          const priorBinding = store.get(
+            `SELECT b.* FROM worktree_bindings b
+             JOIN worktrees w ON w.repository_id=b.repository_id AND w.id=b.worktree_id
+             WHERE b.task_id=? AND b.workspace_id=? AND w.generation=? AND w.state<>'removed'
+             ORDER BY b.id DESC LIMIT 1`,
+            task.id,
+            task.workspace_id,
+            Number(environment.generation),
+          );
+          if (priorBinding && !heldBy(store, repoId, String(priorBinding.worktree_id)).some(r => r.task_id !== task.id)) {
+            const wtRow = store.get('SELECT * FROM worktrees WHERE repository_id=? AND id=?', repoId, priorBinding.worktree_id);
+            if (wtRow) {
+              const claimed = claimWorktree(store, task, wtRow, 'write', false, resolvedSha, String(wtRow.tree_sha));
+              if (claimed !== null) held = taskWorktree(store, task);
+            }
+          }
+        }
+        const shared = Boolean(held && heldBy(store, repoId, String(held.worktree_id)).some(r => r.task_id !== task.id));
+        let fallbackReason: string | null = null;
+        if (mirror && !shared) {
+          try {
+            const advanced = await workspace.advance(resolvedSha, mirror, conflictExtraCommits, `round:${roundNumber}`);
+            if (advanced) {
+              snapshot = advanced;
+              if (held) worktreeMoved(store, repoId, String(held.worktree_id), resolvedSha, snapshot.tree_sha);
+              log({
+                type: 'workspace_reused',
+                round: roundNumber,
+                workspace_id: task.workspace_id,
+                worktree_id: held?.worktree_id ?? null,
+                previous_sha: advanced.previous_sha ?? null,
+                head_sha: resolvedSha,
+                saved_changes: advanced.saved ?? null,
+                detail: `第 ${roundNumber} 轮原地复用工作区 ${String(task.workspace_id).slice(0, 12)} 并对齐到最新远端提交 ${resolvedSha.slice(0, 7)}。`,
+              });
+            } else {
+              fallbackReason = 'advance_failed';
+            }
+          } catch (error) {
+            if (error instanceof TaskError && ['unsafe_skill_file', 'credential_in_repository', 'task_claim_revoked'].includes(error.code)) {
+              throw error;
+            }
+            fallbackReason = error instanceof Error ? error.message : String(error);
+          }
+        } else {
+          fallbackReason = !mirror ? 'mirror_unavailable' : 'worktree_shared';
+        }
+        if (!snapshot) {
+          const prevWs = String(task.workspace_id);
+          releaseWorktrees(store, String(task.id), 'round_reuse_fallback');
+          update({ generation: environment.generation, workspace_id: randomId() });
+          log({
+            type: 'workspace_reuse_fallback',
+            round: roundNumber,
+            previous_workspace_id: prevWs,
+            workspace_id: task.workspace_id,
+            reason: fallbackReason ?? 'advance_failed',
+            detail: `第 ${roundNumber} 轮无法原地复用旧工作区（${fallbackReason ?? 'advance_failed'}），已降级为新建工作区 ${String(task.workspace_id).slice(0, 12)}。`,
+          });
+        }
+      }
+      if (!snapshot) {
+        snapshot = (mirror ? await workspace.bind(github, resolvedSha, mirror, conflictExtraCommits, 'write') : null) || (await workspace.prepare(github, resolvedSha, mirror));
+      }
       syncConcurrentInput();
       Object.assign(input, {
         snapshot_sha: resolvedSha,
@@ -1009,7 +1195,13 @@ export async function runRequest(
                   },
                 }
               : {}),
-            ...(Number(input.round) > 1 ? { continuation: continuationContext(input, String(task.head_sha), targetSpec?.type === 'pr', false) } : {}),
+            ...(Number(input.round) > 1
+              ? {
+                  continuation: input.previous_delivery || entry === 'development'
+                    ? developmentContinuationContext(input, String(task.head_sha), false)
+                    : continuationContext(input, String(task.head_sha), targetSpec?.type === 'pr', false),
+                }
+              : {}),
             ...(() => {
               syncConcurrentInput();
               const updates = pendingReviewUpdates(store, task);
@@ -1376,6 +1568,10 @@ export async function runRequest(
       records.decide(task.id, candidate.id, candidate.revision, verdict, 'completed', true, task.claim_token);
       Object.assign(task, store.get('SELECT * FROM tasks WHERE id=?', task.id));
       if (['pass', 'pass_with_issues'].includes(verdict.outcome)) {
+        try {
+          const delivered = task.result ? JSON.parse(String(task.result)) : null;
+          if (delivered) records.history(task.id, 'delivery', delivered);
+        } catch { /* ignore */ }
         syncConcurrentInput();
         carryRevisionRequests(store, task, input.revision?.requests || [], task.head_sha ? String(task.head_sha) : null);
         carryUnconsumedTaskUpdates(store, String(task.id), task.head_sha ? String(task.head_sha) : null);

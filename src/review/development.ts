@@ -52,8 +52,8 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
       actionable_findings:(result.findings||[]).filter(actionableFinding).length}};
   // A review publishes once, in the transaction that ends it, so each call is one publication of its own.
   const published=randomId().slice(0,16);
-  const event=(type:'issue'|'pr',title:string,option:any)=>recordEvent(context.store,{repositoryId:task.repository_id,key:`${task.repository_id}:review.published:${task.id}:${published}`,type:'review.published',source:'review',
-    summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option]});
+  const event=(type:'issue'|'pr',title:string,option:any,merge?:any)=>recordEvent(context.store,{repositoryId:task.repository_id,key:`${task.repository_id}:review.published:${task.id}:${published}`,type:'review.published',source:'review',
+    summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option],...(merge?{merge}:{})});
   const isIssueReview = task.kind === 'review.issue' || (task.kind === 'task.request' && input?.target?.type === 'issue');
   if(isIssueReview){
     if(!approved||!filters['review.published.issue'])return;
@@ -79,9 +79,10 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const asked=[input.trigger,...(input.merged_updates||[])].filter((t:any)=>t?.source&&t.reason!=='pushed'&&/^[1-9]\d*$/.test(String(t.source.id)))
       .map((t:any)=>({type:String(t.source.type),id:String(t.source.id),author:String(t.actor||''),author_id:String(t.actor_id||''),author_type:t.actor_type==='Bot'?'Bot':'User',url:String(t.url||''),body:''}));
     Object.assign(facts,{bot_pull_request:true,revisions:revisionFacts(context.store,task.repository_id,number,asked[0]?.author_id)});
+    const reviewMerge={key:`${task.repository_id}:review.published:${task.id}:${published}`,data:{reason:'review.published',review:{...result,implementation_goal:goal},review_findings:findings,...(asked.length?{revision_requests:asked}:{})},trigger:{reason:'review.published',review_task:task.id,actionable_findings:findings.length},head:task.head_sha,kinds:['development.pr']};
     event('pr',`bot PR 检视已发布，发现可执行问题：#${number}`,{id:'development',work:'development.pr',title:`跟进 bot PR #${number}`,default:true,
       spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision:{source:'review',...(asked.length?{asked_by:asked}:{})}},
-        delivery:task.source_delivery_id,source_task:task.id,...(asked.length?{requests:asked}:{})}});
+        delivery:task.source_delivery_id,source_task:task.id,...(asked.length?{requests:asked}:{})}},reviewMerge);
   }
 }
 
@@ -123,13 +124,20 @@ export function carryRevisionRequests(store:Store,task:Row,covered:any[],head:st
   const stored=JSON.parse(store.get('SELECT input FROM tasks WHERE id=?',task.id)?.input||'{}');
   const open=((stored.revision?.requests||[]) as any[]).filter(r=>!done.has(key(r)));
   if(!open.length)return;
-  const number=Number(task.object_number);
-  recordEvent(store,{repositoryId:task.repository_id,key:`${task.repository_id}:revision.carried:${task.id}`,type:'pull_request.updated',source:'control_plane',
+  const owned=store.hasTable('bot_pull_requests')
+    ? store.get('SELECT number FROM bot_pull_requests WHERE repository_id=? AND source_task_id=? ORDER BY number DESC LIMIT 1',task.repository_id,task.id)
+    : undefined;
+  const number=Number(stored.bot_pr?.number??stored.pr_number??owned?.number??task.object_number);
+  if(!Number.isSafeInteger(number)||number<1)return;
+  const round=Number(stored.round||1);
+  const carryKey=`${task.repository_id}:revision.carried:${task.id}${round>1?`:r${round}`:''}`;
+  recordEvent(store,{repositoryId:task.repository_id,key:carryKey,type:'pull_request.updated',source:'control_plane',
     summary:`bot PR #${number} 修订进行中收到的意见`,object:{type:'pr',number},delivery:task.source_delivery_id??null,
     facts:{bot_pull_request:true,carried_from:String(task.id),requests:open,revisions:revisionFacts(store,task.repository_id,number,open[0]?.author_id),
       reason:'These comments arrived while the previous revision was already working; it did not carry them out.'},
     options:[{id:'development',work:'development.pr',title:`修订 bot PR #${number}`,default:false,
-      spec:{type:'object',kind:'development.pr',number,head,input:{revision:{source:'request',requests:open}},delivery:null,requests:open}}]});
+      spec:{type:'object',kind:'development.pr',number,head,input:{revision:{source:'request',requests:open}},delivery:null,requests:open}}],
+    merge:{key:carryKey,data:{reason:'carried_revision_requests',pr_number:number,head_sha:head,revision_requests:open},trigger:{reason:'carried_revision_requests',pr_number:number,count:open.length},head,kinds:['development.pr']}});
 }
 export const developmentGoal=(input:any)=>String(input?.review?.implementation_goal||input?.manager?.brief?.goal||'');
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;

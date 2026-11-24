@@ -473,11 +473,11 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
   await Promise.all(engine.active.values());
   if (observed.serverError) throw observed.serverError;
   const reqBotPrDone = h.store.get('SELECT status,error_code,input FROM tasks WHERE id=?', reqBotPrTaskId);
-  assert.equal(reqBotPrDone.status, 'completed', `unexpected task.request bot_pr status: ${JSON.stringify(reqBotPrDone)}`);
+  assert.deepEqual([reqBotPrDone.status, reqBotPrDone.error_code], ['retry_wait', 'manager_deferred'], `unexpected task.request bot_pr status: ${JSON.stringify(reqBotPrDone)}`);
   const reqBotPrInput = JSON.parse(reqBotPrDone.input);
   assert.equal(reqBotPrInput.snapshot_sha, ghFixture.state.botPrSha, 'task.request continuing bot_pr must check out bot PR head');
   assert.equal(reqBotPrInput.checkout_trusted, false, 'task.request continuing bot_pr must mark checkout_trusted=false');
-  assert.ok(observed.systemTexts.length > sysCountBeforeReqBotPr, 'task.request continuing bot_pr must have invoked Pi model');
+  assert.ok(observed.systemTexts.length >= sysCountBeforeReqBotPr + 2, 'task.request continuing bot_pr must have invoked Pi for both controller and delegated worker');
 });
 
 test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-process roles & Event Dispatch Manager read trusted base-branch skills and companion files; bad .agents/skills/ stops at waiting_configuration', { timeout: 90000 }, async t => {

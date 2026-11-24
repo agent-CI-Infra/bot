@@ -346,11 +346,11 @@ test('task facts separate recorded acceptance, a changed workspace checkpoint, p
   assert.equal(facts.history.tool,'read_task_history');assert.ok(!JSON.stringify(context).includes('large-body-must-stay-out'));assert.ok(!JSON.stringify(facts).includes('full-observation-not-in-brief'));
 });
 
-test('a Task Manager naming itself as executor gets its team, as omitting executor_role does; the description says when (#1250)', t => {
+test('a Task Manager naming itself as executor gets its team, pull_request tasks always unify onto the team, and non-PR roles stay direct (#1250, #1331)', t => {
   const { s, commands, caller, save, create } = fixture(t);
   const description = taskManagementTools.find(tool => tool.function.name === 'create_task').function.description;
-  assert.match(description, /Omit executor_role for work that changes repository code and opens a pull request: the Task Manager runs it with the team \(dev, an independent reviewer, test when behaviour changes, then QA\), since the platform does not review the bot's pull request after it opens\./);
-  assert.match(description, /Name one executor_role for work that opens no pull request, or for a trivial code change such as wording, comments or docs\./);
+  assert.match(description, /Always omit executor_role for work that holds pull_request write: the Task Manager coordinates it with the team \(dev, an independent reviewer, test when behaviour changes, then QA\), since the platform does not review the bot's pull request after it opens\./);
+  assert.match(description, /Name one executor_role only for work that opens no pull request \(such as reviewer, test, or dev for read-only\/CI diagnosis\)\./);
   const manager = roleTaskCaller(s, 'r', 'manager', { conversation_id: 'chat-m', source_message: 'message-m', guard() {} });
   const named = create(manager, 'Fix the parser', { executor_role: 'manager' }), omitted = create(manager, 'Fix the formatter');
   // Both the origin and the saved input leave the executor empty: runRequest runs the team only when neither names one.
@@ -358,10 +358,16 @@ test('a Task Manager naming itself as executor gets its team, as omitting execut
     assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', task.id).executor_role, null);
     assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?', task.id).input).executor_role, undefined);
   }
+  // Non-PR report task explicitly assigned to dev runs dev directly.
   const dev = create(manager, 'Fix a typo', { executor_role: 'dev' });
   assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', dev.id).executor_role, 'dev');
   assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?', dev.id).input).executor_role, 'dev');
-  // Another role that may delegate still gets exactly the executor it names.
+  // PR development task always unifies onto the Task Manager team even if executor_role='dev' is passed (#1331).
+  s.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='r'");
+  const prDev = create(manager, 'Implement feature PR', { executor_role: 'dev', intent: 'development', endpoint: 'reviewable_pull_request', writes: ['pull_request'] });
+  assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', prDev.id).executor_role, null);
+  assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?', prDev.id).input).executor_role, undefined);
+  // Another role that may delegate still gets exactly the executor it names for non-PR tasks.
   save('reviewer', { delegation: 'allow' });
   const other = create(caller(), 'Coordinate elsewhere', { executor_role: 'manager' });
   assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', other.id).executor_role, 'manager');

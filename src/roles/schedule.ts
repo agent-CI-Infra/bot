@@ -1,6 +1,7 @@
 import type { Store } from '../storage/database.js';
 import { eventHistory, historyOrder } from './role-run.js';
 import { contentHash, validateCandidateRef, type CandidateRef } from './protocol.js';
+import { roundHistoryFloor } from './nomination.js';
 
 function stageHash(value: unknown) {
   const canonical = (item: any): any =>
@@ -19,10 +20,12 @@ export function candidateKey(candidate: CandidateRef | null) {
 }
 
 export function latestRoleCandidate(s: Store, taskId: string): CandidateRef | null {
+  const floor = roundHistoryFloor(s, taskId);
   const row = s.get(
     `SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON ${eventHistory}
-     WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY ${historyOrder} DESC LIMIT 1`,
+     WHERE e.task_id=? AND h.id>? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY ${historyOrder} DESC LIMIT 1`,
     taskId,
+    floor,
   );
   return row ? JSON.parse(row.data).data.candidate_ref ?? null : null;
 }

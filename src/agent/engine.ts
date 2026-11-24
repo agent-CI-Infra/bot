@@ -289,7 +289,7 @@ export class TaskEngine {
       if(task.kind==='task.development')assertRequestPullRequest(this.store,task);
       // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
       if(event)event.validate(this.store,current!,JSON.parse(current!.input||'{}'));
-      if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
+      if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);const preparingContinuousRound=task.kind==='task.request'&&task.phase==='prepare'&&Number((()=>{try{return JSON.parse(String(task.input||'{}')).round||1;}catch{return 1;}})())>1;if(!environment||(!preparingContinuousRound&&environment.generation!==task.generation))stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
     const update=(values:Record<string,unknown>)=>records.atomic(()=>{
       // A revoked claim may record only its own cancellation; the SQL claim_token fence still protects a new owner.

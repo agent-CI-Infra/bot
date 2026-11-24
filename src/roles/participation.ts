@@ -1,13 +1,15 @@
 import type { Store } from '../storage/database.js';
+import { roundHistoryFloor } from './nomination.js';
 
 /**
- * Which roles produced results for a task's current candidate (#1250). The candidate is the latest Dev result; a worker
- * result recorded after it inspected that candidate (an observer run whose candidate changed underneath is rejected in
- * run.ts), one recorded before it saw an earlier version. The Task Manager reads this where it decides on nomination and
- * QA reads the same: facts for their judgment, never a gate.
+ * Which roles produced results for a task's current candidate (#1250). The candidate is the latest Dev result in the
+ * current round; a worker result recorded after it inspected that candidate (an observer run whose candidate changed
+ * underneath is rejected in run.ts), one recorded before it saw an earlier version. The Task Manager reads this where
+ * it decides on nomination and QA reads the same: facts for their judgment, never a gate.
  */
 export function candidateParticipation(s: Store, taskId: string) {
-  const rows = s.all("SELECT id,json_extract(data,'$.role') role FROM task_history WHERE task_id=? AND type='role_result' ORDER BY id", taskId)
+  const floor = roundHistoryFloor(s, taskId);
+  const rows = s.all("SELECT id,json_extract(data,'$.role') role FROM task_history WHERE task_id=? AND id>? AND type='role_result' ORDER BY id", taskId, floor)
     .filter(row => typeof row.role === 'string' && !['manager', 'qa'].includes(row.role));
   if (!rows.length) return undefined;
   const dev = rows.filter(row => row.role === 'dev'), candidate = dev.at(-1);
@@ -31,12 +33,13 @@ export function candidateParticipation(s: Store, taskId: string) {
 
 /**
  * The same facts for QA: what the Task Manager nominated with, and its note on the checks, while that nomination is newer
- * than the latest worker result. A task without a nomination (a single executing role) reads its own results.
+ * than the latest worker result in the current round. A task without a nomination (a single executing role) reads its own results.
  */
 export function acceptanceParticipation(s: Store, taskId: string) {
+  const floor = roundHistoryFloor(s, taskId);
   const current = candidateParticipation(s, taskId);
-  const row = s.get("SELECT id,data FROM task_history WHERE task_id=? AND type='delivery_nominated' ORDER BY id DESC LIMIT 1", taskId);
-  const latest = s.get("SELECT max(id) id FROM task_history WHERE task_id=? AND type='role_result' AND json_extract(data,'$.role') NOT IN ('manager','qa')", taskId)?.id;
+  const row = s.get("SELECT id,data FROM task_history WHERE task_id=? AND id>? AND type='delivery_nominated' ORDER BY id DESC LIMIT 1", taskId, floor);
+  const latest = s.get("SELECT max(id) id FROM task_history WHERE task_id=? AND id>? AND type='role_result' AND json_extract(data,'$.role') NOT IN ('manager','qa')", taskId, floor)?.id;
   if (!row || (latest != null && Number(row.id) < Number(latest))) return current;
   const nominated = JSON.parse(String(row.data));
   const facts = nominated.candidate_participation ?? current;

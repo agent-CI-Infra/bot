@@ -67,11 +67,46 @@ function botPullRequest(store: Store, repositoryId: string, pr: any, opening = f
   }
   return null;
 }
-// How often the bot's pull request was revised for requests so far, and how often for this author's (#1104): with no limit of
-// its own, the control plane gives the Manager the facts to tell a useful revision from two bots answering each other.
+// How often the bot's pull request was revised for requests so far, and how often for this author's (#1104, #1331):
+// counts distinct (task_id, round) pairs so continuous multi-round PR tasks count each revision round accurately
+// without double-counting comments merged into the same round.
 export function revisionFacts(store: Store, repositoryId: string, number: number, author: unknown) {
-  const count = (extra: string, ...args: string[]) => Number(store.get(`SELECT count(DISTINCT task_id) n FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done'${extra}`,
-    repositoryId, number, ...args)?.n || 0);
+  const count = (extra: string, ...args: string[]) => {
+    const rows = store.all(
+      `SELECT task_id, created_at FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='done'${extra}`,
+      repositoryId,
+      number,
+      ...args,
+    );
+    if (!rows.length) return 0;
+    const roundsByTask = new Map<string, { round: number; at: string }[]>();
+    if (store.hasTable('task_history')) {
+      for (const taskId of new Set(rows.map(r => String(r.task_id || '')))) {
+        if (!taskId) continue;
+        const conts = store.all(
+          "SELECT json_extract(data,'$.round') AS round, created_at FROM task_history WHERE task_id=? AND type='task_continued' ORDER BY id ASC",
+          taskId,
+        );
+        if (conts.length) {
+          roundsByTask.set(
+            taskId,
+            conts.map(c => ({ round: Number(c.round) || 2, at: String(c.created_at || '') })),
+          );
+        }
+      }
+    }
+    const distinct = new Set<string>();
+    for (const r of rows) {
+      const taskId = String(r.task_id || '');
+      const at = String(r.created_at || '');
+      let round = 1;
+      for (const c of roundsByTask.get(taskId) ?? []) {
+        if (c.at <= at) round = c.round;
+      }
+      distinct.add(`${taskId}:${round}`);
+    }
+    return distinct.size;
+  };
   return { for_requests: count(''), for_this_author: author ? count(' AND author_id=?', String(author)) : 0 };
 }
 // A person's or another review bot's comment, review or inline comment on a pull request this bot opened, quoted as a request
@@ -430,6 +465,13 @@ export function queueWebhook(
     const objType = event === 'issues' ? 'issue' : 'pr';
     store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE repository_id=? AND object_number=? AND (kind LIKE ? OR (kind='task.request' AND json_extract(input,'$.target.type')=?)) AND status NOT IN ('succeeded','pr_opened','completed')",
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr', objType);
+    if (objType === 'pr' && store.hasTable('bot_pull_requests')) {
+      const owned = store.get('SELECT source_task_id FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, number);
+      if (owned?.source_task_id) {
+        store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE id=? AND repository_id=? AND status NOT IN ('succeeded','pr_opened','completed')",
+          owned.source_task_id, repositoryId);
+      }
+    }
     // Events of the object that the Manager has not decided yet would only start work on a closed object.
     store.run("UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','failed')",
       '对象已关闭或转为草稿，事件不再分派。', new Date().toISOString(), repositoryId, objType, number);

@@ -245,6 +245,11 @@ test('Issue target.ref selects non-default base branch while keeping trusted ski
       const qaPrompt = JSON.parse(msgs[1].content);
       qaHandoff = qaPrompt.delivery_handoff;
       message = call('submit_acceptance', { pass: true, issues: [] });
+    } else if (tools.includes('delegate_role')) {
+      const delegated = toolMsgs.find(r => typeof r.result_ref === 'string');
+      message = delegated
+        ? call('nominate_delivery', { result_ref: delegated.result_ref })
+        : call('delegate_role', { role: 'dev', purpose: 'Execute the development task.', refs: [] });
     } else if (mode === 'readonly_sha') {
       if (!names.includes('read_file')) {
         message = call('read_file', { path: 'app.txt' });

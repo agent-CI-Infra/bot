@@ -210,8 +210,10 @@ export class TaskCommands {
       const autoExecutor = defaultRole && roleConfig.roles.some(r => r.role_id === defaultRole && r.enabled)
         && (!caller || caller.kind !== 'role' || caller.role === controller || caller.role === defaultRole)
         ? defaultRole : undefined;
-      // A person or the Task Manager naming the Task Manager asks for its team (#1250), as omitting executor_role does.
-      const teamNamed = input.executor_role === controller && (!caller || caller.kind === 'operator' || caller.role === controller);
+      // All pull_request development tasks unify onto Task Manager team orchestration (#1331); naming the controller
+      // role explicitly also asks for its team (#1250), as omitting executor_role does.
+      const unifiedPrTeam = writes.includes('pull_request') && (!caller || caller.kind === 'operator' || caller.role === controller);
+      const teamNamed = unifiedPrTeam || (input.executor_role === controller && (!caller || caller.kind === 'operator' || caller.role === controller));
       const requestedExecutor = teamNamed ? undefined : (input.executor_role as string | undefined) ?? autoExecutor;
       const team=!!caller&&caller.role===controller&&requestedExecutor===undefined;
       if(team){const definition=roleConfig.roles.find(r=>r.role_id===caller!.role);

@@ -60,7 +60,9 @@ test('built-in guidance sends code changes through the team with an independent 
   assert.ok(manager.includes('`candidate_participation` lists which roles produced results for the current candidate.'));
   // Dynamic coordination stays: no fixed stage list is introduced.
   assert.ok(manager.includes('Dynamically coordinate without rigid stage gates.'));
-  assert.ok(dispatchInstructions.includes('Verified development that changes repository code and opens a pull request goes to the team by default: omit the role'));
+  assert.ok(manager.includes('On round 2+ of a continuous PR task (`continuation.mode === "pull_request_development"`), delegate the original `dev` instance first'));
+  assert.ok(dispatchInstructions.includes("Every verified pull_request development task goes to the Task Manager's team: omit the role"));
+  assert.ok(dispatchInstructions.includes('On an open bot PR, prefer continue_task on its resumable task in work.continue'));
   assert.ok(!dispatchInstructions.includes('dev for verified development'));
   assert.match(nominationSchema.properties.checks_note.description, /^Optional, not published\. When no independent reviewer \(or test, where behaviour changed\) inspected this code candidate, say why that is enough/);
   assert.deepEqual(nominationSchema.required, ['result_ref']);

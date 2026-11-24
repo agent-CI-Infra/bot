@@ -713,6 +713,12 @@ test('#1122 Issue-targeted dev revision reads existing open bot PR head under st
     let reply;
     if (tools.includes('submit_acceptance')) {
       reply = toolCall('submit_acceptance', { pass: true, issues: [] });
+    } else if (tools.includes('delegate_role')) {
+      const toolResults = body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const delegated = toolResults.find(r => typeof r.result_ref === 'string');
+      reply = delegated
+        ? toolCall('nominate_delivery', { result_ref: delegated.result_ref })
+        : toolCall('delegate_role', { role: 'dev', purpose: 'Verify open bot PR head checkout.', refs: [] });
     } else if (!called.includes('read_file')) {
       reply = toolCall('read_file', { path: 'calc.mjs' });
     } else {

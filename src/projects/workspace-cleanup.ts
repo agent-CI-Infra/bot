@@ -83,6 +83,11 @@ const push = <K>(map: Map<K, number[]>, key: K, value: number) => map.set(key, [
 
 function pullRequests(store: Store, repo: string): PullRequests {
   const closed = new Set(store.all("SELECT object_number FROM review_objects WHERE repository_id=? AND kind='review.pr' AND closed_at IS NOT NULL", repo).map(row => Number(row.object_number)));
+  if (store.hasTable('bot_pr_states')) {
+    for (const row of store.all("SELECT number FROM bot_pr_states WHERE repository_id=? AND lower(state)<>'open'", repo)) {
+      closed.add(Number(row.number));
+    }
+  }
   const bot = store.all('SELECT number,source_task_id FROM bot_pull_requests WHERE repository_id=?', repo), bySource = new Map<string, number[]>(), byIssue = new Map<number, number[]>();
   for (const row of bot) push(bySource, String(row.source_task_id), Number(row.number));
   // Later developments of the same Issue continue the bot's pull request opened by the first one. The Issue number is read
@@ -172,7 +177,7 @@ function unfinishedWorkspacesState(store: Store, repo: string, unfinishedIds: st
        CASE WHEN json_valid(input) THEN json_extract(input,'$.recovery.source_workspace_id') END AS recovery_ws,
        CASE WHEN json_valid(input) THEN json_extract(input,'$.integration.source_workspace_id') END AS integration_ws,
        CASE WHEN json_valid(input) THEN json_extract(input,'$.round') END AS round_num,
-       CASE WHEN json_valid(input) THEN json_extract(input,'$.previous_result.finished_at') END AS prev_finished_at
+        CASE WHEN json_valid(input) THEN coalesce(json_extract(input,'$.previous_result.finished_at'),json_extract(input,'$.previous_delivery.finished_at')) END AS prev_finished_at
      FROM tasks WHERE id IN (SELECT value FROM json_each(?))`,
     idList,
   )) {

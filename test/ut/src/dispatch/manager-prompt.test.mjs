@@ -48,16 +48,15 @@ test('the regrouped prompt keeps the rules other code and older tasks rely on', 
   ]) assert.ok(flat.includes(rule), rule);
 });
 
-test('new development goes to the team with an independent review; only trivial changes go to dev alone (#1250)', () => {
+test('every pull_request development goes to the Task Manager team and open bot PRs continue the same task across rounds (#1250, #1331)', () => {
   const flat = text.replace(/\s+/g, ' ');
-  assert.ok(flat.includes("New development goes to the team: `create_task` without `role`, and the Task Manager runs `dev`, an independent `reviewer` and, when behaviour changes, `test` before QA, since nobody reviews the bot's pull request after it opens; only a trivial change such as wording, comments or docs goes to `role: \"dev\"` alone."));
+  assert.ok(flat.includes("Every `pull_request` development task goes to the Task Manager's team: `create_task` without `role`, and the Task Manager runs `dev`, an independent `reviewer` and, when behaviour changes, `test` before QA (skipping observers only for trivial wording, comment or docs edits with `checks_note`), since nobody reviews the bot's pull request after it opens."));
   assert.ok(flat.includes("nobody reviews them once they open, so their development reviews them first (scenario 4)."));
-  assert.ok(flat.includes('(`role` omitted: the Task Manager runs the team)'));
-  // The flowchart draws the same split in one box (a separate branch would no longer fit a tablet column), and a
-  // revision of the opened pull request still goes to dev alone.
+  assert.ok(flat.includes('(`role` omitted: the Task Manager runs the team, mandatory for every `pull_request` development task)'));
+  assert.ok(flat.includes('each open bot PR is one continuous multi-round development task: prioritize `continue_task` on its resumable task in `work.continue`'));
   const flow = chapters.find(chapter => chapter.title.startsWith('4.')).blocks[0];
-  assert.match(flow, /basis -->\|是\| team\["团队开发：dev、<br>独立 reviewer，<br>行为改动加 test<br>（小改只派 dev）"\]/);
-  assert.match(flow, /talk -->\|派 dev 修订或重跑\| pr/);
+  assert.match(flow, /basis -->\|是\| team\["Task Manager 团队开发：<br>dev 实现，按需派<br>独立 reviewer \/ test"\]/);
+  assert.match(flow, /talk -->\|续接同一任务下一轮\| pr/);
 });
 
 test('built-in Manager prompt defines internal pull_request.patrol boundaries and re-evaluation on environment changes (#1316)', () => {

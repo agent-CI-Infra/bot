@@ -369,3 +369,61 @@ test('#1268 looping unfinished task with dozens of prior attempt dirs and closed
     assert.deepEqual(f.released(name).map(row => row.release_reason), ['superseded_attempt']);
   }
 });
+
+test('#1331 continuous multi-round bot PR task retains reused workspace, worktree, and CLI state while PR is open, sweeps stale round 1 observer checkout, and reclaims all when bot_pr_states closes', async t => {
+  const f = fixture(t), round1Age = 5 * hour, round2Age = 2 * hour;
+  const sharedWs = f.directory(round1Age);
+  const sharedWt = f.worktree(round1Age);
+  const cliStateWs = f.directory(round1Age);
+  const staleR1QaCheckout = f.directory(round1Age);
+  const prevFinishedAt = iso(Date.now() - 4 * hour);
+
+  // Task is dormant in `pr_opened` after round 1 opening PR #77
+  const prTask = f.task('pr_opened', {
+    age: round1Age,
+    kind: 'task.request',
+    number: 42,
+    workspace: sharedWs,
+    input: JSON.stringify({ generic: true, target: { type: 'issue', number: 42 }, delivery: 'pull_request', round: 1 }),
+  });
+  f.store.run("INSERT INTO bot_pull_requests VALUES('101',77,'5077','999','101','bot/issue-42',?,?,0)", 'a'.repeat(40), prTask.id);
+  f.store.run("INSERT INTO bot_pr_states(repository_id,number,state,draft,head_sha,updated_at) VALUES('101',77,'open',0,?,?)", 'a'.repeat(40), iso(Date.now() - round1Age));
+  f.store.run(`INSERT INTO worktrees(repository_id,id,generation,head_sha,tree_sha,mode,state,created_by,created_at,used_at) VALUES('101',?,1,?,?,'write','ready',?,?,?)`,
+    sharedWt, 'a'.repeat(40), 'b'.repeat(40), prTask.id, iso(Date.now() - round1Age), iso(Date.now() - round1Age));
+  useWorkspace(f.store, { id: prTask.id, repository_id: '101', kind: 'task.request', object_number: 42, workspace_id: sharedWt }, 'worktree', Date.now() - round1Age);
+  useWorkspace(f.store, { id: prTask.id, repository_id: '101', kind: 'task.request', object_number: 42, workspace_id: cliStateWs }, 'task', Date.now() - round1Age);
+  useWorkspace(f.store, { id: prTask.id, repository_id: '101', kind: 'task.request', object_number: 42, workspace_id: staleR1QaCheckout }, 'checkout', Date.now() - round1Age);
+  f.store.run(`INSERT INTO worktree_bindings(repository_id,worktree_id,task_id,workspace_id,mode,head_sha,tree_sha,bound_at,released_at) VALUES('101',?,?,?,'write',?,?,?,NULL)`,
+    sharedWt, prTask.id, sharedWs, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - round1Age));
+  f.store.run(`INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,runtime,harness_state) VALUES('ri-dev-1331',?,'dev','{}','pi',?,?,?)`,
+    prTask.id, iso(Date.now() - round1Age), JSON.stringify({ generation: 1, workspace_id: sharedWs }), JSON.stringify({ harness: 'pi', sessionId: 'pi-1', stateWorkspaceId: cliStateWs }));
+
+  // While dormant in pr_opened with PR #77 open, everything stays (`pr_open`).
+  await f.sweep();
+  assert.deepEqual(f.left(), sorted(sharedWs, cliStateWs, staleR1QaCheckout));
+  assert.deepEqual(f.worktrees(), [sharedWt]);
+
+  // Enter Round 2 (`running`, reusing SAME sharedWs/sharedWt/cliStateWs, previous_delivery.finished_at set):
+  // sharedWs, sharedWt, and cliStateWs MUST stay (`active`), while staleR1QaCheckout is swept as `superseded_round`!
+  f.store.run(
+    "UPDATE tasks SET status='running', attempt=2, input=?, updated_at=? WHERE id=?",
+    JSON.stringify({ generic: true, target: { type: 'issue', number: 42 }, round: 2, previous_delivery: { round: 1, finished_at: prevFinishedAt, pr_number: 77 } }),
+    iso(Date.now() - round2Age),
+    prTask.id,
+  );
+  await f.sweep();
+  assert.deepEqual(f.left(), sorted(sharedWs, cliStateWs));
+  assert.deepEqual(f.worktrees(), [sharedWt]);
+  assert.deepEqual(f.released(staleR1QaCheckout).map(r => r.release_reason), ['superseded_round']);
+
+  // Finish Round 2 (`completed`) and close PR #77 in bot_pr_states (even without a review_objects row!):
+  // next sweep reclaims sharedWs, cliStateWs, and sharedWt promptly as `pr_closed`!
+  f.store.run("UPDATE tasks SET status='completed', updated_at=? WHERE id=?", iso(Date.now() - round2Age), prTask.id);
+  f.store.run("UPDATE bot_pr_states SET state='closed' WHERE repository_id='101' AND number=77");
+  await f.sweep();
+  assert.deepEqual(f.left(), []);
+  assert.deepEqual(f.worktrees(), []);
+  for (const name of [sharedWs, cliStateWs, sharedWt]) {
+    assert.deepEqual(f.released(name).map(r => r.release_reason), ['pr_closed'], `${name} reclaimed as pr_closed`);
+  }
+});
