@@ -504,8 +504,10 @@ function buildHistoryStepsForRun(
         // instead of the whole call disappearing or claiming a finished call is still running.
         const obs = callId ? observationsByCall.get(callId) : undefined;
         const obsOversize = !!obs?.oversize;
-        const obsError = !!(obs?.row as any)?.oversize_error;
         const obsPayload = obsOversize ? null : (obs?.data?.observation?.data ?? obs?.data?.observation ?? null);
+        // A masked argument row only hides the call's own body: the observation still decides whether it failed.
+        const obsError = !!(obs?.row as any)?.oversize_error
+          || !!(obsPayload && typeof obsPayload === 'object' && (obsPayload as any).error);
         steps.push({
           id: `hist:${row.id}`,
           kind: 'tool',

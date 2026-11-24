@@ -417,6 +417,17 @@ function createInnerStepFold(task, spec, foldState) {
     }
     return '原始记录不完整（' + (reason || '原因未知') + '），读不到全文。';
   };
+  const sourcePreview = value => {
+    if (value?.data && typeof value.data.content_preview === 'string') return value.data.content_preview;
+    if (typeof value?.preview === 'string') return value.preview;
+    return null;
+  };
+  const unreadableBody = (result, extra) => {
+    const nodes = [element('p', result.text, extra ? 'muted ' + extra : 'muted')];
+    // A record kept only as a preview is readable up to the capture limit; say so instead of hiding what is left.
+    if (result.preview) nodes.push(element('p', '以下是留下的预览，完整原文已不可读。', 'muted'), element('pre', result.preview, 'output'));
+    return nodes;
+  };
   const readSource = ref => {
     if (!cache.has(ref)) {
       cache.set(ref, api(`/api/tasks/${encodeURIComponent(task.id)}/source?ref=${encodeURIComponent(ref)}`)
@@ -424,7 +435,7 @@ function createInnerStepFold(task, spec, foldState) {
           const value = res?.source ?? res;
           // #1207: a record that was never captured is missing; it is not a full text that happens to be JSON.
           if (value && typeof value === 'object' && value.complete === false) {
-            return { complete: false, text: unreadableText(String(value.missing_reason || '')) };
+            return { complete: false, text: unreadableText(String(value.missing_reason || '')), preview: sourcePreview(value) };
           }
           return { complete: true, text: stepSourceText(ref, value) };
         }));
@@ -440,7 +451,7 @@ function createInnerStepFold(task, spec, foldState) {
       section.loaded = true;
       readSource(section.source)
         .then(result => {
-          if (!result.complete) { slot.replaceChildren(element('p', result.text, 'muted step-io-missing')); return; }
+          if (!result.complete) { slot.replaceChildren(...unreadableBody(result, 'step-io-missing')); return; }
           slot.replaceChildren(element('p', '以上是留下的全文。', 'muted step-io-note'), element('pre', result.text, 'output'));
         })
         .catch(err => { slot.replaceChildren(element('p', '无法读取全文：' + readErrorText(err), 'muted')); });
@@ -449,7 +460,7 @@ function createInnerStepFold(task, spec, foldState) {
       loadedSource = true;
       readSource(spec.sourceRef)
         .then(result => {
-          body.replaceChildren(result.complete ? element('pre', result.text, 'output') : element('p', result.text, 'muted'));
+          body.replaceChildren(...(result.complete ? [element('pre', result.text, 'output')] : unreadableBody(result)));
         })
         .catch(err => { body.replaceChildren(element('p', '无法读取步骤原始正文：' + readErrorText(err), 'muted')); });
     }

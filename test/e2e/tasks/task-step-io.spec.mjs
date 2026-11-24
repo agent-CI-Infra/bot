@@ -37,6 +37,16 @@ async function fixture() {
     request_id: 'mr-none', state: 'external_received', http_status: 200,
     request_source: 'model_requests:mr-none:request', response_source: 'model_requests:mr-none:response',
   }), '2026-11-24T08:02:35Z', 'run-io', 'framework');
+  // A body kept only up to the capture limit: the preview it still holds must stay readable under the note.
+  h.store.run(
+    `INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,finished_at,http_status,state,request_snapshot,response_snapshot)
+     VALUES('mr-prev','t-io','101','req-prev','model-1','gpt-5.4','2026-11-24T08:02:40Z','2026-11-24T08:02:45Z',200,'received',?,NULL)`,
+    JSON.stringify({ schema_version: 1, sha256: 'x', original_bytes: 3000000, complete: false, missing_reason: 'capture_limit_exceeded', data: { content_preview: 'PREVIEW-ONLY-BODY 这段预览仍可读。' } }),
+  );
+  insHist.run('t-io', 'model_request', JSON.stringify({
+    request_id: 'mr-prev', state: 'received', http_status: 200,
+    request_source: 'model_requests:mr-prev:request', response_source: 'model_requests:mr-prev:response',
+  }), '2026-11-24T08:02:45Z', 'run-io', 'framework');
   insHist.run('t-io', 'role_run_event', JSON.stringify({ type: 'message', data: { text: longOutput } }), '2026-11-24T08:03:00Z', 'run-io', 'agent');
   return { h, password, close: async () => { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); } };
 }
@@ -60,7 +70,7 @@ test('a task step states its own input and output, keeps the full text readable 
     await expect(runs).toHaveCount(1);
     await runs.locator('summary').first().click();
     const steps = runs.locator('details.step-fold');
-    await expect(steps).toHaveCount(5);
+    await expect(steps).toHaveCount(6);
     for (const step of await steps.all()) expect(await step.evaluate(el => el.open)).toBe(false);
 
     // The recorded request pair is one step whose expanded body separates the prompt from the answer.
@@ -81,7 +91,7 @@ test('a task step states its own input and output, keeps the full text readable 
 
     // A request whose body was never captured says so; JSON that merely records the gap is not the full text.
     const requests = steps.filter({ hasText: '模型请求' });
-    await expect(requests).toHaveCount(2);
+    await expect(requests).toHaveCount(3);
     const uncaptured = requests.nth(1);
     await uncaptured.locator('summary').click();
     await expect(uncaptured).toContainText('这一步的输入');
@@ -90,6 +100,14 @@ test('a task step states its own input and output, keeps the full text readable 
     await expect(uncaptured).not.toContainText('以上是留下的全文。');
     await expect(uncaptured).not.toContainText('missing_reason');
     await expect(uncaptured).toContainText('这一步没有留下全文记录');
+
+    // A record kept up to the capture limit says so and still shows the preview it kept.
+    const previewed = requests.nth(2);
+    await previewed.locator('summary').click();
+    await expect(previewed.locator('.step-io-missing').first()).toBeVisible();
+    await expect(previewed).toContainText('原始记录超过捕获上限');
+    await expect(previewed).toContainText('PREVIEW-ONLY-BODY');
+    await expect(previewed).not.toContainText('以上是留下的全文。');
 
     // Two read_file steps with the same title keep their own bodies.
     const reads = steps.filter({ hasText: '读取文件' });
