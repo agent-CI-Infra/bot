@@ -86,7 +86,11 @@ export interface RoleHarnessMetadata {id:string;version:string;session:string;ev
  /** What the driver's protocol does, checked by RoleRun admission (see protocol.ts). Undeclared means unsupported. */
  capabilities?:HarnessCapabilities;
  /** false: the driver runs where a configuration names it, but no backend listing (role editor, agent backends) offers it. */
- listed?:boolean}
+ listed?:boolean;
+ /** The driver works a service assistant's turn as the native loop does (#1253): it takes serviceHarnessTurn's steering
+  *  (`pi.service`: messages merged during the turn, the streamed answer), restarts after an edit and answers in text,
+  *  ending silently only through stay_silent. The other drivers get a `finish` tool and no steering. */
+ steered_turns?:boolean}
 /** The drivers a person may choose from: every registered one except those registered as unlisted. */
 export const listedHarnesses=()=>harnesses.filter(h=>h.listed!==false);
 const openai=['openai-chat-completions'];
@@ -101,7 +105,7 @@ const containerAcp: RegisteredRoleHarness = {
 };
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 /** A registered driver: every declaration is filled in except `tool_volume`, which only tool-volume CLIs carry (#1042). */
-export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume'|'listed'>> & {tool_volume?:AgentToolCli;listed?:boolean};
+export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume'|'listed'|'steered_turns'>> & {tool_volume?:AgentToolCli;listed?:boolean;steered_turns?:boolean};
 export const harnesses:RegisteredRoleHarness[]=[
  {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},tool_volume:'claude_code',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
@@ -116,7 +120,9 @@ export const harnesses:RegisteredRoleHarness[]=[
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
  // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
  {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
-  capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
+  capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']},steered_turns:true}];
+/** Whether the driver works service assistant turns with steering (`steered_turns`); an unknown id does not. */
+export const steersServiceTurns=(id:string)=>harnesses.some(h=>h.id===id&&h.steered_turns===true);
 export const runsInTaskCheckout = (driver: RoleHarnessMetadata) => driver.environment === 'workspace' && driver.capabilities?.raw_evidence === 'task_tools';
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
 const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],[containerAcpId,acpHarness],[icodeProductId,spec=>acpHarness(spec,icodeProductId)],[workswarmProductId,spec=>acpHarness(spec,workswarmProductId)],['pi',piHarness]]);

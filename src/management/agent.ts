@@ -1,4 +1,5 @@
 import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
+import {steersServiceTurns} from '../roles/harness.js';
 import {ProgressBudget,type ServiceProgress} from '../harness/service-progress.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import { configuredRedactor, publicText, registeredRedactor } from '../core/redaction.js';
@@ -435,8 +436,8 @@ export class ManagementAgent {
             const currentContext=()=>JSON.stringify({...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()});
             if(role?.harness&&role.harness!=='native'){
               ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope,media);
-              // On Pi the turn behaves like the native loop below (#1253): streamed text, merged messages, a restart after an
-              // edit and stay_silent for a timer; the other harnesses ignore this.
+              // On a steering driver (Pi) the turn behaves like the native loop below (#1253): streamed text, merged messages,
+              // a restart after an edit and stay_silent for a timer; the other harnesses ignore this.
               // Not the progress messages above (#435): what the Pi session itself does, as steps of this turn (#1296).
               const piSteps=this.piSteps(id);
               const control:ServiceTurnControl={text:async delta=>{await guard();this.event(id,'text',{delta:redactor.text(delta),provisional:true});},
@@ -447,7 +448,7 @@ export class ManagementAgent {
               finally{piSteps.close();}
               await guard();incoming?.finish();
               if(silence!==undefined){this.event(id,'reply',{text:'',silent:true,...silence?{reason:redactor.text(silence)}:{},authority:'advisory; see tool receipts'});return;}
-              if(role.harness==='pi'&&mustReply&&!message.trim()&&!media?.attachments.length&&!cardTurn?.staged)fail(502,'management_model_invalid');
+              if(steersServiceTurns(String(role.harness))&&mustReply&&!message.trim()&&!media?.attachments.length&&!cardTurn?.staged)fail(502,'management_model_invalid');
               const finalText=redactor.text(message).trim()?redactor.text(message):(cardTurn?.staged?.fallback_text??redactor.text(message));this.event(id,'reply',{text:finalText,authority:'advisory; see tool receipts'});return;
             }
             const messages:any[]=[{role:'system',content:system},{role:'user',content:JSON.stringify({...context,recent_tool_results:resultFiles.recent()})}];

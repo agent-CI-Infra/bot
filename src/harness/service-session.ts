@@ -17,8 +17,8 @@ import {configuredRedactor} from '../core/redaction.js';
 import {progressText,serviceProgressReader,type ServiceProgress} from './service-progress.js';
 
 /**
- * What the native loop of a service assistant does around its model requests, for a turn on Pi (#1253). The other
- * harnesses run their turn as before and ignore it.
+ * What the native loop of a service assistant does around its model requests, for a turn on a driver that declares
+ * `steered_turns` (Pi, #1253). The other harnesses run their turn as before and ignore it.
  */
 export interface ServiceTurnControl {
  /** The answer as the model writes it, for the console's provisional text. Writing it pauses merging, as natively. */
@@ -53,8 +53,9 @@ export async function serviceHarnessTurn(
  spec={...spec,task:{...spec.task,id:turnId}};
  const workspaceId=digest('workspace:'+binding).slice(0,48);
  const save=(value:Record<string,any>)=>{state=spec.redactor.clean(value);spec.store.run('UPDATE service_harness_sessions SET state=?,updated_at=? WHERE id=?',JSON.stringify(state),Date.now(),binding);};
- // The native loop's turn on Pi: merged messages, streamed text, a restart after an edit and stay_silent as its ending.
- const steered=driver.id==='pi'?control:undefined;
+ // The native loop's turn on a steering driver (Pi): merged messages, streamed text, a restart after an edit and
+ // stay_silent as its ending.
+ const steered=driver.steered_turns?control:undefined;
  const attempt=async(prompt:string,version:unknown):Promise<string>=>{
   // A session kept from earlier turns holds the source as it was then; after an edit or a recall it is not continued.
   if(steered?.source&&state.harness&&!Object.is(state.source_version??null,version??null))save({});
@@ -81,7 +82,7 @@ export async function serviceHarnessTurn(
    // Progress is a view of the turn: a failure to read or record it never ends the turn.
    try{const progress=read(event);if(progress)steered!.progress!(progress);}catch{}
   }:spec.onHarnessEvent;
-  // A Pi turn answers in text, as the native loop does, so the answer streams; it ends silently only through stay_silent.
+  // A steered turn answers in text, as the native loop does, so the answer streams; it ends silently only through stay_silent.
   const silent=!!steered?.silence&&(spec.tools??[]).some(t=>t.function.name===staySilentName);
   const finishTool={type:'function',function:{name:'finish',description:'Finish this conversational turn. This does not accept or complete a business task.',parameters:{type:'object',properties:{message:{type:'string'}},required:['message'],additionalProperties:false}}};
   const current:AgentSpec<string>={...spec,adapter:undefined,prompt,tools:[...(spec.tools??[]).filter(t=>t.function.name!=='finish'),...(steered?[]:[finishTool])],

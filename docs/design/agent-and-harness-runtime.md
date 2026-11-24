@@ -70,12 +70,13 @@
 
 ### 服务助手回合（`src/harness/service-session.ts`）
 
-管理助手和群聊助手选用非 Native 后端时，整轮由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`。Pi 后端按 Native 循环的语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它）：
+管理助手和群聊助手选用非 Native 后端时，整轮由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`。声明了 `steered_turns` 的后端（生产中只有 Pi）按 Native 循环的语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它，改为得到 `finish` 工具）：
 
 - **回答文字**：Pi 用普通文字作答，不提供 `finish` 工具。经网关时，控制面模型请求的逐 token 回调转出文字；直连时，runner 把流式文字（约 200 ms 一批的 `text_delta`）和 Pi 自身的重试（`model_retry`）写入事件流，控制面转给会话，`text_delta` 不进会话日志。
 - **回合中的新消息**：会话启动前取到的消息随配置（`steer`）在提示词之后作为单独的用户消息发出；此后在每批工具调用结束的回合边界（runner 的 `finishTurn` → `boundary('turn')`）取新消息并 `session.steer()`。最终回答之后不再并入。模型输出文字时暂停并入，带工具调用的响应结束后恢复。
 - **编辑后重启**：回合边界、每次经控制面的工具调用和会话结束时比较来源版本。版本变了就结束当前会话：旧版本下经控制面的工具调用不执行，答复不采用（Pi 自带的 `read`/`edit`/`write`/`bash` 直接在助手电脑上运行，不经这道检查）；清空会话绑定，用重建的上下文开新会话，已并入的消息重新提供。跨轮续接的会话在来源版本变化后也不再续接。
 - **保持安静**：允许安静的轮次里，`stay_silent` 是会话的结束工具；被拒绝（例如 `reply_required`）时作为观察返回模型，回合继续。
+- **工具被拒**：经控制面的工具返回 400/403/404/409/413/415 时，错误作为观察交回模型，回合继续；被拒的调用不执行。401 和内部失败结束本轮。管理助手的 Native 循环仍按 #533 只交回 400/404/413/415 和版本冲突的 409。
 - **执行进度**（#1296）：`ServiceTurnControl.progress` 接收会话自己的进度。`serviceHarnessTurn` 把 Pi 的 harness 事件（`src/roles/harness.ts` 经 `onHarnessEvent` 转出的原生工具 `tool` 开始/结束、runner 仅为服务回合写的 `model_start` 与 `compaction`，以及 `image_recovery`）交给 `serviceProgressReader`（`src/harness/service-progress.ts`），再加上编辑后重启的提示。进度只带有界字段：命令首行或路径（≤160 字符）、耗时（runner 的 `duration_ms`，旧 runner 取控制面看到开始的时间）、bash 的退出码和输出末尾（≤5 行、≤300 字符）；这些文本经回合与部署的已知值（含编码形式）、令牌格式规则（`publicText`）和按名称识别的命令行凭据规则清洗。调用方用 `ProgressBudget` 限频：每轮先允许 30 步，之后每 2 秒 1 步，每轮最多 300 步；工具开始被放行时它的结束一定写入，被跳过的调用计数后作为一条提示写出。进度读取或写入出错不影响回合。
 - **邮箱清理**：新会话写入配置时，runner 清除上一进程没答复的工具、令牌和模型请求，新会话不会把它们当成自己的请求。
 

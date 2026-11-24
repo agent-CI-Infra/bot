@@ -1,4 +1,5 @@
 import {serviceHarnessTurn,type ServiceTurnControl} from '../harness/service-session.js';
+import {steersServiceTurns} from '../roles/harness.js';
 import {piNativeTools,ProgressBudget,type ServiceProgress} from '../harness/service-progress.js';
 import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
@@ -435,7 +436,7 @@ export class ChannelServiceSessions {
               catch (error) { event('tool_error', name); throw error; }
             } } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence, media, control);
           };
-          if (harness && harness !== 'pi') { reply = await harnessTurn({}); return; }
+          if (harness && !steersServiceTurns(harness)) { reply = await harnessTurn({}); return; }
           // Model context is bounded: older local messages are folded into a rolling summary; originals stay searchable.
           // Folding waits for a batch, so a busy group does not pay a summary request before every answer, and it is only
           // an aid: a summary the model cannot produce keeps the earlier one and never fails the answer.
@@ -502,8 +503,8 @@ export class ChannelServiceSessions {
               event(silent.error ? 'tool_error' : 'tool_result', staySilentName); return silent;
             } catch (error) { event('tool_error', staySilentName); throw error; }
           };
-          if (harness === 'pi') {
-            // Pi gets the context the loop below starts from, and works the turn the same way (#1253).
+          if (harness) {
+            // A steering driver (Pi) gets the context the loop below starts from, and works the turn the same way (#1253).
             // Pi's native tool calls and model steps join the turn's steps (#1296), by name as every step is, while the turn runs.
             const budget = new ProgressBudget(); let progressing = true;
             const piSteps = (step: ServiceProgress) => {
