@@ -31,7 +31,9 @@ export const skillTreePath = (path: string) => path === '.agents/skills' || path
 /** Paths whose change alters how collaborating agents work on this repository once merged (.bot/ is no longer read, #935). */
 export const behaviorPath = (path: string) =>
   skillTreePath(path) || path === '.pi/skills' || path.startsWith('.pi/skills/') || path === 'AGENTS.md' || path === 'CLAUDE.md';
-export const maxSkillCount = 32, maxSkillFiles = 256, maxSkillFileBytes = 512 * 1024, maxSkillTotalBytes = 1024 * 1024;
+export const maxSkillFiles = 256, maxSkillFileBytes = 512 * 1024, maxSkillTotalBytes = 1024 * 1024;
+// The number of SKILL.md files is not a run gate (#532): skills are optional working material read on demand, so a
+// repository with more than 32 of them must keep running. The file and byte bounds below still bound the bundle.
 export const safeSkillSubpath = (sub: string) =>
   sub.length > 0 && sub.length <= 220 && !sub.startsWith('/') && !sub.endsWith('/') && !sub.includes('\\') && !sub.includes('\0')
   && !sub.split('/').some(part => !part || part === '.' || part === '..');
@@ -235,8 +237,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   for (const [path] of skillEntries) {
     if (!skillFilePath(path)) ruleError('invalid_skill_file', `${path} 不是合法的 .agents/skills/ 文件路径`);
   }
-  const skills = skillEntries.filter(([path]) => skillEntryPath(path)).length;
-  if (skills > maxSkillCount) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${skills} 份 SKILL.md，最多 ${maxSkillCount} 份`);
+  // Only the bundle is bounded, not how many skills it holds: more skills never stop a task (#532).
   if (skillEntries.length > maxSkillFiles) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${skillEntries.length} 个技能文件，最多 ${maxSkillFiles} 个`);
   // A NUL byte means the file is not text; it is rejected, not read as missing, also when an older version cached it.
   const binary = skillEntries.find(([, content]) => content.includes('\0'));
@@ -412,7 +413,6 @@ export class RuleService {
       if (file.path === '.agents/skills' || !safeSkillSubpath(String(file.path).slice('.agents/skills/'.length))) ruleError('invalid_skill_file', `${file.path} 不是合法的 .agents/skills/ 文件路径`);
     }
     const skillRoots = underSkills.filter((f: any) => skillEntryPath(f.path));
-    if (skillRoots.length > maxSkillCount) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${skillRoots.length} 份 SKILL.md，最多 ${maxSkillCount} 份`);
     const skillDirs = skillRoots.map((f: any) => String(f.path).slice(0, -'/SKILL.md'.length));
     const entries = underSkills.filter((f: any) => skillDirs.some(dir => String(f.path).startsWith(dir + '/')));
     if (entries.length > maxSkillFiles) ruleError('too_many_bot_skills', `.agents/skills/ 下共有 ${entries.length} 个技能文件，最多 ${maxSkillFiles} 个`);
