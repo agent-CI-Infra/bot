@@ -28,6 +28,17 @@ export function configuredRedactor(store: Store): Pick<Redactor, 'clean' | 'text
   return redactor;
 }
 
+// A delivery body and a management receipt reach the console, and the same accepted body leaves the control plane
+// towards an external subscriber. A credential in either copy must not leave the server, so every exit shares one rule.
+// A key whose name is exactly one of these loses its value at every depth, in objects and in array elements; nothing is
+// inferred from a value's shape, so a field this list does not name is returned exactly as it was stored.
+export const credentialKey = /^(?:token|secret|password|authorization|cookie|private_key)$/i;
+export function redactEgress(value: any): any {
+  if (Array.isArray(value)) return value.map(redactEgress);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, credentialKey.test(key) ? '[redacted]' : redactEgress(item)]));
+  return value;
+}
+
 /** A publication can also register its freshly issued tokens. Its deployment-wide set stays in the control plane. */
 export function registeredRedactor(store: Store, redactor = new Redactor()) {
   for (const value of configuredRedactor(store).values) redactor.add(value);

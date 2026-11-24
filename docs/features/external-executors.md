@@ -23,5 +23,5 @@
 
 ## 3. 获取 GitHub 事件的两种方式
 
-- **Webhook 签名转发**：在项目「外部执行」创建转发订阅，指定接收 URL（默认仅允许公网 HTTPS，内网接收端需部署管理员通过 `BOT_FORWARD_PRIVATE_HOSTS` 显式批准主机名）和要订阅的事件/动作（可勾选排除草稿）。保存时展示一次签名密钥，接收端按 `X-Bot-Signature-256` 验签并按转发 ID 幂等去重；投递失败自动指数退避重试最多 5 次，也可在控制台手动重试。
+- **Webhook 签名转发**：在项目「外部执行」创建转发订阅，指定接收 URL（默认仅允许公网 HTTPS，内网接收端需部署管理员通过 `BOT_FORWARD_PRIVATE_HOSTS` 显式批准主机名）和要订阅的事件/动作（可勾选排除草稿）。保存时展示一次签名密钥，接收端按 `X-Bot-Signature-256` 验签并按转发 ID 幂等去重（转发的正文与控制台详情走同一出口脱敏：键名为 `token`/`secret`/`password`/`authorization`/`cookie`/`private_key` 的字段值显示为 `[redacted]`，其余字段原样）；投递失败自动指数退避重试最多 5 次，也可在控制台手动重试。
 - **主动事件轮询**：无需暴露公网接收端口——先按上述流程兑换临时令牌，再携带同一 `Authorization: Bearer <token>` 调用 `GET /external/events` 拉取绑定仓库最近 24 小时已验签归档的 `issues` / `pull_request` 事件（每批最多 100 条，服务端按客户端持久化保存消费游标，不额外消耗兑换配额）。

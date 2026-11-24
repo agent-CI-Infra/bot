@@ -12,6 +12,7 @@ import { type Actor, repository, scope } from './auth.js';
 import { authorize } from '../identity/authorization.js';
 import { deliveryResult, deliveryDiagnosis } from '../review/delivery.js';
 import { fail, type Json } from '../core/security.js';
+import { redactEgress } from '../core/redaction.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { legacyTaskCategories } from '../projects/legacy-kinds.js';
 import { explainFailure } from '../agent/failures.js';
@@ -24,15 +25,8 @@ import { taskEventSubscriptionsDetail } from '../tasks/event-subscriptions.js';
 
 const completedGroupSQL = "status IN ('succeeded','pr_opened','completed')";
 const taskListGroups: Record<string, string> = { ...taskGroupSQL, completed: completedGroupSQL };
-// A delivery body and a management receipt reach the console, so a credential in either one must not leave the server.
-// A key whose name is exactly one of these loses its value at every depth, in objects and in array elements; nothing is
-// inferred from a value's shape, so a field this list does not name is returned exactly as it was stored.
-const credentialKey = /^(?:token|secret|password|authorization|cookie|private_key)$/i;
-export function redactEgress(value: any): any {
-  if (Array.isArray(value)) return value.map(redactEgress);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, credentialKey.test(key) ? '[redacted]' : redactEgress(item)]));
-  return value;
-}
+// The console exits and the outbound subscriber copy share one rule for a credential-named field (see core/redaction.ts).
+export { redactEgress } from '../core/redaction.js';
 // A webhook body is stored as the text the sender sent: only a body that actually carries a named key is re-encoded, so
 // every other body keeps its exact bytes. A body that parses but cannot be walked to the end (a nesting deep enough to
 // exhaust the stack, say) is not returned raw: that would hand the caller the credential this exit exists to remove,

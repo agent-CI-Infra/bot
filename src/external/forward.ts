@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
 import { randomId, HttpError, type Json } from '../core/security.js';
+import { redactEgress } from '../core/redaction.js';
 import { sendWebhook } from './target.js';
 
 export function enqueueForwards(store:Store,repositoryId:string,event:string,payload:Json,sourceId:string):number{
@@ -32,8 +33,10 @@ export class Forwarder{
     const source=this.store.get("SELECT * FROM deliveries WHERE id=? AND status='accepted' AND duplicate=0",row.source_id);
     if(!source){this.store.run("UPDATE external_deliveries SET state='failed',error='source_unavailable' WHERE id=?",row.id);return;}
     const claimed=this.store.run("UPDATE external_deliveries SET state='sending',attempts=attempts+1 WHERE id=? AND state IN ('pending','retry')",row.id);if(!claimed.changes)return;
+    // The subscriber receives the accepted body, which is the same body the console shows: a credential-named field is
+    // replaced before it leaves the server, exactly as the console exit does, and no other field is touched (#238, #357).
     const payload={version:1,id:row.id,subscription_id:sub.id,client_id:sub.client_id,repository_id:row.repository_id,event:source.event,
-      delivery_id:source.delivery_id,received_at:source.received_at,payload:JSON.parse(Buffer.from(source.payload).toString('utf8'))};
+      delivery_id:source.delivery_id,received_at:source.received_at,payload:redactEgress(JSON.parse(Buffer.from(source.payload).toString('utf8')))};
     const body=Buffer.from(JSON.stringify(payload)),secret=String(this.store.secrets.open(sub.secret,'external-subscription:'+sub.id).value),signature='sha256='+createHmac('sha256',secret).update(body).digest('hex');
     let status=0,error:string|null=null,blocked=false;
     try{status=await this.sender(sub.url,body,{'Content-Type':'application/json','X-Bot-Delivery':row.id,'X-Bot-Event':source.event,'X-Bot-Signature-256':signature},this.privateHosts);}catch(cause){blocked=cause instanceof HttpError;error=blocked?(cause as HttpError).code:'forward_unavailable';}
