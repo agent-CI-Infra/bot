@@ -63,9 +63,9 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
       await expect(fixedPi()).toHaveCount(0);
       await expect(picker).toHaveValue('pi');
       const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
-      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'container_acp', 'icode', 'workswarm', 'process']);
+      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'container_acp', 'icode', 'workswarm']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
-      for (const backend of ['pi', 'process', 'claude_code', 'codex']) expect(await optionDisabled(backend)).toBe(false);
+      for (const backend of ['pi', 'claude_code', 'codex']) expect(await optionDisabled(backend)).toBe(false);
     }
     await goRolePage(page, { role: 'dev' });
     const acpPicker = page.getByLabel('dev Agent 后端', { exact: true });
@@ -241,12 +241,12 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await expect(consoleSave(page)).toBeHidden();
     await expect(warning).toBeVisible();
     expect((await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'dev').entry_harness_source).toBeUndefined();
-    await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('process');
+    await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     await expect(warning).toHaveCount(0);
     await page.reload();
-    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('process');
+    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('claude_code');
     await expect(warning).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally {

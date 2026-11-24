@@ -97,7 +97,7 @@ test('an unchanged project follows a changed built-in default; a custom one and 
 });
 
 test('restoring a configuration from before RoleDefinitionV2 keeps it readable as a revision', t => {
-  const s = fixture(t), legacy = { enabled: true, harnesses: { manager: 'process' }, roles: [{ id: 'dev', prompt: 'Review first' }] };
+  const s = fixture(t), legacy = { enabled: true, harnesses: { dev: 'codex' }, roles: [{ id: 'dev', prompt: 'Review first' }] };
   s.run("INSERT INTO settings VALUES('roles:r',?)", JSON.stringify(legacy));
   const before = get(s);
   assert.deepEqual([before.configured, before.revision, before.configuration.legacy], [true, 0, true]);
@@ -107,7 +107,7 @@ test('restoring a configuration from before RoleDefinitionV2 keeps it readable a
   // Revision 1 is the legacy configuration as it was read: its backend choice and project instructions included.
   const kept = roleApi(s, admin, 'GET', new URL('http://local/api/repositories/r/roles?revision=1'), {}).configuration;
   assert.deepEqual(kept.roles.map(role => role.role_id), before.configuration.roles.map(role => role.role_id));
-  assert.equal(kept.roles.find(role => role.role_id === 'manager').harness_ref.id, 'process');
+  assert.equal(kept.roles.find(role => role.role_id === 'dev').harness_ref.id, 'codex');
   assert.match(kept.roles.find(role => role.role_id === 'dev').persona_prompt, /Project instructions:\nReview first$/);
   assert.deepEqual(kept.roles, before.configuration.roles);
   assert.equal(get(s).configured, false);
@@ -116,13 +116,13 @@ test('restoring a configuration from before RoleDefinitionV2 keeps it readable a
 test('saving makes the configuration the project\'s own; restoring the defaults is a new revision that keeps the history', t => {
   const s = fixture(t);
   s.run("UPDATE policies SET role_concurrency='{\"dev\":2,\"security\":1}' WHERE repository_id='r'");
-  const saved = put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }, { role_id: 'security', persona_prompt: 'Check secrets.' }] });
+  const saved = put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }, { role_id: 'security', persona_prompt: 'Check secrets.' }] });
   assert.equal(saved.revision, 1);
   assert.equal(saved.follows_default, undefined);
   assert.ok(saved.roles.every(role => role.revision === 1), 'leaving the defaults saves every role for the first time');
   const custom = get(s);
   assert.equal(custom.configured, true);
-  assert.equal(custom.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id, 'process');
+  assert.equal(custom.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
 
   rejects(() => put(s, { follow_default: false }), 'invalid_role_configuration', 'follow_default');
   rejects(() => put(s, { follow_default: true, roles: [] }), 'unknown_field', 'roles');
@@ -183,14 +183,14 @@ test('migration #1068: unchanged saved defaults follow the built-in defaults; cu
   assert.deepEqual(earlierPermissions.manager, [{ project_memory: 'none' }]);
   // Customised: an edited prompt, another backend, a disabled role, an own role, a budget limit, another name.
   put(s, { roles: [{ role_id: 'qa', persona_prompt: roleTemplate('qa') + '\nAlso check the changelog.' }] }, 'p4');
-  put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] }, 'p5');
+  put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }, 'p5');
   put(s, { roles: [{ role_id: 'ux', enabled: false }] }, 'p6');
   put(s, { roles: [{ role_id: 'security' }] }, 'p7');
   put(s, { roles: [{ role_id: 'test', budget_policy_ref: { id: 'bounded', max_turns: 8 } }] }, 'p8');
   put(s, { roles: [{ role_id: 'dev', name: 'Implementer' }] }, 'p9');
   // Before RoleDefinitionV2: no backend chosen and no instructions added; or a backend chosen, or a role added.
   s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: false, harnesses: {} }));
-  s.run("INSERT INTO settings VALUES('roles:custom-legacy',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'process' } }));
+  s.run("INSERT INTO settings VALUES('roles:custom-legacy',?)", JSON.stringify({ enabled: true, harnesses: { dev: 'codex' } }));
   s.run("INSERT INTO settings VALUES('roles:p10',?)", JSON.stringify({ enabled: true, harnesses: {}, roles: [{ id: 'security', prompt: '' }] }));
   const before = Object.fromEntries(['p4', 'p5', 'p6', 'p7', 'p8', 'p9', 'custom-legacy', 'p10'].map(repo => [repo, s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repo).value]));
 
@@ -238,7 +238,7 @@ test('at start-up migration:1072 runs first, so defaults saved before Actions wr
 
 test('legacy saved configurations containing retired coordinator load, preview and re-save cleanly without losing historical revisions or snapshots', t => {
   const s = fixture(t);
-  const config = put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
+  const config = put(s, { roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] });
   const legacySaved = {
     ...config,
     roles: [

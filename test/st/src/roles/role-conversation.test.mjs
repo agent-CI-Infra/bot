@@ -49,7 +49,7 @@ async function fixture(t,harness,budget,stall=false){
   const source={id:'one-logical-conversation',source_message:'source-1',caller,request:'Read the local context',guard(){},fence:()=>current,context:()=>({fixture_mode:'conversation',messages:[{content:'Local context'}]}),query:()=>({messages:[]}),summary:()=>({state:'none'})};
   return {store,requests,started,releaseStall,conversations,source,respond:handler=>{response=handler;},next:()=>({...source,source_message:'source-2',caller:roleTaskCaller(store,'101','reviewer',{actor,conversation_id:source.id,source_message:'source-2',guard(){}})}),change:()=>{current='changed';}};
 }
-for(const harness of ['process','pi'])test(`generic conversation uses the configured ${harness} harness without a business task or fake writer`,async t=>{
+for(const harness of ['scripted','pi'])test(`generic conversation uses the configured ${harness} harness without a business task or fake writer`,async t=>{
   const f=await fixture(t,harness),result=await f.conversations.run(f.source);
   assert.equal(result.message,'A source-bound response');assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
   const turn=f.store.get('SELECT * FROM role_conversation_turns');assert.equal(turn.role_id,'reviewer');assert.equal(turn.state,'completed');

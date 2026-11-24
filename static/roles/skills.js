@@ -97,7 +97,10 @@ function roleSettingsCard(role, state, redraw, access) {
   if (profile) {
     const modelExtra = group('model-extra', '模型细节', advanced);
     modelExtra.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; markRoleDirty(state); })),
-      roleCheck('模型支持工具调用', profile, 'tool_calls', state), field('结构化输出方式', roleSelect('结构化输出方式', profile.structured_output, (backend?.structured_output || []).map(id => [id, id]), value => { profile.structured_output = value; markRoleDirty(state); })),
+      roleCheck('模型支持工具调用', profile, 'tool_calls', state),
+      // Every backend answers through tool calls since text_json went with the Process driver (#1338): a choice is shown
+      // only when the backend offers more than one way.
+      ...((backend?.structured_output || []).length > 1 ? [field('结构化输出方式', roleSelect('结构化输出方式', profile.structured_output, backend.structured_output.map(id => [id, id]), value => { profile.structured_output = value; markRoleDirty(state); }))] : []),
       roleModelResolution(role, state, access));
   } else {
     group('model-extra', '模型细节', advanced).append(roleModelResolution(role, state, access));

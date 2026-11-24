@@ -63,9 +63,9 @@ export function retireNativeServiceAssistants(s: Store, log: (line: string) => v
 }
 
 /**
- * Native is gone for project roles too (#1257): once, at start-up, what still names it moves to Pi, or to Process for a role
- * whose pinned model profile needs text_json output (see retireNativeRoles). Nothing can save Native afterwards: the role
- * API refuses a backend that is not registered.
+ * Native is gone for project roles too (#1257): once, at start-up, what still names it moves to Pi (see retireNativeRoles;
+ * until #1338 a role whose pinned model profile needed text_json output went to Process). Nothing can save Native
+ * afterwards: the role API refuses a backend that is not registered.
  */
 export function retireNativeProjectRoles(s: Store, log: (line: string) => void = line => console.log(line)) {
   const marker = 'migration:1257:retire-native-roles';
@@ -76,7 +76,7 @@ export function retireNativeProjectRoles(s: Store, log: (line: string) => void =
     return moved;
   });
   if (counts.roles || counts.tasks || counts.instances)
-    log(`[migration:1257] Native retired: ${counts.roles} roles in ${counts.projects} projects (${counts.process} to Process for text_json output, the rest to Pi), ${counts.tasks} frozen task configurations, ${counts.instances} role instances`);
+    log(`[migration:1257] Native retired: ${counts.roles} roles in ${counts.projects} projects moved to Pi, ${counts.tasks} frozen task configurations, ${counts.instances} role instances`);
 }
 
 /**
@@ -109,5 +109,24 @@ export function pinAssistantsToPi(s: Store, log: (line: string) => void = line =
   });
   if (counts.serviceRoles || counts.bindings || counts.roles || counts.tasks || counts.instances)
     log(`[migration:1337] assistants on Pi: ${counts.serviceRoles} service roles, ${counts.bindings} group bindings, ${counts.roles} Manager/QA roles in ${counts.projects} projects, ${counts.tasks} frozen task configurations, ${counts.instances} role instances`
+      + (counts.unusable ? `; ${counts.unusable} of those roles pin a model profile Pi cannot use and wait for configuration` : ''));
+}
+
+/**
+ * The Process backend is gone (#1338). Once, at start-up, every role saved on it moves to Pi through moveRolesToPi: saved
+ * configurations, frozen task configurations and role instances, so a waiting or reopened task continues on Pi. A pinned
+ * model profile that answered in text_json, which only Process read, answers through tool calls (see onPi in
+ * definition.ts). The role API refuses `process` afterwards as an unregistered backend.
+ */
+export function retireProcessRoles(s: Store, log: (line: string) => void = line => console.log(line)) {
+  const marker = 'migration:1338:retire-process';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  const counts = s.transaction(() => {
+    const moved = moveRolesToPi(s, 'migration:1338', ['process'], (_role, backend) => backend === 'process');
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+    return moved;
+  });
+  if (counts.roles || counts.tasks || counts.instances)
+    log(`[migration:1338] Process retired: ${counts.roles} roles in ${counts.projects} projects, ${counts.tasks} frozen task configurations, ${counts.instances} role instances moved to Pi`
       + (counts.unusable ? `; ${counts.unusable} of those roles pin a model profile Pi cannot use and wait for configuration` : ''));
 }

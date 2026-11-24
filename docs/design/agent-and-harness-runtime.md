@@ -31,12 +31,12 @@
 
 ## 3. 多后端 Harness 抽象（`src/harness/`、`runner/`）
 
-`roleHarness(id).createSession(spec, services)` 屏蔽执行器差异，统一提供 `run / send / cancel / close` 与规范化恢复模式（`native_resume`、`checkpoint_transcript`、`rebuilt_from_task_records`、`fresh_evaluation`）：
+`roleHarness(id).createSession(spec, services)` 屏蔽执行器差异，统一提供 `run / send / cancel / close` 与规范化恢复模式（`native_resume`、`checkpoint_transcript`、`rebuilt_from_task_records`、`fresh_evaluation`）。所有内置后端都在项目电脑或助手电脑内运行；在控制面以子进程运行的 `process` 后端已删除（#1338），`checkpoint_transcript` 仍是协议词汇，目前只有测试专用的脚本化驱动使用：
+
 
 | 后端 | 运行位置 | 关键设计要点 |
 | --- | --- | --- |
 | `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
-| `process` | 独立 Node 子进程 | 隔离事件循环、JSON-line RPC 通信，不继承控制面环境变量与凭据。 |
 | `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持平台模型（原生直连或回环中转）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
 | `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
 | `icode`、`workswarm`、`container_acp` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
@@ -61,14 +61,16 @@
 
 - 服务角色：`native` → `pi`，递增 revision，旧页面不能悄悄把 `native` 存回去。
 - 群绑定：`native` → `pi`，revision 不变：它属于群的授权围栏，后端不改变群能做什么。
-- 项目角色：V2 配置里的 `native` 角色改为 `pi`，生成新配置版本（`updated_by: migration:1255`）；旧格式配置里写明 `native` 的条目改为 `pi`。角色覆写的模型要求 `text_json` 输出时 Pi 用不了，保持 `native` 并计入日志。
+- 项目角色：V2 配置里的 `native` 角色改为 `pi`，生成新配置版本（`updated_by: migration:1255`）；旧格式配置里写明 `native` 的条目改为 `pi`。角色覆写的模型要求 `text_json` 输出时 Pi 用不了，保持 `native` 并计入日志（由下文 `migration:1257` 迁走）。
 
 新库启动时迁移无事可做、直接记下标记。
 
-`native` 后端已删除（#1257）：控制面里不再有自己的工具循环，`runAgent` 必须带适配器（缺少时抛出 `agent_adapter_required`），每个注册的后端都自带传输。角色配置提交 `native` 由已有校验返回 `unknown_role_harness`；`text_json` 结构化输出仍保留，`process` 支持它。
+`native` 后端已删除（#1257）：控制面里不再有自己的工具循环，`runAgent` 必须带适配器（缺少时抛出 `agent_adapter_required`），每个注册的后端都自带传输。角色配置提交 `native` 由已有校验返回 `unknown_role_harness`。
 
 - 服务助手：提交 `native` 由已有校验返回 `unknown_role_harness`（#1337 起只接受 `pi`，见上文）。`migration:1255` 之后手动选成 `native` 的残留值，由 `retireNativeServiceAssistants`（`src/roles/native-to-pi.ts`）在每次启动时改为 `pi`：服务角色递增 revision，群绑定 revision 不变，有改动时启动日志写 `[migration:1257]` 计数。没有任何写入能再存回 `native`，所以首次启动之后它什么也找不到。
-- 项目角色：`retireNativeProjectRoles`（标记 `migration:1257:retire-native-roles`）在一个事务里一次性改写 `migration:1255` 之后剩下的 `native`：已保存配置里的 V2 角色（生成新配置版本，`updated_by: migration:1257`）和旧格式 `harnesses` 条目、冻结在 `task_execution_configs` 里的任务配置快照（照 #705 退役 ACP 的做法，等待中或重新唤醒的任务能继续运行），以及 `role_instances`（取其任务迁移后的角色后端，否则 `pi`，并清空 `session` 与 `harness_state`，下次运行从任务记录重建）。角色覆写的模型要求 `text_json` 输出时改为 `process`，其余改为 `pi`；有改动时启动日志写一行 `[migration:1257]` 计数。
+- 项目角色：`retireNativeProjectRoles`（标记 `migration:1257:retire-native-roles`）在一个事务里一次性改写 `migration:1255` 之后剩下的 `native`：已保存配置里的 V2 角色（生成新配置版本，`updated_by: migration:1257`）和旧格式 `harnesses` 条目、冻结在 `task_execution_configs` 里的任务配置快照（照 #705 退役 ACP 的做法，等待中或重新唤醒的任务能继续运行），以及 `role_instances`（改为 `pi`，并清空 `session` 与 `harness_state`，下次运行从任务记录重建）。所有角色都改为 `pi`；角色覆写的模型若要求 `text_json` 输出，改为 `tool_call`（见下条）。#1338 之前这类角色改为 `process`。有改动时启动日志写一行 `[migration:1257]` 计数。
+
+`process` 后端已删除（#1338）：注册表、`runner/role-worker.mjs` 和只为它服务的请求预留（`src/roles/run.ts` 的收尾预留现在只用于 Pi）一并删除，角色配置提交 `process` 由已有校验返回 `unknown_role_harness`。`text_json` 结构化输出只有 Process 读取，现在没有后端声明它：保存 `text_json` 返回 `harness_structured_output_unsupported`，角色编辑器在后端只有一种输出方式时不再显示「结构化输出方式」。旧库在启动时由 `retireProcessRoles`（`src/roles/native-to-pi.ts`，标记 `migration:1338:retire-process`）经 `moveRolesToPi` 一次性把已保存配置、冻结快照和角色实例中的 `process` 改为 `pi`；迁移的角色保留固定的模型，`text_json` 改为 `tool_call`，等待中的任务因此能在 Pi 上继续。有改动时启动日志写一行 `[migration:1338]` 计数。
 
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
 

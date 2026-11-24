@@ -342,40 +342,8 @@ test('configured per-run limits replace entry defaults while omitted fields reta
   assert.equal((await roleRuns.prepare({ ...f.spec, maxOutputTokens: 16384 }, 'dev')).wrapped.maxOutputTokens, 16384);
 });
 
-test('process executes twelve calls with printable provider IDs in one message', async t => {
-  let executed=0;
-  const f=await fixture(t,(_body,turn)=>turn===1?{role:'assistant',content:null,tool_calls:Array.from({length:12},(_,i)=>({id:i===0?'functions.read_file:0':i===1?'toolu_x:1':'call_'+i,type:'function',function:{name:'read_file',arguments:JSON.stringify({path:'src/'+i+'.js'})}}))}:call('finish',{summary:'all twelve completed'}));
-  const result=await runRole({...f.spec,tools:[tool('read_file'),tool('finish')],execute:async()=>{executed++;return {content:'inspected'};}},'dev',undefined,'process');
-  assert.equal(executed,12);assert.equal(result.result.summary,'all twelve completed');
-});
-
-test('process returns invalid JSON arguments as an observation and accepts a corrected call', async t => {
-  let executed=0;
-  const f=await fixture(t,(body,turn)=>{
-    if(turn===1){const message=call('read_file',{});message.tool_calls[0].function.arguments='{invalid';return message;}
-    if(turn===2){assert.ok(results(body).some(result=>result.error==='invalid_tool_arguments'));return call('read_file',{path:'a.js'});}
-    return call('finish',{summary:'corrected'});
-  });
-  const result=await runRole({...f.spec,tools:[tool('read_file'),tool('finish')],execute:async()=>{executed++;return {content:'a'};}},'dev',undefined,'process');
-  assert.equal(executed,1);assert.equal(result.result.summary,'corrected');
-});
-
-test('process reserves four of sixteen turns and requires submission on the last turn', async t => {
-  let requests=0;
-  const f=await fixture(t,(body,turn)=>{
-    requests=turn;
-    if(turn<=12){assert.ok(body.tools.some(t=>t.function.name==='read_file'));return call('read_file',{path:'a.js'});}
-    assert.deepEqual(body.tools.map(t=>t.function.name),['finish']);
-    assert.ok(body.messages.some(m=>typeof m.content==='string'&&m.content.includes('4 turns left')));
-    if(turn===16){assert.deepEqual(body.tool_choice,{type:'function',function:{name:'finish'}});return call('finish',{summary:'bounded result'});}
-    return {role:'assistant',content:'Preparing the submission'};
-  });
-  f.put({roles:[{role_id:'dev',budget_policy_ref:{id:'bounded',max_turns:16}}]});
-  const result=await runRole({...f.spec,tools:[tool('read_file'),tool('finish')],finalizationTools:['finish'],execute:async()=>({content:'a'})},'dev',undefined,'process');
-  assert.equal(result.result.summary,'bounded result');assert.equal(requests,16);
-});
-
-for(const harness of ['process','pi'])test(`${harness} refuses two remaining metered requests before starting a run`,async t=>{
+// Only Pi's loop keeps the request-based finalization reserve (the Process loop that shared it is gone, #1338).
+for(const harness of ['pi'])test(`${harness} refuses two remaining metered requests before starting a run`,async t=>{
   let requests=0;
   const f=await fixture(t,()=>{requests++;return call('finish',{summary:'must not run'});});
   f.put({roles:[{role_id:'dev',harness_ref:{id:harness},budget_policy_ref:{id:'metered',max_turns:16,max_model_requests:2}}]});
@@ -452,32 +420,13 @@ test('cancel interrupts through the session first, waits a bounded time, then st
   await assert.rejects(roleRuns.collect(handle));
   assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n, 0);
   assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='role_run_cancelled'"));
-  // A process worker is interrupted by the protocol and ends within the wait.
-  const g = await fixture(t, () => new Promise(() => {}));
-  const p = await roleRuns.prepare(g.spec, 'dev', 'assign-p', 'process'), h = await roleRuns.start(p);
-  await new Promise(r => setTimeout(r, 200));
-  const done = await roleRuns.cancel(h, 'operator request', 5000);
-  assert.deepEqual([done.settled, done.forced], [true, false]);
-  await assert.rejects(roleRuns.collect(h), { code: 'harness_cancelled' });
   // A used operation id cannot start a second run, and one assignment has one running run at a time.
-  const again = await roleRuns.prepare(g.spec, 'dev', 'assign-p', 'process');
-  await assert.rejects(roleRuns.start(again, p.operation_id), { code: 'role_run_operation_used' });
+  const again = await roleRuns.prepare(f.spec, 'dev', 'assign-c');
+  await assert.rejects(roleRuns.start(again, prepared.operation_id), { code: 'role_run_operation_used' });
 });
 
-test('the process worker and the MCP bridge present the run token; a revoked token is refused mid-run', async t => {
-  let s, turns = 0;
-  const f = await fixture(t, (body, turn) => {
-    turns = turn;
-    if (turn === 1) return call('read_task_record', { ref: 'task:t' });
-    // The worker's token-bearing call was served; now revoke the run's token while the worker waits for its next answer.
-    assert.equal(results(body).at(-1).ref, 'task:t'); assert.match(results(body).at(-1).version, /^[a-f0-9]{64}$/);
-    revokeRunTokens(s, s.get("SELECT id FROM task_runs WHERE role='dev' AND status='running'").id, 'test_revocation');
-    return call('read_task_record', { ref: 'task:t' });
-  });
-  s = f.s;
-  // The next step of the run checks its token and stops; nothing further is executed for it.
-  await assert.rejects(runRole(f.spec, 'dev', undefined, 'process'), { code: 'run_token_revoked' });
-  assert.equal(turns, 2); assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='gateway_call'").n, 1);
+test('the MCP bridge presents the run token; a revoked token is refused', async t => {
+  const f = await fixture(t, () => call('finish', { summary: 'unused' }));
   // The MCP bridge answers 401 once its token check fails.
   let valid = true;
   const bridge = await taskToolServer({ ...f.spec, runAccess: { token: 'rrt_' + 'x'.repeat(12) + '.' + 'y'.repeat(43), check: () => { if (!valid) throw new TaskError('run_token_revoked'); } } });

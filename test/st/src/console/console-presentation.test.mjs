@@ -408,11 +408,11 @@ test('review and Actions summaries offer only Dev on its backend in the entry; d
   assert.equal(execution(config,'review.issue'),'只委派 Developer，使用这个入口的工具和工作区，后端 Pi');
   // Dev's own backend applies once chosen; an older V2 configuration keeps Pi in these entries until Dev's choice changes.
   const devTo = async (harness, revision) => (await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: true, actions: true } }, roles: [{ role_id: 'ux', enabled: false }, { role_id: 'dev', harness_ref: { id: harness } }] })).value.configuration;
-  const processDev = await devTo('process', 1);
-  assert.equal(execution(processDev, 'review.issue'),
-    '只委派 Developer，使用这个入口的工具和工作区，后端 Process');
+  const codexDev = await devTo('codex', 1);
+  assert.equal(execution(codexDev, 'review.issue'),
+    '只委派 Developer，使用这个入口的工具和工作区，后端 Codex');
   const older = JSON.parse(p.h.store.get("SELECT value FROM settings WHERE key='roles:101'").value), dev = older.roles.find(r => r.role_id === 'dev');
-  delete dev.entry_harness_source; dev.harness_ref = { id: 'process', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
+  delete dev.entry_harness_source; dev.harness_ref = { id: 'codex', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
   const kept = (await p.admin('/api/repositories/101/roles')).value.configuration;
   assert.equal(execution(kept, 'actions.failures'),
     '只委派 Developer，使用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，该角色的后端选择改变后才换）');
@@ -452,14 +452,14 @@ test('a custom role called constructor shows its own name and responsibility on 
   assert.deepEqual(items, ['Construction inspector\nNative\n已交回\n职责：Inspect construction invariants only.', 'Construction inspector\nNative\n进行中\n职责：Inspect only the new construction paths.']);
   assert.doesNotMatch(p.side(), /function|native code/);
   // A delegation that ran without a recorded snapshot (role_snapshot may be null) gets no definition from today's
-  // instance: the definition changes again and the instance moves to Process, and that delegation still says Native
+  // instance: the definition changes again and the instance moves to Codex, and that delegation still says Native
   // and that its historical definition is unavailable.
   p.h.store.run("INSERT INTO role_assignments VALUES('c-0','custom','c-constructor',1,NULL,'completed','c-input-0',NULL)");
   p.h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,role_instance_id,assignment_id,role_snapshot,harness) VALUES('c-run-0','custom','role',1,1,?,'succeeded','{}','{}','constructor','c-constructor','c-0',NULL,'native')", p.now);
   const v2 = await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: 2, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
-    roles: [{ role_id: 'constructor', name: 'Construction inspector v2', responsibility: 'Inspect the changed construction paths.', harness_ref: { id: 'process' } }] });
+    roles: [{ role_id: 'constructor', name: 'Construction inspector v2', responsibility: 'Inspect the changed construction paths.', harness_ref: { id: 'codex' } }] });
   assert.equal(v2.status, 200, JSON.stringify(v2.value));
-  const third = await snapshot(); p.h.store.run("UPDATE role_instances SET snapshot_id=?,harness='process' WHERE id='c-constructor'", third.snapshot_id);
+  const third = await snapshot(); p.h.store.run("UPDATE role_instances SET snapshot_id=?,harness='codex' WHERE id='c-constructor'", third.snapshot_id);
   const roles = (await p.admin('/api/tasks/custom/roles?limit=100&after=0')).value;
   assert.deepEqual(roles.runs.filter(run => run.assignment_id === 'c-0').map(run => [run.role_snapshot, run.harness]), [[null, 'native']]);
   p.page.run('taskView.close()'); await p.open('custom');
@@ -468,7 +468,7 @@ test('a custom role called constructor shows its own name and responsibility on 
   assert.equal(missing, 'constructor\nNative\n已交回\n历史定义不可用：这次运行没有留下可读的角色快照，名称和职责不按现在的定义补写。');
   assert.doesNotMatch(missing, /Construction inspector v2|Inspect the changed construction paths/);
   // The delegation that has not run yet takes today's definition and harness.
-  assert.match(p.side(), /Construction inspector v2\nProcess\n进行中\n职责：Inspect the changed construction paths\./);
+  assert.match(p.side(), /Construction inspector v2\nCodex\n进行中\n职责：Inspect the changed construction paths\./);
 });
 
 

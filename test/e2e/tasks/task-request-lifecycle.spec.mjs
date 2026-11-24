@@ -73,8 +73,8 @@ async function fixture() {
     expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id, development_enabled: true })).status).toBe(200);
     const roles = (await admin('/api/repositories/101/roles')).value;
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, enabled: false,
-      // In process: Dev on Process; Manager and QA, which run only on Pi in production (#1337), on the test-only scripted driver.
-      roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: role_id === 'dev' ? 'process' : scriptedHarness } })) })).status).toBe(200);
+      // In process, on the test-only scripted driver (Manager and QA run only on Pi in production, #1337).
+      roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: scriptedHarness } })) })).status).toBe(200);
     return { h, admin, password, requests, qaStarted, releaseQA, close,
       run() { advance = true; engine.tick(); return Promise.all(engine.active.values()); } };
   } catch (error) { await close(); throw error; }

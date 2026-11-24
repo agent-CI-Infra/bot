@@ -17,7 +17,6 @@ import { roleConfiguration } from './definition.js';
 export const recommendedBackend = 'pi';
 const names: Record<string, string> = {
   pi: 'Pi',
-  process: 'Process',
   claude_code: 'Claude Code',
   codex: 'Codex',
   container_acp: '容器内 ACP',
