@@ -90,7 +90,7 @@ async function trustedOrganizations(request) {
   const shared = models.filter(model => model.repository_id === null);
   const defaults = (owner, value) => {
     const model = document.createElement('select'); model.setAttribute('aria-label', `${owner} 的默认模型`);
-    model.add(new Option('不设默认模型（项目会等待模型配置）', '')); shared.forEach(m => model.add(new Option(m.model_name, m.id))); model.value = value?.model?.id || '';
+    model.add(new Option('不设默认模型（项目会等待模型配置）', '')); shared.forEach(m => model.add(new Option(modelChoiceName(m), m.id))); model.value = value?.model?.id || '';
     // #850: projects started under the organization get this capability ceiling.
     const ceiling = document.createElement('select'); ceiling.setAttribute('aria-label', `${owner} 的默认能力上限`);
     projectCeilingOptions.forEach(([level, title]) => ceiling.add(new Option(title, level))); ceiling.value = value?.capability_ceiling || 'comment';

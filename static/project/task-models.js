@@ -4,7 +4,7 @@ const releaseNotesSkill = '.agents/skills/release-notes/SKILL.md';
 function modelOption(select, value, caption) { const option = element('option', caption); option.value = value; select.append(option); }
 function modelOptions(select, models, selected, empty = null) {
   if (empty) modelOption(select, '', empty);
-  for (const model of models) modelOption(select, model.id, `${model.model_name} · ${model.repository_id ? '本项目专属' : '部署共享'} · ${hostOf(model.api_url)}${model.key_configured ? '' : ' · Key 已撤销'}`);
+  for (const model of models) modelOption(select, model.id, `${modelChoiceName(model)} · ${model.repository_id ? '本项目专属' : '部署共享'}${model.key_configured ? '' : ' · Key 已撤销'}`);
   if (selected && !models.some(model => model.id === selected)) modelOption(select, selected, `模型不可用（${selected}）`);
   select.value = selected || '';
 }

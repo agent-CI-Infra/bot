@@ -69,7 +69,7 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
 async function prepared(page) {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  const model = (await admin('/api/models/provider', 'POST', { repository_id: '101', api_url: 'http://127.0.0.1:9/v1', api_key: 'sk-role-team', model_names: ['fixture-model'] })).value.models[0];
+  const model = (await admin('/api/models/provider', 'POST', { repository_id: '101', name: 'fixture', api_url: 'http://127.0.0.1:9/v1', api_key: 'sk-role-team', model_names: ['fixture-model'] })).value.models[0];
   const config = (await admin('/api/repositories/101/roles')).value;
   const dev = config.configuration.roles.find(role => role.role_id === 'dev');
   const { revision, kind, entry_harness_source, ...editable } = dev;

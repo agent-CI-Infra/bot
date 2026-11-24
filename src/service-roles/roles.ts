@@ -117,11 +117,11 @@ export function serviceRoleUsage(store: Store, id: string): Json {
     usage_missing_requests: total.usage_missing_requests ?? 0, unpriced_requests: total.unpriced_requests ?? 0, last_requested_at: total.last_requested_at, costs };
 }
 export function serviceRoleView(store: Store, row: Row): Json {
-  const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key,repository_id FROM models WHERE id=?', row.model_id) : undefined;
+  const model = row.model_id ? store.get('SELECT id,provider_name,model_name,api_url,api_key,repository_id FROM models WHERE id=?', row.model_id) : undefined;
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
     harness: row.harness??'pi',
     project: row.project_id ? { id: row.project_id, full_name: store.get('SELECT full_name FROM repositories WHERE id=?', row.project_id)?.full_name ?? row.project_id } : null,
-    model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key, project_id: model.repository_id ?? null } : null,
+    model_id: row.model_id, model: model ? { id: model.id, provider_name: model.provider_name ?? null, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key, project_id: model.repository_id ?? null } : null,
     ...(row.id === managementAssistant ? { permissions: fullPermissions() } : {}), permissions_fixed: row.id===managementAssistant,
     revision: row.revision, created_at: row.created_at, updated_at: row.updated_at, usage: serviceRoleUsage(store, row.id) };
 }

@@ -249,8 +249,8 @@ function deployment() {
     accounts: [{ id: 'a1', name: 'First App', type: 'github_app', app_id: '123', credentials_configured: true, endpoints: [{ webhook_path: '/hooks/github/a1/e1' }] },
       { id: 'a2', name: 'Second App', type: 'github_app', app_id: '456', credentials_configured: true, endpoints: [] },
       { id: 'b1', name: 'Token account', type: 'bot_account', app_id: null, credentials_configured: false, endpoints: [] }],
-    models: [{ id: 'm1', repository_id: null, model_name: 'default-model', api_url: 'https://one.example.com/v1', key_configured: true, version: 1 },
-      { id: 'm2', repository_id: null, model_name: 'second-model', api_url: 'https://two.example.com/v1', key_configured: true, version: 1 },
+    models: [{ id: 'm1', repository_id: null, provider_name: 'one', model_name: 'default-model', api_url: 'https://one.example.com/v1', key_configured: true, version: 1 },
+      { id: 'm2', repository_id: null, provider_name: 'two', model_name: 'second-model', api_url: 'https://two.example.com/v1', key_configured: true, version: 1 },
       { id: 'p1', repository_id: '101', model_name: 'project-model', api_url: 'https://three.example.com/v1', key_configured: true, version: 1 }] };
   const sent = [];
   const respond = (method, path, body) => {
@@ -352,7 +352,7 @@ test('global settings change the wizard settings and shared models without a pro
   assert.deepEqual(choices(), ['', 'm1', 'm2']); assert.doesNotMatch(text(panel), /project-model/);
   section('默认共享模型').querySelector('select').value = 'm2'; await submit(section('默认共享模型').querySelector('form'));
   assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/model', { model_id: 'm2' }]);
-  assert.match(text(section('默认共享模型')), /second-model · https:\/\/two\.example\.com\/v1/);
+  assert.match(text(section('默认共享模型')), /second-model · two · https:\/\/two\.example\.com\/v1/);
 
   // Shared model rows edit, delete and add in place: no project is loaded or reloaded.
   const row = name => section('部署共享模型').querySelectorAll('li').find(node => text(node).includes(name));
@@ -372,8 +372,10 @@ test('global settings change the wizard settings and shared models without a pro
   buttons(section('部署共享模型'), '新增供应商')[0].listeners.click[0]();
   const add = page.run("document.body.querySelector('#provider-edit')").querySelector('form'), fields = Object.fromEntries(add.querySelectorAll('input').map(node => [node.name, node]));
   fields.api_url.value = 'https://four.example.com/v1'; fields.api_key.value = 'sk-fixture'; fields.model_name.value = 'added-model';
-  await submit(add);
-  assert.deepEqual(sent.at(-1), ['POST', '/api/models/provider', { repository_id:null,api_url:'https://four.example.com/v1',api_key:'sk-fixture',model_names:['added-model'] }]);
+  // A provider needs a name (#1332); without one nothing is sent.
+  await submit(add); assert.equal(sent.at(-1)[0], 'DELETE');
+  fields.provider_name.value = 'four'; await submit(add);
+  assert.deepEqual(sent.at(-1), ['POST', '/api/models/provider', { repository_id:null,name:'four',api_url:'https://four.example.com/v1',api_key:'sk-fixture',model_names:['added-model'],interface_type:'auto' }]);
   assert.match(text(section('部署共享模型')), /已新增供应商，已添加 added-model/); assert.ok(row('added-model'));
   assert.equal(page.run('reloads'), 0); assert.equal(page.run('current'), null);
 });

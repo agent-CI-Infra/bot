@@ -88,7 +88,7 @@ async function channelBindingOverview(data) {
           rowActions.append(channelLink('#/identity/feishu/groups/' + b.chat_id, t('feishu.configure'), 'button-link quiet'));
           row.append(name,
             channelProfileDetails(b.chat, () => { name.textContent = channelChatName(b.chat); }),
-            note(`${( { active: t('feishu.state.active'), paused: t('feishu.state.paused'), disabled: t('feishu.state.disabled') } )[b.state] || b.state} · ${b.model?.model_name || t('feishu.model_unconfigured')} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
+            note(`${( { active: t('feishu.state.active'), paused: t('feishu.state.paused'), disabled: t('feishu.state.disabled') } )[b.state] || b.state} · ${b.model ? modelChoiceName(b.model) : t('feishu.model_unconfigured')} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
             rowActions);
           list.append(row);
         }
@@ -392,7 +392,7 @@ async function renderChannelConsole(request) {
       if (result.conversation.mode === 'service' && result.conversation.binding) {
         const b = result.conversation.binding;
         const scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
-        bindingMeta.textContent = `当前群绑定：模型 ${b.model ? b.model.model_name : '未配置'} · 范围：${scopeText}`;
+        bindingMeta.textContent = `当前群绑定：模型 ${b.model ? modelChoiceName(b.model) : '未配置'} · 范围：${scopeText}`;
         bindingMeta.hidden = false;
         if (result.conversation.can_manage) contextActions.append(channelLink('#/identity/feishu/groups/' + selected, '配置群聊助手', 'button-link quiet'));
       } else {

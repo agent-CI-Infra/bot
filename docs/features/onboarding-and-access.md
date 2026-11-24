@@ -27,7 +27,7 @@
 2. **仓库 GitHub App**：选用已登记 App 或通过 manifest 创建新 App（默认仅申请仓库级权限 `contents`、`issues`、`pull_requests`、`statuses`、`actions`、`checks` 写及 `metadata` 读，不申请组织级权限；订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review`、`pull_request_review_comment`、`check_run`、`status`）。已有 App 可随时使用「检查权限和事件订阅」核对缺项。
 3. **GitHub 用户登录**：使用**独立的 OAuth App**（不复用仓库 GitHub App），填写 Homepage URL 与 `<统一入口>/auth/github/callback`，填入 Client ID 与 Client Secret 后启用。
 4. **安装到 GitHub 账号**：输入组织名、个人账号名或仓库链接解析目标账号，跳转到 GitHub 定向安装页选择仓库范围，返回后点击「重新检查安装」。
-5. **配置模型**：添加部署共享模型（支持「获取模型列表」与「测试模型」）。
+5. **配置模型**：添加部署共享模型（可设置供应商名称和接口协议，名称留空时取地址主机名、重名自动加序号；支持「获取模型列表」与「测试模型」），保存为一个独立的供应商。
 6. **查看内置规则**：了解内置默认规则和角色配置入口。
 7. **同步并启用首批仓库**：同步安装列表，为需要的仓库启动检视（自动开发默认关闭）。
 

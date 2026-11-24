@@ -249,12 +249,12 @@ test('missing role impact metadata and late reads never open a deletion confirma
 
 test('project model management keeps shared models read-only for every role', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [200, {}]);
-  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'model', policy: { model_id: null }, models: [{ id: 's', repository_id: null, model_name: 'shared', api_url: 'https://model.invalid/v1', key_configured: true }] };");
+  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'model', policy: { model_id: null }, models: [{ id: 's', repository_id: null, provider_name: 'gateway', model_name: 'shared', api_url: 'https://model.invalid/v1', key_configured: true }] };");
   const cards = page.run('modelManagementSections()'); await settle();
   const shared = cards.find(card => card.querySelector('h3').textContent === '部署共享模型');
-  // The model sits under its provider: the heading carries the address, the row the model name.
+  // The model sits under its provider: the heading carries the provider's name and address, the row the model name.
   assert.deepEqual(shared.querySelectorAll('.model-address').map(node => node.textContent), ['shared']);
-  assert.deepEqual(['.provider-title strong', '.provider-title .muted'].map(selector => shared.querySelector(selector).textContent), ['model.invalid', 'https://model.invalid/v1']);
+  assert.deepEqual(['.provider-title strong', '.provider-title .muted'].map(selector => shared.querySelector(selector).textContent), ['gateway', 'https://model.invalid/v1']);
   assert.equal(shared.querySelectorAll('button').length, 0);
   assert.ok(cards[0].querySelectorAll('button').some(node => node.textContent === '新增供应商'));
   page.run("me.role = 'project_admin';");

@@ -13,8 +13,8 @@ test('provider search, draft tests, pricing and conflict comparison share real s
   const origin=`http://127.0.0.1:${server.address().port}`,h=await harness();
   try{
     const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-    const key=testPassword(),group=(await admin('/api/models/provider','POST',{repository_id:'101',api_url:origin+'/v1',api_key:key,model_names:['alpha','beta']})).value.models;
-    await admin('/api/models/provider','POST',{api_url:origin+'/v1',api_key:testPassword(),model_names:['shared']});
+    const key=testPassword(),group=(await admin('/api/models/provider','POST',{repository_id:'101',name:'fixture',api_url:origin+'/v1',api_key:key,model_names:['alpha','beta']})).value.models;
+    await admin('/api/models/provider','POST',{name:'fixture-shared',api_url:origin+'/v1',api_key:testPassword(),model_names:['shared']});
     await admin(`/api/models/${group[0].id}`,'PATCH',{version:1,pricing:{currency:'CNY',input_per_million:2,output_per_million:8,cache_per_million:0.2}});
     await page.goto(h.admin+'/#/projects/101/model');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
     await openModelCatalog(page);

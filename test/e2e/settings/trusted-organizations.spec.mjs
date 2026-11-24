@@ -36,7 +36,7 @@ test('a trusted organization lets its repository administrator start a repositor
     const card = page.locator('section.side-card', { has: page.getByRole('heading', { name: '受信任的组织' }) });
     await expect(card).toContainText('还没有受信任的组织');
     await card.getByLabel('要信任的组织', { exact: true }).selectOption('10');
-    await card.getByLabel('新组织 的默认模型', { exact: true }).selectOption({ label: '共享模型 A' });
+    await card.getByLabel('新组织 的默认模型', { exact: true }).selectOption({ label: '共享模型 A · 127.0.0.1:9' });
     await card.getByLabel('新组织 的默认能力上限', { exact: true }).selectOption('develop');
     await card.getByRole('button', { name: '信任', exact: true }).click();
     await expect(card.locator('.trusted-organization')).toContainText('由 administrator 于');

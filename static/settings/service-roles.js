@@ -21,7 +21,7 @@ function serviceRoleCard(view, initial, level = 'h2') {
   const live = liveCard(role.name, redraw => {
     const head = element('p', '');
     head.append(badge('内置', 'info'), ' ', role.enabled ? badge('已启用', 'success') : badge('已停用', 'warning'));
-    const model = role.model ? `${role.model.model_name} · ${hostOf(role.model.api_url)}${role.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置';
+    const model = role.model ? `${modelChoiceName(role.model)}${role.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置';
     const nodes = [head, facts([['职责', role.responsibility || '—'], ['模型', model], ['权限', '全部能力已允许'],
       ['累计用量', serviceUsageText(role.usage)], ['最近请求', role.usage.last_requested_at ? timestamp(role.usage.last_requested_at) : null], ['配置版本', String(role.revision)]])];
     if (!role.model) nodes.push(element('p', '没有配置模型时，管理助手的对话会直接提示到这里配置，不会改用其他模型。', 'endpoint-warning'));
@@ -29,7 +29,7 @@ function serviceRoleCard(view, initial, level = 'h2') {
     const prompt = textarea('prompt', role.prompt, { maxLength: 32000, rows: 4, placeholder: '附加在内置安全提示之后的说明；不能扩大工具或权限' });
     const modelSelect = document.createElement('select'), none = element('option', '不使用模型'); modelSelect.name = 'model_id'; none.value = ''; modelSelect.append(none);
     for (const choice of view.models) {
-      const option = element('option', `${choice.model_name} · ${hostOf(choice.api_url)}${choice.key_configured ? '' : '（Key 已撤销）'}`); option.value = choice.id; modelSelect.append(option);
+      const option = element('option', `${modelChoiceName(choice)}${choice.key_configured ? '' : '（Key 已撤销）'}`); option.value = choice.id; modelSelect.append(option);
     }
     modelSelect.value = role.model_id ?? '';
 

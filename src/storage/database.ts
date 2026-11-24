@@ -1,6 +1,7 @@
 import { configuredRedactor } from '../core/redaction.js';
 import { modelCatalogStorage } from '../models/catalog.js';
 import { sharedModelStorage } from '../models/sharing.js';
+import { providerStorage } from '../models/providers.js';
 import { childTaskStorage } from '../tasks/children.js';
 import { eventSubscriptionStorage } from '../tasks/event-subscriptions.js';
 import {longExecutionStorage} from '../roles/long-execution.js';
@@ -269,6 +270,8 @@ export class Store {
     modelCatalogStorage(this);
     // Shared models serve every project unless restricted (#850).
     sharedModelStorage(this);
+    // Providers are named models of one scope (#1332); unnamed ones keep their address groups.
+    providerStorage(this);
     // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
     trajectoryStorage(this.db);
     managerStorage(this);

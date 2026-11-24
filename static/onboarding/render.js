@@ -56,7 +56,7 @@ async function renderOnboarding(request,panel,feedback=''){
   }else if(onboardingStep===4){
     const shared=models.filter(model=>!model.repository_id&&model.key_configured),list=card('使用已配置的模型');for(const model of shared){const row=element('div','','row');row.append(modelAddress(model),button('选用此模型',async()=>{await api('/api/onboarding/model','POST',{model_id:model.id});wizardNext(5);}));list.append(row);}if(shared.length)panel.append(list);
     // The same model fields as a project's add-model form: resolved addresses, upstream list and test (project.js).
-    panel.append(wizardForm('添加模型',[note('保存的接口视为可信，可接收启用项目的代码、日志和测试材料。Key 加密保存，不明文回读。'),...modelFields(null)],'保存并继续',async value=>{const result=await api('/api/models','POST',{...value,repository_id:null});await api('/api/onboarding/model','POST',{model_id:result.model.id});wizardStep(5);}));next();
+    panel.append(wizardForm('添加模型',[note('保存的接口视为可信，可接收启用项目的代码、日志和测试材料。Key 加密保存，不明文回读。'),...modelFields(null)],'保存并继续',async value=>{const {provider_name,...model}=value;let result;try{result=await api('/api/models','POST',{...model,...(provider_name.trim()?{provider_name}:{}),repository_id:null});}catch(error){throw new Error(providerErrorText(error));}await api('/api/onboarding/model','POST',{model_id:result.model.id});wizardStep(5);}));next();
   }else if(onboardingStep===5){
     panel.append(note('四份内置规则覆盖标签、Issue 检视、PR 检视和明确要求改代码时的开发，项目在「角色 → Manager」的 Manager 提示词里改写对应章节；检视和开发标签的名字在项目设置里。仓库里的 .bot/ 文件不再读取。PR 修改仓库 skill 时必须由人决定，不能自动合并。'));
     // The built-in texts by the Manager section each one is (#935); the keys are the retired .bot/ names.

@@ -177,12 +177,16 @@ export function catalogPricing(store:Store,model:{id?:string;api_url:string;mode
   const entry=modelCatalog(store).match(model).entry;if(!entry?.cost)return null;
   return {currency:'USD' as const,input_per_million:entry.cost.input,output_per_million:entry.cost.output,cache_per_million:entry.cost.cache_read??entry.cost.input};
 }
-export function modelProtocol(store: Store, model: { id?: string; api_url: string; model_name: string }): {
+/**
+ * The interface a model uses and why: manual → URL suffix → catalog → default. `draft` replaces the saved manual
+ * interface (null = "auto"), so a form can show and probe what the model would use once saved with that choice.
+ */
+export function modelProtocol(store: Store, model: { id?: string; api_url: string; model_name: string }, draft?: { interface_type: ModelInterfaceType | null }): {
   interface_type: ModelInterfaceType; auth_header: ModelAuthHeader; source: 'manual' | 'url' | 'catalog' | 'default';
   override: { interface_type: ModelInterfaceType | null; auth_header: ModelAuthHeader | null };
 } {
   const saved = model.id ? store.get('SELECT interface_type,auth_header FROM model_catalog_overrides WHERE model_id=?', model.id) : undefined;
-  const manualInterface = modelInterfaceTypes.includes(saved?.interface_type) ? saved!.interface_type as ModelInterfaceType : null;
+  const manualInterface = draft ? draft.interface_type : modelInterfaceTypes.includes(saved?.interface_type) ? saved!.interface_type as ModelInterfaceType : null;
   const manualAuth = modelAuthHeaders.includes(saved?.auth_header) ? saved!.auth_header as ModelAuthHeader : null;
   const trimmed = String(model.api_url ?? '').replace(/\/$/, '');
   const urlInterface: ModelInterfaceType | null = /\/messages$/.test(trimmed) ? 'anthropic-messages'
@@ -197,7 +201,10 @@ export function modelProtocol(store: Store, model: { id?: string; api_url: strin
     : null;
   const interface_type: ModelInterfaceType = manualInterface ?? urlInterface ?? matched?.interface_type ?? codexDefault ?? 'openai-chat-completions';
   const source = manualInterface || manualAuth ? 'manual' : urlInterface ? 'url' : matched ? 'catalog' : 'default';
-  const defaultAuth: ModelAuthHeader = matched?.auth_header ?? (interface_type === 'anthropic-messages' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com') ? 'x-api-key' : 'bearer');
+  // A manual interface decides the automatic header too: the catalog's header belongs to the catalog's interface, so a
+  // Messages provider over a model the catalog lists for Chat Completions sends x-api-key, not the catalog's Bearer.
+  const defaultAuth: ModelAuthHeader = manualInterface ? (manualInterface === 'anthropic-messages' ? 'x-api-key' : 'bearer')
+    : matched?.auth_header ?? (interface_type === 'anthropic-messages' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com') ? 'x-api-key' : 'bearer');
   return { interface_type, auth_header: manualAuth ?? defaultAuth, source, override: { interface_type: manualInterface, auth_header: manualAuth } };
 }
 
