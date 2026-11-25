@@ -15,12 +15,13 @@ import { LedgerMigration, Trajectories, TrajectoryExpiry, inputHeader, trajector
 import { DiskGuard } from './disk.mjs';
 import { IncrementalVacuum } from './compaction.mjs';
 import { isCleanupCall, validateCall } from './project-runner-calls.mjs';
-import { sanitizeAgentPollTrajectory } from '../runner/image-budget.mjs';
+import { sanitizeTrajectoryInput, sanitizeTrajectoryResult } from './trajectory-redaction.mjs';
 import { MAX_CLI_CONFIG_BYTES } from '../runner/cli-config.mjs';
 import { SSH_AGENT_TYPES, SSH_COMMAND_TYPES, SSH_CONFIG_NAME, SSH_KEYS_NAME, publicKeyLine, renderSshConfig, validSshGrant } from '../runner/ssh-config.mjs';
 import { PrecompiledImageBuilder, reservedEnv, normalizePackages, normalizeScript, computeImageKey } from './precompiled-images.mjs';
 
 export { validateCall };
+export { sanitizeTrajectoryInput, sanitizeTrajectoryResult };
 export { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, resourceBounds, validResource };
 
 const randomId = () => randomBytes(24).toString('hex');
@@ -63,28 +64,6 @@ export function validateSpec(input) {
 const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
-const RUN_TOKEN_PATTERN = /\brrt_[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}\b/g;
-function sanitizeTrajectoryValue(value) {
-  if (typeof value === 'string') return value.includes('rrt_') ? value.replace(RUN_TOKEN_PATTERN, '[redacted:run_token]') : value;
-  if (Array.isArray(value)) return value.map(sanitizeTrajectoryValue);
-  if (!value || typeof value !== 'object') return value;
-  const out = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if ((key === 'run_token' || key === 'token') && typeof entry === 'string' && entry.length > 0) out[key] = '[redacted]';
-    else out[key] = sanitizeTrajectoryValue(entry);
-  }
-  return out;
-}
-export function sanitizeTrajectoryInput(input) {
-  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_gateway', 'workspace_agent_tool'].includes(input.request.type) && typeof input.request.base64 === 'string') {
-    return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
-  }
-  return sanitizeTrajectoryValue(input);
-}
-export function sanitizeTrajectoryResult(type, result) {
-  if (type === 'workspace_agent_poll' || type === 'workspace_harness_poll') return sanitizeAgentPollTrajectory(sanitizeTrajectoryValue(result));
-  return result;
-}
 // WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
 // The control plane uses the same limit (src/storage/database.ts).
 export const walSizeLimit = 512 * 1024 * 1024;
