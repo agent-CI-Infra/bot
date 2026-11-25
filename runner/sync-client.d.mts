@@ -10,6 +10,7 @@ export class SyncClientError extends Error {
 
 export function sha256Bytes(data: Buffer | string): string;
 export function isReservedSyncName(name: string): boolean;
+export function isSensitiveSyncPath(relPath: string): boolean;
 export function validateRelativeSyncPath(raw: unknown): string;
 
 export class CasCache {

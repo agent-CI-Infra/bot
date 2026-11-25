@@ -533,7 +533,7 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
   readonly policy: SyncNamespacePolicy = SYNC_NAMESPACE_POLICIES['project-notes'];
   private readonly locks = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly manager: Manager) {}
+  constructor(private readonly manager: Manager, private readonly store?: Store) {}
 
   validateScope(scope: string): void {
     if (!REPO_ID_RE.test(scope)) fail(400, 'sync_invalid_scope');
@@ -550,17 +550,32 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
     return next;
   }
 
-  private async listTree(scope: string): Promise<any[]> {
-    const res = await this.manager.call(
-      'GET',
-      `/v1/projects/${scope}/file-tree?directory=&query=&include_deleted=1&deleted_only=0&recursive=1`,
-    );
-    return Array.isArray(res?.files) ? res.files : [];
+  private async listTree(scope: string, requireExisting = false): Promise<any[]> {
+    const query = `directory=&query=&include_deleted=1&deleted_only=0&recursive=1${requireExisting ? '&require_existing=1' : ''}`;
+    try {
+      const res = await this.manager.call('GET', `/v1/projects/${scope}/file-tree?${query}`);
+      return Array.isArray(res?.files) ? res.files : [];
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.code === 'notes_volume_unavailable' || error.code === 'note_permission_denied')
+      ) {
+        return fail(503, 'sync_scope_unavailable');
+      }
+      throw error;
+    }
   }
 
   async snapshot(scope: string, options?: { paths?: readonly string[] }): Promise<SyncManifestSnapshot> {
     this.validateScope(scope);
-    const files = await this.listTree(scope);
+    const persisted = Boolean(this.store && hasPersistedSyncScope(this.store, 'project-notes', scope));
+    const files = await this.listTree(scope, persisted);
+    // Defense-in-depth: with `include_deleted=1`, even a scope whose files were all soft-deleted still lists
+    // tombstones in `.write-history`. An empty list for a previously synced scope means the backing notes
+    // directory/volume disappeared or was recreated empty -> fail closed so clients never wipe local notes.
+    if (persisted && files.length === 0) {
+      return fail(503, 'sync_scope_unavailable');
+    }
     const pathSet = options?.paths?.length ? new Set(options.paths) : null;
     const entries: SyncEntry[] = [];
     for (const file of files) {

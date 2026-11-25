@@ -635,6 +635,20 @@ test('ManagerProjectNotesAdapter retries concurrent console race into 3-layer co
       () => c1.push({ mode: 'interactive' }),
       err => err.status === 503 && err.code === 'manager_unavailable',
     );
+
+    // Production manager-bridge fail-closed guarantee: deleting the notes directory on the manager
+    // MUST return 503 sync_scope_unavailable without recreating the directory and without wiping client files!
+    await c2.pull();
+    const c2NoteBefore = readFileSync(join(c2Dir, 'runbook.md'), 'utf8');
+    assert.match(c2NoteBefore, /v1-console-conflict/);
+    const mgrNotesDir = join(dir, 'local-repo-77', 'project-notes');
+    rmSync(mgrNotesDir, { recursive: true, force: true });
+    await assert.rejects(
+      () => c2.pull(),
+      err => err.status === 503 && err.code === 'sync_scope_unavailable',
+    );
+    assert.equal(existsSync(mgrNotesDir), false, 'sync pull must not recreate a missing manager notes directory');
+    assert.equal(readFileSync(join(c2Dir, 'runbook.md'), 'utf8'), c2NoteBefore, 'local note must remain intact on 503');
   } finally {
     await new Promise(r => { server.close(() => r()); server.closeAllConnections(); });
     store.close();
@@ -815,6 +829,26 @@ test('SyncClient protects untracked local files on pull, supports same-dir basel
     assert.equal(adaptivePush.skipped_oversized.length, 1);
     assert.equal(adaptivePush.skipped_oversized[0].path, 'huge-no-pull.md');
     assert.equal(existsSync(join(env.projectNotesRoot, '42', 'small-ok.md')), true);
+
+    // 4. Sensitive paths (.env / *.pem) are rejected client-side BEFORE POST /blobs/put so bytes never stage in CAS!
+    const dirSensitive = join(env.dir, 'edge-sensitive');
+    mkdirSync(dirSensitive, { recursive: true });
+    const envPayload = 'DATABASE_URL=postgres://user:pass@host/db\n';
+    const envSha = (await import('../../../../dist/sync/index.js')).sha256Buffer(Buffer.from(envPayload, 'utf8'));
+    writeFileSync(join(dirSensitive, '.env'), envPayload);
+    const sensitiveClient = new SyncClient({
+      baseUrl: env.baseUrl,
+      token,
+      namespace: 'project-notes',
+      scope: '42',
+      targetDir: dirSensitive,
+      cas,
+    });
+    await assert.rejects(
+      () => sensitiveClient.push({ mode: 'interactive' }),
+      err => err.status === 400 && err.code === 'sync_sensitive_path' && err.detail?.path === '.env',
+    );
+    assert.equal(await env.sync.engine.blobStore.has(envSha), false, '.env bytes must never be staged in control-plane CAS');
   } finally {
     await env.close();
   }

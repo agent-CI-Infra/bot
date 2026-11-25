@@ -9,6 +9,7 @@ import { RetentionCleanup } from '../../../../dist/storage/retention.js';
 import {
   FileSyncEngine,
   LocalDiskBlobStore,
+  ManagerProjectNotesAdapter,
   SYNC_NAMESPACE_NAMES,
   SYNC_NAMESPACE_POLICIES,
   SyncTokenService,
@@ -22,6 +23,7 @@ import {
   sha256Buffer,
   validateInternalSymlinkTarget,
 } from '../../../../dist/sync/index.js';
+import { HttpError } from '../../../../dist/core/security.js';
 import { Notes } from '../../../../runner/notes.mjs';
 import { noteComponent, notePath } from '../../../../runner/note-path.mjs';
 import { FileTree } from '../../../../manager/file-tree.mjs';
@@ -682,6 +684,56 @@ test('sync lifecycle cleanup: project/assistant deletion and RetentionCleanup sw
     const later = pruneSyncData(store, { now: now + 40 * 24 * 3600_000 });
     assert.ok(later.refs_pruned >= 1);
     assert.equal(await engine.blobStore.has(sharedSha), false);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ManagerProjectNotesAdapter passes require_existing=1 for persisted scopes and fails closed on empty/unavailable manager responses', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sync-mgr-failclosed-'));
+  const store = makeStore(dir);
+  try {
+    const calls = [];
+    let mode = 'present';
+    const mockManager = {
+      async call(method, path) {
+        calls.push(`${method} ${path}`);
+        if (mode === 'unavailable') throw new HttpError(503, 'notes_volume_unavailable');
+        if (mode === 'empty') return { files: [] };
+        return {
+          files: [
+            { id: 'f:1', path: 'doc.md', revision: 1, sha256: sha256Buffer(Buffer.from('hi')), bytes: 2, deleted: false },
+          ],
+        };
+      },
+    };
+    const engine = new FileSyncEngine({
+      store,
+      blobStore: new LocalDiskBlobStore(store.syncBlobsDir),
+      adapters: [new ManagerProjectNotesAdapter(mockManager, store)],
+    });
+
+    // First manifest: not persisted yet -> does NOT require_existing, advances persisted scope to rev 1.
+    const m1 = await engine.manifest('project-notes', '55');
+    assert.equal(m1.revision, 1);
+    assert.equal(m1.entries.length, 1);
+    assert.ok(!calls[0].includes('require_existing=1'));
+
+    // Subsequent manifest on persisted scope passes require_existing=1 and maps notes_volume_unavailable -> 503 sync_scope_unavailable.
+    mode = 'unavailable';
+    await assert.rejects(
+      () => engine.manifest('project-notes', '55'),
+      err => err.status === 503 && err.code === 'sync_scope_unavailable',
+    );
+    assert.ok(calls.at(-1).includes('require_existing=1'));
+
+    // Defense-in-depth: even if a manager ignores require_existing and returns `{ files: [] }` for a persisted scope, fail closed 503!
+    mode = 'empty';
+    await assert.rejects(
+      () => engine.manifest('project-notes', '55'),
+      err => err.status === 503 && err.code === 'sync_scope_unavailable',
+    );
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
