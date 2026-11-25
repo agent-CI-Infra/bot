@@ -2,7 +2,7 @@ function sshTargetsCard(project, canManage) {
   const root = card('SSH 远程主机'), listing = element('div'), editor = element('div');
   const status = element('p', '正在读取 SSH 主机…', 'muted');
   status.setAttribute('role', 'status');
-  root.append(listing, editor, status);
+  root.append(note('当前可登记主机和配置项目绑定。运行时 SSH 连接尚未启用。'), listing, editor, status);
   const projectPath = '/api/repositories/' + project + '/ssh-targets', poolPath = '/api/ssh-targets';
   let revision = 0;
   const select = (choices, initial) => {
