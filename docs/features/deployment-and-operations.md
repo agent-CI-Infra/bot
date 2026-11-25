@@ -40,7 +40,7 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | 镜像 | 用途 | Compose 服务 |
 | --- | --- | --- |
 | `ghcr.io/agent-ci-infra/bot-control-plane` | 控制面、密钥初始化与入口网关 | `bot`、`key-init`、`webhook` |
-| `ghcr.io/agent-ci-infra/bot-computer-manager` | 管理动态项目电脑与助手电脑（唯一挂载 Docker socket） | `manager` |
+| `ghcr.io/agent-ci-infra/bot-computer-manager` | 管理动态项目电脑与助手电脑（唯一挂载本地 Docker socket；亦作为远端计算节点 `node-agent` 镜像） | `manager` / `node-agent` |
 | `ghcr.io/agent-ci-infra/bot-project-computer` | 项目电脑与助手电脑批准基础镜像（预装工具链、Chromium 与 X11 虚拟桌面） | `project-image` |
 | `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选 Cloudflare Tunnel 连接器 | `tunnel` |
 
@@ -85,6 +85,33 @@ docker compose up -d
 ```
 
 > `docker compose down` 会保留数据卷；**切勿在日常升级或维护时执行 `docker compose down -v`**，否则会删除主密钥、数据库和账本。
+
+### 分布式 Linux Docker 计算节点部署与升级
+
+单机部署默认自动启用内置 `local` 节点，零额外配置即可开箱即用。需要横向扩展多台 Linux Docker 算力主机时，可在控制面保持单点的前提下接入多个远端 `node-agent` 节点（无需 Kubernetes，也绝不暴露任何 Docker TCP 端口）：
+
+1. **签发一次性配对令牌**：超级管理员在控制台「全局设置 → 计算节点」（`#/settings/compute-nodes`）填写节点名称、可选调度标签与令牌有效期，获取一次性 `bnode_...` 配对令牌与启动命令。
+2. **启动远端节点**：在目标 Linux Docker 主机使用 [`docker/compose.node.yaml`](../../docker/compose.node.yaml) 启动（直接复用已发布的 `bot-computer-manager:${BOT_IMAGE_TAG}` 与 `bot-project-computer:${BOT_IMAGE_TAG}` 镜像）：
+
+```sh
+BOT_CENTER_URL=https://bot.example.com \
+BOT_NODE_PAIRING_TOKEN=bnode_... \
+BOT_IMAGE_TAG=latest \
+BOT_NODE_LABELS=region=cn-east,arch=amd64 \
+  docker compose -f docker/compose.node.yaml -p bot-node-worker-01 up -d
+```
+
+- **身份与凭据**：首次配对成功后，`node-agent` 将自动生成的 Ed25519 密钥对持久化在 `node-data` 卷（`/data/node-identity.json`），一次性配对令牌立即失效，后续重启无需再提供 `BOT_NODE_PAIRING_TOKEN`；节点通过 Ed25519 签名断言换取绑定到自身 `node_id` 的短期会话（`bnsess_...`）及按范围授权的短期文件同步令牌（`bsync_...`）。
+- **网络连接与模型代理**：`node-agent` 主动反向连接控制面（优先 WebSocket `/cluster/nodes/ws`，反向代理不支持 Upgrade 或被阻断时自动降级为 `<=25s` HTTPS 长轮询 `/cluster/nodes/poll`，亦可通过 `BOT_NODE_TRANSPORT=long_poll` 显式指定）。容器模型请求经节点本地 UDS（`/run/model-gateway/gateway.sock`）持短期 `rrt_...` 运行令牌中转至控制面模型网关，模型长期 API Key 永不离开控制面。
+- **调度标签与能力边界**：`arch` 与 `gpu` 仅作为节点调度标签与容量展示字段，**不包含容器 GPU 设备直通（`DeviceRequests`）**；宿主机直跑驱动（`host`）仅预留接口占位（返回 `501 host_driver_not_implemented`），当前仅支持 Linux Docker（`docker`）节点。
+- **项目改绑、排水与撤销**：
+  - 超级管理员可在项目「机器配置 → 计算节点绑定」将项目切换至其他在线节点；切换时自动将项目笔记经同步引擎写回控制面、停止并回收旧节点本地容器与工作卷，再在目标节点重建（不跨节点拷贝工作卷）。
+  - 在「计算节点」页发起「排水」后，节点立即停止接收新任务认领与新助手电脑分配，不中断已在跑任务；待在跑任务结束或达到排水超时后自动停容器。
+  - 「下线撤销」会断开连接、吊销所有节点会话与同步令牌，并尽力停止清理该节点上的容器。
+- **滚动升级顺序与版本兼容性**：
+  1. **先升级控制面**（拉取新 `BOT_IMAGE_TAG` 并重启 `bot` 与本机 `manager`）；
+  2. **逐台升级远端节点**：对目标节点执行「开始排水」→ 待排空后在节点主机更新 `BOT_IMAGE_TAG` 并执行 `docker compose -f docker/compose.node.yaml pull && docker compose -f docker/compose.node.yaml up -d` → 在控制台点击「恢复上线」。
+  3. 控制面与 `node-agent` 在配对和会话握手时强校验协议版本范围（当前支持协议 `v1`）；若两端版本不兼容，控制面直接返回 `426 node_protocol_incompatible` 并在日志与错误明细中给出明确升级指引。
 
 ### 标签发版与自动化部署（`release.yml`）
 

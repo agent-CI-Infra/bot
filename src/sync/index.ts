@@ -42,6 +42,7 @@ export interface CreateDefaultSyncRuntimeOptions {
   assistantHomesRoot?: string;
   extraAdapters?: SyncNamespaceAdapter[];
   authenticate?: SyncAuthenticator;
+  tokens?: SyncTokenService;
   clock?: () => number;
 }
 
@@ -86,7 +87,7 @@ export function createDefaultSyncRuntime(options: CreateDefaultSyncRuntimeOption
     adapters,
     clock: options.clock,
   });
-  const tokens = new SyncTokenService(options.store, options.clock);
+  const tokens = options.tokens ?? new SyncTokenService(options.store, options.clock);
   const handleHttp = createSyncHttpHandler({
     engine,
     tokens,

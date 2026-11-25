@@ -10,9 +10,9 @@ export const notesRemovalFailed = 'repository.notes_removal_failed';
 export const notesVolumeReclaimed = 'repository.notes_volume_reclaimed';
 export const notesRemovalAbandoned = 'repository.notes_removal_abandoned';
 
-export interface NotesOrphan { repository_id: string; name: string; first_failed_at: string | null }
+export interface NotesOrphan { repository_id: string; name: string; first_failed_at: string | null; node_id?: string }
 export interface OrphanTrajectory { repository_id: string; path: string }
-export interface NotesVolumes { notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null }[]> ; reclaimNotes(id: string, waitMs?: number): Promise<void> }
+export interface NotesVolumes { notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null; node_id?: string }[]> ; reclaimNotes(id: string, waitMs?: number, nodeId?: string): Promise<void> }
 
 /**
  * Deletions whose notes volume was never deleted: the failed-removal audit that no *later* reclaim audit answers.
@@ -35,15 +35,22 @@ export async function orphanNotesVolumes(store: Store, projects: NotesVolumes): 
   const intents = new Map(notesOrphanIntents(store).map(orphan => [orphan.repository_id, orphan.first_failed_at]));
   const known = new Set(store.all('SELECT id FROM repositories').map(row => String(row.id)));
   const volumes = await projects.notesVolumes();
-  const byRepo = new Map<string, { name: string; first_failed_at: string | null }>();
+  const byRepo = new Map<string, { repository_id: string; name: string; first_failed_at: string | null; node_id?: string }>();
   for (const volume of volumes) {
     const repository_id = volume.repository_id || /-(\d+)-notes$/.exec(volume.name)?.[1] || '';
     if (!repository_id || known.has(repository_id)) continue;
-    byRepo.set(repository_id, { name: volume.name, first_failed_at: intents.get(repository_id) ?? volume.created_at });
+    const nodeId = typeof volume.node_id === 'string' && volume.node_id ? volume.node_id : undefined;
+    const key = nodeId ? `${nodeId}:${repository_id}` : repository_id;
+    byRepo.set(key, {
+      repository_id,
+      name: volume.name,
+      first_failed_at: intents.get(repository_id) ?? volume.created_at,
+      ...(nodeId ? { node_id: nodeId } : {}),
+    });
   }
   // An intent without a volume is already gone (a retry finished without recording it, or the volume never existed).
-  return [...byRepo].map(([repository_id, volume]) => ({ repository_id, name: volume.name, first_failed_at: volume.first_failed_at }))
-    .sort((a, b) => (a.first_failed_at ?? '').localeCompare(b.first_failed_at ?? '') || a.repository_id.localeCompare(b.repository_id));
+  return [...byRepo.values()]
+    .sort((a, b) => (a.first_failed_at ?? '').localeCompare(b.first_failed_at ?? '') || a.repository_id.localeCompare(b.repository_id) || (a.node_id ?? '').localeCompare(b.node_id ?? ''));
 }
 
 /**
@@ -102,11 +109,12 @@ export class NotesReclaimer {
   async sweep(): Promise<NotesOrphan[]> {
     const now = this.now();
     for (const orphan of await orphanNotesVolumes(this.store, this.projects)) {
-      const state = this.attempts.get(orphan.repository_id) ?? { attempts: 0, nextAt: 0, abandoned: false };
-      this.attempts.set(orphan.repository_id, state);
+      const attemptKey = orphan.node_id ? `${orphan.node_id}:${orphan.repository_id}` : orphan.repository_id;
+      const state = this.attempts.get(attemptKey) ?? { attempts: 0, nextAt: 0, abandoned: false };
+      this.attempts.set(attemptKey, state);
       if (state.abandoned || now < state.nextAt) continue;
       try {
-        await this.projects.reclaimNotes(orphan.repository_id);
+        await this.projects.reclaimNotes(orphan.repository_id, undefined, orphan.node_id);
       } catch (error) {
         state.attempts += 1; state.nextAt = now + this.delay(state.attempts);
         if (state.attempts >= this.maxAttempts) {
@@ -118,7 +126,7 @@ export class NotesReclaimer {
       }
       // The intent is closed only after the manager answered; the audit row is what the readiness check counts.
       this.store.audit('system', notesVolumeReclaimed, orphan.repository_id, orphan.repository_id);
-      this.attempts.delete(orphan.repository_id);
+      this.attempts.delete(attemptKey);
     }
     return orphanNotesVolumes(this.store, this.projects);
   }

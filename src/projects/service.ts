@@ -14,6 +14,7 @@ import { consoleComputer, ownComputer, rememberConsoleComputer, saveConsoleCompu
 import { activeProjectToolRevision } from './tools.js';
 import { ensureProjectSkillScope, resolveSkillStoreRoot } from '../roles/skill-store.js';
 import { MAX_CLI_CONFIG_BYTES } from '../../runner/cli-config.mjs';
+import { isRepositoryNodeClaimable, LOCAL_NODE_ID, recordOperationNodeBinding } from '../cluster/storage.js';
 
 // Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
 export const superAdminComputerFields = new Set(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress']);
@@ -195,21 +196,28 @@ export class ProjectService {
       if (failedAt) {
         const listed = await this.manager.call('GET', '/v1/notes-volumes').catch(() => null);
         const volumes = (Array.isArray(listed) ? listed : Array.isArray((listed as any)?.volumes) ? (listed as any).volumes : null) as
-          { repository_id?: unknown; created_at?: unknown }[] | null;
+          { repository_id?: unknown; created_at?: unknown; node_id?: unknown }[] | null;
         // A manager that cannot list its volumes is asked again on the next pass; deleting blind is what lost real notes.
         if (volumes) {
-          const volume = volumes.find(row => String(row.repository_id) === repo.id);
+          const matched = volumes.filter(row => String(row.repository_id) === repo.id);
           // A volume created after the failure belongs to the project connected since: the notes of the deleted project
           // are already gone, so only the intent closes. An old volume, or none at all, is the residue that must go.
-          const stale = !volume || !volume.created_at || !Number.isFinite(Date.parse(String(volume.created_at))) ||
-            Date.parse(String(volume.created_at)) <= Date.parse(failedAt);
-          if (stale) await this.reclaimNotes(repo.id);
+          if (matched.length === 0) {
+            await this.reclaimNotes(repo.id);
+          } else {
+            for (const volume of matched) {
+              const stale = !volume.created_at || !Number.isFinite(Date.parse(String(volume.created_at))) ||
+                Date.parse(String(volume.created_at)) <= Date.parse(failedAt);
+              if (stale) await this.reclaimNotes(repo.id, undefined, typeof volume.node_id === 'string' ? volume.node_id : undefined);
+            }
+          }
           this.store.audit('system', 'repository.notes_volume_reclaimed', repo.id, repo.id);
         }
       }
+      const nodeClaimable = isRepositoryNodeClaimable(this.store, repo.id);
       let state = await this.manager.call('GET', '/v1/projects/' + repo.id);
       if (this.removing.has(repo.id)) return;
-      if (!state && repo.enabled) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);
+      if (!state && repo.enabled && nodeClaimable) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);
       if (!state || this.removing.has(repo.id)) return;
       this.save(state);
       syncConsoleComputer(this.store, repo.id, (state as any)?.computer);
@@ -227,23 +235,26 @@ export class ProjectService {
       // 30 s, 1, 2, 4 … minutes (at most 30) between attempts, so it never stays down with its tasks waiting for it.
       // A failed reset is left for a person: starting the old generation is refused until it is reset again.
       if (state.state !== 'failed') this.restarts.delete(repo.id);
-      const retry = repo.enabled && state.state === 'failed' && Date.now() >= (this.restarts.get(repo.id)?.at ?? 0);
+      const retry = repo.enabled && nodeClaimable && state.state === 'failed' && Date.now() >= (this.restarts.get(repo.id)?.at ?? 0);
       if (retry) { const attempts = (this.restarts.get(repo.id)?.attempts ?? 0) + 1; this.restarts.set(repo.id, { attempts, at: Date.now() + Math.min(30_000 * 2 ** (attempts - 1), 30 * 60_000) }); }
       // A start still owed a notes purge waits for its retry slot: the manager answered why it could not clear the residue,
       // and asking again on this pass would only repeat that answer (#783).
       const notesWaiting = (this.notesRetries.get(repo.id)?.at ?? 0) > Date.now();
       const action = !repo.enabled && !['stopped','deleted'].includes(state.desired) ? 'stop'
-        : repo.enabled && !notesWaiting && (['stopped','deleted'].includes(state.state) || retry) ? 'start' : null;
+        : repo.enabled && nodeClaimable && !notesWaiting && (['stopped','deleted'].includes(state.state) || retry) ? 'start' : null;
       if (action) {
         const input = { operation_id: randomId(), generation: state.generation };
-        this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
+        this.store.transaction(() => {
+          this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
+          recordOperationNodeBinding(this.store, input.operation_id, repo.id);
+        });
         const result = await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
         // A start that brought the computer up ends the backoff, so a later failure is retried at once.
         if (result?.state !== 'failed') this.restarts.delete(repo.id);
         // An answered start also clears the notes-retry slot: the residue it owed is gone, or the manager no longer refuses it.
         this.notesRetries.delete(repo.id);
         if (result?.state) state = result;
-      } else if (repo.enabled && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending || state.computer?.tools_pending || state.computer?.skills_pending)) {
+      } else if (repo.enabled && nodeClaimable && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending || state.computer?.tools_pending || state.computer?.skills_pending)) {
         // Resource defaults changed, a deferred precompiled image finished building, a new project tools revision was
         // published, or the project skill-store subpath became available: rebuild once no task runs on the computer.
         // claimQueuedTask excludes repositories with a pending environment_operations row, so checking claims and
@@ -251,7 +262,9 @@ export class ProjectService {
         const input = { operation_id: randomId(), generation: state.generation };
         const queued = this.store.transaction(() => {
           if (this.store.get("SELECT 1 FROM task_claims WHERE repository_id=? UNION ALL SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", repo.id, repo.id)) return false;
-          this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, 'refresh', JSON.stringify(input)); return true;
+          this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, 'refresh', JSON.stringify(input));
+          recordOperationNodeBinding(this.store, input.operation_id, repo.id);
+          return true;
         });
         if (queued) await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
       }
@@ -287,7 +300,10 @@ export class ProjectService {
     const state = await this.manager.call('GET', '/v1/projects/' + id);
     if (!state) return;
     const input = { operation_id: randomId(), generation: state.generation, ...(deleteNotes ? { request: { delete_notes: true } } : {}) };
-    this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, id, 'delete', JSON.stringify(input));
+    this.store.transaction(() => {
+      this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, id, 'delete', JSON.stringify(input));
+      recordOperationNodeBinding(this.store, input.operation_id, id);
+    });
     await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
   }
   /**
@@ -296,17 +312,19 @@ export class ProjectService {
    * the save to refer to. The caller records a failure instead of reporting the committed deletion as failed.
    */
   /** Every notes volume the manager owns, including ones no project row here refers to any more (#771). */
-  async notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null }[]> {
+  async notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null; node_id?: string }[]> {
     const answer = await this.manager.call('GET', '/v1/notes-volumes') as unknown;
     // The manager answers the bare array today; a proxy or a newer manager may wrap it in `volumes`. Any other answer is
     // unreadable rather than empty: an empty list would claim nothing is left behind while the read actually failed,
     // so every caller takes its documented failure path instead (#808).
     const volumes = Array.isArray(answer) ? answer : (answer as { volumes?: unknown } | null | undefined)?.volumes;
     if (!Array.isArray(volumes)) fail(503, 'manager_notes_volumes_unavailable');
-    return volumes as { name: string; repository_id: string; created_at: string | null }[];
+    return volumes as { name: string; repository_id: string; created_at: string | null; node_id?: string }[];
   }
   /** Idempotent, name-based reclaim: it works after the project row is gone, which a retried deletion needs (#771). */
-  async reclaimNotes(id: string, waitMs = 120_000): Promise<void> { await this.manager.call('POST', `/v1/projects/${id}/notes/reclaim`, {}, waitMs); }
+  async reclaimNotes(id: string, waitMs = 120_000, nodeId?: string): Promise<void> {
+    await this.manager.call('POST', `/v1/projects/${id}/notes/reclaim`, nodeId ? { node_id: nodeId } : {}, waitMs);
+  }
   async removeNotes(id: string, waitMs = 120_000): Promise<void> {
     const state = await this.manager.call('GET', '/v1/projects/' + id);
     // Without the manager's state the volume cannot be identified, so the caller's audit names a removal that did not
@@ -396,8 +414,35 @@ export class ProjectService {
       if (commands.length >= 30) break;
     }
     const computer = live?.computer ? (user ? sanitizeComputerForActor(user, live.computer) : live.computer) : null;
+    const bindingRow = this.store.hasTable('repository_node_bindings')
+      ? this.store.get(
+          'SELECT b.node_id, b.state AS binding_state, b.binding_epoch, n.name AS node_name, n.status AS node_status, n.arch AS node_arch, n.labels AS node_labels FROM repository_node_bindings b LEFT JOIN compute_nodes n ON n.id=b.node_id WHERE b.repository_id=?',
+          id,
+        )
+      : undefined;
+    const localNodeRow = !bindingRow && this.store.hasTable('compute_nodes')
+      ? this.store.get('SELECT id, name, status, arch, labels FROM compute_nodes WHERE id=?', LOCAL_NODE_ID)
+      : undefined;
+    const node_binding = bindingRow
+      ? {
+          node_id: String(bindingRow.node_id),
+          node_name: bindingRow.node_name ? String(bindingRow.node_name) : String(bindingRow.node_id),
+          node_status: bindingRow.node_status ? String(bindingRow.node_status) : 'unknown',
+          node_arch: bindingRow.node_arch ? String(bindingRow.node_arch) : null,
+          state: String(bindingRow.binding_state),
+          binding_epoch: Number(bindingRow.binding_epoch || 1),
+        }
+      : {
+          node_id: LOCAL_NODE_ID,
+          node_name: localNodeRow?.name ? String(localNodeRow.name) : '本机节点 (local)',
+          node_status: localNodeRow?.status ? String(localNodeRow.status) : 'online',
+          node_arch: localNodeRow?.arch ? String(localNodeRow.arch) : null,
+          state: 'bound',
+          binding_epoch: 1,
+        };
     return { observation: { status: observed, checked_at: new Date().toISOString(), state: live?.state ?? null },
       can_configure: user ? canConfigureProject(user, id) : undefined,
+      node_binding,
       environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer,
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
       running_tasks: this.store.all(`SELECT t.id,t.kind,t.status,t.phase,t.object_number,c.claimed_at FROM task_claims c JOIN tasks t ON t.id=c.task_id
@@ -497,6 +542,7 @@ export class ProjectService {
     this.store.transaction(() => {
       if (!previous) {
         this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", String(input.operation_id), id, match[2]!, payload);
+        recordOperationNodeBinding(this.store, String(input.operation_id), id);
         this.store.audit(user.id, 'environment.' + match[2], String(input.operation_id), id);
         if (match[2] === 'start' || match[2] === 'reset') this.store.run('UPDATE policies SET enabled=1 WHERE repository_id=?', id);
         else if (match[2] !== 'configure') this.store.run('UPDATE policies SET enabled=0 WHERE repository_id=?', id);

@@ -47,6 +47,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM event_subscriptions WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pr_states WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1], ['DELETE FROM bot_pr_requests WHERE repository_id=?', 1],
     ['DELETE FROM tasks WHERE repository_id=?', 1], ['DELETE FROM automation_runs WHERE repository_id=?', 1], ['DELETE FROM deliveries WHERE repository_id=?', 1],
     ['DELETE FROM environment_operations WHERE repository_id=?', 1], ['DELETE FROM project_environments WHERE repository_id=?', 1],
+    ['DELETE FROM repository_node_bindings WHERE repository_id=?', 1], ['DELETE FROM repository_node_volumes WHERE repository_id=?', 1],
     ['DELETE FROM project_tool_revisions WHERE repository_id=?', 1], ['DELETE FROM project_tool_state WHERE repository_id=?', 1],
     // Role configuration revisions, versioned project skills, pinned skill bundles and run snapshots belong to the project.
     ['DELETE FROM role_snapshots WHERE repository_id=?', 1], ['DELETE FROM skill_bundle_revisions WHERE repository_id=?', 1], ['DELETE FROM role_config_revisions WHERE repository_id=?', 1],

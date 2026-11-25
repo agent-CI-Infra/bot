@@ -916,6 +916,49 @@ export class SyncTokenService {
     return removed;
   }
 
+  revokeMatchingScope(
+    actor: string,
+    namespace: SyncNamespaceName,
+    scope: string,
+    actorId = 'system',
+  ): number {
+    const now = this.clock();
+    const matches = (grants: readonly SyncTokenGrant[]) =>
+      grants.some(g => (g.namespace === '*' || g.namespace === namespace) && (g.scope === '*' || g.scope === scope));
+    if (this.store) {
+      return this.store.transaction(() => {
+        const rows = this.store!.all(
+          'SELECT id, grants FROM sync_tokens WHERE actor=? AND revoked_at IS NULL',
+          actor,
+        );
+        let revoked = 0;
+        for (const row of rows) {
+          let grants: SyncTokenGrant[] = [];
+          try {
+            const parsed = JSON.parse(String(row.grants));
+            if (Array.isArray(parsed)) grants = parsed;
+          } catch {
+            continue;
+          }
+          if (!matches(grants)) continue;
+          const id = String(row.id);
+          this.store!.run('UPDATE sync_tokens SET revoked_at=? WHERE id=?', now, id);
+          this.store!.audit(actorId, 'sync.token.revoked', id);
+          revoked++;
+        }
+        return revoked;
+      });
+    }
+    let removed = 0;
+    for (const entry of this.memoryTokens.values()) {
+      if (entry.actor === actor && entry.revokedAt === null && matches(entry.grants)) {
+        entry.revokedAt = now;
+        removed++;
+      }
+    }
+    return removed;
+  }
+
   sweepExpired(): void {
     const now = this.clock();
     if (this.store) {
