@@ -1,3 +1,4 @@
+import { testSshTarget } from './ssh-target-test.js';
 import { isIP } from 'node:net';
 import { repository, superAdmin, type Actor } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
@@ -21,8 +22,8 @@ function targets(store: Store, project: string | null): Row[] {
 }
 
 /** Host and network policy are managed by platform administrators, as for the project egress setting. */
-export function sshTargetsApi(store: Store, user: Actor, method: string, url: URL, input: Json): Json | undefined {
-  const match = /^\/api\/(?:repositories\/([1-9]\d{0,19})\/)?ssh-targets(?:\/([a-f0-9]{48}))?(?:\/(binding))?$/.exec(url.pathname);
+export function sshTargetsApi(store: Store, user: Actor, method: string, url: URL, input: Json): Json | Promise<Json> | undefined {
+  const match = /^\/api\/(?:repositories\/([1-9]\d{0,19})\/)?ssh-targets(?:\/([a-f0-9]{48}))?(?:\/(binding|test))?$/.exec(url.pathname);
   if (!match) return undefined;
   const [,projectId,id,action] = match, project = projectId ?? null;
   if (project) {
@@ -31,6 +32,10 @@ export function sshTargetsApi(store: Store, user: Actor, method: string, url: UR
   }
   if (!project || method !== 'GET') superAdmin(user);
   if (!id && method === 'GET') return {targets: targets(store,project)};
+  if (action === 'test' && id && method === 'POST') {
+    fields(input,[]);
+    return testSshTarget(store,user.id,id,project);
+  }
   if (action === 'binding' && id && project && (method === 'PUT' || method === 'DELETE')) {
     fields(input,[]);
     const global = store.get('SELECT alias FROM ssh_targets WHERE id=? AND owner_project IS NULL',id);

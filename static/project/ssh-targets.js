@@ -2,7 +2,7 @@ function sshTargetsCard(project, canManage) {
   const root = card('SSH 远程主机'), listing = element('div'), editor = element('div');
   const status = element('p', '正在读取 SSH 主机…', 'muted');
   status.setAttribute('role', 'status');
-  root.append(note('当前可登记主机和配置项目绑定。运行时 SSH 连接尚未启用。'), listing, editor, status);
+  root.append(note('连通性测试从控制面连接登记地址，核验主机指纹和凭据。'), listing, editor, status);
   const projectPath = '/api/repositories/' + project + '/ssh-targets', poolPath = '/api/ssh-targets';
   let revision = 0;
   const select = (choices, initial) => {
@@ -74,6 +74,21 @@ function sshTargetsCard(project, canManage) {
         tableCell(tr,'别名',element('strong',row.alias));
         tableCell(tr,'地址',element('code',row.username + '@' + row.host + ':' + row.port));
         tableCell(tr,'连接方式',element('span',({direct:'直连',proxy_jump:'跳板',tunnel:'控制面隧道'})[row.route]));
+        if (canManage) {
+          const test = button('测试连通性', async () => {
+            test.disabled = true;
+            const result = element('span', '正在测试…');
+            result.setAttribute('role','status');
+            actions.querySelector('[role="status"]')?.remove();
+            actions.append(result);
+            try {
+              const reply = await api(path + '/' + row.id + '/test','POST',{});
+              result.textContent = reply.ok ? '认证成功' : '测试失败：' + reply.error;
+            } catch (err) { result.textContent = readErrorText(err); }
+            finally { test.disabled = false; }
+          });
+          actions.append(test);
+        }
         if (canManage && (row.owner_project || path === poolPath)) {
           actions.append(button('编辑', () => edit(row,path,rows)));
           const remove = button('删除', async () => {
