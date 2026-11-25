@@ -370,3 +370,29 @@ test('independent pre-upgrade regression: adding skill_bundle_ids column preserv
   const actualFence = bindings.fence('chat-1');
   assert.equal(actualFence, expectedFence, 'ChannelServiceBindings.fence() must remain byte-for-byte identical after upgrading schema');
 });
+
+test('legacy repository-assistant binding keeps default feishu-cards and conflicting inline bundle paths are rejected (#1359)', t => {
+  const s = baseStore(t);
+
+  // 1. Untouched pre-#1249 group binding carrying legacy `repository-assistant` service_role_id with NULL skill_bundle_ids.
+  assert.deepEqual(defaultServiceRoleBundleIds('repository-assistant'), ['feishu-cards']);
+  const legacyGroupSkills = resolveServiceRoleSkills(s, null, 'repository-assistant', 'feishu');
+  assert.deepEqual(legacyGroupSkills.bundleIds, ['feishu-cards']);
+  assert.deepEqual(legacyGroupSkills.skills.map(sk => sk.slug), ['feishu-cards']);
+  assert.ok(legacyGroupSkills.files.some(f => f.path === 'feishu-cards/SKILL.md'));
+  assert.ok(!legacyGroupSkills.files.some(f => f.path.endsWith('LICENSE')));
+
+  // 2. Two bound legacy inline bundles with conflicting content at the same path (`SKILL.md`) are rejected at save time.
+  const cfg = roleConfiguration(s, 'r');
+  assert.throws(
+    () => saveConfiguration(s, 'r', {
+      expected_revision: cfg.revision,
+      skills: [
+        { id: 'legacy-a', source: { type: 'inline', files: [{ path: 'SKILL.md', content: '# Bundle A\n' }] } },
+        { id: 'legacy-b', source: { type: 'inline', files: [{ path: 'SKILL.md', content: '# Bundle B\n' }] } },
+      ],
+      roles: [{ role_id: 'dev', skill_bundle_refs: [{ id: 'legacy-a' }, { id: 'legacy-b' }] }],
+    }, 'admin'),
+    err => err?.status === 400 && err?.code === 'skill_version_conflict',
+  );
+});

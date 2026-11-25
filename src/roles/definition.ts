@@ -913,6 +913,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     const skillRefs: SkillBundleRef[] = [];
     const seenBundleIds = new Set<string>();
     const seenSkillSlugs = new Map<string, { skill_id: string; version: number; origin: string; bundle_id: string }>();
+    const seenBundlePaths = new Map<string, { bundle_id: string; sha256: string }>();
     for (let i = 0; i < rawRefs.length; i++) {
       const ref = rawRefs[i];
       const sfield = singleRefMode ? `${field}.skill_bundle_ref` : `${field}.skill_bundle_refs[${i}]`;
@@ -937,6 +938,20 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
           }
           if (slug) seenSkillSlugs.set(slug, { skill_id: item.skill_id, version: item.version, origin: item.origin, bundle_id: bundle!.id });
         }
+      }
+      for (const file of Array.isArray(bundle!.files) ? bundle!.files : []) {
+        const fpath = String(file.path ?? '');
+        const fsha = String(file.sha256 ?? '');
+        if (!fpath) continue;
+        const prior = seenBundlePaths.get(fpath);
+        if (prior && prior.sha256 !== fsha) {
+          fail(400, 'skill_version_conflict', `${field}.skill_bundle_refs`, {
+            path: fpath,
+            existing: prior,
+            conflicting: { bundle_id: bundle!.id, sha256: fsha },
+          });
+        }
+        if (!prior) seenBundlePaths.set(fpath, { bundle_id: bundle!.id, sha256: fsha });
       }
       skillRefs.push({ id: bundle!.id, revision: bundle!.revision, content_hash: bundle!.content_hash });
     }

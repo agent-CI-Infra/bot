@@ -255,10 +255,12 @@ export class ChannelServiceSessions {
     // Without assistant computers in this deployment the computer tools are not offered at all.
     const computing = !!this.management.assistants?.available();
     const skillStoreRoot = resolveSkillStoreRoot(this.store);
+    // Group bindings always follow the group-assistant skill bundle contract when skill_bundle_ids is NULL,
+    // including untouched pre-#1249 bindings that keep a legacy service_role_id (e.g. repository-assistant).
     const resolvedSkills = resolveServiceRoleSkills(
       this.store,
       parseStoredServiceSkillBundles(binding.skill_bundle_ids),
-      roleId || groupAssistant,
+      groupAssistant,
       'feishu',
     );
     const hasSkills = resolvedSkills.skills.length > 0;
