@@ -262,12 +262,13 @@ export class SshAgentBroker {
         }
       } catch { socket.destroy(); }
       finally { busy = false; }
-      if (!raw && buffer.length >= 4) void pump();
+      // No re-entry here: bytes that arrived during an await are read by the loop above, and a partial message waits
+      // for its next chunk (calling pump again on it would recurse without end and crash the daemon).
     };
     socket.on('data', chunk => {
       buffer = Buffer.concat([buffer, chunk]);
       if (buffer.length > MAX_MESSAGE + 4) { socket.destroy(); return; }
-      void pump();
+      pump().catch(() => socket.destroy());
     });
     // Half-open is for tunnels; an agent conversation the caller ended is ended here too.
     socket.on('end', () => { if (!raw) socket.end(); });
