@@ -4,6 +4,7 @@ import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import type { SyncTokenService } from '../sync/storage.js';
 import { fail, HttpError, randomId, type Json } from '../core/security.js';
+import { computerResultOwner } from '../../runner/result-owner.mjs';
 import { FileTree } from '../../manager/file-tree.mjs';
 import { ClusterHub } from './hub.js';
 import {
@@ -116,6 +117,7 @@ export class ClusterManager implements Manager {
   private readonly centerNotesRoot: string | null;
   private readonly assistantLeaseTtlMs: number;
   private readonly assistantAffinityMs: number;
+  private readonly assistantProjectTools = new Map<string, { nodeId: string; repoIds: Set<string> }>();
   private drainTimer?: ReturnType<typeof setInterval>;
   private reconcilingDrains: Promise<void> | null = null;
   private closed = false;
@@ -134,6 +136,12 @@ export class ClusterManager implements Manager {
         clusterStore: this.clusterStore,
         syncTokens: options.syncTokens,
         imageTag: options.imageTag,
+        isProjectToolAuthorizedOnNode: (nodeId, repoId) => {
+          for (const grant of this.assistantProjectTools.values()) {
+            if (grant.nodeId === nodeId && grant.repoIds.has(repoId)) return true;
+          }
+          return false;
+        },
       });
     this.centerNotesRoot =
       options.notesRoot ??
@@ -887,6 +895,7 @@ export class ClusterManager implements Manager {
           affinityMs: this.assistantAffinityMs,
         });
         if (remove && targetNodeId !== LOCAL_NODE_ID && placement) {
+          this.assistantProjectTools.delete(owner);
           this.syncTokens?.revokeMatchingScope(`node:${targetNodeId}`, 'assistant-homes', `${owner}:${placement.generation}`, 'cluster');
         }
       }
@@ -903,6 +912,7 @@ export class ClusterManager implements Manager {
         }
         return await this.callSpecificNode(targetNodeId, 'DELETE', `/v1/assistant-computers/${owner}`, undefined, timeoutMs);
       } finally {
+        this.assistantProjectTools.delete(owner);
         this.clusterStore.deleteAssistantPlacement(owner, targetNodeId);
         if (targetNodeId !== LOCAL_NODE_ID && placement) {
           this.syncTokens?.revokeMatchingScope(`node:${targetNodeId}`, 'assistant-homes', `${owner}:${placement.generation}`, 'cluster');
@@ -1005,6 +1015,20 @@ export class ClusterManager implements Manager {
       activeEpoch = reserved.epoch;
     }
 
+    const requestedProjectToolRepos = new Set<string>();
+    if (Array.isArray(input.project_tools)) {
+      for (const item of input.project_tools as any[]) {
+        if (item && typeof item === 'object' && typeof item.repository_id === 'string' && /^[1-9]\d{0,19}$/.test(item.repository_id)) {
+          requestedProjectToolRepos.add(item.repository_id);
+        }
+      }
+    }
+    if (targetNodeId !== LOCAL_NODE_ID && requestedProjectToolRepos.size > 0) {
+      this.assistantProjectTools.set(owner, { nodeId: targetNodeId, repoIds: requestedProjectToolRepos });
+    } else {
+      this.assistantProjectTools.delete(owner);
+    }
+
     try {
       const result = await this.callSpecificNode(targetNodeId, 'PUT', `/v1/assistant-computers/${owner}`, input, timeoutMs);
       if (result?.state === 'ready') {
@@ -1017,6 +1041,7 @@ export class ClusterManager implements Manager {
           affinityMs: this.assistantAffinityMs,
         });
         if (!activated) {
+          this.assistantProjectTools.delete(owner);
           // Fenced while creating -> stop container cleanly so no stray writer survives.
           await this.callSpecificNode(targetNodeId, 'DELETE', `/v1/assistant-computers/${owner}`, undefined, 30_000).catch(() => {});
           fail(410, 'assistant_computer_released');
@@ -1027,6 +1052,7 @@ export class ClusterManager implements Manager {
           placement_epoch: activeEpoch,
         };
       }
+      this.assistantProjectTools.delete(owner);
       // Queued for capacity on target node -> release acquiring reservation cleanly.
       this.clusterStore.casReleaseAssistantPlacement({
         owner,
@@ -1038,6 +1064,7 @@ export class ClusterManager implements Manager {
       });
       return result;
     } catch (err) {
+      this.assistantProjectTools.delete(owner);
       this.clusterStore.casReleaseAssistantPlacement({
         owner,
         nodeId: targetNodeId,
@@ -1230,7 +1257,7 @@ export class ClusterManager implements Manager {
       this.syncTokens.revokeMatchingScope(actor, 'project-notes', repositoryId, options.actor);
       this.syncTokens.revokeMatchingScope(actor, 'project-tools', repositoryId, options.actor);
       this.syncTokens.revokeMatchingScope(actor, 'skill-store', `projects/${repositoryId}`, options.actor);
-      this.syncTokens.revokeMatchingScope(actor, 'tool-results', `project_${repositoryId}`, options.actor);
+      this.syncTokens.revokeMatchingScope(actor, 'tool-results', computerResultOwner('project', repositoryId), options.actor);
     }
 
     const binding = this.clusterStore.completeRepositoryRebind(repositoryId, started.rebind_epoch, targetNodeId, options.actor);
@@ -1262,6 +1289,9 @@ export class ClusterManager implements Manager {
     }
 
     const revoked = this.clusterStore.revokeNode(nodeId, options);
+    for (const [owner, grant] of [...this.assistantProjectTools.entries()]) {
+      if (grant.nodeId === nodeId) this.assistantProjectTools.delete(owner);
+    }
     this.syncTokens?.revokeByActor(`node:${nodeId}`, options.actor);
     this.hub.disconnectNode(nodeId, 'node_revoked');
     return revoked;

@@ -335,9 +335,15 @@ function nodeBindingCard(isSuper) {
           const code = String(err?.message || '');
           const reason = ({
             target_node_not_online: '目标节点当前不在线，请先确认目标节点已连接上线。',
-            repository_has_running_tasks: '当前项目仍有正在执行的任务，请等待任务结束或停止后再切换节点。',
+            node_not_found: '目标节点不存在，请刷新页面后重试。',
+            repository_already_bound_to_node: '该项目已绑定到所选节点，无需重复切换。',
+            repository_rebind_in_progress: '该项目正在执行改绑操作，请稍候刷新。',
+            repository_rebinding: '该项目正在执行改绑操作，请稍候刷新。',
+            project_tasks_running: '当前项目仍有正在执行的任务，请等待任务结束或停止后再切换节点。',
+            environment_operation_pending: '当前项目有尚未完成的电脑操作，请稍候完成后再切换节点。',
             previous_node_unreachable: '旧节点当前不可达，暂无法自动清理旧节点工作区。',
-            repository_already_rebinding: '该项目正在执行改绑操作，请稍候刷新。',
+            binding_epoch_mismatch: '节点绑定状态已变化，请刷新页面后重试。',
+            invalid_node_labels: '节点调度标签格式无效。',
           })[code] || readErrorText(err);
           announceSave(feedback, reason, true);
         } finally {

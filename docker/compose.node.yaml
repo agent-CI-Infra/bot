@@ -15,7 +15,7 @@
 #   BOT_CENTER_URL=https://bot.example.com BOT_NODE_PAIRING_TOKEN=bnode_... \
 #     docker compose -f docker/compose.node.yaml up -d
 #
-# After the first successful pairing, the node persists its Ed25519 identity in `node-data` (/data/node-identity.json)
+# After the first successful pairing, the node persists its Ed25519 identity in `data` (/data/node-identity.json)
 # and no longer needs BOT_NODE_PAIRING_TOKEN on subsequent restarts.
 services:
   node-agent:
@@ -51,15 +51,15 @@ services:
       BOT_RUNNER_SOCKETS_DIR: /run/bot-runner
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
-      - node-data:/data
+      - data:/data
       - /var/run/docker.sock:/var/run/docker.sock
-      - node-assistant-homes:/assistant-homes
-      - node-agent-tools:/opt/agent-tools
-      - node-project-tools:/project-tools
-      - node-skill-store:/skill-store
-      - node-tool-results:/tool-results
-      - node-model-gateway:/run/model-gateway
-      - node-runner-sockets:/run/bot-runner
+      - assistant-homes:/assistant-homes
+      - agent-tools:/opt/agent-tools
+      - project-tools:/project-tools
+      - skill-store:/skill-store
+      - tool-results:/tool-results
+      - model-gateway:/run/model-gateway
+      - runner-sockets:/run/bot-runner
     read_only: true
     tmpfs:
       - /tmp:size=512m,mode=1777
@@ -80,11 +80,11 @@ services:
     restart: "no"
 
 volumes:
-  node-data:
-  node-assistant-homes:
-  node-agent-tools:
-  node-project-tools:
-  node-skill-store:
-  node-tool-results:
-  node-model-gateway:
-  node-runner-sockets:
+  data:
+  assistant-homes:
+  agent-tools:
+  project-tools:
+  skill-store:
+  tool-results:
+  model-gateway:
+  runner-sockets:

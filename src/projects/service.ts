@@ -169,7 +169,9 @@ export class ProjectService {
     for (const repo of this.store.all('SELECT r.id,p.enabled FROM repositories r JOIN policies p ON p.repository_id=r.id')) {
       if (this.removing.has(repo.id)) continue;
       const step = this.reconcileProject(repo); this.working.set(repo.id, step);
-      try { await step; } finally { this.working.delete(repo.id); }
+      try { await step; }
+      catch (error) { this.failures.report('project ' + repo.id, error); }
+      finally { this.working.delete(repo.id); }
     }
   }
   /**
@@ -282,12 +284,14 @@ export class ProjectService {
       if (error instanceof HttpError && error.code === 'manager_not_ready') return;
       if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;
       // A manager that answered with its own code has saved what failed (a stopped or failed computer and its code);
-      // that state is shown as it is. Only a manager that could not be reached marks the environment unavailable.
-      const answered = error instanceof HttpError && error.code !== 'manager_unavailable';
+      // that state is shown as it is. Only a manager or bound remote node that could not be reached marks the environment unavailable.
+      const unreachableCodes = new Set(['manager_unavailable', 'node_offline', 'node_revoked', 'node_disconnected', 'node_not_found']);
+      const unreachable = error instanceof HttpError && unreachableCodes.has(error.code);
+      const answered = error instanceof HttpError && !unreachable;
       const state = answered ? await this.manager.call('GET', '/v1/projects/' + repo.id).catch(() => null) : null;
       if (state) { this.save(state); return; }
       this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable',?)
-        ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error=excluded.error`, repo.id, answered ? (error as HttpError).code : 'manager_unavailable');
+        ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error=excluded.error`, repo.id, error instanceof HttpError ? error.code : 'manager_unavailable');
     }
   }
   // Deleting a project runs the existing environment deletion: the containers and networks of every generation go, and the
@@ -297,7 +301,17 @@ export class ProjectService {
     this.removing.add(id);
     const step = this.working.get(id);
     if (step) { let timer: ReturnType<typeof setTimeout> | undefined; await Promise.race([step.catch(() => {}), new Promise(r => { timer = setTimeout(r, waitMs); })]); clearTimeout(timer); }
-    const state = await this.manager.call('GET', '/v1/projects/' + id);
+    let state: any;
+    try {
+      state = await this.manager.call('GET', '/v1/projects/' + id);
+    } catch (error) {
+      // A project bound to an offline or revoked remote node must still be deletable without wedging removal;
+      // residual notes cleanup is tracked via removeNotes -> NotesReclaimer when the node returns.
+      if (error instanceof HttpError && ['node_offline', 'node_revoked', 'node_disconnected', 'node_not_found'].includes(error.code)) {
+        return;
+      }
+      throw error;
+    }
     if (!state) return;
     const input = { operation_id: randomId(), generation: state.generation, ...(deleteNotes ? { request: { delete_notes: true } } : {}) };
     this.store.transaction(() => {

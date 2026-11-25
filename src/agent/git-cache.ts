@@ -81,11 +81,26 @@ export class GitCache {
         let present = await has();
         if (wanted.every(sha => present.has(sha))) return new Mirror(this, repository, present, 'hit');
         const target = new URL(url);
-        if (!['https:', 'http:'].includes(target.protocol) || target.username || target.password) throw new Error('unsupported clone URL');
+        const remoteUrl = target.href;
+        if (
+          !['https:', 'http:'].includes(target.protocol) ||
+          !(remoteUrl.startsWith('https://') || remoteUrl.startsWith('http://')) ||
+          target.username ||
+          target.password
+        ) {
+          throw new Error('unsupported clone URL');
+        }
         // The header applies to this origin only and lives in this process's environment for one command.
         const env = { GIT_ALLOW_PROTOCOL: target.protocol.slice(0, -1), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `http.${target.origin}/.extraheader`,
           GIT_CONFIG_VALUE_0: 'Authorization: Basic ' + Buffer.from('x-access-token:' + token).toString('base64') };
-        const fetch = (specs: string[]) => this.git(['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', target.href, ...specs], { cwd: dir, env, timeoutMs: this.fetchTimeoutMs });
+        const fetch = (specs: string[]) => {
+          const fetchArgs = ['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', '--', remoteUrl];
+          for (const spec of specs) {
+            if (!spec.startsWith('+') || spec.startsWith('-')) throw new Error('unsupported refspec');
+            fetchArgs.push(spec);
+          }
+          return this.git(fetchArgs, { cwd: dir, env, timeoutMs: this.fetchTimeoutMs });
+        };
         // Each fetched commit is pinned under refs/bot/commits/<sha>, so maintenance never prunes what a later task reads.
         const missing = wanted.filter(sha => !present.has(sha));
         let run = await fetch(missing.map(sha => `+${sha}:refs/bot/commits/${sha}`));

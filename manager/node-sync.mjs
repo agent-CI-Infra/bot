@@ -1,5 +1,6 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { computerResultOwner } from '../runner/result-owner.mjs';
 import { CasCache, SyncClient } from '../runner/sync-client.mjs';
 
 /**
@@ -104,14 +105,17 @@ export class NodeSyncManager {
     return home ? join(home, 'memory') : null;
   }
 
-  async syncAgentTools(scope = 'default') {
+  async syncAgentTools(archOrScope = 'default') {
     if (!this.roots.agentTools) return null;
+    let scope = String(archOrScope || 'default').trim();
+    if (scope === 'amd64' || scope === 'x64') scope = 'linux/x64';
+    else if (scope === 'arm64') scope = 'linux/arm64';
     return this.pullNamespace('agent-tools', scope, 'ro', this.roots.agentTools);
   }
 
   async syncSkillStore(scope) {
     if (!this.roots.skillStore) return null;
-    const targetDir = join(this.roots.skillStore, scope);
+    const targetDir = join(this.roots.skillStore, ...String(scope).split('/'));
     return this.pullNamespace('skill-store', scope, 'ro', targetDir);
   }
 
@@ -127,6 +131,8 @@ export class NodeSyncManager {
   async syncToolResults(ownerScope) {
     if (!this.roots.toolResults) return null;
     const targetDir = join(this.roots.toolResults, ownerScope);
+    // Ensure owner directory always exists before Docker resultMount() inspects it, even when empty.
+    await mkdir(targetDir, { recursive: true, mode: 0o755 });
     return this.pullNamespace('tool-results', ownerScope, 'ro', targetDir);
   }
 
@@ -159,14 +165,26 @@ export class NodeSyncManager {
 
   async clearLocalProjectCache(repoId) {
     const id = String(repoId);
+    const resultOwner = computerResultOwner('project', id);
     if (this.roots.projectNotes) {
       await rm(join(this.roots.projectNotes, id), { recursive: true, force: true }).catch(() => {});
     }
     if (this.roots.projectTools) {
       await rm(join(this.roots.projectTools, id), { recursive: true, force: true }).catch(() => {});
     }
+    if (this.roots.skillStore) {
+      await rm(join(this.roots.skillStore, 'projects', id), { recursive: true, force: true }).catch(() => {});
+    }
+    if (this.roots.toolResults) {
+      await rm(join(this.roots.toolResults, resultOwner), { recursive: true, force: true }).catch(() => {});
+    }
     for (const key of [...this._tokenCache.keys()]) {
-      if (key.includes(`:${id}:`) || key.includes(`:${id}@`) || key.includes(`project_${id}:`) || key.includes(`projects/${id}`)) {
+      if (
+        key.includes(`:${id}:`) ||
+        key.includes(`:${id}@`) ||
+        key.includes(`:${resultOwner}:`) ||
+        key.includes(`projects/${id}`)
+      ) {
         this._tokenCache.delete(key);
       }
     }

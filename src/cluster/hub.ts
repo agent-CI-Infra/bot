@@ -1,12 +1,12 @@
 import { EventEmitter } from 'node:events';
-import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PassThrough, type Duplex } from 'node:stream';
 import { fail, fields, HttpError, object, randomId, type Json } from '../core/security.js';
 import type { SyncTokenService } from '../sync/storage.js';
 import { isSyncNamespaceName } from '../sync/namespaces.js';
 import type { SyncMode, SyncNamespaceName } from '../sync/types.js';
 import { defaultModelGateway, maxGatewayRequestBytes, type ModelGatewayHub } from '../harness/model-gateway.js';
+import { computerResultOwner } from '../../runner/result-owner.mjs';
 import { upgradeHttpToWs, type WsConnection } from '../../runner/wire-protocol.mjs';
 import {
   DEFAULT_NODE_HEARTBEAT_MS,
@@ -142,7 +142,6 @@ export class ClusterHub extends EventEmitter {
   private readonly operations = new Map<string, PendingOp>();
   private readonly tunnels = new Map<string, PendingTunnel>();
   private readonly wsModelStreams = new Map<string, ActiveWsModelStream>();
-  private readonly directSessions = new Map<string, string>(); // nodeId -> latest bearer token for optional direct calls
   private staleTimer?: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -258,7 +257,6 @@ export class ClusterHub extends EventEmitter {
       waiter.resolve([]);
     }
     this.outboundQueues.delete(nodeId);
-    this.directSessions.delete(nodeId);
     for (const op of [...this.operations.values()]) {
       if (op.nodeId === nodeId) {
         clearTimeout(op.timer);
@@ -313,13 +311,8 @@ export class ClusterHub extends EventEmitter {
     if (!node || node.kind !== 'remote') return fail(404, 'node_not_found');
     if (node.status === 'revoked') return fail(403, 'node_revoked');
 
-    // Intranet direct-connect fallback when no reverse WS/long-poll session is active and direct_url is configured.
-    if (!this.wsSessions.get(nodeId)?.ws.open && !this.pollWaiters.has(nodeId) && node.direct_url && this.directSessions.has(nodeId)) {
-      return this.callDirectNode(node.direct_url, this.directSessions.get(nodeId)!, method, path, input, options.timeoutMs ?? 90_000);
-    }
-
     if (!this.isNodeConnected(nodeId)) {
-      fail(503, 'manager_unavailable');
+      fail(503, 'node_offline');
     }
 
     const operationId =
@@ -364,52 +357,6 @@ export class ClusterHub extends EventEmitter {
         ...(options.bindingEpoch !== undefined ? { binding_epoch: options.bindingEpoch } : {}),
       });
     });
-  }
-
-  private async callDirectNode(
-    directUrl: string,
-    sessionToken: string,
-    method: string,
-    path: string,
-    input: Json | undefined,
-    timeoutMs: number,
-  ): Promise<any> {
-    const url = new URL(directUrl + path);
-    const body = input !== undefined ? JSON.stringify(input) : undefined;
-    let status = 0;
-    let text = '';
-    try {
-      ({ status, text } = await new Promise<{ status: number; text: string }>((resolve, reject) => {
-        const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
-          url,
-          {
-            method,
-            headers: {
-              Authorization: 'Bearer ' + sessionToken,
-              'Content-Type': 'application/json',
-              ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
-            },
-          },
-          res => {
-            const chunks: Buffer[] = [];
-            res.on('data', chunk => chunks.push(chunk));
-            res.on('error', err => { clearTimeout(timer); reject(err); });
-            res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString('utf8') }); });
-          },
-        );
-        const timer = timeoutMs > 0 ? setTimeout(() => req.destroy(new Error('node_direct_timeout')), timeoutMs) : undefined;
-        req.on('error', err => { clearTimeout(timer); reject(err); });
-        req.end(body);
-      }));
-    } catch {
-      return fail(503, 'manager_unavailable');
-    }
-    let parsed: Json;
-    try { parsed = JSON.parse(text); } catch { return fail(503, 'manager_unavailable'); }
-    if (status < 200 || status >= 300) {
-      fail(status, typeof parsed.error === 'string' ? parsed.error : 'manager_unavailable');
-    }
-    return parsed.result;
   }
 
   /**
@@ -553,12 +500,15 @@ export class ClusterHub extends EventEmitter {
       }
       if (namespace === 'tool-results') {
         if (mode !== 'ro') return false;
-        const projMatch = /^project_([1-9]\d{0,19})$/.exec(scope);
-        if (projMatch) return repoBoundToNode(projMatch[1]!);
-        const asstMatch = /^assistant_([a-f0-9]{32})$/.exec(scope);
-        if (asstMatch) {
-          const placement = this.clusterStore.getAssistantPlacement(asstMatch[1]!);
-          return Boolean(placement && placement.node_id === nodeId);
+        if (/^project-[a-f0-9]{64}$/.test(scope)) {
+          return this.clusterStore
+            .listRepositoriesOnNode(nodeId)
+            .some(repoId => computerResultOwner('project', repoId) === scope);
+        }
+        if (/^assistant-[a-f0-9]{64}$/.test(scope)) {
+          return this.clusterStore
+            .listAssistantPlacements(nodeId)
+            .some(placement => computerResultOwner('assistant', placement.owner) === scope);
         }
         return false;
       }
@@ -975,7 +925,6 @@ export class ClusterHub extends EventEmitter {
         directUrl: typeof input.direct_url === 'string' ? input.direct_url : undefined,
         metrics: input.metrics as NodeMetrics | undefined,
       });
-      this.directSessions.set(paired.node.id, paired.session_token);
       sendJson(res, 200, {
         node: paired.node,
         node_id: paired.node.id,
@@ -1009,7 +958,6 @@ export class ClusterHub extends EventEmitter {
         transport: typeof input.transport === 'string' ? input.transport : undefined,
         metrics: input.metrics as NodeMetrics | undefined,
       });
-      this.directSessions.set(exchanged.node.id, exchanged.session_token);
       sendJson(res, 200, {
         node: exchanged.node,
         node_id: exchanged.node.id,
