@@ -70,7 +70,7 @@ test('a super administrator still sees the platform category bar, and the storag
   const pageWithHost = loadConsole(scripts, (method, path) => {
     if (method === 'GET' && path === '/api/storage') return [200, {
       refreshed_at: '2026-11-15T08:00:00.000Z', alerts: [], projects: [],
-      host: { known: { control_database: 1024, control_trajectories: 2048, git_cache: 0, public_boards: 0, browser_evidence: 0, channel_resources: 4096, channel_cards: 2048 }, unmeasured: [] },
+      host: { known: { control_database: 1024, control_trajectories: 2048, git_cache: 0, public_boards: 0, browser_evidence: 0, channel_resources: 4096, channel_cards: 2048, sync_blobs: 512 }, unmeasured: [] },
     }];
     throw new Error('Unexpected request: ' + method + ' ' + path);
   });
@@ -78,6 +78,7 @@ test('a super administrator still sees the platform category bar, and the storag
   await pageWithHost.run('renderSettings(renderVersion)');
   assert.match(textOf(pageWithHost.$('settings-panel')), /飞书附件存储 channel-resources/);
   assert.match(textOf(pageWithHost.$('settings-panel')), /飞书交互卡片 channel-cards/);
+  assert.match(textOf(pageWithHost.$('settings-panel')), /文件同步对象缓存 sync-blobs/);
 });
 
 test('#1268 storage page shows unfinished tasks holding workspace directories', async () => {

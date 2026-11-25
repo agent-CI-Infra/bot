@@ -8,6 +8,7 @@ import { type ProjectToolsService } from './tools.js';
 import { removeBrowserEvidence } from '../browser/evidence.js';
 import { removeProjectSkillStore, resolveSkillStoreRoot } from '../roles/skill-store.js';
 import { deleteConsolidationScope, releaseConsolidationModels } from '../memory/consolidation-storage.js';
+import { deleteProjectSyncData, sweepUnreferencedSyncBlobs } from '../sync/storage.js';
 
 // The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
 export interface RunningTasks { working(repositoryId: string): Promise<unknown>[] }
@@ -84,6 +85,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     releaseConsolidationModels(store, projectModels, 'system');
   }
   deleteConsolidationScope(store, 'project', id);
+  deleteProjectSyncData(store, id, { files: false });
   for (const [sql, count] of statements) {
     const table = /^(?:DELETE FROM|UPDATE) (\w+)/.exec(sql)![1]!;
     if (store.hasTable(table)) store.run(sql, ...Array<string>(count).fill(id));
@@ -94,6 +96,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
   if (options.files === true) {
     store.trajectories.remove({ repository_id: id });
     removeBrowserEvidence(store, taskIds);
+    sweepUnreferencedSyncBlobs(store);
   }
 }
 
@@ -196,6 +199,8 @@ export class ProjectRemoval {
         if (skillRoot) removeProjectSkillStore(skillRoot, id);
       }
       catch { this.store.audit(user.id, 'repository.skill_store_removal_failed', id, id); }
+      try { sweepUnreferencedSyncBlobs(this.store); }
+      catch { this.store.audit(user.id, 'repository.sync_blobs_removal_failed', id, id); }
       return removed;
     } finally { this.projects?.endRemoval(id); }
   }

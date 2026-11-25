@@ -7,7 +7,7 @@ const fail = (message, status = 400) => { throw Object.assign(new Error(message)
 export const legacyNoteId = name => 'n:' + Buffer.from(name).toString('base64url');
 // The form a legacy id may encode: one path component, never a separator or an internal name. Control characters are
 // allowed here because ids written before the current contract still carry them; addressability is checked separately.
-const legacyComponent = name => typeof name==='string' && !!name && !name.includes('/') && !name.includes('\\') && !['.','..','.git'].includes(name.toLowerCase()) && !name.startsWith('.write-') && !name.startsWith('.expired-');
+const legacyComponent = name => typeof name==='string' && !!name && !name.includes('/') && !name.includes('\\') && !['.','..','.git'].includes(name.toLowerCase()) && !name.startsWith('.write-') && !name.startsWith('.expired-') && !name.startsWith('.sync-');
 export function validNoteId(id) {
   if (typeof id !== 'string') return false;
   if (/^f:[a-f0-9]{32}$/.test(id)) return true;

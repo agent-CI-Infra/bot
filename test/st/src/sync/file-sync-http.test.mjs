@@ -19,12 +19,15 @@ import { randomBytes } from 'node:crypto';
 import { Store } from '../../../../dist/storage/database.js';
 import { createControlPlane } from '../../../../dist/server.js';
 import { ProjectToolsService } from '../../../../dist/projects/tools.js';
+import { deleteProjectRecords } from '../../../../dist/projects/removal.js';
 import { materializeSkillSet, projectSkillScope } from '../../../../dist/roles/skill-store.js';
 import { AssistantHomes } from '../../../../dist/service-roles/assistant-computers.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
+import { HttpError } from '../../../../dist/core/security.js';
 import { CasCache, SyncClient } from '../../../../runner/sync-client.mjs';
+import { harness, setup, testPassword } from '../../../fixtures/helpers.mjs';
 
-async function startServer(setup) {
+async function startServer(setupFn) {
   const dir = mkdtempSync(join(tmpdir(), 'sync-http-st-'));
   const store = new Store(join(dir, 'control.sqlite'), randomBytes(32));
   const projectNotesRoot = join(dir, 'project-notes');
@@ -37,7 +40,6 @@ async function startServer(setup) {
     mkdirSync(d, { recursive: true });
   }
 
-  // Seed a minimal repository row so ProjectToolsService.publish works cleanly.
   store.run(
     "INSERT INTO accounts(id,name,type,app_id,credentials,created_at) VALUES('acc1','Test','github_app','1','{}',?)",
     new Date().toISOString(),
@@ -65,13 +67,13 @@ async function startServer(setup) {
     consolidation: { automatic: false },
   });
 
-  if (setup) await setup({ dir, store, projectTools, projectNotesRoot, projectToolsRoot, agentToolsRoot, skillStoreRoot, assistantHomesRoot, toolResultsRoot, sync });
+  if (setupFn) await setupFn({ dir, store, projectTools, projectNotesRoot, projectToolsRoot, agentToolsRoot, skillStoreRoot, assistantHomesRoot, toolResultsRoot, sync });
 
   await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
   const close = async () => {
-    await new Promise(r => server.close(() => r()));
+    await new Promise(r => { server.close(() => r()); server.closeAllConnections(); });
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
@@ -79,7 +81,7 @@ async function startServer(setup) {
 }
 
 test('FileSyncEngine HTTP + SyncClient: all 4 read-only namespaces support CAS incremental pull with 0-byte unchanged transfer', async () => {
-  const env = await startServer(async ({ store, projectTools, agentToolsRoot, skillStoreRoot, toolResultsRoot }) => {
+  const env = await startServer(async ({ projectTools, agentToolsRoot, skillStoreRoot, toolResultsRoot }) => {
     // 1. tool-results: two immutable UTF-8 result files under owner `project_42`.
     const ownerDir = join(toolResultsRoot, 'project_42');
     mkdirSync(ownerDir, { recursive: true });
@@ -169,13 +171,11 @@ test('FileSyncEngine HTTP + SyncClient: all 4 read-only namespaces support CAS i
     assert.equal(pt1.fetched_blobs, 1);
     assert.equal((lstatSync(join(projToolsTarget, 'bin/mytool')).mode & 0o111) !== 0, true);
 
-    // Unchanged pull -> 0 bytes transferred.
     const ptNoop = await projToolsClient.pull();
     assert.equal(ptNoop.fetched_blobs, 0);
     assert.equal(ptNoop.fetched_bytes, 0);
     assert.equal(ptNoop.entries_count, 0);
 
-    // Merge-publish a second file in rev-2: bin/mytool is unchanged so only README.txt transfers!
     await env.projectTools.publish({
       repositoryId: '42',
       actorId: 'u1',
@@ -221,7 +221,7 @@ test('FileSyncEngine HTTP + SyncClient: all 4 read-only namespaces support CAS i
     });
     const sk1 = await skillClient1.pull();
     assert.ok(sk1.fetched_blobs >= 3);
-    assert.ok(sk1.hardlinked_files >= 2); // non-executable files hardlinked from CAS!
+    assert.ok(sk1.hardlinked_files >= 2);
 
     const skillTarget2 = join(env.dir, 'mount-skills-2');
     const skillClient2 = new SyncClient({
@@ -254,7 +254,7 @@ test('FileSyncEngine HTTP + SyncClient: all 4 read-only namespaces support CAS i
   }
 });
 
-test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way merge, 409 interactive, background conflict copy, redaction, deletion & security', async () => {
+test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way merge, 409 interactive, background conflict copy, secret rejection, deletion, fail-closed missing dir & security', async () => {
   const env = await startServer(async ({ store }) => {
     const sealed = store.secrets.seal({ value: 'super-secret-api-key-123456' }, 'model:m-sync');
     store.run(
@@ -293,7 +293,8 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     assert.equal(push1.results[0].status, 'committed');
     assert.equal(existsSync(join(dirA, '.sync-base.json')), true);
 
-    // Client B pulls -> receives guide.md and writes .sync-base.json.
+    // Even if `.sync-base.json` exists directly inside the server-side notes dir, pull succeeds cleanly and never lists it!
+    writeFileSync(join(env.projectNotesRoot, '42', '.sync-base.json'), '{"schema":"bot.sync-base/1"}');
     const pullB1 = await clientB.pull();
     assert.equal(pullB1.fetched_blobs, 1);
     assert.equal(readFileSync(join(dirB, 'guide.md'), 'utf8'), initial);
@@ -318,7 +319,6 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     assert.match(mergedContent, /updated intro by A/);
     assert.match(mergedContent, /updated steps by B/);
 
-    // A pulls merged content cleanly.
     await clientA.pull();
     assert.equal(readFileSync(join(dirA, 'guide.md'), 'utf8'), mergedContent);
 
@@ -355,31 +355,38 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     assert.equal(bgPush.results[0].status, 'conflict_copy');
     const copyPath = bgPush.results[0].conflict_path;
     assert.match(copyPath, /^guide\.conflict-worker-b-\d{8}T\d{6}Z\.md$/);
-    // Main file preserved as A's version; conflict copy holds B's version on both server and client!
     assert.match(readFileSync(join(env.projectNotesRoot, '42', 'guide.md'), 'utf8'), /main-kept-by-A/);
     assert.match(readFileSync(join(env.projectNotesRoot, '42', copyPath), 'utf8'), /background-attempt-by-B/);
     assert.match(readFileSync(join(dirB, 'guide.md'), 'utf8'), /main-kept-by-A/);
     assert.match(readFileSync(join(dirB, copyPath), 'utf8'), /background-attempt-by-B/);
 
-    // 4. Control-plane Redactor scrubs registered secret on push and syncs redacted bytes back to client.
+    // 4. Default fail-closed secret detection (`sync_secret_detected`) blocks secret upload without persisting to server!
     writeFileSync(join(dirA, 'secret-note.md'), 'key=super-secret-api-key-123456\n');
-    const redactedPush = await clientA.push({ mode: 'interactive' });
-    assert.equal(redactedPush.ok, true);
-    assert.equal(redactedPush.results[0].redacted, true);
-    assert.equal(readFileSync(join(env.projectNotesRoot, '42', 'secret-note.md'), 'utf8'), 'key=[REDACTED]\n');
-    assert.equal(readFileSync(join(dirA, 'secret-note.md'), 'utf8'), 'key=[REDACTED]\n');
+    await assert.rejects(
+      () => clientA.push({ mode: 'interactive' }),
+      err => {
+        assert.equal(err.status, 400);
+        assert.equal(err.code, 'sync_secret_detected');
+        assert.ok(!JSON.stringify(err.detail ?? '').includes('super-secret-api-key-123456'));
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(env.projectNotesRoot, '42', 'secret-note.md')), false);
+    unlinkSync(join(dirA, 'secret-note.md'));
 
     // 5. Deletion propagates across clients.
+    writeFileSync(join(dirA, 'temp-note.md'), 'temporary note\n');
+    assert.equal((await clientA.push({ mode: 'interactive' })).ok, true);
     await clientB.pull();
-    assert.equal(existsSync(join(dirB, 'secret-note.md')), true);
-    unlinkSync(join(dirA, 'secret-note.md'));
+    assert.equal(existsSync(join(dirB, 'temp-note.md')), true);
+    unlinkSync(join(dirA, 'temp-note.md'));
     const delPush = await clientA.push({ mode: 'interactive' });
     assert.equal(delPush.ok, true);
     assert.equal(delPush.results[0].deleted, true);
 
     const pullAfterDel = await clientB.pull();
     assert.equal(pullAfterDel.deleted_files, 1);
-    assert.equal(existsSync(join(dirB, 'secret-note.md')), false);
+    assert.equal(existsSync(join(dirB, 'temp-note.md')), false);
 
     // 6. Client-side symlink protection blocks exfiltration on push.
     const outsideSecret = join(env.dir, 'host-secret.txt');
@@ -388,7 +395,7 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     await assert.rejects(() => clientA.push(), /sync_symlink_forbidden/);
     unlinkSync(join(dirA, 'sneaky-link.md'));
 
-    // 7. Server-side path traversal & unauthorized scope rejection.
+    // 7. Server-side path traversal, unauthorized scope, and cross-scope CAS commit/conflict attack prevention.
     const traversalRes = await fetch(`${env.baseUrl}/sync/project-notes/42/commit`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${tokenA}`, 'Content-Type': 'application/json' },
@@ -409,7 +416,7 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     const noAuthRes = await fetch(`${env.baseUrl}/sync/project-notes/42/manifest`);
     assert.equal(noAuthRes.status, 401);
 
-    // 8. assistant-homes namespace uses the exact same SyncClient & hides `.write-history` from AssistantHomes.list!
+    // 8. assistant-homes namespace uses the exact same SyncClient & hides `.write-history` and `.sync-*` from AssistantHomes.list!
     const owner = 'b'.repeat(32);
     const homeToken = env.sync.tokens.issue({
       actor: 'assistant:group-chat-1',
@@ -434,14 +441,13 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
       '# Memory\n- user prefers short answers\n',
     );
 
-    // Verify AssistantHomes.list("~/memory") does not leak `.write-history` or `.sync-base.json`.
     const homes = new AssistantHomes(env.store, env.assistantHomesRoot);
     const listed = await homes.list(join(env.assistantHomesRoot, owner, 'home-1'), 'memory', true);
     assert.equal(listed.exists, true);
     assert.deepEqual(listed.entries.map(e => e.path), ['INDEX.md']);
 
-    // 9. Dirty local file protection on pull, delete/modify conflicts, re-creation over tombstone,
-    //    single-blob binary GET, cross-scope CAS oracle prevention, and conflicts/history endpoints.
+    // 9. Dirty local file protection on pull, modify-vs-delete conflicts, re-creation over tombstone,
+    //    single-blob binary GET, cross-scope CAS isolation over HTTP, and conflicts/history endpoints.
     writeFileSync(join(dirA, 'guide.md'), 'dirty uncommitted local edit on A\n');
     writeFileSync(join(dirB, 'guide.md'), readFileSync(join(dirB, 'guide.md'), 'utf8') + '\nextra B line\n');
     assert.equal((await clientB.push({ mode: 'interactive' })).ok, true);
@@ -454,7 +460,6 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     assert.deepEqual(forcedPull.skipped_dirty, []);
     assert.match(readFileSync(join(dirA, 'guide.md'), 'utf8'), /extra B line/);
 
-    // Modify-vs-delete in background mode preserves local work as a conflict copy!
     await clientB.pull();
     unlinkSync(join(dirA, 'guide.md'));
     assert.equal((await clientA.push({ mode: 'interactive' })).ok, true);
@@ -469,14 +474,12 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
       'precious edit while deleted on server\n',
     );
 
-    // Re-creating a previously soft-deleted file cleanly with base_revision=0 succeeds.
     await clientA.pull();
     writeFileSync(join(dirA, 'guide.md'), 'freshly recreated guide\n');
     const recreatePush = await clientA.push({ mode: 'interactive' });
     assert.equal(recreatePush.ok, true);
     assert.equal(recreatePush.results[0].status, 'committed');
 
-    // Single-blob binary GET + cross-scope CAS oracle prevention.
     const guideSha = recreatePush.results[0].sha256;
     const blobGetRes = await fetch(`${env.baseUrl}/sync/project-notes/42/blobs/${guideSha}`, {
       headers: { Authorization: `Bearer ${tokenA}` },
@@ -485,14 +488,26 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     assert.equal(blobGetRes.headers.get('x-sync-sha256'), guideSha);
     assert.equal(await blobGetRes.text(), 'freshly recreated guide\n');
 
+    // Cross-scope token on scope 99 cannot read via GET /blobs, copy via content_sha256, or exfiltrate via base_sha256!
     const token99 = env.sync.tokens.issue({
       actor: 'agent:other-project',
-      grants: [{ namespace: 'project-notes', scope: '99', mode: 'ro' }],
+      grants: [{ namespace: 'project-notes', scope: '99', mode: 'rw' }],
     }).token;
     const crossOracleRes = await fetch(`${env.baseUrl}/sync/project-notes/99/blobs/${guideSha}`, {
       headers: { Authorization: `Bearer ${token99}` },
     });
     assert.equal(crossOracleRes.status, 404);
+
+    const crossCopyRes = await fetch(`${env.baseUrl}/sync/project-notes/99/commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token99}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'interactive',
+        changes: [{ path: 'steal.md', base_revision: 0, content_sha256: guideSha }],
+      }),
+    });
+    assert.equal(crossCopyRes.status, 400);
+    assert.equal((await crossCopyRes.json()).error, 'sync_blob_missing');
 
     // Conflicts and history HTTP endpoints return structured records.
     const conflictsRes = await fetch(`${env.baseUrl}/sync/project-notes/42/conflicts`, {
@@ -508,19 +523,52 @@ test('FileSyncEngine HTTP + SyncClient: rw project-notes & assistant-homes 3-way
     assert.equal(historyRes.status, 200);
     const historyBody = await historyRes.json();
     assert.ok(historyBody.versions.length >= 4);
+
+    // 10. Missing server directory fails SyncClient.pull() with 503 WITHOUT deleting local files!
+    rmSync(join(env.projectNotesRoot, '42'), { recursive: true, force: true });
+    await assert.rejects(
+      () => clientA.pull(),
+      err => err.status === 503 && err.code === 'sync_scope_unavailable',
+    );
+    assert.equal(readFileSync(join(dirA, 'guide.md'), 'utf8'), 'freshly recreated guide\n');
+
+    // 11. Project deletion removes sync_* records and unreferenced sync-blobs.
+    deleteProjectRecords(env.store, '42', { files: true });
+    assert.equal(env.store.get("SELECT count(*) n FROM sync_scope_revisions WHERE namespace='project-notes' AND scope='42'").n, 0);
+    assert.equal(env.store.get("SELECT count(*) n FROM sync_blob_refs WHERE namespace='project-notes' AND scope='42'").n, 0);
+    assert.equal(await env.sync.engine.blobStore.has(guideSha), false);
   } finally {
     await env.close();
   }
 });
 
-test('FileSyncEngine HTTP bridges project-notes seamlessly through Manager /v1/projects/:id/file-tree (LocalManager)', async () => {
+test('ManagerProjectNotesAdapter retries concurrent console race into 3-layer conflict handling and propagates transient 503 on readRevision', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sync-mgr-bridge-'));
   const store = new Store(join(dir, 'control.sqlite'), randomBytes(32));
   const localManager = new LocalManager('77', join(dir, 'local-repo-77'));
+
+  // Intercept manager calls to inject (a) a concurrent console write right before PUT, and (b) a transient 503 during readRevision.
+  let injectConsoleRace = null;
+  let injectReadRevision503 = false;
+  const wrappedManager = {
+    async call(method, path, body, timeoutMs) {
+      if (injectConsoleRace && method === 'PUT' && path.includes('/file-tree/')) {
+        const raceFn = injectConsoleRace;
+        injectConsoleRace = null;
+        await raceFn();
+      }
+      if (injectReadRevision503 && method === 'GET' && path.includes('?revision=')) {
+        injectReadRevision503 = false;
+        throw new HttpError(503, 'manager_unavailable');
+      }
+      return localManager.call(method, path, body, timeoutMs);
+    },
+  };
+
   const { server, sync } = createControlPlane({
     store,
     staticDirectory: resolve('static'),
-    projects: { manager: localManager },
+    projects: { manager: wrappedManager },
     channels: { longConnections: false },
     schedules: { automatic: false },
     consolidation: { automatic: false },
@@ -538,23 +586,123 @@ test('FileSyncEngine HTTP bridges project-notes seamlessly through Manager /v1/p
     const c2 = new SyncClient({ baseUrl, token: tok2, namespace: 'project-notes', scope: '77', targetDir: c2Dir, cas });
 
     await c1.pull();
-    writeFileSync(join(c1Dir, 'runbook.md'), 'Header\n\nSection 1\nv1\n\nSection 2\nv2\n');
+    const baseText = 'Header\n\nSection 1\nv1\n\nSection 2\nv2\n';
+    writeFileSync(join(c1Dir, 'runbook.md'), baseText);
     assert.equal((await c1.push({ mode: 'interactive' })).ok, true);
 
     await c2.pull();
-    writeFileSync(join(c1Dir, 'runbook.md'), 'Header\n\nSection 1\nv1-from-c1\n\nSection 2\nv2\n');
-    assert.equal((await c1.push({ mode: 'interactive' })).ok, true);
+    // Simulate a console user editing Section 1 right between snapshot() and applyChange(PUT) while c2 pushes Section 2!
+    const treeList = await localManager.call('GET', '/v1/projects/77/file-tree?directory=&query=&include_deleted=1&deleted_only=0&recursive=1');
+    const fileId = treeList.files.find(f => f.path === 'runbook.md').id;
+    injectConsoleRace = async () => {
+      await localManager.call('PUT', `/v1/projects/77/file-tree/${encodeURIComponent(fileId)}`, {
+        content: baseText.replace('v1', 'v1-console-race'),
+        expected_revision: 1,
+        actor: 'user:console-editor',
+      });
+    };
 
-    writeFileSync(join(c2Dir, 'runbook.md'), 'Header\n\nSection 1\nv1\n\nSection 2\nv2-from-c2\n');
-    const merged = await c2.push({ mode: 'interactive' });
-    assert.equal(merged.ok, true);
-    assert.equal(merged.results[0].status, 'merged');
+    writeFileSync(join(c2Dir, 'runbook.md'), baseText.replace('v2', 'v2-from-c2'));
+    const mergedAfterRace = await c2.push({ mode: 'interactive' });
+    assert.equal(mergedAfterRace.ok, true);
+    assert.equal(mergedAfterRace.results[0].status, 'merged');
     const onDisk = readFileSync(join(dir, 'local-repo-77', 'project-notes', 'runbook.md'), 'utf8');
-    assert.match(onDisk, /v1-from-c1/);
+    assert.match(onDisk, /v1-console-race/);
     assert.match(onDisk, /v2-from-c2/);
+
+    // Overlapping race on interactive commit produces structured 409 sync_conflict (NEVER raw note_revision_changed)!
+    await c1.pull();
+    const currentRev = mergedAfterRace.results[0].revision;
+    const currentDisk = readFileSync(join(dir, 'local-repo-77', 'project-notes', 'runbook.md'), 'utf8');
+    injectConsoleRace = async () => {
+      await localManager.call('PUT', `/v1/projects/77/file-tree/${encodeURIComponent(fileId)}`, {
+        content: currentDisk.replace('v1-console-race', 'v1-console-conflict'),
+        expected_revision: currentRev,
+        actor: 'user:console-editor',
+      });
+    };
+    writeFileSync(join(c1Dir, 'runbook.md'), currentDisk.replace('v1-console-race', 'v1-agent-conflict'));
+    const conflictAfterRace = await c1.push({ mode: 'interactive' });
+    assert.equal(conflictAfterRace.ok, false);
+    assert.equal(conflictAfterRace.status, 409);
+    assert.equal(conflictAfterRace.error, 'sync_conflict');
+    assert.match(conflictAfterRace.conflicts[0].current_content, /v1-console-conflict/);
+    assert.match(conflictAfterRace.conflicts[0].local_content, /v1-agent-conflict/);
+
+    // Transient 503 during readRevision propagates 503 instead of turning into missing_base_blob!
+    injectReadRevision503 = true;
+    await assert.rejects(
+      () => c1.push({ mode: 'interactive' }),
+      err => err.status === 503 && err.code === 'manager_unavailable',
+    );
   } finally {
-    await new Promise(r => server.close(() => r()));
+    await new Promise(r => { server.close(() => r()); server.closeAllConnections(); });
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Super-admin /api/sync/tokens issues, lists (redacted), authenticates, audits, and revokes persistent sync tokens', async t => {
+  const h = await harness(t);
+  const { admin } = await setup(h);
+
+  // Create a non-super-admin project_admin to confirm strict superAdmin gate.
+  const memberPassword = testPassword();
+  await admin('/api/users', 'POST', { username: 'sync-member', password: memberPassword, role: 'project_admin', repository_ids: [] });
+  const member = h.client();
+  await member('/api/auth/login', 'POST', { username: 'sync-member', password: memberPassword });
+  assert.equal((await member('/api/sync/tokens')).status, 403);
+  assert.equal((await member('/api/sync/tokens', 'POST', { actor: 'a', grants: [{ namespace: 'tool-results', scope: 'project_1', mode: 'ro' }] })).status, 403);
+
+  // Issue a scoped token as super-admin.
+  const issued = await admin('/api/sync/tokens', 'POST', {
+    actor: 'node:remote-eu',
+    actor_tag: 'remote-eu',
+    grants: [{ namespace: 'tool-results', scope: 'project_1', mode: 'ro' }],
+    ttl_seconds: 3600,
+  });
+  assert.equal(issued.status, 201);
+  assert.match(issued.value.token, /^bsync_[a-f0-9]{12}\.[a-f0-9]{48}$/);
+  const tokenId = issued.value.token_id;
+
+  // List returns metadata only (no secret/token/hash).
+  const listed = await admin('/api/sync/tokens');
+  assert.equal(listed.status, 200);
+  const row = listed.value.tokens.find(x => x.token_id === tokenId);
+  assert.ok(row);
+  assert.equal(row.actor, 'node:remote-eu');
+  assert.equal(row.active, true);
+  assert.equal('token' in row, false);
+  assert.equal('secret_hash' in row, false);
+
+  // Issued token authenticates against `/sync/tool-results/project_1/manifest`.
+  const manifestRes = await fetch(`${h.admin}/sync/tool-results/project_1/manifest`, {
+    headers: { Authorization: `Bearer ${issued.value.token}` },
+  });
+  assert.equal(manifestRes.status, 200);
+
+  // Restart control plane -> persisted token STILL authenticates!
+  await h.stop();
+  await h.start();
+  const afterRestart = await fetch(`${h.admin}/sync/tool-results/project_1/manifest`, {
+    headers: { Authorization: `Bearer ${issued.value.token}` },
+  });
+  assert.equal(afterRestart.status, 200);
+
+  // Re-login and revoke token -> subsequent `/sync/*` call immediately returns 401!
+  const revoked = await admin(`/api/sync/tokens/${tokenId}`, 'DELETE', {});
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.value.revoked, true);
+
+  const afterRevoke = await fetch(`${h.admin}/sync/tool-results/project_1/manifest`, {
+    headers: { Authorization: `Bearer ${issued.value.token}` },
+  });
+  assert.equal(afterRevoke.status, 401);
+
+  // Unknown token id returns 404.
+  assert.equal((await admin('/api/sync/tokens/deadbeefcafe', 'DELETE', {})).status, 404);
+
+  // Audit trail recorded issuance and revocation.
+  const audits = h.store.all("SELECT action,resource_id FROM audit WHERE resource_id=? ORDER BY rowid", tokenId);
+  assert.deepEqual(audits.map(a => a.action), ['sync.token.issued', 'sync.token.revoked']);
 });

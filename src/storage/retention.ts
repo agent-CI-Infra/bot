@@ -14,6 +14,7 @@ import { sweepOrphanChannelResources } from '../channels/media.js';
 import { ChannelInteractiveCards, sweepOrphanChannelCards } from '../channels/cards.js';
 import { pruneExpiredFeedback, sweepOrphanFeedbackFiles } from '../feedback/storage.js';
 import { pruneUnusedSkillSets } from '../roles/skill-store.js';
+import { pruneSyncData } from '../sync/storage.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
 // by platform administrators (audited) and applied by a daily background job in bounded batches. A cleanup removes
@@ -175,6 +176,7 @@ export class RetentionCleanup {
     const channelCards = this.channelCards();
     const feedback = await this.feedback(settings.feedback_days);
     const skillStore = this.skillStore();
+    const sync = this.syncData();
     const dispatchFailures={count:0,failed:0};
     try{for(const row of this.store.all('SELECT id FROM repositories')){const days=trajectoryDays(settings,String(row.id));if(days===null)continue;const before=new Date(this.now()-days*day).toISOString();while(!this.stopped){const removed=pruneDispatchFailures(this.store,String(row.id),before);dispatchFailures.count+=removed;if(removed<500)break;await this.pause(this.options.pauseMs??20);}}}catch(error){dispatchFailures.failed=1;this.failure('dispatch_failures',error);}
     const dispatchThreads={count:0,failed:0};
@@ -226,7 +228,7 @@ export class RetentionCleanup {
     } catch (error) { memoryConsolidationRuns.failed = 1; this.failure('memory_consolidation_runs', error); }
     const projectNotes = await this.projectNotesHistory(settings);
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, channel_cards: channelCards, feedback, skill_store: skillStore, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, memory_consolidation_runs: memoryConsolidationRuns, project_notes: projectNotes, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, channel_cards: channelCards, feedback, skill_store: skillStore, sync, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, memory_consolidation_runs: memoryConsolidationRuns, project_notes: projectNotes, manager_window: manager, last_error: this.lastError });
   }
 
   private async projectNotesHistory(settings: RetentionSettings): Promise<Removed & { versions: number }> {
@@ -410,6 +412,17 @@ export class RetentionCleanup {
       return pruned;
     } catch (error) {
       this.failure('skill-store', error);
+      return { count: 0, bytes: 0, failed: 1 };
+    }
+  }
+
+  private syncData(): Removed {
+    try {
+      const pruned = pruneSyncData(this.store, { now: this.now() });
+      if (pruned.failed) this.failure('sync', new Error(`${pruned.failed} sync cleanup failure(s)`));
+      return { count: pruned.count, bytes: pruned.bytes, failed: pruned.failed };
+    } catch (error) {
+      this.failure('sync', error);
       return { count: 0, bytes: 0, failed: 1 };
     }
   }

@@ -23,9 +23,7 @@ function isReservedSegment(segment) {
   return (
     segment === '.runner-journal' ||
     segment === '.bot-bg' ||
-    segment === '.sync-base.json' ||
-    segment.startsWith('.sync-base.json.') ||
-    segment.startsWith('.sync-tmp-') ||
+    segment.startsWith('.sync-') ||
     segment.startsWith('.write-') ||
     segment.startsWith('.expired-') ||
     segment.startsWith('.bot-archive-') ||

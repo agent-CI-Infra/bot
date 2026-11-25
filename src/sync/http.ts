@@ -1,10 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { superAdmin, type Actor } from '../app/auth.js';
 import { fail, fields, HttpError, object, type Json } from '../core/security.js';
 import type { FileSyncEngine } from './engine.js';
 import { isSyncNamespaceName } from './namespaces.js';
 import { assertSha256 } from './paths.js';
 import type { SyncTokenService } from './storage.js';
-import type { SyncMode, SyncNamespaceName, SyncPrincipal } from './types.js';
+import type { SyncMode, SyncNamespaceName, SyncPrincipal, SyncTokenGrant } from './types.js';
 
 export type SyncAuthenticator = (
   req: IncomingMessage,
@@ -255,4 +256,67 @@ export function createSyncHttpHandler(options: SyncHttpHandlerOptions) {
 
     return false;
   };
+}
+
+/**
+ * Super-admin console API for issuing, listing, and revoking persistent scoped sync tokens:
+ * - `GET /api/sync/tokens` — lists token metadata (never returns raw token secrets or hashes)
+ * - `POST /api/sync/tokens` — issues a scoped `bsync_<id>.<secret>` token (returned once, audited)
+ * - `DELETE /api/sync/tokens/:id` — revokes an active sync token immediately (audited)
+ */
+export function syncTokensApi(
+  tokens: SyncTokenService,
+  user: Actor,
+  method: string,
+  url: URL,
+  input: Json,
+): Json | undefined {
+  if (url.pathname === '/api/sync/tokens') {
+    superAdmin(user);
+    if (method === 'GET') {
+      return {
+        tokens: tokens.list({
+          includeRevoked: url.searchParams.get('include_revoked') === '1',
+          includeExpired: url.searchParams.get('include_expired') === '1',
+        }) as unknown as Json[],
+      };
+    }
+    if (method === 'POST') {
+      fields(input, ['actor', 'actor_tag', 'grants', 'ttl_seconds', 'ttl_ms']);
+      if (input.ttl_seconds !== undefined && input.ttl_ms !== undefined) {
+        fail(400, 'sync_invalid_ttl');
+      }
+      let ttlMs: number | undefined;
+      if (input.ttl_seconds !== undefined) {
+        const seconds = Number(input.ttl_seconds);
+        if (!Number.isFinite(seconds)) fail(400, 'sync_invalid_ttl');
+        ttlMs = seconds * 1000;
+      } else if (input.ttl_ms !== undefined) {
+        const ms = Number(input.ttl_ms);
+        if (!Number.isFinite(ms)) fail(400, 'sync_invalid_ttl');
+        ttlMs = ms;
+      }
+      const issued = tokens.issue({
+        actor: typeof input.actor === 'string' ? input.actor : '',
+        actorTag: typeof input.actor_tag === 'string' ? input.actor_tag : undefined,
+        grants: (Array.isArray(input.grants) ? input.grants : []) as unknown as SyncTokenGrant[],
+        ttlMs,
+        createdBy: user.id,
+      });
+      return issued as unknown as Json;
+    }
+    return fail(405, 'method_not_allowed');
+  }
+
+  const revokeMatch = /^\/api\/sync\/tokens\/([a-f0-9]{12})$/.exec(url.pathname);
+  if (revokeMatch) {
+    superAdmin(user);
+    if (method !== 'DELETE') return fail(405, 'method_not_allowed');
+    const id = revokeMatch[1]!;
+    if (!tokens.exists(id)) return fail(404, 'sync_token_not_found');
+    tokens.revoke(id, user.id);
+    return { revoked: true, token_id: id };
+  }
+
+  return undefined;
 }

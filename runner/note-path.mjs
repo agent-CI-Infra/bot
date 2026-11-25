@@ -5,7 +5,7 @@ import { constants } from 'node:fs';
 // rest of C0, DEL, the C1 range and the two line separators, which no reader of the catalog can show or round-trip.
 const controlCharacter = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 export function noteComponent(value) {
-  if (typeof value !== 'string' || !value || value.includes('/') || value.includes('\\') || controlCharacter.test(value) || ['.', '..', '.git'].includes(value.toLowerCase()) || value.startsWith('.write-') || value.startsWith('.expired-')) throw new Error('invalid_note_name');
+  if (typeof value !== 'string' || !value || value.includes('/') || value.includes('\\') || controlCharacter.test(value) || ['.', '..', '.git'].includes(value.toLowerCase()) || value.startsWith('.write-') || value.startsWith('.expired-') || value.startsWith('.sync-')) throw new Error('invalid_note_name');
   return value;
 }
 // Paths are relative and already canonical. Do not normalize away traversal or decode names a second time.
@@ -17,7 +17,7 @@ export function notePath(value, { root = false, internal = false } = {}) {
   for (const part of parts) {
     if (Buffer.byteLength(part) > 255) throw new Error('invalid_note_path');
     try {
-      if (internal && (part.startsWith('.write-') || part.startsWith('.expired-'))) {
+      if (internal && (part.startsWith('.write-') || part.startsWith('.expired-') || part.startsWith('.sync-'))) {
         if (!part || ['.', '..', '.git'].includes(part.toLowerCase())) throw new Error('invalid_note_path');
       } else noteComponent(part);
     } catch { throw new Error('invalid_note_path'); }
