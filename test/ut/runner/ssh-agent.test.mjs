@@ -233,9 +233,10 @@ test('a socket path the kernel would truncate is refused instead of bound elsewh
   await assert.rejects(new SshAgentBroker({ socketPath: '/tmp/' + 'x'.repeat(110) + '.sock' }).start(), /ssh_agent_socket_path_too_long/);
 });
 
-test('a running agent the daemon started moves to a newer grant; a process it did not start never gets one', async t => {
+test('a running agent moves to a newer grant only for its own task directory; another task\'s agent or process never does', async t => {
   const { broker, socket } = await fixture(t);
   const first = payload([id(1)], [target(1), target(2)], 'a'), second = payload([id(2)], [target(1), target(2)], 'b');
+  const own = 'c'.repeat(48), other = 'd'.repeat(48);
   // The agent waits for a line on stdin before each child, so the test can re-arm between them.
   const script = `
     const { spawn } = await import('node:child_process');
@@ -244,19 +245,23 @@ test('a running agent the daemon started moves to a newer grant; a process it di
     for await (const _ of lines) console.log(await child());`;
   const agent = spawn(process.execPath, ['--input-type=module', '-e', script], { detached: true, env: { ...process.env, CLIENT: client(socket) }, stdio: ['pipe', 'pipe', 'inherit'] });
   t.after(() => { try { process.kill(-agent.pid, 'SIGKILL'); } catch {} });
-  assert.ok(broker.register(agent.pid, first, 'agent'));
+  assert.ok(broker.register(agent.pid, first, 'agent', own));
   const answers = [];
   agent.stdout.on('data', data => answers.push(...String(data).trim().split('\n').map(line => JSON.parse(line).keys)));
   const ask = async count => { agent.stdin.write('next\n'); while (answers.length < count) await new Promise(resolve => setTimeout(resolve, 20)); };
   await ask(1);
-  assert.ok(broker.rearm(agent.pid, second));
+  // Another task wrote this agent's pid into its own state.json: its call does not move this agent.
+  assert.equal(broker.rearm(agent.pid, second, other), false);
+  assert.equal(broker.rearm(agent.pid, second, null), false);
   await ask(2);
-  assert.deepEqual(answers, [['host-1'], ['host-2']]);
+  assert.ok(broker.rearm(agent.pid, second, own));
+  await ask(3);
+  assert.deepEqual(answers, [['host-1'], ['host-1'], ['host-2']]);
   // Only a process registered as an agent can be re-armed: not a pid read from a file a task could write.
   const stranger = spawn('sleep', ['5'], { detached: true });
   t.after(() => { try { process.kill(stranger.pid, 'SIGKILL'); } catch {} });
-  assert.equal(broker.rearm(stranger.pid, second), false);
-  assert.equal(broker.rearm(agent.pid, { ...second, grant: 'not-a-grant' }), false);
+  assert.equal(broker.rearm(stranger.pid, second, own), false);
+  assert.equal(broker.rearm(agent.pid, { ...second, grant: 'not-a-grant' }, own), false);
   agent.stdin.end();
 });
 
