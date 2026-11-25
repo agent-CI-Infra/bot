@@ -5,6 +5,8 @@ import { harness, setup, account, repository, testPassword } from '../../fixture
 import { beginModelRequest, finishModelRequest } from '../../../dist/metrics/accounting.js';
 import { channelFixture, boundGroup, repositoryAssistant } from '../../fixtures/channel-fixture.mjs';
 import { login as channelLogin } from '../helpers/channel-console-login.mjs';
+import { managementFixture } from '../../fixtures/management-fixture.mjs';
+import { switchConsoleProject } from '../helpers/console-scope-picker.mjs';
 
 // #750 phase 1: the console follows the system theme and offers light / dark / system by hand. The four surfaces in
 // scope (login, project list, global settings, confirmation dialog) must be readable in dark, must not overflow
@@ -1162,4 +1164,53 @@ test('#1067-F the incomplete-metrics note renders at 4.5:1 under system dark', a
       expect(sample.color, `the incomplete note keeps --color-warning in dark at ${width}`).toBe('rgb(240, 200, 130)');
     }
   } finally { await h.stop(); }
+});
+
+// The exception the ut guard records, measured on the page it is about: `.management-feed` still paints the light
+// literal `#fcfdfd` (:25) and no dark block overrides it, so the two link rules keep the fill token `#245de0` instead of
+// the dark text token `#96b4ff`. If the feed is ever themed, the plate leaves `rgb(252, 253, 253)` and both assertions
+// below fail — that is the signal to move the two rules to `--color-brand-text`, not to widen the exception.
+test('#1067-G the unthemed management feed keeps the fill token on its links under system dark', async ({ page }) => {
+  test.setTimeout(240000);
+  const f = await managementFixture();
+  const { h, password } = f;
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.goto(h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await switchConsoleProject(page, '101');
+    const feed = page.getByRole('log', { name: '管理会话记录' });
+    const message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
+    // A real management command through the fixture model: the receipt card carries the 回执详情 / 配置 / 任务 anchors.
+    f.modelState.configurationPrompt = 'Inspect evidence and cite the original logs.';
+    await message.fill('更新任务默认提示词');
+    await send.click();
+    await feed.locator('.management-receipt').filter({ hasText: '操作 更新 Manager 配置' }).last().waitFor({ timeout: 60000 });
+    await feed.locator('.management-receipt a').first().waitFor({ timeout: 30000 });
+    // A markdown reply that carries a link, rendered by the app's own markdown path.
+    f.modelState.respond = async (_body, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: '项目看板见 [项目看板](https://github.com/org/repo)。' } }] }) + '\n\n');
+      res.end('data: [DONE]\n\n');
+    };
+    await message.fill('给我项目看板的链接');
+    await send.click();
+    await feed.locator('.management-markdown a').first().waitFor({ timeout: 60000 });
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      const plate = await page.evaluate(() => getComputedStyle(document.querySelector('.management-feed')).backgroundColor);
+      expect(plate, `the management feed plate at ${width}`).toBe('rgb(252, 253, 253)');
+      // The reason for the exception is measured, not assumed: on this plate the text token is below the bar.
+      expect(contrast(rgb('rgb(150, 180, 255)'), rgb(plate)), 'the dark text token is only readable once the feed itself is themed').toBeLessThan(4.5);
+      for (const selector of ['.management-receipt a', '.management-markdown a']) {
+        const sample = await renderedPair(page, selector);
+        const ratio = pairRatio(sample, selector);
+        expect(sample.color, `${selector} keeps the fill token on the unthemed plate at ${width}`).toBe('rgb(36, 93, 224)');
+        expect(ratio, `${selector} ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  } finally { await f.close(); }
 });

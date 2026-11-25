@@ -86,7 +86,12 @@ body.management-page-mode { overflow: hidden; }
 .management-observation p { font-size: var(--font-size-label); line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; margin: 6px 0; }
 .management-receipt { margin-top: 8px; color: #496773; font-size: var(--font-size-1); }
 .management-receipt > summary { color: #285b67; overflow-wrap: anywhere; cursor: pointer; }
-.management-receipt a { color: var(--color-brand-text); }
+/* The management feed is not themed yet: `.management-feed` (below) still paints the light literal `#fcfdfd` and no
+   dark block overrides it, so the dark text token `#96b4ff` would read 2.01:1 on that white plate. These two
+   anchors keep the fill token `#245de0`, which is the readable one there in both themes (5.65:1 on `#fff`, 5.54:1 on
+   `#fcfdfd`); they move to `--color-brand-text` only when the feed itself takes the dark surface tokens. The ut guard
+   in `test/ut/static/theme.test.mjs` carries the same exception and fails if this plate stops being the literal. */
+.management-receipt a { color: var(--color-brand); }
 .management-receipt button { font-size: var(--font-size-1); }
 .management-receipt details { margin-top: 8px; }
 .management-receipt details summary { cursor: pointer; }
@@ -106,7 +111,7 @@ body.management-page-mode { overflow: hidden; }
 .management-markdown :is(ul,ol) { margin: 10px 0 14px; padding-left: 24px; }
 .management-markdown li { margin: 3px 0; }
 .management-markdown li > p { margin-bottom: 5px; }
-.management-markdown a { color: var(--color-brand-text); text-decoration: underline; text-underline-offset: 3px; }
+.management-markdown a { color: var(--color-brand); text-decoration: underline; text-underline-offset: 3px; }
 .management-markdown blockquote { margin: 14px 0; padding: 8px 14px; border-left: 3px solid #b4d1c9; background: #f2f7f5; color: #5b7775; }
 .management-markdown blockquote p:last-child { margin-bottom: 0; }
 .management-markdown code { padding: 2px 5px; border-radius: 4px; background: #eef2f3; color: #355c65; font: var(--font-size-1)/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }

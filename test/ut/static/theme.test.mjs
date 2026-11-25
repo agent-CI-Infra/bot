@@ -189,6 +189,15 @@ test('#750 no stylesheet in static/ paints text with the fill token', () => {
   };
   walk('static/');
   assert.ok(styles.length > 10, 'the guard reads the whole static/ tree');
+  // Two rows keep the fill token on purpose, and the reason is written here instead of being filtered out silently.
+  // `.management-receipt a` (:89) and `.management-markdown a` (:109) sit on `.management-feed`, which still paints the
+  // light literal `#fcfdfd` (:25) and that no dark block overrides; the dark text token `#96b4ff` reads 2.01:1 on that
+  // plate, while the fill token `#245de0` reads 5.54:1 there and 5.65:1 on the receipt's white box. The management feed
+  // is not themed yet — that is a separate job — so the exception is explicit, checked, and fails as soon as the plate
+  // stops being the literal (then both rows must move to the text token).
+  const unthemedPlate = { path: 'static/management.css', selectors: ['.management-receipt a', '.management-markdown a'] };
+  const allowed = new Set(unthemedPlate.selectors);
+  const used = new Set();
   const violations = [];
   for (const path of styles) {
     const text = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
@@ -196,11 +205,37 @@ test('#750 no stylesheet in static/ paints text with the fill token', () => {
       for (const declaration of body.split(';')) {
         // Only the `color` property counts: `border-color` and `background-color` legitimately keep the fill token.
         const match = declaration.match(/^\s*color\s*:\s*(.+)$/);
-        if (match && /var\(\s*--color-brand\s*\)/.test(match[1])) violations.push(`${path}: ${selector.trim()} { color: ${match[1].trim()} }`);
+        if (!match || !/var\(\s*--color-brand\s*\)/.test(match[1])) continue;
+        if (path === unthemedPlate.path && allowed.has(selector.trim())) used.add(selector.trim());
+        else violations.push(`${path}: ${selector.trim()} { color: ${match[1].trim()} }`);
       }
     }
   }
-  assert.deepEqual(violations, [], 'no static/ rule may paint text with var(--color-brand)');
+  assert.deepEqual(violations, [], 'no static/ rule may paint text with var(--color-brand) unless its plate is the unthemed management feed');
+  assert.deepEqual([...used].sort(), [...allowed].sort(), 'the management-feed exception is exactly the two declared rows');
+  const management = read(unthemedPlate.path).replace(/\/\*[\s\S]*?\*\//g, '');
+  const managementRules = [...management.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selector, body]) => ({ selector: selector.trim(), body }));
+  for (const selector of unthemedPlate.selectors) {
+    const rule = managementRules.find((entry) => entry.selector === selector);
+    assert.ok(rule, `${unthemedPlate.path} still declares ${selector}`);
+    assert.match(rule.body, /color:\s*var\(--color-brand\)/, `${selector} keeps the fill token while its plate is the light literal`);
+    assert.doesNotMatch(rule.body, /--color-brand-text/, `${selector} must not take the text token on the unthemed plate`);
+  }
+  // The exception is valid only while the feed has no dark plate: one literal, and no other declaration that repaints it.
+  const feed = managementRules.find((entry) => entry.selector === '.management-feed');
+  assert.ok(feed && /background:\s*#fcfdfd/.test(feed.body), 'the management feed still paints the light literal #fcfdfd');
+  const repainted = [];
+  for (const path of styles) {
+    const text = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const [, selector, body] of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/\.management-feed\b/.test(selector)) continue;
+      for (const declaration of body.split(';')) {
+        const match = declaration.match(/^\s*background(?:-color)?\s*:\s*(.+)$/);
+        if (match && !/#fcfdfd/i.test(match[1])) repainted.push(`${path}: ${selector.trim()} { background: ${match[1].trim()} }`);
+      }
+    }
+  }
+  assert.deepEqual(repainted, [], 'the unthemed management feed keeps its single light literal, so the exception still holds');
   // The other half of the same guard: a row that carries the fill itself must keep `--color-brand` as its text colour,
   // because the dark text token is the light #96b4ff and the dark fill is the saturated #245de0 — swapping a filled
   // control's label to the text token lowers its contrast instead of raising it. A rule that sets both at once is the
