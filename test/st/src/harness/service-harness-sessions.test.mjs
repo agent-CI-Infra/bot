@@ -1,5 +1,3 @@
-// Legacy conversation fixtures verify gateway accounting and use a synthetic non-streaming provider.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -16,11 +14,12 @@ import {runAgent} from '../../../../dist/agent/runtime.js';
 import {serviceHarnessTurn} from '../../../../dist/harness/service-session.js';
 import {serviceRolesApi} from '../../../../dist/service-roles/api.js';
 import {serviceRole,serviceRoleModel,managementAssistant,updateServiceRole} from '../../../../dist/service-roles/roles.js';
+import {replyChatCompletion} from '../../../fixtures/openai-sse.mjs';
 
 // A service assistant runs only on Pi (#1337).
 test('a non-project service assistant uses pi through the shared session driver',{timeout:60000},async t=>{
  const root=mkdtempSync(join(tmpdir(),'bot-service-session-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root),redactor=new Redactor();
- const model=createServer(async(req,res)=>{let raw='';for await(const part of req)raw+=part;res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'Service native session completed'}}],usage:{prompt_tokens:20,completion_tokens:20}}));});model.listen(0,'127.0.0.1');await once(model,'listening');
+ const model=createServer(async(req,res)=>{let raw='';for await(const part of req)raw+=part;const body=JSON.parse(raw);replyChatCompletion(res,{role:'assistant',content:'Service native session completed'},{stream:Boolean(body.stream),usage:{prompt_tokens:20,completion_tokens:20}});});model.listen(0,'127.0.0.1');await once(model,'listening');
  t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m',NULL,?,'fixture',?,'now')",'http://127.0.0.1:'+model.address().port+'/v1',s.secrets.seal({value:'fixture-key'},'model:m'));
  const before=serviceRole(s,managementAssistant);const saved=updateServiceRole(s,'admin',managementAssistant,{expected_revision:before.revision,harness:'pi',model_id:'m'});assert.equal(saved.harness,'pi');
@@ -44,7 +43,7 @@ test('a non-project service assistant uses pi through the shared session driver'
 
 test('serviceHarnessTurn propagates assistant computer egress=false into harnessAccess.network', { timeout: 60000 }, async t => {
  const root=mkdtempSync(join(tmpdir(),'bot-service-session-egress-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root),redactor=new Redactor();
- const model=createServer(async(req,res)=>{let raw='';for await(const part of req)raw+=part;res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'Offline answer'}}],usage:{prompt_tokens:10,completion_tokens:10}}));});model.listen(0,'127.0.0.1');await once(model,'listening');
+ const model=createServer(async(req,res)=>{let raw='';for await(const part of req)raw+=part;const body=JSON.parse(raw);replyChatCompletion(res,{role:'assistant',content:'Offline answer'},{stream:Boolean(body.stream),usage:{prompt_tokens:10,completion_tokens:10}});});model.listen(0,'127.0.0.1');await once(model,'listening');
  t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m',NULL,?,'fixture',?,'now')",'http://127.0.0.1:'+model.address().port+'/v1',s.secrets.seal({value:'fixture-key'},'model:m'));
  const before=serviceRole(s,managementAssistant);updateServiceRole(s,'admin',managementAssistant,{expected_revision:before.revision,harness:'pi',model_id:'m'});

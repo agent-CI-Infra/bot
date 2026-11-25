@@ -34,7 +34,7 @@ function fixture(t) {
   const s = new Store(':memory:', randomBytes(32));
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
   for (const id of admin.repositories) s.run('INSERT INTO repositories VALUES(?,?,?,?)', id, 'fixture/' + id, 'o', 'a');
-  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r','http://127.0.0.1:9/v1','fixture',?,'now')", s.secrets.seal({ value: 'fixture-key' }, 'model:m'));
+  s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r','http://127.0.0.1:9/v1/responses','fixture',?,'now')", s.secrets.seal({ value: 'fixture-key' }, 'model:m'));
   s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,review_enabled) VALUES('r','m',1,1,1)");
   t.after(() => s.close());
   return s;

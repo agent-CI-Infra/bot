@@ -1,6 +1,4 @@
 // Run with: npm ci --prefix runner && node --test test/live/review/review-session-runner.mjs
-// The fixture model answers plain JSON, which the explicitly enabled gateway transport relays to Pi.
-process.env.BOT_HARNESS_MODEL_TRANSPORT??='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';

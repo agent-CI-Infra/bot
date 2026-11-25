@@ -38,12 +38,11 @@ test('a poll without wait_ms answers at once as before; a long poll with nothing
   assert.ok(capped.ms >= 2900 && capped.ms < 6000, `${capped.ms} ms`);
 });
 
-test('a long poll returns as soon as the session asks for a tool, a token, a turn boundary or a model, or ends', async t => {
+test('a long poll returns as soon as the session asks for a tool, a token or a turn boundary, or ends', async t => {
   const changes = {
     tool: dir => request(dir, 'tool-requests', A, { kind: 'control', name: 'probe', arguments: {} }),
     token: dir => request(dir, 'token-requests', A),
     boundary: dir => writeFile(join(dir, 'boundary.json'), JSON.stringify({ id: A, stage: 'turn' })),
-    model: dir => writeFile(join(dir, 'request.json'), JSON.stringify({ id: A, body: { messages: [] } })),
     completed: dir => writeFile(join(dir, 'state.json'), JSON.stringify({ state: 'completed', pid: process.pid, result: { done: true } })),
     // A process of an earlier boot of the computer is gone.
     interrupted: dir => writeFile(join(dir, 'state.json'), JSON.stringify({ state: 'running', pid: process.pid, boot: 'an-earlier-boot' })),
@@ -55,7 +54,6 @@ test('a long poll returns as soon as the session asks for a tool, a token, a tur
     if (name === 'tool') assert.deepEqual(value.tool_requests, [{ id: A, kind: 'control', name: 'probe', arguments: {} }]);
     if (name === 'token') assert.deepEqual(value.token_requests, [{ id: A }]);
     if (name === 'boundary') assert.equal(value.boundary.id, A);
-    if (name === 'model') assert.equal(value.request.id, A);
     if (name === 'completed') assert.deepEqual([value.state, value.result], ['completed', { done: true }]);
     if (name === 'interrupted') assert.equal(value.state, 'interrupted');
   }
@@ -66,21 +64,16 @@ test('what the control plane already handles does not end a long poll, and its t
   await request(dir, 'tool-requests', A, { kind: 'control', name: 'probe', arguments: { large: 'x'.repeat(1000) } });
   await request(dir, 'token-requests', B);
   await writeFile(join(dir, 'boundary.json'), JSON.stringify({ id: C, stage: 'turn' }));
-  await writeFile(join(dir, 'request.json'), JSON.stringify({ id: D, body: { messages: [] } }));
-  const known = { known_tool_ids: [A], known_token_ids: [B], known_boundary_ids: [C], known_model_ids: [D] };
+  const known = { known_tool_ids: [A], known_token_ids: [B], known_boundary_ids: [C] };
   const held = await timed(poll(root, { wait_ms: 400, ...known }));
   assert.ok(held.ms >= 390, `${held.ms} ms`);
   assert.deepEqual(held.value.tool_requests, [{ id: A, stub: true }]); assert.deepEqual(held.value.token_requests, [{ id: B, stub: true }]);
-  assert.equal(held.value.boundary.id, C); assert.equal(held.value.request.id, D);
+  assert.equal(held.value.boundary.id, C);
   // A request it does not know yet ends the wait, in full beside the known one.
   const [{ value, ms }] = await Promise.all([timed(poll(root, { wait_ms: 3000, ...known })), later(150, () => request(dir, 'tool-requests', D, { kind: 'control', name: 'next', arguments: {} }))]);
   assert.ok(ms < 2000, `${ms} ms`);
   assert.deepEqual(value.tool_requests.find(item => item.id === A), { id: A, stub: true });
   assert.equal(value.tool_requests.find(item => item.id === D).name, 'next');
-  // model_requests belong to the other harnesses' relay and never end a Pi session's wait.
-  const other = await session(t);
-  await request(other.dir, 'model-requests', A, { body: {} });
-  assert.ok((await timed(poll(other.root, { wait_ms: 300 }))).ms >= 290);
 });
 
 test('new events end a long poll no sooner than 200 ms after it began; a full page more ends it at once', async t => {

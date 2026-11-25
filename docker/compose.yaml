@@ -40,6 +40,7 @@ services:
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
+      BOT_MODEL_GATEWAY_SOCKET: /run/model-gateway/gateway.sock
       BOT_HOST_STORAGE_DIR: /run/host-storage
       BOT_COMMAND_TIMEOUT_MAX_SECONDS: "${BOT_COMMAND_TIMEOUT_MAX_SECONDS:-600}"
       BOT_GITHUB_API_URL: "${BOT_GITHUB_API_URL:-https://api.github.com}"
@@ -90,6 +91,8 @@ services:
       # Content-addressed materialized skill sets (/skill-store/projects/<repository_id>/sets/<hash> & /skill-store/service/sets/<hash>, #1359).
       # Only the control plane writes here; project and assistant computers mount their isolated scope read-only at /opt/bot-skills.
       - skill-store:/skill-store
+      # Dedicated UDS passthrough model gateway socket; project and assistant computers mount it read-only.
+      - model-gateway:/run/model-gateway
     networks: [control]
     read_only: true
     tmpfs:
@@ -145,6 +148,7 @@ services:
       BOT_TOOL_RESULTS_DIR: /tool-results
       BOT_PROJECT_TOOLS_DIR: /project-tools
       BOT_SKILL_STORE_DIR: /skill-store
+      BOT_MODEL_GATEWAY_DIR: /run/model-gateway
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
@@ -159,6 +163,8 @@ services:
       - project-tools:/project-tools:ro
       # Read-only: the manager finds the skill-store volume name and validates each scope directory before subpath mount.
       - skill-store:/skill-store:ro
+      # Read-only: the manager finds the model-gateway volume name and mounts it read-only at /run/model-gateway.
+      - model-gateway:/run/model-gateway:ro
     networks: [control]
     read_only: true
     tmpfs:
@@ -191,6 +197,9 @@ volumes:
   skill-store:
     labels:
       department.bot.kind: skill-store
+  model-gateway:
+    labels:
+      department.bot.kind: model-gateway
   assistant-homes:
   bot-data:
   bot-keys:

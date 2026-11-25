@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {normalizeResponseFraming} from '../../../../dist/harness/response-framing.js';
-import {UpstreamStreamDecoder} from '../../../../dist/harness/model-formats.js';
+import {PassthroughTap} from '../../../../dist/harness/model-formats.js';
 
 for (const chunks of [['event: response.created\ndata: {}\n\n'], ['\ufeff\n', 'e', 'ven', 't:', ' response.created\ndata: {}\n\n'], [': heartbeat\n\n', 'data: {}\n\n'], ['da','ta: {}\n\n']]) {
   test('corrects mislabeled SSE without losing bytes: '+JSON.stringify(chunks),async()=>{
@@ -43,7 +43,8 @@ test('actual Responses SSE decodes when the header advertised JSON',async()=>{
   const response={id:'resp_framing',model:'gpt-fixture',status:'completed',output:[{type:'message',id:'msg_1',role:'assistant',content:[{type:'output_text',text:'READY',annotations:[]}]}],usage:{input_tokens:4,output_tokens:2}};
   const body=`event: response.created\ndata: ${JSON.stringify({type:'response.created',response:{...response,status:'in_progress',output:[]}})}\n\nevent: response.completed\ndata: ${JSON.stringify({type:'response.completed',response})}\n\n`;
   const normalized=await normalizeResponseFraming(new Response(body,{headers:{'content-type':'application/json'}}));
-  const decoder=new UpstreamStreamDecoder('openai-responses',normalized.headers.get('content-type').includes('text/event-stream'),'gpt-fixture');
-  const events=[...decoder.push(new Uint8Array(await normalized.arrayBuffer())),...decoder.end()];
-  assert.ok(events.some(e=>e.type==='finish'));assert.equal(decoder.usage.input_tokens,4);
+  const tap=new PassthroughTap('openai-responses',normalized.headers.get('content-type').includes('text/event-stream'),'gpt-fixture');
+  tap.push(new Uint8Array(await normalized.arrayBuffer()));
+  const summary=tap.end();
+  assert.equal(summary.stop_reason,'completed');assert.equal(summary.usage.input_tokens,4);assert.equal(summary.content,'READY');
 });

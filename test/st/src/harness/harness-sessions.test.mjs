@@ -1,5 +1,3 @@
-// These legacy protocol fixtures exercise the explicitly enabled gateway transport.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -19,6 +17,7 @@ import {LocalManager} from '../../../../dist/projects/local-manager.js';
 import {managedSession} from '../../../../dist/harness/session.js';
 import {harnessAccess,checkHarnessAccess} from '../../../../dist/harness/access.js';
 import {defaultPermissions} from '../../../../dist/roles/permissions.js';
+import {replyChatCompletion} from '../../../fixtures/openai-sse.mjs';
 const call=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:randomBytes(8).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 
 test('a session can accept a later turn and cancellation does not poison its next turn',async()=>{
@@ -53,7 +52,7 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
   const skillPathMatch=/([^\s"'<>]+\/roadmap-decomposition\/SKILL\.md)/.exec(payload);
   assert.ok(skillPathMatch,'mounted roadmap-decomposition SKILL.md path must be advertised natively by Pi');
   const message=requests.length===1?call('read',{path:skillPathMatch[1]}):requests.length===2?call('bash',{command:'cat evidence.txt; printf "native-result" > native-result.txt'}):call('finish_coordination',{action:'wait',reason:'Read actual evidence: fixture-ci-infrastructure-unavailable',resume_condition:'CI service is restored'});
-  res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:20,completion_tokens:20}}));
+  replyChatCompletion(res,message,{stream:Boolean(body.stream),usage:{prompt_tokens:20,completion_tokens:20}});
  });model.listen(0,'127.0.0.1');await once(model,'listening');
  t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
  s.run("INSERT INTO accounts VALUES('a','test','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/probe','o','a')");

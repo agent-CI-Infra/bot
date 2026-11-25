@@ -1,5 +1,3 @@
-// These legacy protocol fixtures exercise the explicitly enabled gateway transport.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -347,7 +345,6 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
   mkdirSync(join(root, 'tasks', wsId, 'repo'), { recursive: true, mode: 0o700 });
   mkdirSync(join(agentDir, 'tool-requests'), { recursive: true, mode: 0o700 });
   mkdirSync(join(agentDir, 'token-requests'), { recursive: true, mode: 0o700 });
-  mkdirSync(join(agentDir, 'model-requests'), { recursive: true, mode: 0o700 });
   mkdirSync(join(root, 'project-notes'), { recursive: true, mode: 0o700 });
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -357,7 +354,7 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
   assert.equal(refuseFull({ type: 'workspace_command' }, () => ({ full: true, free_bytes: 0, total_bytes: 100 }))?.error, 'disk_full');
 
   const tool1 = '1'.repeat(48), tool2 = '2'.repeat(48), tool3 = '3'.repeat(48), toolHuge = '4'.repeat(48);
-  const tok1 = '5'.repeat(48), mod1 = '6'.repeat(48);
+  const tok1 = '5'.repeat(48);
 
   // Three ~650 KiB tool requests (~1.95 MiB total) exceed the 1.5 MiB per-poll budget -> 2 delivered, 3rd deferred with has_more=true.
   const bigArg = 'x'.repeat(650 * 1024);
@@ -367,7 +364,6 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
   await delay(10);
   writeFileSync(join(agentDir, 'tool-requests', `${tool3}.json`), JSON.stringify({ id: tool3, name: 't3', arguments: { data: bigArg } }));
   writeFileSync(join(agentDir, 'token-requests', `${tok1}.json`), JSON.stringify({ id: tok1, purpose: 'git', token: 'rrt_secret' }));
-  writeFileSync(join(agentDir, 'model-requests', `${mod1}.json`), JSON.stringify({ id: mod1, path: '/v1/messages', body: { ok: true } }));
 
   const poll1 = await execLocalRunner(root, {
     type: 'workspace_harness_poll',
@@ -378,19 +374,17 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
   assert.equal(poll1.result.has_more, true, '3rd 650 KiB request deferred past 1.5 MiB budget');
   assert.deepEqual(poll1.result.tool_requests.map(r => r.id), [tool1, tool2]);
   assert.equal(poll1.result.token_requests.length, 1);
-  assert.equal(poll1.result.model_requests.length, 1);
 
   // Zero .runner-journal records written by workspace_harness_poll!
   assert.deepEqual(readdirSync(join(root, '.runner-journal')), []);
 
-  // Poll 2 passes tool1, tool2, tok1, mod1 as known IDs -> receives lightweight { id, stub: true } without re-reading bodies, plus full tool3!
+  // Poll 2 passes tool1, tool2, tok1 as known IDs -> receives lightweight { id, stub: true } without re-reading bodies, plus full tool3!
   const poll2 = await execLocalRunner(root, {
     type: 'workspace_harness_poll',
     workspace_id: wsId,
     offset: 0,
     known_tool_ids: [tool1, tool2],
     known_token_ids: [tok1],
-    known_model_ids: [mod1],
   });
   assert.equal(poll2.ok, true);
   assert.equal(poll2.result.has_more, false);
@@ -399,8 +393,6 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
   assert.equal(poll2.result.tool_requests[2].id, tool3);
   assert.equal(poll2.result.tool_requests[2].arguments.data.length, bigArg.length);
   assert.deepEqual(poll2.result.token_requests, [{ id: tok1, stub: true }]);
-  assert.equal(poll2.result.model_requests[0].stub, true);
-  assert.equal(poll2.result.model_requests[0].data, undefined);
 
   // Oversized (>2 MiB) tool request is flagged with { id, oversized: true } instead of blowing up runner stdout.
   writeFileSync(join(agentDir, 'tool-requests', `${toolHuge}.json`), JSON.stringify({ id: toolHuge, name: 'huge', arguments: { blob: 'z'.repeat(2_200_000) } }));
@@ -410,7 +402,6 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
     offset: 0,
     known_tool_ids: [tool1, tool2, tool3],
     known_token_ids: [tok1],
-    known_model_ids: [mod1],
   });
   const hugeEntry = pollHuge.result.tool_requests.find(r => r.id === toolHuge);
   assert.equal(hugeEntry.oversized, true);
@@ -419,7 +410,6 @@ test('M2: workspace_harness_poll returns seen-ID stubs, enforces 1.5 MiB request
   const instLive = hex48();
   rmSync(join(agentDir, 'tool-requests'), { recursive: true, force: true });
   rmSync(join(agentDir, 'token-requests'), { recursive: true, force: true });
-  rmSync(join(agentDir, 'model-requests'), { recursive: true, force: true });
 
   const holdCli = join(root, 'hold-cli.mjs');
   writeFileSync(holdCli, `#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
@@ -847,8 +837,10 @@ test('minor lifecycle fixes: createToolDispatch handles JSON null replies, Works
     if (prevCodexCfg !== undefined) process.env.BOT_CODEX_CONFIG = prevCodexCfg;
   });
 
-  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m1','101','http://127.0.0.1:9/v1','claude-sonnet-4-5',?,'now')",
+  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m1','101','http://127.0.0.1:9/v1/messages','claude-sonnet-4-5',?,'now')",
     store.secrets.seal({ value: 'k' }, 'model:m1'));
+  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m2','101','http://127.0.0.1:9/v1/responses','gpt-5-codex',?,'now')",
+    store.secrets.seal({ value: 'k' }, 'model:m2'));
   store.run("INSERT INTO policies(repository_id,enabled,model_id) VALUES('101',1,'m1')");
   const baseSpec = {
     store,
@@ -862,7 +854,9 @@ test('minor lifecycle fixes: createToolDispatch handles JSON null replies, Works
   };
 
   const prepClaude = await prepareClaudeCode(baseSpec);
-  const prepCodex = await prepareCodex(baseSpec);
+  store.run("UPDATE policies SET model_id='m2' WHERE repository_id='101'");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES('t2','101','task.request','running','test','{}',1,1,?)", wsId);
+  const prepCodex = await prepareCodex({ ...baseSpec, task: store.get("SELECT * FROM tasks WHERE id='t2'") });
   // Install newer compatible versions AFTER prepare:
   writeVolumeCli('claude_code', '2.1.319');
   writeVolumeCli('codex', '0.167.0');

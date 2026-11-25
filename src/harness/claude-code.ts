@@ -13,17 +13,17 @@ import type { HarnessEvent } from './session.js';
 import { claudeCodeRuntime, ClaudeJsonStream, claudeUserMessage, uuidPattern, type ClaudeUsage } from './claude-code-protocol.js';
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, satisfiesCliRange, selectCompatibleCliVersion } from './agent-tools.js';
 import { readProviderCredentialFile, type FileBackedModelProvider } from './model-gateway.js';
+import type { ModelInterfaceType } from '../models/catalog.js';
 import { filterPlatformTools, withContainerHarnessSession } from './container-session.js';
-import { modelTransport, type ModelTransport } from './model-connection.js';
 import type { HarnessModelSource } from './subscription.js';
 
 export interface ClaudeProviderConfig {
   baseUrl: string;
   credentialFile: string;
+  interfaceType?: ModelInterfaceType;
 }
 
 export interface ClaudeConfiguration {
-  modelTransport?: ModelTransport;
   command?: string;
   version: string;
   stateDirectory: string;
@@ -34,7 +34,6 @@ export interface ClaudeConfiguration {
 }
 
 export interface ClaudePreparation {
-  modelTransport: ModelTransport;
   modelSource?: HarnessModelSource;
   mode: 'volume' | 'config_file';
   config?: ClaudeConfiguration;
@@ -88,7 +87,7 @@ export function claudeConfiguration(): ClaudeConfiguration {
   }
   if (
     !c ||
-    Object.keys(c).some(k => !['command', 'version', 'stateDirectory', 'model', 'provider', 'timeoutMs', 'env', 'modelTransport'].includes(k)) ||
+    Object.keys(c).some(k => !['command', 'version', 'stateDirectory', 'model', 'provider', 'timeoutMs', 'env'].includes(k)) ||
     typeof c.version !== 'string' ||
     !satisfiesCliRange('claude_code', c.version) ||
     typeof c.stateDirectory !== 'string' ||
@@ -105,9 +104,10 @@ export function claudeConfiguration(): ClaudeConfiguration {
     !c.provider ||
     typeof c.provider !== 'object' ||
     Array.isArray(c.provider) ||
-    Object.keys(c.provider).some(k => !['baseUrl', 'credentialFile'].includes(k)) ||
+    Object.keys(c.provider).some(k => !['baseUrl', 'credentialFile', 'interfaceType'].includes(k)) ||
     typeof c.provider.credentialFile !== 'string' ||
-    !isAbsolute(c.provider.credentialFile)
+    !isAbsolute(c.provider.credentialFile) ||
+    (c.provider.interfaceType !== undefined && !['openai-chat-completions', 'openai-responses', 'anthropic-messages'].includes(c.provider.interfaceType))
   )) {
     return fail('claude_configuration_invalid');
   }
@@ -136,14 +136,19 @@ export function claudeConfiguration(): ClaudeConfiguration {
     }
   }
   return {
-    modelTransport: modelTransport(c.modelTransport),
     version: c.version,
     stateDirectory: c.stateDirectory,
     model: c.model,
     ...(c.command ? { command: c.command } : {}),
     ...(c.timeoutMs ? { timeoutMs: c.timeoutMs } : {}),
     ...(Object.keys(extraEnv).length ? { env: extraEnv } : {}),
-    ...(c.provider ? {provider: { baseUrl: c.provider.baseUrl, credentialFile: c.provider.credentialFile }} : {}),
+    ...(c.provider ? {
+      provider: {
+        baseUrl: c.provider.baseUrl,
+        credentialFile: c.provider.credentialFile,
+        ...(c.provider.interfaceType ? { interfaceType: c.provider.interfaceType as ModelInterfaceType } : {}),
+      },
+    } : {}),
   };
 }
 
@@ -214,10 +219,17 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
         return fail('claude_version_unsupported');
       }
       const localConfig = spec.containerOptions?.modelSource === 'local_config';
+      const configIface = config.provider?.interfaceType ?? 'anthropic-messages';
+      if (!localConfig && config.provider && configIface !== 'anthropic-messages') {
+        return fail(
+          'harness_model_api_unsupported',
+          'waiting_configuration',
+          `Claude Code 仅支持 Anthropic Messages (anthropic-messages) 协议模型，当前模型协议为 ${configIface}；网关不执行跨协议格式转换。`,
+        );
+      }
       const configurationHash = contentHash({
         ...config,
         command,
-        modelTransport: localConfig ? 'direct' : modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport),
         ...(localConfig ? { modelSource: 'local_config' } : {}),
         protocol: claudeCodeRuntime.protocol,
       });
@@ -226,11 +238,10 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
         baseUrl: config.provider.baseUrl,
         credentialFile: config.provider.credentialFile,
         model: config.model,
-        interfaceType: 'anthropic-messages',
+        interfaceType: configIface,
         authHeader: 'x-api-key',
       } : undefined;
       const prepared: ClaudePreparation = {
-        modelTransport: localConfig ? 'direct' : modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport),
         modelSource: localConfig ? 'local_config' : 'gateway',
         mode: 'config_file',
         config,
@@ -278,7 +289,6 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
       protocol: claudeCodeRuntime.protocol,
     });
     const prepared: ClaudePreparation = {
-      modelTransport: 'direct',
       modelSource: 'local_config',
       mode: 'volume',
       command,
@@ -299,6 +309,14 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
   const primaryModel = fileProvider
     ? undefined
     : ((spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel));
+  const effectiveIface = fileProvider ? (fileProvider.interfaceType ?? 'anthropic-messages') : primaryModel?.protocol?.interface_type;
+  if (effectiveIface && effectiveIface !== 'anthropic-messages') {
+    return fail(
+      'harness_model_api_unsupported',
+      'waiting_configuration',
+      `Claude Code 仅支持 Anthropic Messages (anthropic-messages) 协议模型，当前模型协议为 ${effectiveIface}；网关不执行跨协议格式转换。`,
+    );
+  }
   const modelName = fileProvider ? fileProvider.model : primaryModel!.model;
   const configurationHash = contentHash({
     cli: 'claude_code',
@@ -307,10 +325,8 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
     model: modelName,
     model_id: primaryModel?.id ?? fileProvider?.id ?? 'provider',
     protocol: claudeCodeRuntime.protocol,
-    modelTransport:modelTransport(spec.containerOptions?.modelTransport),
   });
   const prepared: ClaudePreparation = {
-    modelTransport: modelTransport(spec.containerOptions?.modelTransport),
     mode: 'volume',
     command,
     ...(nodeExecutable ? { nodeExecutable } : {}),
@@ -595,7 +611,7 @@ export async function runClaudeCode<T>(
         ...(localConfig ? { modelSource: 'local_config', actualModel: reportedModel } : {}),
         ...(Array.isArray(m.skills) && m.skills.length ? { skills: m.skills } : {}),
         configurationHash: prepared.configurationHash,
-        usage: !localConfig && prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
+        usage: !localConfig ? 'gateway' : 'native_events',
       });
       return;
     }
@@ -685,7 +701,6 @@ export async function runClaudeCode<T>(
       spec,
       {
         cli: 'claude_code',
-        modelTransport: prepared.modelTransport,
         ...(prepared.modelSource ? { modelSource: prepared.modelSource } : {}),
         ...(prepared.config?.env?.CLAUDE_CONFIG_DIR ? {claudeHomeOverride:prepared.config.env.CLAUDE_CONFIG_DIR} : {}),
         ...(prepared.model ? { model: prepared.model } : {}),

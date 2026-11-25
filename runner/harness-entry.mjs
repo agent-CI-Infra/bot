@@ -9,11 +9,11 @@ import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { maskedStream } from './command-output.mjs';
 import { environment as baseEnv, workspaceTag } from './command.mjs';
-import { startModelRelay } from './model-relay.mjs';
+import { startModelBridge } from './model-relay.mjs';
 import { local, runnerRoot, tasksDirectory, workspaceRoot } from './paths.mjs';
 import { bashProfile, loginProfile } from './login-profile.mjs';
 import { ACP_LEASE_MS, acpLeaseFile, acpRunHome, reapAcpDescendants } from './acp-lease.mjs';
-import { releaseWorkSwarmPorts, workSwarmToolNames } from './workswarm.mjs';
+import { releaseWorkSwarmPorts } from './workswarm.mjs';
 import { icodeProductId, requiresAcpRunHome, workswarmProductId } from './acp-products.mjs';
 import { cleanupStagedCliConfig, stageLocalCliConfig } from './cli-config.mjs';
 import { createTokenExchange } from './token-exchange.mjs';
@@ -247,16 +247,14 @@ try {
   }
 
   const localConfig = !acp && rawConfig.model_source === 'local_config';
-  const gateway = !localConfig && rawConfig.model_transport === 'gateway';
-  if (acp && (!gateway || !instanceId)) throw new Error('acp_launch_invalid');
-  if(gateway) relay = await startModelRelay({
-    agentDir, signal: runAbort.signal,
-    ...(workswarm ? {
-      allowedTools: new Set(await workSwarmToolNames(agentDir)),
-    } : {}),
-  });
-  const nativeModel = localConfig || gateway ? undefined : rawConfig.native_model;
-  if(nativeModel?.key)addSecret(nativeModel.key);
+  if (acp && !instanceId) throw new Error('acp_launch_invalid');
+  if (!localConfig) {
+    relay = await startModelBridge({
+      socketPath: rawConfig.model_gateway_socket,
+      targetUrl: rawConfig.model_gateway_url,
+      signal: runAbort.signal,
+    });
+  }
   credHelper = await startCredentialHelperServer({ agentDir, runToken, addSecret, signal: runAbort.signal });
 
   const githubHost = typeof rawConfig.github_host === 'string' && rawConfig.github_host ? rawConfig.github_host : 'github.com';
@@ -310,13 +308,12 @@ try {
   let actualResume = false;
 
   if (harness === 'claude_code') {
-    // Explicit provider credentials take precedence over an unrelated native login; local_config never injects any model env.
-    if(gateway||nativeModel){delete childEnv.ANTHROPIC_AUTH_TOKEN;delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;}
-    if(localConfig){
+    // Explicit gateway credentials take precedence over an unrelated native login; local_config never injects any model env.
+    delete childEnv.ANTHROPIC_AUTH_TOKEN;
+    delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+    if (localConfig) {
       delete childEnv.ANTHROPIC_BASE_URL;
       delete childEnv.ANTHROPIC_API_KEY;
-      delete childEnv.ANTHROPIC_AUTH_TOKEN;
-      delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
     }
     const claudeHome = local && rawConfig.claude_home_override?.startsWith('/')
       ? await ensureSafeDirectory(rawConfig.claude_home_override, dirname(rawConfig.claude_home_override))
@@ -390,8 +387,7 @@ try {
       CLAUDE_CONFIG_DIR: claudeHome,
       XDG_CONFIG_HOME: `${homeDir}/.config`,
       XDG_CACHE_HOME: `${homeDir}/.cache`,
-      ...(gateway ? {ANTHROPIC_BASE_URL: relay.url,ANTHROPIC_API_KEY: runToken}
-        : nativeModel ? {ANTHROPIC_BASE_URL:nativeModel.baseUrl,ANTHROPIC_API_KEY:nativeModel.key} : {}),
+      ...(!localConfig ? { ANTHROPIC_BASE_URL: relay.url, ANTHROPIC_API_KEY: runToken } : {}),
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(rawConfig.max_output_tokens || 8192),
       MCP_TIMEOUT: '60000',
       MCP_TOOL_TIMEOUT: '3600000',
@@ -412,30 +408,30 @@ try {
       delete childEnv.CODEX_RELAY_URL;
       delete childEnv.OPENAI_BASE_URL;
       delete childEnv.OPENAI_API_KEY;
-      delete childEnv.BOT_NATIVE_MODEL_KEY;
       stagedLocalConfigs = await stageLocalCliConfig(workspaceRoot, 'codex', codexHome, addSecret);
       await writeFile(`${agentDir}/staged-cli-config.json`, JSON.stringify(stagedLocalConfigs), { mode: 0o600 });
     }
-    if(gateway) await writeFile(
-      `${codexHome}/config.toml`,
-      buildCodexConfigToml({
-        model: String(rawConfig.model || 'gpt-5-codex'),
-        relayUrl: relay.url,
-        egress: Boolean(rawConfig.egress),
-        nodeExec: nodeExecutable,
-        mcpBridgePath,
-        agentDir,
-        access:rawConfig.execution_access,
-      }),
-      { mode: 0o600 },
-    );
-    const nativeProvider = !localConfig && nativeModel ? ['-c',`model_providers.bot_direct = { name = "Bot direct", base_url = ${tomlString(nativeModel.baseUrl)}, env_key = "BOT_NATIVE_MODEL_KEY", wire_api = "responses" }`] : [];
+    if (!localConfig) {
+      await writeFile(
+        `${codexHome}/config.toml`,
+        buildCodexConfigToml({
+          model: String(rawConfig.model || 'gpt-5-codex'),
+          relayUrl: relay.url,
+          egress: Boolean(rawConfig.egress),
+          nodeExec: nodeExecutable,
+          mcpBridgePath,
+          agentDir,
+          access: rawConfig.execution_access,
+        }),
+        { mode: 0o600 },
+      );
+    }
+    const providerFlags = !localConfig ? ['-c', 'model_provider="bot_relay"'] : [];
     const untrustedDocFlag = rawConfig.execution_access?.trustedCheckout === false ? ['-c', 'project_doc_max_bytes=0'] : [];
-    spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), ...untrustedDocFlag, ...nativeProvider, 'app-server'];
+    spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), ...untrustedDocFlag, ...providerFlags, 'app-server'];
     Object.assign(childEnv, {
       CODEX_HOME: codexHome,
-      ...(gateway ? {CODEX_RELAY_URL: relay.url,OPENAI_BASE_URL: `${relay.url}/v1`,OPENAI_API_KEY: runToken}
-        : !localConfig && nativeModel ? {BOT_NATIVE_MODEL_KEY:nativeModel.key} : {}),
+      ...(!localConfig ? { CODEX_RELAY_URL: relay.url, OPENAI_BASE_URL: `${relay.url}/v1`, OPENAI_API_KEY: runToken } : {}),
     });
   }
 
@@ -489,7 +485,7 @@ try {
     state: 'running',
     cli_pid: cliChild.pid ?? null,
     ...(acp ? { harness, ...(isolatedAcpHome ? { acp_product_id: productId } : {}) } : {}),
-    model_transport: localConfig ? 'local_config' : gateway ? 'gateway' : 'direct',
+    model_transport: localConfig ? 'local_config' : 'gateway',
     ...(localConfig ? { model_source: 'local_config' } : {}),
     relay_url: relay?.url ?? null,
     session_id: sessionId,

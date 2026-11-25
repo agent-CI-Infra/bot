@@ -1,6 +1,5 @@
 // #1106: in the team path the developer's submitted summary is the pull request description. Both tools say what the text
 // becomes, the Manager sees the developer's text where it nominates, and a nomination without summary publishes it unchanged.
-process.env.BOT_HARNESS_MODEL_TRANSPORT = 'gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';

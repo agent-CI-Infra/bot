@@ -10,12 +10,12 @@ async function prepared(page) {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101'); await repository(admin, a.id, '102');
     const models = [];
     for (const model_name of ['Project base', 'Role fixed']) {
-      const saved = await admin('/api/models', 'POST', { repository_id: '101', model_name, api_url: 'http://127.0.0.1:9/v1', api_key: testPassword() }); expect(saved.status).toBe(201); models.push(saved.value.model);
+      const saved = await admin('/api/models', 'POST', { repository_id: '101', model_name, api_url: 'http://127.0.0.1:9/v1/responses', api_key: testPassword() }); expect(saved.status).toBe(201); models.push(saved.value.model);
     }
     expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: models[0].id })).status).toBe(200);
     const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: false, roles: [
       { role_id: 'dev', enabled: true, harness_ref: { id: 'codex' } },
-      { role_id: 'reviewer', enabled: true, harness_ref: { id: 'codex' }, model_profile_ref: { model_id: models[1].id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' } }
+      { role_id: 'reviewer', enabled: true, harness_ref: { id: 'codex' }, model_profile_ref: { model_id: models[1].id, api: 'openai-responses', tool_calls: true, structured_output: 'tool_call' } }
     ] }); expect(saved.status, JSON.stringify(saved.value)).toBe(200);
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();

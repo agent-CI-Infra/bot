@@ -231,6 +231,12 @@ function backendModel(cli: string, store?: Store, repositoryId?: string) {
   let resolvedModel: BackendResolvedModel | null = null;
   let resolvedModelRow: Row | null = null;
   let modelErrorCode: string | null = null;
+  const supportedApis = harnesses.find(h => h.id === cli)?.model_api ?? [];
+  const isCompatible = (row: Row | null | undefined) => {
+    if (!row || !store || !supportedApis.length) return Boolean(row);
+    const proto = modelProtocol(store, row as any);
+    return supportedApis.includes(proto.interface_type);
+  };
 
   if (store && repositoryId) {
     modelCount = Number(
@@ -242,10 +248,17 @@ function backendModel(cli: string, store?: Store, repositoryId?: string) {
     );
     try {
       const opened = selectedModel(store, repositoryId);
-      resolvedModel = { id: String(opened.id), name: String(opened.model), source: 'project' };
-      resolvedModelRow = store.get('SELECT id,model_name,version,updated_at FROM models WHERE id=?', opened.id) ?? null;
+      const row = store.get('SELECT * FROM models WHERE id=?', opened.id) ?? null;
+      if (row && isCompatible(row)) {
+        resolvedModel = { id: String(opened.id), name: String(opened.model), source: 'project' };
+        resolvedModelRow = row;
+      } else if (row) {
+        modelErrorCode = 'harness_model_api_unsupported';
+      }
     } catch (err) {
       modelErrorCode = err instanceof TaskError ? err.code : 'model_not_configured';
+    }
+    if (!resolvedModel) {
       const config = roleConfiguration(store, repositoryId);
       const boundRoles = config.roles.filter(
         r => r.enabled && r.harness_ref.id === cli && r.harness_ref.model_source !== 'local_config',
@@ -254,7 +267,7 @@ function backendModel(cli: string, store?: Store, repositoryId?: string) {
         const rows = boundRoles.map(r =>
           r.model_profile_ref?.model_id ? visibleModel(store, repositoryId, r.model_profile_ref.model_id) : undefined,
         );
-        if (rows.every(r => Boolean(r?.api_key))) {
+        if (rows.every(r => Boolean(r?.api_key) && isCompatible(r))) {
           const first = rows[0]!;
           resolvedModel = { id: String(first.id), name: String(first.model_name), source: 'role' };
           resolvedModelRow = first;
@@ -270,10 +283,14 @@ function backendModel(cli: string, store?: Store, repositoryId?: string) {
       ? modelConnectivity(store, repositoryId, resolvedModelRow)
       : emptyConnectivity();
 
-  return { modelCount, modelRelayReady, resolvedModel, connectivity, modelErrorCode };
+  return { modelCount, modelRelayReady, resolvedModel, connectivity, modelErrorCode, supportedApis };
 }
 
-function relayUnavailable(label: string, modelCount: number) {
+function relayUnavailable(label: string, modelCount: number, modelErrorCode?: string | null, supportedApis: readonly string[] = []) {
+  if (modelErrorCode === 'harness_model_api_unsupported') {
+    const apis = supportedApis.length ? `（${label} 仅支持 ${supportedApis.join('、')}）` : '';
+    return `项目默认模型使用的接口协议与 ${label} 不兼容${apis}，请在项目「模型」页添加兼容协议的模型，或为使用 ${label} 的角色单独指定兼容模型。`;
+  }
   return modelCount > 0
     ? `项目已有 ${modelCount} 个带密钥模型，但尚未选择项目默认模型（请在项目设置选择默认模型，或为使用 ${label} 的角色单独指定模型）。`
     : '项目尚未配置可用于容器内模型中转的上游模型与凭据。';
@@ -294,7 +311,7 @@ function containerCliStatus(
   const configOverride = Boolean(process.env[overrideVar]);
   const installedVersions = [...info.compatible_versions, ...info.incompatible_versions];
 
-  const { modelCount, modelRelayReady, resolvedModel, connectivity, modelErrorCode } = backendModel(cli, store, repositoryId);
+  const { modelCount, modelRelayReady, resolvedModel, connectivity, modelErrorCode, supportedApis } = backendModel(cli, store, repositoryId);
   const localConfigView = subscriptionStatusView(cli, cliConfig);
   const usesLocalConfig = Boolean(
     store && repositoryId && roleConfiguration(store, repositoryId).roles.some(
@@ -312,7 +329,7 @@ function containerCliStatus(
       : `${label} 工具卷不可用（${reasonCode}）。`;
   } else if (!modelRelayReady && !configOverride && !usesLocalConfig) {
     reasonCode = modelErrorCode ?? 'model_not_configured';
-    reason = relayUnavailable(label, modelCount);
+    reason = relayUnavailable(label, modelCount, modelErrorCode, supportedApis);
   }
 
   const ready = reasonCode === null;
@@ -368,7 +385,7 @@ function acpReleaseStatus(id: typeof icodeProductId | typeof workswarmProductId,
   const model = backendModel(id, store, repositoryId);
   if (info.selected_version && !model.modelRelayReady) {
     reasonCode = model.modelErrorCode ?? 'model_not_configured';
-    reason = relayUnavailable(name, model.modelCount);
+    reason = relayUnavailable(name, model.modelCount, model.modelErrorCode, model.supportedApis);
   }
   return {
     source: 'tool_volume', ready: reasonCode === null, status: reasonCode === null ? 'ready' : 'unavailable',
@@ -433,6 +450,7 @@ export function agentBackends(store?: Store, repositoryId?: string, toolsRoot?: 
         kinds: h.kinds,
         model_source: h.externalModel ? 'external_harness' : 'project',
         supported_model_sources: h.tool_volume ? ['gateway', 'local_config'] : ['gateway'],
+        supported_model_apis: h.model_api,
         integration_issue: null,
         runtime_status,
       };

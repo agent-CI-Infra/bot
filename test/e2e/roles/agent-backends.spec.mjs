@@ -29,8 +29,16 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     node_version: null,
     artifacts: [{ role: 'static_binary', source_url: 'https://example.invalid/codex.tar.gz', sha256: 'a'.repeat(64), bytes: 32 }],
   }));
-  const upstream = createServer((_req, res) => {
+  const upstream = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    if ((req.url || '').includes('/responses')) {
+      res.end(JSON.stringify({ id: 'resp_1', object: 'response', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'pong' }] }], usage: { input_tokens: 1, output_tokens: 1 } }));
+      return;
+    }
+    if ((req.url || '').includes('/messages')) {
+      res.end(JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'pong' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }));
+      return;
+    }
     res.end(JSON.stringify({ id: 'cmpl-1', choices: [{ message: { role: 'assistant', content: 'pong' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
   });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
@@ -40,7 +48,10 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
-    const model = await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Fixture', api_url: `http://127.0.0.1:${upstream.address().port}/v1`, api_key: testPassword() });
+    const port = upstream.address().port;
+    const model = await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Fixture', api_url: `http://127.0.0.1:${port}/v1`, api_key: testPassword() });
+    const responsesModel = await admin('/api/models', 'POST', { repository_id: '101', provider_name: 'Responses', model_name: 'Fixture-Responses', api_url: `http://127.0.0.1:${port}/v1/responses`, api_key: testPassword() });
+    const anthropicModel = await admin('/api/models', 'POST', { repository_id: '101', provider_name: 'Anthropic', model_name: 'Fixture-Claude', api_url: `http://127.0.0.1:${port}/v1/messages`, api_key: testPassword() });
     await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id });
     await page.goto(h.admin + '/#/projects/101/roles');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -118,6 +129,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     await page.setViewportSize({ width: 1440, height: 900 });
     await goRolePage(page, { role: 'dev' });
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
+    await page.getByRole('combobox', { name: 'dev 模型', exact: true }).selectOption(anthropicModel.value.model.id);
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     // #740 / #1260: a role page whose tool is unavailable is where a super administrator gets the way into the tool volume.
     await expect(page.getByTestId('backend-runtime-status')).toContainText('未就绪');
@@ -136,6 +148,7 @@ test('角色按能力选择 Agent 后端，展示外部后端的就绪状态与�
     // Switch model_source from local_config back to gateway and verify explicit persistence (#705 M6 / #1260).
     await page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true }).selectOption('gateway');
     await expect(page.getByTestId('local-config-notice')).toHaveCount(0);
+    await page.getByRole('combobox', { name: 'reviewer 模型', exact: true }).selectOption(responsesModel.value.model.id);
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value;

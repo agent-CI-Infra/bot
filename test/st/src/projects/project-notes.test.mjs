@@ -257,17 +257,24 @@ test('model responses redact known credentials in note writes as well as other o
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:key,model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('model-secret','101','review.pr','running','fixture')");
-  const replies=[],logs=[];let replied=false;
+  const logs=[];let configBytes=[],config,gateway={},replyJson=null;
   const finish={summary:'Done',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
   const work={log:entry=>logs.push(entry),call:async(_key,input)=>{
-    if(input.type==='workspace_agent_reply'){replies.push(Buffer.from(input.base64,'base64'));replied=input.final;}
-    if(input.type==='workspace_agent_poll')return replied?{state:'completed',result:finish}:{state:'running',request:{id:id(),body:{messages:[{role:'user',content:'review'}]}}};
+    if(input.type==='workspace_agent_gateway'){gateway=JSON.parse(Buffer.from(input.base64,'base64').toString('utf8'));return {written:true};}
+    if(input.type==='workspace_agent_config'){configBytes.push(Buffer.from(input.base64,'base64'));if(input.final)config=JSON.parse(Buffer.concat(configBytes));}
+    if(input.type==='workspace_agent_poll'){
+      if(!replyJson){
+        const res=await fetch(gateway.model_gateway_url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gateway.run_token},body:JSON.stringify({model:config.model_name,stream:false,messages:[{role:'user',content:'review'}]})});
+        assert.equal(res.status,200);replyJson=await res.json();
+        return {state:'running',events:[],offset:0};
+      }
+      return {state:'completed',result:finish,events:[],offset:0};
+    }
     return {};
   }};
   pinLegacyTaskConfiguration(h.store, 'model-secret');
   await agentLoop(h.store,{id:'model-secret',repository_id:'101',kind:'review.pr',workspace_id:id()},work,new Redactor(),async()=>{},{});
-  const reply=JSON.parse(Buffer.concat(replies));assert.ok(!('rejected_note_calls' in reply));
-  assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,'[REDACTED]');
+  assert.equal(JSON.parse(replyJson.choices[0].message.tool_calls[0].function.arguments).content,'[REDACTED]');
   assert.ok(!JSON.stringify(logs).includes(key));
 });
 

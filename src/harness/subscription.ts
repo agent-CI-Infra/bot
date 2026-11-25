@@ -4,9 +4,9 @@ import type { AgentToolCli } from './agent-tools.js';
 /**
  * Model source selector for container CLIs (`claude_code` and `codex`) (#705, #1260).
  *
- * - `'gateway'`: platform-managed model (direct or loopback model relay).
+ * - `'gateway'`: platform-managed model routed through the unified control-plane passthrough gateway.
  * - `'local_config'`: platform injects NO model configuration (no base URL, API key, `--model`, or
- *   Codex `config.toml`/`bot_direct`); the CLI reads administrator-written configuration files from the
+ *   Codex `config.toml`/`model_provider`); the CLI reads administrator-written configuration files from the
  *   project computer's persistent HOME (`/workspace/home`) staged into the isolated per-run session directory.
  *
  * Legacy `'subscription'` values in stored configurations normalize to `'local_config'`.

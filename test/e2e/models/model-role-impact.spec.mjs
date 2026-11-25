@@ -8,12 +8,12 @@ async function prepared(page, shared = false) {
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
-    const created = await admin('/api/models', 'POST', { repository_id: shared ? null : '101', model_name: 'Role-only model', api_url: 'http://127.0.0.1:9/v1', api_key: testPassword() });
+    const created = await admin('/api/models', 'POST', { repository_id: shared ? null : '101', model_name: 'Role-only model', api_url: 'http://127.0.0.1:9/v1/responses', api_key: testPassword() });
     expect(created.status).toBe(201); const model = created.value.model;
     if (shared) expect((await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: ['101'] })).status).toBe(200);
     const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: false, roles: [{
       role_id: 'reviewer', name: 'Release reviewer', enabled: false, harness_ref: { id: 'codex' },
-      model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }
+      model_profile_ref: { model_id: model.id, api: 'openai-responses', tool_calls: true, structured_output: 'tool_call' }
     }] }); expect(saved.status, JSON.stringify(saved.value)).toBe(200);
     if (shared) expect((await admin('/api/onboarding/model', 'POST', { model_id: model.id })).status).toBe(201);
     await page.goto(h.admin + (shared ? '/#/settings/models' : '/#/projects/101/model'));

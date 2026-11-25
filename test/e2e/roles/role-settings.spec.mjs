@@ -11,7 +11,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
   page.on('pageerror', error => errors.push(error.message));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    const model = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Coding model', api_url: 'http://127.0.0.1:9/v1', api_key: testPassword() })).value.model;
+    const model = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Coding model', api_url: 'http://127.0.0.1:9/v1/responses', api_key: testPassword() })).value.model;
     await page.goto(h.admin + '/#/projects/101/roles');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();

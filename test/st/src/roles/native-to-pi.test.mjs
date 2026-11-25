@@ -224,9 +224,10 @@ test('the assistants, Manager and QA run only on Pi (#1337): what was saved on o
   // v2: Manager on Codex with its own model configuration, QA on Claude Code with a model profile Pi cannot speak, Dev and
   // the reviewer on CLIs too (the API no longer takes the first two).
   put(s, 'v2', { roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }, { role_id: 'reviewer', harness_ref: { id: 'claude_code' } }] });
-  const anthropic = { ...textJsonProfile, api: 'anthropic-messages', structured_output: 'tool_call' }, v2 = stored(s, 'v2');
+  // Pi natively speaks all three standard model APIs under #1358; pin a legacy/unknown API to test the unusable-profile warning path.
+  const unsupported = { ...textJsonProfile, api: 'legacy-provider', structured_output: 'tool_call' }, v2 = stored(s, 'v2');
   save(s, 'v2', { ...v2, roles: v2.roles.map(role => role.role_id === 'manager' ? { ...role, harness_ref: { id: 'codex', version: '1', model_source: 'local_config' } }
-    : role.role_id === 'qa' ? { ...role, harness_ref: { id: 'claude_code', version: role.harness_ref.version }, model_profile_ref: anthropic } : role) });
+    : role.role_id === 'qa' ? { ...role, harness_ref: { id: 'claude_code', version: role.harness_ref.version }, model_profile_ref: unsupported } : role) });
   s.run("INSERT INTO settings VALUES('roles:legacy',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'codex', qa: 'process', dev: 'claude_code' } }));
   const frozen = { 't-v2': ['v2', { roles: stored(s, 'v2') }], 't-legacy': ['legacy', { roles: { enabled: true, harnesses: { qa: 'codex', dev: 'codex' } } }] };
   for (const [task, [repo, snapshot]] of Object.entries(frozen)) {
@@ -246,7 +247,7 @@ test('the assistants, Manager and QA run only on Pi (#1337): what was saved on o
   // Saved configurations: Manager and QA move (the model source with them, the pinned profile stays); Dev and the reviewer keep theirs.
   assert.deepEqual(harnessOf(s, 'v2'), { manager: 'pi', dev: 'codex', test: 'pi', reviewer: 'claude_code', ux: 'pi', qa: 'pi' });
   const saved = stored(s, 'v2'), role = id => saved.roles.find(entry => entry.role_id === id);
-  assert.deepEqual([saved.revision, saved.updated_by, role('manager').harness_ref, role('qa').model_profile_ref.api], [before + 1, 'migration:1337', role('test').harness_ref, 'anthropic-messages']);
+  assert.deepEqual([saved.revision, saved.updated_by, role('manager').harness_ref, role('qa').model_profile_ref.api], [before + 1, 'migration:1337', role('test').harness_ref, 'legacy-provider']);
   assert.equal(role('test').harness_ref.id, 'pi');
   assert.equal(s.get("SELECT actor FROM role_config_revisions WHERE repository_id='v2' AND revision=?", saved.revision).actor, 'migration:1337');
   assert.deepEqual(stored(s, 'legacy').harnesses, { manager: 'pi', qa: 'pi', dev: 'claude_code' });

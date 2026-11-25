@@ -19,7 +19,6 @@ import { roleHarness } from '../roles/harness.js';
 import { groupAssistant, managementAssistant, modelGaps, serviceRole, serviceRoleStorage } from '../service-roles/roles.js';
 import { scopeProjects } from '../channels/service-bindings.js';
 import { assertCurrent, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
-import { recordExternalModelRequest } from '../metrics/accounting.js';
 import {
   beginConsolidationRun,
   consolidationSettings,
@@ -654,11 +653,8 @@ export class MemoryConsolidationService {
     const wrappedExecute = (name: string, args: unknown) =>
       results.execute(name, args, () => input.execute(name, args), true);
 
-    // Gateway transport keeps long-lived API keys inside the control plane and records exact billing in model_requests.
-    // Non-chat-completions protocols (e.g. anthropic-messages) use direct transport with external usage recording.
-    const useGateway = !input.model.protocol?.interface_type || input.model.protocol.interface_type === 'openai-chat-completions';
-    let externalStep = 0;
-
+    // Unified passthrough model gateway keeps long-lived API keys inside the control plane and records exact billing
+    // in model_requests across all three supported model protocols (Chat Completions, Responses, Anthropic Messages).
     const spec: AgentSpec<ConsolidationSubmission> = {
       store,
       task: input.taskRow,
@@ -695,24 +691,6 @@ export class MemoryConsolidationService {
       containerOptions: {
         manager: input.workspace.manager,
         egress: false,
-        modelTransport: useGateway ? 'gateway' : 'direct',
-      },
-      onHarnessEvent: event => {
-        if (!useGateway && event.type === 'usage' && event.source === 'pi_native') {
-          const u = (event.usage ?? {}) as Record<string, any>;
-          const step = ++externalStep;
-          try {
-            recordExternalModelRequest(store, input.taskRow, input.run.id, {
-              key: `consolidation:${input.run.id}:pi:${step}`,
-              source: 'provider_requests',
-              model: String(event.model || input.model.model),
-              input_tokens: Number.isFinite(u.input) ? Number(u.input) + Number(u.cacheRead ?? 0) + Number(u.cacheWrite ?? 0) : null,
-              output_tokens: Number.isFinite(u.output) ? Number(u.output) : null,
-              cached_input_tokens: Number.isFinite(u.cacheRead) ? Number(u.cacheRead) : null,
-              finished: true,
-            });
-          } catch { /* accounting error never aborts completed work */ }
-        }
       },
       runAccess: { token, check: presented => { if (presented !== token) stop('run_token_invalid', 'failed'); } },
       runContext: () => ({

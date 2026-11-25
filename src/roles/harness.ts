@@ -62,14 +62,14 @@ export type RegisteredRoleHarness=Required<Omit<RoleHarnessMetadata,'tool_volume
 // Manager (controller) and QA (evaluator) run only on Pi (#1337): no other driver declares those kinds, so role admission
 // (definition.ts) refuses them for these two roles while Dev, Test, Reviewer, UX and custom roles keep every choice.
 export const harnesses:RegisteredRoleHarness[]=[
- {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['writer','observer'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},tool_volume:'claude_code',externalModel:false,
+ {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['writer','observer'],model_api:['anthropic-messages'],tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},tool_volume:'claude_code',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},tool_volume:'codex',externalModel:false,
+ {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer'],model_api:['openai-responses'],tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},tool_volume:'codex',externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  acpProduct(icodeProductId),
  {...workswarm,model_api:['openai-chat-completions','anthropic-messages'],capabilities:{...workswarm.capabilities,recovery:['rebuilt_from_task_records']}},
- // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
- {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
+ // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), calling models through the unified passthrough gateway.
+ {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']},steered_turns:true}];
 /** Whether the driver works service assistant turns with steering (`steered_turns`); an unknown id does not. */
 export const steersServiceTurns=(id:string)=>harnesses.some(h=>h.id===id&&h.steered_turns===true);
@@ -113,10 +113,9 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
   ...(spec.runAccess?.token?{run_token:spec.runAccess.token}:{}),
   github_host:githubHostFromApiUrl(spec.containerOptions?.githubApiUrl),
   ...(spec.containerOptions?.allowHttpGit?{allow_http_git:true}:{}),
-  model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,...(skillSetConfig?{skill_set:skillSetConfig}:{}),tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
+  system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,...(skillSetConfig?{skill_set:skillSetConfig}:{}),tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
   ...(bound?{native_session:{id:bound.sessionId,file:bound.transcript}}:{}),...(sessionStore?{session_store:sessionStore}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
  return async(services:AgentServices):Promise<T>=>{
-  const nativeUsage=new Map<number,{input:number;output:number;known:boolean}>();
   // Whether this run bound a session (session_bound), which an ending that must not be reopened clears again.
   let binding=false;
   const scopedReads=new ScopedReadTokens(spec,64);
@@ -138,16 +137,9 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
     // bound file is gone. A new session keeps the start mode the run was prepared with.
     if(spec.roleRun&&spec.task.trace_run_id&&['native_resume','rebuilt_from_task_records'].includes(event.recoveryMode))spec.store.run('UPDATE task_runs SET recovery_mode=? WHERE id=?',event.recoveryMode,spec.task.trace_run_id);
    }
-   if(event.type==='model'&&event.source==='pi_native'){
-    const u=event.usage,known=Number.isFinite(u?.input)&&Number.isFinite(u?.output);
-    nativeUsage.set(event.step,{input:known?u.input+(u.cacheRead??0)+(u.cacheWrite??0):0,output:known?u.output:0,known});
-    const rows=[...nativeUsage.values()];
-    spec.onExternalUsage?.({model_requests:rows.length,input_tokens:rows.reduce((n,r)=>n+r.input,0),output_tokens:rows.reduce((n,r)=>n+r.output,0),unknown_requests:rows.filter(r=>!r.known).length,semantics:'lower_bound',cost:'unknown',accounting_source:'pi_native_events'});
-    spec.onHarnessEvent?.({type:'usage',source:'pi_native',usage:u,model:event.model});
-   }
   }};
   try{
-   return await piAdapter<T>({results:spec.resultSession,store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:tokenHandler,createPullRequest:base?.createPullRequest,publication:base?.publication,
+   return await piAdapter<T>({results:spec.resultSession,store:spec.store,taskId:spec.task.id,task:spec.task,guard:spec.guard,beforeModel:spec.beforeModel,runAccess:spec.runAccess,leaseEpoch:spec.runContext?.()?.lease_epoch,workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:tokenHandler,createPullRequest:base?.createPullRequest,publication:base?.publication,
     offered:name=>tools.some(t=>t.function.name===name),ensureWorkspace:async()=>(spec.roleWorkspace??env.workspace).ensure?.()??{},resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:spec.harnessAccess?spec.harnessTurnLimit:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,service:env.service,
     // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
     // passes through here, so every forbidden call is recorded whatever the runtime did with it.

@@ -12,6 +12,7 @@ function makeDockerMock({ volumeNameByTarget = {} } = {}) {
   const volumes = new Map([
     ['bot_project-tools', { Name: 'bot_project-tools', Labels: { 'department.bot.kind': 'project-tools' } }],
     ['bot_assistant-homes', { Name: 'bot_assistant-homes', Labels: { 'com.docker.compose.volume': 'assistant-homes' } }],
+    ['bot_model-gateway', { Name: 'bot_model-gateway', Labels: { 'department.bot.kind': 'model-gateway' } }],
   ]);
   const createdConfigs = [];
   let seq = 0;
@@ -285,4 +286,80 @@ test('group assistant mounts authorized project tools read-only and rotates only
   assert.equal(acqDegraded.state, 'ready');
   assert.equal(docker.createdConfigs.at(-1).body.HostConfig.Mounts.some(m => m.Target.startsWith('/opt/project-tools/')), false);
   assert.deepEqual(projects.activeProjectToolMounts(degradedAssistants).mounts, []);
+});
+
+test('manager mounts model-gateway read-only on project and assistant computers and recreates stale containers missing it', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'mgr-mgw-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const mgwRoot = join(dir, 'model-gateway');
+  const homesRoot = join(dir, 'assistant-homes');
+  const owner = 'b'.repeat(32);
+  const fence = 'c'.repeat(32);
+  await mkdir(mgwRoot, { recursive: true });
+  await mkdir(join(homesRoot, owner, 'home-1'), { recursive: true });
+
+  const docker = makeDockerMock({
+    volumeNameByTarget: {
+      [mgwRoot]: 'bot_model-gateway',
+      [homesRoot]: 'bot_assistant-homes',
+    },
+  });
+  const projects = new Projects({
+    database: join(dir, 'manager.sqlite'),
+    docker,
+    deployment: 'testdep',
+    image: 'test/project:local',
+    tools: null,
+    modelGateway: mgwRoot,
+  });
+
+  // 1. Project computer gets read-only /run/model-gateway mount.
+  await projects.register('101');
+  const projMount = docker.createdConfigs.at(-1).body.HostConfig.Mounts.find(m => m.Target === '/run/model-gateway');
+  assert.deepEqual(projMount, {
+    Type: 'volume',
+    Source: 'bot_model-gateway',
+    Target: '/run/model-gateway',
+    ReadOnly: true,
+  });
+
+  // 2. Assistant computer gets read-only /run/model-gateway mount even with egress disabled (NetworkMode: none).
+  const assistants = new AssistantComputers({
+    docker,
+    db: projects.db,
+    deployment: 'testdep',
+    image: 'test/project:local',
+    homes: homesRoot,
+    modelGateway: () => projects.modelGatewayVolume(),
+    globalEnvironment: () => ({ defaults: { egress: false } }),
+  });
+  const acq = await assistants.acquire(owner, { turn: 't-mgw', fence, home_generation: 1, home_mode: 'rw' });
+  assert.equal(acq.state, 'ready');
+  const asstConfig = docker.createdConfigs.at(-1).body;
+  assert.equal(asstConfig.HostConfig.NetworkMode, 'none');
+  const asstMount = asstConfig.HostConfig.Mounts.find(m => m.Target === '/run/model-gateway');
+  assert.deepEqual(asstMount, {
+    Type: 'volume',
+    Source: 'bot_model-gateway',
+    Target: '/run/model-gateway',
+    ReadOnly: true,
+  });
+  await assistants.release(owner, { turn: 't-mgw', remove: true });
+
+  // 3. Stale container created before model-gateway existed (missing /run/model-gateway mount) is recreated on recover().
+  const containerName = [...docker.containers.keys()][0];
+  const existing = docker.containers.get(containerName);
+  existing.HostConfig.Mounts = existing.HostConfig.Mounts.filter(m => m.Target !== '/run/model-gateway');
+  existing.Mounts = existing.HostConfig.Mounts
+    .map(m => ({ Type: m.Type, Name: m.Source, Source: m.Source, Destination: m.Target, RW: !m.ReadOnly }));
+  const countBefore = docker.createdConfigs.length;
+  await projects.recover();
+  assert.equal(docker.createdConfigs.length, countBefore + 1, 'recover must recreate container missing read-only /run/model-gateway mount');
+  const recreatedMount = docker.createdConfigs.at(-1).body.HostConfig.Mounts.find(m => m.Target === '/run/model-gateway');
+  assert.deepEqual(recreatedMount, {
+    Type: 'volume',
+    Source: 'bot_model-gateway',
+    Target: '/run/model-gateway',
+    ReadOnly: true,
+  });
 });

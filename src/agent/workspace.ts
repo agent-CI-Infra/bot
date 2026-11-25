@@ -91,7 +91,7 @@ export class Workspace {
     const trajectories=this.store.trajectories,scope=trajectories.scopeOf(this.task);
     if(!row){
       // Conversation rows were sealed before: they keep no fields of the request at all, only its ref and hash.
-      const recordedInput=['workspace_agent_config','workspace_harness_config','workspace_agent_token'].includes(input.request?.type)?{...input,request:{...input.request,base64:'[redacted]'}}:input;
+      const recordedInput=['workspace_agent_config','workspace_harness_config','workspace_agent_token','workspace_agent_gateway'].includes(input.request?.type)?{...input,request:{...input.request,base64:'[redacted]'}}:input;
       if(scope)this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state,request_ref,request_sha256) VALUES(?,?,?,NULL,'pending',?,?)`,id,this.task.id,
         conversation?'{}':JSON.stringify(payloadHeader(recordedInput)),trajectories.append(scope,'tool_call',id,recordedInput),digest);
       else this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state,request_sha256) VALUES(?,?,?,NULL,'pending',?)`,id,this.task.id,conversation?this.store.secrets.seal(recordedInput,'conversation-operation:'+id+':request'):JSON.stringify(recordedInput),digest);

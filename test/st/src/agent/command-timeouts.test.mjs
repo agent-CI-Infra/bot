@@ -1,5 +1,3 @@
-// Controlled provider fixtures exercise the explicit gateway transport.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -20,6 +18,7 @@ import { agentLoop } from '../../../../dist/agent/loop.js';
 import { roleApi } from '../../../../dist/roles/api.js';
 import { runRequest } from '../../../../dist/tasks/request.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 import '../../../fixtures/scripted-driver.mjs';
 
 const sdk = existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json');
@@ -40,7 +39,7 @@ async function fixture(t, backend, kind, respond) {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw); bodies.push(body);
     const message = respond(body);
-    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    replyChatCompletion(res, message, { stream: Boolean(body.stream), usage: { prompt_tokens: 10, completion_tokens: 5 } });
   });
   model.listen(0, '127.0.0.1'); await once(model, 'listening');
   t.after(async () => { await manager.recover(); await new Promise(resolve => { model.close(resolve); model.closeAllConnections(); }); store.close(); rmSync(root, { recursive: true, force: true }); });

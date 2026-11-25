@@ -1,5 +1,3 @@
-// These legacy protocol fixtures exercise the explicitly enabled gateway transport.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import { pinLegacyTaskConfiguration } from '../../../fixtures/helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,6 +23,7 @@ import { persistentCliStateWorkspaceId } from '../../../../dist/harness/containe
 import { eventWork } from '../../../../dist/tasks/event-adapters.js';
 import { releaseStorage } from '../../../../dist/releases/storage.js';
 import '../../../../dist/releases/notes.js';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 import '../../../fixtures/scripted-driver.mjs';
 
 // The real Pi SDK (runner/node_modules) in a real runner workspace, driven by the control plane through the task mailbox.
@@ -39,7 +38,7 @@ async function entryFixture(t, kind, respond, controlled = false) {
   const root = mkdtempSync(join(tmpdir(), 'bot-pi-entry-')), store = new Store(':memory:', randomBytes(32)), manager = new LocalManager('101', root), bodies = [], logs = [];
   const model = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); bodies.push(body);
-    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: respond(body) }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    replyChatCompletion(res, respond(body), { stream: Boolean(body.stream), usage: { prompt_tokens: 10, completion_tokens: 5 } });
   });
   model.listen(0, '127.0.0.1'); await once(model, 'listening');
   t.after(async () => { await manager.recover(); await new Promise(resolve => { model.close(resolve); model.closeAllConnections(); }); store.close(); rmSync(root, { recursive: true, force: true }); });
@@ -180,7 +179,7 @@ test('a real Pi controller session delegates a role, reads its result by referen
     else if (!steps.wrote) { steps.wrote = true; message = call('write_file', { path: 'src/a.js', content: 'x' }); }
     else if (!steps.qa) { steps.qa = true; message = call('delegate_role', { role: 'qa', purpose: 'Approve the delivery', refs: [] }); }
     else message = call('nominate_delivery', { result_ref: ref });
-    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    replyChatCompletion(res, message, { stream: Boolean(body.stream), usage: { prompt_tokens: 10, completion_tokens: 5 } });
   });
   model.listen(0, '127.0.0.1'); await once(model, 'listening'); t.after(() => new Promise(resolve => { model.close(resolve); model.closeAllConnections(); }));
   store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')"); store.run("INSERT INTO repositories VALUES('101','fixture/pi','o','a')");
@@ -239,7 +238,7 @@ test('real Pi schedules parallel observers from durable task facts, without a ta
       if(body.messages.at(-1).role==='tool')message=call('submit_role_result',{summary:'Inspected retained artifact',findings:[],inspected_scope:['report'],unknowns:[]});
       else{if(++readers===2)release();await barrier;message=call('read_task_record',{ref:devRef});}
     }else message=call('finish',{summary:'retained bounded artifact'});
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));
+    replyChatCompletion(res,message,{stream:Boolean(body.stream),usage:{prompt_tokens:10,completion_tokens:5}});
   });model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
   store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");store.run("INSERT INTO repositories VALUES('101','fixture/pi','o','a')");
   store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101',`http://127.0.0.1:${model.address().port}/v1`,'fixture',store.secrets.seal({value:'pi-stage-fixture'},'model:m'),'now');store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
@@ -262,7 +261,7 @@ test('configured code flow checks out the collected commit for both observers an
     if(tools.includes('nominate_delivery')){devRef??=results(body.messages).find(r=>r.result_ref)?.result_ref;message=[()=>call('delegate_role',{role:'dev',purpose:'Implement',refs:[]}),()=>call('delegate_roles',{assignments:[{role:'reviewer',purpose:'Inspect',refs:[devRef]},{role:'test',purpose:'Test',refs:[devRef]}]}),()=>call('nominate_delivery',{result_ref:devRef})][step++]();}
     else if(tools.includes('submit_role_result')){workerBodies.push(body);const receipts=results(body.messages);if(!receipts.length){if(++readers===2)release();await barrier;message=call('read_project_memory',{id:'f:'+'0'.repeat(32),revision:1});}else if(!receipts.some(r=>r.body==='SHARED_PROJECT_NOTE'))message=call('read_project_memory',{id:sharedNoteId,revision:1});else if(!receipts.some(r=>r.content==='delivered\n'))message=call('read_file',{path:'result.txt'});else message=call('submit_role_result',{summary:'Read exact delivered files',findings:[],unknowns:[],inspected_scope:['result.txt']});}
     else message=body.messages.at(-1).role==='tool'?call('submit_delivery',{summary:'implemented',test_command:'fixture check'}):call('write_file',{path:'result.txt',content:'delivered\n'});
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));
+    replyChatCompletion(res,message,{stream:Boolean(body.stream),usage:{prompt_tokens:10,completion_tokens:5}});
   });model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
   store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");store.run("INSERT INTO repositories VALUES('101','fixture/pi','o','a')");store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101',`http://127.0.0.1:${model.address().port}/v1`,'fixture',store.secrets.seal({value:'pi-code-fixture'},'model:m'),'now');store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
   const environment=await manager.call('PUT','/v1/projects/101');store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES('t','101','development.issue','running','code','{}',1,?,?)",environment.generation,randomBytes(24).toString('hex'));

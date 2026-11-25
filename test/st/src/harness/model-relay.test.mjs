@@ -7,6 +7,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+process.env.BOT_LOCAL_EXECUTION = 'true';
+process.env.BOT_LOCAL_WORKSPACE = tmpdir();
 import { Store } from '../../../../dist/storage/database.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { openModel } from '../../../../dist/agent/model.js';
@@ -14,9 +16,8 @@ import { ModelCatalog, saveModelMetadata } from '../../../../dist/models/catalog
 import { savePricing } from '../../../../dist/metrics/accounting.js';
 import { allocateLease, issueRunToken, roleRunStorage, verifyRunToken } from '../../../../dist/roles/role-run.js';
 import { beginRun } from '../../../../dist/tasks/trace.js';
-import { createMailboxModelGateway, readProviderCredentialFile } from '../../../../dist/harness/model-gateway.js';
-import { startModelRelay } from '../../../../runner/model-relay.mjs';
-import { agentOperation } from '../../../../runner/agent.mjs';
+import { createModelGatewayHub, readProviderCredentialFile } from '../../../../dist/harness/model-gateway.js';
+const { startModelBridge } = await import('../../../../runner/model-relay.mjs');
 
 const hex48 = () => randomBytes(24).toString('hex');
 
@@ -30,22 +31,21 @@ function collectFiles(dir) {
   return out;
 }
 
-async function createRelayRig(t, options = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'model-relay-'));
+async function createGatewayRig(t, options = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'model-gw-'));
   const store = new Store(':memory:', randomBytes(32), join(root, 'trajectories'));
   roleRunStorage(store);
-  mkdirSync(join(root, 'repo'), { recursive: true });
-  mkdirSync(join(root, 'agent'), { recursive: true });
+  const agentDir = join(root, 'agent');
+  mkdirSync(agentDir, { recursive: true });
 
-  const workspaceId = hex48();
   const repoId = '101';
-  const taskId = 'task-relay-1';
+  const taskId = 'task-gw-1';
   const role = options.role ?? 'developer';
   store.run("INSERT INTO accounts VALUES('acc','org','github_app','1','{}','2026-01-01T00:00:00Z')");
   store.run('INSERT INTO repositories VALUES(?,?,?,?)', repoId, 'org/repo', 'org', 'acc');
   store.run('INSERT INTO policies(repository_id,enabled) VALUES(?,1)', repoId);
   store.run(
-    "INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES(?,?,'development','running','Relay test','{}',1,1)",
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES(?,?,'development','running','Gateway test','{}',1,1)",
     taskId, repoId,
   );
   const run = beginRun(store, store.get('SELECT * FROM tasks WHERE id=?', taskId), 'execution', {});
@@ -72,43 +72,36 @@ async function createRelayRig(t, options = {}) {
     }, 'model:invoke'),
   };
 
-  const runnerCalls = [];
-  const runner = async input => {
-    const serialized = JSON.stringify(input);
-    assert.ok(Buffer.byteLength(serialized) <= 64 * 1024, `runner argv exceeded 64 KiB: ${Buffer.byteLength(serialized)}`);
-    runnerCalls.push(input);
-    const result = await agentOperation(input, root);
-    const outBytes = Buffer.byteLength(JSON.stringify(result));
-    assert.ok(outBytes <= 4 * 1024 * 1024, `runner stdout exceeded 4 MiB: ${outBytes}`);
-    return result;
-  };
-
-  const relay = await startModelRelay({ agentDir: join(root, 'agent'), pollMs: 15, idleTimeoutMs: options.idleTimeoutMs ?? 30_000 });
+  const hub = createModelGatewayHub();
+  const useUds = options.uds !== false;
+  let socketDir = null;
+  let socketPath = null;
   const redactor = new Redactor();
-  let gateway = null;
-  let polling = true;
-  const pollLoop = (async () => {
-    while (polling) {
-      if (gateway) {
-        const polled = await runner({ type: 'workspace_agent_poll', workspace_id: workspaceId, offset: 0 });
-        gateway.dispatchPoll(polled.model_requests);
-      }
-      await new Promise(resolve => setTimeout(resolve, 15));
-    }
-  })();
+  let session = null;
+  let bridge = null;
 
   t.after(async () => {
-    polling = false;
-    await pollLoop;
-    await gateway?.close();
-    await relay.close();
+    await bridge?.close();
+    await session?.close();
+    await hub.closeAll();
     store.close();
     rmSync(root, { recursive: true, force: true });
+    if (socketDir && socketDir !== root) rmSync(socketDir, { recursive: true, force: true });
   });
+
+  if (useUds) {
+    // Keep UDS path well below the Linux 107-byte sun_path limit even inside deep worktree TMPDIRs.
+    const candidate = join(root, 'gateway.sock');
+    socketDir = Buffer.byteLength(candidate, 'utf8') < 100 ? root : mkdtempSync(join('/tmp', 'mgw-'));
+    socketPath = join(socketDir, 'gateway.sock');
+    await hub.startUds(socketPath);
+  }
 
   const taskRow = { ...store.get('SELECT * FROM tasks WHERE id=?', taskId), trace_run_id: runId, active_role: role };
   return {
     root,
+    agentDir,
+    socketPath,
     store,
     repoId,
     taskId,
@@ -117,23 +110,25 @@ async function createRelayRig(t, options = {}) {
     token,
     runAccess,
     redactor,
-    runner,
-    runnerCalls,
-    relay,
+    hub,
     taskRow,
-    startGateway(gwOptions = {}) {
-      gateway = createMailboxModelGateway({
+    get bridge() { return bridge; },
+    async startGateway(gwOptions = {}) {
+      session = await hub.registerSession({
         store,
         task: taskRow,
         runId,
         leaseEpoch: lease.epoch,
         runAccess,
         redactor,
-        runner,
-        workspaceId,
+        preferLoopback: !useUds,
         ...gwOptions,
       });
-      return gateway;
+      bridge = await startModelBridge({
+        socketPath: session.socketPath ?? undefined,
+        targetUrl: session.gatewayUrl ?? undefined,
+      });
+      return { session, bridge };
     },
   };
 }
@@ -148,54 +143,59 @@ function addProjectModel(store, repoId, { id = hex48().slice(0, 16), url, key, n
   return openModel(store, store.get('SELECT * FROM models WHERE id=?', id));
 }
 
-test('Claude Code (/v1/messages) uses OpenAI Chat Completions upstream with streaming SSE, tool calls, accounting and trajectories', async t => {
+test('UDS passthrough gateway streams Anthropic Messages verbatim with query preservation, accounting, delta trajectories, and zero disk writes', async t => {
   const upstreamReqs = [];
-  const providerKey = 'sk-openai-secret-' + randomBytes(16).toString('hex');
+  const anthropicKey = 'sk-ant-uds-secret-' + randomBytes(16).toString('hex');
   const upstream = createServer(async (req, res) => {
     let raw = '';
     for await (const c of req) raw += c;
     const body = raw ? JSON.parse(raw) : null;
     upstreamReqs.push({ method: req.method, url: req.url, headers: req.headers, body });
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
-    const hasToolResult = body.messages.some(m => m.role === 'tool');
+    const hasToolResult = body.messages.some(m => Array.isArray(m.content) && m.content.some(b => b.type === 'tool_result'));
     if (!hasToolResult) {
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: { role: 'assistant', content: 'Checking ' }, finish_reason: null }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: { content: 'workspace.' }, finish_reason: null }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_bash_1', type: 'function', function: { name: 'Bash', arguments: '{"cmd":' } }] }, finish_reason: null }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"ls"}' } }] }, finish_reason: null }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', model: 'deepseek-coder-v3', choices: [], usage: { prompt_tokens: 120, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 20 } } })}\n\n`);
-      res.end('data: [DONE]\n\n');
+      res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], usage: { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 0 } } })}\n\n`);
+      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`);
+      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Checking workspace.' } })}\n\n`);
+      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
+      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call_bash_1', name: 'Bash', input: {} } })}\n\n`);
+      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"cmd":"ls"}' } })}\n\n`);
+      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 1 })}\n\n`);
+      res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 30 } })}\n\n`);
+      res.end(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
     } else {
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-2', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: { role: 'assistant', content: 'All done!' }, finish_reason: null }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-2', model: 'deepseek-coder-v3', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ id: 'chatcmpl-2', model: 'deepseek-coder-v3', choices: [], usage: { prompt_tokens: 200, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 100 } } })}\n\n`);
-      res.end('data: [DONE]\n\n');
+      res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: 'msg_2', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], usage: { input_tokens: 100, cache_read_input_tokens: 100, output_tokens: 0 } } })}\n\n`);
+      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`);
+      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'All done!' } })}\n\n`);
+      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
+      res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } })}\n\n`);
+      res.end(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
     }
   });
   upstream.listen(0, '127.0.0.1');
   await once(upstream, 'listening');
   t.after(() => new Promise(resolve => upstream.close(resolve)));
 
-  const rig = await createRelayRig(t);
+  const rig = await createGatewayRig(t, { uds: true });
   const model = addProjectModel(rig.store, rig.repoId, {
-    url: `http://127.0.0.1:${upstream.address().port}/v1`,
-    key: providerKey,
-    name: 'deepseek-coder-v3',
-    interface_type: 'openai-chat-completions',
-    auth_header: 'bearer',
+    url: `http://127.0.0.1:${upstream.address().port}`,
+    key: anthropicKey,
+    name: 'claude-sonnet-4-5',
+    interface_type: 'anthropic-messages',
+    auth_header: 'x-api-key',
     pricing: { currency: 'USD', input_per_million: 1, output_per_million: 2, cache_per_million: 0.1 },
   });
-  rig.startGateway({ primaryModel: model });
+  await rig.startGateway({ primaryModel: model });
 
-  // Turn 1: Non-claude-* model name works via catalog/configured model, streams Anthropic SSE with tool_use.
-  const turn1Res = await fetch(`${rig.relay.url}/v1/messages?beta=true`, {
+  // Turn 1: client alias is replaced with target model, query ?beta=true preserved, real x-api-key injected.
+  const turn1Res = await fetch(`${rig.bridge.url}/v1/messages?beta=true`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': rig.token, 'anthropic-version': '2023-06-01' },
+    headers: { 'content-type': 'application/json', 'x-api-key': rig.token, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'prompt-caching-2024-07-31' },
     body: JSON.stringify({
-      model: 'deepseek-coder-v3',
+      model: 'claude-sonnet-4-5',
       max_tokens: 1024,
       system: 'You are a helpful coding agent.',
+      thinking: { type: 'enabled', budget_tokens: 1024 },
       stream: true,
       tools: [{ name: 'Bash', description: 'Run shell', input_schema: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'] } }],
       messages: [{ role: 'user', content: 'List files' }],
@@ -204,24 +204,23 @@ test('Claude Code (/v1/messages) uses OpenAI Chat Completions upstream with stre
   assert.equal(turn1Res.status, 200);
   assert.match(turn1Res.headers.get('content-type') || '', /text\/event-stream/);
   const turn1Sse = await turn1Res.text();
-  assert.match(turn1Sse, /event: message_start/);
-  assert.match(turn1Sse, /"text":"Checking "/);
-  assert.match(turn1Sse, /"type":"tool_use","id":"call_bash_1","name":"Bash"/);
-  assert.match(turn1Sse, /"stop_reason":"tool_use"/);
-  assert.match(turn1Sse, /"usage":\{"input_tokens":100,"output_tokens":30,"cache_read_input_tokens":20\}/);
+  assert.match(turn1Sse, /"text":"Checking workspace\."/);
+  assert.match(turn1Sse, /"name":"Bash"/);
   assert.match(turn1Sse, /event: message_stop/);
 
   assert.equal(upstreamReqs.length, 1);
-  assert.equal(upstreamReqs[0].headers.authorization, `Bearer ${providerKey}`);
-  assert.equal(upstreamReqs[0].headers['x-api-key'], undefined);
-  assert.equal(upstreamReqs[0].body.messages[0].role, 'system');
+  assert.equal(upstreamReqs[0].url, '/v1/messages?beta=true');
+  assert.equal(upstreamReqs[0].headers['x-api-key'], anthropicKey);
+  assert.equal(upstreamReqs[0].headers['anthropic-beta'], 'prompt-caching-2024-07-31');
+  assert.equal(upstreamReqs[0].headers.authorization, undefined);
+  assert.deepEqual(upstreamReqs[0].body.thinking, { type: 'enabled', budget_tokens: 1024 });
 
-  // Turn 2: Send tool_result back through /v1/messages.
-  const turn2Res = await fetch(`${rig.relay.url}/v1/messages`, {
+  // Turn 2: tool_result round-trip.
+  const turn2Res = await fetch(`${rig.bridge.url}/v1/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': rig.token },
     body: JSON.stringify({
-      model: 'deepseek-coder-v3',
+      model: 'claude-sonnet-4-5',
       max_tokens: 1024,
       stream: true,
       messages: [
@@ -232,159 +231,102 @@ test('Claude Code (/v1/messages) uses OpenAI Chat Completions upstream with stre
     }),
   });
   assert.equal(turn2Res.status, 200);
-  const turn2Sse = await turn2Res.text();
-  assert.match(turn2Sse, /"text":"All done!"/);
-  assert.match(turn2Sse, /"stop_reason":"end_turn"/);
+  assert.match(await turn2Res.text(), /"text":"All done!"/);
 
-  // Verify per-request ledger accounting & delta-encoded trajectories (#624, #625).
+  // Verify per-request ledger accounting & delta-encoded trajectories.
   const ledger = rig.store.all('SELECT * FROM model_requests WHERE task_id=? ORDER BY requested_at, rowid', rig.taskId);
   assert.equal(ledger.length, 2);
   assert.deepEqual([ledger[0].input_tokens, ledger[0].output_tokens, ledger[0].cached_input_tokens, ledger[0].state], [120, 30, 20, 'received']);
   assert.deepEqual([ledger[1].input_tokens, ledger[1].output_tokens, ledger[1].cached_input_tokens, ledger[1].state], [200, 10, 100, 'received']);
   assert.ok(ledger[0].cost > 0 && ledger[1].cost > 0);
   assert.ok(ledger[0].request_ref && ledger[0].response_ref && ledger[1].request_ref && ledger[1].response_ref);
-  const recordedTurn2 = rig.store.trajectories.readModelRequest(ledger[1].request_ref);
-  assert.equal(recordedTurn2.messages.length, 3);
-  assert.ok(!JSON.stringify(ledger).includes(providerKey));
-  // Reading the HTTP response can finish before the relay unlinks its mailbox files. Drain cleanup before scanning.
-  await rig.relay.close();
-  assert.deepEqual(readdirSync(join(rig.root, 'agent', 'model-requests')), []);
-  assert.deepEqual(readdirSync(join(rig.root, 'agent', 'model-replies')), []);
+  assert.equal(rig.store.trajectories.readModelRequest(ledger[1].request_ref).messages.length, 3);
+  assert.ok(!JSON.stringify(ledger).includes(anthropicKey));
+
+  // Pure in-memory bridge leaves zero mailbox files under agent/.
+  assert.deepEqual(readdirSync(rig.agentDir), []);
   for (const file of collectFiles(rig.root)) {
-    assert.ok(!readFileSync(file, 'utf8').includes(providerKey), `provider key leaked into ${file}`);
+    if (file.endsWith('.sock')) continue;
+    assert.ok(!readFileSync(file, 'utf8').includes(anthropicKey), `provider key leaked into ${file}`);
   }
 });
 
-test('Codex app-server (/v1/responses) uses Anthropic Messages upstream with streaming SSE, developer instructions, function & custom tools', async t => {
-  const upstreamReqs = [];
-  const anthropicKey = 'sk-ant-secret-' + randomBytes(16).toString('hex');
-  const upstream = createServer(async (req, res) => {
-    let raw = '';
-    for await (const c of req) raw += c;
-    const body = raw ? JSON.parse(raw) : null;
-    upstreamReqs.push({ method: req.method, url: req.url, headers: req.headers, body });
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    const hasToolResult = body.messages.some(m => Array.isArray(m.content) && m.content.some(b => b.type === 'tool_result'));
-    if (!hasToolResult) {
-      res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: 'msg_ant_1', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], usage: { input_tokens: 80, cache_read_input_tokens: 20, output_tokens: 0 } } })}\n\n`);
-      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`);
-      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Running patch' } })}\n\n`);
-      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
-      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call_patch_1', name: 'apply_patch', input: {} } })}\n\n`);
-      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"input":"*** Begin Patch"}' } })}\n\n`);
-      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 1 })}\n\n`);
-      res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 25 } })}\n\n`);
-      res.end(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
-    } else {
-      res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: 'msg_ant_2', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], usage: { input_tokens: 110, cache_read_input_tokens: 40, output_tokens: 0 } } })}\n\n`);
-      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`);
-      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Patch applied.' } })}\n\n`);
-      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
-      res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 12 } })}\n\n`);
-      res.end(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
-    }
+test('strict passthrough rejects protocol mismatches with 400 model_protocol_mismatch without calling upstream', async t => {
+  const rig = await createGatewayRig(t, { uds: true });
+  let upstreamCalled = 0;
+  const chatModel = addProjectModel(rig.store, rig.repoId, {
+    url: 'https://chat.internal/v1',
+    key: 'sk-chat-only',
+    name: 'chat-only-model',
+    interface_type: 'openai-chat-completions',
+    auth_header: 'bearer',
   });
-  upstream.listen(0, '127.0.0.1');
-  await once(upstream, 'listening');
-  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  addProjectModel(rig.store, rig.repoId, {
+    url: 'https://resp.internal/v1/responses',
+    key: 'sk-resp-only',
+    name: 'responses-only-model',
+    interface_type: 'openai-responses',
+    auth_header: 'bearer',
+  });
+  addProjectModel(rig.store, rig.repoId, {
+    url: 'https://anth.internal/v1/messages',
+    key: 'sk-anth-only',
+    name: 'anthropic-only-model',
+    interface_type: 'anthropic-messages',
+    auth_header: 'x-api-key',
+  });
 
-  const rig = await createRelayRig(t);
-  const catalog = new ModelCatalog(rig.store, async () => new Response(JSON.stringify({
-    anthropic: {
-      name: 'Anthropic',
-      doc: 'https://docs.anthropic.com/models',
-      models: {
-        'claude-sonnet-4-5': {
-          id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', attachment: true, reasoning: true,
-          limit: { context: 200000, output: 64000 }, modalities: { input: ['text', 'image'], output: ['text'] },
-          cost: { input: 3, output: 15, cache_read: 0.3 },
-        },
-      },
+  await rig.startGateway({
+    primaryModel: chatModel,
+    allowVisibleModels: true,
+    fetcher: async () => {
+      upstreamCalled++;
+      return new Response(JSON.stringify({ id: 'ok', choices: [{ message: { role: 'assistant', content: 'ok' } }], output: [], content: [{ type: 'text', text: 'ok' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
     },
-  })));
-  await catalog.refresh();
-
-  const model = addProjectModel(rig.store, rig.repoId, {
-    url: `http://127.0.0.1:${upstream.address().port}`,
-    key: anthropicKey,
-    name: 'claude-sonnet-4-5',
   });
-  rig.startGateway({ primaryModel: model });
 
-  // Verify GET /v1/models comes from the catalog without hitting upstream /v1/models.
-  const modelsRes = await fetch(`${rig.relay.url}/v1/models`, {
-    headers: { Authorization: `Bearer ${rig.token}` },
-  });
-  assert.equal(modelsRes.status, 200);
-  const modelsJson = await modelsRes.json();
-  assert.equal(modelsJson.object, 'list');
-  assert.ok(modelsJson.data.some(m => m.id === 'claude-sonnet-4-5' && m.interface_type === 'anthropic-messages'));
-  assert.equal(upstreamReqs.length, 0);
+  // Cross-protocol calls are strictly rejected (no translation).
+  const mismatches = [
+    ['/v1/messages', { 'x-api-key': rig.token }, { model: 'chat-only-model', max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/responses', { Authorization: `Bearer ${rig.token}` }, { model: 'chat-only-model', input: 'hi' }],
+    ['/v1/chat/completions', { Authorization: `Bearer ${rig.token}` }, { model: 'responses-only-model', messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/messages', { 'x-api-key': rig.token }, { model: 'responses-only-model', max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/chat/completions', { Authorization: `Bearer ${rig.token}` }, { model: 'anthropic-only-model', messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/responses', { Authorization: `Bearer ${rig.token}` }, { model: 'anthropic-only-model', input: 'hi' }],
+  ];
+  for (const [path, auth, body] of mismatches) {
+    const res = await fetch(`${rig.bridge.url}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...auth },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 400, `${path} with ${body.model} must return 400`);
+    const text = await res.text();
+    assert.match(text, /model_protocol_mismatch/, `${path} with ${body.model}: ${text}`);
+  }
+  assert.equal(upstreamCalled, 0, 'protocol mismatches must never reach upstream');
 
-  // Turn 1: Codex sends POST /v1/responses with Bearer token and custom apply_patch tool.
-  const resp1 = await fetch(`${rig.relay.url}/v1/responses`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', Authorization: `Bearer ${rig.token}` },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5',
-      instructions: 'Base instructions',
-      stream: true,
-      tools: [
-        { type: 'custom', name: 'apply_patch', description: 'Apply patch' },
-        { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } },
-      ],
-      input: [
-        { role: 'user', content: [{ type: 'input_text', text: 'Update README' }] },
-        { role: 'developer', content: [{ type: 'input_text', text: 'Sandbox: workspace-write' }] },
-      ],
-    }),
-  });
-  assert.equal(resp1.status, 200);
-  const sse1 = await resp1.text();
-  assert.match(sse1, /event: response\.created/);
-  assert.match(sse1, /event: response\.output_text\.delta/);
-  assert.match(sse1, /"type":"custom_tool_call","status":"completed","call_id":"call_patch_1","name":"apply_patch","input":"\*\*\* Begin Patch"/);
-  assert.match(sse1, /event: response\.completed/);
-
-  assert.equal(upstreamReqs.length, 1);
-  assert.equal(upstreamReqs[0].url, '/v1/messages');
-  assert.equal(upstreamReqs[0].headers['x-api-key'], anthropicKey);
-  assert.equal(upstreamReqs[0].headers['anthropic-version'], '2023-06-01');
-
-  // Turn 2: Codex returns custom_tool_call_output.
-  const resp2 = await fetch(`${rig.relay.url}/v1/responses`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', Authorization: `Bearer ${rig.token}` },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5',
-      stream: false,
-      tools: [{ type: 'custom', name: 'apply_patch', description: 'Apply patch' }],
-      input: [
-        { role: 'user', content: [{ type: 'input_text', text: 'Update README' }] },
-        { type: 'custom_tool_call', call_id: 'call_patch_1', name: 'apply_patch', input: '*** Begin Patch' },
-        { type: 'custom_tool_call_output', call_id: 'call_patch_1', output: 'Success' },
-      ],
-    }),
-  });
-  assert.equal(resp2.status, 200);
-  const json2 = await resp2.json();
-  assert.equal(json2.object, 'response');
-  assert.equal(json2.status, 'completed');
-  assert.equal(json2.output_text, 'Patch applied.');
-  assert.deepEqual(json2.usage, { input_tokens: 150, output_tokens: 12, total_tokens: 162, input_tokens_details: { cached_tokens: 40 } });
-
-  // Verify Anthropic cache_read_input_tokens + input_tokens accounting and /v1/responses trajectory round-trip.
-  const rows = rig.store.all('SELECT * FROM model_requests WHERE task_id=? ORDER BY rowid', rig.taskId);
-  assert.equal(rows.length, 2);
-  assert.deepEqual([rows[0].input_tokens, rows[0].cached_input_tokens, rows[0].output_tokens], [100, 20, 25]);
-  assert.deepEqual([rows[1].input_tokens, rows[1].cached_input_tokens, rows[1].output_tokens], [150, 40, 12]);
-  const storedReq2 = rig.store.trajectories.readModelRequest(rows[1].request_ref);
-  assert.equal(Array.isArray(storedReq2.input), true);
-  assert.equal(storedReq2.messages, undefined);
+  // Matching protocols succeed verbatim.
+  for (const [path, auth, body] of [
+    ['/v1/chat/completions', { Authorization: `Bearer ${rig.token}` }, { model: 'chat-only-model', stream: false, messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/responses', { Authorization: `Bearer ${rig.token}` }, { model: 'responses-only-model', stream: false, input: 'hi' }],
+    ['/v1/messages', { 'x-api-key': rig.token }, { model: 'anthropic-only-model', max_tokens: 64, stream: false, messages: [{ role: 'user', content: 'hi' }] }],
+  ]) {
+    const res = await fetch(`${rig.bridge.url}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...auth },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 200, `matching ${path} with ${body.model}`);
+  }
+  assert.equal(upstreamCalled, 3);
 });
 
 test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconfigured models, and disabled policies', async t => {
-  const rig = await createRelayRig(t);
+  const rig = await createGatewayRig(t, { uds: true });
   let upstreamCalled = 0;
   const model = addProjectModel(rig.store, rig.repoId, {
     url: 'https://relay.internal:8080/v1',
@@ -393,7 +335,7 @@ test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconf
     interface_type: 'openai-chat-completions',
     auth_header: 'x-api-key',
   });
-  rig.startGateway({
+  await rig.startGateway({
     primaryModel: model,
     fetcher: async (url, init) => {
       upstreamCalled++;
@@ -408,26 +350,34 @@ test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconf
     },
   });
 
-  // 1. Missing token rejected locally at relay before mailbox.
-  assert.equal((await fetch(`${rig.relay.url}/v1/models`)).status, 401);
+  // 1. Missing token rejected.
+  assert.equal((await fetch(`${rig.bridge.url}/v1/models`)).status, 401);
   // 2. Mismatched Bearer + x-api-key rejected.
-  assert.equal((await fetch(`${rig.relay.url}/v1/models`, { headers: { 'x-api-key': rig.token, Authorization: 'Bearer other' } })).status, 401);
-  // 3. Forged token rejected by control plane.
-  assert.equal((await fetch(`${rig.relay.url}/v1/models`, { headers: { 'x-api-key': 'rt_forged_token_value' } })).status, 401);
-  // 4. Token from another run / wrong role rejected by control plane.
+  assert.equal((await fetch(`${rig.bridge.url}/v1/models`, { headers: { 'x-api-key': rig.token, Authorization: 'Bearer other' } })).status, 401);
+  // 3. Forged token rejected.
+  assert.equal((await fetch(`${rig.bridge.url}/v1/models`, { headers: { 'x-api-key': 'rt_forged_token_value' } })).status, 401);
+  // 4. Token from another run / wrong role rejected.
   const otherRun = beginRun(rig.store, rig.store.get('SELECT * FROM tasks WHERE id=?', rig.taskId), 'execution', {});
   rig.store.run("UPDATE task_runs SET role='reviewer' WHERE id=?", otherRun.id);
   const otherLease = allocateLease(rig.store, rig.taskId, 'assign-2', otherRun.id);
   const { token: otherRoleToken } = issueRunToken(rig.store, {
     tenant_id: 'acc', project_id: rig.repoId, task_id: rig.taskId, run_id: otherRun.id, lease_epoch: otherLease.epoch, role: 'reviewer',
   }, ['model:invoke']);
-  assert.equal((await fetch(`${rig.relay.url}/v1/models`, { headers: { Authorization: `Bearer ${otherRoleToken}` } })).status, 401);
+  assert.equal((await fetch(`${rig.bridge.url}/v1/models`, { headers: { Authorization: `Bearer ${otherRoleToken}` } })).status, 401);
 
-  // 5. Unlisted endpoint rejected.
-  assert.equal((await fetch(`${rig.relay.url}/v1/embeddings`, { method: 'POST', headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' }, body: '{}' })).status, 403);
+  // 5. GET /v1/models comes from configured catalog without calling upstream.
+  const modelsRes = await fetch(`${rig.bridge.url}/v1/models`, { headers: { Authorization: `Bearer ${rig.token}` } });
+  assert.equal(modelsRes.status, 200);
+  const modelsJson = await modelsRes.json();
+  assert.equal(modelsJson.object, 'list');
+  assert.ok(modelsJson.data.some(m => m.id === 'qwen3-coder' && m.interface_type === 'openai-chat-completions'));
+  assert.equal(upstreamCalled, 0);
 
-  // 6. Unconfigured model name rejected.
-  const deniedModel = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+  // 6. Unlisted endpoint rejected.
+  assert.equal((await fetch(`${rig.bridge.url}/v1/embeddings`, { method: 'POST', headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' }, body: '{}' })).status, 403);
+
+  // 7. Unconfigured model name rejected.
+  const deniedModel = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'unapproved-model', messages: [{ role: 'user', content: 'hi' }] }),
@@ -435,8 +385,8 @@ test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconf
   assert.equal(deniedModel.status, 403);
   assert.equal(upstreamCalled, 0);
 
-  // 7. Non-loopback http:// upstream with configured x-api-key auth succeeds with valid run token.
-  const allowed = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+  // 8. Valid call succeeds with configured x-api-key auth.
+  const allowed = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'qwen3-coder', messages: [{ role: 'user', content: 'hi' }], stream: false }),
@@ -444,19 +394,18 @@ test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconf
   assert.equal(allowed.status, 200);
   assert.equal(upstreamCalled, 1);
 
-  // 8. Disabling repository policy immediately blocks subsequent calls.
+  // 9. Disabling repository policy immediately blocks subsequent calls.
   rig.store.run('UPDATE policies SET enabled=0 WHERE repository_id=?', rig.repoId);
-  const disabled = await fetch(`${rig.relay.url}/v1/models`, { headers: { Authorization: `Bearer ${rig.token}` } });
-  assert.equal(disabled.status, 403);
+  assert.equal((await fetch(`${rig.bridge.url}/v1/models`, { headers: { Authorization: `Bearer ${rig.token}` } })).status, 403);
   rig.store.run('UPDATE policies SET enabled=1 WHERE repository_id=?', rig.repoId);
 
-  // 9. Revoking run token (e.g. lease takeover / run end) immediately blocks calls.
+  // 10. Revoking run token immediately blocks calls.
   rig.store.run('UPDATE role_run_tokens SET revoked_at=? WHERE run_id=?', Date.now(), rig.runId);
-  assert.equal((await fetch(`${rig.relay.url}/v1/models`, { headers: { Authorization: `Bearer ${rig.token}` } })).status, 401);
+  assert.equal((await fetch(`${rig.bridge.url}/v1/models`, { headers: { Authorization: `Bearer ${rig.token}` } })).status, 401);
 });
 
-test('supports parallel sub-agent requests, >256 KiB chunked prompts and >90 KiB chunked responses within 64 KiB runner limit', async t => {
-  const rig = await createRelayRig(t);
+test('supports parallel sub-agent requests, >320 KiB prompts and >95 KiB responses directly over UDS without disk buffering', async t => {
+  const rig = await createGatewayRig(t, { uds: true });
   const largeOutput = 'A'.repeat(95_000);
   const model = addProjectModel(rig.store, rig.repoId, {
     url: 'https://relay.internal:8080/v1',
@@ -465,12 +414,12 @@ test('supports parallel sub-agent requests, >256 KiB chunked prompts and >90 KiB
     interface_type: 'openai-chat-completions',
     auth_header: 'bearer',
   });
-  rig.startGateway({
+  await rig.startGateway({
     primaryModel: model,
     fetcher: async (_url, init) => {
       const parsed = JSON.parse(init.body);
       const tag = parsed.messages.at(-1).content.slice(0, 12);
-      await new Promise(resolve => setTimeout(resolve, 30));
+      await new Promise(resolve => setTimeout(resolve, 25));
       return new Response(JSON.stringify({
         id: 'cmpl-' + tag,
         model: 'glm-5',
@@ -482,27 +431,27 @@ test('supports parallel sub-agent requests, >256 KiB chunked prompts and >90 KiB
 
   const hugePrompt = 'LARGE_PROMPT' + 'x'.repeat(320_000);
   const [r1, r2, r3] = await Promise.all([
-    fetch(`${rig.relay.url}/v1/messages`, {
+    fetch(`${rig.bridge.url}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'glm-5', max_tokens: 4096, stream: false, messages: [{ role: 'user', content: hugePrompt }] }),
+      headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'glm-5', stream: false, messages: [{ role: 'user', content: hugePrompt }] }),
     }).then(r => r.json()),
-    fetch(`${rig.relay.url}/v1/chat/completions`, {
+    fetch(`${rig.bridge.url}/v1/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'glm-5', stream: false, messages: [{ role: 'user', content: 'SUBAGENT_ONE_prompt' }] }),
     }).then(r => r.json()),
-    fetch(`${rig.relay.url}/v1/responses`, {
+    fetch(`${rig.bridge.url}/v1/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'glm-5', stream: false, input: 'SUBAGENT_TWO_prompt' }),
+      body: JSON.stringify({ model: 'glm-5', stream: false, messages: [{ role: 'user', content: 'SUBAGENT_TWO_prompt' }] }),
     }).then(r => r.json()),
   ]);
 
-  assert.equal(r1.content[0].text, `LARGE_PROMPT:${largeOutput}`);
+  assert.equal(r1.choices[0].message.content, `LARGE_PROMPT:${largeOutput}`);
   assert.equal(r2.choices[0].message.content, `SUBAGENT_ONE:${largeOutput}`);
-  assert.equal(r3.output_text, `SUBAGENT_TWO:${largeOutput}`);
-  assert.ok(rig.runnerCalls.some(c => c.type === 'workspace_agent_model_request'), 'expected >256 KiB prompt to use chunked read');
+  assert.equal(r3.choices[0].message.content, `SUBAGENT_TWO:${largeOutput}`);
+  assert.deepEqual(readdirSync(rig.agentDir), []);
   assert.equal(rig.store.get('SELECT count(*) n FROM model_requests WHERE task_id=?', rig.taskId).n, 3);
 });
 
@@ -542,8 +491,8 @@ test('readProviderCredentialFile accepts read-only files and symlinks and report
   assert.throws(() => readProviderCredentialFile(hugeFile), err => /credential_file_too_large/.test(err.detail));
 });
 
-test('pre-header keepalive heartbeats do not prematurely commit 200/application/json before slow upstream headers or errors arrive', async t => {
-  const rig = await createRelayRig(t);
+test('slow upstream 429, streaming 200, and first-byte timeout preserve exact status codes and headers', async t => {
+  const rig = await createGatewayRig(t, { uds: false });
   const model = addProjectModel(rig.store, rig.repoId, {
     url: 'https://upstream.invalid/v1',
     key: 'sk-slow-upstream-key',
@@ -553,21 +502,20 @@ test('pre-header keepalive heartbeats do not prematurely commit 200/application/
   });
 
   let scenario = '429';
-  rig.startGateway({
+  await rig.startGateway({
     primaryModel: model,
-    timing: { firstByteMs: 450, idleMs: 2_000, keepaliveMs: 25 },
+    timing: { firstByteMs: 250, idleMs: 2_000 },
     fetcher: async (_url, init) => {
       if (scenario === 'timeout') {
         await new Promise((_resolve, reject) => {
           init.signal?.addEventListener('abort', () => reject(init.signal.reason ?? new Error('aborted')), { once: true });
         });
       }
-      // Wait long enough for multiple 25ms keepalive heartbeats to flush to cursor.json before headers arrive.
-      await new Promise(resolve => setTimeout(resolve, 90));
+      await new Promise(resolve => setTimeout(resolve, 60));
       if (scenario === '429') {
         return new Response(JSON.stringify({ error: { message: 'rate limited', type: 'rate_limit_error' } }), {
           status: 429,
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'retry-after': '3' },
         });
       }
       const chunks = [
@@ -582,24 +530,17 @@ test('pre-header keepalive heartbeats do not prematurely commit 200/application/
     },
   });
 
-  // 1. Slow upstream 429 after multiple pre-header keepalives still delivers HTTP 429 to the client.
-  const res429 = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+  const res429 = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'slow-gpt', stream: false, messages: [{ role: 'user', content: 'hi' }] }),
   });
   assert.equal(res429.status, 429);
-  assert.match(res429.headers.get('content-type') || '', /application\/json/);
-  const err429 = await res429.json();
-  assert.equal(err429.error.type, 'rate_limit_error');
-  assert.ok(
-    rig.runnerCalls.some(c => c.type === 'workspace_agent_model_reply' && c.sequence >= 1 && c.status === undefined),
-    'expected pre-header keepalive without premature status',
-  );
+  assert.equal(res429.headers.get('retry-after'), '3');
+  assert.equal((await res429.json()).error.type, 'rate_limit_error');
 
-  // 2. Slow upstream streaming 200 after multiple pre-header keepalives delivers text/event-stream, not application/json.
   scenario = 'stream';
-  const resStream = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+  const resStream = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'slow-gpt', stream: true, messages: [{ role: 'user', content: 'stream please' }] }),
@@ -610,34 +551,18 @@ test('pre-header keepalive heartbeats do not prematurely commit 200/application/
   assert.match(sseBody, /Slow /);
   assert.match(sseBody, /stream!/);
 
-  // 3. First-byte timeout after pre-header keepalives delivers HTTP 502 error instead of HTTP 200.
   scenario = 'timeout';
-  const resTimeout = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+  const resTimeout = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'slow-gpt', stream: false, messages: [{ role: 'user', content: 'hang' }] }),
   });
   assert.equal(resTimeout.status, 502);
-  const errTimeout = await resTimeout.json();
-  assert.equal(errTimeout.error.code, 'provider_timeout');
+  assert.equal((await resTimeout.json()).error.code, 'provider_timeout');
 });
 
-test('propagates client cancellation to upstream when runner returns {error, detail} objects like Workspace.deliver', async t => {
-  const rig = await createRelayRig(t);
-  // Wrap runner to match runner/runner.mjs + Workspace.deliver: catch agentOperation errors and return {error, detail}.
-  const runnerErrors=[];
-  const wrappedRunner = async input => {
-    try {
-      return await rig.runner(input);
-    } catch (err) {
-      runnerErrors.push(String(err?.message));
-      return {
-        error: 'runner_operation_failed',
-        detail: `${input.type}: ${String(err?.message || 'operation failed')}`,
-      };
-    }
-  };
-
+test('client disconnect immediately aborts upstream fetch signal and marks ledger cancelled', async t => {
+  const rig = await createGatewayRig(t, { uds: true });
   const model = addProjectModel(rig.store, rig.repoId, {
     url: 'https://upstream.invalid/v1',
     key: 'sk-cancel-test-secret',
@@ -650,9 +575,8 @@ test('propagates client cancellation to upstream when runner returns {error, det
   let releaseSecondChunk;
   const secondChunkGate = new Promise(resolve => { releaseSecondChunk = resolve; });
 
-  rig.startGateway({
+  await rig.startGateway({
     primaryModel: model,
-    runner: wrappedRunner,
     fetcher: async (_url, init) => {
       init.signal?.addEventListener('abort', () => {
         upstreamAborted = true;
@@ -664,7 +588,7 @@ test('propagates client cancellation to upstream when runner returns {error, det
           controller.enqueue(Buffer.from('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
           controller.enqueue(Buffer.from('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"First chunk"}}\n\n'));
           for (let i = 0; i < 40 && !init.signal?.aborted; i++) {
-            await new Promise(resolve => setTimeout(resolve, 35));
+            await new Promise(resolve => setTimeout(resolve, 30));
             if (init.signal?.aborted) break;
             controller.enqueue(Buffer.from(`event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" more-${i}"}}\n\n`));
           }
@@ -677,7 +601,7 @@ test('propagates client cancellation to upstream when runner returns {error, det
   });
 
   const clientAbort = new AbortController();
-  const res = await fetch(`${rig.relay.url}/v1/messages`, {
+  const res = await fetch(`${rig.bridge.url}/v1/messages`, {
     method: 'POST',
     headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'cancel-model', max_tokens: 512, stream: true, messages: [{ role: 'user', content: 'stream until cancelled' }] }),
@@ -692,7 +616,7 @@ test('propagates client cancellation to upstream when runner returns {error, det
 
   const deadline = Date.now() + 3000;
   while (!upstreamAborted && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 25));
+    await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.equal(upstreamAborted, true, 'expected upstream fetch signal to abort after client disconnect');
 
@@ -700,18 +624,17 @@ test('propagates client cancellation to upstream when runner returns {error, det
   while (Date.now() < deadline) {
     row = rig.store.get('SELECT * FROM model_requests WHERE task_id=?', rig.taskId);
     if (row?.state && row.state !== 'pending') break;
-    await new Promise(resolve => setTimeout(resolve, 25));
+    await new Promise(resolve => setTimeout(resolve, 20));
   }
-  assert.equal(row?.state, 'cancelled',JSON.stringify({runnerErrors,response:row?.response_ref?rig.store.trajectories.read(row.response_ref).data:null}));
+  assert.equal(row?.state, 'cancelled');
 });
 
-test('preserves tool-result images, multi-byte UTF-8 across chunks, text-tool-text blocks, mid-stream SSE errors, and OpenAI protocol auto-selection', async t => {
-  const rig = await createRelayRig(t);
+test('boundary-safe streaming redaction scrubs secrets split across multi-byte UTF-8 chunks without corrupting text', async t => {
+  const rig = await createGatewayRig(t, { uds: true });
   const secretKey = 'sk-utf8-secret-key-998877';
-  const pngBase64 = Buffer.from('fake-png-binary-payload').toString('base64');
-  let capturedChatBody = null;
-  let capturedResponsesBody = null;
-  let capturedOpenAiUrls = [];
+  const outboundToken = 'ghs_outbound_secret_token_998877';
+  rig.redactor.add(outboundToken);
+  let capturedOutboundBody = '';
 
   const chatModel = addProjectModel(rig.store, rig.repoId, {
     url: 'https://chat-provider.internal/v1',
@@ -720,313 +643,207 @@ test('preserves tool-result images, multi-byte UTF-8 across chunks, text-tool-te
     interface_type: 'openai-chat-completions',
     auth_header: 'bearer',
   });
-  addProjectModel(rig.store, rig.repoId, {
-    url: 'https://api.openai.com/v1',
-    key: 'sk-openai-official-key',
-    name: 'gpt-4.1',
-  });
 
-  rig.startGateway({
+  await rig.startGateway({
     primaryModel: chatModel,
-    allowVisibleModels: true,
-    fetcher: async (url, init) => {
-      if (url.startsWith('https://api.openai.com/')) {
-        capturedOpenAiUrls.push(url);
-        if (url.endsWith('/responses')) {
-          capturedResponsesBody = JSON.parse(init.body);
-          return new Response(JSON.stringify({
-            id: 'resp_openai_1',
-            object: 'response',
-            status: 'completed',
-            model: 'gpt-4.1',
-            output: [{ id: 'msg_1', type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: 'Direct responses OK', annotations: [] }] }],
-            usage: { input_tokens: 25, output_tokens: 5, input_tokens_details: { cached_tokens: 0 } },
-          }), { status: 200, headers: { 'content-type': 'application/json' } });
-        }
-        return new Response(JSON.stringify({
-          id: 'cmpl_openai_1',
-          object: 'chat.completion',
-          model: 'gpt-4.1',
-          choices: [{ index: 0, message: { role: 'assistant', content: 'Converted chat OK' }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 25, completion_tokens: 5 },
-        }), { status: 200, headers: { 'content-type': 'application/json' } });
-      }
-
-      const parsed = JSON.parse(init.body);
-      const lastMsg = parsed.messages?.at(-1);
-      // 1. Non-streaming passthrough with multi-byte UTF-8 & secret split mid-character across chunks.
-      if (parsed.stream === false && lastMsg?.content === 'split-utf8') {
-        const fullBytes = Buffer.from(JSON.stringify({
-          id: 'cmpl-utf8',
-          object: 'chat.completion',
-          model: 'vision-chat-model',
-          choices: [{ index: 0, message: { role: 'assistant', content: `中文测试🚀多字节边界 key=${secretKey} 结束` }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 10, completion_tokens: 12 },
-        }), 'utf8');
-        const parts = [];
-        // Slice every 5 bytes so 3-byte Chinese chars, 4-byte emoji, and secretKey all split across chunks.
-        for (let i = 0; i < fullBytes.length; i += 5) parts.push(fullBytes.subarray(i, i + 5));
-        return new Response(Readable.toWeb(Readable.from(parts)), { status: 200, headers: { 'content-type': 'application/json' } });
-      }
-
-      // 2a. Immediate stream error before any chunk flushes -> upgraded to HTTP 502 JSON.
-      if (lastMsg?.content === 'immediate-stream-error') {
-        const stream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(Buffer.from('data: {"error":{"message":"immediate failure"}}\n\n'));
-            controller.close();
-          },
-        });
-        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-      }
-
-      // 2b. Mid-stream SSE error after initial text chunk has already flushed to downstream.
-      if (lastMsg?.content === 'mid-stream-error') {
-        const stream = new ReadableStream({
-          async start(controller) {
-            controller.enqueue(Buffer.from('data: {"id":"cmpl-err","model":"vision-chat-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Partial "},"finish_reason":null}]}\n\n'));
-            await new Promise(resolve => setTimeout(resolve, 60));
-            controller.enqueue(Buffer.from('data: {"error":{"message":"upstream overloaded"}}\n\n'));
-            controller.close();
-          },
-        });
-        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-      }
-
-      // 3. Tool-result image conversion + text -> tool_call -> text + trailing usage chunk.
-      capturedChatBody = parsed;
-      const chunks = [
-        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: { role: 'assistant', content: 'Before tool.' }, finish_reason: null }] })}\n\n`,
-        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_next', type: 'function', function: { name: 'Read', arguments: '{"path":"a"}' } }] }, finish_reason: null }] })}\n\n`,
-        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: { content: 'After tool.' }, finish_reason: null }] })}\n\n`,
-        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`,
-        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [], usage: { prompt_tokens: 90, completion_tokens: 22, prompt_tokens_details: { cached_tokens: 10 } } })}\n\n`,
-        'data: [DONE]\n\n',
-      ].map(s => Buffer.from(s, 'utf8'));
-      return new Response(Readable.toWeb(Readable.from(chunks)), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    fetcher: async (_url, init) => {
+      capturedOutboundBody = String(init.body);
+      const fullBytes = Buffer.from(JSON.stringify({
+        id: 'cmpl-utf8',
+        object: 'chat.completion',
+        model: 'vision-chat-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: `中文测试🚀多字节边界 key=${secretKey} 结束` }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 12 },
+      }), 'utf8');
+      const parts = [];
+      for (let i = 0; i < fullBytes.length; i += 5) parts.push(fullBytes.subarray(i, i + 5));
+      return new Response(Readable.toWeb(Readable.from(parts)), { status: 200, headers: { 'content-type': 'application/json' } });
     },
   });
 
-  // Case A: Non-streaming passthrough preserves split multi-byte UTF-8 and scrubs split secret.
-  const utf8Res = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+  const utf8Res = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'vision-chat-model', stream: false, messages: [{ role: 'user', content: 'split-utf8' }] }),
+    body: JSON.stringify({ model: 'vision-chat-model', stream: false, messages: [{ role: 'user', content: `token=${outboundToken}` }] }),
   });
   assert.equal(utf8Res.status, 200);
   const utf8Json = await utf8Res.json();
   assert.equal(utf8Json.choices[0].message.content, '中文测试🚀多字节边界 key=[REDACTED] 结束');
   assert.ok(!utf8Json.choices[0].message.content.includes('\uFFFD'));
-
-  // Case B: Tool result with image converts cleanly (no base64 JSON text in tool message) & text->tool->text opens 3 Anthropic blocks.
-  const tttRes = await fetch(`${rig.relay.url}/v1/messages`, {
-    method: 'POST',
-    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: 'vision-chat-model',
-      max_tokens: 1024,
-      stream: true,
-      messages: [
-        { role: 'user', content: 'Take screenshot and check status' },
-        {
-          role: 'assistant',
-          content: [
-            { type: 'tool_use', id: 'call_shot', name: 'Screenshot', input: {} },
-            { type: 'tool_use', id: 'call_stat', name: 'Status', input: {} },
-          ],
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call_shot',
-              content: [
-                { type: 'text', text: 'Captured screen' },
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-              ],
-            },
-            { type: 'tool_result', tool_use_id: 'call_stat', content: 'OK' },
-          ],
-        },
-      ],
-    }),
-  });
-  assert.equal(tttRes.status, 200);
-  const tttSse = await tttRes.text();
-  // Verify all tool messages precede the trailing user image_url message and base64 is not JSON.stringified into tool content.
-  const roles = capturedChatBody.messages.map(m => m.role);
-  assert.deepEqual(roles, ['user', 'assistant', 'tool', 'tool', 'user']);
-  assert.equal(capturedChatBody.messages[2].content, 'Captured screen');
-  assert.equal(capturedChatBody.messages[3].content, 'OK');
-  assert.deepEqual(capturedChatBody.messages[4].content, [
-    { type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } },
-  ]);
-
-  // Verify 3 distinct Anthropic content blocks (0: text, 1: tool_use, 2: text) and non-zero usage on message_delta.
-  const blockStarts = [...tttSse.matchAll(/event: content_block_start\ndata: ([^\n]+)/g)].map(m => JSON.parse(m[1]));
-  const blockStops = [...tttSse.matchAll(/event: content_block_stop\ndata: ([^\n]+)/g)].map(m => JSON.parse(m[1]));
-  assert.deepEqual(blockStarts.map(b => [b.index, b.content_block.type]), [[0, 'text'], [1, 'tool_use'], [2, 'text']]);
-  assert.deepEqual(blockStops.map(b => b.index), [0, 1, 2]);
-  assert.match(tttSse, /"usage":\{"input_tokens":80,"output_tokens":22,"cache_read_input_tokens":10\}/);
-
-  // Case C1: Immediate upstream SSE error before first flush returns HTTP 502 JSON instead of 200 + raw JSON.
-  const immErrRes = await fetch(`${rig.relay.url}/v1/messages`, {
-    method: 'POST',
-    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'vision-chat-model', max_tokens: 256, stream: true, messages: [{ role: 'user', content: 'immediate-stream-error' }] }),
-  });
-  assert.equal(immErrRes.status, 502);
-  const immErrJson = await immErrRes.json();
-  assert.equal(immErrJson.error.type, 'api_error');
-  assert.match(immErrJson.error.message, /immediate failure/);
-
-  // Case C2: Mid-stream SSE error after first chunk flushed emits SSE `event: error` frame instead of silent truncation.
-  const midErrRes = await fetch(`${rig.relay.url}/v1/messages`, {
-    method: 'POST',
-    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'vision-chat-model', max_tokens: 256, stream: true, messages: [{ role: 'user', content: 'mid-stream-error' }] }),
-  });
-  assert.equal(midErrRes.status, 200);
-  const midErrSse = await midErrRes.text();
-  assert.match(midErrSse, /"text":"Partial "/);
-  assert.match(midErrSse, /event: error\ndata: \{"type":"error","error":\{"type":"api_error","message":"upstream overloaded"\}\}/);
-
-  // Case D: Official OpenAI base URL automatically uses /v1/responses for Codex (/v1/responses) and /v1/chat/completions for Claude Code (/v1/messages).
-  const codexOpenAiRes = await fetch(`${rig.relay.url}/v1/responses`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-4.1', stream: false, input: 'Hello from Codex' }),
-  });
-  assert.equal(codexOpenAiRes.status, 200);
-  const codexOpenAiJson = await codexOpenAiRes.json();
-  assert.equal(codexOpenAiJson.output[0].content[0].text, 'Direct responses OK');
-  assert.equal(capturedResponsesBody.input, 'Hello from Codex');
-
-  const claudeOpenAiRes = await fetch(`${rig.relay.url}/v1/messages`, {
-    method: 'POST',
-    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-4.1', max_tokens: 256, stream: false, messages: [{ role: 'user', content: 'Hello from Claude Code' }] }),
-  });
-  assert.equal(claudeOpenAiRes.status, 200);
-  assert.equal((await claudeOpenAiRes.json()).content[0].text, 'Converted chat OK');
-  assert.deepEqual(capturedOpenAiUrls, [
-    'https://api.openai.com/v1/responses',
-    'https://api.openai.com/v1/chat/completions',
-  ]);
+  assert.ok(!capturedOutboundBody.includes(outboundToken) && capturedOutboundBody.includes('[REDACTED]'), 'registered secrets must never leave control plane');
 });
 
-test('WorkSwarm relay forwards only granted tools and omits an empty tool list', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'relay-allowed-tools-'));
+test('WorkSwarm gateway filters tools via trusted allowedTools and omits empty tool lists', async t => {
+  const rig = await createGatewayRig(t, { uds: true });
   const allowedName = 'mcp_bot_read_file';
-  const relay = await startModelRelay({ agentDir: dir, allowedTools: new Set([allowedName]), pollMs: 10 });
-  t.after(async () => {
-    await relay.close();
-    rmSync(dir, { recursive: true, force: true });
+  const forwardedBodies = [];
+  const model = addProjectModel(rig.store, rig.repoId, {
+    url: 'https://chat-provider.internal/v1',
+    key: 'sk-ws-key',
+    name: 'ws-model',
+    interface_type: 'openai-chat-completions',
+    auth_header: 'bearer',
+  });
+  await rig.startGateway({
+    primaryModel: model,
+    allowedTools: new Set([allowedName]),
+    fetcher: async (_url, init) => {
+      forwardedBodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({
+        id: 'cmpl-ws',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 2 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
   });
 
   const granted = { type: 'function', function: { name: allowedName } };
   const native = { type: 'function', function: { name: 'native_fixture' } };
-  const submissions = [
+  for (const body of [
     { tools: [native, granted], tool_choice: { type: 'function', function: { name: native.function.name } } },
     { tools: [native], tool_choice: 'required' },
-  ];
-  for (const [index, body] of submissions.entries()) {
-    const controller = new AbortController();
-    const pending = fetch(`${relay.url}/v1/chat/completions`, {
+  ]) {
+    const res = await fetch(`${rig.bridge.url}/v1/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: 'Bearer fixture-token', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'model', messages: [{ role: 'user', content: String(index) }], ...body }),
-      signal: controller.signal,
-    }).catch(() => {});
-    try {
-      const requests = join(dir, 'model-requests');
-      let forwarded;
-      const deadline = Date.now() + 3000;
-      while (!forwarded && Date.now() < deadline) {
-        forwarded = readdirSync(requests).filter(name => name.endsWith('.json'))
-          .map(name => JSON.parse(readFileSync(join(requests, name), 'utf8')).body)
-          .find(request => request.messages[0].content === String(index));
-        if (!forwarded) await new Promise(resolve => setTimeout(resolve, 15));
-      }
-      assert.ok(forwarded, 'expected request in the relay mailbox');
-      if (index === 0) assert.deepEqual(forwarded.tools, [granted]);
-      else assert.ok(!Object.hasOwn(forwarded, 'tools'));
-      assert.ok(!Object.hasOwn(forwarded, 'tool_choice'));
-    } finally {
-      controller.abort();
-      await pending;
-    }
+      headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'ws-model', stream: false, messages: [{ role: 'user', content: 'hi' }], ...body }),
+    });
+    assert.equal(res.status, 200);
+    await res.json();
   }
+  assert.deepEqual(forwardedBodies[0].tools, [granted]);
+  assert.equal('tool_choice' in forwardedBodies[0], false);
+  assert.equal('tools' in forwardedBodies[1], false);
+  assert.equal('tool_choice' in forwardedBodies[1], false);
 });
 
-test('model relay close() resolves promptly when a slow client disconnects during response backpressure', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'relay-drain-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const relay = await startModelRelay({ agentDir: dir, pollMs: 10 });
+test('model bridge close() resolves promptly when a slow client disconnects during streaming backpressure', async t => {
+  const rig = await createGatewayRig(t, { uds: true });
+  const model = addProjectModel(rig.store, rig.repoId, {
+    url: 'https://upstream.invalid/v1',
+    key: 'sk-drain-key',
+    name: 'drain-model',
+    interface_type: 'openai-chat-completions',
+    auth_header: 'bearer',
+  });
+  await rig.startGateway({
+    primaryModel: model,
+    fetcher: async (_url, init) => {
+      const payload = Buffer.alloc(4 * 1024 * 1024, 0x61);
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(payload);
+          init.signal?.addEventListener('abort', () => { try { controller.close(); } catch {} }, { once: true });
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
 
   const { connect } = await import('node:net');
-  const sock = connect(relay.port, '127.0.0.1');
+  const sock = connect(rig.bridge.port, '127.0.0.1');
   await once(sock, 'connect');
-  // Pause reading on the client socket so a large response triggers socket write backpressure.
   sock.pause();
-  const reqBody = JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+  const reqBody = JSON.stringify({ model: 'drain-model', stream: true, messages: [{ role: 'user', content: 'hi' }] });
   sock.write(
-    `POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer tok_drain\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reqBody)}\r\n\r\n${reqBody}`,
+    `POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${rig.token}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reqBody)}\r\n\r\n${reqBody}`,
   );
-
-  let reqId = null;
-  const deadline = Date.now() + 3000;
-  while (!reqId && Date.now() < deadline) {
-    const files = readdirSync(join(dir, 'model-requests')).filter(f => f.endsWith('.json'));
-    if (files.length) reqId = files[0].slice(0, -5);
-    else await new Promise(resolve => setTimeout(resolve, 15));
-  }
-  assert.ok(reqId, 'expected relay request file');
-
-  // Write 4 MiB into the reply stream so res.write() hits highWaterMark and awaits drain.
-  const payload = Buffer.alloc(4 * 1024 * 1024, 0x61);
-  writeFileSync(join(dir, 'model-replies', `${reqId}.stream`), payload);
-  writeFileSync(join(dir, 'model-replies', `${reqId}.cursor.json`), JSON.stringify({
-    status: 200,
-    headers: { 'content-type': 'text/event-stream' },
-    written: payload.length,
-    done: false,
-    error: null,
-    keepalive: 0,
-  }));
-
   await new Promise(resolve => setTimeout(resolve, 80));
   sock.destroy();
 
   const closeResult = await Promise.race([
-    relay.close().then(() => 'closed'),
+    rig.bridge.close().then(() => 'closed'),
     new Promise(resolve => setTimeout(() => resolve('hung'), 2000)),
   ]);
   assert.equal(closeResult, 'closed');
 });
 
-test('Codex Responses relay accepts an SSE body advertised as JSON and preserves completion and accounting', async t => {
-  const response = { id:'resp-framing', object:'response', model:'framing-model', status:'completed',
-    output:[{id:'msg-framing',type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'READY',annotations:[]}]}],
-    usage:{input_tokens:9,output_tokens:2,total_tokens:11} };
-  const body = `event: response.created\ndata: ${JSON.stringify({type:'response.created',response:{...response,status:'in_progress',output:[]}})}\n\nevent: response.completed\ndata: ${JSON.stringify({type:'response.completed',response})}\n\n`;
-  const upstream = createServer(async (req,res) => {
-    for await (const chunk of req) {};
-    res.writeHead(200,{'content-type':'application/json'});
+test('Codex Responses passthrough accepts an SSE body advertised as JSON and preserves completion and accounting', async t => {
+  const response = { id: 'resp-framing', object: 'response', model: 'framing-model', status: 'completed',
+    output: [{ id: 'msg-framing', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'READY', annotations: [] }] }],
+    usage: { input_tokens: 9, output_tokens: 2, total_tokens: 11 } };
+  const body = `event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { ...response, status: 'in_progress', output: [] } })}\n\nevent: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response })}\n\n`;
+  const upstream = createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(200, { 'content-type': 'application/json' });
     res.write('ev');
-    setTimeout(()=>res.end(body.slice(2)),5);
+    setTimeout(() => res.end(body.slice(2)), 5);
   });
-  upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
-  t.after(()=>new Promise(resolve=>upstream.close(resolve)));
-  const rig=await createRelayRig(t);
-  const model=addProjectModel(rig.store,rig.repoId,{url:`http://127.0.0.1:${upstream.address().port}/v1`,key:'framing-provider-key',name:'framing-model',interface_type:'openai-responses'});
-  rig.startGateway({primaryModel:model});
-  const reply=await fetch(`${rig.relay.url}/v1/responses`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+rig.token},body:JSON.stringify({model:'framing-model',stream:true,input:'Say READY'})});
-  assert.equal(reply.status,200);assert.match(reply.headers.get('content-type'),/text\/event-stream/);
-  assert.equal(await reply.text(),body);
-  const deadline=Date.now()+3000;
-  while(rig.store.get('SELECT state FROM model_requests ORDER BY rowid DESC LIMIT 1')?.state!=='received'&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
-  const stored=rig.store.get('SELECT state,input_tokens,output_tokens FROM model_requests ORDER BY rowid DESC LIMIT 1');
-  assert.deepEqual([stored.state,stored.input_tokens,stored.output_tokens],['received',9,2]);
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+
+  const rig = await createGatewayRig(t, { uds: true });
+  const catalog = new ModelCatalog(rig.store, async () => new Response('{}'));
+  await catalog.refresh().catch(() => {});
+  const model = addProjectModel(rig.store, rig.repoId, { url: `http://127.0.0.1:${upstream.address().port}/v1`, key: 'framing-provider-key', name: 'framing-model', interface_type: 'openai-responses' });
+  await rig.startGateway({ primaryModel: model });
+  const reply = await fetch(`${rig.bridge.url}/v1/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + rig.token },
+    body: JSON.stringify({ model: 'framing-model', stream: true, input: 'Say READY' }),
+  });
+  assert.equal(reply.status, 200);
+  assert.match(reply.headers.get('content-type') || '', /text\/event-stream/);
+  assert.equal(await reply.text(), body);
+  const deadline = Date.now() + 3000;
+  while (rig.store.get('SELECT state FROM model_requests ORDER BY rowid DESC LIMIT 1')?.state !== 'received' && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const stored = rig.store.get('SELECT state,input_tokens,output_tokens FROM model_requests ORDER BY rowid DESC LIMIT 1');
+  assert.deepEqual([stored.state, stored.input_tokens, stored.output_tokens], ['received', 9, 2]);
+});
+
+test('client closing SSE stream right after terminal response.completed still records state=received and full usage', async t => {
+  const response = {
+    id: 'resp-early-close',
+    object: 'response',
+    model: 'early-close-model',
+    status: 'completed',
+    output: [{ id: 'msg-ec', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'DONE_EARLY', annotations: [] }] }],
+    usage: { input_tokens: 42, output_tokens: 7, total_tokens: 49 },
+  };
+  const upstream = createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    res.write(`event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { ...response, status: 'in_progress', output: [] } })}\n\n`);
+    res.write(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response })}\n\n`);
+    // Keep upstream open briefly (like real providers before TCP FIN) so client closes first.
+    const keepOpen = setTimeout(() => { try { res.end(); } catch {} }, 5000);
+    keepOpen.unref?.();
+    req.on('close', () => { clearTimeout(keepOpen); try { res.end(); } catch {} });
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => new Promise(resolve => { upstream.close(resolve); upstream.closeAllConnections?.(); }));
+
+  const rig = await createGatewayRig(t, { uds: true });
+  const model = addProjectModel(rig.store, rig.repoId, { url: `http://127.0.0.1:${upstream.address().port}/v1/responses`, key: 'early-close-key', name: 'early-close-model', interface_type: 'openai-responses' });
+  await rig.startGateway({ primaryModel: model });
+
+  const reply = await fetch(`${rig.bridge.url}/v1/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + rig.token },
+    body: JSON.stringify({ model: 'early-close-model', stream: true, input: 'hi' }),
+  });
+  assert.equal(reply.status, 200);
+  const reader = reply.body.getReader();
+  const dec = new TextDecoder();
+  let seen = '';
+  while (!seen.includes('response.completed')) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    seen += dec.decode(value, { stream: true });
+  }
+  // Close client socket immediately upon seeing response.completed (just like Codex CLI does).
+  await reader.cancel();
+
+  const deadline = Date.now() + 3000;
+  let stored = null;
+  while (Date.now() < deadline) {
+    stored = rig.store.get('SELECT state,http_status,input_tokens,output_tokens FROM model_requests ORDER BY rowid DESC LIMIT 1');
+    if (stored && stored.state !== 'pending') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.deepEqual([stored?.state, stored?.http_status, stored?.input_tokens, stored?.output_tokens], ['received', 200, 42, 7]);
 });

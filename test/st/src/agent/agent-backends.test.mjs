@@ -1,5 +1,3 @@
-// These fixtures model the control-plane model boundary, so explicitly select gateway mode.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -21,6 +19,7 @@ import { Workspace } from '../../../../dist/agent/workspace.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { writeICodeProduct } from '../../../fixtures/icode-product.mjs';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 import '../../../fixtures/scripted-driver.mjs';
 
 const tool = (name, properties = {}, required = []) => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties, required, additionalProperties: false } } });
@@ -39,8 +38,7 @@ async function fixture(t, respond) {
     try {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const body = JSON.parse(raw); requests.push(body);
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ choices: [{ message: await respond(body) }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      replyChatCompletion(res, await respond(body), { stream: Boolean(body.stream), usage: { prompt_tokens: 10, completion_tokens: 5 } });
     } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -63,12 +61,14 @@ async function fixture(t, respond) {
 
 test('new roles default to Pi; general backends preserve role authority; Manager and QA run only on Pi', async t => {
   const f = await fixture(t, () => call('finish', {}));
+  f.s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m_codex','101','http://127.0.0.1:9/v1/responses','codex-fixture',?,'now')", f.s.secrets.seal({ value: 'fixture-key' }, 'model:m_codex'));
+  f.s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m_claude','101','http://127.0.0.1:9/v1/messages','claude-fixture',?,'now')", f.s.secrets.seal({ value: 'fixture-key' }, 'model:m_claude'));
   const config = f.put({ roles: [{ role_id: 'security' }] });
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
   // Manager and QA stay on Pi (#1337); every other role may take another backend and keeps its authority.
   const pinned = ['manager', 'qa'];
   for (const backend of ['codex', 'pi']) {
-    const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: pinned.includes(r.role_id) ? 'pi' : backend } })) });
+    const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: pinned.includes(r.role_id) ? 'pi' : backend }, ...(backend === 'codex' && !pinned.includes(r.role_id) ? { model_profile_ref: { model_id: 'm_codex' } } : { model_profile_ref: null }) })) });
     assert.ok(saved.roles.every(r => r.harness_ref.id === (pinned.includes(r.role_id) ? 'pi' : backend)));
     assert.equal(saved.roles.find(r => r.role_id === 'manager').permissions.delegation, 'allow');
     assert.equal(saved.roles.find(r => r.role_id === 'qa').output_schema_ref.id, 'acceptance-verdict');
@@ -78,13 +78,13 @@ test('new roles default to Pi; general backends preserve role authority; Manager
   assert.deepEqual(claude.kinds, ['writer', 'observer']);
   assert.deepEqual(claude.supported_model_sources, ['gateway', 'local_config']);
   assert.ok(claude.runtime_status && typeof claude.runtime_status.compatible_range === 'string');
-  const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
+  const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, model_profile_ref: { model_id: 'm_claude' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
   assert.throws(() => f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'claude_code' } }] }), e => e.code === 'harness_role_unsupported' && e.field === 'roles.manager.harness_ref.id');
   // Codex App Server (#171 / #705) is a container worker backend like Claude Code.
   const codex = f.view().backends.find(b => b.id === 'codex');
   assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['writer', 'observer'], 'project', ['gateway', 'local_config'], null]);
-  assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
+  assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm_codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
   assert.throws(() => f.put({ roles: [{ role_id: 'qa', harness_ref: { id: 'codex' } }] }), e => e.code === 'harness_role_unsupported' && e.field === 'roles.qa.harness_ref.id');
   for (const backend of ['acp', 'opencode', 'process']) {
     const view = f.view();
@@ -229,13 +229,19 @@ test('startup migration retires ACP bindings across role settings, role_instance
 test('container backend runtime_status checks resolved model selection and reports real upstream probe state', async t => {
   let probeStatus = 200;
   const f = await fixture(t, () => ({ content: 'pong' }));
-  const probeServer = createServer((_req, res) => {
+  const probeServer = createServer((req, res) => {
     res.writeHead(probeStatus, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(probeStatus === 200 ? { id: 'cmpl-1', choices: [{ message: { role: 'assistant', content: 'pong' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } } : { error: { message: 'bad upstream key' } }));
+    if (probeStatus !== 200) {
+      res.end(JSON.stringify({ error: { message: 'bad upstream key' } }));
+      return;
+    }
+    res.end(JSON.stringify((req.url || '').includes('/responses')
+      ? { id: 'resp_1', object: 'response', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'pong' }] }], usage: { input_tokens: 1, output_tokens: 1 } }
+      : { id: 'cmpl-1', choices: [{ message: { role: 'assistant', content: 'pong' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
   });
   probeServer.listen(0, '127.0.0.1'); await once(probeServer, 'listening');
   t.after(() => new Promise(r => { probeServer.close(r); probeServer.closeAllConnections(); }));
-  f.s.run('UPDATE models SET api_url=? WHERE id=?', `http://127.0.0.1:${probeServer.address().port}/v1`, 'm');
+  f.s.run('UPDATE models SET api_url=? WHERE id=?', `http://127.0.0.1:${probeServer.address().port}/v1/responses`, 'm');
 
   const toolsRoot = mkdtempSync(join(tmpdir(), 'tools-vol-'));
   t.after(() => rmSync(toolsRoot, { recursive: true, force: true }));

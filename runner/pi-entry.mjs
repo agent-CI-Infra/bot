@@ -1,16 +1,14 @@
 import {dirname,isAbsolute,join,resolve} from 'node:path';
-import {existsSync} from 'node:fs';
+import {existsSync,readFileSync} from 'node:fs';
 import {startCredentialHelperServer} from './credential-helper.mjs';
 import {buildGitConfigEnv} from './git-credential-bot.mjs';
 import { localCommandResult, prepareLocalResults } from './tool-results.mjs';
 import {readFile,writeFile,rename,unlink,appendFile,mkdir} from 'node:fs/promises';
-import {createServer} from 'node:http';
-import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
 import {createAgentSession,createExtensionRuntime,DefaultResourceLoader,createBashTool,createCodingTools,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
 import {workspace as runnerWorkspace,notSelected} from './workspace.mjs';
 import {commandOptions} from './command-policy.mjs';
-import {waitModelReply} from './model-reply.mjs';
+import {startModelBridge} from './model-relay.mjs';
 import {toolCapabilityError,platformWrites} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
 import {createToolDispatch} from './tool-dispatch.mjs';
@@ -24,7 +22,6 @@ import {TEXT_REQUEST_LIMIT,IMAGE_REQUEST_LIMIT,MAX_IMAGES_IN_CONTEXT,IMAGE_TOKEN
 
 const root=process.argv[2],dir=root+'/agent',legacyCwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 if(config.run_token){const scrubbed={...config};delete scrubbed.run_token;await writeFile(dir+'/input.json.tmp',JSON.stringify(scrubbed),{mode:0o600});await rename(dir+'/input.json.tmp',dir+'/input.json');}
-const direct=config.model_transport!=='gateway';
 const native=config.native_access;
 const cwd=native&&/^[a-f0-9]{48}$/.test(config.native_workspace_id??'')?join(dirname(root),config.native_workspace_id,'repo'):legacyCwd;
 // Pi keeps its session files and its own state (settings, staged skills, and for project computers the HOME of its shell)
@@ -60,7 +57,6 @@ const modelRequestTooLarge=(raw,reserve=0,preAnalyzed)=>estimateRequestTokens(ra
 // Mask credentials issued to this runner before its model sees a result or an event reaches disk.
 const secrets = new Redactor();
 let events = Promise.resolve();
-secrets.add(config.native_model?.key);
 secrets.add(config.run_token);
 const clean = value => secrets.clean(value);
 const modelFacing = result => Array.isArray(result?.content) ? { ...result, content: result.content.map(item =>
@@ -82,11 +78,8 @@ const finishNudges=3;
 const controlTools=new Set(config.control_tools||[]);
 // A service assistant's turn (#1253) does on Pi what the native loop does between model requests: messages that arrive
 // while it works join as steering, before the first request (config.steer) and after each tool batch (the turn boundary).
-// With a direct provider connection only this process sees the answer being written, so it reports the text as it
-// streams, and Pi's own retries, to the control plane; through the gateway the control plane streams it itself.
-const serviceTurn=config.service_turn===true&&!config.review_session,streamText=serviceTurn&&direct;
-let pendingText='',textTimer;
-const flushText=()=>{clearTimeout(textTimer);textTimer=undefined;if(!pendingText)return events;const text=pendingText;pendingText='';return writeEvent({type:'text_delta',text});};
+// Streamed text is tapped directly by the control-plane model gateway; this process still reports Pi's own retries.
+const serviceTurn=config.service_turn===true&&!config.review_session;
 // The SDK version that actually runs, from its installed manifest; reported with every state and session event.
 const sdk={agent:'pi',package:'@earendil-works/pi-coding-agent',version:await readFile(new URL('../package.json',import.meta.resolve('@earendil-works/pi-coding-agent')),'utf8').then(text=>JSON.parse(text).version).catch(()=>'unknown'),node:process.version};
 // A task gets its worktree when it first needs one (#769). A file tool or command that finds none asks the control plane to
@@ -118,48 +111,40 @@ async function boundary(stage,detail={}){
   try{for(;;){const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;await new Promise(resolve=>setTimeout(resolve,50));}}
   finally{await unlink(dir+'/boundary.json').catch(()=>{});await unlink(reply).catch(()=>{});}
 }
-// One model request at a time goes through the mailbox, whether the main agent or a sub-agent sends it.
-let proxyQueue=Promise.resolve();
-const server=direct?null:createServer((req,res)=>{const run=proxyQueue.then(()=>proxy(req,res));proxyQueue=run.catch(()=>{});});
-// A request over the 2 MiB mailbox or 128k context limit never leaves the runner. It is answered the way a provider
-// reports a context overflow (HTTP 413), because Pi's own threshold compaction does not always run first: it measures
-// provider-reported usage, not this raw-request estimate, and it always keeps the latest ~16k tokens, so a huge message
-// among them leaves nothing to cut yet. Pi then compacts once and retries; the run fails only when that recovery fails
-// (compaction_end below).
-// A model error saying a request did not fit: this proxy's answer below, and the generic wording providers use (a subset of
-// Pi's own overflow patterns).
 const contextOverflow=/context[_ ]length[_ ]exceeded|exceeds the context window|maximum context length|prompt (?:is )?too long|request_too_large|too many tokens|token limit exceeded/i;
-const overflow=(res,detail)=>{res.writeHead(413,{'Content-Type':'application/json'});
-  res.end(JSON.stringify({error:{type:'invalid_request_error',code:'context_length_exceeded',message:'Request exceeds the context window of this model: '+detail}}));};
-async function proxy(req,res){
-  try{
-    // Any number of model requests per task; only the chat completion endpoint is proxied.
-    if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
-    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes<=imageRequestLimit)chunks.push(chunk);}
-    if(bytes>imageRequestLimit){
-      res.writeHead(413,{'Content-Type':'application/json'});
-      res.end(JSON.stringify({error:{type:'invalid_request_error',code:'request_too_large',message:`Request payload (${bytes} bytes) exceeds the ${Math.round(imageRequestLimit/(1024*1024))} MiB image request limit.`}}));
-      return;
-    }
-    const raw=Buffer.concat(chunks).toString('utf8');
-    const parsed=JSON.parse(raw);
-    const analysis=analyzeModelPayload(parsed,bytes);
-    if(analysis.imageCount===0&&bytes>TEXT_REQUEST_LIMIT)return overflow(res,`${bytes} bytes exceed the 2 MiB request limit.`);
-    if(analysis.imageCount>0&&analysis.textBytes>TEXT_REQUEST_LIMIT)return overflow(res,`text payload (${analysis.textBytes} bytes) exceeds the 2 MiB text request limit.`);
-    if(modelRequestTooLarge(raw,0,analysis))return overflow(res,`the estimated tokens plus the ${outputReserve}-token output reserve exceed ${modelCapabilities.context_window}.`);
-    const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:parsed}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
-    const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
-    res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
-  }catch{res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"model_proxy_unavailable"}');}
-}
+let bridge=null;
+const readGatewayOverride=()=>{try{return JSON.parse(readFileSync(dir+'/gateway.json','utf8'));}catch{return null;}};
+const currentRunToken=()=>{const gw=readGatewayOverride();return (typeof gw?.run_token==='string'&&gw.run_token)||config.run_token||'';};
 try{
-  if(direct&&!config.native_model)throw new Error('pi_native_model_required');
-  if(!direct){server.listen(0,'127.0.0.1');await once(server,'listening');}
-  // This literal is not a provider credential. The local proxy ignores it and cannot reach any provider itself.
-  const providerId=direct?'department-direct':'department-proxy',modelId=direct?config.native_model.model:'selected';
-  const api=direct?({'openai-chat-completions':'openai-completions','openai-responses':'openai-responses','anthropic-messages':'anthropic-messages'}[config.native_model.interfaceType]):'openai-completions';
-  await writeFile(dir+'/models.json',JSON.stringify({providers:{[providerId]:{api,baseUrl:direct?config.native_model.baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:direct?config.native_model.key:'local-proxy',models:[{id:modelId,name:direct?modelId:'Project model',contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:modelSupportsImage?['text','image']:['text'],...(api==='openai-completions'?{compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}:{})}]}}}),{mode:0o600});
+  const initialGw=readGatewayOverride();
+  bridge=await startModelBridge({
+    socketPath:initialGw?.model_gateway_socket??config.model_gateway_socket,
+    targetUrl:initialGw?.model_gateway_url??config.model_gateway_url,
+    resolveTarget:()=>{const gw=readGatewayOverride();return gw?{socketPath:gw.model_gateway_socket,targetUrl:gw.model_gateway_url}:null;},
+  });
+  const interfaceType=config.model_interface_type||'openai-chat-completions';
+  const api=({'openai-chat-completions':'openai-completions','openai-responses':'openai-responses','anthropic-messages':'anthropic-messages'})[interfaceType]||'openai-completions';
+  const baseUrl=interfaceType==='anthropic-messages'?bridge.url:bridge.url+'/v1';
+  const providerId='department-proxy',subagentProviderId='department-proxy-subagent',modelId=config.model_name||'selected';
+  const initialToken=currentRunToken()||'gateway';
+  if(initialToken&&initialToken!=='gateway')secrets.add(initialToken);
+  const modelDef={id:modelId,name:modelId,contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:modelSupportsImage?['text','image']:['text'],...(api==='openai-completions'?{compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}:{})};
+  await writeFile(dir+'/models.json',JSON.stringify({providers:{
+    [providerId]:{api,baseUrl,apiKey:initialToken,models:[modelDef]},
+    [subagentProviderId]:{api,baseUrl,apiKey:initialToken,headers:{'x-bot-subagent':'1'},models:[modelDef]},
+  }}),{mode:0o600});
   const runtime=await ModelRuntime.create({authPath:dir+'/auth.json',modelsPath:dir+'/models.json',modelsStorePath:dir+'/catalog.json',allowModelNetwork:false});
+  if(typeof runtime?.prepareRequest==='function'){
+    const origPrepareRequest=runtime.prepareRequest.bind(runtime);
+    runtime.prepareRequest=async(model,options={})=>{
+      await events;
+      if(model&&(model.provider===providerId||model.provider===subagentProviderId)){
+        const token=currentRunToken();
+        if(token){secrets.add(token);return origPrepareRequest(model,{...options,apiKey:token});}
+      }
+      return origPrepareRequest(model,options);
+    };
+  }
   // Tools for one agent. cfg holds that agent's trusted capabilities; agent names a sub-agent in the task log; guard
   // checks repository results against that agent's own session.
   const makeTools=(cfg,agent,guard)=>cfg.tools.map(tool=>({name:tool.function.name,label:tool.function.name,description:tool.function.description,parameters:tool.function.parameters,
@@ -256,13 +241,14 @@ try{
     const {manager:sessionManager,mode}=openSession(agent);
     if(!agent){nativeSessionId=sessionManager.getSessionId();recovery=mode;}
     if(native?.commands){
-      credentialHelper??=await startCredentialHelperServer({agentDir:dir,runToken:config.run_token,addSecret:token=>secrets.add(token)});
+      const helperToken=currentRunToken();
+      credentialHelper??=await startCredentialHelperServer({agentDir:dir,runToken:helperToken,addSecret:token=>secrets.add(token)});
       const bin=nativeDir+'/bin';await mkdir(bin,{recursive:true,mode:0o700});
       await writeFile(bin+'/gh',`#!/bin/sh\nexec "${process.execPath}" "${new URL('./gh-wrapper.mjs',import.meta.url).pathname}" "$@"\n`,{mode:0o700});
       const githubHost=typeof config.github_host==='string'&&config.github_host?config.github_host:'github.com';
       const allowHttpGit=Boolean(local&&config.allow_http_git===true);
       const gitCredPath=new URL('./git-credential-bot.mjs',import.meta.url).pathname;
-      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:buildGitConfigEnv({...ctx.env,HOME:assistant?homeDirectory:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret,BOT_GITHUB_HOST:githubHost,...(config.run_token?{BOT_RUN_TOKEN:config.run_token}:{}),...(allowHttpGit?{BOT_ALLOW_HTTP_GIT_CREDENTIAL:'true'}:{}),...(local&&process.env.BOT_REAL_GH_BIN?{BOT_REAL_GH_BIN:process.env.BOT_REAL_GH_BIN}:{})},gitCredPath,allowHttpGit)})});
+      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:buildGitConfigEnv({...ctx.env,HOME:assistant?homeDirectory:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret,BOT_GITHUB_HOST:githubHost,...(currentRunToken()?{BOT_RUN_TOKEN:currentRunToken()}:{}),...(allowHttpGit?{BOT_ALLOW_HTTP_GIT_CREDENTIAL:'true'}:{}),...(local&&process.env.BOT_REAL_GH_BIN?{BOT_REAL_GH_BIN:process.env.BOT_REAL_GH_BIN}:{})},gitCredPath,allowHttpGit)})});
       tools.push({...bash,label:'bash'});
     }
     const fileAccess=native?.fileTools??native?.workspace;
@@ -278,7 +264,7 @@ try{
       }
     }
     for(let i=0;i<tools.length;i++){const tool=tools[i];tools[i]={...tool,execute:async(...args)=>modelFacing(await tool.execute(...args))};}
-    const {session:created}=await createAgentSession({cwd,agentDir:native?nativeDir:dir,modelRuntime:runtime,model:runtime.getModel(providerId,modelId),resourceLoader:loader,
+    const {session:created}=await createAgentSession({cwd,agentDir:native?nativeDir:dir,modelRuntime:runtime,model:runtime.getModel(agent?subagentProviderId:providerId,modelId),resourceLoader:loader,
       tools:[...builtin,...tools.map(tool=>tool.name)],customTools:tools,sessionManager,settingsManager});
     // The control plane binds the task's role instance to this session and file; the next run opens them again.
     if(!agent)await writeEvent({type:'session_bound',session_id:sessionManager.getSessionId(),recoveryMode:mode,transcript:sessionManager.getSessionFile(),messages:created.messages.length,native_tools:builtin,resources:{skills:loader.getSkills().skills.map(s=>s.name),context_files:loader.getAgentsFiles().agentsFiles.map(f=>f.path)}});
@@ -303,11 +289,8 @@ try{
     };
     let own=0;
     created.subscribe(event=>{
-      // Streamed text is batched for a fifth of a second; the batch is written before the model event that ends it.
-      if(streamText&&!agent){
-        if(event.type==='message_update'&&event.assistantMessageEvent?.type==='text_delta'){pendingText+=event.assistantMessageEvent.delta;textTimer??=setTimeout(()=>void flushText(),200);}
-        if(event.type==='message_end'&&event.message.role==='assistant')void flushText();
-        if(event.type==='auto_retry_start')void writeEvent({type:'model_retry',retry:event.attempt,retries:event.maxAttempts,delay_ms:event.delayMs,error:String(event.errorMessage??'').slice(0,300)});
+      if(serviceTurn&&!agent&&event.type==='auto_retry_start'){
+        void writeEvent({type:'model_retry',retry:event.attempt,retries:event.maxAttempts,delay_ms:event.delayMs,error:String(event.errorMessage??'').slice(0,300)});
       }
       if(native&&['tool_execution_start','tool_execution_end'].includes(event.type))void writeEvent({type:'tool',phase:event.type==='tool_execution_start'?'started':'completed',name:event.toolName,call_id:event.toolCallId,...(event.args?{arguments:event.args}:{}),...(event.result?{result:event.result}:{}),isError:event.isError,...(Number.isFinite(event.durationMs)?{duration_ms:event.durationMs}:{})});
       // A service turn's conversation shows its progress (#1296): each model step as it starts, and Pi's own compaction.
@@ -336,7 +319,7 @@ try{
           if(!agent)pendingImageRecovery=null;
           lastSentImages=[];
         }
-        void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),...(direct?{model:m.model,usage:m.usage,source:'pi_native'}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
+        void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
       }
     });
     return created;
@@ -418,4 +401,4 @@ try{
   // The reason goes into the task log; issued tokens are masked like every event.
   const known=['agent_context_too_large','agent_compaction_failed','agent_finish_missing','disk_full'];
   await save({state:'failed',error:requestFailure||(known.includes(error?.message)?error.message:noSpace(error)?'disk_full':'pi_execution_failed'),detail:clean(String(failureDetail||error?.detail||error?.message||error||'unknown')).slice(0,1000)});}
-finally{session?.dispose();if(server?.listening){server.closeAllConnections();server.close();}await credentialHelper?.close();}
+finally{session?.dispose();await bridge?.close();await credentialHelper?.close();}

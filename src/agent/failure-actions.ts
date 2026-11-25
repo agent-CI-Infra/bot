@@ -24,6 +24,8 @@ export const codeActions: Record<string,string> = {
   acp_product_not_installed:'请平台管理员在 agent-tools 卷安装并选定兼容的 ACP 产品版本。安装后任务会自动继续。',
   workswarm_protocol_unsupported:'请平台管理员核对 WorkSwarm 中实际安装的版本和 ACP 握手版本。',
   workswarm_model_protocol_unsupported:'请选择支持 Chat Completions 或 Anthropic Messages 的模型。',
+  harness_model_api_unsupported:'所选执行后端不支持该模型的接口协议（例如 Codex 仅支持 OpenAI Responses，Claude Code 仅支持 Anthropic Messages）。统一透传网关不做跨协议转换，请在「角色」页更换兼容协议的模型或切换后端后重试。',
+  model_protocol_mismatch:'请求端点协议与所选模型的接口协议不一致（网关仅做透传、不做跨协议转换）。请在「模型」或「角色」页确认模型接口协议后重试。',
   icode_protocol_unsupported:'请平台管理员核对 agent-tools 卷中选用的 iCode 版本，重新安装并选定受支持的官方 Linux 离线包，再点「重试」。',
   acp_process_exited:'iCode 或 WorkSwarm 进程异常退出，bot 会自动重试。若反复出现，请查看本次运行日志并检查工具卷中的安装版本，再手动重试。',
   subscription_mode_not_implemented:'当前后端不支持「项目电脑内自行配置」模式；仅 Claude Code 与 Codex 支持此模式，请在「角色」页切换回「平台模型」后再试。',

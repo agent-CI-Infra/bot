@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /opt/bot && mv /tmp/image-packages /opt/bot/image-packages \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 project && useradd --uid 10001 --gid project --no-create-home project \
-    && mkdir -p /workspace /workspace/home /opt/agent-tools /opt/project-tools /opt/bot-skills /opt/preinstalled/bin /opt/preinstalled/home/.local/bin /opt/preinstalled/npm-global /opt/preinstalled/uv-tools /opt/preinstalled/python /opt/preinstalled/cargo /opt/preinstalled/go /opt/preinstalled/cache \
-    && chown -R project:project /workspace /opt/agent-tools /opt/project-tools /opt/bot-skills /opt/preinstalled && chmod 700 /workspace /workspace/home && chmod 755 /opt/agent-tools /opt/project-tools /opt/bot-skills /opt/preinstalled
+    && mkdir -p /workspace /workspace/home /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled/bin /opt/preinstalled/home/.local/bin /opt/preinstalled/npm-global /opt/preinstalled/uv-tools /opt/preinstalled/python /opt/preinstalled/cargo /opt/preinstalled/go /opt/preinstalled/cache \
+    && chown -R project:project /workspace /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled && chmod 700 /workspace /workspace/home && chmod 755 /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled
 COPY runner/package.json runner/package-lock.json /opt/runner/
 RUN cd /opt/runner && npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY runner /opt/runner

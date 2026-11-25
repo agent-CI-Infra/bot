@@ -37,10 +37,10 @@
 
 | 后端 | 运行位置 | 关键设计要点 |
 | --- | --- | --- |
-| `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；经 `DefaultResourceLoader` 的 `additionalSkillPaths` 原生读取 `/opt/bot-skills/sets/<hash>/bot/skills` 只读 Skill；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
-| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 `--plugin-dir /opt/bot-skills/sets/<hash>/bot` 与 `--setting-sources ''`（`local_config` 为 `user`）原生按需加载只读 Skill 并隔离检出本地配置/hooks/MCP，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具；支持平台模型与 `local_config` 两种模式。 |
-| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前通过 `skills/extraRoots/set` 挂入 `/opt/bot-skills/sets/<hash>/bot/skills` 并经 `skills/list` + `skills/config/write` 显式禁用检出内自动发现的 repo/cwd Skill（复核失败关闭），同时核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与 `local_config` 两种模式。 |
-| `icode`、`workswarm` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。iCode 通过 `agents/launchpad.yaml` 的 `skills.paths` 原生加载只读 Skill 并恒定关闭 `project.skills_enabled` / `auto_load_cwd_agents_skills`；WorkSwarm 因原生工具全禁而继续经受控 MCP `read_skill` 读取；模型请求经邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
+| `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；经 `DefaultResourceLoader` 的 `additionalSkillPaths` 原生读取 `/opt/bot-skills/sets/<hash>/bot/skills` 只读 Skill；支持原生工具、SDK 压缩与跨重启会话续接；原生支持 Chat Completions / Responses / Anthropic Messages，模型经统一只读 UDS 透传网关直连控制面，工具/令牌与控制事件经任务邮箱通信。 |
+| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 `--plugin-dir /opt/bot-skills/sets/<hash>/bot` 与 `--setting-sources ''`（`local_config` 为 `user`）原生按需加载只读 Skill 并隔离检出本地配置/hooks/MCP，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具；支持平台模型（仅限 Anthropic Messages，经统一只读 UDS 透传网关转发，不做跨协议转换）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
+| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前通过 `skills/extraRoots/set` 挂入 `/opt/bot-skills/sets/<hash>/bot/skills` 并经 `skills/list` + `skills/config/write` 显式禁用检出内自动发现的 repo/cwd Skill（复核失败关闭），同时核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型（仅限 Responses，启动时以进程级 `-c model_provider="bot_relay"` 锁定走统一只读 UDS 透传网关，遇到 `modelProviderMismatch` 等确定性配置错误按 `waiting_configuration` 处理）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
+| `icode`、`workswarm` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。iCode 通过 `agents/launchpad.yaml` 的 `skills.paths` 原生加载只读 Skill 并恒定关闭 `project.skills_enabled` / `auto_load_cwd_agents_skills`；WorkSwarm 因原生工具全禁而继续经受控 MCP `read_skill` 读取；模型请求经控制面统一只读 UDS 透传网关转发（iCode 支持全部三种协议，WorkSwarm 支持 Chat Completions 与 Anthropic Messages），平台工具走回环 HTTP MCP 或 stdio MCP。 |
 
 - **统一只读 Skill 卷与五后端收敛（`skill-store`、`src/roles/skill-store.ts`）**：
   - 控制面独占 `skill-store` 卷可写挂载（`BOT_SKILL_STORE_DIR=/skill-store`，内置 `skills/` 目录亦支持 `BOT_SKILLS_DIR` 环境变量覆盖），在启动各入口（任务角色、事件分派 Manager、管理/群聊服务助手）前将有效 Skill 集合按内容寻址原子物化为单层目录 `sets/<hash>/bot/skills/<slug>/SKILL.md`（同步生成合法 frontmatter 与 `.claude-plugin/plugin.json`，并在 `umask 0077` 下显式赋予 `0755`/`0644` 权限），不再经配置邮箱传正文或落盘至容器可写 HOME（已移除 `runner/session-resources.mjs`）。
@@ -50,8 +50,8 @@
 
 - **容器内短期 Git/`gh` 只读凭证（支持单仓与多仓按需签发）**：`pi`、`claude_code`、`codex`、`icode` 和 `workswarm` 均配置 `credential.useHttpPath=true`、`core.hooksPath=/dev/null` 与 `core.fsmonitor=false`，由 `runner/git-credential-bot.mjs`（解析仓库路径）与 `runner/gh-wrapper.mjs`（解析 `-R`/`--repo`、`gh api repos/...`、`gh repo`、`GH_REPO` 或当前仓库 remote）向回环凭证助手按 `(purpose, repository)` 申请并缓存短期只读安装令牌。控制面 `ScopedReadTokens` 实时校验当前会话仓库范围与 GitHub 读权限（`git` 用途仅签发 `contents: read + metadata: read`），对 PAT 仓库明确提示改用 `checkout_repository` 而不泄露长期凭据，全程经 `Redactor` 流式脱敏并在回合结束统一吊销。
 - **Claude Code / Codex「项目电脑内自行配置」（`model_source: 'local_config'`）**：
-  - `harness_ref.model_source` 规范值为 `'gateway' | 'local_config'`（旧配置 `'subscription'` 自动归一化为 `'local_config'`）。
-  - 选择 `local_config` 时，控制面与 `runner/harness-entry.mjs` **不注入**任何平台模型配置（无 `ANTHROPIC_*`、`--model`、`CODEX_RELAY_URL`、`OPENAI_*`、`BOT_NATIVE_MODEL_KEY`、`config.toml` 或 `-c model_providers.bot_direct`），同时保持每次运行独立的 `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。
+  - `harness_ref.model_source` 规范值为 `'gateway' | 'local_config'`（旧配置 `'subscription'` 自动归一化为 `'local_config'`），与平台模型网关完全正交。
+  - 选择 `local_config` 时，控制面不签发 `'model:invoke'` 令牌能力、不注册模型网关会话，且控制面与 `runner/harness-entry.mjs` **不注入**任何平台模型配置（无 `ANTHROPIC_*`、`--model`、`CODEX_RELAY_URL`、`OPENAI_*`、`config.toml` 或 `-c model_provider`），同时保持每次运行独立的 `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。
   - 启动 CLI 前由 `runner/cli-config.mjs` 仅将 `/workspace/home` 下的白名单文件（Claude Code：`.claude/settings.json`、`.claude/.credentials.json`；Codex：`.codex/config.toml`、`.codex/auth.json`）以 `0600` 权限复制到当前会话目录（Claude Code 传 `--setting-sources user`），运行结束立即删除副本但保留会话 transcript。未检测到任一配置文件时以 `claude_local_config_missing` / `codex_local_config_missing` 失败关闭，绝不回退到平台模型。
   - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志；写入内容在控制面、manager 与 runner 三处统一限制上限为 32 KiB（超限返回 `400 invalid_cli_config_content`），由 manager 经 Docker exec 环境变量 `BOT_CLI_CONFIG_B64` 传入（不进入命令行 `argv`，runner 读取后立即清除环境变量）。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
@@ -81,25 +81,33 @@
 
 通用容器 ACP 后端 `container_acp` 已删除（#1339）：注册表只保留 `icode` 和 `workswarm` 两个 ACP 后端，各自运行工具卷里同名的产品，不再由 `BOT_ACP_PRODUCT` 选择；角色配置提交 `container_acp` 由已有校验返回 `unknown_role_harness`。旧库在启动时由 `retireContainerAcpRoles`（`src/roles/native-to-pi.ts`，标记 `migration:1339:retire-container-acp`）经 `moveRolesToPi` 一次性把已保存配置、冻结快照和角色实例中的 `container_acp` 和更早的 `acp`（#705）改为 `pi`，有改动时启动日志写一行 `[migration:1339]` 计数。工具卷里已安装的 `acp/container_acp` 不再被读取，也不自动删除。
 
+### 统一只读 UDS 透传模型网关（`src/harness/model-gateway.ts`、`src/harness/model-formats.ts`、`runner/model-relay.mjs`）
+
+所有容器化后端使用平台模型时，统一经控制面透传模型网关访问上游，历史 `direct` 直连轨、`BOT_HARNESS_MODEL_TRANSPORT` 与文件邮箱模型中转（`workspace_agent_model_*`、`workspace_agent_request/reply/progress`、`runner/model-reply.mjs`）已全部移除：
+
+- **只读 UDS 传输与内存态回环桥**：控制面（`src/main.ts`）在独立命名卷 `model-gateway` 上监听 HTTP-over-UDS（`/run/model-gateway/gateway.sock`，权限 `0660`，UID/GID `10001:10001`）；`manager` 将该卷以只读（`:ro`）挂入全部项目电脑与助手电脑（容器无法删除、覆盖或替换套接字）。容器内 `runner/model-relay.mjs` 仅启动一个纯内存的 `127.0.0.1:0` → `/run/model-gateway/gateway.sock` TCP 字节转发桥（`socket.pipe`，零磁盘读写、零 JSON 解析、容器模式路径固定不可覆盖）；本地/进程内测试无 UDS 时由控制面按引用计数自动启停 `127.0.0.1:0` 回环端口。该通道不依赖容器外网，在 `egress=false` / `NetworkMode: none` 下照常工作，且长期 API Key 永不离开控制面。
+- **纯透传、零跨协议转换**：网关校验短期运行令牌（`rrt_…` 或 Pi 短时网关令牌）、`lease_epoch`、实时模型授权与累计预算后，严格核对请求端点协议与所绑模型的有效接口协议（`openai-chat-completions`、`openai-responses`、`anthropic-messages`），不匹配直接返回 `400 model_protocol_mismatch`；仅替换上游目标 URL（保留查询参数）、真实上游鉴权头与 JSON 顶层 `model` 字段（附加输出 token 上限封顶、流式 Chat Completions 补齐 `stream_options.include_usage: true`、WorkSwarm 可信 `allowedTools` 工具过滤，以及边界安全的流式密钥脱敏）。上游响应字节流原样透传回下游，同时由旁路解析器（`PassthroughTap`）无侵入提取 `usage`、`text_delta` 与轨迹摘要写入统一 `model_requests` 账本；下游断开、任务取消或令牌撤销时立即中断上游请求。
+- **协议兼容矩阵前置强校验**：角色保存、运行预览（`resolveRole`）与启动前统一核对后端声明的支持协议（`pi` / `icode` 支持全部三种协议，`codex` 仅 `openai-responses`，`claude_code` 仅 `anthropic-messages`，`workswarm` 支持 `openai-chat-completions` 与 `anthropic-messages`），不兼容立即返回 `harness_model_api_unsupported` 或进入 `waiting_configuration`。
+
 ### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
 
-控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱通信，每次调用都由 manager 在容器里执行一次 runner（`docker exec`）。
+控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱处理工具调用、短期只读令牌、回合边界与 harness 事件，每次轮询由 manager 在容器里执行一次 runner（`docker exec`）；**模型请求不再走文件邮箱**，而是由容器内 Pi SDK 直接经内存态回环桥走控制面统一 UDS 透传网关（原生适配三种接口协议，并在网关钩子内完成请求体/图片大小上限拦截、实时授权、预算/最大请求数收尾、流式 `text_delta` 推送与轨迹入库）。
 
 - **启动**：配置按 30000 字节分块写入，最后一块同时带 `start` 和角色固定的 Pi 版本。runner 先核对版本，不符时什么也不写、不启动，控制面报 `harness_version_mismatch`；版本相符时清理上一进程的邮箱、写入配置并启动，答复里带上实际运行时。工作卷写满时，runner 把带 `start` 的最后一块当作启动拒绝，答复 `disk_full`（`runner/disk.mjs`），什么也不清理、不写、不启动，任务进入等待环境，与单独的 `workspace_agent_start` 一致；只存配置的其他分块照常写入。旧 runner 不认识 `start`，答复里没有运行时，控制面按原流程再查运行时、再启动。续接（`workspace_agent_continue`）和重新附着的会话没有配置可带，仍先单独查运行时。
-- **长轮询**：控制面每次轮询带 `wait_ms`（3 s）、事件 offset，以及已在处理的请求 id：后台运行中或已答复的工具和令牌请求、已答复的模型请求和回合边界。runner 每 50 ms 检查一次，出现控制面没见过的东西就立即返回，包括会话离开运行状态、新的回合边界、模型请求（`request.json`）、工具或令牌请求，以及超过一页的事件。只有新事件时，最早在等待开始 200 ms 后返回，和流式文字 200 ms 一批对齐；什么都没有就等满 3 s。已在处理的工具和令牌请求只返回 id。`model_requests` 属于其他后端的模型中转，不算 Pi 会话的变化。
-- **轮询节奏**：答复带 `long_poll: true` 时控制面立即发下一次轮询。旧 runner 或测试替身会立即答复、不带这个标记，控制面仍隔 500 ms 再轮询。等待期间会话被取消或后台工作失败，控制面立即结束等待并丢弃这次答复。每次轮询前控制面都检查任务状态（用户停止、权限变化），间隔不超过约 3 s，远低于 manager 的 90 s 执行超时。
+- **长轮询**：控制面每次轮询带 `wait_ms`（3 s）、事件 offset，以及已在处理的请求 id：后台运行中或已答复的工具和令牌请求及回合边界。runner 每 50 ms 检查一次，出现控制面没见过的东西就立即返回，包括会话离开运行状态、新的回合边界、工具或令牌请求，以及超过一页的事件。只有新事件时，最早在等待开始 200 ms 后返回；什么都没有就等满 3 s。已在处理的工具和令牌请求只返回 id。
+- **轮询节奏**：答复带 `long_poll: true` 时控制面立即发下一次轮询。旧 runner 或测试替身会立即答复、不带这个标记，控制面仍隔 500 ms 再轮询。等待期间会话被取消、网关发生致命配置/鉴权故障或后台工作失败，控制面立即结束等待并丢弃这次答复。每次轮询前控制面都检查任务状态（用户停止、权限变化），间隔不超过约 3 s，远低于 manager 的 90 s 执行超时。
 
 ### 服务助手回合（`src/harness/service-session.ts`）
 
 管理助手和群聊助手的每一轮都由 `serviceHarnessTurn` 在会话归属的助手电脑上运行，会话绑定保存在 `service_harness_sessions`；控制面里没有服务助手自己的工具循环。独立任务（`start_own_task`，`src/service-roles/own-tasks.ts`）同样经宿主的 `run` 在同一后端上另开会话。声明了 `steered_turns` 的后端（生产中只有 Pi）按对话语义运行一轮（调用方传入 `ServiceTurnControl`，其他后端忽略它，改为得到 `finish` 工具）：
 
-- **回答文字**：Pi 用普通文字作答，不提供 `finish` 工具。经网关时，控制面模型请求的逐 token 回调转出文字；直连时，runner 把流式文字（约 200 ms 一批的 `text_delta`）和 Pi 自身的重试（`model_retry`）写入事件流，控制面转给会话，`text_delta` 不进会话日志。
+- **回答文字**：Pi 用普通文字作答，不提供 `finish` 工具。模型流式响应在控制面统一透传网关的旁路解析器中逐段提取 `text_delta` 并实时转给 `ServiceTurnControl.text`（子 Agent 请求携带 `x-bot-subagent: 1` 头跳过主回答流式输出）；Pi SDK 自身的自动重试（`model_retry`）仍写入事件流供控制面同步。
 - **回合中的新消息**：会话启动前取到的消息随配置（`steer`）在提示词之后作为单独的用户消息发出；此后在每批工具调用结束的回合边界（runner 的 `finishTurn` → `boundary('turn')`）取新消息并 `session.steer()`。最终回答之后不再并入。模型输出文字时暂停并入，带工具调用的响应结束后恢复。
 - **编辑后重启**：回合边界、每次经控制面的工具调用和会话结束时比较来源版本。版本变了就结束当前会话：旧版本下经控制面的工具调用不执行，答复不采用（Pi 自带的 `read`/`edit`/`write`/`bash` 直接在助手电脑上运行，不经这道检查）；清空会话绑定，用重建的上下文开新会话，已并入的消息重新提供。跨轮续接的会话在来源版本变化后也不再续接。
 - **保持安静**：允许安静的轮次里，`stay_silent` 是会话的结束工具；被拒绝（例如 `reply_required`）时作为观察返回模型，回合继续。
 - **工具被拒**：经控制面的工具返回 400/403/404/409/413/415 时，错误作为观察交回模型，回合继续；被拒的调用不执行。401 和内部失败结束本轮。
 - **执行进度**（#1296）：`ServiceTurnControl.progress` 接收会话自己的进度。`serviceHarnessTurn` 把 Pi 的 harness 事件（`src/roles/harness.ts` 经 `onHarnessEvent` 转出的原生工具 `tool` 开始/结束、runner 仅为服务回合写的 `model_start` 与 `compaction`，以及 `image_recovery`）交给 `serviceProgressReader`（`src/harness/service-progress.ts`），再加上编辑后重启的提示。进度只带有界字段：命令首行或路径（≤160 字符）、耗时（runner 的 `duration_ms`，旧 runner 取控制面看到开始的时间）、bash 的退出码和输出末尾（≤5 行、≤300 字符）；这些文本经回合与部署的已知值（含编码形式）、令牌格式规则（`publicText`）和按名称识别的命令行凭据规则清洗。调用方用 `ProgressBudget` 限频：每轮先允许 30 步，之后每 2 秒 1 步，每轮最多 300 步；工具开始被放行时它的结束一定写入，被跳过的调用计数后作为一条提示写出。进度读取或写入出错不影响回合。
-- **邮箱清理**：新会话写入配置时，runner 清除上一进程没答复的工具、令牌和模型请求，新会话不会把它们当成自己的请求。
+- **邮箱清理**：新会话写入配置时，runner 清除上一进程没答复的工具与令牌请求，新会话不会把它们当成自己的请求。
 
 ### 第三方 Agent 工具卷统一管理（`runner/agent-products.mjs`、`src/harness/agent-tools.ts`）
 
@@ -120,9 +128,9 @@ HTTP MCP 按运行监听 `127.0.0.1` 动态端口，使用运行令牌作为 Bea
 
 #### WorkSwarm
 
-`workswarm` 复用 ACP 会话和模型邮箱，启动独立的 AgentServer 与 Gateway 并探测两个回环 WebSocket。每次运行提供独立 HOME、数据目录和三个回环端口。配套服务退出、取消、超时和租约失效由 ACP 运行回收逻辑处理。runner 核对 ACP 版本和产品版本。WorkSwarm 不支持 `session/load`，恢复时标记 `rebuilt_from_task_records`。
+`workswarm` 复用 ACP 会话与控制面统一只读 UDS 透传模型网关，启动独立的 AgentServer 与 Gateway 并探测两个回环 WebSocket。每次运行提供独立 HOME、数据目录和三个回环端口。配套服务退出、取消、超时和租约失效由 ACP 运行回收逻辑处理。runner 核对 ACP 版本和产品版本。WorkSwarm 不支持 `session/load`，恢复时标记 `rebuilt_from_task_records`。
 
-WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm 自己的 `mcp.servers` 注册受运行令牌保护的回环 MCP。WorkSwarm 在独立目录启动，禁用钩子，通过平台工具读写任务检出和执行命令。runner 准备工作目录时跳过上游配置模板合并，核对默认拒绝和平台 MCP 工具许可表后才启动配套服务。模型中转仅提供许可的任务工具，任务邮箱再次按角色权限检查。ACP 会话声明无人可交互。Gateway 自带调度器仍启动，平台不创建定时任务或配置 WorkSwarm 自带消息渠道。
+WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm 自己的 `mcp.servers` 注册受运行令牌保护的回环 MCP。WorkSwarm 在独立目录启动，禁用钩子，通过平台工具读写任务检出和执行命令。runner 准备工作目录时跳过上游配置模板合并，核对默认拒绝和平台 MCP 工具许可表后才启动配套服务。控制面透传模型网关在请求入口按可信 `allowedTools` 仅放行许可的任务工具，任务邮箱再次按角色权限检查。ACP 会话声明无人可交互。Gateway 自带调度器仍启动，平台不创建定时任务或配置 WorkSwarm 自带消息渠道。
 
 #### iCode
 
