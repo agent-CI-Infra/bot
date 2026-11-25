@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, privateChat, boundGroup, scriptedModel, repositoryAssistant, until, bindFixture, envelope, inGroup, post, finished } from '../../../fixtures/channel-fixture.mjs';
+import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
+import { defaultLimits } from '../../../../dist/schedules/types.js';
 
 // Prompt-driven timers on a Feishu chat (#330). Model and Feishu traffic go to local protocol fixtures.
 const timer = (client, chat, input = {}) => client('/api/channels/chats/' + chat.id + '/schedules', 'POST',
@@ -153,6 +155,54 @@ test('any member of an active bound group manages its own timers through the ass
   // The console shows it to the binding's managers like any group timer; another chat's timer is out of reach.
   assert.equal((await f.admin('/api/channels/chats/' + group.id + '/schedules')).value.schedules[0].name, '群巡检');
   assert.throws(() => f.service.schedules.conversation(group.id, { binding: 'another-binding' }, { action: 'list' }), { code: 'channel_schedule_forbidden' });
+});
+
+test('a console management turn sets up a daily push in a bound group the person manages, never in one they do not (#1362)', async t => {
+  const f = await channelFixture(t); await repositoryAssistant(f);
+  const allowed = await boundGroup(f, ['101']), other = await boundGroup(f, ['102'], 'oc_other');
+  f.h.store.run("UPDATE channel_chats SET display_name='仓库日报群' WHERE id=?", allowed.id);
+  // A project administrator of 101 manages the group bound over 101 (config.write over its whole scope), not the one over 102.
+  const member = await f.member('group-timer-admin', { repository_ids: ['101'] });
+  const ask = { name: '仓库日报', prompt: '汇总本群仓库昨天的 PR 和 Issue，在群里发日报。', cron: '0 9 * * *' };
+  // The production turn first tried a project plan: its refusal now names the missing identity and how to get one.
+  const plan = { name: '仓库日报', kind: 'project', actor_id: 'not-a-service', owner_id: 'self', maintainer_id: 'self', workflow: 'manager.check', parameters: { instruction: '汇总昨天的 PR 和 Issue' },
+    timezone: 'Asia/Shanghai', cron: '0 9 * * *', start_at: Date.now(), enabled: true, misfire: 'skip', grace_ms: 60000, limits: { ...defaultLimits } };
+  scriptedModel(f, [['management_query', { operation: 'preview_schedule', target: { project_id: '101' }, arguments: { plan } }],
+    ['group_schedules', { action: 'groups' }],
+    done => ['group_schedules', { action: 'create', group_id: done[1].groups[0].group_id, ...ask }],
+    ['group_schedules', { action: 'create', group_id: other.id, ...ask }],
+    done => `已在「${done[1].groups[0].name}」创建「${done[2].schedule.name}」`]);
+  const conversation = (await member.client('/api/management/conversations', 'POST', { scope: 'platform' })).value.conversation.id;
+  const sent = (await member.client(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'web-1362', content: '每天北京时间 9 点在两个群里推送仓库日报' })).value;
+  const message = await until(async () => (await member.client(`/api/management/conversations/${conversation}`)).value.messages.find(m => m.id === sent.id), m => m && !['pending', 'running'].includes(m.state));
+  assert.equal(message.state, 'completed');
+  const results = f.h.store.all("SELECT data FROM management_events WHERE message_id=? AND type IN ('tool_result','tool_error') ORDER BY sequence", sent.id).map(e => JSON.parse(e.data));
+  assert.ok(offeredTools(f).includes('group_schedules') && !offeredTools(f).includes('conversation_schedules'), 'a console conversation has no private chat timers');
+  const system = f.requests.at(-1).messages[0].content;
+  assert.match(system, /A project scheduled task never posts to Feishu/); assert.match(system, /manage it with group_schedules/);
+  // What the model was given back: the refusal with its detail, then only the group it manages, by name.
+  const observations = f.requests.at(-1).messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
+  assert.equal(observations[0].error, 'project_service_identity_missing'); assert.match(observations[0].detail.message, /actor_id "auto"/);
+  assert.deepEqual(observations[1].groups, [{ group_id: allowed.id, name: '仓库日报群', chat_id: 'oc_group' }]);
+  assert.equal(observations[3].error, 'channel_schedule_forbidden');
+  assert.equal(results.at(-1).error, 'channel_schedule_forbidden');
+  // One timer, on the managed group: a group timer authored by the person, at the default time zone, as the console shows it.
+  const saved = f.h.store.all("SELECT * FROM channel_schedules WHERE state<>'deleted'");
+  assert.deepEqual(saved.map(s => ({ chat: s.chat_id, kind: s.kind, by: s.created_by, timezone: s.timezone, cron: s.cron })),
+    [{ chat: allowed.id, kind: 'group', by: member.id, timezone: 'Asia/Shanghai', cron: '0 9 * * *' }]);
+  assert.equal((await member.client('/api/channels/chats/' + allowed.id + '/schedules')).value.schedules[0].prompt, ask.prompt);
+  // It runs as the group's own assistant turn and posts its answer in the group, like a timer set up in the group.
+  scriptedModel(f, ['昨日日报：新开 2 个 Issue，合入 1 个 PR。']);
+  assert.equal((await member.client('/api/channels/schedules/' + saved[0].id + '/run', 'POST', {})).status, 201);
+  const run = await settled(f, saved[0].id); assert.equal(run.state, 'completed', run.error);
+  assert.equal(f.h.store.get('SELECT service_role_id FROM channel_service_turns WHERE id=?', run.turn_id).service_role_id, 'group-assistant');
+  await until(() => cards(f, allowed).find(c => c.includes('定时任务「仓库日报」') && c.includes('昨日日报')));
+  // Updates go through the same checks: a timer of the other group is out of reach even by id.
+  const foreign = f.service.schedules.create(resolvePrincipalActor(f.h.store, f.principal, null), other.id, { ...ask, timezone: 'UTC' }).schedule;
+  const actor = resolvePrincipalActor(f.h.store, member.id, null);
+  assert.throws(() => f.service.schedules.managed(actor, { action: 'pause', id: foreign.id }), { code: 'channel_schedule_forbidden' });
+  const paused = f.service.schedules.managed(actor, { action: 'update', id: saved[0].id, cron: '30 8 * * *' }).schedule;
+  assert.deepEqual([paused.cron, paused.prompt, paused.revision], ['30 8 * * *', ask.prompt, 2]);
 });
 
 test('a group timer holds the chat while its grantors are re-verified; a group message arriving meanwhile joins the timer\'s turn (#857, #851)', async t => {

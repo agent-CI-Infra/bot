@@ -257,6 +257,38 @@ test('a project administrator sets up a project Manager check without a super ad
   const paused = await command(f, 'schedule.pause', { id: schedule.id, revision: schedule.revision }, owner.client);
   assert.equal(paused.value.state, 'succeeded', JSON.stringify(paused.value));
 });
+test('preview_schedule resolves actor_id "auto" as registration does and creates nothing; a plan without a service identity says so (#1362)', async t => {
+  const f = await fixture(t), owner = await f.member('project-owner-1362', { repository_ids: ['101'] }), store = f.h.store;
+  const plan = f.plan({ name: '每日检查', kind: 'project', actor_id: 'auto', owner_id: 'self', maintainer_id: 'self' });
+  const facts = () => ({ services: store.get("SELECT count(*) n FROM principals WHERE kind='service' AND project_id='101'").n,
+    grants: store.get("SELECT count(*) n FROM scoped_grants WHERE role='service'").n, audit: store.get("SELECT count(*) n FROM audit WHERE action='service_principal.created'").n });
+  const preview = (p, client = owner.client) => client('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan: p } });
+  const before = facts(); assert.equal(before.services, 0);
+  // Not a service identity of this project: a missing identity, with how to get one, never "service paused".
+  const missing = await preview({ ...plan, actor_id: 'not-a-service' });
+  assert.deepEqual([missing.status, missing.value.error, missing.value.field], [409, 'project_service_identity_missing', 'actor_id']);
+  assert.match(missing.value.detail.message, /actor_id "auto"/);
+  const refused = (await command(f, 'schedule.register', { plan: { ...plan, actor_id: 'not-a-service' } }, owner.client)).value;
+  assert.equal(refused.result?.error ?? refused.error, 'project_service_identity_missing', JSON.stringify(refused));
+  // "auto" without an identity: checked as registration would create it, and nothing is left behind.
+  const rehearsed = await preview(plan);
+  assert.equal(rehearsed.status, 201, JSON.stringify(rehearsed.value));
+  assert.deepEqual(rehearsed.value.service_identity, { id: null, created_on_register: true });
+  assert.deepEqual([rehearsed.value.plan.actor_id, rehearsed.value.plan.owner_id, rehearsed.value.plan.maintainer_id], ['auto', owner.id, owner.id]);
+  assert.ok(rehearsed.value.future.length > 0); assert.deepEqual(facts(), before);
+  // The same rules as registration: someone who may not set up project plans cannot preview one either.
+  const outsider = await f.member('outsider-1362', { repository_ids: ['102'] });
+  assert.equal((await preview(plan, outsider.client)).value.error, 'capability_forbidden'); assert.deepEqual(facts(), before);
+  // Registration creates it; a later preview of "auto" names it.
+  const registered = await command(f, 'schedule.register', { plan }, owner.client);
+  assert.equal(registered.value.state, 'succeeded', JSON.stringify(registered.value));
+  const service = registered.value.result.schedule.actor_id; assert.equal(facts().services, 1);
+  const named = (await preview(plan)).value;
+  assert.deepEqual([named.service_identity, named.plan.actor_id], [{ id: service, created_on_register: false }, service]);
+  // A paused identity is still reported as paused.
+  store.run("UPDATE principals SET maintenance='' WHERE id=?", service);
+  assert.equal((await preview({ ...plan, actor_id: service })).value.error, 'service_paused');
+});
 test('an authorized administrator hands over a service plan after owner departure without changing its identity or capabilities', async t => {
   const f = await fixture(t), admin = await f.member('handover-admin', { role: 'super_admin' }), first = await f.member('first-maintainer', { repository_ids: ['101'] }), replacement = await f.member('replacement-maintainer', { repository_ids: ['101'] });
   const outsider = await f.member('other-project-admin', { repository_ids: ['102'] });

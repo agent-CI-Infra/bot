@@ -14,6 +14,11 @@ import { defaultLimits, type Plan, type SubscriptionSpec, type TriggerHandler, t
 import { budgetScopes, notificationWorkflow, reserve, terminalRunStates } from './budget.js';
 
 export const reasonOf = (e: unknown): string => e instanceof HttpError ? e.code : 'schedule_service_failed';
+const missingServiceIdentity = 'actor_id is not a service identity of this project, and a project plan runs as one. For a new project plan pass actor_id "auto": '
+  + 'schedule.register then uses the project\'s service identity or, when it has none, creates one holding the project capabilities you hold; '
+  + 'preview_schedule previews "auto" the same way without creating anything. list_schedule_destinations lists the existing ones as services.';
+/** A preview run inside a savepoint that is rolled back: the identity "auto" would create is checked, then undone (#1362). */
+class Rehearsal extends Error { constructor(readonly plan: Plan) { super('schedule_preview_rehearsal'); } }
 export class ScheduleService {
   readonly handlers = new Map<string, TriggerHandler>();
   constructor(readonly store: Store, readonly management: ManagementService, readonly channels: ChannelService, readonly clock: () => number = Date.now) {
@@ -75,7 +80,11 @@ export class ScheduleService {
     // Project plans run as the project's service identity; its administrators (config.write) set them up (#851).
     authorize(actor, 'config.write', { project_id: project });
     const principal = this.store.get("SELECT * FROM principals WHERE id=? AND kind='service' AND project_id=?", plan.actor_id, project);
-    if (!principal || !principal.maintenance) return fail(403, 'service_paused');
+    // #1362: an actor_id that is no service identity of this project is a missing identity, not a paused one. Reported as
+    // service_paused, the assistant told people the scheduling service was paused. 409: the console's schedule panel reads a
+    // 403 as its own access being lost.
+    if (!principal) return fail(409, 'project_service_identity_missing', 'actor_id', { message: missingServiceIdentity });
+    if (!principal.maintenance) return fail(403, 'service_paused');
     // An existing owner is an immutable audit reference, not the current maintenance authority.
     const people: [string, string][] = existing ? [['maintainer', plan.maintainer_id]] : [['owner', plan.owner_id], ['maintainer', plan.maintainer_id]];
     for (const [role, id] of people) {
@@ -194,6 +203,27 @@ export class ScheduleService {
     if (!register) { if (!this.chatDestinations(actor, project).some(d => d.id === id)) fail(403, 'schedule_destination_unavailable'); return id; }
     return String(this.channels.registerDestination(actor, id.slice(5), { project_id: project }).id);
   }
+  /** The project's first maintained service identity, which a project plan's actor_id "auto" stands for. */
+  private projectService(project: string): string | undefined {
+    return this.store.get("SELECT id FROM principals WHERE kind='service' AND active=1 AND project_id=? AND maintenance<>'' ORDER BY rowid LIMIT 1", project)?.id;
+  }
+  private static auto(value: unknown): boolean {
+    return !!value && typeof value === 'object' && (value as Json).kind === 'project' && (value as Json).actor_id === 'auto';
+  }
+  /** A new plan's shorthand identities: 'self' is the actor, and a project plan's actor_id "auto" the project's service identity,
+   * created as in the console's schedule panel when the project has none (#851). Registration and preview both use this. */
+  private resolveIdentities(actor: ActorContext, project: string, value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const next = { ...value } as Json;
+    if (next.owner_id === 'self') next.owner_id = actor.principal_id;
+    if (next.maintainer_id === 'self') next.maintainer_id = actor.principal_id;
+    if (next.kind === 'personal' && next.actor_id === 'self') next.actor_id = actor.principal_id;
+    if (ScheduleService.auto(next)) {
+      authorize(actor, 'config.write', { project_id: project });
+      next.actor_id = this.projectService(project) ?? createProjectServicePrincipal(this.store, actor, project, '项目定时检查');
+    }
+    return next;
+  }
   validatePlan(actor: ActorContext, project: string, value: unknown, existing?: Row): { plan: Plan; grant: Row; execution: ActorContext } {
     validate(planSchema, value); const plan = value as Plan;
     if (!this.handlers.has(plan.workflow)) fail(400, 'schedule_workflow_unsupported');
@@ -271,19 +301,7 @@ export class ScheduleService {
       if (operation === 'schedule.register' || operation === 'schedule.update') {
         const old = operation === 'schedule.update' ? this.schedule(project, args.id) : undefined;
         if (old) { this.owned(actor, old); if (old.state === 'deleted' || old.revision !== args.revision) fail(409, 'schedule_revision_conflict'); }
-        let inputPlan = args.plan;
-        if (!old && inputPlan && typeof inputPlan === 'object' && !Array.isArray(inputPlan)) {
-          const next = { ...inputPlan };
-          if (next.owner_id === 'self') next.owner_id = actor.principal_id;
-          if (next.maintainer_id === 'self') next.maintainer_id = actor.principal_id;
-          if (next.kind === 'personal' && next.actor_id === 'self') next.actor_id = actor.principal_id;
-          if (next.kind === 'project' && next.actor_id === 'auto') {
-            authorize(actor, 'config.write', { project_id: project });
-            next.actor_id = this.store.get("SELECT id FROM principals WHERE kind='service' AND active=1 AND project_id=? AND maintenance<>'' ORDER BY rowid LIMIT 1", project)?.id
-              ?? createProjectServicePrincipal(this.store, actor, project, '项目定时检查');
-          }
-          inputPlan = next;
-        }
+        const inputPlan = old ? args.plan : this.resolveIdentities(actor, project, args.plan);
         const { plan, grant, execution } = this.validatePlan(actor, project, inputPlan, old), id = old?.id ?? randomId(), now = this.clock();
         if (old) this.store.run(`UPDATE schedules SET spec=?,maintainer_id=?,grant_snapshot=?,approver_id=?,authorization_revision=?,revision=revision+1,
           state=?,reason=NULL,next_at=?,updated_at=? WHERE id=?`, JSON.stringify(plan), plan.maintainer_id, JSON.stringify(grant), grant.approver_id, execution.authorization_revision,
@@ -369,8 +387,17 @@ export class ScheduleService {
     if (operation === 'preview_schedule') {
       const existing = args.schedule_id ? this.schedule(project, args.schedule_id) : undefined;
       if (existing) this.owned(actor, existing);
-      const { plan } = this.validatePlan(actor, project, args.plan, existing);
-      return { revision, plan, timezone: plan.timezone, future: previewTimes(plan, this.clock()), supported: this.handlers.has(plan.workflow) };
+      const check = () => this.validatePlan(actor, project, existing ? args.plan : this.resolveIdentities(actor, project, args.plan), existing).plan;
+      // #1362: "auto" previews as registration resolves it. When registration would create the project's service identity,
+      // the preview creates and checks it in a savepoint that is then rolled back: the same rules, and nothing is left behind.
+      const auto = !existing && ScheduleService.auto(args.plan), creates = auto && !this.projectService(project);
+      const rehearse = (): Plan => {
+        try { return this.store.transaction(() => { throw new Rehearsal(check()); }); }
+        catch (error) { if (error instanceof Rehearsal) return { ...error.plan, actor_id: 'auto' }; throw error; }
+      };
+      const plan = creates ? rehearse() : check();
+      return { revision, plan, timezone: plan.timezone, future: previewTimes(plan, this.clock()), supported: this.handlers.has(plan.workflow),
+        ...(auto ? { service_identity: creates ? { id: null, created_on_register: true } : { id: plan.actor_id, created_on_register: false } } : {}) };
     }
     if (operation === 'preview_subscription') {
       const { spec, destination } = this.validateSubscription(actor, project, args.subscription, false), now = this.clock();
