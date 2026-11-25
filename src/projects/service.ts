@@ -86,7 +86,13 @@ export class ManagerClient implements Manager {
     } catch (error) { this.report(error, 'request', timedOut); return fail(503, 'manager_unavailable'); }
     let value: Json; try { value = JSON.parse(text); } catch (error) { this.report(error, 'response_json', false); return fail(503, 'manager_unavailable'); }
     this.failures.clear('request');
-    if (status < 200 || status >= 300) fail(status, typeof value.error === 'string' ? value.error : 'manager_unavailable');
+    if (status < 200 || status >= 300) {
+      const extra: Json = {};
+      if (Number.isSafeInteger(value.limit)) extra.limit = value.limit as number;
+      if (Number.isSafeInteger(value.length)) extra.length = value.length as number;
+      if (typeof value.detail === 'string') extra.detail = value.detail;
+      fail(status, typeof value.error === 'string' ? value.error : 'manager_unavailable', undefined, Object.keys(extra).length ? extra : undefined);
+    }
     return value.result;
   }
 }

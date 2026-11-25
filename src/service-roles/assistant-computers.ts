@@ -690,7 +690,8 @@ export class AssistantComputer {
       }
       // The manager refused the same request this side measured; the same named answer, with the size this side computed.
       if (error instanceof HttpError && error.code === 'runner_request_too_large') {
-        throw new Refusal(requestTooLarge({ ...request, operation_id: operation }) ?? { error: 'runner_request_too_large' });
+        const extra = error.detail && typeof error.detail === 'object' && !Array.isArray(error.detail) ? error.detail as Record<string, any> : null;
+        throw new Refusal(requestTooLarge({ ...request, operation_id: operation }) ?? { error: 'runner_request_too_large', ...(extra || {}) });
       }
       // The computer went away under the turn (idle sweep after a manager restart, a removal): it is taken again once.
       if (retry && error instanceof HttpError && ['assistant_computer_released', 'assistant_computer_not_acquired'].includes(error.code)) {

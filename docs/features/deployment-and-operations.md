@@ -66,6 +66,7 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_SKILL_STORE_DIR` | `/skill-store` | 控制面内容寻址只读 Skill 卷目录（标准 Compose 由控制面可写挂载、`manager` 只读按项目/服务子路径挂入容器 `/opt/bot-skills`） |
 | `BOT_SKILLS_DIR` | 镜像内置 `skills/` | 可选覆盖控制面读取内置 Skill 源目录的路径（默认使用随控制面镜像打包的 `skills/`） |
 | `BOT_MODEL_GATEWAY_SOCKET` | `/run/model-gateway/gateway.sock`（挂载 `/run/model-gateway` 时自动启用） | 控制面统一透传模型网关的 Unix Domain Socket 路径。未显式设置且 `/run/model-gateway` 目录存在时自动监听 `/run/model-gateway/gateway.sock`；若目录不存在且未设置（或显式置空），控制面启动时打印告警并仅保留本地回环（非容器开发/测试场景）。标准 Compose 挂载 `model-gateway` 卷，`manager` 经 `BOT_MODEL_GATEWAY_DIR=/run/model-gateway` 将该卷只读挂入所有项目电脑与助手电脑；历史 `BOT_HARNESS_MODEL_TRANSPORT` 开关已移除 |
+| `BOT_RUNNER_SOCKETS_DIR` | `/run/bot-runner`（`manager` 标准 Compose 配置） | `manager` 挂载 `runner-sockets` 运行时卷的目录，按容器生成独立子路径的私有 Unix Domain Socket 供常驻 `runner/daemon.mjs` 通信；未配置时 `manager` 回退 `docker exec` 通道 |
 | `BOT_AGENT_TOOLS_AUTO_INSTALL` | `1` | 设为 `0` 关闭控制面启动时后台自动安装工具卷默认版本（仅由 `src/main.ts` 触发；设为 `0` 后仍可在控制台按 Agent 手动安装） |
 | `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
@@ -116,6 +117,7 @@ docker compose up -d
 | `project-tools` | 按项目隔离的只读二进制工具快照卷（`/project-tools/<repository_id>/rev-<N>`，默认单项目配额 20 GiB、保留当前版本与最近 3 个回滚旧版，须纳入一致备份） |
 | `skill-store` | 控制面按内容寻址物化的只读 Skill 卷（`projects/<repository_id>/sets/<hash>` 与 `service/sets/<hash>`，由每日保留与手动回收自动清理未引用旧集合，可随运行按需重建） |
 | `model-gateway` | 控制面统一透传模型网关的 Unix Socket 运行时卷（`bot` 可写监听 `/run/model-gateway/gateway.sock`，`manager` 与所有项目/助手电脑只读挂载；纯运行时套接字卷，无需备份） |
+| `runner-sockets` | `manager` 与容器内常驻 `runner/daemon.mjs` 通信的 Unix Socket 运行时卷（仅 `manager` 挂载并按每容器子路径挂入项目/助手电脑 `/run/bot-runner`，`bot`/`webhook`/`tunnel` 不挂载；纯运行时套接字卷，无需备份） |
 | `tunnel-keys` | Cloudflare Tunnel token 文件 |
 
 ### 备份与恢复要点

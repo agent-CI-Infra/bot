@@ -7,8 +7,9 @@ import { legacyExecRequestLimit, requestTooLarge, runnerRequestLimit } from '../
 import { RunnerClient } from './runner-client.mjs';
 
 const defaultMaxResponseBytes = 4 * 1024 * 1024;
-// Runner transport bound (8 MiB over HTTP/1.1 + WebSocket to resident `runner/daemon.mjs`); legacy `docker exec`
-// fallback retains the Linux MAX_ARG_STRLEN 95 KiB cap (`legacyExecRequestLimit`). Both live in runner/command-policy.mjs.
+// Runner transport bound (8 MiB over HTTP/1.1 + WebSocket to resident `runner/daemon.mjs` or `docker exec --stdin`
+// fallback); small `docker exec` payloads up to `legacyExecRequestLimit` (95 KiB) stay on base64url argv for legacy
+// container compatibility. Both bounds live in runner/command-policy.mjs.
 export { runnerRequestLimit };
 
 export class ManagerError extends Error {
@@ -170,6 +171,81 @@ export class Docker {
       net_rx_bytes: sum(networks, 'rx_bytes'), net_tx_bytes: sum(networks, 'tx_bytes'),
       block_read_bytes: io.filter(r => /read/i.test(r.op)).reduce((t, r) => t + r.value, 0), block_write_bytes: io.filter(r => /write/i.test(r.op)).reduce((t, r) => t + r.value, 0) };
   }
+  execStartWithStdin(execId, stdinBuffer, timeout = 90000, maxBytes = defaultMaxResponseBytes) {
+    const limit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : defaultMaxResponseBytes;
+    return new Promise((resolve, reject) => {
+      const bytes = Buffer.from(JSON.stringify({ Detach: false, Tty: false }));
+      const req = http.request({
+        socketPath: this.socketPath,
+        path: `/v1.47/exec/${execId}/start`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': bytes.length,
+          Connection: 'Upgrade',
+          Upgrade: 'tcp',
+        },
+      });
+      let settled = false;
+      let timer = null;
+      let upgradedSocket = null;
+      const finish = (err, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (err) reject(err);
+        else resolve(value);
+      };
+      if (timeout) {
+        timer = setTimeout(() => {
+          const err = new Error('docker_timeout');
+          upgradedSocket?.destroy(err);
+          req.destroy(err);
+          finish(err);
+        }, timeout);
+      }
+      req.on('upgrade', (_res, socket, head) => {
+        upgradedSocket = socket;
+        const chunks = [];
+        let size = 0;
+        const append = buf => {
+          if (!buf?.length || settled) return;
+          size += buf.length;
+          if (size > limit) {
+            const err = new Error('docker_response_too_large');
+            socket.destroy(err);
+            finish(err);
+            return;
+          }
+          chunks.push(buf);
+        };
+        socket.on('data', append);
+        socket.on('end', () => finish(null, Buffer.concat(chunks)));
+        socket.on('close', () => finish(null, Buffer.concat(chunks)));
+        socket.on('error', err => finish(err));
+        if (head?.length) append(head);
+        if (!settled) {
+          // Stream the JSON payload to the container's stdin and half-close so `runner.mjs --stdin` sees EOF.
+          socket.end(stdinBuffer);
+        }
+      });
+      req.on('response', res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          if (res.statusCode === 404) { finish(null, null); return; }
+          let reason = '';
+          try { reason = String(JSON.parse(Buffer.concat(chunks).toString()).message || ''); } catch {}
+          finish(Object.assign(new ManagerError('docker_operation_failed', 503), {
+            detail: `POST /exec/${execId}/start → HTTP ${res.statusCode}${reason ? ': ' + reason.slice(0, 500) : ''}`,
+          }));
+        });
+        res.on('error', err => finish(err));
+      });
+      req.on('error', err => finish(err));
+      req.end(bytes);
+    });
+  }
   async runner(container, input, timeout = 90000, extraEnv = []) {
     const tooLarge = requestTooLarge(input);
     if (tooLarge) throw Object.assign(new ManagerError(tooLarge.error, 413), tooLarge);
@@ -178,14 +254,27 @@ export class Docker {
     return this.execRunner(container, input, timeout, extraEnv);
   }
   async execRunner(container, input, timeout = 90000, extraEnv = []) {
-    const tooLarge = requestTooLarge(input, legacyExecRequestLimit);
+    const tooLarge = requestTooLarge(input);
     if (tooLarge) throw Object.assign(new ManagerError(tooLarge.error, 413), tooLarge);
-    const exec = await this.request('POST', `/containers/${encodeURIComponent(container)}/exec`, { AttachStdout: true, AttachStderr: true,
-      User: '10001:10001', WorkingDir: '/workspace', Env: [`BOT_OPERATION_ID=${input.operation_id}`, ...(Array.isArray(extraEnv) ? extraEnv : [])],
-      Cmd: ['node', '/opt/runner/runner.mjs', Buffer.from(JSON.stringify(input)).toString('base64url')] });
+    const json = JSON.stringify(input);
+    const useStdin = Buffer.byteLength(json, 'utf8') > legacyExecRequestLimit;
+    const exec = await this.request('POST', `/containers/${encodeURIComponent(container)}/exec`, {
+      AttachStdin: useStdin,
+      AttachStdout: true,
+      AttachStderr: true,
+      User: '10001:10001',
+      WorkingDir: '/workspace',
+      Env: [`BOT_OPERATION_ID=${input.operation_id}`, ...(Array.isArray(extraEnv) ? extraEnv : [])],
+      Cmd: useStdin
+        ? ['node', '/opt/runner/runner.mjs', '--stdin']
+        : ['node', '/opt/runner/runner.mjs', Buffer.from(json).toString('base64url')],
+    });
     if (!exec) throw new ManagerError('container_missing');
-    const raw = await this.request('POST', `/exec/${exec.Id}/start`, { Detach: false, Tty: false }, true, timeout);
-    let offset = 0;const stdout = [];
+    const raw = useStdin
+      ? await this.execStartWithStdin(exec.Id, Buffer.from(json, 'utf8'), timeout)
+      : await this.request('POST', `/exec/${exec.Id}/start`, { Detach: false, Tty: false }, true, timeout);
+    if (!raw) throw new ManagerError('container_missing');
+    let offset = 0; const stdout = [];
     while (offset + 8 <= raw.length) {
       const size = raw.readUInt32BE(offset + 4); if (offset + 8 + size > raw.length) throw new ManagerError('runner_protocol_failed');
       if (raw[offset] === 1) stdout.push(raw.subarray(offset + 8, offset + 8 + size)); offset += size + 8;
