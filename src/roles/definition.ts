@@ -12,8 +12,10 @@ import { recommendedBackend, plannedBackend } from './backends.js';
 import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
 import { cachedRuleFiles, maxSkillFiles, skillFilePath, trustedCachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, LOCAL_CONFIG_CAPABLE_HARNESSES, normalizeHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
-import {roleSkills} from './skill-defaults.js';
-import { MAX_SKILL_BUNDLES, resolveLibraryBundleItems, skillLibraryStorage, type SkillFileEncoding } from './skill-library.js';
+import { roleSkills, type BoundRoleBundle } from './skill-defaults.js';
+import { getSkillVersion, MAX_SKILL_BUNDLES, resolveLibraryBundleItems, skillLibraryStorage, type SkillFileEncoding } from './skill-library.js';
+import { buildDefaultProjectBundles, defaultProjectRoleBundleIds } from './builtin-bundles.js';
+import { migrateSkillsToLibraryV3 } from './skill-migration.js';
 
 /**
  * RoleDefinitionV2: one project's versioned role configuration. Every reference names a fixed version: model profiles pin
@@ -28,7 +30,7 @@ export interface ModelProfileRef { model_id: string; name: string; profile_hash:
 export interface SkillBundleRef { id: string; revision: number; content_hash: string }
 export interface RoleDefinitionV2 {
   role_id: string; revision: number; enabled: boolean; kind: RoleKind; name: string; responsibility: string; persona_prompt: string;
-  model_profile_ref: ModelProfileRef | null; skill_bundle_ref: SkillBundleRef | null; harness_ref: Ref & { model_source?: HarnessModelSource }; permissions: RolePermissions;
+  model_profile_ref: ModelProfileRef | null; skill_bundle_ref: SkillBundleRef | null; skill_bundle_refs?: SkillBundleRef[]; harness_ref: Ref & { model_source?: HarnessModelSource }; permissions: RolePermissions;
   /** Server-owned opt-in: old V2 review/Actions dev assignments used the entry's Pi executor. */
   entry_harness_source?: 'role';
   environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; command_timeout_seconds?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number }; output_schema_ref: Ref;
@@ -41,7 +43,7 @@ export interface RoleConfiguration {
   controller: { role: string; entries: Record<Entry, boolean> };
   roles: RoleDefinitionV2[];
   deleted_roles?: string[];
-  skills: (SkillBundleRef & { source: any; files: { path: string; sha256: string; bytes: number }[] })[];
+  skills: (SkillBundleRef & { name?: string; origin?: 'builtin' | 'project'; source: any; files: { path: string; sha256: string; bytes: number }[] })[];
   updated_at?: string; updated_by?: string;
 }
 const entries: Entry[] = ['development', 'request', 'review', 'actions'];
@@ -81,10 +83,16 @@ const definitionHash = ({ revision, ...rest }: RoleDefinitionV2) => short(rest);
  * time, so such a project follows built-in updates; a task keeps the copy it froze when it started. A role that has to
  * run on another backend says so here, never by whether the project saved a configuration.
  */
-export function defaultRoles(): RoleDefinitionV2[] {
+export function defaultRoles(s?: Store): RoleDefinitionV2[] {
+  const defaultBundles = buildDefaultProjectBundles(s);
+  const bundleById = new Map(defaultBundles.map(b => [b.id, b]));
   return rolePool.map(({ id }) => {
     const kind = roleKind(id), [name, responsibility] = names(id);
-    return { role_id: id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: roleTemplate(id), model_profile_ref: null, skill_bundle_ref: null,
+    const refs: SkillBundleRef[] = defaultProjectRoleBundleIds(id)
+      .map(bid => bundleById.get(bid))
+      .filter((b): b is NonNullable<typeof b> => !!b)
+      .map(b => ({ id: b.id, revision: b.revision, content_hash: b.content_hash }));
+    return { role_id: id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: roleTemplate(id), model_profile_ref: null, skill_bundle_ref: refs[0] ?? null, skill_bundle_refs: refs,
       harness_ref: harnessRef(defaultHarness()), permissions: defaultPermissions(id, kind),
       // The review and Actions entries run the dev role's own backend, as a saved recommended configuration always did.
       ...(id === 'dev' ? { entry_harness_source: 'role' as const } : {}),
@@ -94,9 +102,12 @@ export function defaultRoles(): RoleDefinitionV2[] {
 }
 /** A stored "follow the defaults" record: a revision and who set it, no roles. Reading it expands the current defaults. */
 const followsDefault = (value: any) => value?.schema === 2 && !Array.isArray(value.roles);
-function defaultConfiguration(marker: { revision?: number; updated_at?: string; updated_by?: string }): RoleConfiguration {
+function defaultConfiguration(s: Store | undefined, marker: { revision?: number; updated_at?: string; updated_by?: string }): RoleConfiguration {
+  const defaultBundles = buildDefaultProjectBundles(s);
   return { schema: 2, revision: Number(marker.revision ?? 0), enabled: true, follows_default: true, controller: { role: 'manager', entries: managerEntries() },
-    roles: defaultRoles(), skills: [], ...(marker.updated_at ? { updated_at: marker.updated_at, updated_by: marker.updated_by } : {}) };
+    roles: defaultRoles(s),
+    skills: defaultBundles.map(({ fullFiles: _full, ...meta }) => meta),
+    ...(marker.updated_at ? { updated_at: marker.updated_at, updated_by: marker.updated_by } : {}) };
 }
 
 export function roleStorageV2(s: Store) {
@@ -110,6 +121,7 @@ export function roleStorageV2(s: Store) {
   actionsWriteFollowsIssues(s);
   // After #381 and #1072 have brought saved permissions to the defaults it compares with.
   followBuiltinDefaults(s);
+  migrateSkillsToLibraryV3(s);
   retireAcpRoleBindings(s);
   retireAcpTaskExecutionConfigs(s);
   retireIsolatedEnvironmentProfiles(s);
@@ -129,14 +141,28 @@ export function unmodifiedConfiguration(s: Store, repositoryId: string, stored: 
   if (followsDefault(stored)) return true;
   if (stored?.schema !== 2) return !!stored && typeof stored === 'object' && !Object.keys(stored.harnesses ?? {}).length
     && (stored.roles ?? []).every((role: any) => !role?.prompt && rolePool.some(entry => entry.id === role?.id));
-  if (!Array.isArray(stored.roles) || (stored.skills ?? []).length || (stored.required_stages ?? []).length || (stored.controller?.role ?? 'manager') !== 'manager') return false;
-  const current = roleConfiguration(s, repositoryId, stored).roles, builtin = defaultRoles();
+  if (!Array.isArray(stored.roles) || (stored.required_stages ?? []).length || (stored.controller?.role ?? 'manager') !== 'manager') return false;
+  const storedSkills: any[] = Array.isArray(stored.skills) ? stored.skills : [];
+  const defaultBundles = buildDefaultProjectBundles(s);
+  const preSkillRefactor = storedSkills.length === 0;
+  const matchesBuiltinBundles = storedSkills.length === defaultBundles.length
+    && defaultBundles.every(def => {
+      const got = storedSkills.find((b: any) => b?.id === def.id);
+      return !!got && got.content_hash === def.content_hash;
+    });
+  if (!preSkillRefactor && !matchesBuiltinBundles) return false;
+  const current = roleConfiguration(s, repositoryId, stored).roles, builtin = defaultRoles(s);
   if (current.length !== builtin.length) return false;
   return builtin.every(want => {
     const role = current.find(entry => entry.role_id === want.role_id);
     const matchesName = role && (role.name === want.name || (want.role_id === 'manager' && earlierManagerNames.has(role.name)));
     const matchesDuty = role && (role.responsibility === want.responsibility || (want.role_id === 'manager' && earlierManagerDuties.has(role.responsibility)));
-    if (!role || !role.enabled || !matchesName || !matchesDuty || role.model_profile_ref || role.skill_bundle_ref) return false;
+    const roleRefs = role ? (Array.isArray(role.skill_bundle_refs) ? role.skill_bundle_refs : role.skill_bundle_ref ? [role.skill_bundle_ref] : []) : [];
+    const wantRefs = want.skill_bundle_refs ?? [];
+    const matchesSkills = preSkillRefactor
+      ? roleRefs.length === 0
+      : roleRefs.length === wantRefs.length && roleRefs.every((r, i) => r.id === wantRefs[i]!.id && r.content_hash === wantRefs[i]!.content_hash);
+    if (!role || !role.enabled || !matchesName || !matchesDuty || role.model_profile_ref || !matchesSkills) return false;
     if (role.harness_ref?.id !== want.harness_ref.id || (role.harness_ref.model_source ?? 'gateway') !== 'gateway') return false;
     if (role.environment_profile_ref?.id !== want.environment_profile_ref.id || role.output_schema_ref?.id !== want.output_schema_ref.id) return false;
     if (role.budget_policy_ref?.id !== want.budget_policy_ref.id || Object.keys(role.budget_policy_ref).some(key => !['id', 'version'].includes(key))) return false;
@@ -582,7 +608,7 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
     return { ...config, enabled: true, controller: { ...config.controller, entries: managerEntries() } };
   }
   const value = stored;
-  if (followsDefault(value)) return defaultConfiguration(value);
+  if (followsDefault(value)) return defaultConfiguration(s, value);
   if (value.schema === 2) {
     // Filter out the retired Task Coordinator role (#1218) so legacy saved configs load and re-save cleanly while
     // historical role_config_revisions and task snapshots stay intact for audit.
@@ -602,7 +628,18 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
                 : (() => { const { model_source: _ms, ...rest } = definition.harness_ref; return rest; })();
             })()
           : definition.harness_ref;
-        return { ...definition, harness_ref: normalizedHarnessRef, kind, environment_profile_ref: migrateEnvironmentRef(definition.environment_profile_ref, kind), ...(budgetEntry ? { budget_policy_ref: { ...definition.budget_policy_ref, version: budgetEntry.version } } : {}), output_schema_ref: outputRef, permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
+        const rawRefs: SkillBundleRef[] = Array.isArray(definition.skill_bundle_refs)
+          ? definition.skill_bundle_refs.filter((r: any) => r && typeof r === 'object' && typeof r.id === 'string')
+          : definition.skill_bundle_ref ? [definition.skill_bundle_ref] : [];
+        // Keep legacy in-memory patches that overwrite only `skill_bundle_ref` without updating `skill_bundle_refs` coherent.
+        const refPatched = Array.isArray(definition.skill_bundle_refs)
+          && definition.skill_bundle_ref !== undefined
+          && ((definition.skill_bundle_ref?.id ?? null) !== (rawRefs[0]?.id ?? null)
+            || (definition.skill_bundle_ref?.content_hash ?? null) !== (rawRefs[0]?.content_hash ?? null));
+        const normalizedSkillRefs: SkillBundleRef[] = refPatched
+          ? (definition.skill_bundle_ref ? [definition.skill_bundle_ref] : [])
+          : rawRefs;
+        return { ...definition, skill_bundle_ref: normalizedSkillRefs[0] ?? null, skill_bundle_refs: normalizedSkillRefs, harness_ref: normalizedHarnessRef, kind, environment_profile_ref: migrateEnvironmentRef(definition.environment_profile_ref, kind), ...(budgetEntry ? { budget_policy_ref: { ...definition.budget_policy_ref, version: budgetEntry.version } } : {}), output_schema_ref: outputRef, permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
       });
     // Stored roles are fixed, even in a copy of the defaults (a task's frozen configuration, or one saved as read): only a
     // record without roles follows the defaults.
@@ -615,7 +652,7 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
   return { schema: 2, revision: 0, enabled: !!value.enabled, legacy: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } }, skills: [],
     roles: legacy.map(r => { const kind = roleKind(r.id), [name, responsibility] = names(r.id);
       const custom = (value.roles ?? []).find((c: any) => c.id === r.id);
-      return { role_id: r.id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: roleTemplate(r.id) + (custom?.prompt ? '\nProject instructions:\n' + custom.prompt : ''), model_profile_ref: null, skill_bundle_ref: null,
+      return { role_id: r.id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: roleTemplate(r.id) + (custom?.prompt ? '\nProject instructions:\n' + custom.prompt : ''), model_profile_ref: null, skill_bundle_ref: null, skill_bundle_refs: [],
         harness_ref: harnessRef(r.harness), permissions: defaultPermissions(r.id, kind), environment_profile_ref: catalogRef(environmentProfiles, allowedFor(kind).environment[0]!),
         budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'), output_schema_ref: catalogRef(outputSchemas, allowedFor(kind).output[0]!) }; }) };
 }
@@ -646,8 +683,18 @@ function retireLegacyRoleGuidance(prompt: string): string {
 function pinSkill(s: Store, repositoryId: string, input: any, index: number, previous?: { id: string; revision: number }) {
   const field = `skills[${index}]`;
   if (!input || typeof input !== 'object' || Array.isArray(input)) invalid('invalid_skill_bundle', field);
-  if (Object.keys(input).some(k => !['id', 'source'].includes(k))) invalid('unknown_field', field);
+  if (Object.keys(input).some(k => !['id', 'name', 'origin', 'source'].includes(k))) invalid('unknown_field', field);
   if (typeof input.id !== 'string' || !idPattern.test(input.id)) invalid('invalid_skill_bundle_id', field + '.id');
+  let bundleName: string | undefined;
+  if (input.name !== undefined) {
+    if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 80 || input.name.includes('\0')) invalid('invalid_skill_bundle', field + '.name');
+    bundleName = input.name.trim();
+  }
+  let bundleOrigin: 'builtin' | 'project' | undefined;
+  if (input.origin !== undefined) {
+    if (input.origin !== 'builtin' && input.origin !== 'project') invalid('invalid_skill_bundle', field + '.origin');
+    bundleOrigin = input.origin;
+  }
   const source = input.source;
   if (!source || typeof source !== 'object' || Array.isArray(source)) invalid('invalid_skill_source', field + '.source');
   let files: { path: string; content: string; encoding?: SkillFileEncoding; executable?: boolean }[] = [], descriptor: any;
@@ -685,11 +732,17 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
     const prior = stored ? skillSourceDescriptor(JSON.parse(String(stored.source)), { id: input.id, revision: previous!.revision, content_hash: String(stored.content_hash) }) : null;
     descriptor = { type: 'inline', commit: null, ...(prior?.origin ? { origin: prior.origin } : {}) };
   } else if (source.type === 'library') {
-    if (Object.keys(source).some(k => !['type', 'items'].includes(k))) invalid('unknown_field', field + '.source');
+    if (Object.keys(source).some(k => !['type', 'items', 'origin', 'builtin_id', 'migrated_needs_review'].includes(k))) invalid('unknown_field', field + '.source');
+    if (source.origin !== undefined && source.origin !== 'builtin' && source.origin !== 'project') invalid('invalid_skill_source', field + '.source.origin');
+    if (source.builtin_id !== undefined && (typeof source.builtin_id !== 'string' || !idPattern.test(source.builtin_id))) invalid('invalid_skill_source', field + '.source.builtin_id');
+    if (source.migrated_needs_review !== undefined && typeof source.migrated_needs_review !== 'boolean') invalid('invalid_skill_source', field + '.source.migrated_needs_review');
     const resolved = resolveLibraryBundleItems(s, repositoryId, source.items, field + '.source.items');
     files = resolved.files;
     descriptor = {
       type: 'library',
+      ...(source.origin === 'builtin' ? { origin: 'builtin' as const } : {}),
+      ...(typeof source.builtin_id === 'string' ? { builtin_id: source.builtin_id } : {}),
+      ...(source.migrated_needs_review === true ? { migrated_needs_review: true } : {}),
       items: resolved.items.map(item => ({
         skill_id: item.skill_id,
         version: item.version,
@@ -706,7 +759,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
     return { path: f.path, sha256: sha256(raw), bytes: raw.length };
   };
   const listing = files.map(fileMeta);
-  return { id: input.id as string, source: descriptor, listing, files, content_hash: sha256(JSON.stringify({ source: descriptor, files: listing })) };
+  return { id: input.id as string, ...(bundleName ? { name: bundleName } : {}), ...(bundleOrigin ? { origin: bundleOrigin } : {}), source: descriptor, listing, files, content_hash: sha256(JSON.stringify({ source: descriptor, files: listing })) };
 }
 
 /**
@@ -724,12 +777,31 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   const pinned = skillInput.map((value: any, index: number) => pinSkill(s, repositoryId, value, index, current.skills.find(bundle => bundle.id === value?.id)));
   if (new Set(pinned.map((b: any) => b.id)).size !== pinned.length) invalid('duplicate_skill_bundle', 'skills');
   const added: any[] = [];
-  const skills = input.skills === undefined ? current.skills : pinned.map((bundle: any) => {
-    const latest = s.get('SELECT revision,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? ORDER BY revision DESC LIMIT 1', repositoryId, bundle.id);
-    const revision = latest && latest.content_hash === bundle.content_hash ? Number(latest.revision) : Number(latest?.revision ?? 0) + 1;
-    if (revision !== Number(latest?.revision)) added.push({ ...bundle, revision });
-    return { id: bundle.id, revision, content_hash: bundle.content_hash, source: bundle.source, files: bundle.listing };
-  });
+  let skills: RoleConfiguration['skills'];
+  if (input.skills === undefined) {
+    if (current.follows_default && current.skills.length) {
+      // Saving a custom configuration for the first time freezes the default built-in bundles into skill_bundle_revisions.
+      const defaultFull = new Map(buildDefaultProjectBundles(s).map(b => [b.id, b]));
+      skills = current.skills.map(bundle => {
+        const latest = s.get('SELECT revision,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? ORDER BY revision DESC LIMIT 1', repositoryId, bundle.id);
+        const revision = latest && latest.content_hash === bundle.content_hash ? Number(latest.revision) : Number(latest?.revision ?? 0) + 1;
+        if (revision !== Number(latest?.revision)) {
+          const built = defaultFull.get(bundle.id);
+          if (built) added.push({ id: built.id, revision, source: built.source, files: built.fullFiles, content_hash: built.content_hash });
+        }
+        return { ...bundle, revision };
+      });
+    } else {
+      skills = current.skills;
+    }
+  } else {
+    skills = pinned.map((bundle: any) => {
+      const latest = s.get('SELECT revision,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? ORDER BY revision DESC LIMIT 1', repositoryId, bundle.id);
+      const revision = latest && latest.content_hash === bundle.content_hash ? Number(latest.revision) : Number(latest?.revision ?? 0) + 1;
+      if (revision !== Number(latest?.revision)) added.push({ ...bundle, revision });
+      return { id: bundle.id, ...(bundle.name ? { name: bundle.name } : {}), ...(bundle.origin ? { origin: bundle.origin } : {}), revision, content_hash: bundle.content_hash, source: bundle.source, files: bundle.listing };
+    });
+  }
   const roleInput = input.roles ?? [];
   if (!Array.isArray(roleInput) || roleInput.length > 32) invalid('invalid_role_definitions', 'roles');
   const ids = roleInput.map((r: any, i: number) => {
@@ -739,7 +811,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   });
   if (new Set(ids).size !== ids.length) invalid('duplicate_role', 'roles');
   if (ids.filter((id: string) => !rolePool.some(r => r.id === id)).length > 16) invalid('too_many_custom_roles', 'roles');
-  const allowedKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];
+  const allowedKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'skill_bundle_refs', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];
   const rawDeleted = input.deleted_roles ?? [];
   if (!Array.isArray(rawDeleted) || rawDeleted.some(id => typeof id !== 'string' || !idPattern.test(id))) invalid('invalid_deleted_roles', 'deleted_roles');
   // Retired coordinator is already omitted on read; ignore older clients echoing it in deleted_roles.
@@ -802,14 +874,73 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
         if (!harness!.model_api.includes(actualApi)) invalid('harness_model_api_unsupported', `${field}.model_profile_ref.api`);
       }
     }
-    let skill: SkillBundleRef | null = null;
-    if (given.skill_bundle_ref !== undefined && given.skill_bundle_ref !== null) {
-      const ref = given.skill_bundle_ref, sfield = `${field}.skill_bundle_ref`;
-      if (typeof ref !== 'object' || typeof ref.id !== 'string') invalid('invalid_role_reference', sfield);
-      const bundle = skills.find((b: any) => b.id === ref.id); if (!bundle) invalid('skill_bundle_not_found', sfield + '.id');
-      if (ref.revision !== undefined && ref.revision !== bundle!.revision) invalid('skill_bundle_revision_unavailable', sfield + '.revision');
-      skill = { id: bundle!.id, revision: bundle!.revision, content_hash: bundle!.content_hash };
+    const explicitRole = roleInput.find((r: any) => r.role_id === id);
+    let rawRefs: any[] = [];
+    let singleRefMode = false;
+    let explicitSkillRefs = false;
+    if (explicitRole && Object.hasOwn(explicitRole, 'skill_bundle_refs')) {
+      explicitSkillRefs = true;
+      if (!Array.isArray(explicitRole.skill_bundle_refs) || explicitRole.skill_bundle_refs.length > MAX_SKILL_BUNDLES) {
+        invalid('invalid_role_reference', `${field}.skill_bundle_refs`);
+      }
+      rawRefs = explicitRole.skill_bundle_refs;
+      if (Object.hasOwn(explicitRole, 'skill_bundle_ref') && explicitRole.skill_bundle_ref !== undefined) {
+        const firstId = rawRefs[0]?.id ?? null;
+        const singleId = explicitRole.skill_bundle_ref === null ? null : explicitRole.skill_bundle_ref?.id;
+        if (singleId !== firstId) invalid('invalid_role_reference', `${field}.skill_bundle_ref`);
+      }
+    } else if (explicitRole && Object.hasOwn(explicitRole, 'skill_bundle_ref')) {
+      explicitSkillRefs = true;
+      singleRefMode = true;
+      if (explicitRole.skill_bundle_ref === null) {
+        rawRefs = [];
+      } else if (explicitRole.skill_bundle_ref && typeof explicitRole.skill_bundle_ref === 'object' && !Array.isArray(explicitRole.skill_bundle_ref)) {
+        rawRefs = [explicitRole.skill_bundle_ref];
+      } else {
+        invalid('invalid_role_reference', `${field}.skill_bundle_ref`);
+      }
+    } else if (previous) {
+      const prevRefs = Array.isArray(previous.skill_bundle_refs)
+        ? previous.skill_bundle_refs
+        : previous.skill_bundle_ref ? [previous.skill_bundle_ref] : [];
+      // If a follows_default project submits an explicit custom `skills` list without re-listing implicit default bundles,
+      // drop those unreferenced default bundles from untouched roles while still enforcing strict refs on saved projects.
+      rawRefs = current.follows_default && input.skills !== undefined
+        ? prevRefs.filter(r => skills.some((b: any) => b.id === r.id))
+        : prevRefs;
     }
+
+    const skillRefs: SkillBundleRef[] = [];
+    const seenBundleIds = new Set<string>();
+    const seenSkillSlugs = new Map<string, { skill_id: string; version: number; origin: string; bundle_id: string }>();
+    for (let i = 0; i < rawRefs.length; i++) {
+      const ref = rawRefs[i];
+      const sfield = singleRefMode ? `${field}.skill_bundle_ref` : `${field}.skill_bundle_refs[${i}]`;
+      if (!ref || typeof ref !== 'object' || Array.isArray(ref) || typeof ref.id !== 'string') invalid('invalid_role_reference', sfield);
+      const bundle = skills.find((b: any) => b.id === ref.id);
+      if (!bundle) invalid('skill_bundle_not_found', sfield + '.id');
+      if (explicitSkillRefs && ref.revision !== undefined && ref.revision !== bundle!.revision) {
+        invalid('skill_bundle_revision_unavailable', sfield + '.revision');
+      }
+      if (seenBundleIds.has(bundle!.id)) continue;
+      seenBundleIds.add(bundle!.id);
+      if (bundle!.source?.type === 'library' && Array.isArray(bundle!.source.items)) {
+        for (const item of bundle!.source.items) {
+          const slug = String(item.slug ?? '');
+          const prior = slug ? seenSkillSlugs.get(slug) : undefined;
+          if (prior && (prior.skill_id !== item.skill_id || prior.version !== item.version)) {
+            fail(400, 'skill_version_conflict', `${field}.skill_bundle_refs`, {
+              slug,
+              existing: prior,
+              conflicting: { skill_id: item.skill_id, version: item.version, origin: item.origin, bundle_id: bundle!.id },
+            });
+          }
+          if (slug) seenSkillSlugs.set(slug, { skill_id: item.skill_id, version: item.version, origin: item.origin, bundle_id: bundle!.id });
+        }
+      }
+      skillRefs.push({ id: bundle!.id, revision: bundle!.revision, content_hash: bundle!.content_hash });
+    }
+    const skill: SkillBundleRef | null = skillRefs[0] ?? null;
     const budget = pick('budget_policy_ref', budgetPolicies, budgetPolicies.map(b => b.id), 'entry-default', 'unknown_budget_policy') as RoleDefinitionV2['budget_policy_ref'];
     if (budget.id === 'bounded' || budget.id === 'metered') {
       const b = given.budget_policy_ref, bfield = `${field}.budget_policy_ref`;
@@ -834,7 +965,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     }
     const permissions = updatePermissions(previous?.permissions ?? defaultPermissions(id,kind),permissionInput);
     const definition: RoleDefinitionV2 = { role_id: id, revision: 0, enabled, kind, name: textField('name', 80, defaultName), responsibility: textField('responsibility', 2000, defaultResponsibility),
-      persona_prompt: textField('persona_prompt', 32000, previous?.persona_prompt ?? roleTemplate(id)), model_profile_ref: model, skill_bundle_ref: skill,
+      persona_prompt: textField('persona_prompt', 32000, previous?.persona_prompt ?? roleTemplate(id)), model_profile_ref: model, skill_bundle_ref: skill, skill_bundle_refs: skillRefs,
       harness_ref: { id: harness!.id, version: harness!.version, ...(modelSource === 'local_config' ? { model_source: 'local_config' as const } : {}) },
       permissions,
       environment_profile_ref: environmentRef,
@@ -909,6 +1040,67 @@ export function skillFiles(s: Store, repositoryId: string, ref: SkillBundleRef):
   return JSON.parse(row.files);
 }
 
+/**
+ * Resolves all skill bundles explicitly bound to `definition` (`skill_bundle_refs`, falling back to legacy `skill_bundle_ref`),
+ * reading saved revisions from `skill_bundle_revisions` and unpersisted `follows_default` built-in library bundles directly
+ * from `skill_versions` so preview/dispatch paths remain side-effect free.
+ */
+export function resolveRoleBoundBundles(
+  s: Store,
+  repositoryId: string,
+  config: RoleConfiguration,
+  definition: RoleDefinitionV2,
+): BoundRoleBundle[] {
+  const refs = Array.isArray(definition.skill_bundle_refs)
+    ? definition.skill_bundle_refs
+    : definition.skill_bundle_ref ? [definition.skill_bundle_ref] : [];
+  const out: BoundRoleBundle[] = [];
+  for (const ref of refs) {
+    const bundle = config.skills.find(b => b.id === ref.id && b.revision === ref.revision)
+      ?? config.skills.find(b => b.id === ref.id);
+    const storedRow = s.get('SELECT files,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?', repositoryId, ref.id, ref.revision);
+    if (storedRow && storedRow.content_hash === ref.content_hash) {
+      const files = JSON.parse(String(storedRow.files));
+      const effectiveBundle = bundle
+        ? { id: bundle.id, revision: bundle.revision, content_hash: bundle.content_hash, source: bundle.source, files: bundle.files }
+        : { id: ref.id, revision: ref.revision, content_hash: ref.content_hash, source: { type: 'inline' }, files: files.map(({ path, sha256: d, bytes }: any) => ({ path, sha256: d, bytes })) };
+      out.push({ bundle: effectiveBundle, files, persisted: true });
+      continue;
+    }
+    if (bundle?.source?.type === 'library' && Array.isArray(bundle.source.items)) {
+      const files: { path: string; sha256: string; bytes: number; content: string; encoding?: SkillFileEncoding; executable?: boolean }[] = [];
+      for (const item of bundle.source.items) {
+        const resolved = getSkillVersion(s, repositoryId, String(item.skill_id), Number(item.version));
+        for (const file of resolved.version.files) {
+          files.push({
+            path: `${resolved.skill.slug}/${file.path}`,
+            sha256: file.sha256,
+            bytes: file.bytes,
+            content: file.content,
+            ...(file.encoding === 'base64' ? { encoding: 'base64' as const } : {}),
+            ...(file.executable ? { executable: true } : {}),
+          });
+        }
+      }
+      files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      out.push({
+        bundle: { id: bundle.id, revision: bundle.revision, content_hash: bundle.content_hash, source: bundle.source, files: bundle.files },
+        files,
+        persisted: false,
+      });
+      continue;
+    }
+    // Missing or tampered saved revision fails closed via skillFiles().
+    const files = skillFiles(s, repositoryId, ref);
+    out.push({
+      bundle: bundle ?? { id: ref.id, revision: ref.revision, content_hash: ref.content_hash, source: { type: 'inline' }, files: files.map(({ path, sha256: d, bytes }) => ({ path, sha256: d, bytes })) },
+      files,
+      persisted: true,
+    });
+  }
+  return out;
+}
+
 export interface RoleSnapshot {
   schema: 2; repository_id: string; role_id: string; kind: RoleKind; role_revision: number; config_revision: number; legacy: boolean; name: string; responsibility: string;
   prompt: { framework_hash: string; persona_hash: string; system_hash: string };
@@ -933,8 +1125,6 @@ export function rolePrompt(definition: RoleDefinitionV2) {
  */
 export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean; entryExecutor?: boolean;
   configuration?: RoleConfiguration; fallbackModel?:()=>{model:ReturnType<typeof openModel>;source:'workflow'|'project'};
-  /** The task is a CI change a project administrator confirmed (#931): its planning and writing roles get the CI gate skill. */
-  ciChange?: boolean;
   /** Trusted base-branch `.agents/skills/` snapshot for this task; `undefined` reads the project's rule cache. */
   repositorySkills?: { sha: string | null; files: Record<string, string> } | null } = {}) {
   const config = roleConfiguration(s, repositoryId, options.configuration);
@@ -1001,13 +1191,11 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   if (!harness.kinds.includes(definition.kind) && !harnessOverride && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
   const permission = permissionSnapshot(definition.permissions,definition.kind);
   const environment = environmentProfiles.find(e => e.id === definition.environment_profile_ref.id)!, schema = outputSchemas.find(o => o.id === definition.output_schema_ref.id)!;
-  const bundle = definition.skill_bundle_ref ? config.skills.find(b => b.id === definition.skill_bundle_ref!.id && b.revision === definition.skill_bundle_ref!.revision) : undefined;
-  const projectFiles=definition.skill_bundle_ref?skillFiles(s,repositoryId,definition.skill_bundle_ref):[];
-  const configuredSkills=bundle?{id:bundle.id,revision:bundle.revision,content_hash:bundle.content_hash,source:bundle.source,files:bundle.files}:null;
+  const boundBundles = resolveRoleBoundBundles(s, repositoryId, config, definition);
   const repositorySource=options.repositorySkills===undefined
     ? (()=>{const cached=trustedCachedRuleFiles(s,repositoryId);return cached?{sha:cached.sha,files:cached.files}:null;})()
     : options.repositorySkills;
-  const skills=roleSkills(s,repositoryId,{id:roleId,kind:definition.kind},configuredSkills,projectFiles,options.persist!==false,!!options.ciChange,repositorySource);
+  const skills=roleSkills(s,repositoryId,{id:roleId,kind:definition.kind},boundBundles,options.persist!==false,repositorySource);
   const system = rolePrompt(definition);
   const snapshot: RoleSnapshot = { schema: 2, repository_id: repositoryId, role_id: roleId, kind: definition.kind, role_revision: definition.revision, config_revision: config.revision, legacy: !!config.legacy,
     name: definition.name, responsibility: definition.responsibility,

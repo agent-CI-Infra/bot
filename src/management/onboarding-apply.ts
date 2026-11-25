@@ -386,7 +386,7 @@ export class OnboardingApply {
 
 interface ItemContext { base: ActorContext; actor: ActorContext; id: string; application: Row; plan: Json; attempt: number; item: OnboardingItem }
 // The fields roles.update keeps for a role it is given (see roles/definition.ts); a role sent without one loses it.
-const roleKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];
+const roleKeys = ['role_id', 'enabled', 'name', 'responsibility', 'persona_prompt', 'model_profile_ref', 'skill_bundle_ref', 'skill_bundle_refs', 'harness_ref', 'permissions', 'environment_profile_ref', 'budget_policy_ref', 'output_schema_ref'];
 /** The roles that get the conventions: every enabled role working on the repository. */
 const roleTargets = (store: Store, id: string) => roleConfiguration(store, id).roles.filter(role => role.enabled);
 /** The Manager text the dispatch reads: the project's effective unified Manager prompt. */

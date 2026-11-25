@@ -9,7 +9,6 @@ import {executionBaseline} from '../agent/common.js';
 import { executionModel, taskConfiguration, trustedTaskRuleFiles } from '../tasks/configuration.js';
 import { trustedCachedRuleFiles } from '../rules/service.js';
 import { cleanRoleMessages } from './storage.js';
-import { workflowChanges } from '../tasks/pull-request.js';
 import { runAgent,type AgentSpec } from '../agent/runtime.js';
 import { environmentProfiles } from './catalog.js';
 import { TaskToolGateway,gatewayToolNames,gatewayCapabilities } from './gateway.js';
@@ -81,7 +80,7 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
  if(!override&&config&&instance){const revision=Math.max(Number(instance.config_revision??0),Number(instance.pending_revision??0));
   if(revision>config.revision)config=configurationRevision(s,task.repository_id,revision)??config;}
  const workflow=String(task.kind??'task.request');
- return resolveRole(s,task.repository_id,role,workflow,{harness,pinned,configuration:config,entryExecutor,ciChange:workflowChanges(task,s),
+ return resolveRole(s,task.repository_id,role,workflow,{harness,pinned,configuration:config,entryExecutor,
   repositorySkills:taskRepositorySkills(s,task),
   fallbackModel:fixed?()=>({model:model??executionModel(s,task),source:'project'}):undefined});
 }

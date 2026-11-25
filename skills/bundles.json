@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "bundles": [
+    {
+      "id": "planning",
+      "name": "规划与拆分",
+      "description": "面向复杂需求与大任务的渐进式路线图拆分与编排方法。",
+      "skills": [
+        "roadmap-decomposition"
+      ],
+      "default_roles": [
+        "manager"
+      ],
+      "service_roles": []
+    },
+    {
+      "id": "ci-gates",
+      "name": "CI 门禁规范",
+      "description": "分层设计、评审与修复 GitHub Actions 流水线及仓库质量门禁。",
+      "skills": [
+        "layered-ci-gates"
+      ],
+      "default_roles": [
+        "manager",
+        "dev",
+        "reviewer"
+      ],
+      "service_roles": [
+        "management-assistant"
+      ]
+    },
+    {
+      "id": "dev-practices",
+      "name": "开发与排障实践",
+      "description": "测试驱动开发（TDD）与系统化根因排障工作流。",
+      "skills": [
+        "test-driven-development",
+        "systematic-debugging"
+      ],
+      "default_roles": [
+        "dev",
+        "test"
+      ],
+      "service_roles": []
+    },
+    {
+      "id": "feishu-cards",
+      "name": "飞书互动卡片",
+      "description": "飞书 Card JSON 2.0 布局、VChart 图表与交互卡片规范（仅飞书渠道生效）。",
+      "skills": [
+        "feishu-cards"
+      ],
+      "default_roles": [],
+      "service_roles": [
+        "management-assistant",
+        "group-assistant"
+      ],
+      "channels": [
+        "feishu"
+      ]
+    }
+  ]
+}

@@ -16,7 +16,7 @@ import { stopAboveCeiling } from '../projects/ceiling.js';
 
 export const isRequestedTask = (task: { kind?: unknown }) => ['task.request', 'task.development'].includes(String(task.kind ?? ''));
 
-/** Whether a task targets `.github/workflows/` or CI gates, used to attach the built-in `layered-ci-gates` skill. */
+/** Whether a task or bot PR revision targets `.github/workflows/` or CI gates. */
 export const workflowChanges = (
   task: { repository_id?: unknown; kind?: unknown; object_number?: unknown; input?: unknown; summary?: unknown },
   store?: Store,

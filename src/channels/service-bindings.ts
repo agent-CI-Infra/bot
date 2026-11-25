@@ -2,6 +2,8 @@ import type { Store, Row } from '../storage/database.js';
 import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { defaultGroupAssistantPrompt, defaultSharedModel, groupAssistant, managementAssistant, modelGaps, modelServes, repositoryAssistant, serviceHarnesses, serviceRole } from '../service-roles/roles.js';
+import { defaultServiceRoleBundleIds } from '../roles/builtin-bundles.js';
+import { parseStoredServiceSkillBundles, serviceSkillBundleCatalog, validateServiceSkillBundleIds } from '../service-roles/skills.js';
 import { githubResources, groupPermissionItems, groupTaskModes, normalizePermissions, permissionItems, permitsManagement, retiredPermissionItems, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
@@ -137,6 +139,8 @@ export function serviceBindingStorage(store: Store): void {
   if (!bindingCols.includes('prompt')) store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN prompt TEXT');
   // Pi is the default backend (#1255); a database from before it moves its Native bindings over once (src/roles/native-to-pi.ts).
   if (!bindingCols.includes('harness')) store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
+  // Explicit skill bundle bindings (#1359); NULL follows skills/bundles.json defaults without changing fence() or revision.
+  if (!bindingCols.includes('skill_bundle_ids')) store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN skill_bundle_ids TEXT');
   migrateEmployees(store);
   migrateLevels(store);
   migrateActionsWrite(store);
@@ -513,7 +517,7 @@ export class ChannelServiceBindings {
    * Changing an existing binding needs its owner or someone who governs it, who may do so from outside the group.
    */
   async configure(actor: ActorContext, id: string, input: Json): Promise<Json> {
-    fields(input, ['scope', 'participation', 'level', 'permissions', 'model_id', 'prompt', 'harness', 'enabled', 'expected_revision']);
+    fields(input, ['scope', 'participation', 'level', 'permissions', 'model_id', 'prompt', 'harness', 'skill_bundle_ids', 'enabled', 'expected_revision']);
     assertCurrent(actor);
     if (!Number.isSafeInteger(input.expected_revision)) fail(400, 'expected_revision_required', 'expected_revision');
     if (typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
@@ -530,6 +534,10 @@ export class ChannelServiceBindings {
     // As for a service role, a backend the request names must be Pi (#1337); an omitted one keeps the saved one.
     const harness = input.harness !== undefined ? String(input.harness) : String(previous?.harness ?? 'pi');
     if (input.harness !== undefined && !serviceHarnesses.includes(harness)) fail(400, 'unknown_role_harness', 'harness');
+    const skillBundleIds = input.skill_bundle_ids !== undefined
+      ? validateServiceSkillBundleIds(input.skill_bundle_ids, 'skill_bundle_ids')
+      : parseStoredServiceSkillBundles(previous?.skill_bundle_ids);
+    const storedSkillBundleIds = skillBundleIds === null ? null : JSON.stringify(skillBundleIds);
     const permissions = this.levelInput(input, previous);
     const previewScope = this.scopeInput(actor, input.scope, chat);
     const resolveModel = (scope: { kind: string; rows: { tenant_id: string; project_id: string | null }[] }): string | null => {
@@ -564,15 +572,15 @@ export class ChannelServiceBindings {
       const items = permissions;
       for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time, items);
       if (locked) {
-        this.store.run(`UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,model_id=?,prompt=?,harness=?,enabled=1,revision=?,updated_at=? WHERE id=?`,
-          groupAssistant, scope.kind, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, binding);
+        this.store.run(`UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,model_id=?,prompt=?,harness=?,skill_bundle_ids=?,enabled=1,revision=?,updated_at=? WHERE id=?`,
+          groupAssistant, scope.kind, actor.principal_id, participation, stored(items), nextModel, prompt, harness, storedSkillBundleIds, next, time, binding);
         // Preserve a pre-#1249 binding's persistent assistant HOME when migrating its role slot to group-assistant;
         // AssistantHomes.prepare() still seals the HOME if repositories were narrowed.
         if (locked.service_role_id !== groupAssistant && this.store.hasTable('assistant_homes')) {
           this.store.run('UPDATE assistant_homes SET service_role_id=? WHERE binding_id=? AND service_role_id=?', groupAssistant, binding, locked.service_role_id);
         }
-      } else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,model_id,prompt,harness,enabled,revision,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, groupAssistant, scope.kind, principal, actor.principal_id, actor.principal_id, participation, stored(items), nextModel, prompt, harness, next, time, time);
+      } else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,model_id,prompt,harness,skill_bundle_ids,enabled,revision,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, groupAssistant, scope.kind, principal, actor.principal_id, actor.principal_id, participation, stored(items), nextModel, prompt, harness, storedSkillBundleIds, next, time, time);
       invalidateIfLost(this.store, principal, before, 'channel_service_binding_configured');
       // Summaries and replies derived under the previous scope must not return into the new one.
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
@@ -640,6 +648,8 @@ export class ChannelServiceBindings {
       model: modelRow ? { id: modelRow.id, provider_name: modelRow.provider_name ?? null, model_name: modelRow.model_name, api_url: modelRow.api_url, key_configured: !!modelRow.api_key, project_id: modelRow.repository_id ?? null } : null,
       prompt: String(binding.prompt ?? ''),
       harness: String(binding.harness ?? 'pi'),
+      skill_bundle_ids: parseStoredServiceSkillBundles(binding.skill_bundle_ids),
+      effective_skill_bundle_ids: parseStoredServiceSkillBundles(binding.skill_bundle_ids) ?? defaultServiceRoleBundleIds(groupAssistant),
       usage: this.usage(binding.chat_id),
       model_gaps: gaps,
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,
@@ -680,6 +690,8 @@ export class ChannelServiceBindings {
       return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_view: platform || !!this.canView(actor, b.chat_id),
         can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
       models, default_model_id: defaultModelId, default_prompt: defaultGroupAssistantPrompt,
+      skill_bundles: serviceSkillBundleCatalog() as unknown as Json,
+      default_skill_bundle_ids: defaultServiceRoleBundleIds(groupAssistant),
       levels: bindingLevels.map(level => ({ id: level, permissions: levelPermissions(level) })),
       github_levels: bindingGithubLevels.map(level => ({ id: level, permissions: githubLevelPermissions(level) })),
       default_permissions: levelPermissions('read'),

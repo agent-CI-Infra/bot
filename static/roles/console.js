@@ -25,7 +25,7 @@ function rolesConsole() {
     let saveRoles = async () => {};
     holder.replaceChildren(); roleDraftStatus = null;
     const requestedView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
-    const auxiliaryView = !current.item && requestedView === 'skills' ? 'skills' : '';
+    const auxiliaryView = !current.item && (requestedView === 'skills' || requestedView === 'library') ? requestedView : '';
     const fields = element('fieldset', '', 'role-editor-fields'); fields.disabled = !!state.busy;
     const role = state.draft.roles.find(role => role.role_id === current.item);
     // #566: overview is a list; a role (or auxiliary) page only has a back crumb, not a tab strip of every role.
@@ -41,17 +41,27 @@ function rolesConsole() {
         here.setAttribute('aria-current', 'page');
         nav.append(here);
       } else {
-        const here = element('a', '技能包目录');
-        here.href = `#/projects/${id}/roles?view=skills`;
-        here.setAttribute('aria-current', 'page');
-        nav.append(here);
+        const libLink = element('a', '技能库');
+        libLink.href = `#/projects/${id}/roles?view=library`;
+        libLink.dataset.testid = 'role-skill-library-link';
+        if (auxiliaryView === 'library') libLink.setAttribute('aria-current', 'page');
+        const skillsLink = element('a', '技能包目录');
+        skillsLink.href = `#/projects/${id}/roles?view=skills`;
+        skillsLink.dataset.testid = 'role-skills-link';
+        if (auxiliaryView === 'skills') skillsLink.setAttribute('aria-current', 'page');
+        nav.append(libLink, skillsLink);
       }
     } else {
+      const libLink = element('a', '技能库'); libLink.href = `#/projects/${id}/roles?view=library`; libLink.dataset.testid = 'role-skill-library-link';
       const skills = element('a', '技能包目录'); skills.href = `#/projects/${id}/roles?view=skills`; skills.dataset.testid = 'role-skills-link';
-      nav.append(skills);
+      nav.append(libLink, skills);
     }
-    if (auxiliaryView === 'skills') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSkillsWorkspace(state, draw)); }
-    else if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));
+    if (auxiliaryView === 'library') {
+      fields.append(roleSkillLibraryWorkspace(state, draw, { live, failed, repositoryId: id }));
+    } else if (auxiliaryView === 'skills') {
+      roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = '';
+      fields.append(roleDraftStatus, roleSkillsWorkspace(state, draw));
+    } else if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));
     else if (role) {
       roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus);
       if (role.role_id === 'manager') fields.append(...managerSection(state.data));
@@ -70,7 +80,11 @@ function rolesConsole() {
         if (current === target && current.section === 'roles') await reloadWith(state.data.configured === false ? rolePageText('savedCustom') : '角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
       } catch (err) {
         if (live() && err.code === 'role_configuration_conflict') { state.conflict = true; message.textContent = '角色配置已被别人修改。当前草稿仍保留，请读取最新版本并比较。'; }
-        else if (live() && err.code === 'retired_skill_source') message.textContent = '旧指南来源已停用。请读取最新配置保留已迁移文件，或改用仓库技能文件、自定义文件。';
+        else if (live() && err.code === 'retired_skill_source') message.textContent = '旧指南来源已停用。请读取最新配置保留已迁移文件，或改用技能库、仓库技能文件或自定义文件。';
+        else if (live() && err.code === 'skill_version_conflict') {
+          const slug = err.detail?.slug ? `（Skill：${err.detail.slug}）` : '';
+          message.textContent = `同一角色或技能包绑定了同名 Skill 的不同版本或来源${slug}，请统一版本或调整绑定后再保存。`;
+        }
         else failed(err);
       } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
     };
@@ -109,7 +123,7 @@ function rolesConsole() {
     });
     actions.classList.add('role-save');
     state.saveBar = actions;
-    holder.append(actions);
+    if (auxiliaryView !== 'library' || state.dirty || state.conflict) holder.append(actions);
 
     if (comparison) holder.append(comparison); holder.append(fields);
     if (comparison && state.focusComparison) {
@@ -119,16 +133,35 @@ function rolesConsole() {
       const heading = comparison.querySelector('h3'); heading.tabIndex = -1; heading.focus({ preventScroll: true });
     }
   };
+  const refreshSkillLibrary = async () => {
+    try {
+      const lib = await api(`/api/repositories/${id}/skills?limit=100`);
+      if (!live() || !state) return null;
+      state.skillLibrary = lib;
+      state.skillLibraryError = '';
+      return lib;
+    } catch (err) {
+      if (live() && state) state.skillLibraryError = readErrorText(err);
+      return null;
+    }
+  };
   const read = async () => {
     const revision = ++request; holder.replaceChildren(note('正在读取角色配置…'), message); message.textContent = '';
     try {
-      const data = await api(`/api/repositories/${id}/roles`);
+      const [data, skillLibrary] = await Promise.all([
+        api(`/api/repositories/${id}/roles`),
+        api(`/api/repositories/${id}/skills?limit=100`).catch(() => null),
+      ]);
       if (!live() || revision !== request) return;
       state = target.rolesDraft;
       if (!state || !state.dirty) {
         const base = editableRoleDraft(data);
-        state = { data, base, dirty: false, draft: { ...editableRoleDraft(data), deleted_roles: [] } }; target.rolesDraft = state;
+        state = { data, base, dirty: false, draft: { ...editableRoleDraft(data), deleted_roles: [] }, skillLibrary };
+        target.rolesDraft = state;
+      } else if (skillLibrary) {
+        state.skillLibrary = skillLibrary;
       }
+      state.refreshSkillLibrary = refreshSkillLibrary;
       draw();
     } catch (err) {
       if (!live() || revision !== request) return;
