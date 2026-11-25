@@ -22,6 +22,7 @@ import { taskPermissions } from '../tasks/configuration.js';
 import { taskReadScopes } from '../tasks/management.js';
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, selectCompatibleCliVersion, type AgentToolCli } from './agent-tools.js';
 import type { HarnessModelSource } from './subscription.js';
+import { sshAccess, type SshGrantPayload } from '../projects/ssh-access.js';
 import { registerModelGatewaySession, type FileBackedModelProvider } from './model-gateway.js';
 import { LocalManager } from '../projects/local-manager.js';
 import { toHarnessSkillSetConfig } from '../roles/skill-store.js';
@@ -117,7 +118,7 @@ interface RunnerTransport {
   workspaceId: string;
   stateWorkspaceId: string;
   egress: boolean;
-  deliver: (request: Record<string, unknown>) => Promise<any>;
+  deliver: (request: Record<string, unknown>, extra?: { ssh?: SshGrantPayload }) => Promise<any>;
   deliverCleanup: (request: Record<string, unknown>) => Promise<any>;
   reap: (instanceId: string, superseded: boolean) => Promise<void>;
 }
@@ -185,7 +186,7 @@ function resolveRunnerTransport<T>(spec: AgentSpec<T>, launch: ContainerHarnessL
       workspaceId,
       stateWorkspaceId,
       egress: launch.egress ?? spec.containerOptions?.egress ?? false,
-      deliver: request => space.deliver(request),
+      deliver: (request, extra) => space.deliver(request, extra),
       deliverCleanup: request => space.deliverCleanup(request, 15_000),
       reap: async (instanceId, superseded) => {
         if (superseded) return;
@@ -465,6 +466,12 @@ export async function withContainerHarnessSession<T, R>(
     preferLoopback: transport.kind === 'local',
   }) : undefined;
 
+  // The CLI and the commands it runs in the computer may use this role's SSH targets while the run token stands (#1379).
+  // A local runner has no agent socket, so it gets none.
+  const sshGrant = transport.kind === 'workspace' && spec.roleRun && spec.task?.repository_id ? sshAccess.issue({
+    store: spec.store, repository: String(spec.task.repository_id), task: String(spec.task.id), role: spec.roleRun.role,
+    trusted: spec.harnessAccess?.trustedCheckout === true, live: () => { runAccess.check(runAccess.token); return true; },
+  }) : null;
   const githubApiUrl = spec.containerOptions?.githubApiUrl;
   const scopedReadTokens = new ScopedReadTokens(spec, 64);
   const readTokens = scopedReadTokens.available ? scopedReadTokens : null;
@@ -540,7 +547,7 @@ export async function withContainerHarnessSession<T, R>(
 
   let started: any;
   try {
-    started = await transport.deliver({ type: 'workspace_harness_start', instance_id: instanceId });
+    started = await transport.deliver({ type: 'workspace_harness_start', instance_id: instanceId }, sshGrant ? { ssh: sshGrant.payload } : {});
     if (!started?.started) {
       if (started?.error === 'claude_local_config_missing' || started?.error === 'codex_local_config_missing') {
         const detail = started.error === 'claude_local_config_missing'
@@ -552,6 +559,7 @@ export async function withContainerHarnessSession<T, R>(
       stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.backendId ?? launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
     }
   } catch (error) {
+    sshGrant?.close();
     await Promise.allSettled([transport.reap(instanceId, false), modelGateway?.close(), dispatcher.close(), readTokens?.revoke()]);
     throw error;
   }
@@ -923,6 +931,7 @@ export async function withContainerHarnessSession<T, R>(
     return await drive(handle);
   } finally {
     stopPolling = true;
+    sshGrant?.close();
     signal.removeEventListener('abort', onAbort);
     dispatcher.halt();
     notifyWake();

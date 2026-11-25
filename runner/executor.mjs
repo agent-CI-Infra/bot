@@ -78,6 +78,7 @@ async function executeInner(input, options = {}) {
       output_file: outputFile,
       ...(options.onOutput ? { _onOutput: options.onOutput } : {}),
       ...(options.onSpawn ? { _onSpawn: options.onSpawn } : {}),
+      ...(options.sshEnv ? { _sshEnv: options.sshEnv } : {}),
     });
   }
   if (input.type.startsWith('git_')) return storeOperation(input);
@@ -108,6 +109,7 @@ async function executeInner(input, options = {}) {
     operationId: input.operation_id,
     onOutput: options.onOutput,
     onSpawn: options.onSpawn,
+    sshEnv: options.sshEnv,
     ...(assistant ? { backgroundDirectory: '/tmp/.bot-bg' } : {}),
   });
 }

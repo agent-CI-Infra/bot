@@ -1,6 +1,7 @@
 import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { runRole, roleExecutionModel } from '../roles/run.js';
+import { withTaskSsh } from './ssh-context.js';
 import { roleBackendWorkspace } from '../roles/workspace.js';
 import { memoryTools, memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
@@ -287,7 +288,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
         verificationOutcome = verdict.outcome;
         return verdict;
       }
-      additionalVerification = await verification.call(`accept:${evaluationId}:policy`, { type: 'workspace_command', command: required, timeout_ms: null });
+      additionalVerification = await withTaskSsh(store, task, 'qa', ssh => verification.call(`accept:${evaluationId}:policy`, { type: 'workspace_command', command: required, timeout_ms: null }, { ssh }));
       records.history(task.id, 'acceptance_evidence', { evaluation_id: evaluationId, name: 'policy_validation', version: tested ?? sourceTree, tested_tree: tested, command: required, result: additionalVerification });
       if (additionalVerification.error || additionalVerification.exit_code !== 0 || additionalVerification.timed_out) {
         const failure = required + '; ' + String(additionalVerification.output || additionalVerification.error || 'verification incomplete').slice(-4000);

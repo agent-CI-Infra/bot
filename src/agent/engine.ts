@@ -1,3 +1,4 @@
+import { withTaskSsh } from '../tasks/ssh-context.js';
 import { assertRequestPullRequest, isRequestedTask } from '../tasks/pull-request.js';
 import { resumeParentTasks } from '../tasks/children.js';
 import { hasActiveEventSubscriptions, nextEventSubscriptionTimeout, onSubscriptionWake, resumeExpiredEventSubscriptions } from '../tasks/event-subscriptions.js';
@@ -749,7 +750,7 @@ export class TaskEngine {
           const integration=input.integration,prior=loadDevelopmentCandidateMeta(this.store,id)!;
           const artifact=await workspace.artifact('integration-artifact:'+integration.id+':'+ref.object.sha);
           const command=String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim();
-          const validation=command?{...await workspace.call('integration-tests:'+integration.id+':'+ref.object.sha,{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'}:{command:'',source:'policy',skipped:true};
+          const validation=command?{...await withTaskSsh(this.store,task,'dev',ssh=>workspace!.call('integration-tests:'+integration.id+':'+ref.object.sha,{type:'workspace_command',command,timeout_ms:null},{ssh})),command,source:'policy'}:{command:'',source:'policy',skipped:true};
           const valid=!validation.error&&(validation.skipped||validation.exit_code===0&&!validation.timed_out);
           const checked=traceEvent(this.store,id,'integration_validation',{integration_id:integration.id,base_sha:ref.object.sha,source_sha:integration.sha,tree_sha:artifact.tree_sha,passed:valid,validation},task.trace_run_id,'framework');
           if(valid){
@@ -869,7 +870,7 @@ export class TaskEngine {
           const command=String(policy.test_command||'').trim();
           let validation:any={command:args.test_command,source:'agent',skipped:true};
           if(command){
-            validation={...await workspace!.call('create-pr:'+requestId+':tests',{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'};
+            validation={...await withTaskSsh(this.store,task,'dev',ssh=>workspace!.call('create-pr:'+requestId+':tests',{type:'workspace_command',command,timeout_ms:null},{ssh})),command,source:'policy'};
             if(validation.error||validation.exit_code!==0||validation.timed_out)return {...validation,error:'validation_failed'};
           }
           let branch:string,ownerTask=id,prNumber:number|null=null;

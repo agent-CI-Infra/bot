@@ -17,7 +17,12 @@ const projectEnvironment = Object.fromEntries(String(process.env.BOT_PROJECT_ENV
   .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
 // An assistant's HOME is persistent and has a size limit: package caches go to /tmp, which ends with the computer.
 const caches = assistant ? { XDG_CACHE_HOME:'/tmp/.cache', PIP_CACHE_DIR:'/tmp/.cache/pip', UV_CACHE_DIR:'/tmp/.cache/uv', npm_config_cache:'/tmp/.npm' } : {};
-export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, ...caches,
+// An agent process the daemon started with an SSH grant (#1379) passes the agent socket and, for password targets, the
+// askpass helper on to the commands it runs. BOT_SSH_BROKER marks them, so a host's own SSH_AUTH_SOCK never leaks in.
+const sshKeys = ['BOT_SSH_BROKER', 'SSH_AUTH_SOCK', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE'];
+const inheritedSsh = process.env.BOT_SSH_BROKER === '1'
+  ? Object.fromEntries(sshKeys.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])) : {};
+export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, ...caches, ...inheritedSsh,
   ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
   ...(/^[a-f0-9]{48}$/.test(process.env.BOT_OPERATION_ID || '') ? { BOT_OPERATION_ID: process.env.BOT_OPERATION_ID } : {}),
   PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:${preinstalledBins}:/usr/local/bin:/usr/bin:/bin${assistant ? '' : ':/opt/project-tools/bin'}`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
@@ -55,7 +60,8 @@ export function openShellScriptFd(value, fallbackDir) {
 // operationId marks unscoped/daemon operations (BOT_OPERATION_ID) without relying on shared process.env.
 // On a project computer a command that fails while the work volume runs full is marked disk_full (runner/disk.mjs);
 // volume replaces the statfs reader in tests.
-export function command(value, cwd, timeoutMs = 10000, { outputFile, keepBackground = false, secretEnv, workspaceId, operationId, backgroundDirectory, volume, onOutput, onSpawn } = {}) {
+// sshEnv is the SSH environment of a command the daemon registered with a grant (runner/ssh-agent.mjs).
+export function command(value, cwd, timeoutMs = 10000, { outputFile, keepBackground = false, secretEnv, workspaceId, operationId, backgroundDirectory, volume, onOutput, onSpawn, sshEnv } = {}) {
   const tooLong = commandTooLong(value);
   if (tooLong) throw Object.assign(new Error('command_too_long'), tooLong);
   if (typeof value !== 'string' || !value) throw new Error('invalid_command');
@@ -64,7 +70,7 @@ export function command(value, cwd, timeoutMs = 10000, { outputFile, keepBackgro
     return Promise.resolve({ exit_code: 126, output: 'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.', timed_out: false, truncated: false });
   }
   const extra = Object.fromEntries(Object.entries(secretEnv || {}).filter(([key, secret]) => ['GH_TOKEN', 'GITHUB_TOKEN'].includes(key) && typeof secret === 'string' && secret.length >= 8));
-  const childEnv = { ...environment, ...operationTag(operationId), ...workspaceTag(workspaceId), ...extra };
+  const childEnv = { ...environment, ...(sshEnv || {}), ...operationTag(operationId), ...workspaceTag(workspaceId), ...extra };
   // Project computers watch only their data-disk work volume (never their RAM-backed /tmp tmpfs); assistant computers
   // mount both /workspace and /tmp as disk-backed volumes, so watch both by severity tier (#1279).
   const watch = watchVolume(volume ?? (assistant ? () => watchedVolume([workspaceRoot, '/tmp']) : readWorkspaceVolume));

@@ -17,6 +17,7 @@ import { extractRepositorySkillFiles, pinRepositorySkillEntries, type PinnedRepo
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
 import { runRole, roleExecutionModel } from '../roles/run.js';
+import { withTaskSsh } from './ssh-context.js';
 import { assertManagedExecution, sourcePolicies, taskReadScopes } from './management.js';
 import { ReadTokens } from '../agent/read-token.js';
 import { RepositoryExplorer, workspaceRepositoryTools } from '../agent/exploration.js';
@@ -1436,7 +1437,7 @@ export async function runRequest(
           // A Manager can nominate a Dev result saved before this execution. Read that result's files in the current workspace.
           const media = checkedMedia?.selection === JSON.stringify(paths) ? checkedMedia.files : await collectPullRequestMedia(workspace, paths);
           const command = String(store.get('SELECT test_command FROM policies WHERE repository_id=?', task.repository_id)?.test_command || '').trim();
-          const validation = command ? { ...(await workspace.call(`request:${execution}:tests`, { type: 'workspace_command', command, timeout_ms: null })), command, source: 'policy' } : { command: result.test_command ?? null, source: 'agent', skipped: true };
+          const validation = command ? { ...(await withTaskSsh(store, task, budgetRole(), ssh => workspace.call(`request:${execution}:tests`, { type: 'workspace_command', command, timeout_ms: null }, { ssh }))), command, source: 'policy' } : { command: result.test_command ?? null, source: 'agent', skipped: true };
           // A delivery on a non-default baseline publishes on its own branch, so it neither reuses nor is blocked by the
           // branch an open PR on another baseline already owns. The name follows from the delivery target alone.
           const baselineBranchName = (issueNumber: number) => {

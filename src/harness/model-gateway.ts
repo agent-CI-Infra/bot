@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { sshAccess } from '../projects/ssh-access.js';
 import { once } from 'node:events';
 import { dirname } from 'node:path';
 import { Readable } from 'node:stream';
@@ -1125,6 +1127,8 @@ export class ModelGatewayHub {
   private loopbackRefs = 0;
 
   private readonly onRequest = (req: IncomingMessage, res: ServerResponse) => {
+    // The computers' SSH requests (#1379) share this read-only socket; their grant, not a run token, authorizes them.
+    if (sshAccess.request(req, res)) return;
     const route = parseRoute(req.url, req.method);
     if (!route) {
       res.writeHead(403, { 'content-type': 'application/json' });
@@ -1144,6 +1148,10 @@ export class ModelGatewayHub {
         res.end(formatErrorPayload(route.endpoint, 'api_error'));
       }
     });
+  };
+
+  private readonly onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    if (!sshAccess.upgrade(req, socket, head)) socket.destroy();
   };
 
   get socketPath(): string | null {
@@ -1172,6 +1180,7 @@ export class ModelGatewayHub {
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o755 });
     try { unlinkSync(socketPath); } catch {}
     const server = createServer(this.onRequest);
+    server.on('upgrade', this.onUpgrade);
     server.requestTimeout = 0;
     server.headersTimeout = 60_000;
     server.keepAliveTimeout = 60_000;
@@ -1211,6 +1220,7 @@ export class ModelGatewayHub {
     if (!this.loopbackStart) {
       this.loopbackStart = (async () => {
         const server = createServer(this.onRequest);
+        server.on('upgrade', this.onUpgrade);
         server.requestTimeout = 0;
         server.headersTimeout = 60_000;
         server.keepAliveTimeout = 60_000;

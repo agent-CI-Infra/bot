@@ -1,6 +1,6 @@
 import { storageFootprint, managerLocations } from './storage-footprint.mjs';
 import { computerResultOwner } from '../runner/result-owner.mjs';
-import { chmod, lstat, mkdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -17,6 +17,7 @@ import { IncrementalVacuum } from './compaction.mjs';
 import { isCleanupCall, validateCall } from './project-runner-calls.mjs';
 import { sanitizeAgentPollTrajectory } from '../runner/image-budget.mjs';
 import { MAX_CLI_CONFIG_BYTES } from '../runner/cli-config.mjs';
+import { SSH_AGENT_TYPES, SSH_COMMAND_TYPES, SSH_CONFIG_NAME, SSH_KEYS_NAME, publicKeyLine, renderSshConfig, validSshGrant } from '../runner/ssh-config.mjs';
 import { PrecompiledImageBuilder, reservedEnv, normalizePackages, normalizeScript, computeImageKey } from './precompiled-images.mjs';
 
 export { validateCall };
@@ -935,6 +936,29 @@ export class Projects {
     await chmod(tokenPath, 0o640);
     return { ...info, token };
   }
+  // Once the daemon has bound runner.sock and ssh-agent.sock, no process of the computer may add, replace or remove an
+  // entry of its runner directory (#1379): every process there has the daemon's UID, so only the manager, which owns the
+  // directory, keeps write access. A start prepares it writable again.
+  async sealRunnerSocketDir(info) {
+    await chmod(info.dir, 0o750);
+  }
+  // The computer's ssh_config and the public keys it names (#1379), written by the manager into the sealed runner
+  // directory, so a task cannot change what another run's ssh reads. The images include it from /etc/ssh/ssh_config.d;
+  // OpenSSH refuses an included file not owned by root or the caller, or writable by group or others: 0640 as root.
+  async writeSshConfig(containerName, targets) {
+    if (!this.runnerSocketsMount) return;
+    const dir = `${this.runnerSocketsMount}/${this.runnerSocketKey(containerName)}`, keys = `${dir}/${SSH_KEYS_NAME}`;
+    const replace = async (path, content) => {
+      const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+      await writeFile(temporary, content, { mode: 0o640 });
+      await rename(temporary, path).catch(async error => { await unlink(temporary).catch(() => {}); throw error; });
+    };
+    await mkdir(keys, { recursive: true, mode: 0o750 });
+    const wanted = new Set(targets.filter(row => row.auth === 'key').map(row => `${row.id}.pub`));
+    for (const row of targets) if (row.auth === 'key') await replace(`${keys}/${row.id}.pub`, publicKeyLine(row));
+    await replace(`${dir}/${SSH_CONFIG_NAME}`, renderSshConfig(targets));
+    for (const name of await readdir(keys).catch(() => [])) if (!wanted.has(name)) await unlink(`${keys}/${name}`).catch(() => {});
+  }
   async prepareRunnerSocket(containerName) {
     const info = await this.expectedRunnerSocketMount(containerName);
     if (!info) return null;
@@ -1172,6 +1196,7 @@ export class Projects {
       if (!container.State.Running) this.docker.unregisterRunnerEndpoint?.(names.container);
       throw new ManagerError('runner_not_ready');
     }
+    if (runnerSocketInfo) await this.sealRunnerSocketDir(runnerSocketInfo);
     container = await this.inspect(repo, generation, 'container');
     this.update(repo, 'ready', 'ready', null, container.State.StartedAt);
     this.prune(repo, true);
@@ -1577,6 +1602,15 @@ export class Projects {
   }
   async operate(repo, action, input) {
     this.validate(repo);
+    // A run's SSH grant (#1379) rides next to a call that starts processes. It is not part of the operation: never
+    // recorded, hashed or replayed, and it reaches the computer only over the daemon's socket.
+    let ssh = null;
+    if (input && typeof input === 'object' && Object.hasOwn(input, 'ssh')) {
+      const { ssh: grant, ...rest } = input;
+      if (action !== 'execute' || ![...SSH_COMMAND_TYPES, ...SSH_AGENT_TYPES].includes(rest.request?.type)) throw new ManagerError('invalid_ssh_grant', 400);
+      try { ssh = validSshGrant(grant); } catch { throw new ManagerError('invalid_ssh_grant', 400); }
+      input = rest;
+    }
     if (!['start', 'stop', 'reset', 'delete', 'execute', 'configure', 'refresh'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
     // An invalid spec or runner request is rejected before it is recorded, so it never touches the running computer.
     if (action === 'configure') validateSpec(input.request);
@@ -1695,7 +1729,9 @@ export class Projects {
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
             const request = command ? { ...call, timeout_ms: limit } : call,
               timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import','tasks_remove','worktrees_remove'].includes(call.type) ? 0 : ['tasks_list','worktrees_list'].includes(call.type) ? 300000 : 90000;
-            result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
+            const containerName = this.names(repo, project.generation).container;
+            if (ssh) await this.writeSshConfig(containerName, ssh.targets);
+            result = await this.docker.runner(containerName, { ...request, operation_id: input.operation_id, ...(ssh ? { ssh } : {}) }, timeout);
             if (['tasks_remove', 'worktrees_remove'].includes(call.type) && result.ok && result.result?.removed?.length) {
               // Exclude the pre-cleanup total until the next background check scans the volume.
               // A scan already in flight may have visited the deleted directories too.

@@ -134,7 +134,9 @@ export function createManagerServer({ projects, token, assistants = null }) {
         else if (req.method === 'PUT' && !match[2]) result = await projects.register(match[1]);
         else if (req.method === 'POST' && match[2]) {
           const input = await json(req, match[2] === 'execute' ? EXECUTE_BODY_LIMIT : undefined);
-          if (Object.keys(input).some(k => !['operation_id','generation','request'].includes(k))) throw new ManagerError('invalid_input', 400);
+          // An execute may carry the run's SSH grant (#1379); Projects.operate validates it and keeps it out of the ledger.
+          const keys = ['operation_id', 'generation', 'request', ...(match[2] === 'execute' ? ['ssh'] : [])];
+          if (Object.keys(input).some(k => !keys.includes(k))) throw new ManagerError('invalid_input', 400);
           result = await projects.operate(match[1], match[2], input);
         } else throw new ManagerError('not_found', 404);
       }

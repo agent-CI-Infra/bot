@@ -16,6 +16,7 @@ import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, regi
 import { sanitizeAgentPollTrajectory } from '../../runner/image-budget.mjs';
 import { MAX_ARTIFACT_COMPRESSED_BYTES } from '../../runner/artifact-zip.mjs';
 import { RUNNER_TRANSFER_CHUNK_BYTES, requestTooLarge } from '../../runner/command-policy.mjs';
+import type { SshGrantPayload } from '../projects/ssh-access.js';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -64,7 +65,9 @@ export class Workspace {
   private settled?:string;
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void,
     readonly operations?:'service_role_operations'){}
-  async call(key:string,request:any){
+  // ssh is the run's SSH grant (#1379) for a call that starts processes. It goes to the manager beside the request and is
+  // neither recorded nor part of the operation's hash: a repeated call replays the result, not the grant.
+  async call(key:string,request:any,{ssh}:{ssh?:SshGrantPayload}={}){
     await this.guard();
     // A task gets its worktree when it first needs one (#769): the one its controller or agent chose, or the system's.
     if(!aside(request)){const ready=await this.ensure();if(ready.error)return ready;}
@@ -109,7 +112,7 @@ export class Workspace {
     else{
       const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
       operations.delete(id);operations.set(id,input.request);
-      try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
+      try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,ssh?{...input,ssh}:input,wait);}
       catch(error){
         const code=error instanceof HttpError?error.code:null,what=`${request.type}${request.path?' '+request.path:''}`;
         if(code==='runner_request_too_large'){
@@ -156,13 +159,13 @@ export class Workspace {
   }
   // Hands a credential or read-only poll/liveness call to the runner without writing task_tools or task_history;
   // a lost answer is safe to repeat.
-  async deliver(request:any){
+  async deliver(request:any,{ssh}:{ssh?:SshGrantPayload}={}){
     await this.guard();
     useWorkspace(this.store,this.task,request.type);
     let response:any;
     try {
       response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
-        request:{...request,workspace_id:this.task.workspace_id}},90000);
+        request:{...request,workspace_id:this.task.workspace_id},...(ssh?{ssh}:{})},90000);
     } catch (error) {
       if (error instanceof HttpError && error.code === 'disk_full') stop('disk_full','waiting_environment',`manager 的数据盘空间不足，调用未完成：${request.type}`);
       response=null;

@@ -119,11 +119,12 @@ test('Projects mounts private per-container /run/bot-runner subpath, uses daemon
   assert.equal(runnerMount.VolumeOptions?.Subpath, expectedKey);
   assert.equal(runnerMount.VolumeOptions?.NoCopy, true);
 
-  // Per-container dir created with 0770 and fresh .token written with 0640.
+  // Per-container dir prepared with 0770 and fresh .token written with 0640; once the runner answers, only the manager may
+  // add, replace or remove its entries (#1379), so no process of the computer can swap runner.sock or ssh-agent.sock.
   const containerSockDir = join(socketsDir, expectedKey);
   const tokenPath = join(containerSockDir, '.token');
   assert.equal(existsSync(tokenPath), true);
-  assert.equal(statSync(containerSockDir).mode & 0o777, 0o770);
+  assert.equal(statSync(containerSockDir).mode & 0o777, 0o750);
   assert.equal(statSync(tokenPath).mode & 0o777, 0o640);
   const firstToken = readFileSync(tokenPath, 'utf8').trim();
   assert.match(firstToken, /^[a-f0-9]{64}$/);
@@ -147,6 +148,7 @@ test('Projects mounts private per-container /run/bot-runner subpath, uses daemon
   const secondToken = readFileSync(tokenPath, 'utf8').trim();
   assert.match(secondToken, /^[a-f0-9]{64}$/);
   assert.notEqual(secondToken, firstToken, 'restart must rotate the one-time runner token');
+  assert.equal(statSync(containerSockDir).mode & 0o777, 0o750, 'a restarted computer is sealed again');
 
   // Legacy idle.mjs container is automatically detected as stale and recreated on refresh (keeping generation 1).
   const createdBefore = docker.created;

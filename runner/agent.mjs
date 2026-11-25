@@ -176,14 +176,15 @@ async function piRuntime(){
   return manifest?{agent:'pi',package:manifest.name,version:manifest.version,node:process.version}:{error:'pi_runtime_missing'};
 }
 // Starts the Pi process on the configuration in input.json; a session that already has a state answers instead.
-async function startAgent(dir,root,boot,workspaceId){
+async function startAgent(dir,root,boot,workspaceId,{onSpawn,env}={}){
   const old=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
   if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
   JSON.parse(await readFile(dir+'/input.json','utf8'));
   const out=await open(dir+'/process.log','a',0o600);
   // A task gets its worktree when it first needs one (#769): until then the session starts in the task directory.
   const cwd=await stat(root+'/repo').then(()=>root+'/repo',()=>root);
-  try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd,env:{...environment,...workspaceTag(workspaceId)},detached:true,stdio:['ignore',out.fd,out.fd]});
+  try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd,env:{...environment,...env,...workspaceTag(workspaceId)},detached:true,stdio:['ignore',out.fd,out.fd]});
+    if(child.pid)try{onSpawn?.(child.pid);}catch{}
     await writeFile(dir+'/state.json',JSON.stringify({state:'running',pid:child.pid,boot}),{mode:0o600});child.unref();}
   finally{await out.close();}return {started:true};
 }
@@ -299,9 +300,9 @@ export async function agentOperation(input,root){
     const path=dir+'/input.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
     if(input.final)await rename(path,dir+'/input.json');
-    return launch?{written:true,...await startAgent(dir,root,boot,input.workspace_id),runtime}:{written:true};
+    return launch?{written:true,...await startAgent(dir,root,boot,input.workspace_id,{onSpawn:input._onSpawn,env:input._sshEnv}),runtime}:{written:true};
   }
-  if(input.type==='workspace_agent_start')return startAgent(dir,root,boot,input.workspace_id);
+  if(input.type==='workspace_agent_start')return startAgent(dir,root,boot,input.workspace_id,{onSpawn:input._onSpawn,env:input._sshEnv});
   if(input.type==='workspace_agent_poll'){
     const offset=Number(input.offset)||0;
     const known={tools:knownIds(input.known_tool_ids),tokens:knownIds(input.known_token_ids),boundaries:knownIds(input.known_boundary_ids)};
@@ -424,11 +425,12 @@ export async function agentOperation(input,root){
       }:{};
       const child=spawn(process.execPath,[runnerRoot+'/harness-entry.mjs',root],{
         cwd:root+'/repo',
-        env:{...environment,...workspaceTag(input.workspace_id),...extraLocalEnv},
+        env:{...environment,...(input._sshEnv||{}),...workspaceTag(input.workspace_id),...extraLocalEnv},
         detached:true,
         stdio:['ignore',out.fd,out.fd],
       });
       childPid=child.pid;
+      if(child.pid)try{input._onSpawn?.(child.pid);}catch{}
       const acp = cfg.harness === 'acp' ? { harness: cfg.harness, acp_product_id: cfg.acp_product?.id } : {};
       await writeFile(dir+'/harness-state.json',JSON.stringify({state:'starting',pid:child.pid,boot,...acp,...(targetInstanceId?{instance_id:targetInstanceId}:{})}),{mode:0o600});
       child.unref();
