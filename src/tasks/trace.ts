@@ -89,7 +89,7 @@ export function traceStorage(store:Store){
   store.db.exec('DROP TRIGGER IF EXISTS trace_task_tools_insert;DROP TRIGGER IF EXISTS trace_task_tools_update;');
   const operation="trace_snapshot(CASE WHEN NEW.request_ref IS NULL THEN json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result) "+
     "ELSE json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result,'request_ref',NEW.request_ref,'result_ref',NEW.result_ref) END)";
-  const pollFilter="WHEN coalesce(json_extract(NEW.request,'$.request.type'),json_extract(NEW.request,'$.type'),'') NOT IN ('workspace_agent_poll','workspace_harness_poll','workspace_agent_live','workspace_agent_runtime','workspace_agent_progress')";
+  const pollFilter="WHEN coalesce(json_extract(NEW.request,'$.request.type'),json_extract(NEW.request,'$.type'),'') NOT IN ('workspace_agent_poll','workspace_harness_poll','workspace_agent_live','workspace_agent_runtime')";
   for(const [name,event] of [['insert','INSERT'],['update','UPDATE OF state']])store.db.exec(`CREATE TRIGGER trace_task_tools_${name} AFTER ${event} ON task_tools ${pollFilter} BEGIN
       INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'operation',${operation},strftime('%Y-%m-%dT%H:%M:%fZ','now'),'task_tools:'||NEW.id);
     END;`);

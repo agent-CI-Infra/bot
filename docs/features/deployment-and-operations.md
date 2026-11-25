@@ -65,7 +65,7 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_PROJECT_TOOLS_DIR` | `/project-tools` | 按项目隔离的只读二进制工具卷目录（标准 Compose 由控制面可写挂载、`manager` 只读校验并按子路径挂入项目/群助手容器） |
 | `BOT_SKILL_STORE_DIR` | `/skill-store` | 控制面内容寻址只读 Skill 卷目录（标准 Compose 由控制面可写挂载、`manager` 只读按项目/服务子路径挂入容器 `/opt/bot-skills`） |
 | `BOT_SKILLS_DIR` | 镜像内置 `skills/` | 可选覆盖控制面读取内置 Skill 源目录的路径（默认使用随控制面镜像打包的 `skills/`） |
-| `BOT_MODEL_GATEWAY_SOCKET` | `/run/model-gateway/gateway.sock` | 控制面统一透传模型网关的 Unix Domain Socket 路径（标准 Compose 挂载在 `model-gateway` 卷；`manager` 经 `BOT_MODEL_GATEWAY_DIR=/run/model-gateway` 将该卷只读挂入所有项目电脑与助手电脑；历史 `BOT_HARNESS_MODEL_TRANSPORT` 开关已移除） |
+| `BOT_MODEL_GATEWAY_SOCKET` | `/run/model-gateway/gateway.sock`（挂载 `/run/model-gateway` 时自动启用） | 控制面统一透传模型网关的 Unix Domain Socket 路径。未显式设置且 `/run/model-gateway` 目录存在时自动监听 `/run/model-gateway/gateway.sock`；若目录不存在且未设置（或显式置空），控制面启动时打印告警并仅保留本地回环（非容器开发/测试场景）。标准 Compose 挂载 `model-gateway` 卷，`manager` 经 `BOT_MODEL_GATEWAY_DIR=/run/model-gateway` 将该卷只读挂入所有项目电脑与助手电脑；历史 `BOT_HARNESS_MODEL_TRANSPORT` 开关已移除 |
 | `BOT_AGENT_TOOLS_AUTO_INSTALL` | `1` | 设为 `0` 关闭控制面启动时后台自动安装工具卷默认版本（仅由 `src/main.ts` 触发；设为 `0` 后仍可在控制台按 Agent 手动安装） |
 | `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |

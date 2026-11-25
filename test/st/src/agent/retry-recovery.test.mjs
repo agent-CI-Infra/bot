@@ -32,7 +32,7 @@ test('a cached started receipt left by an older run cannot bypass the runner liv
 
 for(const kind of ['review.issue','development.issue'])for(const fault of ['transport','interrupted']){
   test(`${kind}: ${fault} after attempt 3 reaps the process and restarts with a fresh receipt, including eight-hour retries`,async t=>{
-    let failing=true,requests=0;const starts=[],processes=new Map();
+    let failing=true,requests=0;const starts=[],processes=new Map(),gateways=new Map();
     const model=createServer(async(req,res)=>{
       let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);
       if(body.tools?.some(t=>t.function.name==='submit_retry_decision')){
@@ -45,8 +45,12 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
       modelUrl:'http://127.0.0.1:'+model.address().port+'/v1',
       taskKind:kind,
       github(path,send){if(path.endsWith('/issues/1')){send(issue);return true;}},
-      execute(request){
+      async execute(request){
         const id=request.workspace_id;
+        if(request.type==='workspace_agent_gateway'){
+          gateways.set(id,JSON.parse(Buffer.from(request.base64,'base64').toString('utf8')));
+          return {ok:true,result:{written:true}};
+        }
         if(request.type==='workspace_agent_start'){
           assert.equal(processes.has(id),false,'a retry must not reuse the workspace of the reaped process');
           starts.push(id);processes.set(id,{alive:true,published:false});return {ok:true,result:{started:true}};
@@ -54,7 +58,12 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
         if(request.type==='reap'){if(processes.has(id))processes.get(id).alive=false;return {ok:true,result:{killed:1,remaining:0}};}
         if(request.type==='workspace_agent_poll'){
           const process=processes.get(id);assert.equal(process?.alive,true,'must start a new process instead of polling a dead PID');
-          if(failing)return {ok:true,result:fault==='interrupted'?{state:'interrupted',offset:45}:{state:'running',request:{id:'c'.repeat(48),body:{messages:[{role:'user',content:'Review.'}]}}}};
+          if(failing){
+            if(fault==='interrupted')return {ok:true,result:{state:'interrupted',offset:45}};
+            const gw=gateways.get(id);
+            const res=await fetch(`${gw.model_gateway_url}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gw.run_token},body:JSON.stringify({model:'fixture-model',messages:[{role:'user',content:'Review.'}]})});
+            return {ok:true,result:{state:'failed',error:'model_request_failed',detail:`HTTP ${res.status}`}};
+          }
           if(kind.startsWith('development.')&&!process.published){process.published=true;return {ok:true,result:{state:'running',tool_requests:[{id:'d'.repeat(48),kind:'pull_request',name:'create_pull_request',arguments:{summary:'No changes needed.',test_command:'node --test'}}]}};}
           return {ok:true,result:{state:'completed',result:review}};
         }
@@ -74,8 +83,8 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
     const saved=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId),receipts=h.store.all("SELECT id,request FROM task_tools WHERE task_id=? AND json_extract(request,'$.request.type')='workspace_agent_start'",h.taskId);
     assert.equal(new Set(receipts.map(row=>row.id)).size,5);
     assert.equal(new Set(receipts.map(row=>JSON.parse(row.request).request.workspace_id)).size,5);
-    // Five failed task attempts each exhaust the shared transport budget: one request and five retries.
-    assert.equal(requests,fault==='transport'?30:0);
+    // Five failed task attempts each forward one passthrough model request without duplicating upstream calls.
+    assert.equal(requests,fault==='transport'?5:0);
     // Recreate the engine: the slow schedule belongs to the task, not a timer in this process.
     await h.engine.close();const engine=new TaskEngine(h.store,h.engine.manager,h.githubUrl, undefined, acceptanceFixture);t.after(()=>engine.close());
     let now=saved.next_run_at-1;t.mock.method(Date,'now',()=>now);

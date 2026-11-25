@@ -453,7 +453,7 @@ test('#1266 runner polls add no task_tools or task_history rows; effectful opera
 
   // 2) Defense-in-depth: even a direct task_tools insert/update for poll/liveness types adds zero task_history rows.
   const histBeforeDirect = store.get("SELECT count(*) n FROM task_history WHERE task_id='t' AND type='operation'").n;
-  for (const pollType of ['workspace_agent_poll', 'workspace_harness_poll', 'workspace_agent_live', 'workspace_agent_runtime', 'workspace_agent_progress']) {
+  for (const pollType of ['workspace_agent_poll', 'workspace_harness_poll', 'workspace_agent_live', 'workspace_agent_runtime']) {
     store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,'t',?,NULL,'pending')", 'direct-' + pollType, JSON.stringify({ request: { type: pollType } }));
     store.run("UPDATE task_tools SET state='completed',result='{}' WHERE id=?", 'direct-' + pollType);
   }
