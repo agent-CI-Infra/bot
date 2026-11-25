@@ -264,7 +264,7 @@ export class ScheduleService {
   private command(actor: ActorContext, command: ManagementCommand, key: string): Json {
     return this.store.transaction(() => {
       const previous = this.store.get('SELECT result FROM schedule_operations WHERE effect_key=?', key); if (previous) return JSON.parse(previous.result);
-      if (this.management.revision(command.target) !== command.expected_revision) fail(409, 'management_revision_conflict');
+      this.management.expectRevision(command.target, command.expected_revision);
       const project = command.target.project_id, args = command.arguments as any, operation = command.operation;
       this.management.scope(actor, project, 'schedules.manage');
       let result: Json;

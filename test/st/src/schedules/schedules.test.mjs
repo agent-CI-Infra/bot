@@ -11,6 +11,7 @@ import { ChannelService } from '../../../../dist/channels/service.js';
 import { ScheduleService } from '../../../../dist/schedules/service.js';
 import { Scheduler } from '../../../../dist/schedules/worker.js';
 import { scheduleStorage } from '../../../../dist/schedules/storage.js';
+import { ProjectService } from '../../../../dist/projects/service.js';
 import { migrateDailyReports } from '../../../../dist/schedules/migration.js';
 import { defaultLimits } from '../../../../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../../../../dist/schedules/time.js';
@@ -160,6 +161,31 @@ test('misfire skips an unbounded history; once runs only one due instance, updat
   const edit = await command(f, 'schedule.update', { id: s.id, revision: 2, plan: f.plan({ timezone: 'Europe/Berlin' }) }); assert.equal(edit.value.state, 'succeeded');
   f.worker.dispatch(claim); assert.equal(f.h.store.get('SELECT state FROM schedule_occurrences WHERE id=?', claim.id).state, 'succeeded');
   assert.equal(JSON.parse(f.h.store.get('SELECT snapshot FROM schedule_occurrences WHERE id=?', claim.id).snapshot).plan.timezone, 'UTC');
+});
+// #1361: on a busy project the computer manager reports a new state every few seconds. A revision read before those
+// reports still registers a plan; a stale revision is refused with the current one.
+test('computer state reports leave the project revision alone, and a stale command learns the current revision', async t => {
+  const f = await fixture(t), projects = new ProjectService(f.h.store, null);
+  const report = (state, revision, change = {}) => projects.save({ repository_id: '101', generation: 1, state, desired: 'ready', revision, ...change });
+  const submit = (revision, key = randomId()) => f.admin('/api/management/commands', 'POST', { operation: 'schedule.register', target, arguments: { plan: f.plan() },
+    expected_revision: revision, idempotency_key: key, source_conversation: 'schedule-fixture', source_message: key });
+  report('ready', 1);
+  const read = (await query(f, 'list_schedules')).revision;
+  // The computer runs tasks in parallel: its state flips and the manager's own revision climbs.
+  for (const [state, revision] of [['busy', 2], ['ready', 3], ['busy', 5955721]]) report(state, revision);
+  assert.equal(f.h.store.get("SELECT revision FROM project_environments WHERE repository_id='101'").revision, 5955721);
+  assert.equal((await query(f, 'list_schedules')).revision, read);
+  const registered = await submit(read); assert.equal(registered.status, 201); assert.equal(registered.value.state, 'succeeded', JSON.stringify(registered.value));
+  // The new plan is configuration: the revision read before it is stale now, and the refusal names the current one.
+  const current = (await query(f, 'list_schedules')).revision; assert.notEqual(current, read);
+  const stale = await submit(read);
+  assert.equal(stale.status, 409); assert.equal(stale.value.error, 'management_revision_conflict'); assert.equal(stale.value.field, 'expected_revision');
+  assert.deepEqual(stale.value.detail, { current_revision: current });
+  assert.equal((await submit(stale.value.detail.current_revision)).value.state, 'succeeded');
+  // What a person sets on the computer still counts: stopping it (desired) and resetting it (a new generation).
+  const started = (await query(f, 'list_schedules')).revision;
+  report('stopped', 5955722, { desired: 'stopped' }); const stopped = (await query(f, 'list_schedules')).revision; assert.notEqual(stopped, started);
+  report('stopped', 1, { generation: 2, desired: 'stopped' }); assert.notEqual((await query(f, 'list_schedules')).revision, stopped);
 });
 test('revoking a personal owner pauses the plan, and blocks their subscription\'s queued notification before transport', async t => {
   const f = await fixture(t), member = await f.member('schedule-member', { repository_ids: ['101'] });

@@ -42,6 +42,7 @@ test('configuration commands execute normally, conflict without overwrite, repla
   assert.equal(result.status,201);assert.equal(result.value.state,'succeeded');assert.equal(result.value.channel,'api');assert.equal(result.value.result.diff.after.prompt,'New default');assert.equal(result.value.result.effect,'future_tasks');
   assert.deepEqual((await command(admin,'manager.update',project,{prompt:'New default'},'save-one',before.revision)).value,result.value);
   const conflicting=await command(admin,'manager.update',project,{prompt:'Stale value'},'stale',before.revision);assert.equal(conflicting.status,409);assert.equal(conflicting.value.error,'management_revision_conflict');
+  assert.deepEqual(conflicting.value.detail,{current_revision:(await query(admin,'get_effective_config',project)).value.revision});
   assert.equal((await managerSection(admin,'101')),'New default');
   assert.equal((await command(admin,'manager.update',project,{prompt:'Different payload'},'save-one',before.revision)).value.error,'idempotency_conflict');
   h.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)','101','a'.repeat(40),JSON.stringify({'.bot/rules/issue-review.md':'Repository rule'}),'now');

@@ -8,7 +8,7 @@
 
 - **查询与命令契约**：
   - `POST /api/management/query`：只读查询目录（`list_projects`、`list_tasks`、`get_task`、`get_effective_config`、`get_usage`、`list_audit`、`search_knowledge` 等），统一通过 `resolveActor` 过滤项目范围。
-  - `POST /api/management/commands`：写操作必须携带闭合 Schema 参数、`expected_revision`（冲突返回 `409 management_revision_conflict`）、操作者范围唯一 `idempotency_key` 与来源会话/消息引用；保存持久化回执（`succeeded` / `failed` / `unknown`）和变更 diff，支持按命令 ID 对账恢复。
+  - `POST /api/management/commands`：写操作必须携带闭合 Schema 参数、`expected_revision`（项目版本号只覆盖配置：策略、Manager、角色、定时与订阅、标签、规则来源、模型、电脑规格及电脑的 `generation`/`desired`，不含项目电脑上报的运行状态；冲突返回 `409 management_revision_conflict`，`detail.current_revision` 给出当前版本号）、操作者范围唯一 `idempotency_key` 与来源会话/消息引用；保存持久化回执（`succeeded` / `failed` / `unknown`）和变更 diff，支持按命令 ID 对账恢复。
 - **无审批直执行**：授权范围内的管理命令（含 `task.create`）直接执行并记审计，不设额外的控制台二次确认卡片拦截；历史请求中的 `workflow_changes` 布尔字段平滑兼容忽略。
 - **仓库接入归一**：管理助手原生覆盖已安装未启动仓库（`pending_repositories`）的只读探索与 `start_repository` 工具（超管或受信任组织管理员直接启动并同轮配置，未受信任组织落库 `onboarding_requests` 待超管审批）。
 - **回合来源**：`ManagementAgent.context()` 按当前消息自己的 `source_message` 判断来源并写入 `message_source`：`feishu:` 前缀为 `feishu_private_chat`，`schedule:` 前缀为 `timer`，其余为网页控制台输入的 `web_console`；历史中的每一轮也带自己的 `source`。名字由渠道层的 `sourceNames` 补充：私聊对象的飞书名字为 `chat_name`，定时任务为 `timer_name` 与结果发往私聊的 `chat_name`，未知时为 `null`。Pi 回合在消息被编辑后重建上下文时走同一个 `context()`，来源随之保留。
