@@ -864,3 +864,120 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
     }
   } finally { await h.stop(); }
 });
+
+// #1067: the OS-dark audit found four more surfaces that keep a light literal while their text follows the dark
+// tokens. Each cluster below measures the pair a reader actually gets from getComputedStyle — foreground against the
+// nearest ancestor that paints a background — not a token compared with a token. The message carries the ratio so a
+// red run on an un-fixed tree states the number it measured.
+async function renderedPair(page, selector) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { missing: sel };
+    let background = null;
+    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+      const bg = getComputedStyle(node).backgroundColor;
+      if (bg && bg !== 'transparent' && !/rgba\(0, 0, 0, 0\)/.test(bg)) { background = bg; break; }
+    }
+    const style = getComputedStyle(el);
+    const box = el.getBoundingClientRect();
+    return { color: style.color, background: background || getComputedStyle(document.body).backgroundColor,
+      visible: box.width > 1 && box.height > 1, stroke: style.stroke || null,
+      classes: typeof el.className === 'string' ? el.className : '' };
+  }, selector);
+}
+
+function pairRatio(sample, label) {
+  expect(sample.missing, `${label} must render`).toBeFalsy();
+  expect(sample.visible, `${label} must be visible`).toBe(true);
+  const foreground = rgb(sample.color);
+  const background = rgb(sample.background);
+  expect(foreground, `${label} foreground ${sample.color}`).not.toBeNull();
+  expect(background, `${label} background ${sample.background}`).not.toBeNull();
+  return contrast(foreground, background);
+}
+
+test('#1067-A the costs table head renders at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await signIn(page, h, password, '#/costs');
+    await page.locator('#costs-panel .cost-table-scroll th').first().waitFor();
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(400);
+    const sample = await renderedPair(page, '#costs-panel .cost-table-scroll th');
+    const ratio = pairRatio(sample, 'costs table head');
+    expect(ratio, `costs table head ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+  } finally { await h.stop(); }
+});
+
+test('#1067-B the saved-notice flash renders at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await signIn(page, h, password, '#/projects/101/basic');
+    await page.locator('[data-testid="console-save-bar"]').waitFor();
+    // `liveCard()` and the project save path render `view-success flash`; drive one real save so the pair is the one
+    // the app paints, not a hand-built node.
+    const branch = page.locator('input[name="base_branch"]').first();
+    await branch.fill('dark-750');
+    await page.locator('[data-testid="console-save"]').click();
+    const flash = page.locator('p.view-success.flash').first();
+    await flash.waitFor({ timeout: 15000 });
+    await page.waitForTimeout(300);
+    const sample = await renderedPair(page, 'p.view-success.flash');
+    const ratio = pairRatio(sample, 'saved-notice flash');
+    expect(sample.classes, 'the measured node is the app-rendered view-success flash').toContain('view-success');
+    expect(ratio, `saved-notice flash ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+  } finally { await h.stop(); }
+});
+
+test('#1067-C the console save bar status renders at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await signIn(page, h, password, '#/projects/101/basic');
+    const status = page.locator('[data-testid="console-save-bar"] [data-testid="console-save-status"]');
+    await status.waitFor();
+    const sample = await renderedPair(page, '[data-testid="console-save-bar"] [data-testid="console-save-status"]');
+    const ratio = pairRatio(sample, 'console save bar status');
+    expect(ratio, `console save bar status ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+  } finally { await h.stop(); }
+});
+
+test('#1067-D the knowledge tree current entry renders at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await signIn(page, h, password, '#/projects/101/knowledge');
+    const entry = page.locator('.knowledge-tree button.quiet[aria-current]').first();
+    await entry.waitFor({ timeout: 15000 });
+    await page.waitForTimeout(300);
+    const sample = await renderedPair(page, '.knowledge-tree button.quiet[aria-current]');
+    const ratio = pairRatio(sample, 'knowledge tree current entry');
+    expect(ratio, `knowledge tree current entry ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+    // Same 2.46:1 cause: the entry's icon is `currentColor`, so pin its stroke too instead of letting the text fix
+    // hide an icon that stayed brand blue on the brand-weak fill.
+    const icon = await renderedPair(page, '.knowledge-tree button.quiet[aria-current] svg');
+    expect(icon.missing, 'the current entry renders its icon').toBeFalsy();
+    const stroke = rgb(icon.stroke);
+    expect(stroke, `knowledge tree icon stroke ${icon.stroke}`).not.toBeNull();
+    const iconRatio = contrast(stroke, rgb(icon.background));
+    expect(iconRatio, `knowledge tree icon ${icon.stroke} on ${icon.background} is ${iconRatio.toFixed(2)}:1, needs 3:1`).toBeGreaterThanOrEqual(3);
+  } finally { await h.stop(); }
+});

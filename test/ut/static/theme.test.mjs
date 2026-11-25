@@ -115,3 +115,59 @@ test('#750 status text that paints no background takes a dark token in both dark
     }
   }
 });
+
+test('#750 the token root declares --surface for light and for both dark blocks', () => {
+  // #1067 C: `.console-save-bar` reads `var(--surface, #fff)`; phase 1 never declared `--surface`, so the fallback was
+  // the only value and the whole bar stayed white in dark (its muted status read 2.14:1). The token belongs to the
+  // token root: one light value, one value in each dark block, and the light value is the old fallback so light pixels
+  // do not move.
+  assert.equal(light.get('--surface'), '#fff', 'the light :root must declare --surface: #fff');
+  for (const rule of dark) assert.equal(rule.tokens.get('--surface'), '#161d27', `${rule.selector} must declare --surface: #161d27`);
+});
+
+test('#750 the costs page takes its surfaces from the dark tokens in both dark blocks', () => {
+  // The costs page hardcodes the light palette (`.cost-filters` #fafcfd, `.cost-stat` #f8fbfc, `.cost-table-scroll th`
+  // #f5f8fa, borders #dde6eb / #e3eaf0, the incomplete notice #fff7e8), while its text already comes from the tokens.
+  // Following the system preference therefore puts token-coloured text on light plates — the e2e guard in
+  // `test/e2e/projects/project-tools.spec.mjs` measures 1.1–2.1:1 on those nodes. Both dark blocks must repaint the
+  // surfaces, not only the text.
+  const views = read('static/views.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...views.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selector, body]) => ({ selector: selector.trim(), body }));
+  const rows = [
+    ['#costs-panel', 'border-top-color', '--color-border'],
+    ['.cost-filters', 'background', '--color-surface-alt'],
+    ['.cost-stat', 'background', '--color-surface-alt'],
+    ['.cost-stat', 'border-color', '--color-border'],
+    ['.cost-chart-section', 'border-color', '--color-border'],
+    ['.cost-table-scroll', 'border-bottom-color', '--color-border'],
+    ['.cost-table-scroll th', 'background', '--color-surface-alt'],
+    ['.cost-incomplete', 'background', '--color-warning-bg'],
+    ['.cost-incomplete', 'color', '--color-warning'],
+    ['.cost-chart-detail', 'color', '--color-text-muted']
+  ];
+  for (const scope of [':root:not([data-theme="light"])', ':root[data-theme="dark"]']) {
+    const scoped = rules.filter((rule) => rule.selector.startsWith(scope));
+    for (const [selector, property, token] of rows) {
+      const hit = scoped.find((rule) => rule.selector.includes(selector) && new RegExp(`(^|;|\\s)${property}:\\s*var\\(${token}\\)`).test(rule.body));
+      assert.ok(hit, `${scope} must set ${property} of ${selector} to var(${token})`);
+    }
+  }
+  const muted = contrast(darkManual.get('--color-text-muted'), darkManual.get('--color-surface-alt'));
+  assert.ok(muted >= 4.5, `muted text on the dark surface-alt is ${muted.toFixed(2)}:1, needs 4.5:1`);
+});
+
+test('#750 the flash notice keeps a dark plate in both dark blocks', () => {
+  // `.flash` paints `#e5f2e9` and lets the text follow the tokens, so in dark the light plate meets the light text
+  // (about 1.2:1) and `view-success flash` (the notification `liveCard()` and the project save path paint) reads
+  // 1.46:1. The light rule stays as it is; the two dark blocks give the plate the success background token.
+  const views = read('static/views.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...views.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selector, body]) => ({ selector: selector.trim(), body }));
+  const lightFlash = rules.find((rule) => rule.selector === '.flash');
+  assert.ok(lightFlash && /background:\s*#e5f2e9/.test(lightFlash.body), 'the light flash plate is unchanged');
+  for (const scope of [':root:not([data-theme="light"])', ':root[data-theme="dark"]']) {
+    const hit = rules.find((rule) => rule.selector === `${scope} .flash` && /background:\s*var\(--color-success-bg\)/.test(rule.body));
+    assert.ok(hit, `${scope} must paint .flash with var(--color-success-bg)`);
+  }
+  const ratio = contrast(darkManual.get('--color-text'), darkManual.get('--color-success-bg'));
+  assert.ok(ratio >= 4.5, `text on the dark flash plate is ${ratio.toFixed(2)}:1, needs 4.5:1`);
+});

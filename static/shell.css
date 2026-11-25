@@ -39,6 +39,10 @@
      background in light (a terminal look); in dark that inverts into light-on-light, so all three read these two
      tokens instead. The light values are the ones `pre.output` already had. */
   --color-code-bg: #f5f8fa; --color-code-text: #17243b;
+  /* #1067: views.css reads `var(--surface, #fff)` for its sticky save bars (role-save, console-save-bar); this token
+     root never declared it, so the fallback was the only value and those bars stayed white in dark. Light keeps the
+     old fallback so no light pixel moves; both dark blocks below override it. */
+  --surface: #fff;
   color-scheme: light dark;
 }
 /* #750: one dark palette, declared twice on purpose. The media query is the system preference and stays in force only
@@ -61,6 +65,7 @@
     --color-overlay: #000000a6; --color-modal-backdrop: #000000a6; --shadow-confirm: 0 8px 24px #00000073; --shadow-card: 0 2px 6px #00000040;
     --shadow-card-hover: 0 3px 10px #00000059; --shadow-popover: 0 8px 24px #00000073;
     --color-code-bg: #1b2430; --color-code-text: #e7edf6;
+    --surface: #161d27;
   }
 }
 :root[data-theme="dark"] {
@@ -78,6 +83,7 @@
   --color-overlay: #000000a6; --color-modal-backdrop: #000000a6; --shadow-confirm: 0 8px 24px #00000073; --shadow-card: 0 2px 6px #00000040;
   --shadow-card-hover: 0 3px 10px #00000059; --shadow-popover: 0 8px 24px #00000073;
   --color-code-bg: #1b2430; --color-code-text: #e7edf6;
+  --surface: #161d27;
 }
 /* A manual light choice wins over a dark system: this block comes after the media query on purpose. */
 :root[data-theme="light"] { color-scheme: light; }

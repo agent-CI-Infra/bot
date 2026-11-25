@@ -1143,6 +1143,16 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root:not([data-theme="light"]) .view-success { color: var(--color-success); }
   :root:not([data-theme="light"]) .view-progress { color: var(--color-info); }
   :root:not([data-theme="light"]) .machine-config-error { color: var(--color-danger); }
+  /* `.flash` is a light plate with token text; in dark it takes the success background token. */
+  :root:not([data-theme="light"]) .flash { background: var(--color-success-bg); }
+  /* The costs page paints its plates with light literals; in dark they have to come from the palette too. */
+  :root:not([data-theme="light"]) #costs-panel { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(.cost-filters, .cost-stat, .cost-table-scroll th) { background: var(--color-surface-alt); }
+  :root:not([data-theme="light"]) :is(.cost-stat, .cost-chart-section) { border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .cost-table-scroll :is(th, td) { border-bottom-color: var(--color-border); }
+  :root:not([data-theme="light"]) .cost-incomplete { color: var(--color-warning); background: var(--color-warning-bg); }
+  :root:not([data-theme="light"]) .cost-chart-detail { color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .cost-chart-scroll rect:focus { outline-color: var(--focus-ring); }
   :root:not([data-theme="light"]) .step-fold-body { background: var(--color-surface-alt); border-top-color: var(--color-border); }
   :root:not([data-theme="light"]) .step-io-block { background: var(--color-surface-alt); border-color: var(--color-border); }
   :root:not([data-theme="light"]) .step-io-title { color: var(--color-text-muted); }
@@ -1195,6 +1205,16 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   :root[data-theme="dark"] .view-success { color: var(--color-success); }
   :root[data-theme="dark"] .view-progress { color: var(--color-info); }
   :root[data-theme="dark"] .machine-config-error { color: var(--color-danger); }
+  /* `.flash` is a light plate with token text; in dark it takes the success background token. */
+  :root[data-theme="dark"] .flash { background: var(--color-success-bg); }
+  /* The costs page paints its plates with light literals; in dark they have to come from the palette too. */
+  :root[data-theme="dark"] #costs-panel { border-top-color: var(--color-border); }
+  :root[data-theme="dark"] :is(.cost-filters, .cost-stat, .cost-table-scroll th) { background: var(--color-surface-alt); }
+  :root[data-theme="dark"] :is(.cost-stat, .cost-chart-section) { border-color: var(--color-border); }
+  :root[data-theme="dark"] .cost-table-scroll :is(th, td) { border-bottom-color: var(--color-border); }
+  :root[data-theme="dark"] .cost-incomplete { color: var(--color-warning); background: var(--color-warning-bg); }
+  :root[data-theme="dark"] .cost-chart-detail { color: var(--color-text-muted); }
+  :root[data-theme="dark"] .cost-chart-scroll rect:focus { outline-color: var(--focus-ring); }
   :root[data-theme="dark"] .step-fold-body { background: var(--color-surface-alt); border-top-color: var(--color-border); }
   :root[data-theme="dark"] .step-io-block { background: var(--color-surface-alt); border-color: var(--color-border); }
   :root[data-theme="dark"] .step-io-title { color: var(--color-text-muted); }
