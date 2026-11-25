@@ -113,8 +113,8 @@ export function validateAssistantSettings(input, host = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, modelGateway = null, projectToolsMount = null, projectToolsVolume = null, skillStoreMount = null, skillStoreVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
-    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.modelGateway = modelGateway; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.skillStoreMount = skillStoreMount; this.skillStoreVolume = skillStoreVolume; this.resultMount=resultMount;
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, modelGateway = null, runnerSocket = null, projectToolsMount = null, projectToolsVolume = null, skillStoreMount = null, skillStoreVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
+    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.modelGateway = modelGateway; this.runnerSocket = runnerSocket; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.skillStoreMount = skillStoreMount; this.skillStoreVolume = skillStoreVolume; this.resultMount=resultMount;
     this.globalEnvironment = globalEnvironment; this.disk = disk; this.allocatedMemoryMb = allocatedMemoryMb; this.lastHost = null;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
@@ -315,8 +315,11 @@ export class AssistantComputers {
   discard(lease, reason) {
     if (this.leases.get(lease.owner) === lease) this.leases.delete(lease.owner);
     lease.removed = reason;
+    const containerName = this.name(lease.owner);
+    this.docker.unregisterRunnerEndpoint?.(containerName);
     const previous = this.removing.get(lease.owner) || Promise.resolve();
-    const done = previous.then(() => this.docker.request('DELETE', `/containers/${this.name(lease.owner)}?force=true`))
+    const done = previous.then(() => this.docker.request('DELETE', `/containers/${containerName}?force=true`))
+      .then(() => this.runnerSocket?.cleanup(containerName))
       .then(() => this.removeScratchVolumes(lease.owner))
       .then(() => { if (this.db.isOpen && !this.settings().egress && ![...this.leases.values()].some(l => l.egress)) return this.removeNetwork(); })
       .catch(error => logFailure(`assistant computer ${lease.owner} removal (${reason}) failed`, error))
@@ -496,8 +499,9 @@ export class AssistantComputers {
     const extraEnv = lease.env && Object.keys(lease.env).length
       ? [...Object.entries(lease.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(lease.env).join(',')}`]
       : [];
+    const preparedSocket = await this.runnerSocket?.prepare(name);
     const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
-      Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant', `BOT_WORKSPACE_LIMIT_MB=${l.workspace_mb}`, `BOT_TMP_LIMIT_MB=${l.tmp_mb}`, ...extraEnv], Labels: this.labels(owner),
+      Cmd: ['node', '/opt/runner/daemon.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant', `BOT_WORKSPACE_LIMIT_MB=${l.workspace_mb}`, `BOT_TMP_LIMIT_MB=${l.tmp_mb}`, ...extraEnv], Labels: this.labels(owner),
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: networkMode,
         Mounts: [
@@ -509,10 +513,21 @@ export class AssistantComputers {
           ...skillMounts,
           ...(modelGatewayVol ? [{ Type: 'volume', Source: modelGatewayVol, Target: '/run/model-gateway', ReadOnly: true }] : []),
           ...projectToolMounts,
+          ...(preparedSocket ? [preparedSocket.mount] : []),
         ] } });
-    if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
+    if (!made) {
+      await this.runnerSocket?.cleanup(name);
+      throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
+    }
+    if (preparedSocket) {
+      this.docker.registerRunnerEndpoint?.(name, { socketPath: preparedSocket.socketPath, token: preparedSocket.token });
+    }
     await this.docker.request('POST', `/containers/${name}/start`);
-    const health = await this.docker.runner(name, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
+    const health = typeof this.docker.waitForRunner === 'function'
+      ? await this.docker.waitForRunner(name, {
+        isAlive: async () => Boolean((await this.inspect(owner).catch(() => null))?.State?.Running),
+      })
+      : await this.docker.runner(name, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
     if (!health?.ok || !health.result?.ready) throw new ManagerError('runner_not_ready');
   }
   held(owner, turn) {
@@ -582,7 +597,10 @@ export class AssistantComputers {
       // Wait for that removal: a second DELETE meanwhile gets Docker's 409 "removal already in progress", and the caller
       // (the control plane's sweep, a console clear, retention) would fail although the computer is gone.
       await this.removing.get(owner);
-      if (await this.inspect(owner).catch(() => null)) await this.docker.request('DELETE', `/containers/${this.name(owner)}?force=true`);
+      const cname = this.name(owner);
+      this.docker.unregisterRunnerEndpoint?.(cname);
+      if (await this.inspect(owner).catch(() => null)) await this.docker.request('DELETE', `/containers/${cname}?force=true`);
+      await this.runnerSocket?.cleanup(cname);
       await this.removeScratchVolumes(owner);
     }
     return { owner, state: 'removed' };
@@ -611,7 +629,12 @@ export class AssistantComputers {
   async recover() {
     const filters = encodeURIComponent(JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, 'department.bot.kind=assistant'] }));
     const containers = await this.docker.request('GET', `/containers/json?all=1&filters=${filters}`) || [];
-    for (const container of containers) await this.docker.request('DELETE', `/containers/${container.Id}?force=true`).catch(error => logFailure('leftover assistant computer removal failed', error));
+    for (const container of containers) {
+      const cname = container.Names?.[0]?.replace(/^\//, '') || null;
+      if (cname) this.docker.unregisterRunnerEndpoint?.(cname);
+      await this.docker.request('DELETE', `/containers/${container.Id}?force=true`).catch(error => logFailure('leftover assistant computer removal failed', error));
+      if (cname) await this.runnerSocket?.cleanup(cname);
+    }
     for (const kind of ['assistant-workspace', 'assistant-tmp']) {
       const volFilters = encodeURIComponent(JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, `department.bot.kind=${kind}`] }));
       const listed = await this.docker.request('GET', `/volumes?filters=${volFilters}`).catch(() => null);

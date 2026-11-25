@@ -1,7 +1,7 @@
 import { mkdir, open, rm, stat, readdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { environment } from './command.mjs';
+import { environment, operationTag } from './command.mjs';
 import { workspaceRoot } from './paths.mjs';
 
 // One git object store per project computer, in its work volume, shared by the tasks on it. The control plane keeps the
@@ -12,10 +12,10 @@ import { workspaceRoot } from './paths.mjs';
 export const storeRoot = workspaceRoot + '/git';
 const paths = root => ({ store: root + '/repo.git', incoming: root + '/incoming' });
 const objectId = /^[a-f0-9]{40}$/, packId = /^[a-f0-9]{48}$/;
-export function git(args, { cwd = paths(storeRoot).store, input, output } = {}) {
+export function git(args, { cwd = paths(storeRoot).store, input, output, operationId } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [], child = spawn('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
-      { cwd, env: { ...environment, GIT_TERMINAL_PROMPT: '0' }, stdio: [input ? 'pipe' : 'ignore', output ?? 'pipe', 'pipe'] });
+      { cwd, env: { ...environment, ...operationTag(operationId), GIT_TERMINAL_PROMPT: '0' }, stdio: [input ? 'pipe' : 'ignore', output ?? 'pipe', 'pipe'] });
     let stderr = '';
     child.stdout?.on('data', chunk => chunks.push(chunk)); child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
     child.on('error', () => reject(new Error(`git ${args[0]} could not start`)));
@@ -32,7 +32,7 @@ async function ensureStore(root) {
   for (const [key, value] of [['core.autocrlf', 'false'], ['gc.autoDetach', 'false'], ['commit.gpgsign', 'false']]) await git(['config', key, value], { cwd: store });
 }
 export async function storeOperation(input, root = storeRoot) {
-  await ensureStore(root); const { store, incoming } = paths(root), run = (args, options = {}) => git(args, { cwd: store, ...options });
+  await ensureStore(root); const { store, incoming } = paths(root), run = (args, options = {}) => git(args, { cwd: store, operationId: input.operation_id, ...options });
   // The commits this store holds, so the control plane sends only what is missing.
   if (input.type === 'git_have') return { commits: (await run(['for-each-ref', '--format=%(objectname)', 'refs/bot/commits/'])).toString().split('\n').filter(sha => objectId.test(sha)) };
   if (!packId.test(input.pack_id || '')) throw new Error('invalid_pack');
@@ -57,7 +57,8 @@ export async function storeOperation(input, root = storeRoot) {
     }
     const handle = await open(out, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      const size = (await handle.stat()).size, buffer = Buffer.alloc(Math.max(0, Math.min(45000, size - input.offset)));
+      const chunkLimit = Number.isSafeInteger(input.limit) && input.limit >= 1 ? Math.min(input.limit, 4 * 1024 * 1024) : 45000;
+      const size = (await handle.stat()).size, buffer = Buffer.alloc(Math.max(0, Math.min(chunkLimit, size - input.offset)));
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, input.offset), next = input.offset + bytesRead;
       if (next >= size) await rm(out, { force: true });
       return { base64: buffer.subarray(0, bytesRead).toString('base64'), offset: input.offset, size, done: next >= size };

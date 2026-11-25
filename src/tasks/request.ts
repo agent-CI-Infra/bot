@@ -1,4 +1,4 @@
-import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
+import { RUNNER_TRANSFER_CHUNK_BYTES, commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
 import { versionTools, versionTool } from './versions.js';
 import { applyIntegration } from './integration.js';
 import { blobValue, saveDevelopmentCandidate, storedInput } from '../storage/payloads.js';
@@ -1502,10 +1502,13 @@ export async function runRequest(
             continue;
           }
           const chunks: Buffer[] = [];
-          for (let offset = 0; offset < file.size; offset += 30000) {
-            const part = await workspace.call(`archive:${snapshot.local_sha}:${file.sha}:${offset}`, { type: 'workspace_blob', sha: file.sha, offset });
+          for (let offset = 0; offset < file.size;) {
+            const part = await workspace.call(`archive:${snapshot.local_sha}:${file.sha}:${offset}`, { type: 'workspace_blob', sha: file.sha, offset, limit: RUNNER_TRANSFER_CHUNK_BYTES });
             if (part.error) break;
-            chunks.push(Buffer.from(part.base64 || '', 'base64'));
+            const buf = Buffer.from(part.base64 || '', 'base64');
+            if (!buf.length) break;
+            chunks.push(buf);
+            offset += buf.length;
           }
           const data = Buffer.concat(chunks);
           traceEvent(store, task.id, 'artifact_content', JSON.parse(traceSnapshot({ ...retainedTextArtifact(file.path, file.sha, data, file.size, text => redactor.text(text)), candidate_tree: snapshot.tree_sha })));

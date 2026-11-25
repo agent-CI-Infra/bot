@@ -45,21 +45,20 @@ test('a ceiling below the 120 second entry default lowers the default instead of
   assert.throws(() => low.assistantCommandTimeout(61), error => error.status === 400 && error.code === 'invalid_timeout_seconds' && /between 1 and 60/.test(String(error.detail?.message ?? '')));
 });
 
-test('the assistant computer run_command accepts the declared 64 KiB command limit and refuses a longer command by name', async () => {
-  // #1320 review: the assistant tool described the same 64 KiB limit as the task workspace, but its execution path
-  // stopped at 16000 characters with a generic invalid_field, so the declared bound was never the real one. The
-  // refusal must be the same named answer the runner gives, with the limit and the actual byte length.
+test('the assistant computer run_command accepts the declared 1 MiB command limit and refuses a longer command by name', async () => {
   const { AssistantComputer } = await import('../../../../dist/service-roles/assistant-computers.js');
+  const { commandLimit } = await import('../../../../dist/agent/command.js');
+  assert.equal(commandLimit, 1024 * 1024);
   const instance = new AssistantComputer({}, {});
   const requests = [];
   instance.run = async request => { requests.push(request); return { ok: true, result: { exit_code: 0 } }; };
-  const atLimit = 'x'.repeat(65536);
+  const atLimit = 'x'.repeat(commandLimit);
   await instance.execute('run_command', { command: atLimit });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].command, atLimit, 'a command at the declared limit reaches the computer unchanged');
   const over = await instance.execute('run_command', { command: atLimit + 'x' });
-  assert.deepEqual([over.error, over.limit, over.length], ['command_too_long', 65536, 65537]);
-  assert.match(String(over.detail), /65536 bytes/);
+  assert.deepEqual([over.error, over.limit, over.length], ['command_too_long', commandLimit, commandLimit + 1]);
+  assert.match(String(over.detail), new RegExp(`${commandLimit} bytes`));
   assert.match(String(over.detail), /script file/);
   assert.equal(requests.length, 1, 'a refused command never reaches the computer');
 });

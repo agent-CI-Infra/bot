@@ -270,20 +270,30 @@ function transportWorkspace(t, call) {
   return { store, manager, workspace };
 }
 
-test('a command inside the byte limit whose JSON request exceeds the transport limit is refused by name', async t => {
+test('a dense-escaped 65 KiB command now fits transport, while a request over the 8 MiB transport limit is refused by name', async t => {
   const { runnerRequestLimit } = await import('../../../../dist/agent/command.js');
-  const f = transportWorkspace(t, async () => { throw new Error('the manager must not be asked to carry a request that cannot arrive'); });
-  // Both commands are 65535 UTF-8 bytes, inside the declared 64 KiB command limit, but JSON escaping pushes the request
-  // past the 95 KiB transport bound: 32767 quotes become 32767 more bytes, 65535 newlines 65535 more.
-  const commands = ['"'.repeat(32767) + 'x'.repeat(32768), '\n'.repeat(65535)];
-  for (const [index, command] of commands.entries()) {
+  const forwarded = [];
+  const f = transportWorkspace(t, async (_method, _path, body) => {
+    forwarded.push(body);
+    return { ok: true, result: { exit_code: 0, output: 'ok' } };
+  });
+  // Previously blocked at 95 KiB because JSON escaping doubled quotes/newlines; now easily fits inside 8 MiB.
+  const dense = ['"'.repeat(32767) + 'x'.repeat(32768), '\n'.repeat(65535)];
+  for (const [index, command] of dense.entries()) {
     assert.equal(Buffer.byteLength(command), 65535);
-    const result = await f.workspace.call('transport-' + index, { type: 'workspace_command', command, timeout_ms: 10000 });
-    assert.equal(result.error, 'runner_request_too_large');
-    assert.equal(result.limit, runnerRequestLimit);
-    assert.ok(Number.isSafeInteger(result.length) && result.length > runnerRequestLimit, String(result.length));
-    assert.match(String(result.detail), /script file/);
+    const ok = await f.workspace.call('transport-fits-' + index, { type: 'workspace_command', command, timeout_ms: 10000 });
+    assert.equal(ok.exit_code, 0);
   }
+  assert.equal(forwarded.length, 2);
+
+  // Requests exceeding the 8 MiB transport bound are refused locally before calling the manager.
+  const guarded = transportWorkspace(t, async () => { throw new Error('the manager must not be asked to carry a request that cannot arrive'); });
+  const oversized = '"'.repeat(Math.floor(runnerRequestLimit / 2) + 1024);
+  const result = await guarded.workspace.call('transport-over', { type: 'workspace_command', command: oversized, timeout_ms: 10000 });
+  assert.equal(result.error, 'runner_request_too_large');
+  assert.equal(result.limit, runnerRequestLimit);
+  assert.ok(Number.isSafeInteger(result.length) && result.length > runnerRequestLimit, String(result.length));
+  assert.match(String(result.detail), /script file/);
 });
 
 test('a runner answer that names the command limit keeps its limit and length in the tool result', async t => {

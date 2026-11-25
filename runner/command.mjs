@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync, fstatSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { appendFileSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync, fstatSync, writeFileSync, unlinkSync, constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommandOutput, maskedStream, outputLimit, backgroundOutputNotice } from './command-output.mjs';
-import { commandTooLong } from './command-policy.mjs';
+import { INLINE_ARGV_COMMAND_LIMIT, commandTooLong } from './command-policy.mjs';
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
 import { volume as readWorkspaceVolume, watchVolume, watchedVolume } from './disk.mjs';
+
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
 // persistent HOME of an assistant computer. Precompiled tools installed at build time live under /opt/preinstalled.
 const userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
@@ -20,96 +22,154 @@ export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvi
   ...(/^[a-f0-9]{48}$/.test(process.env.BOT_OPERATION_ID || '') ? { BOT_OPERATION_ID: process.env.BOT_OPERATION_ID } : {}),
   PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:${preinstalledBins}:/usr/local/bin:/usr/bin:/bin${assistant ? '' : ':/opt/project-tools/bin'}`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
+
+export const workspaceTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_WORKSPACE_ID: id } : {};
+export const operationTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_OPERATION_ID: id } : {};
+
+// Commands within INLINE_ARGV_COMMAND_LIMIT (64 KiB) run directly via `/bin/sh -c`; larger scripts (up to 1 MiB)
+// are materialized to a private 0600 script file in TMPDIR so Linux MAX_ARG_STRLEN (128 KiB) never raises E2BIG
+// while preserving `stdin = /dev/null` identically to `sh -c`.
+export function prepareShellScript(value, fallbackDir) {
+  if (Buffer.byteLength(value, 'utf8') <= INLINE_ARGV_COMMAND_LIMIT) {
+    return { args: ['-c', value], cleanup: () => {} };
+  }
+  const scriptDir = environment.TMPDIR || fallbackDir || '/tmp';
+  mkdirSync(scriptDir, { recursive: true });
+  const scriptPath = join(scriptDir, `.bot-cmd-${randomBytes(12).toString('hex')}.sh`);
+  const fd = openSync(scriptPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    writeFileSync(fd, value, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  let removed = false;
+  return {
+    args: [scriptPath],
+    scriptPath,
+    cleanup() {
+      if (removed) return;
+      removed = true;
+      try { unlinkSync(scriptPath); } catch {}
+    },
+  };
+}
+
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 // timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.
 // secretEnv (the task's read-only GitHub token) is added to the command's environment and masked in everything it prints.
 // workspaceId marks the command and everything it starts as that task's (BOT_WORKSPACE_ID), so cleanup can end one task's
 // processes while other tasks keep running on the same computer.
+// operationId marks unscoped/daemon operations (BOT_OPERATION_ID) without relying on shared process.env.
 // On a project computer a command that fails while the work volume runs full is marked disk_full (runner/disk.mjs);
 // volume replaces the statfs reader in tests.
-export const workspaceTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_WORKSPACE_ID: id } : {};
-export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv,workspaceId,backgroundDirectory,volume}={}) {
-  const tooLong=commandTooLong(value);
-  if(tooLong)throw Object.assign(new Error('command_too_long'),tooLong);
-  if(typeof value!=='string'||!value)throw new Error('invalid_command');
+export function command(value, cwd, timeoutMs = 10000, { outputFile, keepBackground = false, secretEnv, workspaceId, operationId, backgroundDirectory, volume, onOutput, onSpawn } = {}) {
+  const tooLong = commandTooLong(value);
+  if (tooLong) throw Object.assign(new Error('command_too_long'), tooLong);
+  if (typeof value !== 'string' || !value) throw new Error('invalid_command');
   // Local mode shares the host process namespace: use task cleanup, never name-wide kills.
-  if(local&&/(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value))return Promise.resolve({exit_code:126,output:'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.',timed_out:false,truncated:false});
-  const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
+  if (local && /(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value)) {
+    return Promise.resolve({ exit_code: 126, output: 'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.', timed_out: false, truncated: false });
+  }
+  const extra = Object.fromEntries(Object.entries(secretEnv || {}).filter(([key, secret]) => ['GH_TOKEN', 'GITHUB_TOKEN'].includes(key) && typeof secret === 'string' && secret.length >= 8));
+  const childEnv = { ...environment, ...operationTag(operationId), ...workspaceTag(workspaceId), ...extra };
   // Project computers watch only their data-disk work volume (never their RAM-backed /tmp tmpfs); assistant computers
   // mount both /workspace and /tmp as disk-backed volumes, so watch both by severity tier (#1279).
-  const watch=watchVolume(volume ?? (assistant ? () => watchedVolume([workspaceRoot, '/tmp']) : readWorkspaceVolume));
-  const run=keepBackground?backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory}):new Promise((resolve,reject)=>{
-    const output=new CommandOutput();let fd,logPath=outputFile;
-    if(logPath)fd=openSync(logPath,'w',0o600);
-    const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...workspaceTag(workspaceId),...extra},stdio:['ignore','pipe','pipe']});
-    let timedOut=false,done=false;
-    const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
-    const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();},Math.max(100,Number(timeoutMs)||10000));
-    const close=()=>{if(fd!==undefined){closeSync(fd);fd=undefined;}};
-    const failed=error=>{if(done)return;done=true;clearTimeout(timer);kill();child.stdout.destroy();child.stderr.destroy();close();reject(error);};
-    const collect=text=>{
-      if(done)return;
-      // Direct callers need no extra file for a small result. Large results get the same complete output contract.
-      if(!logPath&&output.bytes+Buffer.byteLength(text)>outputLimit){
-        logPath=join(mkdtempSync(join(backgroundDirectory||cwd,'.command-')),'output.log');fd=openSync(logPath,'wx',0o600);
-        appendFileSync(fd,output.head.subarray(0,output.bytes));
+  const watch = watchVolume(volume ?? (assistant ? () => watchedVolume([workspaceRoot, '/tmp']) : readWorkspaceVolume));
+  const run = keepBackground
+    ? backgroundCommand(value, cwd, timeoutMs, { outputFile, extra, childEnv, backgroundDirectory, onSpawn })
+    : new Promise((resolve, reject) => {
+      const output = new CommandOutput();
+      let fd, logPath = outputFile;
+      if (logPath) fd = openSync(logPath, 'w', 0o600);
+      let invocation;
+      try {
+        invocation = prepareShellScript(value, cwd);
+      } catch (error) {
+        if (fd !== undefined) { closeSync(fd); fd = undefined; }
+        reject(error);
+        return;
       }
-      if(fd!==undefined)appendFileSync(fd,text);
-      output.append(text);
-    };
-    const finish=(code,signal)=>{
-      if(done)return;done=true;clearTimeout(timer);
-      kill();close();
-      const result=output.result();
-      resolve({exit_code:code,signal,...result,timed_out:timedOut,...(result.truncated?{output_file:logPath}:{})});
-    };
-    for(const stream of [child.stdout,child.stderr]){
-      const masked=maskedStream(Object.values(extra),collect);
-      stream.on('data',data=>{try{masked.data(data);}catch(error){failed(error);}});
-      stream.on('end',()=>{try{masked.end();}catch(error){failed(error);}});
-    }
-    child.on('error',failed);
-    // By default the process group ends with the shell; keep_background leaves it running for later commands of the same task.
-    child.on('exit',()=>kill());
-    child.on('close',finish);
-  });
-  return watch?run.then(result=>watch.mark(result),error=>{watch.stop();throw error;}):run;
+      const child = spawn('/bin/sh', invocation.args, { cwd, detached: true, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      if (child.pid) try { onSpawn?.(child.pid); } catch {}
+      let timedOut = false, done = false;
+      const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
+      const timer = timeoutMs === null ? null : setTimeout(() => { timedOut = true; kill(); }, Math.max(100, Number(timeoutMs) || 10000));
+      const close = () => {
+        if (fd !== undefined) { closeSync(fd); fd = undefined; }
+        invocation.cleanup();
+      };
+      const failed = error => { if (done) return; done = true; clearTimeout(timer); kill(); child.stdout.destroy(); child.stderr.destroy(); close(); reject(error); };
+      const collect = text => {
+        if (done) return;
+        const offsetBefore = output.bytes;
+        // Direct callers need no extra file for a small result. Large results get the same complete output contract.
+        if (!logPath && output.bytes + Buffer.byteLength(text) > outputLimit) {
+          logPath = join(mkdtempSync(join(backgroundDirectory || cwd, '.command-')), 'output.log');
+          fd = openSync(logPath, 'wx', 0o600);
+          appendFileSync(fd, output.head.subarray(0, output.bytes));
+        }
+        if (fd !== undefined) appendFileSync(fd, text);
+        output.append(text);
+        if (onOutput) try { onOutput(text, offsetBefore, output.bytes); } catch {}
+      };
+      const finish = (code, signal) => {
+        if (done) return; done = true; clearTimeout(timer);
+        kill(); close();
+        const result = output.result();
+        resolve({ exit_code: code, signal, ...result, timed_out: timedOut, ...(result.truncated ? { output_file: logPath } : {}) });
+      };
+      for (const stream of [child.stdout, child.stderr]) {
+        const masked = maskedStream(Object.values(extra), collect);
+        stream.on('data', data => { try { masked.data(data); } catch (error) { failed(error); } });
+        stream.on('end', () => { try { masked.end(); } catch (error) { failed(error); } });
+      }
+      child.on('error', failed);
+      // By default the process group ends with the shell; keep_background leaves it running for later commands of the same task.
+      child.on('exit', () => kill());
+      child.on('close', finish);
+    });
+  return watch ? run.then(result => watch.mark(result), error => { watch.stop(); throw error; }) : run;
 }
 
 // A small detached logger owns the service's pipes after this request exits. Its stdout is a regular file, so neither
 // the runner's exit nor a full pipe buffer can terminate a service. Logs sit outside the candidate checkout.
-function backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory}) {
-  const directory=backgroundDirectory||cwd;mkdirSync(directory,{recursive:true,mode:0o700});
-  const logPath=join(mkdtempSync(join(directory,'.command-')),'output.log'),fd=openSync(logPath,'wx',0o600);
-  return new Promise((resolve,reject)=>{
-    let child;try{child=spawn(process.execPath,[fileURLToPath(new URL('./background-command.mjs',import.meta.url))],
-      {cwd,detached:true,env:{...environment,...workspaceTag(workspaceId),...extra},stdio:['ignore',fd,fd,'ipc']});}finally{closeSync(fd);}
-    let done=false,code=null,signal=null,timedOut=false;
-    const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
-    const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();finish();},Math.max(100,Number(timeoutMs)||10000));
-    const startup=setTimeout(()=>finish(),500);
-    const finish=()=>{
-      if(done)return;done=true;clearTimeout(timer);clearTimeout(startup);
-      let handle,mirror,size;const buffer=Buffer.alloc(65536),output=new CommandOutput();
-      try{
-        handle=openSync(logPath,'r');size=fstatSync(handle).size;
-        if(outputFile)mirror=openSync(outputFile,'w',0o600);
-        const decoded=maskedStream([],text=>{output.append(text);if(mirror!==undefined)appendFileSync(mirror,text);});
-        for(let position=0;position<size;){
-          const bytes=readSync(handle,buffer,0,Math.min(buffer.length,size-position),position);if(!bytes)throw new Error('command_output_unavailable');
-          const part=buffer.subarray(0,bytes);decoded.data(part);position+=bytes;
+function backgroundCommand(value, cwd, timeoutMs, { outputFile, extra, childEnv, backgroundDirectory, onSpawn }) {
+  const directory = backgroundDirectory || cwd; mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const logPath = join(mkdtempSync(join(directory, '.command-')), 'output.log'), fd = openSync(logPath, 'wx', 0o600);
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(process.execPath, [fileURLToPath(new URL('./background-command.mjs', import.meta.url))],
+        { cwd, detached: true, env: childEnv, stdio: ['ignore', fd, fd, 'ipc'] });
+      if (child.pid) try { onSpawn?.(child.pid); } catch {}
+    } finally { closeSync(fd); }
+    let done = false, code = null, signal = null, timedOut = false;
+    const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
+    const timer = timeoutMs === null ? null : setTimeout(() => { timedOut = true; kill(); finish(); }, Math.max(100, Number(timeoutMs) || 10000));
+    const startup = setTimeout(() => finish(), 500);
+    const finish = () => {
+      if (done) return; done = true; clearTimeout(timer); clearTimeout(startup);
+      let handle, mirror, size; const buffer = Buffer.alloc(65536), output = new CommandOutput();
+      try {
+        handle = openSync(logPath, 'r'); size = fstatSync(handle).size;
+        if (outputFile) mirror = openSync(outputFile, 'w', 0o600);
+        const decoded = maskedStream([], text => { output.append(text); if (mirror !== undefined) appendFileSync(mirror, text); });
+        for (let position = 0; position < size;) {
+          const bytes = readSync(handle, buffer, 0, Math.min(buffer.length, size - position), position);
+          if (!bytes) throw new Error('command_output_unavailable');
+          const part = buffer.subarray(0, bytes); decoded.data(part); position += bytes;
         }
         // A live logger may be in the middle of a UTF-8 write. This immutable snapshot ends at the last complete character.
-      }catch(error){kill();reject(error);return;}
-      finally{if(handle!==undefined)closeSync(handle);if(mirror!==undefined)closeSync(mirror);}
-      if(child.connected)child.disconnect();child.unref();
-      const result=output.result();
-      resolve({exit_code:code,signal,...result,timed_out:timedOut,log_path:logPath,...(result.truncated?{output_file:outputFile||logPath}:{}),
-        ...(!timedOut&&code===null&&signal===null?{running:true,pid:child.pid,notice:backgroundOutputNotice}:{})});
+      } catch (error) { kill(); reject(error); return; }
+      finally { if (handle !== undefined) closeSync(handle); if (mirror !== undefined) closeSync(mirror); }
+      if (child.connected) child.disconnect(); child.unref();
+      const result = output.result();
+      resolve({ exit_code: code, signal, ...result, timed_out: timedOut, log_path: logPath, ...(result.truncated ? { output_file: outputFile || logPath } : {}),
+        ...(!timedOut && code === null && signal === null ? { running: true, pid: child.pid, notice: backgroundOutputNotice } : {}) });
     };
-    child.on('message',message=>{if(message.type==='exit'){code=message.code;signal=message.signal;}});
-    child.on('exit',(exitCode,exitSignal)=>{code??=exitCode;signal??=exitSignal;finish();});
-    child.on('error',error=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(startup);kill();reject(error);});
-    child.send({command:value,secrets:Object.values(extra)});
+    child.on('message', message => { if (message.type === 'exit') { code = message.code; signal = message.signal; } });
+    child.on('exit', (exitCode, exitSignal) => { code ??= exitCode; signal ??= exitSignal; finish(); });
+    child.on('error', error => { if (done) return; done = true; clearTimeout(timer); clearTimeout(startup); kill(); reject(error); });
+    child.send({ command: value, secrets: Object.values(extra) });
   });
 }

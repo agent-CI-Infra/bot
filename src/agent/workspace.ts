@@ -15,7 +15,7 @@ import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.j
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
 import { sanitizeAgentPollTrajectory } from '../../runner/image-budget.mjs';
 import { MAX_ARTIFACT_COMPRESSED_BYTES } from '../../runner/artifact-zip.mjs';
-import { requestTooLarge } from '../../runner/command-policy.mjs';
+import { RUNNER_TRANSFER_CHUNK_BYTES, requestTooLarge } from '../../runner/command-policy.mjs';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -185,9 +185,9 @@ export class Workspace {
   async write(key:string,path:string,data:Buffer,mode='100644',snapshot=false,hash?:string){
     snapshot?safePath(path):workspaceToolPath(path);
     if(this.redactor.contains(data))stop('credential_in_repository',undefined,`Credential found in repository file: ${path}`);
-    for(let offset=0;offset<data.length||offset===0;offset+=30000){
-      const result=await this.call(key+':'+offset,{type:'workspace_write',path,base64:data.subarray(offset,offset+30000).toString('base64'),offset,
-        final:offset+30000>=data.length,mode,snapshot,...(hash?{sha:hash}:{})});
+    for(let offset=0;offset<data.length||offset===0;offset+=RUNNER_TRANSFER_CHUNK_BYTES){
+      const result=await this.call(key+':'+offset,{type:'workspace_write',path,base64:data.subarray(offset,offset+RUNNER_TRANSFER_CHUNK_BYTES).toString('base64'),offset,
+        final:offset+RUNNER_TRANSFER_CHUNK_BYTES>=data.length,mode,snapshot,...(hash?{sha:hash}:{})});
       if(result.error)stop('workspace_write_failed','waiting_environment',`Could not write ${path} at offset ${offset}: ${result.detail||result.error}`);
     }
   }
@@ -396,12 +396,12 @@ export class Workspace {
     const pack=await mirror.pack(missing,have.commits),id=randomId(),file=await open(pack.file,'r');
     try{
       // Chunks go straight to the computer: a first pack holds the whole repository and is not kept with the task.
-      const chunk=Buffer.alloc(45000);
-      for(let offset=0;offset<pack.size;offset+=45000){
+      const chunk=Buffer.alloc(RUNNER_TRANSFER_CHUNK_BYTES);
+      for(let offset=0;offset<pack.size;offset+=RUNNER_TRANSFER_CHUNK_BYTES){
         const {bytesRead}=await file.read(chunk,0,chunk.length,offset);
         const sent=await this.deliver({type:'git_pack',pack_id:id,base64:chunk.subarray(0,bytesRead).toString('base64'),offset});
         if(sent.error)return null;
-        if(offset%(45000*200)===0)this.log({type:'snapshot_progress',sha:commitSha,bytes:offset+bytesRead,detail:`正在把仓库历史传到虚拟电脑：${offset+bytesRead}／${pack.size} 字节`});
+        if(offset%(RUNNER_TRANSFER_CHUNK_BYTES*8)===0)this.log({type:'snapshot_progress',sha:commitSha,bytes:offset+bytesRead,detail:`正在把仓库历史传到虚拟电脑：${offset+bytesRead}／${pack.size} 字节`});
       }
     }finally{await file.close();await rm(pack.file,{force:true});}
     const imported=await this.call('checkout:import:'+id,{type:'git_import',pack_id:id,commits:missing});if(imported.error)return null;
@@ -420,8 +420,8 @@ export class Workspace {
     this.task.trace_context={...this.task.trace_context,...this.redactor.clean(files)};
     for(const [path,text] of Object.entries(files)){
       safePath(path);const data=Buffer.from(this.redactor.text(text));
-      for(let offset=0;offset<data.length||offset===0;offset+=45000){
-        const result=await this.deliver({type:'workspace_context',path,base64:data.subarray(offset,offset+45000).toString('base64'),offset});
+      for(let offset=0;offset<data.length||offset===0;offset+=RUNNER_TRANSFER_CHUNK_BYTES){
+        const result=await this.deliver({type:'workspace_context',path,base64:data.subarray(offset,offset+RUNNER_TRANSFER_CHUNK_BYTES).toString('base64'),offset});
         if(result.error)stop('workspace_write_failed','waiting_environment',`Could not write task context ${path} at offset ${offset}: ${result.detail||result.error}`);
       }
     }
@@ -431,8 +431,8 @@ export class Workspace {
     if(data.length>MAX_ARTIFACT_COMPRESSED_BYTES)return {error:'github_artifact_too_large',detail:`Compressed artifact size ${data.length} exceeds ${MAX_ARTIFACT_COMPRESSED_BYTES} bytes.`};
     if(!aside({type:'workspace_artifact_extract',path:targetPath})){const ready=await this.ensure();if(ready.error)return ready;}
     const stageId=randomId();
-    for(let offset=0;offset<data.length||offset===0;offset+=45000){
-      const staged=await this.deliver({type:'workspace_artifact_stage',stage_id:stageId,base64:data.subarray(offset,offset+45000).toString('base64'),offset});
+    for(let offset=0;offset<data.length||offset===0;offset+=RUNNER_TRANSFER_CHUNK_BYTES){
+      const staged=await this.deliver({type:'workspace_artifact_stage',stage_id:stageId,base64:data.subarray(offset,offset+RUNNER_TRANSFER_CHUNK_BYTES).toString('base64'),offset});
       if(staged.error)return staged;
       if(data.length===0)break;
     }
@@ -546,9 +546,13 @@ export class Workspace {
         continue;
       }
       const chunks:Buffer[]=[];
-      for(let offset=0;offset<file.size||offset===0;offset+=30000){
-        const part=await this.call(`candidate:blob:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset});
-        if(part.error)stop('candidate_blob_unavailable','waiting_environment',`Could not read candidate ${file.path} at offset ${offset}: ${part.detail||part.error}`);chunks.push(Buffer.from(part.base64,'base64'));
+      for(let offset=0;offset<file.size||offset===0;){
+        const part=await this.call(`candidate:blob:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset,limit:RUNNER_TRANSFER_CHUNK_BYTES});
+        if(part.error)stop('candidate_blob_unavailable','waiting_environment',`Could not read candidate ${file.path} at offset ${offset}: ${part.detail||part.error}`);
+        const chunk=Buffer.from(part.base64,'base64');
+        chunks.push(chunk);
+        if(file.size===0||chunk.length===0)break;
+        offset+=chunk.length;
       }
       const bytes=Buffer.concat(chunks);
       if(blobSha(bytes)!==file.sha||this.redactor.contains(bytes))stop('candidate_blob_invalid',undefined,`Candidate blob hash or credential check failed: ${file.path}`);

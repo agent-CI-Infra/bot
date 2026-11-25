@@ -3,8 +3,16 @@
 // environ(pid) and cwd(pid) read /proc in the computer; tests pass their own.
 import { tasksDirectory, runnerRoot } from './paths.mjs';
 export const tasksRoot = tasksDirectory + '/';
-const idPattern = /^[a-f0-9]{48}$/, runnerPrefix = 'node ' + runnerRoot + '/runner.mjs ', agentPrefix = 'node ' + runnerRoot + '/pi-entry.mjs ' + tasksRoot, harnessMarker = runnerRoot + '/harness-entry.mjs ' + tasksRoot;
-export const isRunner = row => row.cmdline.startsWith(runnerPrefix);
+const idPattern = /^[a-f0-9]{48}$/;
+const runnerPrefixes = [...new Set(['node ' + runnerRoot + '/runner.mjs ', process.execPath + ' ' + runnerRoot + '/runner.mjs '])];
+const daemonCmdlines = new Set(['node ' + runnerRoot + '/daemon.mjs', process.execPath + ' ' + runnerRoot + '/daemon.mjs']);
+const idleCmdlines = new Set(['node ' + runnerRoot + '/idle.mjs', process.execPath + ' ' + runnerRoot + '/idle.mjs']);
+const agentPrefix = 'node ' + runnerRoot + '/pi-entry.mjs ' + tasksRoot;
+const harnessMarker = runnerRoot + '/harness-entry.mjs ' + tasksRoot;
+
+export const isRunner = row => runnerPrefixes.some(prefix => row.cmdline.startsWith(prefix)) || daemonCmdlines.has(row.cmdline);
+export const isKeeper = row => daemonCmdlines.has(row.cmdline) || idleCmdlines.has(row.cmdline);
+
 // Remember orphaned descendants across cleanup rounds by PID and Linux start time, never by a recycled PID alone.
 export async function operationOwnership(rows, operationId, environ, known = new Map()) {
   const current = new Map(rows.map(row => [row.pid, row]));
@@ -20,7 +28,10 @@ export async function ownership(rows, { environ, cwd }) {
   const byPid = new Map(rows.map(row => [row.pid, row])), direct = new Map(), resolved = new Map();
   for (const row of rows) {
     let id = String(await environ(row.pid)).split('\0').find(entry => entry.startsWith('BOT_WORKSPACE_ID='))?.slice(17) || null;
-    if (!id && isRunner(row)) try { id = JSON.parse(Buffer.from(row.cmdline.slice(runnerPrefix.length), 'base64url').toString()).workspace_id || null; } catch { /* Not a request. */ }
+    if (!id) {
+      const matchedPrefix = runnerPrefixes.find(prefix => row.cmdline.startsWith(prefix));
+      if (matchedPrefix) try { id = JSON.parse(Buffer.from(row.cmdline.slice(matchedPrefix.length), 'base64url').toString()).workspace_id || null; } catch { /* Not a request. */ }
+    }
     if (!id && row.cmdline.startsWith(agentPrefix)) id = row.cmdline.slice(agentPrefix.length).split('/')[0];
     if (!id) { const idx = row.cmdline.indexOf(harnessMarker); if (idx >= 0) id = row.cmdline.slice(idx + harnessMarker.length).split(/[ /\0]/)[0]; }
     if (!id) { const dir = String(await cwd(row.pid)); if (dir.startsWith(tasksRoot)) id = dir.slice(tasksRoot.length).split('/')[0]; }

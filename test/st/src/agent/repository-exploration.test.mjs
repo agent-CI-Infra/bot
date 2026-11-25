@@ -12,6 +12,8 @@ import { agentLoop } from '../../../../dist/agent/loop.js';
 const legacyAgentLoop = (store, task, ...args) => { pinLegacyTaskConfiguration(store, task.id); return agentLoop(store, task, ...args); };
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { workspaceProfile } from '../../../../dist/agent/profiles.js';
+import { deliverMailboxToolReply } from '../../../../dist/roles/task-tools.js';
+import { RUNNER_TRANSFER_CHUNK_BYTES } from '../../../../runner/command-policy.mjs';
 import { agentOperation } from '../../../../runner/agent.mjs';
 
 async function explorerFixture(t) {
@@ -183,8 +185,20 @@ test('real Workspace delivery ignores only abandoned repository replies, includi
     if (continues) assert.match((await running).summary, /Continued/);
     else await assert.rejects(running, { code: 'execution_interrupted' });
     assert.equal(deliveries.length, 1, 'stop sending chunks after the first rejected delivery');
-    assert.equal(deliveries[0].offset, 0); assert.equal(deliveries[0].final, false);
+    assert.equal(deliveries[0].offset, 0); assert.equal(deliveries[0].final, true);
     assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token'));
+
+    // Multi-chunk (>1 MiB) reply stops on the very first rejected chunk (offset=0, final=false).
+    const multiChunks = [];
+    const oversizedReply = { payload: 'x'.repeat(RUNNER_TRANSFER_CHUNK_BYTES + 1024) };
+    const multiSend = deliverMailboxToolReply(oversizedReply, 'b'.repeat(48), async chunk => {
+      multiChunks.push(chunk);
+      return failure;
+    });
+    if (continues) assert.equal(await multiSend, false);
+    else await assert.rejects(multiSend, { code: 'execution_interrupted' });
+    assert.equal(multiChunks.length, 1, 'must stop sending remaining chunks after first rejection');
+    assert.equal(multiChunks[0].offset, 0); assert.equal(multiChunks[0].final, false);
   });
 });
 
