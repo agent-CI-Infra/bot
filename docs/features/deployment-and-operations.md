@@ -101,7 +101,7 @@ BOT_NODE_LABELS=region=cn-east,arch=amd64 \
   docker compose -f docker/compose.node.yaml -p bot-node-worker-01 up -d
 ```
 
-- **身份与凭据**：首次配对成功后，`node-agent` 将自动生成的 Ed25519 密钥对持久化在 `node-data` 卷（`/data/node-identity.json`），一次性配对令牌立即失效，后续重启无需再提供 `BOT_NODE_PAIRING_TOKEN`；节点通过 Ed25519 签名断言换取绑定到自身 `node_id` 的短期会话（`bnsess_...`）及按范围授权的短期文件同步令牌（`bsync_...`）。
+- **身份与凭据**：首次配对成功后，`node-agent` 将自动生成的 Ed25519 密钥对持久化在 `data` 卷（`/data/node-identity.json`），一次性配对令牌立即失效，后续重启无需再提供 `BOT_NODE_PAIRING_TOKEN`；节点通过 Ed25519 签名断言换取绑定到自身 `node_id` 的短期会话（`bnsess_...`）及按范围授权的短期文件同步令牌（`bsync_...`）。
 - **网络连接与模型代理**：`node-agent` 主动反向连接控制面（优先 WebSocket `/cluster/nodes/ws`，反向代理不支持 Upgrade 或被阻断时自动降级为 `<=25s` HTTPS 长轮询 `/cluster/nodes/poll`，亦可通过 `BOT_NODE_TRANSPORT=long_poll` 显式指定）。容器模型请求经节点本地 UDS（`/run/model-gateway/gateway.sock`）持短期 `rrt_...` 运行令牌中转至控制面模型网关，模型长期 API Key 永不离开控制面。
 - **调度标签与能力边界**：`arch` 与 `gpu` 仅作为节点调度标签与容量展示字段，**不包含容器 GPU 设备直通（`DeviceRequests`）**；宿主机直跑驱动（`host`）仅预留接口占位（返回 `501 host_driver_not_implemented`），当前仅支持 Linux Docker（`docker`）节点。
 - **项目改绑、排水与撤销**：

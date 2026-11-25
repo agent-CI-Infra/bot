@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { once } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +28,7 @@ import { createManagerServer } from '../../../../manager/server.mjs';
 import { ManagerClient } from '../../../../dist/projects/service.js';
 import { NodeAgent } from '../../../../manager/node-agent.mjs';
 import { NODE_AGENT_PROTOCOL_VERSION } from '../../../../runner/node-protocol.mjs';
+import { computerResultOwner } from '../../../../runner/result-owner.mjs';
 
 async function startLocalManager(dir) {
   const token = randomBytes(24);
@@ -67,7 +69,7 @@ async function startLocalManager(dir) {
   };
 }
 
-async function createClusterHarness(t) {
+async function createClusterHarness(t, extraSyncOptions = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cluster-st-'));
   const local = await startLocalManager(dir);
   const store = fixtureStore(join(dir, 'control.sqlite'), randomBytes(32));
@@ -86,7 +88,7 @@ async function createClusterHarness(t) {
     projects,
     cluster,
     assistantHomes: local.assistantHomes,
-    syncOptions: { tokens: syncTokens },
+    syncOptions: { tokens: syncTokens, ...extraSyncOptions },
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -97,15 +99,15 @@ async function createClusterHarness(t) {
   const shortSocketDirs = [];
   h.spawnNode = async (pairingToken, opts = {}) => {
     const nodeDir = mkdtempSync(join(dir, 'node-'));
-    const docker = new FakeDocker();
-    const homesDir = join(nodeDir, 'assistant-homes');
+    const docker = opts.docker || new FakeDocker();
+    const homesDir = opts.assistantHomesDir || join(nodeDir, 'assistant-homes');
     // Keep Unix domain socket path well below Linux's 108-byte sun_path limit regardless of TMPDIR depth.
     const gwDir = mkdtempSync('/tmp/bgw-');
     shortSocketDirs.push(gwDir);
     const notesDir = join(nodeDir, 'project-notes');
     mkdirSync(homesDir, { recursive: true });
     mkdirSync(notesDir, { recursive: true });
-    docker.homesMount = homesDir;
+    if (!docker.homesMount) docker.homesMount = homesDir;
     const agent = new NodeAgent({
       centerUrl: base,
       pairingToken,
@@ -594,4 +596,279 @@ test('assistant single-writer cross-node handoff (stop-old-before-start-new), UD
     body: JSON.stringify({ metrics: {} }),
   });
   assert.ok([401, 403].includes(staleBeat.status));
+});
+
+test('compose.node.yaml volume labels pass real Projects/AssistantComputers trust checks, all 4 read-only sync namespaces sync on node-agent lifecycle, and offline nodes never wedge reconcile or deletion', async t => {
+  // 1. Parse docker/compose.node.yaml (using real `docker compose config --format json` when available, else YAML parse)
+  //    and prove every declared volume name + Compose label passes manager/projects.mjs & assistant-computers.mjs trust checks.
+  const projectName = 'bot-node-test';
+  let composeVolumes = null;
+  let mountTargets = null;
+  try {
+    const raw = execFileSync(
+      'docker',
+      ['compose', '-f', join(process.cwd(), 'docker/compose.node.yaml'), '-p', projectName, 'config', '--format', 'json'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const parsed = JSON.parse(raw);
+    composeVolumes = parsed.volumes || {};
+    mountTargets = (parsed.services?.['node-agent']?.volumes || [])
+      .filter(v => v.type === 'volume')
+      .map(v => ({ key: v.source, target: v.target, name: composeVolumes[v.source]?.name || `${projectName}_${v.source}` }));
+  } catch {
+    // Fallback parser for CI environments without a Docker CLI binary.
+    const yaml = readFileSync(join(process.cwd(), 'docker/compose.node.yaml'), 'utf8');
+    const volsBlock = yaml.split(/^volumes:\s*$/m)[1] || '';
+    composeVolumes = {};
+    for (const line of volsBlock.split('\n')) {
+      const m = /^\s{2}([a-z0-9-]+):\s*$/.exec(line);
+      if (m) composeVolumes[m[1]] = { name: `${projectName}_${m[1]}` };
+    }
+    mountTargets = [];
+    for (const m of yaml.matchAll(/^\s+-\s+([a-z0-9-]+):(\/[^\s]+)\s*$/gm)) {
+      if (composeVolumes[m[1]]) {
+        mountTargets.push({ key: m[1], target: m[2], name: composeVolumes[m[1]].name });
+      }
+    }
+  }
+
+  assert.ok(mountTargets.length >= 8, `expected all canonical compose.node.yaml volumes, got ${mountTargets.length}`);
+  const volDir = mkdtempSync(join(tmpdir(), 'compose-vols-'));
+  t.after(() => rmSync(volDir, { recursive: true, force: true }));
+
+  const mountByTarget = new Map();
+  const dockerVolumes = new Map();
+  const localDirByTarget = new Map();
+  for (const entry of mountTargets) {
+    const localPath = join(volDir, entry.key);
+    mkdirSync(localPath, { recursive: true });
+    localDirByTarget.set(entry.target, localPath);
+    mountByTarget.set(localPath, entry.name);
+    // Docker Compose automatically applies `com.docker.compose.volume=<key>` to every declared volume.
+    dockerVolumes.set(entry.name, {
+      Name: entry.name,
+      Labels: {
+        'com.docker.compose.project': projectName,
+        'com.docker.compose.volume': entry.key,
+      },
+    });
+  }
+
+  const composeDocker = new FakeDocker();
+  const origVolumeName = composeDocker.volumeName.bind(composeDocker);
+  composeDocker.volumeName = async target => {
+    if (mountByTarget.has(target)) return mountByTarget.get(target);
+    return origVolumeName(target);
+  };
+  const origRequest = composeDocker.request.bind(composeDocker);
+  composeDocker.request = async (method, path, body) => {
+    if (method === 'GET' && path.startsWith('/volumes/')) {
+      const name = decodeURIComponent(path.slice('/volumes/'.length));
+      if (dockerVolumes.has(name)) return dockerVolumes.get(name);
+    }
+    return origRequest(method, path, body);
+  };
+
+  const resultsOwner101 = computerResultOwner('project', '101');
+  mkdirSync(join(localDirByTarget.get('/tool-results'), resultsOwner101), { recursive: true });
+  mkdirSync(join(localDirByTarget.get('/project-tools'), '101', 'rev-1'), { recursive: true });
+  mkdirSync(join(localDirByTarget.get('/skill-store'), 'projects', '101'), { recursive: true });
+  mkdirSync(join(localDirByTarget.get('/skill-store'), 'service'), { recursive: true });
+
+  const composeProjects = new Projects({
+    database: join(volDir, 'compose-check.sqlite'),
+    docker: composeDocker,
+    deployment: 'nodetest',
+    image: 'approved',
+    tools: localDirByTarget.get('/opt/agent-tools'),
+    projectTools: localDirByTarget.get('/project-tools'),
+    skillStore: localDirByTarget.get('/skill-store'),
+    results: localDirByTarget.get('/tool-results'),
+    modelGateway: localDirByTarget.get('/run/model-gateway'),
+    runnerSockets: localDirByTarget.get('/run/bot-runner'),
+  });
+  const composeAssistants = new AssistantComputers({
+    docker: composeDocker,
+    db: composeProjects.db,
+    deployment: 'nodetest',
+    image: 'approved',
+    homes: localDirByTarget.get('/assistant-homes'),
+    skillStoreMount: localDirByTarget.get('/skill-store'),
+    skillStoreVolume: () => composeProjects.skillStoreVolume(),
+  });
+  t.after(async () => {
+    await composeAssistants.shutdown();
+    await composeProjects.shutdown();
+  });
+
+  assert.equal(await composeProjects.agentToolsVolume(), `${projectName}_agent-tools`);
+  assert.equal(await composeProjects.projectToolsVolume(), `${projectName}_project-tools`);
+  assert.equal(await composeProjects.skillStoreVolume(), `${projectName}_skill-store`);
+  assert.equal(await composeProjects.modelGatewayVolume(), `${projectName}_model-gateway`);
+  assert.equal(await composeProjects.runnerSocketsVolume(), `${projectName}_runner-sockets`);
+  const rMounts = await composeProjects.resultMount(resultsOwner101);
+  assert.equal(rMounts[0].Source, `${projectName}_tool-results`);
+  const ptMount = await composeProjects.projectToolsSpecMount('101', 1);
+  assert.equal(ptMount.Source, `${projectName}_project-tools`);
+  const skMounts = await composeProjects.projectSkillsMount('101');
+  assert.equal(skMounts[0].Source, `${projectName}_skill-store`);
+  assert.equal(await composeAssistants.volume(), `${projectName}_assistant-homes`);
+
+  // 2. End-to-end sync of ALL 4 read-only namespaces (agent-tools, project-tools, skill-store, tool-results)
+  //    from control plane FileSyncEngine to a paired remote NodeAgent during project & assistant lifecycles.
+  const syncRoot = mkdtempSync(join(tmpdir(), 'cluster-ro-sync-'));
+  t.after(() => rmSync(syncRoot, { recursive: true, force: true }));
+  const cpAgentTools = join(syncRoot, 'cp-agent-tools');
+  const cpProjectTools = join(syncRoot, 'cp-project-tools');
+  const cpSkillStore = join(syncRoot, 'cp-skill-store');
+  const cpToolResults = join(syncRoot, 'cp-tool-results');
+
+  const nodeArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  mkdirSync(join(cpAgentTools, 'codex', '1.0.0', 'bin'), { recursive: true });
+  writeFileSync(join(cpAgentTools, 'codex', '1.0.0', 'manifest.json'), JSON.stringify({ arch: nodeArch, version: '1.0.0' }));
+  writeFileSync(join(cpAgentTools, 'codex', '1.0.0', 'bin', 'codex'), '#!/bin/sh\necho codex-ok\n', { mode: 0o755 });
+
+  const toolContent = Buffer.from('#!/bin/sh\necho custom-tool-ok\n');
+  const toolSha = createHash('sha256').update(toolContent).digest('hex');
+  mkdirSync(join(cpProjectTools, '101', 'rev-1', 'bin'), { recursive: true });
+  writeFileSync(join(cpProjectTools, '101', 'rev-1', 'bin', 'mytool'), toolContent, { mode: 0o755 });
+
+  mkdirSync(join(cpSkillStore, 'projects', '101', 'sets', 'a'.repeat(64)), { recursive: true });
+  writeFileSync(join(cpSkillStore, 'projects', '101', 'sets', 'a'.repeat(64), 'SKILL.md'), '# Project Skill 101\n');
+  mkdirSync(join(cpSkillStore, 'service', 'sets', 'b'.repeat(64)), { recursive: true });
+  writeFileSync(join(cpSkillStore, 'service', 'sets', 'b'.repeat(64), 'SKILL.md'), '# Service Skill\n');
+
+  const projResultFile = 'a'.repeat(48) + '.utf8';
+  const asstOwner = 'c'.repeat(32);
+  const asstResultOwner = computerResultOwner('assistant', asstOwner);
+  const asstResultFile = 'd'.repeat(48) + '.utf8';
+  mkdirSync(join(cpToolResults, resultsOwner101), { recursive: true });
+  writeFileSync(join(cpToolResults, resultsOwner101, projResultFile), 'project tool result payload\n');
+  mkdirSync(join(cpToolResults, asstResultOwner), { recursive: true });
+  writeFileSync(join(cpToolResults, asstResultOwner, asstResultFile), 'assistant tool result payload\n');
+
+  const { h, admin, acc } = await createClusterHarness(t, {
+    agentToolsRoot: cpAgentTools,
+    projectToolsRoot: cpProjectTools,
+    skillStoreRoot: cpSkillStore,
+    toolResultsRoot: cpToolResults,
+  });
+  await repository(admin, acc.id, '101');
+  await repository(admin, acc.id, '102');
+
+  // Record active project-tools revision 1 for repo 101 in control-plane DB
+  const nowIso = new Date().toISOString();
+  h.store.run(
+    `INSERT INTO project_tool_revisions(repository_id,revision,status,mode,files_count,total_bytes,manifest,sha256,actor,source,note,created_at)
+     VALUES('101',1,'active','replace',1,?,?,?,?,?,'',?)`,
+    toolContent.length,
+    JSON.stringify([{ path: 'bin/mytool', type: 'file', sha256: toolSha, size: toolContent.length, executable: true }]),
+    toolSha,
+    'admin',
+    'test',
+    nowIso,
+  );
+  h.store.run(
+    `INSERT INTO project_tool_state(repository_id,active_revision,next_revision,updated_at,updated_by) VALUES('101',1,2,?,'admin')`,
+    nowIso,
+  );
+
+  // Pair remote node with dedicated empty node-side volume roots (all 4 RO namespaces + assistant-homes)
+  // backed by a FakeDocker returning the exact canonical Compose volume names & labels from docker/compose.node.yaml.
+  const createdSyncNode = await admin('/api/nodes', 'POST', { id: 'node-sync', name: 'Sync Node' });
+  assert.equal(createdSyncNode.status, 201);
+  const nAgentTools = join(syncRoot, 'node-agent-tools');
+  const nProjectTools = join(syncRoot, 'node-project-tools');
+  const nSkillStore = join(syncRoot, 'node-skill-store');
+  const nToolResults = join(syncRoot, 'node-tool-results');
+  const nAssistantHomes = join(syncRoot, 'node-assistant-homes');
+  for (const d of [nAgentTools, nProjectTools, nSkillStore, nToolResults, nAssistantHomes]) mkdirSync(d, { recursive: true });
+
+  const syncNodeDocker = new FakeDocker();
+  syncNodeDocker.homesMount = nAssistantHomes;
+  const syncVolByMount = new Map([
+    [nAgentTools, { name: `${projectName}_agent-tools`, key: 'agent-tools' }],
+    [nProjectTools, { name: `${projectName}_project-tools`, key: 'project-tools' }],
+    [nSkillStore, { name: `${projectName}_skill-store`, key: 'skill-store' }],
+    [nToolResults, { name: `${projectName}_tool-results`, key: 'tool-results' }],
+    [nAssistantHomes, { name: `${projectName}_assistant-homes`, key: 'assistant-homes' }],
+  ]);
+  const syncVolByName = new Map(
+    [...syncVolByMount.values()].map(v => [
+      v.name,
+      { Name: v.name, Labels: { 'com.docker.compose.project': projectName, 'com.docker.compose.volume': v.key } },
+    ]),
+  );
+  const origSyncVolName = syncNodeDocker.volumeName.bind(syncNodeDocker);
+  syncNodeDocker.volumeName = async target => syncVolByMount.get(target)?.name ?? origSyncVolName(target);
+  const origSyncReq = syncNodeDocker.request.bind(syncNodeDocker);
+  syncNodeDocker.request = async (method, path, body) => {
+    if (method === 'GET' && path.startsWith('/volumes/')) {
+      const name = decodeURIComponent(path.slice('/volumes/'.length));
+      if (syncVolByName.has(name)) return syncVolByName.get(name);
+    }
+    return origSyncReq(method, path, body);
+  };
+
+  const nodeSync = await h.spawnNode(createdSyncNode.value.pairing_token, {
+    docker: syncNodeDocker,
+    toolsDir: nAgentTools,
+    projectToolsDir: nProjectTools,
+    skillStoreDir: nSkillStore,
+    toolResultsDir: nToolResults,
+    assistantHomesDir: nAssistantHomes,
+  });
+
+  // Rebind repo 101 to node-sync and sync tools revision + start project
+  const rebind = await admin('/api/repositories/101/node', 'PUT', { node_id: 'node-sync' });
+  assert.equal(rebind.status, 200);
+  await h.cluster.call('PUT', '/v1/projects/101');
+  await h.cluster.call('PUT', '/v1/projects/101/tools', { revision: 1 });
+  const started = await h.cluster.call('POST', '/v1/projects/101/start', { operation_id: 'f'.repeat(48), generation: 1 });
+  assert.equal(started.state, 'ready');
+
+  assert.equal(readFileSync(join(nAgentTools, 'codex', '1.0.0', 'bin', 'codex'), 'utf8'), '#!/bin/sh\necho codex-ok\n');
+  assert.equal(readFileSync(join(nProjectTools, '101', 'rev-1', 'bin', 'mytool'), 'utf8'), '#!/bin/sh\necho custom-tool-ok\n');
+  assert.equal(readFileSync(join(nSkillStore, 'projects', '101', 'sets', 'a'.repeat(64), 'SKILL.md'), 'utf8'), '# Project Skill 101\n');
+  assert.equal(readFileSync(join(nToolResults, resultsOwner101, projResultFile), 'utf8'), 'project tool result payload\n');
+  assert.equal(nodeSync.agent.driver.projects.hasProjectSkillsDir('101'), true);
+
+  // Acquire assistant computer on node-sync (drain local so node-sync is picked) with project_tools
+  await admin('/api/nodes/local/drain', 'POST', {});
+  const asstHomeDir = join(h.local.assistantHomes, asstOwner, 'home-1', 'memory');
+  mkdirSync(asstHomeDir, { recursive: true });
+  const acq = await h.cluster.call('PUT', `/v1/assistant-computers/${asstOwner}`, {
+    turn: 'turn-sync-1',
+    fence: 'a'.repeat(32),
+    home_generation: 1,
+    home_mode: 'rw',
+    project_tools: [{ repository_id: '101', revision: 1, mount_name: 'fixture__project-101' }],
+  });
+  assert.equal(acq.state, 'ready');
+  assert.equal(acq.node_id, 'node-sync');
+  assert.equal(readFileSync(join(nSkillStore, 'service', 'sets', 'b'.repeat(64), 'SKILL.md'), 'utf8'), '# Service Skill\n');
+  assert.equal(readFileSync(join(nToolResults, asstResultOwner, asstResultFile), 'utf8'), 'assistant tool result payload\n');
+  await admin('/api/nodes/local/undrain', 'POST', {});
+
+  // 3. Offline remote node must NOT abort reconcile() for later healthy repos, and must NOT block removeEnvironment()!
+  await repository(admin, acc.id, '103');
+  const createdOffline = await admin('/api/nodes', 'POST', { id: 'node-flaky', name: 'Flaky Node' });
+  assert.equal(createdOffline.status, 201);
+  const nodeFlaky = await h.spawnNode(createdOffline.value.pairing_token);
+  const rebind102 = await admin('/api/repositories/102/node', 'PUT', { node_id: 'node-flaky' });
+  assert.equal(rebind102.status, 200);
+  // Disconnect node-flaky and mark offline
+  await nodeFlaky.agent.stop();
+  h.store.run("UPDATE compute_nodes SET status='offline' WHERE id='node-flaky'");
+
+  // Run reconcile(): repo 102 (ordered before 103) is bound to offline node-flaky, yet repo 103 on local MUST still reconcile to ready!
+  await h.projects.reconcile();
+  const env102 = h.store.get('SELECT state,error FROM project_environments WHERE repository_id=?', '102');
+  const env103 = h.store.get('SELECT state FROM project_environments WHERE repository_id=?', '103');
+  assert.equal(env102?.state, 'unavailable');
+  assert.equal(env103?.state, 'ready', 'later healthy repository must still reconcile when an earlier repository node is offline');
+
+  // Deleting repo 102 while its bound remote node is offline must succeed without wedging on GET /v1/projects/102
+  await h.projects.removeEnvironment('102');
+  h.projects.endRemoval('102');
 });

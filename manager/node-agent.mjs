@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { computerResultOwner } from '../runner/result-owner.mjs';
 import { connectWs } from '../runner/wire-protocol.mjs';
 import {
   DEFAULT_NODE_HEARTBEAT_MS,
@@ -488,6 +489,7 @@ export class NodeAgent extends EventEmitter {
     this.connected = true;
     this.emit('connected', { node_id: this.nodeId, transport: 'websocket' });
     this._startHeartbeatLoop();
+    this._warmSyncOnConnect();
 
     return new Promise(resolveSession => {
       let done = false;
@@ -525,6 +527,7 @@ export class NodeAgent extends EventEmitter {
     this.transport = 'long_poll';
     let needsResume = true;
     this._startHeartbeatLoop();
+    this._warmSyncOnConnect();
 
     try {
       while (!this._stopping && !this.revoked) {
@@ -851,15 +854,63 @@ export class NodeAgent extends EventEmitter {
       return { revoked: true, ...cleanup };
     }
 
-    // Sync hooks before lifecycle operations so remote containers receive fresh synced state via SyncClient.
+    // Sync hooks before lifecycle operations so remote containers receive fresh synced state via SyncClient
+    // across all 6 FileSyncEngine namespaces (agent-tools, project-tools, skill-store, tool-results,
+    // project-notes, assistant-homes).
     if (this.sync) {
-      const projLifecycle = /^\/v1\/projects\/([1-9]\d{0,19})\/(start|reset|refresh|configure)$/.exec(path);
-      if (projLifecycle && method === 'POST') {
-        await this.sync.pullProjectNotes(projLifecycle[1]).catch(() => {});
+      const projToolsUpdate = /^\/v1\/projects\/([1-9]\d{0,19})\/tools$/.exec(path);
+      if (projToolsUpdate && method === 'PUT' && Number.isSafeInteger(Number(input.revision)) && Number(input.revision) >= 1) {
+        await this._syncRequiredNamespace(() => this.sync.syncProjectTools(projToolsUpdate[1], Number(input.revision)));
       }
+
+      const projProvision =
+        (method === 'PUT' && /^\/v1\/projects\/([1-9]\d{0,19})$/.exec(path)) ||
+        (method === 'POST' && /^\/v1\/projects\/([1-9]\d{0,19})\/(start|reset|refresh|configure)$/.exec(path));
+      if (projProvision) {
+        const repoId = projProvision[1];
+        await this._syncOptionalNamespace(() => this.sync.syncAgentTools(normalizeNodeArch(process.arch)));
+        await this._syncOptionalNamespace(() => this.sync.syncSkillStore(`projects/${repoId}`));
+        const desiredToolsRev = this.driver.projects?.get?.(repoId)?.tools_revision;
+        if (Number.isSafeInteger(desiredToolsRev) && desiredToolsRev >= 1) {
+          await this._syncRequiredNamespace(() => this.sync.syncProjectTools(repoId, desiredToolsRev));
+        }
+        await this._syncOptionalNamespace(() => this.sync.syncToolResults(computerResultOwner('project', repoId)));
+        await this._syncOptionalNamespace(() => this.sync.pullProjectNotes(repoId));
+      }
+
+      const projRun = method === 'POST' && /^\/v1\/projects\/([1-9]\d{0,19})\/(runner|commands)$/.exec(path);
+      if (projRun) {
+        await this._syncOptionalNamespace(() => this.sync.syncToolResults(computerResultOwner('project', projRun[1])));
+      }
+
       const asstAcquire = /^\/v1\/assistant-computers\/([a-f0-9]{32})$/.exec(path);
-      if (asstAcquire && method === 'PUT' && Number.isSafeInteger(Number(input.home_generation))) {
-        await this.sync.pullAssistantHome(asstAcquire[1], Number(input.home_generation)).catch(() => {});
+      if (asstAcquire && method === 'PUT') {
+        const owner = asstAcquire[1];
+        await this._syncOptionalNamespace(() => this.sync.syncAgentTools(normalizeNodeArch(process.arch)));
+        await this._syncOptionalNamespace(() => this.sync.syncSkillStore('service'));
+        if (Array.isArray(input.project_tools)) {
+          for (const item of input.project_tools) {
+            if (
+              item &&
+              typeof item === 'object' &&
+              typeof item.repository_id === 'string' &&
+              /^[1-9]\d{0,19}$/.test(item.repository_id) &&
+              Number.isSafeInteger(Number(item.revision)) &&
+              Number(item.revision) >= 1
+            ) {
+              await this._syncRequiredNamespace(() => this.sync.syncProjectTools(item.repository_id, Number(item.revision)));
+            }
+          }
+        }
+        await this._syncOptionalNamespace(() => this.sync.syncToolResults(computerResultOwner('assistant', owner)));
+        if (Number.isSafeInteger(Number(input.home_generation))) {
+          await this._syncOptionalNamespace(() => this.sync.pullAssistantHome(owner, Number(input.home_generation)));
+        }
+      }
+
+      const asstCmd = method === 'POST' && /^\/v1\/assistant-computers\/([a-f0-9]{32})\/command$/.exec(path);
+      if (asstCmd) {
+        await this._syncOptionalNamespace(() => this.sync.syncToolResults(computerResultOwner('assistant', asstCmd[1])));
       }
     }
 
@@ -872,6 +923,33 @@ export class NodeAgent extends EventEmitter {
       }
     }
     return result;
+  }
+
+  _warmSyncOnConnect() {
+    if (!this.sync) return;
+    const arch = normalizeNodeArch(process.arch);
+    void this._syncOptionalNamespace(() => this.sync.syncAgentTools(arch));
+    void this._syncOptionalNamespace(() => this.sync.syncSkillStore('service'));
+  }
+
+  async _syncOptionalNamespace(fn) {
+    try {
+      await fn();
+    } catch {
+      // Optional namespaces (e.g. unmounted agent-tools/skill-store/tool-results in minimal setups)
+      // degrade safely so containers can still start with available mounts.
+    }
+  }
+
+  async _syncRequiredNamespace(fn) {
+    try {
+      await fn();
+    } catch (err) {
+      // Only tolerate missing sync engine in minimal unit setups; real sync errors fail loudly
+      // rather than masking missing pinned project-tools revisions.
+      if (err?.code === 'sync_not_configured' || err?.status === 404) return;
+      throw err;
+    }
   }
 
   /**
