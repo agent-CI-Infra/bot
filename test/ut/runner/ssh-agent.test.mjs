@@ -279,3 +279,26 @@ test('starting or continuing a session that is already running hands its pid to 
   assert.deepEqual(attached, [process.pid, process.pid]);
   assert.deepEqual(spawned, []);
 });
+
+test('a message that arrives in pieces is answered once complete, and a partial one leaves the agent serving', async t => {
+  const { socket } = await fixture(t);
+  const frame = agentFrame(AGENT.EXTENSION, sshString('check@bot-runner'), sshString(id(1)));
+  // A partial message (more than the length field, less than the body), then the rest after a pause.
+  const reply = await new Promise((resolve, reject) => {
+    const s = connect(socket); let got = Buffer.alloc(0);
+    s.on('error', reject);
+    s.on('data', chunk => { got = Buffer.concat([got, chunk]); if (got.length >= 4 && got.length >= 4 + got.readUInt32BE(0)) { s.end(); resolve(got); } });
+    s.on('connect', () => { s.write(frame.subarray(0, 9)); setTimeout(() => s.write(frame.subarray(9)), 200); });
+  });
+  assert.equal(reply[4], AGENT.EXTENSION_FAILURE);
+  // A client that sends half a message and leaves does not take the socket down for the next one.
+  await new Promise(resolve => { const s = connect(socket); s.on('connect', () => { s.end(frame.subarray(0, 9)); resolve(); }); s.on('error', resolve); });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const again = await new Promise((resolve, reject) => {
+    const s = connect(socket); let got = Buffer.alloc(0);
+    s.on('error', reject);
+    s.on('data', chunk => { got = Buffer.concat([got, chunk]); if (got.length >= 5) { s.end(); resolve(got); } });
+    s.on('connect', () => s.write(agentFrame(17)));
+  });
+  assert.deepEqual([...again], [0, 0, 0, 1, AGENT.FAILURE]);
+});
