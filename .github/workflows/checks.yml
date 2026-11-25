@@ -43,8 +43,9 @@ jobs:
       # #734: the bound on the command, not only on the job: a wedged test run fails this step in 25 minutes, while the
       # job's remaining minutes still run Compose files, and a killed command exits non-zero so the check is a failure.
       # #1371: the runner stops a test set after BOT_TEST_SET_TIMEOUT seconds (SIGKILL 10 s later), reports it as timed
-      # out and runs the rest. 900 s is above the slowest healthy set here (codex-harness, 342 s) and, with the grace,
-      # still lands before the 1500 s bound, so the log names the hung set instead of ending at the outer SIGKILL.
+      # out and runs the rest. 900 s is above the slowest healthy set here (codex-harness, 342 s). The limit counts from
+      # each set's own start, so a set that hangs is named before the 1500 s bound if it started within the first 590 s;
+      # in recent merge-group runs every set had started by 470 s. A later one still ends at the outer SIGKILL.
       - run: timeout --signal=KILL 1500 npm test
         env:
           BOT_TEST_SET_TIMEOUT: '900'
