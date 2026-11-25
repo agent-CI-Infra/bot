@@ -1,6 +1,7 @@
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id); },
   async 'memory-consolidation'(request) { return memoryConsolidationSettingsPage(request); },
+  async feedback(request, id) { return feedbackSettingsPage(request, id); },
   // Group assistants' and the management assistant's computers (#457): their timers and limits, each computer's resources
   // (the counterpart of the work computers' default resources), and every HOME.
   async 'assistant-computers'(request) {
@@ -103,7 +104,7 @@ const settingsCards = {
     if (view.host) {
       const host = settingsCard('采集明细', 'h2'), known = view.host.known ?? {};
       const table = costTable(['占用', '大小']);
-      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'], ['channel_resources', '飞书附件存储 channel-resources'], ['channel_cards', '飞书交互卡片 channel-cards'],
+      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'], ['channel_resources', '飞书附件存储 channel-resources'], ['channel_cards', '飞书交互卡片 channel-cards'], ['feedback', '角色意见箱 feedback'],
         ...(Object.hasOwn(known, 'project_tools') ? [['project_tools', '项目工具卷 project-tools']] : []),
         ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存'],
         ['docker_volumes', 'Docker 卷（未被计入的部分）'], ['assistant_homes', '助手电脑 HOME（assistant-homes 卷）']])

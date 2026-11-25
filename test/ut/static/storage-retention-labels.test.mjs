@@ -6,9 +6,9 @@ import { loadConsole } from '../../fixtures/console-page.mjs';
 // sibling is not a name, so each input has to carry its own: `<project> 轨迹正文保留天数`. The five global fields keep
 // their wrapped <label> and must not be renamed.
 const retention = () => ({
-  settings: { trajectory_days: 30, trajectory_days_by_project: { '101': 7 }, manager_payload_days: 14, workspace_finished_days: 14, workspace_failed_days: 30, webhook_payload_days: 14, project_notes_keep_versions: 50, project_notes_keep_days: 30 },
+  settings: { trajectory_days: 30, trajectory_days_by_project: { '101': 7 }, manager_payload_days: 14, workspace_finished_days: 14, workspace_failed_days: 30, webhook_payload_days: 14, project_notes_keep_versions: 50, project_notes_keep_days: 30, feedback_days: null },
   defaults: { manager_payload_days: 14, workspace_finished_days: 14, workspace_failed_days: 30, project_notes_keep_versions: 50, project_notes_keep_days: 30 },
-  bounds: { trajectory_days: [1, 365], manager_payload_days: [1, 365], workspace_finished_days: [1, 365], workspace_failed_days: [1, 365], webhook_payload_days: [1, 365], project_notes_keep_versions: [1, 10000], project_notes_keep_days: [1, 3650] },
+  bounds: { trajectory_days: [1, 365], manager_payload_days: [1, 365], workspace_finished_days: [1, 365], workspace_failed_days: [1, 365], webhook_payload_days: [1, 365], project_notes_keep_versions: [1, 10000], project_notes_keep_days: [1, 3650], feedback_days: [1, 3650] },
   projects: [{ id: '101', name: 'fixture-project' }],
   last_cleanup: null,
 });
@@ -23,8 +23,8 @@ test('each per-project retention input carries its project name', async () => {
   assert.equal(perProject.length, 1, 'one input per project in the retention table');
   assert.equal(perProject[0].getAttribute('aria-label'), 'fixture-project 轨迹正文保留天数');
   // The global windows are named by their visible <label>; they are not the defect.
-  const globals = ['trajectory_days', 'manager_payload_days', 'workspace_finished_days', 'workspace_failed_days', 'webhook_payload_days', 'project_notes_keep_versions', 'project_notes_keep_days'];
+  const globals = ['trajectory_days', 'manager_payload_days', 'workspace_finished_days', 'workspace_failed_days', 'webhook_payload_days', 'project_notes_keep_versions', 'project_notes_keep_days', 'feedback_days'];
   const named = inputs.filter(input => globals.includes(input.name));
-  assert.equal(named.length, 7);
+  assert.equal(named.length, 8);
   for (const control of named) assert.equal(control.getAttribute('aria-label'), null, `${control.name} keeps its <label>`);
 });

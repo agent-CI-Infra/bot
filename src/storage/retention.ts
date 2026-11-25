@@ -12,6 +12,7 @@ import { pruneCommitChecks } from '../tasks/external-links.js';
 import { pruneEventSubscriptions } from '../tasks/event-subscriptions.js';
 import { sweepOrphanChannelResources } from '../channels/media.js';
 import { ChannelInteractiveCards, sweepOrphanChannelCards } from '../channels/cards.js';
+import { pruneExpiredFeedback, sweepOrphanFeedbackFiles } from '../feedback/storage.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
 // by platform administrators (audited) and applied by a daily background job in bounded batches. A cleanup removes
@@ -35,12 +36,13 @@ export interface RetentionSettings {
   webhook_payload_days: number | null;
   project_notes_keep_versions: number | null;
   project_notes_keep_days: number | null;
+  feedback_days: number | null;
 }
 export const retentionDefaults: RetentionSettings = { trajectory_days: null, trajectory_days_by_project: {}, manager_payload_days: 2, workspace_finished_days: 1,
-  workspace_failed_days: 7, webhook_payload_days: null, project_notes_keep_versions: 50, project_notes_keep_days: 30 };
+  workspace_failed_days: 7, webhook_payload_days: null, project_notes_keep_versions: 50, project_notes_keep_days: 30, feedback_days: null };
 export const retentionBounds: Record<string, [number, number]> = { trajectory_days: [1, 3650], manager_payload_days: [1, 365], workspace_finished_days: [1, 365],
-  workspace_failed_days: [1, 365], webhook_payload_days: [7, 3650], project_notes_keep_versions: [1, 10000], project_notes_keep_days: [1, 3650] };
-const nullable = new Set(['trajectory_days', 'webhook_payload_days', 'project_notes_keep_versions', 'project_notes_keep_days']);
+  workspace_failed_days: [1, 365], webhook_payload_days: [7, 3650], project_notes_keep_versions: [1, 10000], project_notes_keep_days: [1, 3650], feedback_days: [1, 3650] };
+const nullable = new Set(['trajectory_days', 'webhook_payload_days', 'project_notes_keep_versions', 'project_notes_keep_days', 'feedback_days']);
 const day = 24 * 3600_000;
 // Statuses after which a task's files are not read again by its own execution (src/projects/workspace-cleanup.ts).
 const ended = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
@@ -170,6 +172,7 @@ export class RetentionCleanup {
     const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days), evidence = await this.browserEvidence(settings);
     const channelResources = this.channelResources();
     const channelCards = this.channelCards();
+    const feedback = await this.feedback(settings.feedback_days);
     const dispatchFailures={count:0,failed:0};
     try{for(const row of this.store.all('SELECT id FROM repositories')){const days=trajectoryDays(settings,String(row.id));if(days===null)continue;const before=new Date(this.now()-days*day).toISOString();while(!this.stopped){const removed=pruneDispatchFailures(this.store,String(row.id),before);dispatchFailures.count+=removed;if(removed<500)break;await this.pause(this.options.pauseMs??20);}}}catch(error){dispatchFailures.failed=1;this.failure('dispatch_failures',error);}
     const dispatchThreads={count:0,failed:0};
@@ -221,7 +224,7 @@ export class RetentionCleanup {
     } catch (error) { memoryConsolidationRuns.failed = 1; this.failure('memory_consolidation_runs', error); }
     const projectNotes = await this.projectNotesHistory(settings);
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, channel_cards: channelCards, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, memory_consolidation_runs: memoryConsolidationRuns, project_notes: projectNotes, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, channel_resources: channelResources, channel_cards: channelCards, feedback, commit_checks: commitChecks, event_subscriptions: eventSubscriptions, dispatch_failures:dispatchFailures, dispatch_threads:dispatchThreads, memory_consolidation_runs: memoryConsolidationRuns, project_notes: projectNotes, manager_window: manager, last_error: this.lastError });
   }
 
   private async projectNotesHistory(settings: RetentionSettings): Promise<Removed & { versions: number }> {
@@ -366,6 +369,34 @@ export class RetentionCleanup {
     } catch (error) {
       this.failure('channel-cards', error);
       return { count: 0, bytes: 0, failed: 1 };
+    }
+  }
+
+  private async feedback(days: number | null): Promise<Removed> {
+    if (!this.store.hasTable('feedback_entries')) return { count: 0, bytes: 0, failed: 0 };
+    const total: Removed = { count: 0, bytes: 0, failed: 0 };
+    try {
+      if (days !== null) {
+        const before = new Date(this.now() - days * day).toISOString();
+        const batchSize = this.options.batch ?? 200;
+        while (!this.stopped) {
+          const pruned = pruneExpiredFeedback(this.store, before, batchSize);
+          total.count += pruned.count;
+          total.bytes += pruned.bytes;
+          total.failed += pruned.failed;
+          if (pruned.count < batchSize || pruned.failed > 0) break;
+          await this.pause(this.options.pauseMs ?? 20);
+        }
+      }
+      const swept = sweepOrphanFeedbackFiles(this.store, this.now(), 3600_000);
+      total.count += swept.count;
+      total.bytes += swept.bytes;
+      total.failed += swept.failed;
+      if (total.failed) this.failure('feedback', new Error(`${total.failed} cleanup failure(s)`));
+      return total;
+    } catch (error) {
+      this.failure('feedback', error);
+      return { ...total, failed: total.failed + 1 };
     }
   }
 

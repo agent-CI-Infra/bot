@@ -8,7 +8,7 @@ const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel �
 // Each group carries its own stable key, so a category that later moves into the dictionary is named by identity, not by
 // matching the Chinese caption it happens to have today.
 const settingsGroups = [
-  ['system', '系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['management-assistant', '管理助手设置'], ['memory-consolidation', '夜间记忆整理'], ['assistant-computers', '助手电脑'], ['agent-tools', 'Agent CLI 工具卷'], ['storage', '存储']]],
+  ['system', '系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['management-assistant', '管理助手设置'], ['memory-consolidation', '夜间记忆整理'], ['assistant-computers', '助手电脑'], ['agent-tools', 'Agent CLI 工具卷'], ['storage', '存储'], ['feedback', '意见箱']]],
   ['access', '接入与网络', [['onboarding', '系统初始化'], ['access', '公网接入'], ['external', '外部执行']]],
   ['channels', '连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
   ['repository', '仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
@@ -18,7 +18,7 @@ const settingsSections = settingsGroups.flatMap(([, , items]) => items);
 // label and the group holding it follow a language switch with the page instead of waiting for a reload. Keyed by the
 // section key and the group key, not by the caption, so renaming or translating a caption later cannot silently drop the
 // mapping. Every other category keeps its literal and moves in a later slice.
-const settingsSectionCaptions = { installations: 'settings.nav.installations' };
+const settingsSectionCaptions = { installations: 'settings.nav.installations', feedback: 'settings.nav.feedback' };
 const settingsGroupCaptions = { channels: 'settings.nav.group_channels' };
 const settingsCaption = (captions, key, caption) => (captions[key] ? t(captions[key]) : caption);
 // #1039: a settings page carries its own h1 (全局设置, or 存储 for the one page a project administrator may open), so the

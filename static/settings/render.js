@@ -12,6 +12,7 @@ async function renderSettings(request) {
   // The categories are drawn at once; the chosen category's cards follow when their data arrives.
   $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
+  if (typeof refreshFeedbackNavBadge === 'function' && section !== 'feedback') void refreshFeedbackNavBadge(request);
   // The hash may only choose among the declared sections: never let a user-written name reach the prototype chain, and
   // never call anything that is not a declared loader. Anything else falls back to 工作电脑.
   const handler = Object.hasOwn(settingsCards, section) ? settingsCards[section] : settingsCards['work-computers'];

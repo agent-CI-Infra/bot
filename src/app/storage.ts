@@ -70,7 +70,7 @@ export class StorageReport {
       await this.refresh();
     });
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
-    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources'), channel_cards: data && join(data, 'channel-cards'), ...(paths.project_tools ? { project_tools: paths.project_tools } : {}) })
+    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources'), channel_cards: data && join(data, 'channel-cards'), feedback: store.path === ':memory:' ? undefined : store.feedbackDir, ...(paths.project_tools ? { project_tools: paths.project_tools } : {}) })
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
   }
 
@@ -319,6 +319,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     browser_evidence: measured(control?.directories?.browser_evidence?.bytes),
     channel_resources: measured(control?.directories?.channel_resources?.bytes),
     channel_cards: measured(control?.directories?.channel_cards?.bytes),
+    feedback: measured(control?.directories?.feedback?.bytes),
     ...(control?.directories && Object.hasOwn(control.directories, 'project_tools') ? { project_tools: measured(control.directories.project_tools?.bytes) } : {}),
     manager_database: database(manager?.database),
     manager_trajectories: manager ? sum(p => bytesOf(p.manager?.files?.bytes) + bytesOf(p.manager?.open?.bytes)) : null,

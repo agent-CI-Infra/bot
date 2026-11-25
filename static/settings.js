@@ -19,4 +19,5 @@
  * settings/models.js
  * settings/service-roles.js
  * settings/memory-consolidation.js
+ * settings/feedback.js
  */

@@ -53,6 +53,8 @@ import {
   projectConsolidationTools,
   type ConsolidationMutationTracker,
 } from './consolidation-tools.js';
+import { executeSubmitFeedback, feedbackGuidance, isFeedbackEnabled, SUBMIT_FEEDBACK_TOOL_NAME, submitFeedbackTool } from '../feedback/tool.js';
+import { RecentToolTracker } from '../feedback/snapshot.js';
 
 const CONSOLIDATION_PROMPT_PATH = resolve(import.meta.dirname, '../../docs/prompts/memory-consolidation.md');
 
@@ -541,6 +543,83 @@ export class MemoryConsolidationService {
     }
   }
 
+  private withFeedback(input: {
+    run: ConsolidationRunRow;
+    model: RuntimeModel;
+    system: string;
+    tools: Json[];
+    execute: (name: string, args: unknown) => Promise<Json>;
+    redactor: Redactor;
+    repositoryId: string | null;
+    repositoryFullName?: string | null;
+    permissions?: Json | null;
+    scopeSummary: Json;
+    environmentProfile: 'workspace' | 'assistant';
+  }): { system: string; tools: Json[]; execute: (name: string, args: unknown) => Promise<Json> } {
+    const { store } = this.deps;
+    const enabled = isFeedbackEnabled(store);
+    const system = enabled ? `${input.system}\n\n${feedbackGuidance}` : input.system;
+    const tools = enabled ? [...input.tools, submitFeedbackTool as unknown as Json] : input.tools;
+    const startedAt = new Date(this.now()).toISOString();
+    const recentTools = new RecentToolTracker(20);
+    const driver = roleHarness('pi');
+    const execute = async (name: string, args: unknown): Promise<Json> => {
+      if (name === SUBMIT_FEEDBACK_TOOL_NAME) {
+        const res = executeSubmitFeedback({
+          store,
+          idempotencyScope: 'memory_consolidation:' + input.run.id,
+          extraSecrets: input.redactor.values,
+          now: () => this.now(),
+          snapshot: () => ({
+            source_kind: 'memory_consolidation',
+            untrusted_context: false,
+            repository_id: input.repositoryId,
+            repository_full_name: input.repositoryFullName ?? null,
+            scope_summary: input.scopeSummary,
+            role: {
+              role_id: 'memory-consolidation',
+              role_name: 'Memory Consolidation',
+              kind: 'controller',
+              system_prompt: system,
+              permissions: input.permissions ?? null,
+              offered_tools: tools.map(t => String((t as { function?: { name?: string } })?.function?.name ?? '')).filter(Boolean),
+            },
+            model: {
+              id: input.model.id,
+              name: input.model.model,
+              version: input.model.version,
+              source: 'memory_consolidation',
+              api_url: input.model.url,
+              interface_type: input.model.protocol?.interface_type ?? null,
+            },
+            harness: {
+              id: 'pi',
+              version: driver.version,
+              environment: input.environmentProfile,
+            },
+            execution: {
+              consolidation_run_id: input.run.id,
+              consolidation_scope_kind: input.run.scope_kind,
+              consolidation_scope_id: input.run.scope_id,
+              conversation_id: input.run.scope_kind === 'group_assistant' ? input.run.scope_id : null,
+              started_at: startedAt,
+              recent_tools: recentTools.snapshot(),
+            },
+          }),
+        }, args);
+        recentTools.record(name, res.accepted ? 'ok' : 'error', res.error ?? null);
+        return res as unknown as Json;
+      }
+      const out = await input.execute(name, args);
+      const errCode = out && typeof out === 'object' && 'error' in out && typeof (out as { error?: unknown }).error === 'string'
+        ? (out as { error: string }).error
+        : null;
+      recentTools.record(name, errCode ? 'error' : 'ok', errCode);
+      return out;
+    };
+    return { system, tools, execute };
+  }
+
   private async runPiSession(input: {
     run: ConsolidationRunRow;
     model: RuntimeModel;
@@ -724,7 +803,7 @@ export class MemoryConsolidationService {
       : 0;
     const notesListing = await manager.call('GET', `/v1/projects/${repoId}/file-tree?directory=&query=&include_deleted=0&deleted_only=0&recursive=1&preview=0`).catch(() => ({ files: [] }));
 
-    const system = loadConsolidationPrompt();
+    const baseSystem = loadConsolidationPrompt();
     const prompt = JSON.stringify({
       scope: {
         kind: 'project',
@@ -747,12 +826,18 @@ export class MemoryConsolidationService {
       instruction: 'Inspect all existing project notes and freely explore full historical tasks, task records/traces/logs, and dispatch threads using the offered tools. Consolidate durable knowledge, resolve contradictions, remove obsolete or redundant files, maintain INDEX.md, and call finish_consolidation when done.',
     });
 
-    const execute = createProjectConsolidationExecutor({ store, manager, repositoryId: repoId, runId: run.id, guard, mutations });
+    const baseExecute = createProjectConsolidationExecutor({ store, manager, repositoryId: repoId, runId: run.id, guard, mutations });
+    const { system, tools, execute } = this.withFeedback({
+      run, model, system: baseSystem, tools: projectConsolidationTools, execute: baseExecute, redactor,
+      repositoryId: repoId, repositoryFullName: String(repo.full_name),
+      scopeSummary: { scope_kind: 'project', scope_id: repoId, trigger: run.trigger, logical_day: run.logical_day },
+      environmentProfile: 'workspace',
+    });
 
     if (this.deps.runner) {
       return await this.deps.runner({
         run, scope_kind: 'project', scope_id: repoId, model, system, prompt,
-        tools: projectConsolidationTools, execute, guard, signal, mutations,
+        tools, execute, guard, signal, mutations,
       });
     }
 
@@ -779,7 +864,7 @@ export class MemoryConsolidationService {
       const init = await workspace.call('consolidation-init:' + randomId(), { type: 'workspace_init' });
       if (init?.error) stop('controller_workspace_unavailable', 'waiting_environment', '初始化项目记忆整理工作区失败。');
       return await this.runPiSession({
-        run, model, system, prompt, tools: projectConsolidationTools, execute, guard, signal, redactor,
+        run, model, system, prompt, tools, execute, guard, signal, redactor,
         workspace,
         resultOwner: () => projectResultOwner(repoId),
         taskRow,
@@ -835,9 +920,9 @@ export class MemoryConsolidationService {
     const ownTaskCount = Number(store.get("SELECT count(*) AS n FROM service_role_own_tasks WHERE owner_kind='channel' AND owner_id=? AND service_role_id=? AND principal_id=? AND fence=?", chatId, binding.service_role_id, binding.principal_id, initialFence)?.n ?? 0);
     const listedMem = await homes.list(prepared.directory, 'memory', true).catch(() => ({ exists: false, entries: [], truncated: false }));
     const permissions = channels.serviceBindings.permissions(binding);
-    const tools = groupConsolidationTools(permissions);
+    const baseTools = groupConsolidationTools(permissions);
 
-    const system = loadConsolidationPrompt();
+    const baseSystem = loadConsolidationPrompt();
     const prompt = JSON.stringify({
       scope: {
         kind: 'group_assistant',
@@ -861,10 +946,16 @@ export class MemoryConsolidationService {
       instruction: 'Inspect all existing files under ~/memory/ and freely explore the full group conversation ledger, summary, cached members, own tasks, and authorized project context using the offered tools. Consolidate durable group preferences and facts into ~/memory/, remove redundant or obsolete files, maintain ~/memory/INDEX.md, and call finish_consolidation when done.',
     });
 
-    const execute = createGroupConsolidationExecutor({
+    const baseExecute = createGroupConsolidationExecutor({
       store, manager, channels, chat, binding, fence: initialFence,
       home: { homes, ownerId: ownerKey, generation: initialGeneration, directory: prepared.directory, mode: prepared.mode },
       guard, mutations,
+    });
+    const { system, tools, execute } = this.withFeedback({
+      run, model, system: baseSystem, tools: baseTools, execute: baseExecute, redactor,
+      repositoryId: billedRepo, permissions: permissions as unknown as Json,
+      scopeSummary: { scope_kind: 'group_assistant', scope_id: chatId, chat_name: String(chat.display_name || chat.chat_id || ''), trigger: run.trigger, logical_day: run.logical_day },
+      environmentProfile: 'assistant',
     });
 
     if (this.deps.runner) {
@@ -963,7 +1054,7 @@ export class MemoryConsolidationService {
     const privateChats = listBoundPersonalPrivateChats(store, principalId, tenant);
     const listedMem = await homes.list(prepared.directory, 'memory', true).catch(() => ({ exists: false, entries: [], truncated: false }));
 
-    const system = loadConsolidationPrompt();
+    const baseSystem = loadConsolidationPrompt();
     const prompt = JSON.stringify({
       scope: {
         kind: 'personal_assistant',
@@ -987,17 +1078,23 @@ export class MemoryConsolidationService {
       instruction: 'Inspect all existing files under ~/memory/ and freely explore all your Web management conversations, bound Feishu private chat history, own tasks, and authorized projects using the offered tools. Consolidate durable personal working preferences, recurring project context, and lessons into ~/memory/, remove redundant or obsolete files, maintain ~/memory/INDEX.md, and call finish_consolidation when done.',
     });
 
-    const execute = createPersonalConsolidationExecutor({
+    const baseExecute = createPersonalConsolidationExecutor({
       store, manager, management, channels, actor, scopeId: run.scope_id, tenant,
       home: { homes, ownerId: ownerKey, generation: initialGeneration, directory: prepared.directory, mode: prepared.mode },
       guard, mutations,
+    });
+    const { system, tools, execute } = this.withFeedback({
+      run, model, system: baseSystem, tools: personalConsolidationTools, execute: baseExecute, redactor,
+      repositoryId: null,
+      scopeSummary: { scope_kind: 'personal_assistant', scope_id: run.scope_id, trigger: run.trigger, logical_day: run.logical_day, accessible_projects: management.projects(actor).length },
+      environmentProfile: 'assistant',
     });
 
     if (this.deps.runner) {
       try {
         return await this.deps.runner({
           run, scope_kind: 'personal_assistant', scope_id: run.scope_id, model, system, prompt,
-          tools: personalConsolidationTools, execute, guard, signal, mutations,
+          tools, execute, guard, signal, mutations,
         });
       } finally {
         await homes.measure(ownerKey).catch(() => {});
@@ -1030,7 +1127,7 @@ export class MemoryConsolidationService {
     try {
       workspace = await computer.sessionWorkspace(taskRow, workspaceId, redactor, () => {});
       return await this.runPiSession({
-        run, model, system, prompt, tools: personalConsolidationTools, execute, guard, signal, redactor,
+        run, model, system, prompt, tools, execute, guard, signal, redactor,
         workspace,
         resultOwner: () => assistantResultOwner(ownerKey),
         taskRow,

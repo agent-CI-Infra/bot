@@ -54,7 +54,9 @@ export const basicTools = ['read_file','read_version_file','compare_versions','w
   // files themselves, so they need no computer permission.
   'list_workspaces','use_workspace','create_workspace',
   // Lightweight webhook event subscriptions (#1168) for releasing a task's execution slot while waiting for external CI/GitHub events.
-  'subscribe_event','list_event_subscriptions','cancel_event_subscription'];
+  'subscribe_event','list_event_subscriptions','cancel_event_subscription',
+  // Write-only platform feedback box: available to every role without expanding business or GitHub permissions.
+  'submit_feedback'];
 const githubReads = ['github_read_token','github_read','github_search'];
 const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
 const github = (item: PermissionItem) => ({ ...item, group: 'github' });

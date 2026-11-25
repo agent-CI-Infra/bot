@@ -14,7 +14,7 @@
   - 公共原语：`consoleState`（统一空/加载/失败态）、`askConfirm`（危险操作二次确认）、统一顶部保存栏（角色/基本设置/模型/机器配置共用）以及唯一错误文案出口 `readErrorText(err)`（屏蔽浏览器原生网络报错差异）。
   - 内置超级管理员专属设计样例页 `#/design` 用于令牌与组件视觉回归验证。
 - **严格 CSP 下的安全 Markdown 与 Mermaid 渲染**：
-  - 管理助手回复、项目知识 `.md` 与提示词阅读视图共用 `renderManagementMarkdown()`（Marked + DOMPurify 仅保留文档标签，移除脚本、内联事件与自动加载外链图片）。
+  - 管理助手回复、项目知识 `.md`、提示词阅读视图与角色意见箱正文共用 Marked + DOMPurify 安全渲染路径（仅保留文档标签，移除脚本、内联事件、外链图片与危险协议链接；意见箱 `renderFeedbackMarkdown()` 额外将 `h1`–`h3` 降级为 `h4` 以保持详情页标题层级）。
   - Mermaid 图表采用固定版本 `@mermaid-js/tiny`（`securityLevel: 'strict'`，禁止 `foreignObject` 与 `%%{init}%%` 覆写），渲染出的 SVG 再经 DOMPurify 清洗全部 `<style>`、`href` 与可导航链接，样式全部走 `static/diagrams.css` 令牌，严格遵守控制台无内联样式/脚本的 CSP。
 
 ## 2. 管理 API 通用契约（`src/server.ts`、`src/app/`）
@@ -38,6 +38,7 @@
 | 模型与统计 | `/api/models*`（含 `/provider`、`/endpoints`、`/upstream`、`/test`、`/projects`）、`/api/costs`、`/api/storage*` | 供应商模型管理、目录与连通性探测、按时区汇总的用量成本统计、存储占用与按天回收。 |
 | 知识库与发版本 | `/api/repositories/:id/knowledge-files*`、`.../knowledge-directories`、`.../releases*` | 单源物理知识文件、正文检索与版本历史管理（旧 `/memories*`、`/knowledge*` 返回 `410 project_memory_api_removed`）、手动发版本预检/标签跟踪/草稿发布。 |
 | 管理助手与渠道 | `/api/management/*`、`/api/service-roles*`、`/api/channels/*`（含 `/conversations`、`.../chats/:id/timeline`、`.../schedules`、`.../sync`、`.../retention`） | 统一查询/命令/回执、流式持久会话、启动申请审批、全局管理助手配置（`#/settings/management-assistant`，旧 `#/settings/service-roles` 兼容跳转）、飞书连接/双端绑定/群绑定（独立群配置路由 `#/identity/feishu/groups/new`、`<chat-id>`，内联模型、提示词与三维权限；助手固定在 Pi 上运行）；`GET /api/channels/conversations` 支持可选 `connector_id` 过滤（先按会话鉴权再分页），`timeline` 在 `chat` 返回 `connector_id`、`state`、`revision`、`can_sync`、`can_manage_retention`、`can_view_schedules`，统一支撑「飞书会话」页的会话定时任务（`?section=schedules`）、本地消息检索、显式重同步（`POST .../sync`）与超管按会话保留/清理（`GET/PUT/DELETE .../retention`）。 |
+| 角色意见箱 | `GET /api/feedback`、`GET/PATCH/DELETE /api/feedback/:id`、`GET/PUT /api/feedback/settings` | 仅超级管理员可访问（`superAdmin`）；分页筛选列表与待处理计数、校验 SHA-256 解压读取完整意见与服务端环境快照（损坏返回 `409 feedback_payload_corrupt`）、分诊状态/备注更新、索引与 `.json.gz` 文件联删及全局开关/单次上限配置（写操作均记审计日志）；不向任何 Agent/助手暴露读取或管理接口。 |
 | 外部执行与 Webhook | `/hooks/github/:account/:endpoint`、`/hooks/feishu/:connector`、`/external/token`、`/external/revoke`、`/external/events`、`/api/repositories/:id/external/*` | 验签入库、非对称 JWT/OIDC 凭据兑换与撤销、事件轮询、外部客户端与转发订阅管理。 |
 
 ## 4. 模型供应商与接口协议（`src/app/models.ts`、`src/models/`）

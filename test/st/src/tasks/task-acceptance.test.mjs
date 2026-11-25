@@ -29,7 +29,7 @@ test('real evaluator starts fresh, can inspect raw artifacts, records separate m
  const verdict=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{},false);
  assert.equal(verdict.outcome,'pass');assert.equal(reads[0].path,'report.md');
  assert.equal(f.requests[0].messages.length,2);assert.ok(!JSON.stringify(f.requests).includes('PRIVATE_EXECUTOR_CONVERSATION_SENTINEL'));
- assert.deepEqual(f.requests[0].tools.map(t=>t.function.name),['read_evidence','read_task_history','read_file','search_project_memory','read_project_memory','submit_acceptance','read_tool_result']);
+ assert.deepEqual(f.requests[0].tools.map(t=>t.function.name),['read_evidence','read_task_history','read_file','search_project_memory','read_project_memory','submit_acceptance','read_tool_result','submit_feedback']);
  assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_evidence'").n,1);
  assert.equal(f.h.store.get('SELECT count(*) n FROM model_requests WHERE task_id=?',f.task.id).n,2);
 });

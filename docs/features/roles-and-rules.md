@@ -52,7 +52,7 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
 - **两类细粒度权限**：
   - **平台权限**：`delegation`（委派角色）、`project_tasks`（同项目其他任务只读查询 `list_project_tasks`/`read_project_task`，读写还可修改任务、声明依赖等待 `wait_for_tasks`、调整优先级与关联任务）、`project_memory`（项目共享知识读/写）。
   - **GitHub 资源权限**：`github_issues`、`github_pull_requests`、`github_actions`、`github_contents`（无/只读/读写），以及 `github_checks`、`github_statuses`（无/只读）。默认仅 Manager 具备 GitHub 写权限，其余内置角色只读。
-  - **内置基础能力**：使用虚拟电脑（文件与命令）是所有工作角色的内置能力，不单独设权限开关。
+  - **内置基础能力**：使用虚拟电脑（文件与命令）是所有工作角色的内置能力，不单独设权限开关。全平台角色与助手（含全部 5 种后端 `pi`/`claude_code`/`codex`/`icode`/`workswarm`、项目工作角色、对象 Manager 分派、角色对话、个人管理助手、飞书群聊助手与夜间自动记忆整理）同时默认获得只写工具 `submit_feedback`（append-only），用于反馈真实、可复现的平台问题（Skill、工具、提示词、流程或环境）；该工具不扩大任何业务或 GitHub 权限，也不向任何角色暴露读取、检索、修改或删除意见箱的能力，并受全局意见箱开关与单次运行提交上限约束（在「全局设置 → 意见箱」配置）。
 - **内置可选开发 Skill**：平台随包提供 `roadmap-decomposition`（Manager 默认自动加载）、`layered-ci-gates`（涉及 `.github/workflows/` 或 CI 门禁的开发及 bot PR 修订任务自动加载）、`test-driven-development` 与 `systematic-debugging`（可在角色配置中按需绑定给 Dev）。
 
 ## 5. 仓库 Skill（`.agents/skills/`）

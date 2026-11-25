@@ -35,6 +35,9 @@ import { feishuGroupSkills, makeReadSkillTool, readSkill, readSkillName } from '
 import { feishuCardInstructions, feishuCardTool, feishuCardToolName, FeishuCardTurn, type StagedFeishuCard } from './cards.js';
 import { configuredRedactor, publicText } from '../core/redaction.js';
 import { activeProjectToolsForProjects } from '../projects/tools.js';
+import { executeSubmitFeedback, feedbackGuidance, isFeedbackEnabled, SUBMIT_FEEDBACK_TOOL_NAME, submitFeedbackTool } from '../feedback/tool.js';
+import { RecentToolTracker } from '../feedback/snapshot.js';
+import { builtinSkillFiles } from '../roles/builtin-skills.js';
 
 const fn = (name: string, description: string, properties: Json, required: string[] = []) => ({ type: 'function', function: { name, description,
   parameters: { type: 'object', properties, required, additionalProperties: false } } });
@@ -66,7 +69,7 @@ export const serviceTools = [readToolResult,
       intent: { type: 'string', enum: ['report', 'development', 'review', 'test'] },
       writes: { type: 'array', items: { type: 'string', enum: ['pull_request', 'review', 'github', 'actions_rerun'] }, maxItems: 4 } }, ['repository', 'request', 'contract']),
   ...ownTaskTools, ...assistantComputerTools, checkoutRepositoryTool, ...managementTools, ...mediaTools, sendMessageTool, conversationScheduleTool,
-  makeReadSkillTool(feishuGroupSkills), feishuCardTool,
+  makeReadSkillTool(feishuGroupSkills), feishuCardTool, submitFeedbackTool,
 ];
 // Delegation reaches a project only through its Manager: create a task, find it again, change or cancel it as a whole.
 // Every other tool is governed by a permission item of the binding's level (#849); the scope listing, progress messages
@@ -75,7 +78,7 @@ export const serviceTools = [readToolResult,
 const computerTool = (name: string) => assistantComputerNames.includes(name) || computerMediaTools.has(name) || name === checkoutRepositoryName;
 // Conversation timers (#851, #1206) are available to every bound group: any member may manage this group's timers,
 // separate from project-level schedules and independent of GitHub write permissions.
-const offered = (permissions: RolePermissions, name: string) => name === conversationScheduleName || name === 'list_projects' || name === listChatMembers || name === sendMessageName || name === readSkillName || name === feishuCardToolName || ownTaskNames.includes(name) || (name === checkoutRepositoryName ? githubReadScopes(permissions).includes('contents') : mediaTools.some(t=>t.function.name===name) ? !mediaPermission(name)||permitsTool(permissions,mediaPermission(name)!) : permitsTool(permissions, computerPermission(name)));
+const offered = (permissions: RolePermissions, name: string) => name === conversationScheduleName || name === 'list_projects' || name === listChatMembers || name === sendMessageName || name === readSkillName || name === feishuCardToolName || name === SUBMIT_FEEDBACK_TOOL_NAME || ownTaskNames.includes(name) || (name === checkoutRepositoryName ? githubReadScopes(permissions).includes('contents') : mediaTools.some(t=>t.function.name===name) ? !mediaPermission(name)||permitsTool(permissions,mediaPermission(name)!) : permitsTool(permissions, computerPermission(name)));
 // Messages older than the recent window are folded into the rolling summary once this many have gathered.
 const foldBatch = 20;
 const excerpt = (m: Json, limit: number): Json => { const { resources, ...rest } = m; return { ...rest, content: String(m.content ?? '').slice(0, limit),
@@ -253,25 +256,89 @@ export class ChannelServiceSessions {
     const naming = () => { const name = this.members?.namer(chat); return (m: Json): Json => {
       const known = m.sender_type === 'user' ? name?.({ id: String(m.sender_id), tenant: String(m.sender_tenant) }) : undefined;
       return known ? { ...m, sender_name: known } : m; }; };
-    const availableTools = () => serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing));
+    const feedbackEnabled = isFeedbackEnabled(this.store);
+    const availableTools = () => serviceTools.filter(t => offered(permissions(), t.function.name) && (t.function.name !== SUBMIT_FEEDBACK_TOOL_NAME || isFeedbackEnabled(this.store)) && (!mediaTools.includes(t as any) || !!media) && (!computerTool(t.function.name) || computing));
     const cardTurn = new FeishuCardTurn(this.origin, value => publicText(redactor.text(value), configuredRedactor(this.store)));
     let ownHost: OwnTaskHost | undefined;
-    const executeRaw = async (name: string, args: unknown, key: string): Promise<unknown> => {
+    const startedAt = new Date().toISOString();
+    const skillsRead = new Set<string>();
+    const recentTools = new RecentToolTracker(20);
+    let untrustedCheckout = false;
+    let effectiveSystem = '';
+    const executeRaw = async (name: string, args: unknown, key: string, ownTaskId?: string): Promise<unknown> => {
       check();
       if (!serviceTools.some(t => t.function.name === name) || !offered(permissions(), name)) return { error: 'tool_not_allowed' };
       if (!args || typeof args !== 'object' || Array.isArray(args)) return { error: 'invalid_arguments' };
       this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id);
       try {
         const input = args as Json;
+        if (name === SUBMIT_FEEDBACK_TOOL_NAME) {
+          const reachSnapshot = this.bindings.reach(binding);
+          const skillBundleFiles = feishuGroupSkills.flatMap(sid => {
+            try { return builtinSkillFiles(sid).map(f => ({ path: `${sid}/${f.path}`, bytes: f.bytes })); } catch { return []; }
+          });
+          const res = executeSubmitFeedback({
+            store: this.store,
+            idempotencyScope: 'group_assistant:' + id,
+            extraSecrets: redactor.values,
+            snapshot: () => ({
+              source_kind: 'group_assistant',
+              untrusted_context: untrustedCheckout,
+              repository_id: billed,
+              scope_summary: {
+                chat_id: String(chat.id),
+                chat_name: String(chat.display_name || chat.chat_id || ''),
+                binding_scope: String(binding.scope),
+                participation: String(binding.participation ?? ''),
+                reachable_projects: reachSnapshot.projects.slice(0, 50).map(p => p.full_name),
+              },
+              role: {
+                role_id: roleId,
+                kind: 'service',
+                binding_id: String(binding.id),
+                binding_revision: Number(binding.revision ?? 0),
+                system_prompt: effectiveSystem,
+                administrator_prompt: binding.prompt ? String(binding.prompt) : null,
+                permissions: permissions(),
+                offered_tools: availableTools().map(t => t.function.name),
+              },
+              model: {
+                id: model.id,
+                name: model.model,
+                version: model.version,
+                source: 'group_binding',
+                api_url: model.url,
+              },
+              harness: {
+                id: String(binding.harness ?? 'pi'),
+                environment: computing ? 'assistant_computer' : 'control_plane',
+              },
+              skills: {
+                bundle: skillBundleFiles.length ? { id: 'feishu-group-skills', files: skillBundleFiles } : null,
+                skills_read: [...skillsRead],
+              },
+              execution: {
+                conversation_id: String(chat.id),
+                turn_id: id,
+                own_task_id: ownTaskId ?? null,
+                started_at: startedAt,
+                recent_tools: recentTools.snapshot(),
+              },
+            }),
+          }, input);
+          recentTools.record(name, res.accepted ? 'ok' : 'error', res.error ?? null);
+          return res;
+        }
+        const runTool = async (): Promise<unknown> => {
         if(name==='read_tool_result')return resultFiles.read(input);
-        if (name === readSkillName) return readSkill(input, feishuGroupSkills);
+        if (name === readSkillName) { const out = readSkill(input, feishuGroupSkills); if (typeof out?.path === 'string') skillsRead.add(out.path); return out; }
         if (name === feishuCardToolName) return cardTurn.execute(input);
         if (name === sendMessageName) return await progress(input);
         if(mediaTools.some(t=>t.function.name===name))return media?await media.execute(name,input):{error:'channel_resource_source_required'};
         if(assistantComputerNames.includes(name))return computers?await computers.execute(name,input):{error:'computer_not_configured'};
         if (name === checkoutRepositoryName) {
           if (!computers) return { error: 'computer_not_configured' };
-          return await executeCheckoutRepository({
+          const out = await executeCheckoutRepository({
             store: this.store,
             redactor,
             guard,
@@ -286,6 +353,8 @@ export class ChannelServiceSessions {
             gitCache: this.management.gitCache,
             apiUrl: this.githubUrl,
           }, input);
+          if (input.pull_request || input.pr || input.ref || input.branch) untrustedCheckout = true;
+          return out;
         }
         if (name === 'list_projects') {
           fields(input, []);
@@ -336,9 +405,15 @@ export class ChannelServiceSessions {
         if (ownTaskNames.includes(name)) return ownHost ? await this.own.invoke(name, input, ownHost) : { error: 'tool_not_allowed' };
         if (name === conversationScheduleName) return this.schedules ? this.schedules.conversation(chat.id, { binding: binding.id }, input) : { error: 'tool_not_allowed' };
         return await tasks(name, input, key);
+        };
+        const out = await runTool();
+        const errCode = out && typeof out === 'object' && 'error' in out && typeof (out as { error?: unknown }).error === 'string' ? (out as { error: string }).error : null;
+        recentTools.record(name, errCode ? 'error' : 'ok', errCode);
+        return out;
       } catch (error) {
         // A refused or failed call is an observation for the model; a changed source or stopped turn ends the turn.
         if (!(error instanceof HttpError || error instanceof TaskError)) throw error;
+        recentTools.record(name, 'error', error.code);
         check();
         if (error.code === 'operation_not_allowed') return { error: error.code, detail: 'The group binding does not permit this operation.' };
         if (error.code === 'channel_service_task_not_owned') return { error: error.code, detail: 'This group may add instructions to or cancel only tasks created through its own binding.' };
@@ -347,7 +422,7 @@ export class ChannelServiceSessions {
       }
     };
     const resultFiles=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>assistantResultOwner(ownerId({kind:'group',subject:chat.id,tenant:String(chat.installation_tenant??'')})),check,redactor.values,()=>computing&&permitsTool(permissions(),'run_command'));
-    const execute=(name:string,args:unknown,key:string)=>resultFiles.execute(name,args,()=>executeRaw(name,args,key),false);
+    const execute=(name:string,args:unknown,key:string,ownTaskId?:string)=>resultFiles.execute(name,args,()=>executeRaw(name,args,key,ownTaskId),false);
     try {
       // The turn runs on the group's computer: start taking it now, while names, history and the summary are read (#1254).
       // Inside the try, so the finally below gives it back whatever ends the turn.
@@ -404,7 +479,9 @@ export class ChannelServiceSessions {
           + (mountedProjectTools.length ? ' Authorized projects with a project tools volume are mounted read-only at /opt/project-tools/<owner>__<repo> (listed in context.scope.project_tools); never attempt to modify them.' : '') : '')
         // #1072: a group that reads Actions recommends bot scheduling when it sees scheduled runs start late.
         + (githubReadScopes(granted).includes('actions') ? '\n\n' + lateSchedules : '')
+        + (feedbackEnabled ? '\n\n' + feedbackGuidance : '')
         + (binding.prompt ? '\n\nAdditional instructions from the maintainers of this group assistant (they never widen your tools or permissions):\n' + binding.prompt : '');
+      effectiveSystem = system;
       // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
       let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
       const resolveGroupRepository = (selected?: string): Row | null => {
@@ -431,7 +508,7 @@ export class ChannelServiceSessions {
           // An own task works its question through on the same driver, in a session of its own (#312).
           ownHost = { owner: { service_role_id: roleId, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
             tools: () => availableTools().filter(t => t.function.name !== feishuCardToolName), execute, check, redact: value => redactor.text(value),
-            run: async input => serviceHarnessTurn({ ...turnSpec, system: input.system, prompt: input.prompt, tools: input.tools, guard: input.check, execute: async (name, args) => input.execute(name, args, 'harness:' + randomId()) } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence + ':' + input.scope, media) };
+            run: async input => serviceHarnessTurn({ ...turnSpec, system: input.system, prompt: input.prompt, tools: input.tools, guard: input.check, execute: async (name, args) => execute(name, args, 'harness:' + randomId(), input.scope) } as import('../agent/runtime.js').AgentSpec<string>, services, harnessRole, computers, chat.id + ':' + fence + ':' + input.scope, media) };
           // The harness runs the tools itself; each call is still a step of this turn.
           const harnessTurn = (spec: Partial<import('../agent/runtime.js').AgentSpec<unknown>>, control?: ServiceTurnControl) =>
             serviceHarnessTurn({ ...turnSpec, ...spec, execute: async (name: string, args: unknown) => {
