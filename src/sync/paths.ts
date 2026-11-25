@@ -2,13 +2,12 @@ import { constants } from 'node:fs';
 import { lstat, open, readlink, realpath } from 'node:fs/promises';
 import { posix, resolve, sep } from 'node:path';
 import { fail } from '../core/security.js';
-import { isSensitiveToolPath } from '../projects/tools-archive.js';
+import { isSensitiveSyncPath } from '../../runner/sensitive-paths.mjs';
 
+export { isSensitiveSyncPath };
 export const SHA256_RE = /^[a-f0-9]{64}$/;
 export const SYNC_BASE_FILENAME = '.sync-base.json';
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-const SENSITIVE_MEMORY_PATH_RE =
-  /(^|\/)(?:\.env(?:\.[^/]*)?|\.git|\.ssh|\.aws|credentials(?:\.(?!ts$|tsx$|js$|mjs$|cjs$|jsx$|py$|md$|mdx$|html$|css$|scss$|vue$|svelte$|rs$|go$|java$|kt$|rb$|php$|sh$)[^/]*)?|id_(?:rsa|ed25519)|[^/]+\.(?:pem|key))(?:\/|$)/i;
 
 export function isReservedSyncSegment(segment: string): boolean {
   const lower = segment.toLowerCase();
@@ -55,12 +54,6 @@ export function normalizeSyncPath(
     return fail(400, 'sync_sensitive_path');
   }
   return value;
-}
-
-export function isSensitiveSyncPath(relPath: string): boolean {
-  if (isSensitiveToolPath(relPath) !== null) return true;
-  if (SENSITIVE_MEMORY_PATH_RE.test(relPath)) return true;
-  return false;
 }
 
 export function assertSha256(value: unknown, code = 'sync_invalid_sha256'): string {

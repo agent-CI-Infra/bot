@@ -795,6 +795,7 @@ export class Projects {
     if(id!==undefined&&!directories&&method!=='GET'&&(!Number.isSafeInteger(input.expected_revision)||input.expected_revision<1))throw new ManagerError('invalid_note_revision',400);
     if(action==='restore'&&(!Number.isSafeInteger(input.revision)||input.revision<1))throw new ManagerError('invalid_note_revision',400);
     return this.lock(repo,async()=>{
+      await this.reclaimStaleNotes(repo);
       const requireExisting = method === 'GET' && query.require_existing === '1';
       if (requireExisting) {
         const volume = await this.notesVolume(repo, false);
@@ -804,7 +805,6 @@ export class Projects {
           throw new ManagerError('notes_volume_unavailable', 503);
         }
       } else {
-        await this.reclaimStaleNotes(repo);
         if(!this.get(repo))this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
         await this.notesVolume(repo);
       }

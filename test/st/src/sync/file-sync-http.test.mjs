@@ -26,6 +26,7 @@ import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { HttpError } from '../../../../dist/core/security.js';
 import { CasCache, SyncClient } from '../../../../runner/sync-client.mjs';
 import { harness, setup, testPassword } from '../../../fixtures/helpers.mjs';
+import { managerFixture } from '../../../fixtures/project-manager-fixture.mjs';
 
 async function startServer(setupFn) {
   const dir = mkdtempSync(join(tmpdir(), 'sync-http-st-'));
@@ -830,26 +831,103 @@ test('SyncClient protects untracked local files on pull, supports same-dir basel
     assert.equal(adaptivePush.skipped_oversized[0].path, 'huge-no-pull.md');
     assert.equal(existsSync(join(env.projectNotesRoot, '42', 'small-ok.md')), true);
 
-    // 4. Sensitive paths (.env / *.pem) are rejected client-side BEFORE POST /blobs/put so bytes never stage in CAS!
-    const dirSensitive = join(env.dir, 'edge-sensitive');
-    mkdirSync(dirSensitive, { recursive: true });
-    const envPayload = 'DATABASE_URL=postgres://user:pass@host/db\n';
-    const envSha = (await import('../../../../dist/sync/index.js')).sha256Buffer(Buffer.from(envPayload, 'utf8'));
-    writeFileSync(join(dirSensitive, '.env'), envPayload);
-    const sensitiveClient = new SyncClient({
-      baseUrl: env.baseUrl,
-      token,
-      namespace: 'project-notes',
-      scope: '42',
-      targetDir: dirSensitive,
-      cas,
-    });
-    await assert.rejects(
-      () => sensitiveClient.push({ mode: 'interactive' }),
-      err => err.status === 400 && err.code === 'sync_sensitive_path' && err.detail?.path === '.env',
-    );
-    assert.equal(await env.sync.engine.blobStore.has(envSha), false, '.env bytes must never be staged in control-plane CAS');
+    // 4. Sensitive paths (shared server+client policy: .env, secrets.yaml, .pgpass, .kube/config, .codex/auth.json, *.ppk)
+    //    are rejected client-side BEFORE POST /blobs/put so bytes never stage in control-plane CAS!
+    const { sha256Buffer } = await import('../../../../dist/sync/index.js');
+    for (const [idx, sensitivePath] of [
+      '.env',
+      'secrets.yaml',
+      '.pgpass',
+      '.kube/config',
+      '.codex/auth.json',
+      'vpn/client.ppk',
+    ].entries()) {
+      const dirSensitive = join(env.dir, `edge-sensitive-${idx}`);
+      const fullSensitive = join(dirSensitive, ...sensitivePath.split('/'));
+      mkdirSync(join(fullSensitive, '..'), { recursive: true });
+      const secretPayload = `TOP_SECRET_${idx}=${sensitivePath}\n`;
+      const secretSha = sha256Buffer(Buffer.from(secretPayload, 'utf8'));
+      writeFileSync(fullSensitive, secretPayload);
+      const sensitiveClient = new SyncClient({
+        baseUrl: env.baseUrl,
+        token,
+        namespace: 'project-notes',
+        scope: '42',
+        targetDir: dirSensitive,
+        cas,
+      });
+      await assert.rejects(
+        () => sensitiveClient.push({ mode: 'interactive' }),
+        err => err.status === 400 && err.code === 'sync_sensitive_path' && err.detail?.path === sensitivePath,
+        `expected client pre-upload rejection for ${sensitivePath}`,
+      );
+      assert.equal(
+        await env.sync.engine.blobStore.has(secretSha),
+        false,
+        `${sensitivePath} bytes must never be staged in control-plane CAS`,
+      );
+    }
   } finally {
     await env.close();
+  }
+});
+
+test('Production manager bridge (manager/projects.mjs) runs reclaimStaleNotes before require_existing=1 and never serves stale residue notes', async t => {
+  const fixture = await managerFixture(t);
+  const dir = mkdtempSync(join(tmpdir(), 'sync-real-mgr-'));
+  const store = new Store(join(dir, 'control.sqlite'), randomBytes(32));
+  const { server, sync } = createControlPlane({
+    store,
+    staticDirectory: resolve('static'),
+    projects: { manager: fixture.manager },
+    channels: { longConnections: false },
+    schedules: { automatic: false },
+    consolidation: { automatic: false },
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    const token = sync.tokens.issue({
+      actor: 'agent:prod-bridge',
+      actorTag: 'prod-bridge',
+      grants: [{ namespace: 'project-notes', scope: '88', mode: 'rw' }],
+    }).token;
+    const cas = new CasCache(join(dir, 'cas'));
+    const clientDir = join(dir, 'client');
+    const client = new SyncClient({ baseUrl, token, namespace: 'project-notes', scope: '88', targetDir: clientDir, cas });
+
+    // Seed scope 88 through real ProjectManager (`manager/projects.mjs`) so `sync_scope_revisions` is persisted (rev > 0).
+    await client.pull();
+    writeFileSync(join(clientDir, 'runbook.md'), 'original project 88 runbook\n');
+    assert.equal((await client.push({ mode: 'interactive' })).ok, true);
+    const mgrNotesDir = join(fixture.projects.notesRoot, '88');
+    assert.equal(readFileSync(join(mgrNotesDir, 'runbook.md'), 'utf8'), 'original project 88 runbook\n');
+
+    // Case A: project marked `notes_purge = 1` (deletion owed purge, stale volume + files still on disk).
+    // Sync read (`require_existing=1`) MUST run `reclaimStaleNotes`, purge residue, and fail closed 503 (never serve stale notes!).
+    fixture.projects.db.prepare("UPDATE projects SET notes_purge=1 WHERE repository_id='88'").run();
+    await assert.rejects(
+      () => client.pull(),
+      err => err.status === 503 && err.code === 'sync_scope_unavailable',
+    );
+    assert.equal(existsSync(mgrNotesDir), false, 'stale notes directory must be purged by reclaimStaleNotes');
+    assert.equal(readFileSync(join(clientDir, 'runbook.md'), 'utf8'), 'original project 88 runbook\n');
+
+    // Case B: project row missing in manager DB (reconnected/deleted) while residue notes volume + file still exist on disk.
+    // Sync read (`require_existing=1`) MUST purge the residue and fail closed 503 instead of returning stale notes!
+    await fixture.projects.notesVolume('88', true);
+    writeFileSync(join(mgrNotesDir, 'stale-previous-tenant.md'), 'stale secret from deleted project\n');
+    fixture.projects.db.prepare("DELETE FROM projects WHERE repository_id='88'").run();
+    await assert.rejects(
+      () => client.pull(),
+      err => err.status === 503 && err.code === 'sync_scope_unavailable',
+    );
+    assert.equal(existsSync(mgrNotesDir), false, 'residue notes for missing project row must be purged');
+    assert.equal(existsSync(join(clientDir, 'stale-previous-tenant.md')), false);
+  } finally {
+    await new Promise(r => { server.close(() => r()); server.closeAllConnections(); });
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

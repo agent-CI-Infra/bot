@@ -5,7 +5,7 @@ COPY public-board/dashboard/package.json ./public-board/dashboard/package.json
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-COPY runner/agent-products.mjs runner/agent-products.d.mts runner/acp-products.mjs runner/acp-products.d.mts runner/acp-install-worker.mjs runner/acp-install-worker.d.mts runner/cli-config.mjs runner/cli-config.d.mts runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/image-budget.mjs runner/image-budget.d.mts runner/result-owner.mjs runner/result-owner.d.mts runner/credential-redaction.mjs runner/credential-redaction.d.mts runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/artifact-zip.d.mts runner/notes.mjs runner/notes.d.mts runner/note-catalog.mjs runner/note-path.mjs runner/note-path.d.mts ./runner/
+COPY runner/agent-products.mjs runner/agent-products.d.mts runner/acp-products.mjs runner/acp-products.d.mts runner/acp-install-worker.mjs runner/acp-install-worker.d.mts runner/cli-config.mjs runner/cli-config.d.mts runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/image-budget.mjs runner/image-budget.d.mts runner/result-owner.mjs runner/result-owner.d.mts runner/credential-redaction.mjs runner/credential-redaction.d.mts runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/artifact-zip.d.mts runner/notes.mjs runner/notes.d.mts runner/note-catalog.mjs runner/note-path.mjs runner/note-path.d.mts runner/sensitive-paths.mjs runner/sensitive-paths.d.mts ./runner/
 COPY manager/compaction.mjs manager/compaction.d.mts manager/storage-footprint.mjs manager/storage-footprint.d.mts manager/file-tree.mjs manager/file-tree.d.mts ./manager/
 COPY public-board ./public-board
 RUN npm run build
@@ -36,7 +36,7 @@ COPY docs/external-token-api.md ./docs/external-token-api.md
 COPY docs/prompts ./docs/prompts
 COPY skills ./skills
 # Runner modules the control plane imports directly (tool volumes, command policy, notes, disk checks).
-COPY runner/agent-products.mjs runner/acp-products.mjs runner/acp-install-worker.mjs runner/cli-config.mjs runner/command-policy.mjs runner/command-output.mjs runner/image-budget.mjs runner/result-owner.mjs runner/filesystem-id.mjs runner/credential-redaction.mjs runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/notes.mjs runner/note-catalog.mjs runner/note-path.mjs ./runner/
+COPY runner/agent-products.mjs runner/acp-products.mjs runner/acp-install-worker.mjs runner/cli-config.mjs runner/command-policy.mjs runner/command-output.mjs runner/image-budget.mjs runner/result-owner.mjs runner/filesystem-id.mjs runner/credential-redaction.mjs runner/paths.mjs runner/disk.mjs runner/artifact-zip.mjs runner/notes.mjs runner/note-catalog.mjs runner/note-path.mjs runner/sensitive-paths.mjs ./runner/
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
 COPY manager/compaction.mjs manager/storage-footprint.mjs manager/file-tree.mjs ./manager/
 RUN node --input-type=module -e "await import('./dist/app/storage.js'); await import('./dist/agent/workspace.js'); await import('./dist/projects/local-manager.js'); await import('./dist/projects/tools.js'); await import('./dist/feedback/index.js'); await import('./dist/roles/skill-store.js'); await import('./dist/roles/skill-library.js'); await import('./dist/roles/skill-library-api.js'); await import('./dist/sync/index.js'); await import('./manager/compaction.mjs');"
