@@ -31,6 +31,9 @@ import { assertManagedTask, assertManagedExecution, assertTaskRole, managedTaskO
 import { TaskCommands } from '../tasks/commands.js';
 import { resolvePrincipalActor } from '../identity/authorization.js';
 import { externalModelRecorder } from '../metrics/accounting.js';
+import { executeSubmitFeedback, isFeedbackEnabled, SUBMIT_FEEDBACK_TOOL_NAME, submitFeedbackTool } from '../feedback/tool.js';
+import { collectRunRecentTools, collectTaskRunMeta, collectTaskSkillsRead } from '../feedback/snapshot.js';
+import type { Json } from '../core/security.js';
 /** The project's role configuration in its V2 form (legacy configurations are presented as V2 with legacy:true). */
 export function roleConfig(store:AgentSpec<any>['store'],task:AgentSpec<any>['task']){return roleConfiguration(store,task.repository_id,taskConfiguration(store,task)?.roles);}
 /** Whether this entry point runs under the project controller. */
@@ -227,7 +230,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const allowedTools=snapshot.capability.tools;
   // grant_writes (#814) is a task-management tool of the project's controller only.
   const managedTools=snapshot.kind==='evaluator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
-  const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...(snapshot.skills?[skillTool]:[])].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
+  const feedbackTools=isFeedbackEnabled(s)?[submitFeedbackTool]:[];
+  const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)&&t.function.name!==SUBMIT_FEEDBACK_TOOL_NAME),...managedTools,...(snapshot.skills?[skillTool]:[]),...feedbackTools].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   const cmdConfigured=configuredCommandTimeout(s,task,role),cmdBudget=cmdConfigured!==null?resolveCommandTimeout(s,task,role,cmdConfigured):null;
   const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
@@ -292,6 +296,77 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},summaries:skillSummariesFromFiles(files),files:files.map(({content,...f})=>f)};
       const file=resolveSkillBundleFile(files,args?.path);if(!file)return {error:'skill_file_not_found',files:files.map(f=>f.path)};
       traceEvent(s,task.id,'skill_read',{role,instance_id:instance.id,bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},path:file.path,sha256:file.sha256},task.trace_run_id,'role:'+role);return {path:file.path,sha256:file.sha256,content:file.content};}
+     if(name===SUBMIT_FEEDBACK_TOOL_NAME){
+      const runId=b?.run_id??executionRun??null;
+      const checkout=taskCheckoutContext(s,task);
+      const runMeta=collectTaskRunMeta(s,runId);
+      const repoRow=s.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id);
+      return executeSubmitFeedback({
+       store:s,
+       idempotencyScope:`project_role:${task.id}:${runId??`${instance.id}:${instance.sequence}`}`,
+       extraSecrets:spec.redactor.values,
+       snapshot:()=>({
+        source_kind:'project_role',
+        untrusted_context:!checkout.trustedCheckout,
+        repository_id:String(task.repository_id),
+        repository_full_name:repoRow?.full_name?String(repoRow.full_name):null,
+        role:{
+         role_id:role,
+         role_name:resolved.definition.name,
+         kind:snapshot.kind,
+         config_revision:snapshot.config_revision,
+         role_revision:snapshot.role_revision,
+         snapshot_id:resolved.id,
+         system_prompt:definition.prompt,
+         persona_prompt:resolved.definition.persona_prompt,
+         permissions:snapshot.capability.permissions??resolved.definition.permissions,
+         budget:budget as unknown as Json,
+         offered_tools:tools.map(t=>t.function.name),
+        },
+        model:{
+         id:model.id,
+         name:model.model,
+         version:model.version,
+         source:snapshot.model.source,
+         api_url:model.url,
+         interface_type:snapshot.model.api??null,
+         transport:containerOptions?.modelTransport??null,
+        },
+        harness:{
+         id:harness,
+         version:driver.version,
+         cli_version:runMeta.cli_version,
+         environment:snapshot.environment.id,
+         model_source:snapshot.harness.model_source??'gateway',
+        },
+        skills:{
+         bundle:snapshot.skills?{
+          id:snapshot.skills.id,
+          revision:snapshot.skills.revision,
+          content_hash:snapshot.skills.content_hash,
+          source:snapshot.skills.source,
+          files:snapshot.skills.files,
+         }:null,
+         skills_read:collectTaskSkillsRead(s,String(task.id),runId,role),
+        },
+        execution:{
+         task_id:String(task.id),
+         task_kind:String(task.kind??''),
+         task_status:task.status?String(task.status):null,
+         task_phase:task.phase?String(task.phase):null,
+         object_number:task.object_number==null?null:Number(task.object_number),
+         attempt:task.attempt==null?null:Number(task.attempt),
+         run_id:runId,
+         instance_id:String(instance.id),
+         assignment_id:assignment??null,
+         recovery_mode:recover,
+         lease_epoch:b?.epoch??null,
+         started_at:runMeta.started_at,
+         recent_tools:collectRunRecentTools(s,String(task.id),runId,20),
+        },
+       }),
+      },args);
+     }
      return spec.execute?.(name,args);})();
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},

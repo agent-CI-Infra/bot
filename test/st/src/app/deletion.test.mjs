@@ -14,6 +14,7 @@ import { FakeDocker } from '../../../fixtures/fake-docker.mjs';
 import { loadConsole } from '../../../fixtures/console-page.mjs';
 import { externalFixture } from '../../../fixtures/external-helpers.mjs';
 import { deleteProjectRecords } from '../../../../dist/projects/removal.js';
+import { executeSubmitFeedback } from '../../../../dist/feedback/tool.js';
 import { builtinRules } from '../../../../dist/dispatch/rules.js';
 import { managerFixture as sharedManagerFixture } from '../../../fixtures/project-manager-fixture.mjs';
 
@@ -129,6 +130,25 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   h.store.run("INSERT INTO board_options(id,field_id,name,position) VALUES('opt-del-high',?,'High',0)", field.id);
   h.store.run("INSERT INTO board_values(user_id,repository_id,object_type,object_number,field_id,option_id) VALUES(?,'101','issue',5,?,'opt-del-high')", adminUser, field.id);
   assert.ok(h.store.get("SELECT 1 FROM external_events WHERE repository_id='101'"));
+  const feedback101 = executeSubmitFeedback({
+    store: h.store,
+    idempotencyScope: 'del:101',
+    snapshot: () => ({
+      source_kind: 'project_role',
+      untrusted_context: false,
+      repository_id: '101',
+      repository_full_name: 'fixture/project-101',
+      role: { role_id: 'dev', system_prompt: 'fixture', offered_tools: ['submit_feedback'] },
+      harness: { id: 'pi' },
+      model: { name: 'own' },
+      execution: { task_id: 'done-101' },
+    }),
+  }, {
+    category: 'tool', severity: 'medium', title: 'Retained across project deletion',
+    context: 'Running in project 101', problem: 'Observed issue', suggestion: 'Keep feedback after deletion',
+    idempotency_key: 'k1',
+  });
+  assert.equal(feedback101.accepted, true);
   for(const repoId of ['101','202']){h.store.run("INSERT INTO dispatch_events(id,repository_id,event_key,type,source,summary,facts,options,state,created_at) VALUES(?,?,?,'probe','fixture','failure cleanup','{}','[]','failed',?)",'failure-'+repoId,repoId,'failure-'+repoId,now);h.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)','failure-'+repoId,1,now,JSON.stringify({code:'fixture_failure'}),0,0);h.store.run("INSERT INTO github_repository_member_cache(installation_ref,repository_id,owner_id,full_name,tier,in_installation,etag,synced_at,checked_at,dirty,failures,last_error,next_retry_at) VALUES('github.com/123/77',?,'10',?,'full',1,NULL,1,1,0,0,NULL,0)",repoId,'fixture/project-'+repoId);h.store.run("INSERT INTO github_repository_collaborators(installation_ref,repository_id,github_user_id,login,role) VALUES('github.com/123/77',?,'42','member','write')",repoId);h.store.run("INSERT INTO github_repository_assignees VALUES('github.com/123/77',?,'42','member')",repoId);h.store.run("INSERT INTO event_subscriptions(id,repository_id,task_id,events,hints,note,state,timeout_at,created_at,updated_at) VALUES(?,?,?,'[\"workflow_run\"]','{}','fixture','active',9999999999999,?,?)",'sub-'+repoId,repoId,'done-'+repoId,now,now);h.store.run("INSERT INTO memory_consolidation_state(scope_kind,scope_id,enabled_override,model_id,updated_at) VALUES('project',?,1,?,?)",repoId,repoId==='101'?own.id:shared.id,now);h.store.run("INSERT INTO memory_consolidation_runs(id,scope_kind,scope_id,trigger,status,logical_day,model_id,started_at,finished_at,summary,changed_files_json,deleted_files_json) VALUES(?,'project',?,'nightly','completed','2026-11-24',?,?,?,'done','[]','[]')",'cons-run-'+repoId,repoId,repoId==='101'?own.id:shared.id,now,now);}
   // The running task stops at its next checkpoint once it is cancelled, as the engine's guard does.
   let stoppedAs = null;
@@ -148,8 +168,13 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   assert.equal(h.store.get("SELECT count(*) n FROM memory_consolidation_runs WHERE scope_kind='project' AND scope_id='202'").n, 1);
   assert.deepEqual(await listedIds(admin), ['202']);
   assert.ok(github.requests.includes('GET /repositories/101'));
-  // Nothing that names 101 is left except the audit, which keeps its records.
-  for (const table of tablesWith(h.store, 'repository_id').filter(name => name !== 'audit')) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE repository_id='101'`).n, 0, table);
+  // Nothing that names 101 is left except the audit and feedback_entries, which retain historical records.
+  for (const table of tablesWith(h.store, 'repository_id').filter(name => !['audit', 'feedback_entries'].includes(name))) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE repository_id='101'`).n, 0, table);
+  const retainedFeedback = await admin(`/api/feedback/${feedback101.feedback_id}`);
+  assert.equal(retainedFeedback.status, 200);
+  assert.equal(retainedFeedback.value.entry.repository_full_name, 'fixture/project-101');
+  assert.equal(retainedFeedback.value.entry.repository_deleted, true);
+  assert.equal(retainedFeedback.value.payload.feedback.title, 'Retained across project deletion');
   for (const table of ['worktrees', 'worktree_bindings', 'bot_pr_states', 'github_repository_member_cache', 'github_repository_collaborators', 'github_repository_assignees', 'event_subscriptions']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE repository_id='202'`).n, 1, table);
   for (const table of ['task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE task_id LIKE '%-101'`).n, 0, table);
   for (const table of ['external_grants', 'external_subscriptions', 'external_event_cursors']) assert.equal(h.store.get(`SELECT count(*) n FROM ${table} WHERE client_id='client-101'`).n, 0, table);

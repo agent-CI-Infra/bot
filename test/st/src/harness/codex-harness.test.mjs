@@ -110,7 +110,7 @@ test('Codex app-server: handshake, stdio MCP task tools, thread/turn binding, qu
   const events = f.events(), bound = events.find(e => e.type === 'session_bound');
   assert.deepEqual(
     [bound.threadId, bound.protocol, bound.tools, bound.approvalPolicy, bound.sandbox.type, bound.model, bound.enabledBuiltins, bound.disabledBuiltins],
-    [state.sessionId, 'codex-app-server', ['finish', 'read_managed_task', 'read_task_record', 'read_tool_result'], 'never', 'workspaceWrite', 'gpt-fixture', [...enabledFeatures], [...deniedFeatures]],
+    [state.sessionId, 'codex-app-server', ['finish', 'read_managed_task', 'read_task_record', 'read_tool_result', 'submit_feedback'], 'never', 'workspaceWrite', 'gpt-fixture', [...enabledFeatures], [...deniedFeatures]],
   );
   const turns = events.filter(e => e.type === 'turn');
   assert.deepEqual(turns.map(e => [e.phase, e.status ?? null, e.usage ?? null]), [['started', null, null], ['ended', 'completed', 'observed']]);

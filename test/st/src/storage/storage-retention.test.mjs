@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { Store } from '../../../../dist/storage/database.js';
 import { RetentionCleanup, retentionSettings, saveRetention, trajectoryDays } from '../../../../dist/storage/retention.js';
+import { executeSubmitFeedback } from '../../../../dist/feedback/tool.js';
+import { getFeedbackEntry } from '../../../../dist/feedback/storage.js';
 import { runScope, TrajectoryError } from '../../../../dist/storage/trajectories.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { Redactor } from '../../../../dist/agent/common.js';
@@ -43,10 +45,11 @@ const usage = (store, repo) => Object.fromEntries(store.all('SELECT kind,count,b
 
 test('settings default to keeping everything, validate their ranges per field, and every change is audited', t => {
   const { store } = fixture(t);
-  assert.deepEqual(retentionSettings(store), { trajectory_days: null, trajectory_days_by_project: {}, manager_payload_days: 2, workspace_finished_days: 1, workspace_failed_days: 7, webhook_payload_days: null, project_notes_keep_versions: 50, project_notes_keep_days: 30 });
+  assert.deepEqual(retentionSettings(store), { trajectory_days: null, trajectory_days_by_project: {}, manager_payload_days: 2, workspace_finished_days: 1, workspace_failed_days: 7, webhook_payload_days: null, project_notes_keep_versions: 50, project_notes_keep_days: 30, feedback_days: null });
   const refused = (input, field) => assert.throws(() => saveRetention(store, 'admin', input), error => error.code === 'storage_retention_invalid' && error.field === field, JSON.stringify(input));
   refused({ trajectory_days: 0 }, 'trajectory_days'); refused({ trajectory_days: 3651 }, 'trajectory_days'); refused({ trajectory_days: 1.5 }, 'trajectory_days');
   refused({ manager_payload_days: null }, 'manager_payload_days'); refused({ webhook_payload_days: 6 }, 'webhook_payload_days');
+  refused({ feedback_days: 0 }, 'feedback_days'); refused({ feedback_days: 3651 }, 'feedback_days');
   refused({ workspace_failed_days: '7' }, 'workspace_failed_days'); refused({ unknown: 1 }, 'unknown');
   refused({ trajectory_days_by_project: { 999: 5 } }, 'trajectory_days_by_project'); refused({ trajectory_days_by_project: { 101: 0 } }, 'trajectory_days_by_project');
   assert.throws(() => saveRetention(store, 'admin', {}), error => error.code === 'storage_retention_invalid');
@@ -266,4 +269,67 @@ test('#1122 inactive dispatch_threads past the project trajectory window are pru
  const result=await cleanup.run();
  assert.equal(result.dispatch_threads.count,1);
  assert.deepEqual(store.all('SELECT thread_key FROM dispatch_threads ORDER BY thread_key').map(r=>r.thread_key),['101:issue:9','102:event:keep']);
+});
+
+test('feedback cleanup sweeps stale orphan files even when feedback_days is null, and prunes expired entries when feedback_days is set', async t => {
+  const { store } = fixture(t);
+  const oldRes = executeSubmitFeedback({
+    store,
+    idempotencyScope: 'ret:1',
+    now: () => Date.now() - 40 * day,
+    snapshot: () => ({
+      source_kind: 'project_role',
+      untrusted_context: false,
+      repository_id: '101',
+      repository_full_name: 'fixture/project-101',
+      role: { role_id: 'dev', system_prompt: 'sys', offered_tools: ['submit_feedback'] },
+      harness: { id: 'pi' },
+      model: { name: 'm' },
+    }),
+  }, { category: 'tool', severity: 'medium', title: 'Old feedback', context: 'c', problem: 'p', suggestion: 's' });
+  assert.equal(oldRes.accepted, true);
+  const oldEntry = getFeedbackEntry(store, oldRes.feedback_id);
+  const freshRes = executeSubmitFeedback({
+    store,
+    idempotencyScope: 'ret:2',
+    now: () => Date.now() - day,
+    snapshot: () => ({
+      source_kind: 'project_role',
+      untrusted_context: false,
+      repository_id: '101',
+      repository_full_name: 'fixture/project-101',
+      role: { role_id: 'dev', system_prompt: 'sys', offered_tools: ['submit_feedback'] },
+      harness: { id: 'pi' },
+      model: { name: 'm' },
+    }),
+  }, { category: 'skill', severity: 'low', title: 'Fresh feedback', context: 'c', problem: 'p', suggestion: 's' });
+  assert.equal(freshRes.accepted, true);
+  const freshEntry = getFeedbackEntry(store, freshRes.feedback_id);
+  const orphanShard = join(store.feedbackDir, 'ff');
+  mkdirSync(orphanShard, { recursive: true, mode: 0o700 });
+  const staleOrphan = join(orphanShard, 'ff00stale1.json.gz');
+  const staleTmp = join(orphanShard, 'ff00stale2.json.gz.a1b2c3d4e5f6.tmp');
+  const recentOrphan = join(orphanShard, 'ff00recent.json.gz');
+  for (const p of [staleOrphan, staleTmp, recentOrphan]) writeFileSync(p, Buffer.from('orphan'));
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(staleOrphan, twoHoursAgo, twoHoursAgo);
+  utimesSync(staleTmp, twoHoursAgo, twoHoursAgo);
+
+  const cleanup = new RetentionCleanup(store, undefined, { pauseMs: 0 });
+  t.after(() => cleanup.stop());
+  // Default feedback_days = null: keeps both indexed entries, sweeps >1h orphans only.
+  const first = await cleanup.run();
+  assert.equal(first.feedback.count, 2);
+  assert.equal(existsSync(staleOrphan), false);
+  assert.equal(existsSync(staleTmp), false);
+  assert.equal(existsSync(recentOrphan), true, 'orphans younger than 1 hour are left alone');
+  assert.equal(store.get('SELECT count(*) n FROM feedback_entries').n, 2);
+
+  // Explicit feedback_days = 30: removes oldEntry index + file, retains freshEntry.
+  saveRetention(store, 'admin', { feedback_days: 30 });
+  const second = await cleanup.run();
+  assert.equal(second.feedback.count, 1);
+  assert.equal(existsSync(join(store.feedbackDir, oldEntry.payload_relpath)), false);
+  assert.equal(existsSync(join(store.feedbackDir, freshEntry.payload_relpath)), true);
+  assert.deepEqual(store.all('SELECT id FROM feedback_entries').map(r => r.id), [freshEntry.id]);
 });

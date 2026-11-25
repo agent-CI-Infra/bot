@@ -48,6 +48,7 @@ import { migrateNativeToPi, pinAssistantsToPi, retireContainerAcpRoles, retireNa
 import { workspaceStorage } from '../projects/workspace-cleanup.js';
 import { worktreeStorage } from '../projects/worktrees.js';
 import { projectToolsStorage } from '../projects/tools.js';
+import { feedbackStorage } from '../feedback/storage.js';
 
 export type Row = Record<string, any>;
 export interface StoreOptions { slowSqlMs?: number; log?: (line: string) => void; now?: () => number }
@@ -75,6 +76,8 @@ export class Store {
   readonly channelResourcesDir: string;
   // Encrypted Feishu interactive card specs beside the database (temp dir inside trajectories root for :memory: stores).
   readonly channelCardsDir: string;
+  // Plaintext gzipped role feedback payloads beside the database (temp dir inside trajectories root for :memory: stores).
+  readonly feedbackDir: string;
   // Free space of the disk the database is on (#671); null for an in-memory store.
   readonly disk: DiskGuard | null;
   private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
@@ -92,6 +95,7 @@ export class Store {
     this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'), undefined, value => configuredRedactor(this).clean(value));
     this.channelResourcesDir = path === ':memory:' ? join(this.trajectories.root, '.channel-resources') : join(dirname(path), 'channel-resources');
     this.channelCardsDir = path === ':memory:' ? join(this.trajectories.root, '.channel-cards') : join(dirname(path), 'channel-cards');
+    this.feedbackDir = path === ':memory:' ? join(this.trajectories.root, '.feedback') : join(dirname(path), 'feedback');
     // One place turns a post-commit cleanup failure into an audit row, whether the files belonged to a project or a
     // conversation, and whether the removal came from a deletion, a retention sweep or a retried reclaim (#771).
     this.trajectories.onCleanupFailure = (where, error) => {
@@ -325,6 +329,8 @@ export class Store {
     worktreeStorage(this);
     // Per-project isolated read-only tool volume revisions (#1322).
     projectToolsStorage(this);
+    // Platform-wide append-only role feedback box lightweight index (bodies live in store.feedbackDir).
+    feedbackStorage(this);
     // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
     ceilingStorage(this);
     // One-time #1122 migration retiring work_settings, task_models and legacy work-type sections.
