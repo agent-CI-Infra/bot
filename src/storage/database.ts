@@ -49,6 +49,7 @@ import { workspaceStorage } from '../projects/workspace-cleanup.js';
 import { worktreeStorage } from '../projects/worktrees.js';
 import { projectToolsStorage } from '../projects/tools.js';
 import { feedbackStorage } from '../feedback/storage.js';
+import { syncStorage } from '../sync/storage.js';
 
 export type Row = Record<string, any>;
 export interface StoreOptions { slowSqlMs?: number; log?: (line: string) => void; now?: () => number }
@@ -336,6 +337,8 @@ export class Store {
     projectToolsStorage(this);
     // Platform-wide append-only role feedback box lightweight index (bodies live in store.feedbackDir).
     feedbackStorage(this);
+    // Unified FileSyncEngine conflict audit & scope revision tracking (#1377).
+    syncStorage(this);
     // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
     ceilingStorage(this);
     // One-time #1122 migration retiring work_settings, task_models and legacy work-type sections.

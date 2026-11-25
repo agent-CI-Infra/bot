@@ -64,6 +64,7 @@ import { MemoryConsolidationService, type ConsolidationRunContext, type Consolid
 import { MemoryConsolidationApi } from './memory/consolidation-api.js';
 import { feedbackApi } from './feedback/api.js';
 import { skillLibraryApi } from './roles/skill-library-api.js';
+import { createDefaultSyncRuntime, type CreateDefaultSyncRuntimeOptions, type SyncRuntime } from './sync/index.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -94,7 +95,10 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
   schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void;
   consolidation?: { clock?: () => number; tickMs?: number; firstDelayMs?: number; automatic?: boolean; runner?: (ctx: ConsolidationRunContext) => Promise<ConsolidationSubmission> };
-  onConsolidation?: (service: MemoryConsolidationService) => void; }
+  onConsolidation?: (service: MemoryConsolidationService) => void;
+  /** Optional pre-built FileSyncEngine runtime or override options for the unified `/sync/:namespace/:scope/*` API (#1377). */
+  sync?: SyncRuntime;
+  syncOptions?: Partial<CreateDefaultSyncRuntimeOptions>; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -162,6 +166,15 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     root: options.projectToolsDir ?? process.env.BOT_PROJECT_TOOLS_DIR ?? (options.assistantHomes ? DEFAULT_PROJECT_TOOLS_ROOT : undefined),
     manager: toolsManager,
     reconcile: () => { void options.projects?.reconcile().catch(() => {}); },
+  });
+  const sync = options.sync ?? createDefaultSyncRuntime({
+    store,
+    manager: toolsManager,
+    projectTools,
+    agentToolsRoot: agentTools.volumeRoot,
+    assistantHomes: assistants.homes,
+    assistantHomesRoot: options.assistantHomes,
+    ...options.syncOptions,
   });
   sharedManagement.assistants = assistants;
   sharedManagement.projectTools = projectTools;
@@ -274,6 +287,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       let value:Json;try{value=object(JSON.parse(input.bytes.toString('utf8')));}catch{return fail(400,'invalid_json');}
       respond(res,200,await external.publicApi(path,value,String(req.headers.authorization||'')));return;
     }
+    if (await sync.handleHttp(req, res, url)) return;
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
     if (method === 'POST' && match) {
       const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
@@ -597,5 +611,5 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   const close=server.close.bind(server);
   // The caller may close SQLite after this callback; every background consumer must have finished first.
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;
-  return { server };
+  return { server, sync };
 }

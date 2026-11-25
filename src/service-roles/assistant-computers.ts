@@ -323,6 +323,15 @@ export class AssistantHomes {
         const fdDir = `/proc/self/fd/${dirHandle.fd}`;
         const dirents = (await readdir(fdDir, { withFileTypes: true }).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name));
         for (const dirent of dirents) {
+          if (
+            dirent.name === '.sync-base.json' ||
+            dirent.name.startsWith('.sync-base.json.') ||
+            dirent.name.startsWith('.sync-tmp-') ||
+            dirent.name.startsWith('.write-') ||
+            dirent.name.startsWith('.expired-')
+          ) {
+            continue;
+          }
           if (entries.length >= maxEntries) { truncated = true; return; }
           const childPath = `${fdDir}/${dirent.name}`;
           const info = await lstat(childPath).catch(() => null);

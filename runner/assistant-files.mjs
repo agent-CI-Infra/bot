@@ -20,7 +20,19 @@ const MAX_ASSISTANT_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024;
 const USAGE_CACHE_TTL_MS = 15_000;
 
 function isReservedSegment(segment) {
-  return segment === '.runner-journal' || segment === '.bot-bg' || segment.startsWith('.bot-archive-') || segment.startsWith('.bot-unpack-') || segment.startsWith('.bot-pack-') || segment.startsWith('.bot-usage-');
+  return (
+    segment === '.runner-journal' ||
+    segment === '.bot-bg' ||
+    segment === '.sync-base.json' ||
+    segment.startsWith('.sync-base.json.') ||
+    segment.startsWith('.sync-tmp-') ||
+    segment.startsWith('.write-') ||
+    segment.startsWith('.expired-') ||
+    segment.startsWith('.bot-archive-') ||
+    segment.startsWith('.bot-unpack-') ||
+    segment.startsWith('.bot-pack-') ||
+    segment.startsWith('.bot-usage-')
+  );
 }
 
 function resolveRoots(options = {}) {

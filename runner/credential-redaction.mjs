@@ -4,7 +4,7 @@
 const installationToken = String.raw`(?:gh[pousr]_|github_pat_)\d+_(?=[\w.*-]{20})[\w-]+(?:\.[\w-]+\.[\w-]+|(?:\.[\w-]+)?(?=\*))`;
 const githubBoundary = String.raw`(?:\b|(?<=\\[nrt]|\x1b\[[0-9;]{0,32}m))`;
 export const githubTokenSource = githubBoundary + '(?:' + installationToken + String.raw`|gh[pousr]_(?=[\w*]{30})\w+|github_pat_(?=[\w*]{22})\w+)\**`;
-const providerTokenSource = String.raw`\b(?:sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_(?:[\w-]{12}\.[\w-]{43}|[\w-]{16,}))`;
+const providerTokenSource = String.raw`\b(?:sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_(?:[\w-]{12}\.[\w-]{43}|[\w-]{16,})|bsync_(?:[a-f0-9]{12}\.[a-f0-9]{48}|[\w-]{16,}))`;
 const tokens = new RegExp(githubTokenSource + '|' + providerTokenSource, 'g');
 const pemDelimiter = /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----/g;
 const marker = '[REDACTED]';
