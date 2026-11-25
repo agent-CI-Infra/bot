@@ -26,7 +26,11 @@ export class Redactor {
   #raw;
   #public;
   add(value) {
-    if (typeof value !== 'string' || value.length < 8 || this.values.has(value)) return;
+    if (typeof value === 'string' && value.length >= 8) this.addExact(value);
+  }
+  // Explicit credentials have no minimum length. Empty strings must never be patterns.
+  addExact(value) {
+    if (typeof value !== 'string' || !value.length || this.values.has(value)) return;
     this.values.add(value);
     this.#raw = this.#public = undefined;
   }

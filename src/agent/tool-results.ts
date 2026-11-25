@@ -1,4 +1,5 @@
 import { Redactor } from './common.js';
+import { configuredRedactor } from '../core/redaction.js';
 import { computerResultOwner } from '../../runner/result-owner.mjs';
 import { boundedResult, batchBytes } from './tool-context.js';
 import { maskedStream, backgroundOutputNotice } from '../../runner/command-output.mjs';
@@ -17,9 +18,17 @@ const active = new AsyncLocalStorage<ResultSession>();
 /** A trusted caller supplies the execution computer owner and its live authorization guard. */
 export class ResultSession {
   constructor(readonly store: Store, readonly scope: TrajectoryScope, readonly owner: () => string, readonly guard: () => unknown | Promise<unknown>, readonly secrets: Iterable<string> = active.getStore()?.secrets ?? [], readonly mounted: () => boolean = () => false) {}
+  outputRedactor(includeConfigured = false) {
+    const redactor = new Redactor();
+    if (includeConfigured) {
+      for (const secret of configuredRedactor(this.store,this.scope.repository_id).values) redactor.addExact(secret);
+    }
+    for (const secret of this.secrets) redactor.addExact(secret);
+    return redactor;
+  }
   preserve = (value: unknown, name = 'tool'): any => {
     const session = active.getStore() ?? this;
-    const redactor = new Redactor(); for (const secret of session.secrets) redactor.add(secret);
+    const redactor = session.outputRedactor();
     const text = JSON.stringify(redactor.clean(value)) ?? 'null';
     try {
       const ref = session.store.trajectories.results.saveText(session.owner(), session.scope, name + ':' + createHash('sha256').update(text).digest('hex'), text);
@@ -53,7 +62,7 @@ export class ResultSession {
     await session.guard();return result;
   }
   execute(name:string,args:any,execute:()=>Promise<any>,interceptRead=true):Promise<any> {
-    return this.run(async()=>{await (active.getStore()??this).guard();const raw=await (name==='read_tool_result'&&interceptRead?this.read(args):execute()); const redactor=new Redactor(); for(const secret of this.secrets)redactor.add(secret); const value=redactor.clean(raw);await (active.getStore()??this).guard(); return boundedResult(value, batchBytes, value => this.preserve(value, name));},true);
+    return this.run(async()=>{await (active.getStore()??this).guard();const raw=await (name==='read_tool_result'&&interceptRead?this.read(args):execute()); const value=this.outputRedactor().clean(raw);await (active.getStore()??this).guard(); return boundedResult(value, batchBytes, value => this.preserve(value, name));},true);
   }
 }
 export function resultSpec<T>(spec: AgentSpec<T>, owner: () => string = () => taskResultOwner(spec.task), mounted?: () => boolean): AgentSpec<T> {
@@ -64,14 +73,21 @@ export function resultSpec<T>(spec: AgentSpec<T>, owner: () => string = () => ta
 }
 /** Streaming copy: runner journals are read only by a trusted operation id, never a model-supplied path. */
 export async function commandResult(result: any, source: string, page: (offset: number) => Promise<any>, fallback?: ResultSession) {
-  if (!result || !result.truncated || !result.output_file) return result;
-  const { output_file: _path, ...preview } = result, session = active.getStore() ?? fallback;
-  if (!session) return { ...preview, error: 'tool_result_storage_unavailable' };
+  const session = active.getStore() ?? fallback;
+  if (!result || !session) {
+    if (!result?.truncated || !result.output_file) return result;
+    const {output_file: _path, ...preview} = result;
+    return {...preview, error:'tool_result_storage_unavailable'};
+  }
+  const redactor = session.outputRedactor(true);
+  if (!result.truncated || !result.output_file) return redactor.clean(result);
+  const {output_file: _path, ...rawPreview} = result;
+  const preview = redactor.clean(rawPreview);
   const owner = session.owner();
   const guard = async () => { await session.guard(); if (session.owner() !== owner) throw new Error('tool_result_source_changed'); };
   async function* chunks() {
     let offset = 0, size: number | undefined;
-    const ready:string[]=[],mask=maskedStream([...session!.secrets],value=>ready.push(value));
+    const ready:string[]=[],mask=maskedStream([...redactor.values],value=>ready.push(value));
     do {
       await guard(); const part = await page(offset);
       if (!part || typeof part.data !== 'string' || !Number.isSafeInteger(part.offset) || !Number.isSafeInteger(part.size) || part.offset <= offset || part.offset > part.size ||

@@ -135,6 +135,18 @@ export class Store {
       CREATE TABLE IF NOT EXISTS endpoints(id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), secret TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, full_name TEXT NOT NULL COLLATE NOCASE UNIQUE, owner_id TEXT NOT NULL,
         account_id TEXT NOT NULL REFERENCES accounts(id));
+      CREATE TABLE IF NOT EXISTS ssh_targets(
+        id TEXT PRIMARY KEY, owner_project TEXT REFERENCES repositories(id) ON DELETE CASCADE,
+        alias TEXT NOT NULL COLLATE NOCASE, host TEXT NOT NULL, port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
+        username TEXT NOT NULL, host_key_sha256 TEXT NOT NULL, auth TEXT NOT NULL CHECK(auth IN ('key','password')),
+        sealed TEXT NOT NULL, route TEXT NOT NULL CHECK(route IN ('direct','proxy_jump','tunnel')),
+        jump_id TEXT REFERENCES ssh_targets(id), allowed_roles TEXT NOT NULL,
+        allow_untrusted_pr INTEGER NOT NULL DEFAULT 0 CHECK(allow_untrusted_pr IN (0,1)),
+        CHECK((route='proxy_jump')=(jump_id IS NOT NULL)));
+      CREATE UNIQUE INDEX IF NOT EXISTS ssh_target_alias ON ssh_targets(COALESCE(owner_project,''),alias);
+      CREATE TABLE IF NOT EXISTS ssh_target_projects(
+        repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+        target_id TEXT NOT NULL REFERENCES ssh_targets(id) ON DELETE CASCADE, PRIMARY KEY(repository_id,target_id));
       CREATE TABLE IF NOT EXISTS project_admin_assignments(user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT NOT NULL,
         PRIMARY KEY(user_id,repository_id));
       CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, repository_id TEXT REFERENCES repositories(id), api_url TEXT NOT NULL, model_name TEXT NOT NULL,

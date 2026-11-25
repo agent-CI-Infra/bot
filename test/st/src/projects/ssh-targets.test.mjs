@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
+import { configuredRedactor } from '../../../../dist/core/redaction.js';
+import { ResultSession, commandResult } from '../../../../dist/agent/tool-results.js';
+
+test('SSH inventory seals credentials, scopes global bindings, pins updates, and redacts paginated output', async t => {
+  const h = await harness(t), {admin} = await setup(h), acc = await account(admin);
+  for (const id of ['101','202']) await repository(admin,acc.id,id);
+  const pool = '/api/ssh-targets', project = '/api/repositories/101/ssh-targets';
+  const spec = {alias:'board',host:'board.invalid',username:'tester',host_key_sha256:'SHA256:'+'A'.repeat(43),
+    auth:'password',password:'p!4',allowed_roles:['qa']};
+  const created = await admin(pool,'POST',spec);
+  assert.equal(created.status,201);
+  const id = created.value.id, binding = project+'/'+id+'/binding';
+  assert.deepEqual((await admin(project)).value.targets,[]);
+  assert.equal((await admin(binding,'PUT',{})).status,200);
+  const dump = (await admin(project)).value.targets;
+  assert.deepEqual(dump.map(row=>[row.alias,row.allow_untrusted_pr]),[['board',false]]);
+  for (const field of ['password','private_key','sealed']) assert.ok(!Object.hasOwn(dump[0],field));
+  assert.deepEqual((await admin('/api/repositories/202/ssh-targets')).value.targets,[]);
+  const sealed = h.store.get('SELECT sealed FROM ssh_targets WHERE id=?',id).sealed;
+  assert.deepEqual(h.store.secrets.open(sealed,'ssh-target:'+id),{password:spec.password});
+  assert.throws(()=>h.store.secrets.open(sealed,'ssh-target:another'));
+  assert.equal((await admin(pool+'/'+id,'PUT',{host:'elsewhere.invalid'})).status,400);
+  assert.equal((await admin(project,'POST',spec)).status,409);
+  assert.equal((await admin(project,'POST',{...spec,alias:'bad-jump',route:'proxy_jump',jump_id:'unknown'})).status,400);
+  const jump = await admin(project,'POST',{...spec,alias:'behind',route:'proxy_jump',jump_id:id});
+  assert.equal(jump.status,201);
+  assert.equal((await admin(pool+'/'+id,'DELETE',{})).status,409);
+  const projectUser = h.client();
+  await admin('/api/users','POST',{username:'padmin',password:'project-admin-password-123',role:'project_admin',repository_ids:['101']});
+  await projectUser('/api/auth/login','POST',{username:'padmin',password:'project-admin-password-123'});
+  assert.equal((await projectUser(project)).status,200);
+  assert.equal((await projectUser('/api/repositories/202/ssh-targets')).status,403);
+  assert.equal((await projectUser(binding,'DELETE',{})).status,403);
+  assert.equal(configuredRedactor(h.store,'101').text('got p!4'),'got [REDACTED]');
+  assert.equal(configuredRedactor(h.store,'202').text('got p!4'),'got p!4');
+  const scope = h.store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'});
+  const session = new ResultSession(h.store,scope,()=>'owner',()=>{});
+  const parts = ['got p','!','4.'];
+  let offset = 0;
+  const ref = await commandResult({output:'got p!4.',truncated:true,output_file:'journal'},'command',async pos=>{
+    assert.equal(pos,offset);
+    const part = parts.shift(); offset += Buffer.byteLength(part);
+    return {data:part,offset,size:8};
+  },session);
+  assert.equal(ref.output,'got [REDACTED].');
+  assert.equal((await session.read({file:ref.file})).content,ref.output);
+  assert.equal((await admin(project+'/'+jump.value.id,'DELETE',{})).status,200);
+  assert.equal((await admin(binding,'DELETE',{})).status,200);
+  assert.deepEqual((await admin(project)).value.targets,[]);
+  assert.equal((await admin(pool+'/'+id,'DELETE',{})).status,200);
+  assert.ok(!JSON.stringify(h.store.all("SELECT * FROM audit WHERE action LIKE 'ssh_target.%'")).includes(spec.password));
+});

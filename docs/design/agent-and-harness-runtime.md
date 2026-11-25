@@ -95,7 +95,7 @@
 
 所有容器化后端使用平台模型时，统一经控制面透传模型网关访问上游，历史 `direct` 直连轨、`BOT_HARNESS_MODEL_TRANSPORT` 与文件邮箱模型中转（`workspace_agent_model_*`、`workspace_agent_request/reply/progress`、`runner/model-reply.mjs`）已全部移除：
 
-- **只读 UDS 传输与内存态回环桥**：控制面（`src/main.ts`）在独立命名卷 `model-gateway` 上监听 HTTP-over-UDS（`/run/model-gateway/gateway.sock`，权限 `0660`，UID/GID `10001:10001`）；`manager` 将该卷以只读（`:ro`）挂入全部项目电脑与助手电脑（容器无法删除、覆盖或替换套接字）。容器内 `runner/model-relay.mjs` 仅启动一个纯内存的 `127.0.0.1:0` → `/run/model-gateway/gateway.sock` TCP 字节转发桥（`socket.pipe`，零磁盘读写、零 JSON 解析、容器模式路径固定不可覆盖）；本地/进程内测试无 UDS 时由控制面按引用计数自动启停 `127.0.0.1:0` 回环端口。该通道不依赖容器外网，在 `egress=false` / `NetworkMode: none` 下照常工作，且长期 API Key 永不离开控制面。
+- **只读 UDS 传输与内存态回环桥**：控制面（`src/main.ts`）在独立命名卷 `model-gateway` 上监听 HTTP-over-UDS（`/run/model-gateway/gateway.sock`，权限 `0660`，UID/GID `10001:10001`）；`manager` 将该卷以只读（`:ro`）挂入全部项目电脑与助手电脑（容器无法删除、覆盖或替换套接字）。容器内 `runner/model-relay.mjs` 仅启动一个纯内存的 `127.0.0.1:0` → `/run/model-gateway/gateway.sock` TCP 字节转发桥（`socket.pipe`，零磁盘读写、零 JSON 解析、容器模式路径固定不可覆盖）；本地/进程内测试无 UDS 时由控制面按引用计数自动启停 `127.0.0.1:0` 回环端口。该通道不依赖容器外网，在 `egress=false` 时仍可工作。此时项目电脑接入 Docker internal bridge（`manager/projects.mjs` 创建网络时设置 `Internal: !spec.egress`）。长期 API Key 只驻留控制面。
 - **纯透传、零跨协议转换**：网关校验短期运行令牌（`rrt_…` 或 Pi 短时网关令牌）、`lease_epoch`、实时模型授权与累计预算后，严格核对请求端点协议与所绑模型的有效接口协议（`openai-chat-completions`、`openai-responses`、`anthropic-messages`），不匹配直接返回 `400 model_protocol_mismatch`；仅替换上游目标 URL（保留查询参数）、真实上游鉴权头与 JSON 顶层 `model` 字段（附加输出 token 上限封顶、流式 Chat Completions 补齐 `stream_options.include_usage: true`、WorkSwarm 可信 `allowedTools` 工具过滤，以及边界安全的流式密钥脱敏）。上游响应字节流原样透传回下游，同时由旁路解析器（`PassthroughTap`）无侵入提取 `usage`、`text_delta` 与轨迹摘要写入统一 `model_requests` 账本；下游断开、任务取消或令牌撤销时立即中断上游请求。
 - **协议兼容矩阵前置强校验**：角色保存、运行预览（`resolveRole`）与启动前统一核对后端声明的支持协议（`pi` / `icode` 支持全部三种协议，`codex` 仅 `openai-responses`，`claude_code` 仅 `anthropic-messages`，`workswarm` 支持 `openai-chat-completions` 与 `anthropic-messages`），不兼容立即返回 `harness_model_api_unsupported` 或进入 `waiting_configuration`。
 
@@ -167,7 +167,7 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 - **常驻进程内分发（零 `docker exec` 冷启动）**：所有项目电脑与助手电脑以 `node /opt/runner/daemon.mjs` 作为主进程常驻运行（取代原空转 `runner/idle.mjs`，后者保留兼容转发）。`daemon.mjs` 将既有 `runner/` 操作通过共享 ESM 模块 `runner/executor.mjs` 在进程内直接分发，不再为每次命令、文件、Git 或邮箱轮询冷启动 Node 子进程；`runner/runner.mjs` 保留薄 CLI 封装并支持 `--stdin`（供 `LocalManager` 与测试直接投递最高 8 MiB 请求，彻底脱离 `argv` 上限）。
 - **每容器私有 UDS 传输与可选受控 TCP 端点**：
   - `docker/compose.yaml` 新增独立命名卷 `runner-sockets`（仅挂载至 `manager:/run/bot-runner`，`bot`/`webhook`/`tunnel` 均不挂载）。`manager` 为每个容器分配独立子路径 `/run/bot-runner/<sha256(name)[0..24]>`（`0770` GID `10001`），仅将该子路径以 `VolumeOptions: { NoCopy: true, Subpath }` 挂入容器 `/run/bot-runner`，实现容器间隔离、对非 `manager` 服务不可见且不暴露宿主机端口（容器内代码与 `daemon.mjs` 共享 UID/GID `10001`，业务权限与凭据边界仍由控制面强制执行）。
-  - 每次容器启动前，`manager` 清理遗留套接字并写入一次性 256-bit 随机 Bearer 令牌至 `.token`（`0640`）；`daemon.mjs` 启动读取后立即 `unlink` `.token`（或读取并清除 `BOT_RUNNER_TOKEN` 环境变量），监听 `/run/bot-runner/runner.sock`（`0660`），并对全部 HTTP 与 WebSocket 请求强制 `timingSafeEqual` 校验 Bearer 令牌（与 `egress=false`、`NetworkMode: none`、`ReadonlyRootfs: true`、`UID 10001`、`cap_drop: [ALL]` 完全兼容）。
+  - 每次容器启动前，`manager` 清理遗留套接字并写入一次性 256-bit 随机 Bearer 令牌至 `.token`（`0640`）；`daemon.mjs` 启动读取后立即 `unlink` `.token`（或读取并清除 `BOT_RUNNER_TOKEN` 环境变量），监听 `/run/bot-runner/runner.sock`（`0660`），并对全部 HTTP 与 WebSocket 请求强制 `timingSafeEqual` 校验 Bearer 令牌（与 `egress=false`、`ReadonlyRootfs: true`、`UID 10001`、`cap_drop: [ALL]` 完全兼容）。
   - 同时支持通过 `BOT_RUNNER_LISTEN` 启用强制鉴权的受控明文 HTTP/WebSocket TCP 端点（`daemon.mjs` 本身不内置 TLS，远程节点部署时须配合外层 TLS 反向代理、SSH 隧道或受控内网隧道使用），为后续远程执行节点（Docker Agent 节点与轻量 SSH 后端，#1379/#1380）复用同一线协议与 `manager/runner-client.mjs` 客户端奠定统一契约。
 - **异步流式命令执行与长连接保活**：
   - `POST /v1/commands` 立即持久化 `running` journal 并返回 `202` 与 `operation_id`；`manager/runner-client.mjs` 通过持久 WebSocket（`GET /v1/ws`）订阅 `command.output` 实时增量输出、`command.heartbeat`（默认 5 秒心跳）与 `command.done` 终态，彻底解除长耗时命令的 100 秒网关/代理超时风险。
@@ -201,3 +201,9 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 - **必需组件提示**：启用管理助手或群绑定时，助手电脑不可用（控制面没配 manager、控制面没挂 `assistant-homes`、manager 不响应、manager 没挂 `assistant-homes`）会在控制面启动时写一条 `[assistant-computers]` 警告日志；控制台在管理助手和群配置的编辑处（`GET /api/assistant-computers/status`）和「助手电脑」设置页给出原因。
 - **群聊助手只读项目工具挂载与空闲切换**：群聊助手仅在助手电脑与 `project-tools` 卷可用时才于 `context.scope.project_tools` 宣告本群可达项目的只读工具路径，并在 `acquire` 时传入活跃工具版本列表（`project_tools`）；`manager/assistant-computers.mjs` 校验目录后按项目隔离只读挂入 `/opt/project-tools/<owner>__<repo>`（若 `project-tools` 卷或单个版本目录缺失，仅跳过对应挂载并记录告警，不中断群聊回合），并将版本集合签名（`projectToolsSignature`）纳入空闲容器复用条件——运行中的回合绝不中断，下一空闲回合自动重建切换新版本。管理助手（控制台与飞书私聊）可通过 `assistant_archive_pack` / `assistant_archive_read` / `assistant_archive_cleanup` 流式导出 `/workspace` 或 `/tmp` 中已验证的文件/目录，经控制面安全校验后发布到目标项目的工具卷；群聊助手不具备工具卷写入权限。
 - **预装浏览器与 X11 虚拟桌面**：项目与助手基础镜像统一预装 Chromium（`/usr/local/bin/bot-chromium`）与虚拟桌面包装（`/usr/local/bin/bot-desktop`，封装 `Xvfb`、`openbox`、`xdotool`、`scrot`、`ffmpeg` 等），兼容只读根文件系统与非特权用户，控制面本身不安装浏览器。
+
+### SSH 主机登记与运行边界
+
+控制面通过 `ssh_targets` 保存主机资料，`ssh_target_projects` 记录全局主机与项目的显式绑定。私钥与密码使用 `SecretBox` 按目标 ID 密封；管理接口只投影配置字段，审计仅含资源 ID 与操作。超级管理员管理连接策略，拥有项目配置权限的管理员可读本项目的主机清单。保存或者绑定主机不会建立连接。
+
+OpenSSH agent 的普通签名请求只标识密钥。每台目标应使用专用密钥，主机与端口约束必须由对应网络路径实施。项目电脑以同一 UID 执行多个任务，按 run 命名的 `0600` 套接字本身无法鉴别调用任务。撤回签名权只影响未来的认证，已握手的直连和跳板会话具有独立生命周期。原生 `SSH_ASKPASS` 通过子进程和管道传递明文密码；要让任务进程与凭据隔离，需要在任务的操作系统权限范围之外执行认证。

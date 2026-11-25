@@ -41,7 +41,7 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | --- | --- | --- |
 | `ghcr.io/agent-ci-infra/bot-control-plane` | 控制面、密钥初始化与入口网关 | `bot`、`key-init`、`webhook` |
 | `ghcr.io/agent-ci-infra/bot-computer-manager` | 管理动态项目电脑与助手电脑（唯一挂载本地 Docker socket；亦作为远端计算节点 `node-agent` 镜像） | `manager` / `node-agent` |
-| `ghcr.io/agent-ci-infra/bot-project-computer` | 项目电脑与助手电脑批准基础镜像（预装工具链、Chromium 与 X11 虚拟桌面） | `project-image` |
+| `ghcr.io/agent-ci-infra/bot-project-computer` | 项目电脑与助手电脑批准基础镜像（预装 OpenSSH 客户端、rsync、开发工具链、Chromium 与 X11 虚拟桌面） | `project-image` |
 | `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选 Cloudflare Tunnel 连接器 | `tunnel` |
 
 ## 2. 端口与常用环境变量

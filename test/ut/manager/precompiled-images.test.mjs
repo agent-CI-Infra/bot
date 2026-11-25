@@ -297,6 +297,12 @@ test('manager HTTP server exposes precompiled image list, prune, and build cance
   assert.equal(pruned.removed.length, 0);
 });
 
+test('project computers install both OpenSSH clients and rsync in the base image', () => {
+  const dockerfile = readFileSync(new URL('../../../docker/project-computer.Dockerfile', import.meta.url), 'utf8');
+  const packages = dockerfile.split('apt-get install -y --no-install-recommends')[1]?.split('&&')[0]?.split(/\s+/);
+  for (const pkg of ['openssh-client', 'rsync']) assert.ok(packages?.includes(pkg), pkg);
+});
+
 test('project-computer.Dockerfile keeps runtime install prefixes unset in ENV while build RUN scopes them to /opt/preinstalled', () => {
   const dockerfile = readFileSync(new URL('../../../docker/project-computer.Dockerfile', import.meta.url), 'utf8');
   for (const name of ['NPM_CONFIG_PREFIX=', 'UV_TOOL_DIR=', 'UV_TOOL_BIN_DIR=', 'PYTHONUSERBASE=', 'CARGO_HOME=', 'GOPATH=']) {
