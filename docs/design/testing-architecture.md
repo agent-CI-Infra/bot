@@ -23,6 +23,7 @@
 
 - **集内串行、集间并行**：默认每个 `test/ut/**/*.test.mjs` 与 `test/st/**/*.test.mjs` 文件自成一个测试集，各自运行在独立的 `node --test --test-concurrency=1` 子进程中；确需共享状态的多文件通过文件头 `// test-set: <name> <reason>` 合并为同一集。
 - **进程级资源隔离**：`test-sets.mjs` 为每个测试集分配独立 `.tmp/tests-*/<set>/` 下的 `TMPDIR` 与 `HOME`，清掉 `XDG_*` 与 `TMP`/`TEMP` 环境变量。用例内部遵循：临时目录用 `mkdtempSync(join(tmpdir(), '<prefix>-'))` 并在 `t.after` 清理、HTTP 监听 `127.0.0.1` 随机端口 `listen(0)`、宿主机 runner 工作区使用 `randomWorkspaceId()`。
+- **集级墙钟上限**：`test-sets.mjs` 给每个集一个墙钟上限（`BOT_TEST_SET_TIMEOUT`，默认 1800 秒，高于 CI 与繁忙本机上最慢的健康集），到点对该集进程树先发 `SIGTERM`、宽限 10 秒后 `SIGKILL`，记为失败并继续其余集；运行器收到 `SIGINT`/`SIGTERM` 时同样结束整棵进程树。上限加在整集进程上而不用 Node 的 `--test-timeout`：后者传给 `node --test` 时按整个文件计时，会截断用例各自写了更长 `timeout`、但合计更久的文件；作为单个用例的默认上限，又管不到卡在用例之外（如顶层 `await`）的集。
 - **回环外网络硬拦截**：`test-network-guard.mjs` 通过 `NODE_OPTIONS=--import=...` 注入每个测试集子进程，拦截任何回环外 TCP 连接并记入集日志，即便被测代码吞掉错误也会判该集失败。
 - **真实 Pi SDK 一致性**：CI 预先安装 `runner/` 依赖并传 `BOT_REQUIRE_PI=1` 强制零 `skip`；本地全量复现 CI 用例集合时须先执行 `npm ci --prefix runner --omit=dev --ignore-scripts` 并携带 `BOT_REQUIRE_PI=1`。
 

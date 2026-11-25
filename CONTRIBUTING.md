@@ -61,6 +61,7 @@ npm run test:e2e
 
 - 运行单个测试文件：`npm test -- test/st/src/channels/channel-setup.test.mjs`
 - 调整并行度：`npm test -- --jobs 4` 或 `BOT_TEST_JOBS=4`
+- 单个测试集默认最多运行 1800 秒，到点先 `SIGTERM`、10 秒后 `SIGKILL`（连同它拉起的进程），该集记为失败，其余集照常运行；机器很忙或调试挂住的集时用 `BOT_TEST_SET_TIMEOUT=<秒>` 调整。
 - 仅运行单个 E2E spec：`npm run test:e2e -- test/e2e/console/console-shell.spec.mjs`
 
 ### 测试分层与编写约定
