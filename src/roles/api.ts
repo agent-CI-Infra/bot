@@ -39,8 +39,11 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json,cliC
    const source=cachedRuleFiles(s,repo);
    const preview=current.roles.filter(r=>r.enabled).map(r=>{try{const {id,snapshot}=resolveRole(s,repo,r.role_id,workflow,{persist:false});return {role:r.role_id,snapshot_id:id,model:snapshot.model,harness:snapshot.harness,skills:snapshot.skills&&{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash}};}catch(error){if(error instanceof TaskError)return {role:r.role_id,error:error.code,detail:error.detail??null};throw error;}});
    // The editable sources of the current bundles, so a console edit can resave them unchanged.
-   const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}'),files=JSON.parse(row?.files??'[]');
-    return {id:b.id,source:['inline','builtin'].includes(source.type)?{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}:{type:'repository',commit:source.commit,paths:source.paths}};});
+   const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}');
+    if(source.type==='library')return {id:b.id,source:{type:'library',items:Array.isArray(source.items)?source.items.map((item:any)=>({skill_id:item.skill_id,version:item.version})):[]}};
+    if(!['inline','builtin'].includes(source.type))return {id:b.id,source:{type:'repository',commit:source.commit,paths:source.paths}};
+    const files=JSON.parse(row?.files??'[]');
+    return {id:b.id,source:{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}};});
     const can_edit=(()=>{try{if(user.context)authorize(user.context,'roles.edit',{project_id:repo});return true;}catch{return false;}})();
     const builtIn=defaultRoles();
     // configured: the project has a configuration of its own; otherwise it follows the built-in defaults (#1068).

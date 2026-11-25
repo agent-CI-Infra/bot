@@ -55,13 +55,17 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
   - **内置基础能力**：使用虚拟电脑（文件与命令）是所有工作角色的内置能力，不单独设权限开关。全平台角色与助手（含全部 5 种后端 `pi`/`claude_code`/`codex`/`icode`/`workswarm`、项目工作角色、对象 Manager 分派、角色对话、个人管理助手、飞书群聊助手与夜间自动记忆整理）同时默认获得只写工具 `submit_feedback`（append-only），用于反馈真实、可复现的平台问题（Skill、工具、提示词、流程或环境）；该工具不扩大任何业务或 GitHub 权限，也不向任何角色暴露读取、检索、修改或删除意见箱的能力，并受全局意见箱开关与单次运行提交上限约束（在「全局设置 → 意见箱」配置）。
 - **内置可选开发 Skill**：平台随包提供 `roadmap-decomposition`（Manager 默认自动加载）、`layered-ci-gates`（涉及 `.github/workflows/` 或 CI 门禁的开发及 bot PR 修订任务自动加载）、`test-driven-development` 与 `systematic-debugging`（可在角色配置中按需绑定给 Dev）。
 
-## 5. 仓库 Skill（`.agents/skills/`）
+## 5. 仓库 Skill（`.agents/skills/`）与独立版本化技能库
 
-代码仓库可在基准分支的 `.agents/skills/<名称>/` 目录下放置 `SKILL.md` 及同目录配套文本文件（`references/`、`scripts/`、`assets/` 等），作为本仓专属协作 Skill：
+代码仓库可在基准分支的 `.agents/skills/<名称>/` 目录下放置 `SKILL.md` 及同目录配套文件（`references/`、`scripts/`、`assets/` 等），平台同时提供按项目隔离的**独立 Skill 版本库**（覆盖平台内置 `builtin`、仓库整目录导入 `repository` 与控制台自定义 `console` 三类来源）：
 
 - **可信来源与自动挂载**：任务始终从项目的**基准分支**（未配置时为默认分支）读取 `.agents/skills/` 并按需提供给 Agent，非 QA 角色即便显式绑定了技能包也会自动叠加可信基准分支的仓库 Skill；控制面统一物化后通过只读卷 `/opt/bot-skills` 供 Pi、Claude Code、Codex 与 iCode 原生按需读取（WorkSwarm 及无文件读取权限场景保留受控 `read_skill`），绝不从外部 PR 或未合入分支自动加载检出内 Skill（防止提示词/规则投毒）。
-- **限制与边界**：仅加载文本文件，SKILL.md 份数不设上限，`.agents/skills/` 下最多 256 个文件、单文件 512 KiB、总计 1 MiB；仓库其他业务目录里的 `SKILL.md` 不当作协作 Skill 加载。Skill 只指导工作方法，不能扩大权限或绕过控制面规则。
-- **刷新与查看**：在「角色 → Manager」的「仓库 skill」区查看当前已加载列表并手动刷新。
+- **独立版本库与整目录导入**：
+  - 平台内置 Skill 在控制面启动时自动按内容哈希登记为不可变版本（内容未变不重复出版本，内置升级自动递增版本且历史版本保持可读）。
+  - 具备 `roles.edit` 权限的项目管理员可通过接口或管理助手从受信任基准分支整目录导入 `.agents/skills/<名称>/**`（实时导入完整保留 `references/`、`scripts/` Git 可执行位与受控静态资源如常见图片/PDF/字体，缓存模式导入已校验的 UTF-8 文本快照，均记录可信提交 SHA），或在控制台按标准 `SKILL.md`（必填合法 YAML frontmatter `name` 与 `description`）创建与版本化编辑项目自有 Skill（自动脱敏已登记凭据，带 `expected_version` 并发校验）。
+  - 角色技能包支持直接按 `{ skill_id, version }` 引用版本库中的内置或本项目 Skill（同 slug 不同版本或来源冲突时以 `skill_version_conflict` 拒绝，单包聚合上限 64 项 / 512 文件 / 16 MiB），单项目技能包上限统一为 32 个；已保存的历史技能包与任务快照继续只读兼容。
+- **限制与边界**：独立技能库支持普通 UTF-8 文本与白名单受控静态资源（拒绝符号链接、子模块、路径逃逸、文件/目录前缀冲突及未知二进制），单文件上限 512 KiB、单 Skill 上限 8 MiB 且最多 256 个文件；仓库自动挂载规则缓存（`.agents/skills/`）维持最多 256 个文本文件、单文件 512 KiB、总计 1 MiB 边界，仓库其他业务目录里的 `SKILL.md` 不当作协作 Skill 加载。Skill 只指导工作方法，不能扩大权限或绕过控制面规则。
+- **刷新与查看**：在「角色 → Manager」的「仓库 skill」区查看当前已加载列表并手动刷新，也可通过 `/api/repositories/:id/skills*` 或管理助手 `list_skills`/`get_skill`/`list_skill_versions` 与 `skill.save`/`skill.import`/`skill.delete` 管理版本库。
 
 ## 6. 标签与虚拟电脑规格
 

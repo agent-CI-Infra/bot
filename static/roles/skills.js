@@ -147,13 +147,16 @@ function roleSettingsCard(role, state, redraw, access) {
   section.append(advanced);
   return section;
 }
-const skillSourceNames = { repository: '固定仓库提交', inline: '控制台文件' };
+const skillSourceNames = { repository: '固定仓库提交', inline: '控制台文件', library: '技能库' };
 function roleSkillFacts(bundle, state) {
   const saved = state.data.configuration.skills.find(entry => entry.id === bundle.id), box = element('section', '', 'skill-saved-facts'); box.setAttribute('aria-label', '已保存技能版本');
   const savedBindings = state.data.configuration.roles.filter(role => role.skill_bundle_ref?.id === bundle.id).map(roleConfigName);
   box.append(facts([['已保存版本', saved ? String(saved.revision) : '此标识尚未保存'], ['已保存来源', saved ? skillSourceNames[saved.source.type] || saved.source.type : '尚未保存'], ['已保存绑定角色', savedBindings.join('、') || '无'], ['内容哈希', saved?.content_hash || '保存后由服务端计算']]));
   if (saved?.source.origin) box.append(note('已迁移为控制台文件；保留原绑定内容和文件哈希。原指南：' + saved.source.origin.playbooks.join('、') + '；原版本：' + saved.source.origin.revision + '；原内容哈希：' + saved.source.origin.content_hash));
   if (saved?.source.type === 'repository') box.append(note('已固定提交：' + saved.source.commit));
+  if (saved?.source.type === 'library' && Array.isArray(saved.source.items)) {
+    box.append(note('已固定技能库条目：' + (saved.source.items.map(item => `${item.skill_id}@v${item.version}`).join('、') || '无')));
+  }
   const table = projectTable(['文件', '大小', 'SHA-256'], '已保存技能文件');
   for (const file of saved?.files || []) { const row = document.createElement('tr'); tableCell(row, '文件', element('code', file.path)); tableCell(row, '大小', note(String(file.bytes) + ' B')); tableCell(row, 'SHA-256', element('code', file.sha256)); table.body.append(row); }
   if (saved?.files?.length) box.append(table.table); else box.append(note('尚无已保存的文件清单；下面编辑的是草稿。'));
@@ -188,14 +191,31 @@ function roleSkillsCard(state, redraw, selected = null) {
     name.addEventListener('change', redraw);
     group.append(element('legend', bundle.id), field('技能包名称', name));
     if (selected) group.append(roleSkillFacts(bundle, state));
-    group.append(field('来源', roleSelect('技能来源', bundle.source.type, [['repository', '仓库技能文件'], ['inline', '自定义文件']], type => {
+    const sourceOptions = bundle.source.type === 'library'
+      ? [['library', '技能库（只读）'], ['repository', '仓库技能文件'], ['inline', '自定义文件']]
+      : [['repository', '仓库技能文件'], ['inline', '自定义文件']];
+    group.append(field('来源', roleSelect('技能来源', bundle.source.type, sourceOptions, type => {
+      if (type === 'library') return;
       bundle.source = type === 'repository' ? { type, commit: data.skill_sources?.repository?.commit || '', paths: [] } : { type, files: [{ path: 'guide.md', content: '' }] }; markRoleDirty(state); redraw();
     })));
     if (bundle.source.type === 'repository') {
       group.append(roleText('固定仓库提交', bundle.source, 'commit', state, { maxLength: 40 }), roleChoices('仓库技能文件', bundle.source, 'paths', [...new Set([...(bundle.source.paths || []), ...(data.skill_sources?.repository?.paths || [])])].map(path => [path, path]), state));
+    } else if (bundle.source.type === 'library') {
+      const items = Array.isArray(bundle.source.items) ? bundle.source.items : [];
+      const list = element('ul', '', 'skill-library-items');
+      list.setAttribute('aria-label', '技能库条目');
+      for (const item of items) {
+        const entry = element('li', '');
+        entry.append(element('code', `${item.skill_id}@v${item.version}`));
+        list.append(entry);
+      }
+      group.append(
+        note('此技能包引用独立技能库中的固定版本，在此页面只读展示；直接保存配置将原样保留其条目。'),
+        items.length ? list : note('未指定技能库条目。'),
+      );
     } else {
-      for (const file of bundle.source.files) group.append(roleText('文件路径', file, 'path', state), roleText('文件内容', file, 'content', state, { multiline: true, rows: 5 }), button('移除文件', () => { bundle.source.files = bundle.source.files.filter(entry => entry !== file); markRoleDirty(state); redraw(); }));
-      group.append(button('添加文件', () => { bundle.source.files.push({ path: '', content: '' }); markRoleDirty(state); redraw(); }));
+      for (const file of bundle.source.files || []) group.append(roleText('文件路径', file, 'path', state), roleText('文件内容', file, 'content', state, { multiline: true, rows: 5 }), button('移除文件', () => { bundle.source.files = bundle.source.files.filter(entry => entry !== file); markRoleDirty(state); redraw(); }));
+      group.append(button('添加文件', () => { (bundle.source.files ??= []).push({ path: '', content: '' }); markRoleDirty(state); redraw(); }));
     }
     if (selected) {
       const bindings = element('fieldset', '', 'role-choices'); bindings.append(element('legend', '草稿绑定角色'));

@@ -13,6 +13,7 @@ import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
 import { cachedRuleFiles, maxSkillFiles, skillFilePath, trustedCachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, LOCAL_CONFIG_CAPABLE_HARNESSES, normalizeHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
 import {roleSkills} from './skill-defaults.js';
+import { MAX_SKILL_BUNDLES, resolveLibraryBundleItems, skillLibraryStorage, type SkillFileEncoding } from './skill-library.js';
 
 /**
  * RoleDefinitionV2: one project's versioned role configuration. Every reference names a fixed version: model profiles pin
@@ -104,6 +105,7 @@ export function roleStorageV2(s: Store) {
   CREATE TABLE IF NOT EXISTS skill_bundle_revisions(repository_id TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,source TEXT NOT NULL,files TEXT NOT NULL,content_hash TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(repository_id,id,revision));
   CREATE TABLE IF NOT EXISTS role_snapshots(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,role TEXT NOT NULL,config_revision INTEGER NOT NULL,role_revision INTEGER NOT NULL,snapshot TEXT NOT NULL,created_at TEXT NOT NULL);
   `);
+  skillLibraryStorage(s);
   resetBuiltinRolePermissions(s);
   actionsWriteFollowsIssues(s);
   // After #381 and #1072 have brought saved permissions to the defaults it compares with.
@@ -648,7 +650,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
   if (typeof input.id !== 'string' || !idPattern.test(input.id)) invalid('invalid_skill_bundle_id', field + '.id');
   const source = input.source;
   if (!source || typeof source !== 'object' || Array.isArray(source)) invalid('invalid_skill_source', field + '.source');
-  let files: { path: string; content: string }[] = [], descriptor: any;
+  let files: { path: string; content: string; encoding?: SkillFileEncoding; executable?: boolean }[] = [], descriptor: any;
   if (source.type === 'builtin') {
     // Compatibility is limited to an already saved binding. There is no catalog to resolve new names from.
     const stored = previous && previous.id === input.id ? s.get('SELECT source,files,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?', repositoryId, previous.id, previous.revision) : undefined;
@@ -682,10 +684,28 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
     const stored = previous && previous.id === input.id ? s.get('SELECT source,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?', repositoryId, previous.id, previous.revision) : undefined;
     const prior = stored ? skillSourceDescriptor(JSON.parse(String(stored.source)), { id: input.id, revision: previous!.revision, content_hash: String(stored.content_hash) }) : null;
     descriptor = { type: 'inline', commit: null, ...(prior?.origin ? { origin: prior.origin } : {}) };
+  } else if (source.type === 'library') {
+    if (Object.keys(source).some(k => !['type', 'items'].includes(k))) invalid('unknown_field', field + '.source');
+    const resolved = resolveLibraryBundleItems(s, repositoryId, source.items, field + '.source.items');
+    files = resolved.files;
+    descriptor = {
+      type: 'library',
+      items: resolved.items.map(item => ({
+        skill_id: item.skill_id,
+        version: item.version,
+        slug: item.slug,
+        origin: item.origin,
+        content_hash: item.content_hash,
+      })),
+    };
   } else invalid('invalid_skill_source', field + '.source.type');
   if (new Set(files.map(f => f.path)).size !== files.length) invalid('duplicate_skill_file', field + '.source');
   files.sort((a, b) => a.path < b.path ? -1 : 1);
-  const listing = files.map(f => ({ path: f.path, sha256: sha256(f.content), bytes: Buffer.byteLength(f.content) }));
+  const fileMeta = (f: { path: string; content: string; encoding?: SkillFileEncoding; executable?: boolean }) => {
+    const raw = f.encoding === 'base64' ? Buffer.from(f.content, 'base64') : Buffer.from(f.content, 'utf8');
+    return { path: f.path, sha256: sha256(raw), bytes: raw.length };
+  };
+  const listing = files.map(fileMeta);
   return { id: input.id as string, source: descriptor, listing, files, content_hash: sha256(JSON.stringify({ source: descriptor, files: listing })) };
 }
 
@@ -700,7 +720,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') invalid('invalid_role_configuration', 'enabled');
   // Skill bundles first: a role may reference a bundle saved in this same request.
   const skillInput = input.skills ?? [];
-  if (!Array.isArray(skillInput) || skillInput.length > 16) invalid('invalid_skill_bundles', 'skills');
+  if (!Array.isArray(skillInput) || skillInput.length > MAX_SKILL_BUNDLES) invalid('invalid_skill_bundles', 'skills');
   const pinned = skillInput.map((value: any, index: number) => pinSkill(s, repositoryId, value, index, current.skills.find(bundle => bundle.id === value?.id)));
   if (new Set(pinned.map((b: any) => b.id)).size !== pinned.length) invalid('duplicate_skill_bundle', 'skills');
   const added: any[] = [];
@@ -872,7 +892,10 @@ export function saveConfiguration(s: Store, repositoryId: string, input: any, ac
     }
     const { config, added } = normalizeConfiguration(s, repositoryId, input, current), now = new Date().toISOString();
     if (input.deleted_roles?.length) dropRoleLimits(s, repositoryId, input.deleted_roles as string[]);
-    for (const bundle of added) s.run('INSERT INTO skill_bundle_revisions VALUES(?,?,?,?,?,?,?)', repositoryId, bundle.id, bundle.revision, JSON.stringify(bundle.source), JSON.stringify(bundle.files.map((f: any) => ({ path: f.path, sha256: sha256(f.content), bytes: Buffer.byteLength(f.content), content: f.content }))), bundle.content_hash, now);
+    for (const bundle of added) s.run('INSERT INTO skill_bundle_revisions VALUES(?,?,?,?,?,?,?)', repositoryId, bundle.id, bundle.revision, JSON.stringify(bundle.source), JSON.stringify(bundle.files.map((f: any) => {
+      const raw = f.encoding === 'base64' ? Buffer.from(f.content, 'base64') : Buffer.from(f.content, 'utf8');
+      return { path: f.path, sha256: sha256(raw), bytes: raw.length, content: f.content, ...(f.encoding === 'base64' ? { encoding: 'base64' } : {}), ...(f.executable ? { executable: true } : {}) };
+    })), bundle.content_hash, now);
     const saved = { ...config, updated_at: now, updated_by: actor };
     s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?)', repositoryId, saved.revision, JSON.stringify(saved), short(config), actor, now);
     s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'roles:' + repositoryId, JSON.stringify(saved));
@@ -880,7 +903,7 @@ export function saveConfiguration(s: Store, repositoryId: string, input: any, ac
   });
 }
 export const configurationRevision = (s: Store, repositoryId: string, revision: number): RoleConfiguration | undefined => { const row = s.get('SELECT config FROM role_config_revisions WHERE repository_id=? AND revision=?', repositoryId, revision); return row ? JSON.parse(row.config) : undefined; };
-export function skillFiles(s: Store, repositoryId: string, ref: SkillBundleRef): { path: string; sha256: string; bytes: number; content: string }[] {
+export function skillFiles(s: Store, repositoryId: string, ref: SkillBundleRef): { path: string; sha256: string; bytes: number; content: string; encoding?: SkillFileEncoding; executable?: boolean }[] {
   const row = s.get('SELECT files,content_hash FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?', repositoryId, ref.id, ref.revision);
   if (!row || row.content_hash !== ref.content_hash) return stop('skill_bundle_unavailable', 'waiting_configuration', `技能包 ${ref.id}@${ref.revision} 已不存在或内容不一致。`);
   return JSON.parse(row.files);

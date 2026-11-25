@@ -63,6 +63,7 @@ import type { GitCache } from './agent/git-cache.js';
 import { MemoryConsolidationService, type ConsolidationRunContext, type ConsolidationSubmission } from './memory/consolidation-engine.js';
 import { MemoryConsolidationApi } from './memory/consolidation-api.js';
 import { feedbackApi } from './feedback/api.js';
+import { skillLibraryApi } from './roles/skill-library-api.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -391,8 +392,11 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     if (mutation) {
       if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'json_required');
       // Notes and the Manager prompt are written as administrators write them, without a size limit of their own.
+      // Skill library writes accept up to 8 MiB raw files (~12 MiB JSON with base64 asset encoding).
       const noteWrite = (['PUT','POST'].includes(method) && /^\/api\/repositories\/[^/]+\/knowledge-files(?:\/[^/]+)?$/.test(path)) || method === 'PUT' && (/^\/api\/repositories\/[^/]+\/notes\/[^/]+$/.test(path) || /^\/api\/repositories\/[^/]+\/manager$/.test(path));
-      const raw = await body(req, noteWrite ? Infinity : 1024 * 1024);
+      const skillWrite = (method === 'POST' && /^\/api\/repositories\/[^/]+\/skills$/.test(path))
+        || (method === 'PUT' && /^\/api\/repositories\/[^/]+\/skills\/[^/]+$/.test(path));
+      const raw = await body(req, noteWrite ? Infinity : skillWrite ? 12 * 1024 * 1024 : 1024 * 1024);
       if (!raw.complete) fail(413, 'payload_too_large');
       try { input = object(JSON.parse(raw.bytes.toString('utf8'))); }
       catch (error) { if (error instanceof HttpError) throw error; fail(400, 'invalid_json'); }
@@ -538,7 +542,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     let resourceProject = /^\/api\/repositories\/([^/]+)/.exec(path)?.[1];
     const taskId = /^\/api\/tasks\/([^/]+)/.exec(path)?.[1];
     if (taskId) resourceProject = store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id;
-    const capability = /\/releases(?:\/|$)/.test(path) ? 'release.manage' : /\/roles(?:\/|$)/.test(path) ? 'roles.edit'
+    const capability = /\/releases(?:\/|$)/.test(path) ? 'release.manage' : /\/(?:roles|skills)(?:\/|$)/.test(path) ? 'roles.edit'
       : /\/(?:memory|memories|memory-consolidation|knowledge|knowledge-files|knowledge-directories|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
     // Every write and GitHub call rechecks the current grants (#521): the guard authorizes the target project, and
     // assertCurrent replays whatever else this request was authorized for once the principal has lost some authority.
@@ -554,11 +558,11 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     };
     guard();
     if (path === '/api/agent-tools/install' || path === '/api/agent-tools/upgrade') res.setTimeout(1_200_000);
-    const result = await store.withAuthorizationGuard(guard, async () => feedbackApi(store, current, method, url, input) ?? await consolidationApi.api(current, method, url, input) ?? identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => feedbackApi(store, current, method, url, input) ?? await consolidationApi.api(current, method, url, input) ?? identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? await skillLibraryApi(store,current,method,url,input,{githubUrl:options.githubUrl}) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? await taskChecksApi(store, user, method, url, options.githubUrl) ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
-    // List visibility, board publication and notes never change the desired state of a project computer.
-    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|memory-consolidation|releases|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
+    // List visibility, board publication, skill library metadata and notes never change the desired state of a project computer.
+    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|memory-consolidation|releases|skills|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     const activatedRepo = method === 'POST' ? /^\/api\/installations\/([1-9]\d*)\/activate$/.exec(path)?.[1] : undefined;
     if (activatedRepo) githubLogin.identity?.scheduleRepositoryMemberSync(activatedRepo);
