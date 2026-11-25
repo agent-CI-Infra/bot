@@ -62,6 +62,13 @@ test('a post-execution guard error does not claim the command did not run', asyn
   assert.equal(notice, '无法确认这一步是否完成：执行过程中权限变了，请在回执与执行进展里核对后再重试。（authorization_changed）');
 });
 
+test('a management command that failed inside the server does not claim it did not complete', async () => {
+  const [notice] = await failureNotices([[['model_start', { turn: 0 }], call('management_command'),
+    ['tool_error', { call_id: 'b1', name: 'management_command', error: 'management_tool_failed' }], ['done']]]);
+  assert.equal(notice, '无法确认这一步是否完成：management_tool_failed');
+  assert.ok(!notice.includes('没有完成'), 'the catch-all tool error must not claim the command did not complete');
+});
+
 test('a receipt sentence is not used for a tool that is not a management command', async () => {
   const [notice] = await failureNotices([[['model_start', { turn: 0 }], call('github_write'),
     ['tool_error', { call_id: 'b1', name: 'github_write', error: 'management_tool_failed' }], ['done']]]);
