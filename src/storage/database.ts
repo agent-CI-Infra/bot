@@ -79,6 +79,8 @@ export class Store {
   readonly channelCardsDir: string;
   // Plaintext gzipped role feedback payloads beside the database (temp dir inside trajectories root for :memory: stores).
   readonly feedbackDir: string;
+  // Content-addressed file sync staging & read-through cache beside the database (separate from trajectory_blobs refcounting).
+  readonly syncBlobsDir: string;
   // Content-addressed materialized skill sets (/skill-store in Compose, temp dir inside trajectories root for :memory: stores).
   readonly skillStoreDir: string;
   // Free space of the disk the database is on (#671); null for an in-memory store.
@@ -99,6 +101,7 @@ export class Store {
     this.channelResourcesDir = path === ':memory:' ? join(this.trajectories.root, '.channel-resources') : join(dirname(path), 'channel-resources');
     this.channelCardsDir = path === ':memory:' ? join(this.trajectories.root, '.channel-cards') : join(dirname(path), 'channel-cards');
     this.feedbackDir = path === ':memory:' ? join(this.trajectories.root, '.feedback') : join(dirname(path), 'feedback');
+    this.syncBlobsDir = path === ':memory:' ? join(this.trajectories.root, '.sync-blobs') : join(dirname(path), 'sync-blobs');
     this.skillStoreDir = process.env.BOT_SKILL_STORE_DIR?.trim()
       ? resolve(process.env.BOT_SKILL_STORE_DIR.trim())
       : (path === ':memory:' ? join(this.trajectories.root, '.skill-store') : join(dirname(path), 'skill-store'));

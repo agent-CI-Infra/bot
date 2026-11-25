@@ -5,7 +5,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { NoteCatalog } from './note-catalog.mjs';
 import { noteComponent, notePath, withNoteDirectory, withNoteParent } from './note-path.mjs';
 
-const internal = name => name.startsWith('.write-') || name.startsWith('.expired-');
+const internal = name => name.startsWith('.write-') || name.startsWith('.expired-') || name.startsWith('.sync-');
 // An externally replaced file is unavailable on its own; it must not become a deletion revision or hide other files.
 const unavailableEntry = error => ['ELOOP','ENOTDIR','ENOENT'].includes(error.code) || ['invalid_note_file','invalid_note_path'].includes(error.message);
 const permissionError = error => ['EACCES','EPERM'].includes(error?.code);

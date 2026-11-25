@@ -14,14 +14,14 @@ const filePath = (value: unknown, root = false): string => {
   if (root && value === '') return '';
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 4096 || /^[A-Za-z]:\//.test(value) || value.includes('\\') || controlCharacter.test(value)) fail(400, 'invalid_note_path');
   const parts = (value as string).split('/');
-  if (parts.length > 32 || parts.some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase()) || /^\.(?:write|expired)-/.test(part) || Buffer.byteLength(part) > 255)) fail(400, 'invalid_note_path');
+  if (parts.length > 32 || parts.some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase()) || /^\.(?:write|expired|sync)-/.test(part) || Buffer.byteLength(part) > 255)) fail(400, 'invalid_note_path');
   return value as string;
 };
 // A legacy id is a physical file id by form: an old name that carries a control character still round-trips, and the
 // manager reports that file as quarantined instead of this route misrouting the request as an unknown id. A name the
-// manager refuses for being internal (`.`, `..`, `.git`, `.write-*`, `.expired-*`) is not a file this route can address,
+// manager refuses for being internal (`.`, `..`, `.git`, `.write-*`, `.expired-*`, `.sync-*`) is not a file this route can address,
 // so it stays unknown here and reads as 404 like any other unknown id, instead of being forwarded to answer 400.
-const internalName = (name: string) => ['.', '..', '.git'].includes(name.toLowerCase()) || /^\.(?:write|expired)-/.test(name);
+const internalName = (name: string) => ['.', '..', '.git'].includes(name.toLowerCase()) || /^\.(?:write|expired|sync)-/.test(name);
 const physicalId = (id: string) => {
   if (/^f:[a-f0-9]{32}$/.test(id)) return true;
   if (!/^n:[a-zA-Z0-9_-]+$/.test(id)) return false;

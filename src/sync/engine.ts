@@ -11,11 +11,15 @@ import {
   sanitizeActorTag,
 } from './paths.js';
 import {
+  hasSyncBlobRef,
   listScopeEntriesSince,
   listSyncConflicts,
   reconcileScopeManifestDelta,
   recordSyncConflict,
+  registerSyncBlobRef,
+  removeStagedSyncBlobRef,
   syncStorage,
+  touchSyncBlobRef,
 } from './storage.js';
 import type {
   BlobStore,
@@ -38,6 +42,7 @@ import type {
 } from './types.js';
 
 const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+const MAX_COMMIT_RACE_ATTEMPTS = 3;
 
 function isHumanActor(actor: string | null | undefined): boolean {
   if (!actor) return false;
@@ -108,7 +113,7 @@ export class FileSyncEngine {
       const latin1 = raw.toString('latin1');
       const hasRegistered = [...redactor.values].some(secret => raw.includes(Buffer.from(secret, 'utf8')));
       if (hasRegistered || PEM_PRIVATE_KEY_RE.test(latin1)) {
-        fail(400, 'sync_secret_detected');
+        fail(400, 'sync_secret_detected', undefined, { reason: 'binary_secret_or_private_key' });
       }
       return { bytes: raw, sha256: sha256Buffer(raw), redacted: false };
     }
@@ -117,12 +122,29 @@ export class FileSyncEngine {
     const cleaned = publicText(redactor.text(originalText), redactor);
     if (cleaned !== originalText) {
       if (policy.redactionPolicy === 'reject') {
-        fail(400, 'sync_secret_detected');
+        fail(400, 'sync_secret_detected', undefined, { reason: 'registered_secret_or_token_pattern' });
       }
       const nextBytes = Buffer.from(cleaned, 'utf8');
       return { bytes: nextBytes, sha256: sha256Buffer(nextBytes), redacted: true };
     }
     return { bytes: raw, sha256: sha256Buffer(raw), redacted: false };
+  }
+
+  private async putScopedBlob(
+    namespace: SyncNamespaceName,
+    scope: string,
+    bytes: Buffer,
+    sha256: string,
+    staged: boolean,
+  ): Promise<{ sha256: string; size: number; deduplicated: boolean }> {
+    // Register scope ref BEFORE writing blob so concurrent GC sweeps never race with an in-flight write.
+    registerSyncBlobRef(this.store, namespace, scope, sha256, bytes.length, staged, this.clock());
+    try {
+      return await this.blobStore.put(bytes, sha256);
+    } catch (error) {
+      if (staged) removeStagedSyncBlobRef(this.store, namespace, scope, sha256);
+      throw error;
+    }
   }
 
   async manifest(
@@ -245,12 +267,15 @@ export class FileSyncEngine {
     }
 
     const cached = await this.blobStore.get(cleanHash);
-    if (cached) return cached;
+    if (cached) {
+      touchSyncBlobRef(this.store, adapter.policy.name, scope, cleanHash, this.clock());
+      return cached;
+    }
 
     const fromAdapter = await adapter.readBlob(scope, cleanHash, matchingEntry.path);
     if (!fromAdapter) return null;
     if (sha256Buffer(fromAdapter) !== cleanHash) fail(409, 'sync_blob_corrupt');
-    await this.blobStore.put(fromAdapter, cleanHash);
+    await this.putScopedBlob(adapter.policy.name, scope, fromAdapter, cleanHash, false);
     return fromAdapter;
   }
 
@@ -286,11 +311,13 @@ export class FileSyncEngine {
       let data: Buffer | null = null;
       if (entry) {
         data = await this.blobStore.get(hash);
-        if (!data) {
+        if (data) {
+          touchSyncBlobRef(this.store, adapter.policy.name, scope, hash, this.clock());
+        } else {
           data = await adapter.readBlob(scope, hash, entry.path);
           if (data) {
             if (sha256Buffer(data) !== hash) fail(409, 'sync_blob_corrupt');
-            await this.blobStore.put(data, hash);
+            await this.putScopedBlob(adapter.policy.name, scope, data, hash, false);
           }
         }
       } else if (adapter.policy.history) {
@@ -339,7 +366,13 @@ export class FileSyncEngine {
       if (actualRawSha !== claimedSha) fail(400, 'sync_blob_hash_mismatch');
 
       const sanitized = this.sanitizeAndCheckContent(adapter.policy, raw);
-      const putResult = await this.blobStore.put(sanitized.bytes, sanitized.sha256);
+      const putResult = await this.putScopedBlob(
+        adapter.policy.name,
+        scope,
+        sanitized.bytes,
+        sanitized.sha256,
+        true,
+      );
       stored.push({
         sha256: putResult.sha256,
         original_sha256: claimedSha,
@@ -442,6 +475,11 @@ export class FileSyncEngine {
     return adapter.withScopeLock ? adapter.withScopeLock(scope, runLocked) : runLocked();
   }
 
+  /**
+   * Loads a specific revision's bytes strictly from this scope's authoritative adapter history.
+   * NEVER reads an unverified client-supplied `expectedSha` from the global `blobStore`
+   * (blocking cross-scope CAS disclosure via `409 base_content`).
+   */
   private async loadRevisionBytes(
     adapter: SyncNamespaceAdapter,
     scope: string,
@@ -450,23 +488,62 @@ export class FileSyncEngine {
     expectedSha?: string | null,
   ): Promise<Buffer | null> {
     if (revision === 0) return Buffer.alloc(0);
-    if (expectedSha) {
-      const fromCas = await this.blobStore.get(expectedSha);
-      if (fromCas) return fromCas;
-    }
     if (adapter.readRevision) {
       const rev = await adapter.readRevision(scope, path, revision);
-      if (rev && !rev.deleted && rev.content !== null) {
-        if (!expectedSha || sha256Buffer(rev.content) === expectedSha) {
-          return rev.content;
-        }
-      }
+      if (!rev || rev.deleted || rev.content === null) return null;
+      if (expectedSha && sha256Buffer(rev.content) !== expectedSha) return null;
+      return rev.content;
     }
     if (expectedSha) {
       const fromAdapter = await adapter.readBlob(scope, expectedSha, path);
       if (fromAdapter && sha256Buffer(fromAdapter) === expectedSha) return fromAdapter;
     }
     return null;
+  }
+
+  /**
+   * Loads a committed/staged blob ONLY if it belongs to `(adapter.policy.name, scope)`:
+   * either previously uploaded/cached for this scope (`sync_blob_refs`) or reachable in this
+   * scope's authoritative files/history via `adapter.readBlob`. Prevents cross-scope CAS theft.
+   */
+  private async loadScopeOwnedBlob(
+    adapter: SyncNamespaceAdapter,
+    scope: string,
+    requestedSha: string,
+    currentByPath: ReadonlyMap<string, SyncEntry>,
+  ): Promise<Buffer> {
+    if (hasSyncBlobRef(this.store, adapter.policy.name, scope, requestedSha)) {
+      const fromCas = await this.blobStore.get(requestedSha);
+      if (fromCas) return fromCas;
+    }
+    let hintPath: string | undefined;
+    for (const entry of currentByPath.values()) {
+      if (!entry.deleted && entry.sha256 === requestedSha) {
+        hintPath = entry.path;
+        break;
+      }
+    }
+    const fromAdapter = await adapter.readBlob(scope, requestedSha, hintPath);
+    if (fromAdapter && sha256Buffer(fromAdapter) === requestedSha) {
+      await this.putScopedBlob(adapter.policy.name, scope, fromAdapter, requestedSha, false);
+      return fromAdapter;
+    }
+    return fail(400, 'sync_blob_missing');
+  }
+
+  private async refreshScopeMaps(
+    adapter: SyncNamespaceAdapter,
+    scope: string,
+    currentByPath: Map<string, SyncEntry>,
+    existingPaths: Set<string>,
+  ): Promise<void> {
+    const snap = await adapter.snapshot(scope);
+    currentByPath.clear();
+    existingPaths.clear();
+    for (const entry of snap.entries) {
+      currentByPath.set(entry.path, entry);
+      if (!entry.deleted) existingPaths.add(entry.path);
+    }
   }
 
   private async commitSingleFile(
@@ -481,10 +558,6 @@ export class FileSyncEngine {
       rejectSensitivePaths: adapter.policy.rejectSensitivePaths,
     });
     const isDelete = Boolean(change.deleted);
-    const current = currentByPath.get(path);
-    const currentRevision = current ? current.revision : 0;
-    const currentDeleted = !current || current.deleted;
-    const currentSha = current && !current.deleted ? current.sha256 : null;
 
     let localBytes: Buffer | null = null;
     let localSha: string | null = null;
@@ -492,19 +565,71 @@ export class FileSyncEngine {
 
     if (!isDelete) {
       const requestedSha = assertSha256(change.content_sha256);
-      const rawBlob = await this.blobStore.get(requestedSha);
-      if (!rawBlob) return fail(400, 'sync_blob_missing');
+      const rawBlob = await this.loadScopeOwnedBlob(adapter, scope, requestedSha, currentByPath);
       const sanitized = this.sanitizeAndCheckContent(adapter.policy, rawBlob);
       localBytes = sanitized.bytes;
       localSha = sanitized.sha256;
       redactedOnCommit = sanitized.redacted;
       if (redactedOnCommit) {
-        await this.blobStore.put(localBytes, localSha);
+        await this.putScopedBlob(adapter.policy.name, scope, localBytes, localSha, true);
       }
     }
 
+    for (let attempt = 0; attempt < MAX_COMMIT_RACE_ATTEMPTS; attempt++) {
+      try {
+        return await this.commitSingleFileOnce(
+          adapter,
+          scope,
+          path,
+          change,
+          isDelete,
+          localBytes,
+          localSha,
+          redactedOnCommit,
+          currentByPath,
+          existingPaths,
+          ctx,
+        );
+      } catch (error) {
+        if (
+          error instanceof HttpError &&
+          error.status === 409 &&
+          error.code === 'sync_revision_race' &&
+          attempt < MAX_COMMIT_RACE_ATTEMPTS - 1
+        ) {
+          await this.refreshScopeMaps(adapter, scope, currentByPath, existingPaths);
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return fail(409, 'sync_revision_race');
+  }
+
+  private async commitSingleFileOnce(
+    adapter: SyncNamespaceAdapter,
+    scope: string,
+    path: string,
+    change: SyncCommitChange,
+    isDelete: boolean,
+    localBytes: Buffer | null,
+    localSha: string | null,
+    redactedOnCommit: boolean,
+    currentByPath: Map<string, SyncEntry>,
+    existingPaths: Set<string>,
+    ctx: { mode: 'interactive' | 'background'; actor: string; actorTag: string; skipIfHumanEdited: boolean },
+  ): Promise<SyncCommitItemResult> {
+    const current = currentByPath.get(path);
+    const currentRevision = current ? current.revision : 0;
+    const currentDeleted = !current || current.deleted;
+    const currentSha = current && !current.deleted ? current.sha256 : null;
+
     // Fast path 1: convergent state (already matches server).
     if ((isDelete && currentDeleted) || (!isDelete && !currentDeleted && currentSha === localSha)) {
+      if (localBytes && localSha) {
+        registerSyncBlobRef(this.store, adapter.policy.name, scope, localSha, localBytes.length, false, this.clock());
+      }
       return {
         path,
         status: 'unchanged',
@@ -531,7 +656,9 @@ export class FileSyncEngine {
         mode: change.mode,
         actor: ctx.actor,
       });
-      if (localBytes && applied.sha256) await this.blobStore.put(localBytes, applied.sha256);
+      if (localBytes && applied.sha256) {
+        await this.putScopedBlob(adapter.policy.name, scope, localBytes, applied.sha256, false);
+      }
       currentByPath.set(path, applied);
       if (applied.deleted) existingPaths.delete(path);
       else existingPaths.add(path);
@@ -582,7 +709,7 @@ export class FileSyncEngine {
       }
     }
 
-    // Load base & current contents for 3-way merge evaluation.
+    // Load base & current contents strictly from this scope's authoritative revision history.
     const baseBytes = await this.loadRevisionBytes(adapter, scope, path, change.base_revision, change.base_sha256);
     const currentBytes = currentDeleted
       ? null
@@ -604,7 +731,7 @@ export class FileSyncEngine {
           reason,
           base_revision: change.base_revision,
           current_revision: currentRevision,
-          base_sha256: change.base_sha256 ?? (baseBytes ? sha256Buffer(baseBytes) : null),
+          base_sha256: baseBytes ? sha256Buffer(baseBytes) : null,
           current_sha256: currentSha,
           local_sha256: localSha,
           binary: detail.binary,
@@ -646,7 +773,7 @@ export class FileSyncEngine {
       if (localBytes !== null) {
         const candidatePath = buildConflictCopyPath(path, ctx.actorTag, this.clock(), existingPaths);
         const sanitizedCopy = this.sanitizeAndCheckContent(adapter.policy, localBytes);
-        await this.blobStore.put(sanitizedCopy.bytes, sanitizedCopy.sha256);
+        await this.putScopedBlob(adapter.policy.name, scope, sanitizedCopy.bytes, sanitizedCopy.sha256, false);
         conflictEntry = await adapter.applyChange!(scope, {
           path: candidatePath,
           expectedRevision: 0,
@@ -670,7 +797,7 @@ export class FileSyncEngine {
         actor: ctx.actor,
         base_revision: change.base_revision,
         current_revision: currentRevision,
-        base_sha256: change.base_sha256 ?? (baseBytes ? sha256Buffer(baseBytes) : null),
+        base_sha256: baseBytes ? sha256Buffer(baseBytes) : null,
         current_sha256: currentSha,
         local_sha256: localSha,
         conflict_path: conflictPath,
@@ -722,7 +849,7 @@ export class FileSyncEngine {
     }
 
     const sanitizedMerged = this.sanitizeAndCheckContent(adapter.policy, merged.merged);
-    await this.blobStore.put(sanitizedMerged.bytes, sanitizedMerged.sha256);
+    await this.putScopedBlob(adapter.policy.name, scope, sanitizedMerged.bytes, sanitizedMerged.sha256, false);
 
     const applied = await adapter.applyChange!(scope, {
       path,

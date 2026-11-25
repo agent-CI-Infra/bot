@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants, existsSync } from 'node:fs';
-import { chmod, lstat, mkdir, open, readdir, readlink, realpath } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, open, readdir, readlink, realpath } from 'node:fs/promises';
 import { join, posix, resolve, sep } from 'node:path';
 import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
@@ -9,7 +9,7 @@ import type { StagedToolEntry } from '../projects/tools-archive.js';
 import type { AssistantHomes } from '../service-roles/assistant-computers.js';
 import { DEFAULT_AGENT_TOOLS_ROOT, resolveSupportedArch } from '../harness/agent-tools.js';
 import { resolveSkillStoreRoot } from '../roles/skill-store.js';
-import { fail } from '../core/security.js';
+import { fail, HttpError } from '../core/security.js';
 import { Notes } from '../../runner/notes.mjs';
 import { withNoteDirectory } from '../../runner/note-path.mjs';
 import { isBinaryBuffer } from './merge3.js';
@@ -23,6 +23,7 @@ import {
   readRegularFileAnchored,
   validateInternalSymlinkTarget,
 } from './paths.js';
+import { hasPersistedSyncScope } from './storage.js';
 import type {
   SyncAdapterCommitInput,
   SyncEntry,
@@ -39,6 +40,57 @@ const TOOL_RESULT_FILE_RE = /^[a-f0-9]{48}\.utf8$/;
 const SKILL_SCOPE_RE = /^(service|projects\/[A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/sets\/([a-f0-9]{64}))?$/;
 const ASSISTANT_SCOPE_RE = /^([a-f0-9]{32})(?::([1-9]\d{0,9}))?$/;
 const AGENT_TOOLS_SCOPE_RE = /^(?:default|linux\/(x64|arm64)(?:\/([a-zA-Z0-9_-]+)@([0-9]+\.[0-9]+\.[0-9]+))?)$/;
+
+const UNAVAILABLE_ERRNO_CODES = new Set(['EACCES', 'EPERM', 'EIO', 'ENOTDIR', 'EROFS', 'ESTALE']);
+
+function isUnavailableFsError(error: any): boolean {
+  return Boolean(error && typeof error.code === 'string' && UNAVAILABLE_ERRNO_CODES.has(error.code));
+}
+
+function isNotFoundManagerError(error: any): boolean {
+  if (error instanceof HttpError && error.status === 404) return true;
+  if (error?.code === 'ENOENT' || error?.code === 'note_not_found' || error?.message === 'note_not_found') return true;
+  return false;
+}
+
+function isRevisionRaceError(error: any): boolean {
+  if (
+    error instanceof HttpError &&
+    error.status === 409 &&
+    (error.code === 'note_revision_changed' || error.code === 'note_path_conflict')
+  ) {
+    return true;
+  }
+  const msg = String(error?.message || '');
+  return msg === 'note_revision_changed' || msg === 'note_path_conflict';
+}
+
+function hasReservedSegment(relPath: string): boolean {
+  return relPath.split('/').some(isReservedSyncSegment);
+}
+
+/**
+ * Verifies a directory exists (not a symlink) and is readable/traversable.
+ * Returns `'missing'` ONLY on `ENOENT`; fails closed with `503 sync_scope_unavailable`
+ * on unreadable/unmounted/IO errors and `400 sync_symlink_forbidden` on symlinks.
+ */
+async function checkDirectoryReadable(dirPath: string): Promise<'ok' | 'missing'> {
+  let info;
+  try {
+    info = await lstat(dirPath);
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return 'missing';
+    return fail(503, 'sync_scope_unavailable');
+  }
+  if (info.isSymbolicLink()) return fail(400, 'sync_symlink_forbidden');
+  if (!info.isDirectory()) return fail(503, 'sync_scope_unavailable');
+  try {
+    await access(dirPath, constants.R_OK | constants.X_OK);
+  } catch {
+    return fail(503, 'sync_scope_unavailable');
+  }
+  return 'ok';
+}
 
 interface HashCacheEntry {
   mtimeMs: number;
@@ -83,6 +135,68 @@ class FileHashCache {
   }
 }
 
+/**
+ * Bounded LRU map `(scope -> (sha256 -> fullPath))` so read-only adapters never leak unbounded memory
+ * across high-churn scopes or hashes in long-running control planes.
+ */
+class ScopedBlobPathCache {
+  private readonly scopes = new Map<string, Map<string, string>>();
+
+  constructor(
+    private readonly maxScopes = 64,
+    private readonly maxEntriesPerScope = 2048,
+  ) {}
+
+  get(scope: string, sha256: string): string | undefined {
+    const scopeMap = this.scopes.get(scope);
+    if (!scopeMap) return undefined;
+    // Refresh scope LRU recency
+    this.scopes.delete(scope);
+    this.scopes.set(scope, scopeMap);
+    return scopeMap.get(sha256);
+  }
+
+  set(scope: string, sha256: string, fullPath: string): void {
+    let scopeMap = this.scopes.get(scope);
+    if (scopeMap) {
+      this.scopes.delete(scope);
+      this.scopes.set(scope, scopeMap);
+    } else {
+      if (this.scopes.size >= this.maxScopes) {
+        const oldest = this.scopes.keys().next().value;
+        if (oldest !== undefined) this.scopes.delete(oldest);
+      }
+      scopeMap = new Map<string, string>();
+      this.scopes.set(scope, scopeMap);
+    }
+    if (scopeMap.has(sha256)) {
+      scopeMap.delete(sha256);
+    } else if (scopeMap.size >= this.maxEntriesPerScope) {
+      const oldestHash = scopeMap.keys().next().value;
+      if (oldestHash !== undefined) scopeMap.delete(oldestHash);
+    }
+    scopeMap.set(sha256, fullPath);
+  }
+
+  replaceScope(scope: string, entries: Iterable<[string, string]>): void {
+    const bounded = new Map<string, string>();
+    for (const [sha, full] of entries) {
+      if (bounded.size >= this.maxEntriesPerScope) {
+        const oldestHash = bounded.keys().next().value;
+        if (oldestHash !== undefined) bounded.delete(oldestHash);
+      }
+      bounded.set(sha, full);
+    }
+    if (this.scopes.has(scope)) {
+      this.scopes.delete(scope);
+    } else if (this.scopes.size >= this.maxScopes) {
+      const oldest = this.scopes.keys().next().value;
+      if (oldest !== undefined) this.scopes.delete(oldest);
+    }
+    this.scopes.set(scope, bounded);
+  }
+}
+
 async function walkReadOnlyTree(
   rootDir: string,
   options: {
@@ -98,14 +212,22 @@ async function walkReadOnlyTree(
 ): Promise<{ entries: SyncEntry[]; hashToPath: Map<string, string> }> {
   const entries: SyncEntry[] = [];
   const hashToPath = new Map<string, string>();
-  if (!(await isRealDirectory(rootDir))) {
+  const state = await checkDirectoryReadable(rootDir);
+  if (state === 'missing') {
     return { entries, hashToPath };
   }
   const canonicalRoot = await realpath(rootDir);
 
   const walk = async (dirReal: string, relDir: string, depth: number): Promise<void> => {
     if (depth > 32) return;
-    const dirents = (await readdir(dirReal, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    let rawDirents;
+    try {
+      rawDirents = await readdir(dirReal, { withFileTypes: true });
+    } catch (error) {
+      if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
+      throw error;
+    }
+    const dirents = rawDirents.sort((a, b) => a.name.localeCompare(b.name));
     for (const dirent of dirents) {
       if (depth === 0 && options.skipTopLevel?.has(dirent.name)) continue;
       if (options.skipName?.(dirent.name)) continue;
@@ -115,7 +237,8 @@ async function walkReadOnlyTree(
       let info;
       try {
         info = await lstat(full);
-      } catch {
+      } catch (error) {
+        if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
         continue;
       }
       if (info.isSymbolicLink()) {
@@ -216,10 +339,16 @@ export class VersionedDirectoryAdapter implements SyncNamespaceAdapter {
     if (!dir) return null;
     if (!existsSync(dir)) {
       if (!create) return null;
-      await mkdir(dir, { recursive: true, mode: 0o770 });
-      await chmod(dir, 0o770).catch(() => {});
+      try {
+        await mkdir(dir, { recursive: true, mode: 0o770 });
+        await chmod(dir, 0o770).catch(() => {});
+      } catch (error) {
+        if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
+        throw error;
+      }
     }
-    if (!(await isRealDirectory(dir))) fail(400, 'sync_symlink_forbidden');
+    const state = await checkDirectoryReadable(dir);
+    if (state === 'missing') return null;
     const canonical = await realpath(dir);
     return new Notes(canonical, { canonicalRoot: canonical });
   }
@@ -227,10 +356,17 @@ export class VersionedDirectoryAdapter implements SyncNamespaceAdapter {
   async snapshot(scope: string, options?: { paths?: readonly string[] }): Promise<SyncManifestSnapshot> {
     const notes = await this.openNotes(scope, false);
     if (!notes) return { revision: 0, entries: [] };
-    const { files } = await notes.files(true);
+    let files;
+    try {
+      ({ files } = await notes.files(true));
+    } catch (error) {
+      if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
+      throw error;
+    }
     const pathSet = options?.paths?.length ? new Set(options.paths) : null;
     const entries: SyncEntry[] = [];
     for (const file of files) {
+      if (!file?.name || hasReservedSegment(file.name)) continue;
       if (pathSet && !pathSet.has(file.name)) continue;
       entries.push({
         path: file.name,
@@ -256,6 +392,7 @@ export class VersionedDirectoryAdapter implements SyncNamespaceAdapter {
       return await notes.blob(sha256, true);
     } catch (error: any) {
       if (error?.code === 'ENOENT') return null;
+      if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
       throw error;
     }
   }
@@ -278,6 +415,7 @@ export class VersionedDirectoryAdapter implements SyncNamespaceAdapter {
         }));
     } catch (error: any) {
       if (error?.code === 'ENOENT') return [];
+      if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
       throw error;
     }
   }
@@ -308,13 +446,14 @@ export class VersionedDirectoryAdapter implements SyncNamespaceAdapter {
       };
     } catch (error: any) {
       if (error?.code === 'ENOENT') return null;
+      if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
       throw error;
     }
   }
 
   async applyChange(scope: string, input: SyncAdapterCommitInput): Promise<SyncEntry> {
     const notes = await this.openNotes(scope, true);
-    if (!notes) return fail(404, 'sync_scope_not_found');
+    if (!notes) return fail(503, 'sync_scope_unavailable');
 
     try {
       if (input.deleted) {
@@ -375,11 +514,12 @@ export class VersionedDirectoryAdapter implements SyncNamespaceAdapter {
         updated_at: saved.created_at ?? new Date().toISOString(),
       };
     } catch (error: any) {
-      if (error?.message === 'note_revision_changed') fail(409, 'sync_conflict');
+      if (isRevisionRaceError(error)) fail(409, 'sync_revision_race');
       if (error?.message === 'invalid_note_path' || error?.message === 'invalid_note_file') {
         fail(400, 'sync_invalid_path');
       }
       if (error?.code === 'ELOOP') fail(400, 'sync_symlink_forbidden');
+      if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
       throw error;
     }
   }
@@ -425,7 +565,7 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
     const entries: SyncEntry[] = [];
     for (const file of files) {
       const rel = String(file.path ?? file.name ?? '');
-      if (!rel || (pathSet && !pathSet.has(rel))) continue;
+      if (!rel || hasReservedSegment(rel) || (pathSet && !pathSet.has(rel))) continue;
       entries.push({
         path: rel,
         sha256: file.deleted ? null : (file.sha256 ? String(file.sha256) : null),
@@ -450,7 +590,13 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
       ? files.filter(f => String(f.path ?? '') === hintPath)
       : files.filter(f => String(f.sha256 ?? '') === sha256 && !f.deleted);
     for (const candidate of candidates) {
-      const file = await this.manager.call('GET', `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(candidate.id))}`);
+      let file: any;
+      try {
+        file = await this.manager.call('GET', `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(candidate.id))}`);
+      } catch (error) {
+        if (isNotFoundManagerError(error)) continue;
+        throw error;
+      }
       if (file?.deleted) continue;
       const buf = file?.binary && typeof file.download_base64 === 'string'
         ? Buffer.from(file.download_base64, 'base64')
@@ -465,7 +611,13 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
     const files = await this.listTree(scope);
     const found = files.find(f => String(f.path ?? '') === path);
     if (!found?.id) return [];
-    const res = await this.manager.call('GET', `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(found.id))}/versions`);
+    let res: any;
+    try {
+      res = await this.manager.call('GET', `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(found.id))}/versions`);
+    } catch (error) {
+      if (isNotFoundManagerError(error)) return [];
+      throw error;
+    }
     const list = Array.isArray(res?.versions) ? res.versions : [];
     return [...list]
       .sort((a: any, b: any) => Number(a.revision) - Number(b.revision))
@@ -505,8 +657,10 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
         deleted: false,
         binary: false,
       };
-    } catch {
-      return null;
+    } catch (error) {
+      // Only treat explicit 404/not-found as missing revision; let transient 5xx/network/permission errors propagate!
+      if (isNotFoundManagerError(error)) return null;
+      throw error;
     }
   }
 
@@ -515,57 +669,62 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
     const files = await this.listTree(scope);
     const existing = files.find(f => String(f.path ?? '') === input.path);
 
-    if (input.deleted) {
-      if (!existing?.id) fail(404, 'sync_file_not_found');
-      const res = await this.manager.call(
-        'DELETE',
-        `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(existing.id))}`,
-        { expected_revision: input.expectedRevision, actor: input.actor },
-      );
+    try {
+      if (input.deleted) {
+        if (!existing?.id) fail(404, 'sync_file_not_found');
+        const res = await this.manager.call(
+          'DELETE',
+          `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(existing.id))}`,
+          { expected_revision: input.expectedRevision, actor: input.actor },
+        );
+        return {
+          path: input.path,
+          sha256: null,
+          revision: Number(res.revision),
+          size: 0,
+          mode: 0o644,
+          deleted: true,
+          kind: 'file',
+          actor: res.actor ?? input.actor,
+          updated_at: res.created_at ?? new Date().toISOString(),
+        };
+      }
+
+      const content = input.content ?? Buffer.alloc(0);
+      if (isBinaryBuffer(content)) fail(415, 'sync_unsupported_binary');
+      const textContent = content.toString('utf8');
+
+      let saved: any;
+      if (existing?.id) {
+        saved = await this.manager.call(
+          'PUT',
+          `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(existing.id))}`,
+          { content: textContent, expected_revision: input.expectedRevision, actor: input.actor },
+        );
+      } else {
+        saved = await this.manager.call('POST', `/v1/projects/${scope}/file-tree`, {
+          path: input.path,
+          content: textContent,
+          actor: input.actor,
+          create_parents: true,
+        });
+      }
+
       return {
         path: input.path,
-        sha256: null,
-        revision: Number(res.revision),
-        size: 0,
+        sha256: saved.sha256 ? String(saved.sha256) : input.sha256,
+        revision: Number(saved.revision),
+        size: Number(saved.bytes ?? content.length),
         mode: 0o644,
-        deleted: true,
+        deleted: false,
         kind: 'file',
-        actor: res.actor ?? input.actor,
-        updated_at: res.created_at ?? new Date().toISOString(),
+        actor: saved.actor ?? input.actor,
+        updated_at: saved.created_at ?? new Date().toISOString(),
       };
+    } catch (error) {
+      if (isRevisionRaceError(error)) fail(409, 'sync_revision_race');
+      throw error;
     }
-
-    const content = input.content ?? Buffer.alloc(0);
-    if (isBinaryBuffer(content)) fail(415, 'sync_unsupported_binary');
-    const textContent = content.toString('utf8');
-
-    let saved: any;
-    if (existing?.id) {
-      saved = await this.manager.call(
-        'PUT',
-        `/v1/projects/${scope}/file-tree/${encodeURIComponent(String(existing.id))}`,
-        { content: textContent, expected_revision: input.expectedRevision, actor: input.actor },
-      );
-    } else {
-      saved = await this.manager.call('POST', `/v1/projects/${scope}/file-tree`, {
-        path: input.path,
-        content: textContent,
-        actor: input.actor,
-        create_parents: true,
-      });
-    }
-
-    return {
-      path: input.path,
-      sha256: saved.sha256 ? String(saved.sha256) : input.sha256,
-      revision: Number(saved.revision),
-      size: Number(saved.bytes ?? content.length),
-      mode: 0o644,
-      deleted: false,
-      kind: 'file',
-      actor: saved.actor ?? input.actor,
-      updated_at: saved.created_at ?? new Date().toISOString(),
-    };
   }
 }
 
@@ -576,7 +735,7 @@ export class ManagerProjectNotesAdapter implements SyncNamespaceAdapter {
 export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
   readonly policy: SyncNamespacePolicy = SYNC_NAMESPACE_POLICIES['tool-results'];
   private readonly hashCache = new FileHashCache();
-  private readonly lastBlobMap = new Map<string, Map<string, string>>();
+  private readonly lastBlobMap = new ScopedBlobPathCache();
 
   constructor(private readonly store: Store, private readonly rootDir?: string) {}
 
@@ -584,9 +743,12 @@ export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
     if (!TOOL_RESULT_OWNER_RE.test(scope)) fail(400, 'sync_invalid_scope');
   }
 
+  private baseRoot(): string {
+    return this.rootDir ? resolve(this.rootDir) : resolve(this.store.trajectories.results.root);
+  }
+
   private ownerRoot(scope: string): string {
-    const base = this.rootDir ? resolve(this.rootDir) : resolve(this.store.trajectories.results.root);
-    return join(base, scope);
+    return join(this.baseRoot(), scope);
   }
 
   private activeResultNames(scope: string): Set<string> | null {
@@ -601,11 +763,21 @@ export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
 
   async snapshot(scope: string, options?: { paths?: readonly string[] }): Promise<SyncManifestSnapshot> {
     this.validateScope(scope);
-    const ownerDir = this.ownerRoot(scope);
-    if (!(await isRealDirectory(ownerDir))) return { revision: 0, entries: [] };
-    const canonicalOwner = await realpath(ownerDir);
     const activeInDb = this.activeResultNames(scope);
-    const blobMap = this.lastBlobMap.get(scope) ?? new Map<string, string>();
+    const expectsFiles = Boolean((activeInDb && activeInDb.size > 0) || hasPersistedSyncScope(this.store, 'tool-results', scope));
+    const rootState = await checkDirectoryReadable(this.baseRoot());
+    if (rootState === 'missing') {
+      if (expectsFiles) return fail(503, 'sync_scope_unavailable');
+      return { revision: 0, entries: [] };
+    }
+
+    const ownerDir = this.ownerRoot(scope);
+    const ownerState = await checkDirectoryReadable(ownerDir);
+    if (ownerState === 'missing') {
+      if (activeInDb && activeInDb.size > 0) return fail(503, 'sync_scope_unavailable');
+      return { revision: 0, entries: [] };
+    }
+    const canonicalOwner = await realpath(ownerDir);
     const entries: SyncEntry[] = [];
 
     const candidates: string[] = [];
@@ -615,7 +787,14 @@ export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
         if (TOOL_RESULT_FILE_RE.test(clean)) candidates.push(clean);
       }
     } else {
-      for (const dirent of (await readdir(canonicalOwner, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      let dirents;
+      try {
+        dirents = await readdir(canonicalOwner, { withFileTypes: true });
+      } catch (error) {
+        if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
+        throw error;
+      }
+      for (const dirent of dirents.sort((a, b) => a.name.localeCompare(b.name))) {
         if (dirent.isFile() && TOOL_RESULT_FILE_RE.test(dirent.name)) candidates.push(dirent.name);
       }
     }
@@ -629,7 +808,7 @@ export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
       const info = await lstat(full).catch(() => null);
       if (!info || info.isSymbolicLink() || !info.isFile()) continue;
       const sha256 = await this.hashCache.hashFile(full, info.size, info.mtimeMs);
-      blobMap.set(sha256, full);
+      this.lastBlobMap.set(scope, sha256, full);
       entries.push({
         path: name,
         sha256,
@@ -641,7 +820,6 @@ export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
         updated_at: new Date(info.mtimeMs).toISOString(),
       });
     }
-    this.lastBlobMap.set(scope, blobMap);
     entries.sort((a, b) => a.path.localeCompare(b.path));
     return { revision: entries.length ? 1 : 0, entries };
   }
@@ -654,10 +832,10 @@ export class ToolResultsSyncAdapter implements SyncNamespaceAdapter {
       const data = await readRegularFileAnchored(ownerDir, hintPath);
       if (data && createHash('sha256').update(data).digest('hex') === sha256) return data;
     }
-    let full = this.lastBlobMap.get(scope)?.get(sha256);
+    let full = this.lastBlobMap.get(scope, sha256);
     if (!full) {
       await this.snapshot(scope);
-      full = this.lastBlobMap.get(scope)?.get(sha256);
+      full = this.lastBlobMap.get(scope, sha256);
     }
     if (!full) return null;
     const rel = posix.basename(full);
@@ -723,8 +901,18 @@ export class ProjectToolsSyncAdapter implements SyncNamespaceAdapter {
 
   async snapshot(scope: string, options?: { paths?: readonly string[] }): Promise<SyncManifestSnapshot> {
     this.validateScope(scope);
+    const root = this.resolveRoot();
+    if (root) {
+      const rootState = await checkDirectoryReadable(root);
+      if (rootState === 'missing') fail(503, 'sync_scope_unavailable');
+    }
     const resolved = this.resolveRevisionRow(scope);
     if (!resolved) return { revision: 0, entries: [] };
+    if (!root) return fail(503, 'sync_scope_unavailable');
+    const revDir = join(root, resolved.repositoryId, `rev-${resolved.revision}`);
+    if ((await checkDirectoryReadable(revDir)) === 'missing') {
+      fail(503, 'sync_scope_unavailable');
+    }
     const pathSet = options?.paths?.length ? new Set(options.paths) : null;
     const entries: SyncEntry[] = [];
     for (const item of resolved.files) {
@@ -790,9 +978,9 @@ export class ProjectToolsSyncAdapter implements SyncNamespaceAdapter {
 export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
   readonly policy: SyncNamespacePolicy = SYNC_NAMESPACE_POLICIES['agent-tools'];
   private readonly hashCache = new FileHashCache();
-  private readonly lastBlobMap = new Map<string, Map<string, string>>();
+  private readonly lastBlobMap = new ScopedBlobPathCache();
 
-  constructor(private readonly rootDir?: string) {}
+  constructor(private readonly rootDir?: string, private readonly store?: Store) {}
 
   private parseScope(scope: string): { arch: 'x64' | 'arm64'; product?: string; version?: string } {
     const match = AGENT_TOOLS_SCOPE_RE.exec(scope);
@@ -835,7 +1023,9 @@ export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
   async snapshot(scope: string, options?: { paths?: readonly string[] }): Promise<SyncManifestSnapshot> {
     const { arch, product, version } = this.parseScope(scope);
     const root = this.resolveRoot();
-    if (!(await isRealDirectory(root))) return { revision: 0, entries: [] };
+    if ((await checkDirectoryReadable(root)) === 'missing') {
+      fail(503, 'sync_scope_unavailable');
+    }
     const canonicalRoot = await realpath(root);
     const subtrees = new Set<string>();
 
@@ -868,6 +1058,8 @@ export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
         if (!manifest?.arch || manifest.arch === arch) {
           subtrees.add(`acp/${product}/${version}`);
         }
+      } else if (this.store && hasPersistedSyncScope(this.store, 'agent-tools', scope)) {
+        fail(503, 'sync_scope_unavailable');
       }
     } else {
       for (const category of ['claude_code', 'codex', 'node', 'uv']) {
@@ -890,7 +1082,7 @@ export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
 
     const pathFilter = options?.paths?.length ? new Set(options.paths) : undefined;
     const allEntries: SyncEntry[] = [];
-    const blobMap = new Map<string, string>();
+    const blobEntries: [string, string][] = [];
 
     for (const relSubtree of [...subtrees].sort()) {
       const fullSubtree = join(canonicalRoot, relSubtree);
@@ -903,11 +1095,11 @@ export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
         skipName: name => name.startsWith('.tmp-') || name === '.staging',
       });
       allEntries.push(...walked.entries);
-      for (const [sha, full] of walked.hashToPath) blobMap.set(sha, full);
+      for (const pair of walked.hashToPath) blobEntries.push(pair);
     }
 
     allEntries.sort((a, b) => a.path.localeCompare(b.path));
-    this.lastBlobMap.set(scope, blobMap);
+    this.lastBlobMap.replaceScope(scope, blobEntries);
     return { revision: allEntries.length ? 1 : 0, entries: allEntries };
   }
 
@@ -919,10 +1111,10 @@ export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
       const data = await readRegularFileAnchored(root, hintPath);
       if (data && createHash('sha256').update(data).digest('hex') === sha256) return data;
     }
-    let full = this.lastBlobMap.get(scope)?.get(sha256);
+    let full = this.lastBlobMap.get(scope, sha256);
     if (!full) {
       await this.snapshot(scope);
-      full = this.lastBlobMap.get(scope)?.get(sha256);
+      full = this.lastBlobMap.get(scope, sha256);
     }
     if (!full) return null;
     const canonicalRoot = await realpath(root).catch(() => null);
@@ -941,7 +1133,7 @@ export class AgentToolsSyncAdapter implements SyncNamespaceAdapter {
 export class SkillStoreSyncAdapter implements SyncNamespaceAdapter {
   readonly policy: SyncNamespacePolicy = SYNC_NAMESPACE_POLICIES['skill-store'];
   private readonly hashCache = new FileHashCache();
-  private readonly lastBlobMap = new Map<string, Map<string, string>>();
+  private readonly lastBlobMap = new ScopedBlobPathCache();
 
   constructor(private readonly store: Store, private readonly rootDir?: string) {}
 
@@ -949,16 +1141,33 @@ export class SkillStoreSyncAdapter implements SyncNamespaceAdapter {
     if (!SKILL_SCOPE_RE.test(scope)) fail(400, 'sync_invalid_scope');
   }
 
+  private resolveRoot(): string | null {
+    return resolveSkillStoreRoot(this.store, this.rootDir);
+  }
+
   private resolveScopeDir(scope: string): string | null {
-    const root = resolveSkillStoreRoot(this.store, this.rootDir);
+    const root = this.resolveRoot();
     if (!root) return null;
     return join(root, ...scope.split('/'));
   }
 
   async snapshot(scope: string, options?: { paths?: readonly string[] }): Promise<SyncManifestSnapshot> {
     this.validateScope(scope);
-    const dir = this.resolveScopeDir(scope);
-    if (!dir || !(await isRealDirectory(dir))) return { revision: 0, entries: [] };
+    const root = this.resolveRoot();
+    if (!root) return fail(503, 'sync_scope_unavailable');
+    const expectsDir = scope.includes('/sets/') || hasPersistedSyncScope(this.store, 'skill-store', scope);
+    if ((await checkDirectoryReadable(root)) === 'missing') {
+      if (expectsDir) return fail(503, 'sync_scope_unavailable');
+      return { revision: 0, entries: [] };
+    }
+    const dir = join(root, ...scope.split('/'));
+    const state = await checkDirectoryReadable(dir);
+    if (state === 'missing') {
+      if (expectsDir) {
+        return fail(503, 'sync_scope_unavailable');
+      }
+      return { revision: 0, entries: [] };
+    }
     const pathFilter = options?.paths?.length ? new Set(options.paths) : undefined;
     const walked = await walkReadOnlyTree(dir, {
       allowInternalSymlinks: false,
@@ -967,7 +1176,7 @@ export class SkillStoreSyncAdapter implements SyncNamespaceAdapter {
       pathFilter,
       skipName: name => name.startsWith('.tmp-'),
     });
-    this.lastBlobMap.set(scope, walked.hashToPath);
+    this.lastBlobMap.replaceScope(scope, walked.hashToPath);
     return { revision: walked.entries.length ? 1 : 0, entries: walked.entries };
   }
 
@@ -980,10 +1189,10 @@ export class SkillStoreSyncAdapter implements SyncNamespaceAdapter {
       const data = await readRegularFileAnchored(dir, hintPath);
       if (data && createHash('sha256').update(data).digest('hex') === sha256) return data;
     }
-    let full = this.lastBlobMap.get(scope)?.get(sha256);
+    let full = this.lastBlobMap.get(scope, sha256);
     if (!full) {
       await this.snapshot(scope);
-      full = this.lastBlobMap.get(scope)?.get(sha256);
+      full = this.lastBlobMap.get(scope, sha256);
     }
     if (!full) return null;
     const canonicalDir = await realpath(dir).catch(() => null);
@@ -995,16 +1204,33 @@ export class SkillStoreSyncAdapter implements SyncNamespaceAdapter {
   }
 }
 
-export function createProjectNotesDirectoryAdapter(projectNotesRoot: string): VersionedDirectoryAdapter {
+export function createProjectNotesDirectoryAdapter(
+  projectNotesRoot: string,
+  store?: Store,
+  policyOverride?: SyncNamespacePolicy,
+): VersionedDirectoryAdapter {
   const base = resolve(projectNotesRoot);
   return new VersionedDirectoryAdapter(
-    SYNC_NAMESPACE_POLICIES['project-notes'],
+    policyOverride ?? SYNC_NAMESPACE_POLICIES['project-notes'],
     scope => {
       if (!REPO_ID_RE.test(scope)) fail(400, 'sync_invalid_scope');
     },
     async (scope, { create }) => {
+      // Fail closed if the backing project-notes volume root itself is unmounted or unreadable.
+      const baseState = await checkDirectoryReadable(base);
+      if (baseState === 'missing') fail(503, 'sync_scope_unavailable');
+
       const dir = join(base, scope);
-      if (!existsSync(dir) && !create) return null;
+      const dirState = await checkDirectoryReadable(dir);
+      if (dirState === 'missing') {
+        if (!create) {
+          // A previously synced scope whose directory vanished must fail closed instead of emitting an empty manifest!
+          if (store && hasPersistedSyncScope(store, 'project-notes', scope)) {
+            fail(503, 'sync_scope_unavailable');
+          }
+          return null;
+        }
+      }
       return dir;
     },
   );
@@ -1013,9 +1239,12 @@ export function createProjectNotesDirectoryAdapter(projectNotesRoot: string): Ve
 export function createAssistantHomesAdapter(
   assistantHomes: AssistantHomes | undefined,
   explicitRoot?: string,
+  store?: Store,
+  policyOverride?: SyncNamespacePolicy,
 ): VersionedDirectoryAdapter {
+  const effectiveStore = store ?? assistantHomes?.store;
   return new VersionedDirectoryAdapter(
-    SYNC_NAMESPACE_POLICIES['assistant-homes'],
+    policyOverride ?? SYNC_NAMESPACE_POLICIES['assistant-homes'],
     scope => {
       if (!ASSISTANT_SCOPE_RE.test(scope)) fail(400, 'sync_invalid_scope');
     },
@@ -1025,9 +1254,13 @@ export function createAssistantHomesAdapter(
       const owner = match[1]!;
       let generation = match[2] ? Number(match[2]) : null;
       const root = explicitRoot ? resolve(explicitRoot) : assistantHomes?.root ? resolve(assistantHomes.root) : null;
-      if (!root) return null;
+      if (!root) return fail(503, 'sync_scope_unavailable');
+      if ((await checkDirectoryReadable(root)) === 'missing') {
+        return fail(503, 'sync_scope_unavailable');
+      }
+
+      const row = assistantHomes?.row(owner);
       if (generation === null) {
-        const row = assistantHomes?.row(owner);
         if (row && Number.isSafeInteger(row.generation)) {
           generation = Number(row.generation);
         } else {
@@ -1036,11 +1269,34 @@ export function createAssistantHomesAdapter(
       }
       const homeDir = join(root, owner, `home-${generation}`);
       const memoryDir = join(homeDir, 'memory');
+
+      if (!create) {
+        const homeState = await checkDirectoryReadable(homeDir);
+        if (homeState === 'missing') {
+          if (row || (effectiveStore && hasPersistedSyncScope(effectiveStore, 'assistant-homes', scope))) {
+            fail(503, 'sync_scope_unavailable');
+          }
+          return null;
+        }
+        const memState = await checkDirectoryReadable(memoryDir);
+        if (memState === 'missing') {
+          if (effectiveStore && hasPersistedSyncScope(effectiveStore, 'assistant-homes', scope)) {
+            fail(503, 'sync_scope_unavailable');
+          }
+          return null;
+        }
+        return memoryDir;
+      }
+
       if (!existsSync(memoryDir)) {
-        if (!create) return null;
-        await mkdir(join(root, owner), { recursive: true, mode: 0o750 });
-        await mkdir(homeDir, { recursive: true, mode: 0o700 });
-        await mkdir(memoryDir, { recursive: true, mode: 0o700 });
+        try {
+          await mkdir(join(root, owner), { recursive: true, mode: 0o750 });
+          await mkdir(homeDir, { recursive: true, mode: 0o700 });
+          await mkdir(memoryDir, { recursive: true, mode: 0o700 });
+        } catch (error) {
+          if (isUnavailableFsError(error)) fail(503, 'sync_scope_unavailable');
+          throw error;
+        }
       }
       return memoryDir;
     },

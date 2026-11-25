@@ -1,4 +1,3 @@
-import { dirname, join } from 'node:path';
 import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import type { ProjectToolsService } from '../projects/tools.js';
@@ -57,28 +56,24 @@ export interface SyncRuntime {
  * (`tool-results`, `project-tools`, `agent-tools`, `skill-store`, `project-notes`, `assistant-homes`).
  */
 export function createDefaultSyncRuntime(options: CreateDefaultSyncRuntimeOptions): SyncRuntime {
-  const defaultBlobRoot =
-    options.blobRoot ??
-    (options.store.path === ':memory:'
-      ? join(options.store.trajectories.root, '.sync-blobs')
-      : join(dirname(options.store.path), 'sync-blobs'));
+  const defaultBlobRoot = options.blobRoot ?? options.store.syncBlobsDir;
   const blobStore = options.blobStore ?? new LocalDiskBlobStore(defaultBlobRoot);
 
   const adapters: SyncNamespaceAdapter[] = [
     new ToolResultsSyncAdapter(options.store, options.toolResultsRoot),
     new ProjectToolsSyncAdapter(options.store, options.projectTools, options.projectToolsRoot),
-    new AgentToolsSyncAdapter(options.agentToolsRoot),
+    new AgentToolsSyncAdapter(options.agentToolsRoot, options.store),
     new SkillStoreSyncAdapter(options.store, options.skillStoreRoot),
   ];
 
   if (options.projectNotesRoot) {
-    adapters.push(createProjectNotesDirectoryAdapter(options.projectNotesRoot));
+    adapters.push(createProjectNotesDirectoryAdapter(options.projectNotesRoot, options.store));
   } else if (options.manager) {
     adapters.push(new ManagerProjectNotesAdapter(options.manager));
   }
 
   if (options.assistantHomes || options.assistantHomesRoot) {
-    adapters.push(createAssistantHomesAdapter(options.assistantHomes, options.assistantHomesRoot));
+    adapters.push(createAssistantHomesAdapter(options.assistantHomes, options.assistantHomesRoot, options.store));
   }
 
   if (options.extraAdapters) {
@@ -91,7 +86,7 @@ export function createDefaultSyncRuntime(options: CreateDefaultSyncRuntimeOption
     adapters,
     clock: options.clock,
   });
-  const tokens = new SyncTokenService(options.clock);
+  const tokens = new SyncTokenService(options.store, options.clock);
   const handleHttp = createSyncHttpHandler({
     engine,
     tokens,

@@ -17,9 +17,7 @@ export function isReservedSyncSegment(segment: string): boolean {
     lower === '.' ||
     lower === '..' ||
     lower === '.git' ||
-    segment === SYNC_BASE_FILENAME ||
-    segment.startsWith(SYNC_BASE_FILENAME + '.') ||
-    segment.startsWith('.sync-tmp-') ||
+    segment.startsWith('.sync-') ||
     segment.startsWith('.write-') ||
     segment.startsWith('.expired-')
   );
@@ -190,6 +188,8 @@ export function formatConflictTimestamp(date: Date | number = Date.now()): strin
   );
 }
 
+const MAX_CONFLICT_EXT_BYTES = 64;
+
 function truncateUtf8Bytes(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value) <= maxBytes) return value;
   let out = '';
@@ -197,12 +197,13 @@ function truncateUtf8Bytes(value: string, maxBytes: number): string {
     if (Buffer.byteLength(out + ch) > maxBytes) break;
     out += ch;
   }
-  return out || 'file';
+  return out || 'f';
 }
 
 /**
  * Generates `<dir>/<stem>.conflict-<actorTag>-<ts>[-<disambiguator>]<ext>`,
- * keeping the resulting filename within the 255-byte POSIX segment limit and never colliding with `existingPaths`.
+ * keeping the resulting filename strictly within the 255-byte POSIX segment limit
+ * (even when the original extension is arbitrarily long) and never colliding with `existingPaths`.
  */
 export function buildConflictCopyPath(
   originalPath: string,
@@ -214,7 +215,8 @@ export function buildConflictCopyPath(
   const slash = safePath.lastIndexOf('/');
   const dir = slash >= 0 ? safePath.slice(0, slash) : '';
   const base = slash >= 0 ? safePath.slice(slash + 1) : safePath;
-  const ext = posix.extname(base);
+  const rawExt = posix.extname(base);
+  const ext = rawExt && Buffer.byteLength(rawExt) <= MAX_CONFLICT_EXT_BYTES ? rawExt : '';
   const rawStem = ext ? base.slice(0, -ext.length) : base;
   const cleanTag = sanitizeActorTag(actorTag);
   const ts = formatConflictTimestamp(timestamp);

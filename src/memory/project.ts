@@ -20,7 +20,7 @@ export function knowledgePath(path: unknown): string {
     fail(400, 'invalid_memory_path');
   }
   const parts = (path as string).split('/');
-  if (parts.length > 32 || parts.some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase()) || /^\.(?:write|expired)-/.test(part) || Buffer.byteLength(part) > 255)) {
+  if (parts.length > 32 || parts.some(part => !part || ['.', '..', '.git'].includes(part.toLowerCase()) || /^\.(?:write|expired|sync)-/.test(part) || Buffer.byteLength(part) > 255)) {
     fail(400, 'invalid_memory_path');
   }
   if (SENSITIVE_PATH.test(path as string)) fail(400, 'memory_sensitive_path');
@@ -32,7 +32,7 @@ export function isPhysicalNoteId(id: string): boolean {
   if (!/^n:[a-zA-Z0-9_-]+$/.test(id)) return false;
   try {
     const name = Buffer.from(id.slice(2), 'base64url').toString('utf8');
-    return !!name && !name.includes('/') && !['.', '..', '.git'].includes(name.toLowerCase()) && !/^\.(?:write|expired)-/.test(name) && 'n:' + Buffer.from(name).toString('base64url') === id;
+    return !!name && !name.includes('/') && !['.', '..', '.git'].includes(name.toLowerCase()) && !/^\.(?:write|expired|sync)-/.test(name) && 'n:' + Buffer.from(name).toString('base64url') === id;
   } catch {
     return false;
   }

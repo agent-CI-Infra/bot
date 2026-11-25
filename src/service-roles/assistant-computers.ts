@@ -11,6 +11,7 @@ import { superAdmin, type Actor } from '../app/auth.js';
 import { RUNNER_TRANSFER_CHUNK_BYTES, commandFailure, commandLengthNotice, commandTimeoutLimit, commandTooLong, requestTooLarge } from '../agent/command.js';
 import { readFileChunks } from './checkout.js';
 import type { ProjectToolMountSpec } from '../projects/tools.js';
+import { deleteAssistantSyncData } from '../sync/storage.js';
 
 /**
  * Assistant computers (#457): group assistants and the management assistant get a computer of their conversation owner, a
@@ -324,9 +325,7 @@ export class AssistantHomes {
         const dirents = (await readdir(fdDir, { withFileTypes: true }).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name));
         for (const dirent of dirents) {
           if (
-            dirent.name === '.sync-base.json' ||
-            dirent.name.startsWith('.sync-base.json.') ||
-            dirent.name.startsWith('.sync-tmp-') ||
+            dirent.name.startsWith('.sync-') ||
             dirent.name.startsWith('.write-') ||
             dirent.name.startsWith('.expired-')
           ) {
@@ -451,6 +450,7 @@ export class AssistantHomes {
     if (keep && row) {
       this.store.run('UPDATE assistant_homes SET bytes=0,files=0,measured_at=?,over_limit=0 WHERE owner=?', Date.now(), owner);
     } else this.store.run('DELETE FROM assistant_homes WHERE owner=?', owner);
+    deleteAssistantSyncData(this.store, owner, { files: true });
   }
   async sweepSealed(now: number): Promise<number> {
     const before = now - this.settings().retention_days * 86400_000, rows = this.store.all('SELECT * FROM assistant_home_sealed WHERE sealed_at<?', before);
@@ -458,6 +458,7 @@ export class AssistantHomes {
       // A sealed generation is never mounted, so nothing can change it while it is removed.
       await rm(this.directory(row.owner, row.generation), { recursive: true, force: true });
       this.store.run('DELETE FROM assistant_home_sealed WHERE owner=? AND generation=?', row.owner, row.generation);
+      deleteAssistantSyncData(this.store, String(row.owner), { generation: Number(row.generation), files: true });
     }
     return rows.length;
   }

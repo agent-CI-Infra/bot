@@ -44,9 +44,7 @@ export function isReservedSyncName(name) {
     lower === '.' ||
     lower === '..' ||
     lower === '.git' ||
-    name === SYNC_BASE_FILENAME ||
-    name.startsWith(SYNC_BASE_FILENAME + '.') ||
-    name.startsWith('.sync-tmp-') ||
+    name.startsWith('.sync-') ||
     name.startsWith('.write-') ||
     name.startsWith('.expired-')
   );
