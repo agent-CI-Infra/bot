@@ -59,7 +59,7 @@ test('a code the console does not know at turn level keeps the settings advice',
 test('a post-execution guard error does not claim the command did not run', async () => {
   const [notice] = await failureNotices([[['model_start', { turn: 0 }], call('management_command'),
     ['tool_error', { call_id: 'b1', name: 'management_command', error: 'authorization_changed' }], ['done']]]);
-  assert.equal(notice, '操作未完成：权限在执行过程中变了，这一步可能已经生效，请在回执与执行进展里核对后再重试。（authorization_changed）');
+  assert.equal(notice, '无法确认这一步是否完成：执行过程中权限变了，请在回执与执行进展里核对后再重试。（authorization_changed）');
 });
 
 test('a receipt sentence is not used for a tool that is not a management command', async () => {

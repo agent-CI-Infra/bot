@@ -124,9 +124,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   // (github_write) runs its own action, so a sentence written about a submitted command would describe the wrong thing.
   // A code the console cannot explain keeps its bare value, exactly as before, rather than being guessed at.
   // authorization_changed is also raised by the mid-turn guard after the command or the write has already finished
-  // (src/management/agent.ts), so it must not claim that nothing ran.
+  // (src/management/agent.ts), so it must not claim that nothing ran, nor that the step did.
   const failedNotice = data => data.error === 'authorization_changed'
-    ? '操作未完成：权限在执行过程中变了，这一步可能已经生效，请在回执与执行进展里核对后再重试。（authorization_changed）'
+    ? '无法确认这一步是否完成：执行过程中权限变了，请在回执与执行进展里核对后再重试。（authorization_changed）'
     : data.name === 'management_command' && managementFailureHints[data.error] ? '操作未完成：' + managementFailureHints[data.error] + '（' + data.error + '）'
     : '操作未完成：' + data.error;
   // A turn-level failure can stop before any command was submitted (the permission guard runs mid-turn), so it speaks in
