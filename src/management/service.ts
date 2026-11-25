@@ -18,6 +18,18 @@ import { autoMergePolicy } from '../github/merge-policy.js';
 import { projectCeiling } from '../projects/ceiling.js';
 import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
+import {
+  createConsoleSkill,
+  deleteProjectSkill,
+  getSkill,
+  importRepositorySkills,
+  listSkills,
+  listSkillVersions,
+  listTrustedCacheRepositorySkills,
+  stripSkillVersionContent,
+  updateConsoleSkill,
+  type SkillOrigin,
+} from '../roles/skill-library.js';
 import { installationExecutionDenied } from '../installations/archive.js';
 import { commands, commandSchema, querySchema, queries as queryNames, schedulingQueries, validate } from './catalog.js';
 import { configurationPrRemoved } from './configuration-pr.js';
@@ -44,6 +56,7 @@ const asyncComputerOperations = new Set([...platformComputerOperations, ...envir
 const now=()=>new Date().toISOString();
 export class ManagementService {
   readonly extensions = new Map<string,ManagementExtension>();
+  private readonly inFlightImports = new Set<string>();
   // A trusted transport rechecks its persisted source whenever a command executes, including a reconciliation resumed in Web.
   sourceGuard?: (command: Row) => void;
   /** Called inside the creating transaction when a task.create command creates a task. */
@@ -151,6 +164,7 @@ export class ManagementService {
       subscriptions:this.store.all('SELECT id,revision FROM notification_subscriptions WHERE project_id=? ORDER BY id',target.project_id),
       manager:managerPrompt(this.store,target.project_id).revision,labels:projectLabels(this.store,target.project_id),
       roles:this.store.get('SELECT value FROM settings WHERE key=?','roles:'+target.project_id),
+      skills:this.store.hasTable('skills')?this.store.all('SELECT id,latest_version FROM skills WHERE repository_id=? ORDER BY id',target.project_id):[],
       sources:this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',target.project_id),
       models:this.store.all(`SELECT id,version,model_name,api_url,api_key FROM models WHERE repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
         (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))) ORDER BY id`,target.project_id,target.project_id)});
@@ -217,6 +231,7 @@ export class ManagementService {
       manager:{capability_ceiling:manager.capability_ceiling,prompt:manager.prompt,standing_rules:manager.standing_rules,events:manager.events,rules:manager.rules,migration:manager.migration},
       roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:roles.configuration.follows_default?'builtin':'console'}))},
       skills:rules.files.filter((f:any)=>f.path.startsWith('.agents/skills/')).map((f:any)=>({path:f.path,source:f.source,version:sources.sha,content:f.effective})),
+      skill_library:listSkills(this.store,project,{limit:100}).skills.map(({id,slug,origin,latest_version})=>({id,slug,origin,latest_version})),
       sources,capability_gaps:[...new Set(roles.preview.filter(r=>r.error).map(r=>r.error))],semantics:{defaults:'只影响之后新建的任务。',instructions:'追加记录，不改写旧 run 快照；后续步骤读取。',contract:'增加合同 revision，清除旧候选和验收。',adopt_config:'先暂停并等待旧执行结束，再显式采用新配置 revision。'}});
   }
   private nextSteps(actor:ActorContext,target:ManagementCommand['target']):string[]{
@@ -246,6 +261,27 @@ export class ManagementService {
     }),total:ids.length,next_offset:offset+limit<ids.length?offset+limit:null,
       ...(!target.project_id&&offset===0?{pending_repositories:this.pendingRepositories(actor).map(r=>({id:r.id,full_name:r.full_name,started:false,self_start:r.self_start,tenant_id:'github.com:'+r.owner_id}))}:{})};
     if(operation==='get_effective_config'){if(!target.project_id)fail(400,'project_target_required');return this.effective(actor,target.project_id);}
+    if(operation==='list_skills'){
+      if(!target.project_id)fail(400,'project_target_required');
+      const page=listSkills(this.store,target.project_id,{
+        origin:args.origin as SkillOrigin|undefined,
+        query:typeof args.query==='string'?args.query:undefined,
+        include_builtin:args.include_builtin,
+        offset,
+        limit,
+      });
+      return traceClean({...page,project_id:target.project_id,revision:this.revision({project_id:target.project_id}),repository_sources:listTrustedCacheRepositorySkills(this.store,target.project_id)});
+    }
+    if(operation==='get_skill'){
+      if(!target.project_id)fail(400,'project_target_required');
+      if(typeof args.id!=='string'||!args.id)fail(400,'invalid_management_arguments');
+      return traceClean({...getSkill(this.store,target.project_id,args.id,{version:args.version,include_content:args.include_content}),project_id:target.project_id,revision:this.revision({project_id:target.project_id})});
+    }
+    if(operation==='list_skill_versions'){
+      if(!target.project_id)fail(400,'project_target_required');
+      if(typeof args.id!=='string'||!args.id)fail(400,'invalid_management_arguments');
+      return traceClean({...listSkillVersions(this.store,target.project_id,args.id,{offset,limit}),project_id:target.project_id});
+    }
     if(operation==='search_knowledge'){if(!target.project_id)fail(400,'project_target_required');if(!this.knowledgeSearch)fail(409,'knowledge_not_registered');return this.knowledgeSearch!(actor,target.project_id,args.query??'',offset,limit);}
     if(['read_knowledge','knowledge_versions'].includes(operation)){if(!target.project_id||typeof args.id!=='string')fail(400,'knowledge_target_required');if(!this.knowledgeRead)fail(409,'knowledge_not_registered');return this.knowledgeRead!(actor,target.project_id,args.id,args.revision,operation==='knowledge_versions',args.baseline);}
     const marks=ids.map(()=>'?').join(',')||'NULL';
@@ -349,6 +385,7 @@ export class ManagementService {
     const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id);if(!row)fail(404,'management_command_not_found');
     if(row!.principal_id!==actor.principal_id)fail(403,'command_operator_required');
     this.check(actor,this.command(row!));
+    if(this.inFlightImports.has(id))return this.receipt(row!);
     if(['pending','unknown','executing'].includes(row!.state))return this.execute(actor,id,this.command(row!));
     return this.receipt(row!);
   }
@@ -376,6 +413,34 @@ export class ManagementService {
         this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
         const result=await this.executeComputerCommand(actor,command);
         this.finish(id,'succeeded',result);
+      }else if(command.operation==='skill.import'){
+        this.expectRevision(command.target,command.expected_revision);
+        this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
+        this.inFlightImports.add(id);
+        const user=this.user(actor);
+        try{
+          const imported=await importRepositorySkills(
+            this.store,
+            command.target.project_id,
+            command.arguments,
+            user.id,
+            {
+              githubUrl:this.githubUrl,
+              beforeCommit:()=>{
+                this.sourceGuard?.(row);
+                this.check(actor,command);
+                this.expectRevision(command.target,command.expected_revision);
+              },
+            },
+          );
+          this.finish(id,'succeeded',{...imported,imported:imported.imported.map(entry=>({...entry,version:stripSkillVersionContent(entry.version)})),effect:'future_tasks'});
+        }catch(error){
+          // importRepositorySkills validates all inputs before its atomic transaction commit;
+          // any throw before returning leaves the skill library unchanged, so record failed rather than unknown.
+          this.finish(id,'failed',{error:error instanceof HttpError||error instanceof TaskError?error.code:'management_tool_failed',http_status:error instanceof HttpError?error.status:503,...(error instanceof HttpError&&error.field?{field:error.field}:{}),...(error instanceof HttpError&&error.detail?{detail:error.detail}:{})});
+        }finally{
+          this.inFlightImports.delete(id);
+        }
       }else this.store.transaction(()=>{
         this.check(actor,command);
         this.expectRevision(command.target,command.expected_revision);
@@ -397,6 +462,15 @@ export class ManagementService {
           if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(['deleted_roles','follow_default'].includes(k)?'roles':k)))fail(403,'role_setting_forbidden');
           result=roleApi(this.store,user,'PUT',new URL('http://local/api/repositories/'+target.project_id+'/roles'),args)!;
           result={...result,effect:'future_tasks'};
+        }else if(operation==='skill.save'){
+          const hasId=typeof args.id==='string'&&args.id.length>0,hasSlug=typeof args.slug==='string'&&args.slug.length>0;
+          if((hasId&&hasSlug)||(!hasId&&!hasSlug))fail(400,'invalid_management_arguments');
+          const saved=hasId
+            ? updateConsoleSkill(this.store,target.project_id,String(args.id),{expected_version:args.expected_version,files:args.files},user.id)
+            : (args.expected_version!==undefined?fail(400,'invalid_management_arguments'):createConsoleSkill(this.store,target.project_id,{slug:args.slug,files:args.files},user.id));
+          result={...saved,version:stripSkillVersionContent(saved.version),effect:'future_tasks'} as unknown as Json;
+        }else if(operation==='skill.delete'){
+          result={...deleteProjectSkill(this.store,target.project_id,String(args.id),args.expected_version,user.id),effect:'future_tasks'} as unknown as Json;
         }else if(operation.startsWith('task.')){
           const action=operation.slice(5),url=action==='create'?'/api/tasks':'/api/tasks/'+target.task_id+'/'+action;
           const body=action==='create'?{repository_id:target.project_id,...args}:action==='contract'?{...args,expected_revision:new TaskRecords(this.store).get(target.task_id!).revision}:args;

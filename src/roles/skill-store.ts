@@ -23,6 +23,8 @@ export interface SkillStoreFile {
   content: string;
   sha256?: string;
   bytes?: number;
+  encoding?: 'utf8' | 'base64';
+  executable?: boolean;
 }
 
 export interface MaterializedSkillEntry {
@@ -63,6 +65,7 @@ const SET_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 
 const hashText = (value: string) => createHash('sha256').update(value).digest('hex');
+const hashBytes = (value: Buffer) => createHash('sha256').update(value).digest('hex');
 
 function assertSafeRelativePath(raw: unknown): string {
   if (typeof raw !== 'string') throw new Error('skill_store_path_invalid');
@@ -209,10 +212,15 @@ export function normalizeSkillMarkdown(content: string, slug: string): { content
 type OriginLayer = 'defaults' | 'repository' | 'project' | 'direct';
 const LAYER_PRIORITY: Record<OriginLayer, number> = { defaults: 1, repository: 2, project: 3, direct: 3 };
 
-interface ClassifiedFile {
+interface StoredEntry {
+  content: string;
+  encoding: 'utf8' | 'base64';
+  executable?: boolean;
+}
+
+interface ClassifiedFile extends StoredEntry {
   layer: OriginLayer;
   rel: string;
-  content: string;
 }
 
 interface FlattenedSkill {
@@ -220,26 +228,28 @@ interface FlattenedSkill {
   name: string;
   description: string;
   priority: number;
-  files: Map<string, string>; // relative path inside bot/skills/<slug>/ -> content
+  files: Map<string, StoredEntry>; // relative path inside bot/skills/<slug>/ -> stored file entry
 }
 
 function classifyFile(file: SkillStoreFile): ClassifiedFile {
-  if (typeof file.content !== 'string' || file.content.includes('\0')) {
+  const encoding: 'utf8' | 'base64' = file.encoding === 'base64' ? 'base64' : 'utf8';
+  if (typeof file.content !== 'string' || (encoding === 'utf8' && file.content.includes('\0'))) {
     throw new Error('skill_store_content_invalid');
   }
   const normalized = assertSafeRelativePath(file.path);
-  if (normalized.startsWith('defaults/')) return { layer: 'defaults', rel: normalized.slice('defaults/'.length), content: file.content };
-  if (normalized.startsWith('repository/')) return { layer: 'repository', rel: normalized.slice('repository/'.length), content: file.content };
-  if (normalized.startsWith('.agents/skills/')) return { layer: 'repository', rel: normalized.slice('.agents/skills/'.length), content: file.content };
-  if (normalized.startsWith('project/')) return { layer: 'project', rel: normalized.slice('project/'.length), content: file.content };
-  return { layer: 'direct', rel: normalized, content: file.content };
+  const base: StoredEntry = { content: file.content, encoding, ...(file.executable ? { executable: true } : {}) };
+  if (normalized.startsWith('defaults/')) return { layer: 'defaults', rel: normalized.slice('defaults/'.length), ...base };
+  if (normalized.startsWith('repository/')) return { layer: 'repository', rel: normalized.slice('repository/'.length), ...base };
+  if (normalized.startsWith('.agents/skills/')) return { layer: 'repository', rel: normalized.slice('.agents/skills/'.length), ...base };
+  if (normalized.startsWith('project/')) return { layer: 'project', rel: normalized.slice('project/'.length), ...base };
+  return { layer: 'direct', rel: normalized, ...base };
 }
 
 function extractLayerSkills(layer: OriginLayer, items: ClassifiedFile[]): FlattenedSkill[] {
   if (!items.length) return [];
   const priority = LAYER_PRIORITY[layer];
-  const byRel = new Map<string, string>();
-  for (const item of items) byRel.set(item.rel, item.content);
+  const byRel = new Map<string, StoredEntry>();
+  for (const item of items) byRel.set(item.rel, { content: item.content, encoding: item.encoding, ...(item.executable ? { executable: true } : {}) });
 
   const skillEntries = [...byRel.keys()]
     .filter(rel => rel === 'SKILL.md' || rel.endsWith('/SKILL.md'))
@@ -264,33 +274,36 @@ function extractLayerSkills(layer: OriginLayer, items: ClassifiedFile[]): Flatte
   for (const entryPath of nestedEntries) {
     const dir = entryPath.slice(0, -'/SKILL.md'.length);
     const leaf = dir.split('/').at(-1) || dir;
-    const rawSkillMd = byRel.get(entryPath)!;
+    const rawSkillEntry = byRel.get(entryPath)!;
+    if (rawSkillEntry.encoding !== 'utf8') throw new Error('skill_store_content_invalid');
     const slug = allocateSlug(leaf, dir);
-    const normalizedMd = normalizeSkillMarkdown(rawSkillMd, slug);
-    const skillFiles = new Map<string, string>();
-    skillFiles.set('SKILL.md', normalizedMd.content);
+    const normalizedMd = normalizeSkillMarkdown(rawSkillEntry.content, slug);
+    const skillFiles = new Map<string, StoredEntry>();
+    skillFiles.set('SKILL.md', { content: normalizedMd.content, encoding: 'utf8' });
     claimed.add(entryPath);
     const prefix = dir + '/';
-    for (const [rel, content] of byRel) {
+    for (const [rel, entry] of byRel) {
       if (claimed.has(rel) || !rel.startsWith(prefix)) continue;
-      skillFiles.set(rel.slice(prefix.length), content);
+      skillFiles.set(rel.slice(prefix.length), entry);
       claimed.add(rel);
     }
     out.push({ slug, name: normalizedMd.name, description: normalizedMd.description, priority, files: skillFiles });
   }
 
   if (byRel.has('SKILL.md')) {
-    const rawSkillMd = byRel.get('SKILL.md')!;
+    const rawSkillEntry = byRel.get('SKILL.md')!;
+    if (rawSkillEntry.encoding !== 'utf8') throw new Error('skill_store_content_invalid');
+    const rawSkillMd = rawSkillEntry.content;
     const { hasFrontmatter, front } = parseFrontmatter(rawSkillMd);
     const declared = hasFrontmatter ? frontmatterField(front, 'name') : '';
     const slug = allocateSlug(declared || 'project', `${layer}:root`);
     const normalizedMd = normalizeSkillMarkdown(rawSkillMd, slug);
-    const skillFiles = new Map<string, string>();
-    skillFiles.set('SKILL.md', normalizedMd.content);
+    const skillFiles = new Map<string, StoredEntry>();
+    skillFiles.set('SKILL.md', { content: normalizedMd.content, encoding: 'utf8' });
     claimed.add('SKILL.md');
-    for (const [rel, content] of byRel) {
+    for (const [rel, entry] of byRel) {
       if (claimed.has(rel)) continue;
-      skillFiles.set(rel, content);
+      skillFiles.set(rel, entry);
       claimed.add(rel);
     }
     out.push({ slug, name: normalizedMd.name, description: normalizedMd.description, priority, files: skillFiles });
@@ -304,8 +317,8 @@ function extractLayerSkills(layer: OriginLayer, items: ClassifiedFile[]): Flatte
       `---\nname: ${yamlScalar(slug)}\ndescription: Supplemental project working material pinned for this role.\n---\n\n# ${slug}\n\nPinned working material files in this skill directory:\n${fileList}\n`,
       slug,
     );
-    const skillFiles = new Map<string, string>([['SKILL.md', synthesized.content]]);
-    for (const [rel, content] of unclaimed) skillFiles.set(rel, content);
+    const skillFiles = new Map<string, StoredEntry>([['SKILL.md', { content: synthesized.content, encoding: 'utf8' }]]);
+    for (const [rel, entry] of unclaimed) skillFiles.set(rel, entry);
     out.push({ slug, name: synthesized.name, description: synthesized.description, priority, files: skillFiles });
   }
 
@@ -357,23 +370,29 @@ export function materializeSkillSet(options: {
   if (!merged.size) return null;
 
   const sortedSkills = [...merged.values()].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
-  const payload: { relPath: string; content: string; mode: number }[] = [
-    { relPath: 'bot/.claude-plugin/plugin.json', content: CLAUDE_PLUGIN_MANIFEST, mode: 0o644 },
+  const payload: { relPath: string; content: string; encoding: 'utf8' | 'base64'; mode: number }[] = [
+    { relPath: 'bot/.claude-plugin/plugin.json', content: CLAUDE_PLUGIN_MANIFEST, encoding: 'utf8', mode: 0o644 },
   ];
   for (const skill of sortedSkills) {
     const sortedEntries = [...skill.files.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    for (const [relInsideSkill, content] of sortedEntries) {
+    for (const [relInsideSkill, entry] of sortedEntries) {
       const safeInside = assertSafeRelativePath(relInsideSkill);
+      const executable = entry.encoding !== 'base64' && (entry.executable === true || isExecutableSkillFile(safeInside, entry.content));
       payload.push({
         relPath: `bot/skills/${skill.slug}/${safeInside}`,
-        content,
-        mode: isExecutableSkillFile(safeInside, content) ? 0o755 : 0o644,
+        content: entry.content,
+        encoding: entry.encoding,
+        mode: executable ? 0o755 : 0o644,
       });
     }
   }
   payload.sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
 
-  const setHash = hashText(JSON.stringify(payload.map(entry => [entry.relPath, entry.mode, hashText(entry.content)])));
+  const setHash = hashText(JSON.stringify(payload.map(entry => [
+    entry.relPath,
+    entry.mode,
+    entry.encoding === 'base64' ? hashBytes(Buffer.from(entry.content, 'base64')) : hashText(entry.content),
+  ])));
   const storeRoot = resolve(root);
   const scopeDir = ensureReadableTree(storeRoot, scopeParts);
   const setsDir = join(scopeDir, 'sets');
@@ -396,7 +415,11 @@ export function materializeSkillSet(options: {
           dirCursor = join(dirCursor, segment);
           ensureReadableDir(dirCursor);
         }
-        writeFileSync(dest, entry.content, { encoding: 'utf8', mode: entry.mode });
+        if (entry.encoding === 'base64') {
+          writeFileSync(dest, Buffer.from(entry.content, 'base64'), { mode: entry.mode });
+        } else {
+          writeFileSync(dest, entry.content, { encoding: 'utf8', mode: entry.mode });
+        }
         chmodSync(dest, entry.mode);
       }
       chmodSync(tmpDir, 0o755);

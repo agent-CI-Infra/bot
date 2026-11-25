@@ -81,3 +81,54 @@ test('a skill draft survives a version conflict, while permission loss clears pr
     await expect(page.getByLabel('文件内容', { exact: true })).toHaveCount(0); await expect(page.locator('#project-page')).not.toContainText('Unsaved content stays here.');
   } finally { await h.stop(); }
 });
+
+test('library-backed skill bundle renders read-only on roles overview and skill catalogue and resaves unchanged (#1359)', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const seeded = await admin('/api/repositories/101/roles', 'PUT', {
+      expected_revision: 0,
+      enabled: false,
+      skills: [
+        { id: 'ops-kit', source: { type: 'library', items: [{ skill_id: 'builtin:test-driven-development', version: 1 }] } },
+      ],
+      roles: [{ role_id: 'dev', skill_bundle_ref: { id: 'ops-kit' } }],
+    });
+    expect(seeded.status).toBe(200);
+
+    await page.goto(h.admin + '/#/projects/101/basic');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.evaluate(() => { location.hash = '#/projects/101/roles'; });
+
+    // Default roles overview renders roleSkillsCard without throwing on library source
+    await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('#project-page')).not.toContainText('角色配置读取失败');
+    await expect(page.locator('#project-page')).toContainText('builtin:test-driven-development@v1');
+    await expect(page.getByRole('combobox', { name: '技能来源', exact: true })).toHaveValue('library');
+
+    // Skill catalogue tab shows saved library facts and items
+    await goRolePage(page, { view: 'skills' });
+    const catalogue = page.getByRole('region', { name: '技能包目录', exact: true });
+    await expect(catalogue.getByRole('region', { name: '已保存技能版本', exact: true })).toContainText('技能库');
+    await expect(catalogue.getByRole('region', { name: '已保存技能版本', exact: true })).toContainText('builtin:test-driven-development@v1');
+
+    // Editing an unrelated role and saving preserves the library bundle untouched
+    await goRolePage(page, { role: 'Reviewer' });
+    await page.getByLabel('职责', { exact: true }).fill('Updated reviewer note alongside library bundle.');
+    await consoleSave(page).click();
+    await expect(page.locator('.flash')).toContainText('角色配置已保存');
+
+    const after = (await admin('/api/repositories/101/roles')).value;
+    expect(after.skill_inputs.find(b => b.id === 'ops-kit')).toEqual({
+      id: 'ops-kit',
+      source: { type: 'library', items: [{ skill_id: 'builtin:test-driven-development', version: 1 }] },
+    });
+    expect(after.configuration.roles.find(r => r.role_id === 'dev').skill_bundle_ref.id).toBe('ops-kit');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});

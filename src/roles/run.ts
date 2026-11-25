@@ -303,7 +303,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
      if(b&&gatewayToolNames.includes(name))return gateway(s,notesBridge).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch,role});
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},summaries:skillSummariesFromFiles(files),files:files.map(({content,...f})=>f)};
       const file=resolveSkillBundleFile(files,args?.path);if(!file)return {error:'skill_file_not_found',files:files.map(f=>f.path)};
-      traceEvent(s,task.id,'skill_read',{role,instance_id:instance.id,bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},path:file.path,sha256:file.sha256},task.trace_run_id,'role:'+role);return {path:file.path,sha256:file.sha256,content:file.content};}
+      traceEvent(s,task.id,'skill_read',{role,instance_id:instance.id,bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},path:file.path,sha256:file.sha256},task.trace_run_id,'role:'+role);
+      if(file.encoding==='base64')return {path:file.path,sha256:file.sha256,bytes:file.bytes,encoding:'base64',notice:'Binary controlled asset file; read it directly from the mounted skill directory if file tools are available.'};
+      return {path:file.path,sha256:file.sha256,content:file.content};}
      if(name===SUBMIT_FEEDBACK_TOOL_NAME){
       const runId=b?.run_id??executionRun??null;
       const checkout=taskCheckoutContext(s,task);
