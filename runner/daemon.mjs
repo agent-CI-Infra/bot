@@ -22,6 +22,8 @@ import { MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES } from './assistant-files.mjs';
 import { MAX_CLI_CONFIG_BYTES } from './cli-config.mjs';
 import { refuseFull, volume as readVolume } from './disk.mjs';
 import { closeAllMailboxWatchers, watchMailbox } from './mailbox-watch.mjs';
+import { SshAgentBroker } from './ssh-agent.mjs';
+import { SSH_AGENT_TYPES, SSH_COMMAND_TYPES, validSshGrant } from './ssh-config.mjs';
 import {
   DEFAULT_COMMAND_HEARTBEAT_MS,
   DEFAULT_LONG_POLL_WAIT_MS,
@@ -170,6 +172,35 @@ export async function startRunnerDaemon(options = {}) {
   }
   const heartbeatMs = Math.max(200, Number(options.heartbeatMs ?? process.env.BOT_RUNNER_HEARTBEAT_MS) || DEFAULT_COMMAND_HEARTBEAT_MS);
 
+  // The computer's SSH agent (#1379) sits next to runner.sock and is bound first, so a daemon that answers health serves
+  // both. options.ssh replaces its paths, upstream and process probes in tests; false turns it off.
+  const sshOptions = options.ssh === false ? null : (options.ssh ?? {});
+  const sshSocket = sshOptions?.socketPath ?? (socketPath ? `${dirname(socketPath)}/ssh-agent.sock` : null);
+  const sshBroker = sshSocket
+    ? await new SshAgentBroker({ ...sshOptions, socketPath: sshSocket }).start().catch(error => {
+      console.error(`[ssh-agent] not listening: ${String(error?.message || error).slice(0, 200)}`);
+      return null;
+    })
+    : null;
+  // A request may carry the run's SSH grant (manager/projects.mjs). It never reaches the runner operation: the daemon
+  // keeps it in memory and registers the process groups the operation starts with it.
+  const takeSsh = input => {
+    if (!input || typeof input !== 'object' || !Object.hasOwn(input, 'ssh')) return { request: input, grant: null };
+    const { ssh, ...request } = input;
+    const kind = SSH_AGENT_TYPES.includes(request.type) ? 'agent' : SSH_COMMAND_TYPES.includes(request.type) ? 'command' : null;
+    let grant = null;
+    try { grant = kind && sshBroker ? validSshGrant(ssh) : null; } catch { grant = null; }
+    return { request, grant, kind, spawned: [] };
+  };
+  const sshHooks = (taken, onSpawn) => taken.grant ? {
+    onSpawn: pid => { onSpawn?.(pid); if (sshBroker.register(pid, taken.grant, taken.kind)) taken.spawned.push(pid); },
+    sshEnv: sshBroker.environment(taken.grant),
+  } : (onSpawn ? { onSpawn } : {});
+  // A finished command's group is released; agents and kept background services stay until their leader exits.
+  const releaseSsh = taken => {
+    if (taken.grant && taken.kind === 'command' && taken.request.keep_background !== true) for (const pid of taken.spawned) sshBroker.release(pid);
+  };
+
   const activeOperations = new Map(); // operationId -> Set<pid>
   const commands = new Map(); // operationId -> CommandEntry
   const wsClients = new Set();
@@ -221,8 +252,9 @@ export async function startRunnerDaemon(options = {}) {
     return { data: tailed.data || '', nextOffset: tailed.offset ?? offset };
   };
 
-  const startAsyncCommand = async request => {
-    if (!idPattern.test(request.operation_id || '')) {
+  const startAsyncCommand = async input => {
+    const taken = takeSsh(input), request = taken.request;
+    if (!idPattern.test(request?.operation_id || '')) {
       throw Object.assign(new Error('invalid_operation_id'), { status: 400, code: 'invalid_operation_id' });
     }
     if (!['command', 'workspace_command'].includes(request.type)) {
@@ -279,7 +311,7 @@ export async function startRunnerDaemon(options = {}) {
       daemon: true,
       preJournaled: true,
       activeOperations,
-      onSpawn: pid => trackPid(opId, pid),
+      ...sshHooks(taken, pid => trackPid(opId, pid)),
       onOutput: (text, offsetBefore, totalBytes) => {
         const bytes = Buffer.byteLength(text, 'utf8');
         entry.outputBytes = totalBytes;
@@ -300,7 +332,7 @@ export async function startRunnerDaemon(options = {}) {
           wakeCommandWaiters(entry, 'output');
         }
       },
-    }).then(response => {
+    }).finally(() => releaseSsh(taken)).then(response => {
       clearInterval(entry.heartbeatTimer);
       entry.heartbeatTimer = null;
       entry.state = 'completed';
@@ -360,20 +392,21 @@ export async function startRunnerDaemon(options = {}) {
       }
 
       if (req.method === 'POST' && path === '/v1/execute') {
-        const input = await readJsonBody(req, runnerRequestLimit);
+        const taken = takeSsh(await readJsonBody(req, runnerRequestLimit)), input = taken.request;
         const cliHeader = req.headers['x-bot-cli-config-b64'];
         const cliConfigB64 = typeof cliHeader === 'string' && cliHeader.length > 0 ? cliHeader : undefined;
-        const opId = idPattern.test(input.operation_id || '') ? input.operation_id : null;
+        const opId = idPattern.test(input?.operation_id || '') ? input.operation_id : null;
         try {
           const response = await executeRunnerRequest(input, {
             daemon: true,
             cliConfigB64,
             activeOperations,
-            onSpawn: opId ? pid => trackPid(opId, pid) : undefined,
+            ...sshHooks(taken, opId ? pid => trackPid(opId, pid) : undefined),
           });
           sendJson(res, 200, response);
         } finally {
           if (opId) untrackOp(opId);
+          releaseSsh(taken);
         }
         return;
       }
@@ -708,18 +741,18 @@ export async function startRunnerDaemon(options = {}) {
 
       if (msg.type === 'rpc.request') {
         const rpcId = msg.id;
-        const request = msg.request;
+        const taken = takeSsh(msg.request), request = taken.request;
         const cliConfigB64 = typeof msg.cli_config_b64 === 'string' && msg.cli_config_b64.length > 0 ? msg.cli_config_b64 : undefined;
         const opId = idPattern.test(request?.operation_id || '') ? request.operation_id : null;
         void executeRunnerRequest(request, {
           daemon: true,
           cliConfigB64,
           activeOperations,
-          onSpawn: opId ? pid => trackPid(opId, pid) : undefined,
+          ...sshHooks(taken, opId ? pid => trackPid(opId, pid) : undefined),
         }).then(
           response => { if (ws.open) ws.sendJson({ type: 'rpc.response', id: rpcId, response }); },
           () => { if (ws.open) ws.sendJson({ type: 'rpc.response', id: rpcId, response: { ok: false, error: 'runner_operation_failed' } }); },
-        ).finally(() => { if (opId) untrackOp(opId); });
+        ).finally(() => { if (opId) untrackOp(opId); releaseSsh(taken); });
       }
     });
   };
@@ -781,6 +814,7 @@ export async function startRunnerDaemon(options = {}) {
     for (const ws of [...wsClients]) ws.close(1001, 'daemon_stopping');
     wsClients.clear();
     closeAllMailboxWatchers();
+    await sshBroker?.close().catch(() => {});
     await Promise.all(servers.map(srv => new Promise(resolveClose => {
       srv.closeIdleConnections?.();
       srv.close(() => resolveClose());
@@ -795,6 +829,7 @@ export async function startRunnerDaemon(options = {}) {
     socketPath: boundSocketPath,
     tcp: boundTcp,
     token: authToken,
+    ssh: sshBroker,
     close,
   };
 }

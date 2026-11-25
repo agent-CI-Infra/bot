@@ -342,7 +342,9 @@ export class DockerComputeDriver {
     if (method === 'PUT' && !match[2]) return await projects.register(match[1]);
     if (method === 'POST' && match[2]) {
       const { node_id: _n, binding_epoch: _e, ...clean } = input;
-      if (Object.keys(clean).some(k => !['operation_id', 'generation', 'request'].includes(k))) {
+      // As in manager/server.mjs: an execute may carry the run's SSH grant (#1379), validated by Projects.operate.
+      const keys = ['operation_id', 'generation', 'request', ...(match[2] === 'execute' ? ['ssh'] : [])];
+      if (Object.keys(clean).some(k => !keys.includes(k))) {
         throw new ManagerError('invalid_input', 400);
       }
       return await projects.operate(match[1], match[2], clean);

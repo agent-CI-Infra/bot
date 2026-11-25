@@ -23,7 +23,11 @@ RUN for file in /opt/runner/*.mjs; do node --check "$file"; done
 COPY LICENSE NOTICE /opt/licenses/
 COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
 COPY docker/bot-desktop.sh /usr/local/bin/bot-desktop
-RUN chmod 755 /usr/local/bin/bot-chromium /usr/local/bin/bot-desktop && chmod -R a-w /opt/runner /opt/bot
+# Registered SSH aliases (#1379): the manager writes /run/bot-runner/ssh_config; OpenSSH reads the passwd home, never $HOME,
+# so the system config includes it. SSH_ASKPASS must name an executable.
+RUN printf 'Include /run/bot-runner/ssh_config\n' > /etc/ssh/ssh_config.d/bot-runner.conf && chmod 644 /etc/ssh/ssh_config.d/bot-runner.conf \
+    && chmod 555 /opt/runner/ssh-askpass.mjs /opt/runner/ssh-gate.mjs \
+    && chmod 755 /usr/local/bin/bot-chromium /usr/local/bin/bot-desktop && chmod -R a-w /opt/runner /opt/bot
 # Preinstalled browser and X11 virtual desktop tools for project and assistant computers (#1214),
 # plus the read-only-at-runtime /opt/preinstalled PATH entries (install prefix env vars are set only during build RUN
 # so runtime pip/uv/cargo/go installs continue writing to the container's writable HOME).

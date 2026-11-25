@@ -40,5 +40,7 @@ if (arg === '--stdin') {
   request = JSON.parse(Buffer.from(arg, 'base64url').toString());
 }
 
+// An SSH grant is served only by the resident daemon's agent socket (runner/ssh-agent.mjs); a one-shot runner drops it.
+if (request && typeof request === 'object') delete request.ssh;
 const result = await executeRunnerRequest(request, { daemon: false });
 process.stdout.write(JSON.stringify(result));

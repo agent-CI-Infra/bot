@@ -141,9 +141,11 @@ export class Store {
         username TEXT NOT NULL, host_key_sha256 TEXT NOT NULL, auth TEXT NOT NULL CHECK(auth IN ('key','password')),
         sealed TEXT NOT NULL, route TEXT NOT NULL CHECK(route IN ('direct','proxy_jump','tunnel')),
         jump_id TEXT REFERENCES ssh_targets(id), allowed_roles TEXT NOT NULL,
-        allow_untrusted_pr INTEGER NOT NULL DEFAULT 0 CHECK(allow_untrusted_pr IN (0,1)),
-        CHECK((route='proxy_jump')=(jump_id IS NOT NULL)));
+        allow_untrusted_pr INTEGER NOT NULL DEFAULT 0 CHECK(allow_untrusted_pr IN (0,1)), public_key TEXT, relay_node TEXT,
+        CHECK((route='proxy_jump')=(jump_id IS NOT NULL)), CHECK((auth='key')=(public_key IS NOT NULL)),
+        CHECK(relay_node IS NULL OR route='tunnel'));
       CREATE UNIQUE INDEX IF NOT EXISTS ssh_target_alias ON ssh_targets(COALESCE(owner_project,''),alias);
+      CREATE UNIQUE INDEX IF NOT EXISTS ssh_target_public_key ON ssh_targets(public_key) WHERE public_key IS NOT NULL;
       CREATE TABLE IF NOT EXISTS ssh_target_projects(
         repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
         target_id TEXT NOT NULL REFERENCES ssh_targets(id) ON DELETE CASCADE, PRIMARY KEY(repository_id,target_id));

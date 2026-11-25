@@ -1,12 +1,13 @@
 import { testSshTarget } from './ssh-target-test.js';
+import { sshPublicKey } from './ssh-access.js';
 import { isIP } from 'node:net';
 import { repository, superAdmin, type Actor } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 import { requireProjectConfigWrite } from './service.js';
 import type { Row, Store } from '../storage/database.js';
 
-const columns = 'id,owner_project,alias,host,port,username,host_key_sha256,auth,route,jump_id,allowed_roles,allow_untrusted_pr';
-const parameters = ['alias','host','port','username','host_key_sha256','auth','route','jump_id','allowed_roles','allow_untrusted_pr','private_key','password'];
+const columns = 'id,owner_project,alias,host,port,username,host_key_sha256,auth,route,jump_id,relay_node,allowed_roles,allow_untrusted_pr';
+const parameters = ['alias','host','port','username','host_key_sha256','auth','route','jump_id','relay_node','allowed_roles','allow_untrusted_pr','private_key','password'];
 
 function checked(value: unknown, pattern: RegExp, max: number, field: string): string {
   if (typeof value !== 'string' || value.length > max || !pattern.test(value)) return fail(400, 'invalid_ssh_target', field);
@@ -50,7 +51,7 @@ export function sshTargetsApi(store: Store, user: Actor, method: string, url: UR
     });
   }
   if (action || (id ? !['PUT','DELETE'].includes(method) : method !== 'POST')) return fail(405,'method_not_allowed');
-  const previous = id ? store.get(`SELECT ${columns} FROM ssh_targets WHERE id=? AND owner_project IS ?`,id,project) : null;
+  const previous = id ? store.get(`SELECT ${columns},public_key FROM ssh_targets WHERE id=? AND owner_project IS ?`,id,project) : null;
   if (id && !previous) return fail(404,'ssh_target_not_found');
   if (id && method === 'DELETE') {
     fields(input,[]);
@@ -87,6 +88,9 @@ export function sshTargetsApi(store: Store, user: Actor, method: string, url: UR
       next = store.get('SELECT jump_id FROM ssh_targets WHERE id=?',next)?.jump_id;
     }
   } else if (jump !== null) return fail(400,'invalid_ssh_jump');
+  // Reserved for a tunnel through a compute node near the host (#1380). Until nodes relay, such a tunnel is refused.
+  const relay = data.relay_node ?? null;
+  if (relay !== null && (route !== 'tunnel' || typeof relay !== 'string' || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(relay))) return fail(400,'invalid_ssh_target','relay_node');
   const field = auth === 'key' ? 'private_key' : 'password';
   if ((auth === 'key' ? 'password' : 'private_key') in input) return fail(400,'ssh_auth_mismatch');
   const secret = input[field];
@@ -98,16 +102,20 @@ export function sshTargetsApi(store: Store, user: Actor, method: string, url: UR
   if (auth === 'key' && typeof secret === 'string' &&
       !/^-----BEGIN ((?:OPENSSH |RSA |EC )?PRIVATE KEY)-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END \1-----\s*$/.test(secret))
     return fail(400,'invalid_ssh_credential');
+  // An agent signature request names only the key (#1379): every target has its own unencrypted key, never shared.
+  const publicKey = auth === 'password' ? null : typeof secret === 'string' ? sshPublicKey(secret) : previous?.public_key ?? null;
+  if (auth === 'key' && !publicKey) return fail(400,'invalid_ssh_credential');
   const sealed = secret === undefined ? null : store.secrets.seal({[field]:secret},'ssh-target:'+targetId);
   return store.transaction(() => {
     if (targets(store,project).some(target => target.id !== targetId && target.alias === alias)) fail(409,'ssh_alias_in_use');
     if (!project && id && store.get(`SELECT 1 FROM ssh_target_projects b JOIN ssh_targets t ON t.owner_project=b.repository_id
         WHERE b.target_id=? AND t.alias=?`,id,alias)) fail(409,'ssh_alias_in_use');
-    const values = [alias,host,port,username,pin,auth,route,jump,JSON.stringify([...new Set(roles)]),data.allow_untrusted_pr ? 1 : 0];
-    if (id) store.run(`UPDATE ssh_targets SET alias=?,host=?,port=?,username=?,host_key_sha256=?,auth=?,route=?,jump_id=?,
-      allowed_roles=?,allow_untrusted_pr=?,sealed=COALESCE(?,sealed) WHERE id=?`,...values,sealed,id);
-    else store.run(`INSERT INTO ssh_targets(alias,host,port,username,host_key_sha256,auth,route,jump_id,allowed_roles,
-      allow_untrusted_pr,sealed,id,owner_project) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,...values,sealed,targetId,project);
+    if (publicKey && store.get('SELECT 1 FROM ssh_targets WHERE public_key=? AND id<>?',publicKey,targetId)) fail(409,'ssh_key_reused');
+    const values = [alias,host,port,username,pin,auth,route,jump,relay,JSON.stringify([...new Set(roles)]),data.allow_untrusted_pr ? 1 : 0,publicKey];
+    if (id) store.run(`UPDATE ssh_targets SET alias=?,host=?,port=?,username=?,host_key_sha256=?,auth=?,route=?,jump_id=?,relay_node=?,
+      allowed_roles=?,allow_untrusted_pr=?,public_key=?,sealed=COALESCE(?,sealed) WHERE id=?`,...values,sealed,id);
+    else store.run(`INSERT INTO ssh_targets(alias,host,port,username,host_key_sha256,auth,route,jump_id,relay_node,allowed_roles,
+      allow_untrusted_pr,public_key,sealed,id,owner_project) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,...values,sealed,targetId,project);
     store.audit(user.id,id ? 'ssh_target.updated' : 'ssh_target.created',targetId,project);
     return {id:targetId};
   });

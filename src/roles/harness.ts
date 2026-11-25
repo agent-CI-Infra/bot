@@ -139,7 +139,9 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
    }
   }};
   try{
-   return await piAdapter<T>({results:spec.resultSession,store:spec.store,taskId:spec.task.id,task:spec.task,guard:spec.guard,beforeModel:spec.beforeModel,runAccess:spec.runAccess,leaseEpoch:spec.runContext?.()?.lease_epoch,workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:tokenHandler,createPullRequest:base?.createPullRequest,publication:base?.publication,
+   return await piAdapter<T>({results:spec.resultSession,store:spec.store,taskId:spec.task.id,task:spec.task,guard:spec.guard,beforeModel:spec.beforeModel,runAccess:spec.runAccess,leaseEpoch:spec.runContext?.()?.lease_epoch,
+    // An unknown checkout is an untrusted one (#1379).
+    ...(spec.roleRun&&spec.runAccess?{ssh:{role:spec.roleRun.role,trusted:spec.harnessAccess?.trustedCheckout===true}}:{}),workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:tokenHandler,createPullRequest:base?.createPullRequest,publication:base?.publication,
     offered:name=>tools.some(t=>t.function.name===name),ensureWorkspace:async()=>(spec.roleWorkspace??env.workspace).ensure?.()??{},resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:spec.harnessAccess?spec.harnessTurnLimit:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,service:env.service,
     // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
     // passes through here, so every forbidden call is recorded whatever the runtime did with it.

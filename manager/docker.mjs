@@ -251,6 +251,8 @@ export class Docker {
     if (tooLarge) throw Object.assign(new ManagerError(tooLarge.error, 413), tooLarge);
     const client = this.runnerClients.get(container);
     if (client) return client.execute(input, { timeoutMs: timeout, extraEnv });
+    // A one-shot exec carries the request in argv or stdin of a process every task can inspect: no SSH grant goes that way.
+    if (input && Object.hasOwn(input, 'ssh')) { const { ssh: _grant, ...request } = input; input = request; }
     return this.execRunner(container, input, timeout, extraEnv);
   }
   async execRunner(container, input, timeout = 90000, extraEnv = []) {

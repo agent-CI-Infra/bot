@@ -2,7 +2,7 @@ function sshTargetsCard(project, canManage) {
   const root = card('SSH 远程主机'), listing = element('div'), editor = element('div');
   const status = element('p', '正在读取 SSH 主机…', 'muted');
   status.setAttribute('role', 'status');
-  root.append(note('连通性测试从控制面连接登记地址，核验主机指纹和凭据。'), listing, editor, status);
+  root.append(note('项目电脑里的任务可直接 ssh、scp、rsync 到登记的别名：只有允许角色可用，不可信 PR 默认不可用。每台主机使用一把专用私钥。连通性测试从控制面连接登记地址，核验主机指纹和凭据。'), listing, editor, status);
   const projectPath = '/api/repositories/' + project + '/ssh-targets', poolPath = '/api/ssh-targets';
   let revision = 0;
   const select = (choices, initial) => {
@@ -77,7 +77,7 @@ function sshTargetsCard(project, canManage) {
         if (canManage) {
           const test = button('测试连通性', async () => {
             test.disabled = true;
-            const result = element('span', '正在测试…');
+            const result = element('p', '正在测试…', 'muted');
             result.setAttribute('role','status');
             actions.querySelector('[role="status"]')?.remove();
             actions.append(result);
