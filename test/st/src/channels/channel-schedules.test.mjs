@@ -117,6 +117,8 @@ test('the management assistant manages its private chat\'s timers for the owner,
   const row = await finished(f.h, (await post(f.h, f.id, envelope('每天早上检查 main 的 CI，有问题提 Issue 告诉我'))).value.operation_id);
   assert.equal(row.state, 'completed', row.error);
   assert.ok(offeredTools(f).includes('conversation_schedules'));
+  const scheduleTool = f.requests.at(-1).tools.find(tool => tool.function.name === 'conversation_schedules');
+  assert.match(scheduleTool.function.description, /single complete final result.*no mid-turn progress messages/i);
   const saved = f.h.store.get("SELECT * FROM channel_schedules WHERE state<>'deleted'");
   // A personal timer of this chat, owned by the person: the same timer the console shows them, at the default time zone.
   assert.deepEqual({ kind: saved.kind, chat: saved.chat_id, owner: saved.owner_id, by: saved.created_by, timezone: saved.timezone, cron: saved.cron, revision: saved.revision },
@@ -141,6 +143,8 @@ test('any member of an active bound group manages its own timers through the ass
   let row = await finished(f.h, (await post(f.h, f.id, inGroup('每天早 8 点统计昨天的 PR 和 Issue 情况', 'ou_stranger'))).value.operation_id);
   assert.equal(row.state, 'completed', row.error);
   assert.ok(offeredTools(f).includes('conversation_schedules'));
+  const scheduleTool = f.requests.at(-1).tools.find(tool => tool.function.name === 'conversation_schedules');
+  assert.match(scheduleTool.function.description, /single complete final result.*no mid-turn progress messages/i);
   assert.ok(!offeredTools(f).includes('github_write'), 'conversation timers stay decoupled from GitHub writes');
   assert.match(f.requests.at(-1).messages[0].content, /conversation_schedules manages this group's own timers/);
   const saved = f.h.store.get('SELECT * FROM channel_schedules');
