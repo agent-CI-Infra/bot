@@ -2,6 +2,7 @@ import type { Row, Store } from '../storage/database.js';
 import { fail, HttpError, randomId, type Json } from '../core/security.js';
 import { cardText } from './format.js';
 import { cardSpecFileMarker, readEncryptedCardSpec, removeCardSpecFile, removeCardSpecFiles, writeEncryptedCardSpec } from './card-storage.js';
+import { formatReplyTargetObservation, replyTargetProperties, replyTargetToolName, type ReplyTargetTurn } from './reply-target.js';
 
 export { cardSpecFileMarker, channelCardPath, interactiveCardStorage, removeCardSpecFile, removeCardSpecFiles, sweepOrphanChannelCards } from './card-storage.js';
 
@@ -84,96 +85,111 @@ function normalizeTableHeaderTextSize(value: string): 'normal' | 'heading' {
   return value === 'heading' || value.startsWith('heading-') || ['large', 'x_large', 'xx_large'].includes(value) ? 'heading' : 'normal';
 }
 
-export function feishuCardPrompt(nativeSkills: boolean): string {
+export function feishuCardPrompt(nativeSkills: boolean, withReplyTarget = false): string {
   const skillHint = nativeSkills
     ? 'Consult the natively loaded feishu-cards skill (feishu-cards/SKILL.md) when you want component syntax, VChart rules or interactive layout patterns.'
     : 'Read feishu-cards/SKILL.md via read_skill when you want component syntax, VChart rules or interactive layout patterns.';
-  return ` Your default Feishu reply is native Markdown (post), which remains best for ordinary Q&A, short answers, code explanations and prose. When structured layout, tables, charts, collapsible sections, multi-view tabs, paginated/filterable lists, or follow-up action buttons genuinely make a reply clearer or easier to browse, you may call ${feishuCardToolName} on demand for any topic. Never force every reply into a card, and never tie cards to one fixed use case. ${skillHint} Calling ${feishuCardToolName} validates and stages the card for your final reply (calling it again replaces the staged card; { clear: true } reverts to Markdown; ending a turn silently discards it). After staging a card, finish with a brief plain-text summary as a fallback.`;
+  const targetHint = withReplyTarget
+    ? ` You may also pass optional reply_to_message_id, thread_id, or reply_in_thread directly on ${feishuCardToolName} as a shortcut for ${replyTargetToolName} (they share the same validation and reply-target state for this turn).`
+    : '';
+  return ` Your default Feishu reply is native Markdown (post), which remains best for ordinary Q&A, short answers, code explanations and prose. When structured layout, tables, charts, collapsible sections, multi-view tabs, paginated/filterable lists, or follow-up action buttons genuinely make a reply clearer or easier to browse, you may call ${feishuCardToolName} on demand for any topic. Never force every reply into a card, and never tie cards to one fixed use case. ${skillHint} Calling ${feishuCardToolName} validates and stages the card for your final reply (calling it again replaces the staged card; { clear: true } reverts to Markdown; ending a turn silently discards it).${targetHint} After staging a card, finish with a brief plain-text summary as a fallback.`;
 }
 
 export const feishuCardInstructions = feishuCardPrompt(false);
 
-export const feishuCardTool = {
-  type: 'function',
-  function: {
-    name: feishuCardToolName,
-    description: 'Stage a validated Feishu Card JSON 2.0 (static or interactive) as this turn\'s Feishu reply instead of default Markdown post. General-purpose: use on demand whenever structured layout, tables, VChart charts, collapsible panels, switchable views, paginated/filterable lists or follow-up action buttons genuinely improve clarity. Supports header, markdown, div, plain_text, hr, note, column_set, collapsible_panel, root-level table (native page_size 1-10 & freeze_first_column), chart (VChart chart_spec), open_url button/interactive_container, plus platform-managed interactive views, paginated_list and actions. Calling again replaces the staged card; pass { clear: true } to revert to normal Markdown. Validation errors are returned so you can fix and retry.',
-    parameters: {
+const feishuCardBaseDescription = 'Stage a validated Feishu Card JSON 2.0 (static or interactive) as this turn\'s Feishu reply instead of default Markdown post. General-purpose: use on demand whenever structured layout, tables, VChart charts, collapsible panels, switchable views, paginated/filterable lists or follow-up action buttons genuinely improve clarity. Supports header, markdown, div, plain_text, hr, note, column_set, collapsible_panel, root-level table (native page_size 1-10 & freeze_first_column), chart (VChart chart_spec), open_url button/interactive_container, plus platform-managed interactive views, paginated_list and actions. Calling again replaces the staged card; pass { clear: true } to revert to normal Markdown. Validation errors are returned so you can fix and retry.';
+
+const feishuCardSchema = {
+  type: 'object',
+  description: 'Card JSON 2.0 definition plus optional platform-managed interactive fields (views, paginated_list blocks, actions).',
+  properties: {
+    schema: { type: 'string', enum: ['2.0'] },
+    config: {
       type: 'object',
       properties: {
-        clear: { type: 'boolean', description: 'Set true to cancel any previously staged Feishu card in this turn and reply with normal Markdown.' },
-        fallback_text: { type: 'string', maxLength: 8000, description: 'Optional concise Markdown fallback if Feishu rejects the card; auto-derived from the card when omitted.' },
-        card: {
-          type: 'object',
-          description: 'Card JSON 2.0 definition plus optional platform-managed interactive fields (views, paginated_list blocks, actions).',
-          properties: {
-            schema: { type: 'string', enum: ['2.0'] },
-            config: {
-              type: 'object',
-              properties: {
-                width_mode: { type: 'string', enum: ['default', 'fill', 'compact'], description: 'Use "fill" for wide tables, multi-column layouts or charts.' },
-                enable_forward: { type: 'boolean' },
-              },
-              additionalProperties: false,
-            },
-            header: {
-              type: 'object',
-              properties: {
-                title: { description: 'Title string or { tag: "plain_text", content: "..." }.' },
-                subtitle: { description: 'Optional subtitle string or { tag: "plain_text", content: "..." }.' },
-                template: { type: 'string', enum: [...headerTemplates] },
-                text_tag_list: { type: 'array', maxItems: 3, items: { type: 'object' } },
-                icon: { type: 'object', description: 'Only { tag: "standard_icon", token, color? }.' },
-              },
-              additionalProperties: false,
-            },
-            elements: { type: 'array', description: 'Top-level body elements (shared above views when views is also set).' },
-            body: { type: 'object', properties: { elements: { type: 'array' } }, additionalProperties: false, description: 'Alias for elements matching raw Card JSON 2.0.' },
-            views: {
-              type: 'array', minItems: 2, maxItems: 10,
-              description: 'Optional switchable named views/tabs. Each view has { id, label, elements } and gets its own 30 KB / 200-element render budget.',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  label: { type: 'string' },
-                  elements: { type: 'array' },
-                },
-                required: ['id', 'label', 'elements'],
-                additionalProperties: false,
-              },
-            },
-            default_view: { type: 'string', description: 'Initial view id when views is provided.' },
-            view_switcher: { type: 'string', enum: ['buttons', 'select'] },
-            actions: {
-              type: 'array', maxItems: 4,
-              description: 'Optional controlled follow-up buttons. Clicking triggers a normal turn attributed to the clicking user with the visible prompt.',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  label: { type: 'string' },
-                  prompt: { type: 'string', maxLength: 300 },
-                  type: { type: 'string', enum: [...buttonTypes] },
-                  confirm: {
-                    type: 'object',
-                    properties: { title: { type: 'string' }, text: { type: 'string' } },
-                    required: ['title', 'text'],
-                    additionalProperties: false,
-                  },
-                },
-                required: ['id', 'label', 'prompt'],
-                additionalProperties: false,
-              },
-            },
-          },
-          additionalProperties: false,
-        },
+        width_mode: { type: 'string', enum: ['default', 'fill', 'compact'], description: 'Use "fill" for wide tables, multi-column layouts or charts.' },
+        enable_forward: { type: 'boolean' },
       },
       additionalProperties: false,
     },
+    header: {
+      type: 'object',
+      properties: {
+        title: { description: 'Title string or { tag: "plain_text", content: "..." }.' },
+        subtitle: { description: 'Optional subtitle string or { tag: "plain_text", content: "..." }.' },
+        template: { type: 'string', enum: [...headerTemplates] },
+        text_tag_list: { type: 'array', maxItems: 3, items: { type: 'object' } },
+        icon: { type: 'object', description: 'Only { tag: "standard_icon", token, color? }.' },
+      },
+      additionalProperties: false,
+    },
+    elements: { type: 'array', description: 'Top-level body elements (shared above views when views is also set).' },
+    body: { type: 'object', properties: { elements: { type: 'array' } }, additionalProperties: false, description: 'Alias for elements matching raw Card JSON 2.0.' },
+    views: {
+      type: 'array', minItems: 2, maxItems: 10,
+      description: 'Optional switchable named views/tabs. Each view has { id, label, elements } and gets its own 30 KB / 200-element render budget.',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          elements: { type: 'array' },
+        },
+        required: ['id', 'label', 'elements'],
+        additionalProperties: false,
+      },
+    },
+    default_view: { type: 'string', description: 'Initial view id when views is provided.' },
+    view_switcher: { type: 'string', enum: ['buttons', 'select'] },
+    actions: {
+      type: 'array', maxItems: 4,
+      description: 'Optional controlled follow-up buttons. Clicking triggers a normal turn attributed to the clicking user with the visible prompt.',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          prompt: { type: 'string', maxLength: 300 },
+          type: { type: 'string', enum: [...buttonTypes] },
+          confirm: {
+            type: 'object',
+            properties: { title: { type: 'string' }, text: { type: 'string' } },
+            required: ['title', 'text'],
+            additionalProperties: false,
+          },
+        },
+        required: ['id', 'label', 'prompt'],
+        additionalProperties: false,
+      },
+    },
   },
+  additionalProperties: false,
 };
+
+export function makeFeishuCardTool(withReplyTarget = false) {
+  return {
+    type: 'function',
+    function: {
+      name: feishuCardToolName,
+      description: withReplyTarget
+        ? `${feishuCardBaseDescription} Optional reply_to_message_id, thread_id, and reply_in_thread are shortcuts that share the same validation and state as ${replyTargetToolName}.`
+        : feishuCardBaseDescription,
+      parameters: {
+        type: 'object',
+        properties: {
+          clear: { type: 'boolean', description: 'Set true to cancel any previously staged Feishu card in this turn and reply with normal Markdown.' },
+          fallback_text: { type: 'string', maxLength: 8000, description: 'Optional concise Markdown fallback if Feishu rejects the card; auto-derived from the card when omitted.' },
+          card: feishuCardSchema,
+          ...(withReplyTarget ? replyTargetProperties : {}),
+        },
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+export const feishuCardTool = makeFeishuCardTool(false);
+export const feishuCardToolWithReplyTarget = makeFeishuCardTool(true);
 
 export interface SanitizedPaginatedList {
   tag: 'paginated_list';
@@ -1475,20 +1491,47 @@ export function buildFeishuCard(args: unknown, options: { origin?: string; clean
 /** Per-turn holder that validates, redacts and stages at most one Feishu Card JSON 2.0 for the turn's final reply. */
 export class FeishuCardTurn {
   private current: StagedFeishuCard | null = null;
-  constructor(private readonly origin = '', private readonly clean: (s: string) => string = s => s) {}
+  constructor(
+    private readonly origin = '',
+    private readonly clean: (s: string) => string = s => s,
+    private readonly replyTarget?: ReplyTargetTurn,
+  ) {}
   get staged(): StagedFeishuCard | null { return this.current; }
+  reset(): void { this.current = null; }
   execute(args: unknown): Json {
     if (!args || typeof args !== 'object' || Array.isArray(args)) {
       return { error: 'invalid_arguments', detail: 'set_feishu_card takes a JSON object.' };
     }
     const input = args as Json;
+    const hasTargetField = input.reply_to_message_id !== undefined || input.thread_id !== undefined || input.reply_in_thread !== undefined;
+    if (hasTargetField && !this.replyTarget) {
+      return { error: 'invalid_arguments', detail: 'Reply target fields (reply_to_message_id, thread_id, reply_in_thread) are only supported in interactive Feishu turns.' };
+    }
+    const allowedKeys = new Set(this.replyTarget
+      ? ['clear', 'fallback_text', 'card', 'reply_to_message_id', 'thread_id', 'reply_in_thread']
+      : ['clear', 'fallback_text', 'card']);
+    if (Object.keys(input).some(key => !allowedKeys.has(key))) {
+      return { error: 'invalid_arguments', detail: 'set_feishu_card received unsupported argument fields.' };
+    }
     if (input.clear === true) {
+      if (hasTargetField) {
+        return { error: 'invalid_arguments', detail: `Use ${replyTargetToolName} to change or clear the reply target; set_feishu_card({ clear: true }) only clears the staged card.` };
+      }
       this.current = null;
       return { staged: false, cleared: true, notice: 'Staged Feishu card cleared; this turn will reply with normal Markdown.' };
+    }
+    let resolvedTarget: ReturnType<ReplyTargetTurn['resolve']> | undefined;
+    if (hasTargetField && this.replyTarget) {
+      resolvedTarget = this.replyTarget.resolve(input);
+      if ('error' in resolvedTarget) return resolvedTarget;
     }
     try {
       const staged = buildFeishuCard(input, { origin: this.origin, clean: this.clean });
       this.current = staged;
+      if (resolvedTarget && !('error' in resolvedTarget) && resolvedTarget.target) {
+        this.replyTarget!.apply(resolvedTarget.target);
+      }
+      const activeTarget = this.replyTarget?.current;
       return {
         staged: true,
         interactive: staged.interactive,
@@ -1497,6 +1540,7 @@ export class FeishuCardTurn {
         width_mode: staged.spec.config.width_mode,
         ...(staged.spec.views.length ? { views: staged.spec.views.map(v => v.id), default_view: staged.spec.default_view } : {}),
         ...(staged.spec.actions.length ? { actions: staged.spec.actions.map(a => a.id) } : {}),
+        ...(activeTarget ? { reply_target: formatReplyTargetObservation(activeTarget) } : {}),
         summary: staged.summary.slice(0, 500),
         notice: 'Feishu Card JSON 2.0 validated and staged. Finish with a brief text summary as fallback.',
       };

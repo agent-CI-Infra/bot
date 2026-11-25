@@ -66,7 +66,10 @@ test('a text preamble followed by a tool call resumes admission and incorporates
   const newer = inGroup('后到的问题'), b = await post(f.h, f.id, newer); assert.equal(row(f, b).state, 'merged');
   tool.release(); await done(f, initial); await done(f, a); await done(f, b);
   assert.equal(calls, 2); assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1);
-  assert.equal(f.service.turnMessages.replyEvent(row(f, initial).message_id).message_id, newer.event.message.message_id);
+  const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', initial.value.operation_id + ':business-result');
+  const delivery = f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery;
+  assert.equal(delivery.reply_to, undefined, 'platform no longer auto-attaches reply_to to the last merged message (#1385)');
+  assert.equal(delivery.reply_in_thread, undefined);
 });
 
 test('verified self mentions stay distinct from ambient participation and same-name other targets (#458, #460)', async t => {
@@ -156,7 +159,9 @@ test('messages during a tool are injected together at the next step with their f
   assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'DELETE').map(r => r.message).sort(),
     [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   const outbox = f.h.store.get("SELECT * FROM channel_outbox WHERE idempotency_key=?", initial.value.operation_id + ':business-result');
-  assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, f.service.turnMessages.replyEvent(row(f, initial).message_id).message_id);
+  const finalDelivery = f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery;
+  assert.equal(finalDelivery.reply_to, undefined, 'combined reply posts directly to main stream unless model sets a reply target (#1385)');
+  assert.equal(finalDelivery.reply_in_thread, undefined);
   const view = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value.conversation.turns[0];
   assert.deepEqual(view.incoming_messages.map(m => [m.needs_reply, m.state]), [[true, 'answered'], [true, 'answered'], [false, 'answered']]);
 });
@@ -230,7 +235,9 @@ test('private management messages join the natural next step and remain in subse
   await done(f, initial); await done(f, extra); await until(() => sent(f).some(s => s.includes('两个问题一起回答')));
   assert.equal(f.h.store.get('SELECT count(*) n FROM management_messages').n, 1); assert.equal(calls, 2);
   const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', initial.value.operation_id + ':result');
-  assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, e.event.message.message_id);
+  const dmDelivery = f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery;
+  assert.equal(dmDelivery.reply_to, undefined, 'private reply posts directly to main stream unless model sets a reply target (#1385)');
+  assert.equal(dmDelivery.reply_in_thread, undefined);
   f.modelState.respond = async (body, res) => {
     assert.equal(JSON.parse(body.messages[1].content).history.at(-1).incoming_messages[0].content, '再看看第二个问题'); say(res, '保留了补充问题的上下文');
   };
@@ -452,8 +459,8 @@ test('speakers are named from the directory first, then the member list; externa
   // Only the installation's own user is looked up in the directory; external members never are.
   assert.deepEqual(f.wire.state.profileRequests.map(url => decodeURIComponent(new URL(url).pathname.split('/').at(-1))), ['ou_carol']);
   const [merged] = incoming(second)[0].messages;
-  assert.deepEqual([merged.sender_id, 'sender_name' in merged, merged.same_sender_as_request, merged.in_request_thread, merged.reply_to_message_id],
-    ['ou_guest', false, false, true, request.event.message.message_id]);
+  assert.deepEqual([merged.sender_id, 'sender_name' in merged, merged.same_sender_as_request, merged.in_request_thread, merged.parent_id, merged.reply_to_message_id, merged.root_id],
+    ['ou_guest', false, false, true, request.event.message.message_id, request.event.message.message_id, request.event.message.message_id]);
   const listed = JSON.parse(second.messages.find(m => m.role === 'tool').content);
   assert.deepEqual(listed.members, [{ id: 'ou_alice', name: 'Alice', external: true }, { id: 'ou_carol', name: '卡罗尔' }, { id: 'ou_guest', external: true }]);
   assert.equal(listed.total, 3); assert.equal(listed.next_offset, null); assert.ok(listed.refreshed_at);

@@ -31,8 +31,11 @@ for(const personal of [false,true]) {
       const text=JSON.stringify(body);
       if(personal){
         assert.ok(!text.includes('old-source-unique'),text);
-        // The context rebuilt for the new attempt still says where its message came from (#1360).
-        assert.deepEqual(JSON.parse(body.messages[1].content).message_source,{kind:'feishu_private_chat',chat_name:null});
+        // The context rebuilt for the new attempt still says where its message came from (#1360, #1385).
+        const msgSource=JSON.parse(body.messages[1].content).message_source;
+        assert.equal(msgSource.kind,'feishu_private_chat');
+        assert.equal(msgSource.chat_name,null);
+        assert.ok(typeof msgSource.message_id==='string'&&msgSource.message_id.startsWith('om_'));
       }
       else {
         const prompt=JSON.parse(body.messages[1].content);

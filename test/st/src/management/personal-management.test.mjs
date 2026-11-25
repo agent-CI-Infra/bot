@@ -19,7 +19,7 @@ test('multi-project greetings use the shared management agent and private histor
   const f=await channelFixture(t);let channel=true;
   f.modelState.respond=async(body,res)=>{
     // A private chat's conversation also manages that chat's timers (#851); a console conversation has no chat.
-    assert.deepEqual(body.tools.map(t=>t.function.name),['read_tool_result','management_query','management_command','project_tools_list','project_tools_publish','project_tools_rollback','start_repository',...(channel?['conversation_schedules']:[]),'start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','github_read','github_search','read_job_log','read_skill',...(channel?['set_feishu_card']:[]),'github_write',
+    assert.deepEqual(body.tools.map(t=>t.function.name),['read_tool_result','management_query','management_command','project_tools_list','project_tools_publish','project_tools_rollback','start_repository',...(channel?['conversation_schedules']:[]),'start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','github_read','github_search','read_job_log','read_skill',...(channel?['set_feishu_card','set_reply_target']:[]),'github_write',
       ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','attach_message_resource','create_reply_file']:[]),'submit_feedback','send_message']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);
@@ -51,10 +51,10 @@ test('each management turn tells the model where its own message came from: web 
   const source=()=>seen.at(-1).context.message_source;
   // A private chat message; the person's Feishu name is null until it is known.
   const first=await im(f,'第一条私聊');assert.equal(first.row.state,'completed',first.row.error);
-  assert.deepEqual(source(),{kind:'feishu_private_chat',chat_name:null});
+  assert.deepEqual(source(),{kind:'feishu_private_chat',chat_name:null,message_id:first.event.event.message.message_id});
   f.h.store.run("UPDATE external_identities SET display_name='张小明' WHERE principal_id=? AND provider='feishu'",f.principal);
-  assert.equal((await im(f,'第二条私聊')).row.state,'completed');
-  assert.deepEqual(source(),{kind:'feishu_private_chat',chat_name:'张小明'});
+  const second=await im(f,'第二条私聊');assert.equal(second.row.state,'completed');
+  assert.deepEqual(source(),{kind:'feishu_private_chat',chat_name:'张小明',message_id:second.event.event.message.message_id});
   // The same conversation continued in the console: the source is this message's own, each history round keeps its own.
   const conversation=first.row.conversation_id;
   const continued=(await f.admin('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'fixture-web-continued',content:'在网页上继续'})).value;

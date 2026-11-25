@@ -198,8 +198,11 @@ test('group and private timers omit and refuse send_message, instruct single com
     const first = bodies[0], offered = first.tools.map(tool => tool.function.name), system = first.messages[0].content;
     const request = JSON.parse(first.messages[1].content).request;
     assert.ok(!offered.includes('send_message'), `${kind} timer must not offer send_message`);
+    assert.ok(!offered.includes('set_reply_target'), `${kind} timer must not offer set_reply_target`);
     assert.ok(offered.includes('stay_silent'), `${kind} timer keeps stay_silent`);
     assert.ok(offered.includes('set_feishu_card'), `${kind} timer keeps set_feishu_card`);
+    const cardSchemaProps = Object.keys(first.tools.find(tool => tool.function.name === 'set_feishu_card').function.parameters.properties);
+    assert.ok(!cardSchemaProps.includes('reply_to_message_id') && !cardSchemaProps.includes('thread_id') && !cardSchemaProps.includes('reply_in_thread'), `${kind} timer set_feishu_card must not expose reply target fields`);
     // Credential-redaction safety rule stays, while send_message progress instructions are removed and replaced by single-output guidance.
     assert.match(system, /Do not paste environment variables or real credentials into public comments, issues, pull requests or messages\./);
     assert.doesNotMatch(system, /Keep people informed with send_message|At most 10 per turn/);

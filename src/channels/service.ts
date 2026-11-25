@@ -27,6 +27,7 @@ import { ChannelReactions } from './reactions.js';
 import { ChannelMedia, MediaTurn } from './media.js';
 import { cardText, markdownPosts } from './format.js';
 import { applyInteractiveCardAction, ChannelInteractiveCards, FeishuCardTurn, renderFeishuCard, type StagedFeishuCard } from './cards.js';
+import { messageRelationFields, ReplyTargetTurn, revalidateReplyTarget, type ResolvedReplyTarget } from './reply-target.js';
 import { asksForHelp, assistantMessage, ChannelTurnMessages } from './turn-messages.js';
 import { ChannelMembers } from './members.js';
 import { chatProfile } from './profiles.js';
@@ -134,7 +135,17 @@ export class ChannelService {
     };
     // The timers of bound groups (#1362), for a person who may manage at least one of them, in any of their conversations.
     management.groupSchedules=actor=>this.schedules.groups(actor).length?args=>this.schedules.managed(actor,args):undefined;
-    management.feishuCard=(actor,conversation,input,clean)=>{
+    management.replyTarget=(actor,conversation,input)=>{
+      const source=String(input.source_message??'');
+      if(source.startsWith('schedule:')||actor.channel==='web')return;
+      const row=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',source.replace(/^feishu:/,''),conversation);
+      if(!row)return;
+      const e=this.turnMessages.event(row);
+      const chat=store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
+      if(!chat||e.chat_type!=='p2p')return;
+      return new ReplyTargetTurn(store,chat.id);
+    };
+    management.feishuCard=(actor,conversation,input,clean,replyTarget)=>{
       const source=String(input.source_message??'');
       if(source.startsWith('schedule:')){
         const row=store.get("SELECT s.chat_id FROM channel_schedule_runs r JOIN channel_schedules s ON s.id=r.schedule_id WHERE r.id=? AND s.kind='personal'",source.slice(9));
@@ -142,7 +153,7 @@ export class ChannelService {
       }
       if(actor.channel==='web')return;
       const chat=personalChat(conversation);if(!chat||chat.chat_type!=='p2p')return;
-      return new FeishuCardTurn(this.options.origin??'',clean);
+      return new FeishuCardTurn(this.options.origin??'',clean,replyTarget);
     };
     management.sourceContext=(conversation,context)=>{
       const chat=personalChat(conversation);if(!chat)return context;
@@ -153,8 +164,9 @@ export class ChannelService {
         const event=this.turnMessages.event(source),message=this.ledger.query(chat.id,{message_id:event.message_id}).messages as Json[];
         // Replies and progress are derived from the whole supplied chat, not just their initiating message.
         const {reply,reply_truncated,progress_messages,...rest}=item;
-        const content=String(message[0]?.content??'[消息已清理]');
-        return {...(changedAt>=Date.parse(String(item.created_at))?rest:item),request:{...request,content:privateMessageText(content)}};
+        const stored=message[0],content=String(stored?.content??'[消息已清理]');
+        const relations=messageRelationFields({parent_id:stored?.parent_id||event.parent_id,root_id:stored?.root_id||event.root_id,thread_id:stored?.thread_id||event.thread_id});
+        return {...(changedAt>=Date.parse(String(item.created_at))?rest:item),request:{...request,content:privateMessageText(content),...(event.message_id?{message_id:event.message_id}:{}),...relations}};
       });
       return {...context,history,source_updates:this.ledger.sourceUpdates(chat.id),write_receipts:{
         management:store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',conversation,String(context.source_message)),
@@ -170,7 +182,9 @@ export class ChannelService {
       }
       const row=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',source.replace(/^feishu:/,''),conversation);
       const event=row?this.turnMessages.event(row):undefined;
-      return {chat_name:chatName(event&&store.get('SELECT id FROM channel_chats WHERE connector_id=? AND chat_id=?',event.connector_id,event.chat_id)?.id)};
+      const chatRow=event?store.get('SELECT id FROM channel_chats WHERE connector_id=? AND chat_id=?',event.connector_id,event.chat_id):undefined;
+      const stored=chatRow&&event?.message_id?store.get('SELECT parent_id,root_id,thread_id FROM channel_messages WHERE chat_id=? AND message_id=?',chatRow.id,event.message_id):undefined;
+      return {chat_name:chatName(chatRow?.id),...(event?.message_id?{message_id:event.message_id,...messageRelationFields({parent_id:stored?.parent_id||event.parent_id,root_id:stored?.root_id||event.root_id,thread_id:stored?.thread_id||event.thread_id})}:{})};
     };
     management.mediaTurn=(actor,conversation,input,computers,guard,imageInput)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
@@ -185,7 +199,7 @@ export class ChannelService {
     // A progress message of the management assistant (#435) goes to the private chat that started an interactive turn, under
     // the same protection as its final answer; console conversations only show it in their event stream, and timer turns
     // deliver only their final result without mid-turn progress messages (#1367).
-    management.stageMessage=(actor,conversation,input,message,text,sequence)=>{
+    management.stageMessage=(actor,conversation,input,message,text,sequence,replyTarget)=>{
       const source=String(input.source_message);
       if(source.startsWith('schedule:'))return;
       const row=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',source.replace(/^feishu:/,''),conversation);
@@ -195,8 +209,9 @@ export class ChannelService {
       if(!chat||e.chat_type!=='p2p')return;
       this.source(e);this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
       if(row.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
+      const target=replyTarget?revalidateReplyTarget(store,chat.id,replyTarget):undefined;
       return this.queue(e,card(text),row.id+':stage:'+sequence,row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
-        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message,stage:sequence});
+        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message,stage:sequence},false,false,undefined,[],target);
     };
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
@@ -473,11 +488,11 @@ export class ChannelService {
   postCard(chat: Row, staged: StagedFeishuCard, key: string, source: string, protection: Json, owner: { kind: 'personal' | 'group'; id: string; fence: string }, options?: { footerNote?: string; consoleUrl?: string }): string {
     return this.queueRichCard(this.chatEvent(chat), chat, staged, key, source, protection, owner, options);
   }
-  private queueRichCard(e: ChannelEvent, chat: Row, staged: StagedFeishuCard, key: string, source: string, protection: Json, owner: { kind: 'personal' | 'group'; id: string; fence: string }, options?: { resources?: string[]; replyTo?: boolean; footerNote?: string; consoleUrl?: string }): string {
+  private queueRichCard(e: ChannelEvent, chat: Row, staged: StagedFeishuCard, key: string, source: string, protection: Json, owner: { kind: 'personal' | 'group'; id: string; fence: string }, options?: { resources?: string[]; replyTarget?: ResolvedReplyTarget; footerNote?: string; consoleUrl?: string }): string {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key);
     if (previous) return previous.id;
     const prepared = this.prepareRichCard(chat, staged, owner, { footerNote: options?.footerNote, consoleUrl: options?.consoleUrl });
-    return this.queue(e, prepared.content, key, source, protection, false, false, undefined, options?.resources ?? [], !!options?.replyTo,
+    return this.queue(e, prepared.content, key, source, protection, false, false, undefined, options?.resources ?? [], options?.replyTarget,
       { rich_card: true, ...(prepared.card_id ? { card_id: prepared.card_id } : {}), card_fallback: prepared.fallback_text });
   }
   private guardInteractiveCard(cardRow: Row, chat: Row, actor?: { actor_id: string; actor_tenant: string }): void {
@@ -579,13 +594,14 @@ export class ChannelService {
     }
     // Follow-up action: enter the standard inbound message pipeline attributed to the clicking user.
     const now = Date.now();
+    const cardMsg = event.message_id ? this.store.get('SELECT root_id, thread_id FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, event.message_id) : undefined;
     const synthetic: ChannelEvent = {
       provider: 'feishu', connector_id: c.id, connector_revision: c.revision,
       app_id: c.app_id, installation_tenant: c.installation_tenant,
       actor_tenant: event.actor_tenant, actor_id: event.actor_id,
       chat_id: chat.chat_id, chat_type: chat.chat_type as 'p2p' | 'group',
       message_id: 'card-act-' + event.event_id, event_id: event.event_id,
-      thread_id: '', parent_id: event.message_id, root_id: '',
+      thread_id: String(cardMsg?.thread_id ?? ''), parent_id: event.message_id, root_id: String(cardMsg?.root_id || (cardMsg?.thread_id ? event.message_id : '')),
       created_at: now, updated_at: now, received_at: now,
       kind: 'message', message_type: 'text', sender_type: 'user', addressed: true,
       content: `[卡片操作：${outcome.label}] ${outcome.prompt}`, command_text: `[卡片操作：${outcome.label}] ${outcome.prompt}`,
@@ -675,10 +691,13 @@ export class ChannelService {
     this.serviceBindings.assertUsable(binding);
     if (!this.serviceBindings.reachable(binding, project, ['tasks.read'])) fail(403, 'channel_service_scope_paused');
   }
-  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = [], replyTo = false, extra?: { rich_card?: boolean; card_id?: string; card_fallback?: string }): string {
+  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = [], replyTarget?: ResolvedReplyTarget, extra?: { rich_card?: boolean; card_id?: string; card_fallback?: string }): string {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key); if (previous) return previous.id;
-    const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, resources,format_version:2,
-      ...(!direct&&(replyTo||e.thread_id)&&e.message_id&&!e.message_id.startsWith('card-act-')?{reply_to:e.message_id,...(e.thread_id?{reply_in_thread:true}:{})}:{}),...(update ? { message_id: update } : {}), ...(extra ?? {}) };
+    const explicitReply = !direct && replyTarget?.reply_to && !replyTarget.reply_to.startsWith('card-act-')
+      ? { reply_to: replyTarget.reply_to, reply_in_thread: !!replyTarget.reply_in_thread, ...(replyTarget.thread_id ? { reply_thread_id: replyTarget.thread_id } : {}) }
+      : {};
+    const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, resources, format_version: 2,
+      ...explicitReply, ...(update ? { message_id: update } : {}), ...(extra ?? {}) };
     this.store.run('INSERT INTO channel_outbox(id,connector_id,idempotency_key,source_event,payload,state,next_attempt,created_at) VALUES(?,?,?,?,?,?,?,?)', id, e.connector_id, key, source ?? null,
       this.store.secrets.seal({ event: {...e,content:'',raw_content:''}, delivery, protection }, 'channel-outbox:' + id), registered ? 'registered' : 'queued', Date.now(), Date.now());
     return id;
@@ -810,18 +829,19 @@ export class ChannelService {
       this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?",row.id);return;
     }
     const protection=(fence:string,turn:string)=>({kind:'service_binding',chat_id:chat.id,binding_id:binding.id,binding_revision:binding.revision,source_message:row.id,source_fence:fence,turn_id:turn});
-    // Progress messages (#435) go out while the turn runs, as replies to the same message; attachments only with the answer.
+    // Progress messages (#435) and final replies post to the main stream unless the assistant explicitly chose a target (#1385).
     const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed,
-      stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence})});
-    const target=this.turnMessages.replyEvent(result.id);
+      stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence},false,false,undefined,[],
+        m.reply_target?revalidateReplyTarget(this.store,chat.id,m.reply_target,{projects:[bindingScope(binding.id)],fence:m.fence}):undefined)});
+    const replyTarget=result.reply_target?revalidateReplyTarget(this.store,chat.id,result.reply_target,{projects:[bindingScope(binding.id)],fence:result.fence}):undefined;
     this.store.transaction(()=>{
       // An explicit stay_silent (#489) or an empty answer sends nothing.
       const outbox = !result.silent && result.card
-        ? this.queueRichCard(target ?? e, chat, result.card, row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
-            { kind: 'group', id: binding.id, fence: result.fence }, { resources: result.attachments, replyTo: !!target })
+        ? this.queueRichCard(e, chat, result.card, row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
+            { kind: 'group', id: binding.id, fence: result.fence }, { resources: result.attachments, replyTarget })
         : !result.silent && (result.message.trim() || result.attachments?.length)
-          ? this.queue(target ?? e, card(result.message), row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
-              false, false, undefined, result.attachments, !!target)
+          ? this.queue(e, card(result.message), row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
+              false, false, undefined, result.attachments, replyTarget)
           : undefined;
       this.turnMessages.complete(result.id,outbox);
       this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
@@ -840,18 +860,20 @@ export class ChannelService {
     if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
     const selected=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='attachments' ORDER BY sequence DESC LIMIT 1",row.message_id);
     const cardEvent=m.state==='completed'?this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='feishu_card' ORDER BY sequence DESC LIMIT 1",row.message_id):undefined;
+    const replyTargetEvent=m.state==='completed'?this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply_target' ORDER BY sequence DESC LIMIT 1",row.message_id):undefined;
     const failedOps=cardEvent?this.store.get("SELECT count(*) n FROM management_commands WHERE source_conversation=? AND source_message=? AND state<>'succeeded'",message.conversation_id,message.source_message)!.n:0;
     const stagedCard=cardEvent&&!failedOps?JSON.parse(cardEvent.data).card as StagedFeishuCard:undefined;
     const attachments=m.state==='completed'&&selected?JSON.parse(selected.data):{};
-    const target=this.turnMessages.replyEvent(message.id);
+    const rawReplyTarget=replyTargetEvent?(JSON.parse(replyTargetEvent.data).target as ResolvedReplyTarget|null):null;
+    const replyTarget=rawReplyTarget?revalidateReplyTarget(this.store,chat.id,rawReplyTarget):undefined;
     this.store.transaction(()=>{
       const prot={principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
         personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message.id,resource_fence:attachments.fence??''};
       const outbox=stagedCard
-        ? this.queueRichCard(target??e,chat,stagedCard,row.id+':result',row.id,prot,
+        ? this.queueRichCard(e,chat,stagedCard,row.id+':result',row.id,prot,
             {kind:'personal',id:actor.principal_id,fence:this.personalCardFence(chat,actor.principal_id)},
-            {resources:attachments.resource_ids??[],replyTo:!!target,consoleUrl:this.options.origin?this.url():undefined})
-        : this.queue(target??e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,prot,false,false,undefined,attachments.resource_ids??[],!!target);
+            {resources:attachments.resource_ids??[],replyTarget,consoleUrl:this.options.origin?this.url():undefined})
+        : this.queue(e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,prot,false,false,undefined,attachments.resource_ids??[],replyTarget);
       if(m.state==='completed')this.turnMessages.complete(message.id,outbox);
       this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
     });
@@ -931,7 +953,11 @@ export class ChannelService {
         if(protection.kind==='personal_task'||protection.kind==='onboarding_request'||protection.kind==='channel_schedule'&&!protection.binding_id)return;
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':cardText(part.content);
-        this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');
+        const replied=part.reply_to?this.store.get('SELECT root_id,thread_id FROM channel_messages WHERE chat_id=? AND message_id=?',chat.id,part.reply_to):undefined;
+        const parentId=part.reply_to??'';
+        const rootId=part.reply_to?String(replied?.root_id||part.reply_to):'';
+        const threadId=part.reply_to&&part.reply_in_thread?String(part.reply_thread_id||replied?.thread_id||''):'';
+        this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:parentId,root_id:rootId,thread_id:threadId,deleted:false},'live');
         const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
         this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
       });
