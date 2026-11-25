@@ -157,9 +157,10 @@ test('#737 390 宽度跟随手机底部导航切换页面也会把焦点交给�
     await expect(page.locator('.console-inbox')).toBeVisible();
     await expect(page).toHaveTitle('待处理' + zh);
     await expect.poll(() => page.evaluate(() => document.activeElement?.tagName || null)).toBe('H1');
-    // A console page in the same list lands on its own heading rather than the skip-link target.
-    await page.locator('#console-mobile-nav a[data-page="more"]').click();
-    await expect(page.locator('#console-page h1')).toBeVisible();
+    // A list page in the same bar lands on its own heading rather than the skip-link target.
+    await page.locator('#console-mobile-nav a[data-page="costs"]').click();
+    await expect(page.locator('#costs-panel')).toBeVisible();
+    await expect(page).toHaveTitle('用量与成本' + zh);
     await expect.poll(() => page.evaluate(() => document.activeElement?.tagName || null)).toBe('H1');
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

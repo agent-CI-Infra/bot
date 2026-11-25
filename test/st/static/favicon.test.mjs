@@ -22,7 +22,6 @@ test('console eyebrows are complete Chinese phrases, not English labels', () => 
   const sources = ['static/shell.js', 'static/workspace.js', 'static/task-create.js'].map(path => readFileSync(path, 'utf8')).join('\n');
   const dictionary = readFileSync('static/i18n.js', 'utf8');
   for (const label of ['NEEDS ATTENTION', 'PROJECT OVERVIEW', 'NEW TASK']) assert.equal(sources.includes(label), false, label);
-  assert.match(sources, /element\('p', '工作区', 'eyebrow'\)/);
   assert.match(sources, /element\('p', '需要关注', 'eyebrow'\)/);
   assert.match(sources, /'项目工作台视图'/);
   // #527: the new-task eyebrow is a dictionary phrase now, so the page reads it through t() and the Chinese-interface

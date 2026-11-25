@@ -19,7 +19,7 @@ function personalSettingsNav() {
   const nav = element('nav', '', 'project-nav'), hash = location.hash;
   nav.setAttribute('aria-label', t('nav.personal_categories'));
   // #615: the bar only lists pages that really open; a caption that looks clickable but goes nowhere is gone.
-  const activeKey = tab === 'external' ? 'external'
+  const activeKey = tab === 'settings' ? 'storage' : tab === 'external' ? 'external'
     : tab === 'conversations' || hash === '#/identity/feishu/conversations' ? 'conversations'
     : /^#\/identity\/feishu-apps(?:\/|$)/.test(hash) ? 'feishu-apps'
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(hash) ? 'feishu' : 'identity';
@@ -28,7 +28,9 @@ function personalSettingsNav() {
     ['feishu', '#/identity/feishu', t('nav.feishu')],
     ...(personalCanManageApps || activeKey === 'feishu-apps' ? [['feishu-apps', '#/identity/feishu-apps', t('nav.feishu_apps')]] : []),
     ['conversations', '#/conversations', t('nav.conversations')],
-    ['external', '#/external', t('nav.external')]
+    ['external', '#/external', t('nav.external')],
+    // #1369: the projects this user administers; for a super administrator it opens the same page under 全局设置.
+    ['storage', '#/settings/storage', t('nav.storage')]
   ];
   for (const [key, href, caption] of items) {
     const item = element('a', caption); item.href = href;

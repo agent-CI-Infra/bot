@@ -148,10 +148,11 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     await page.goto(h.admin + '/#/projects/101/roles');
     await expect(page.getByTestId('role-list-manager')).toBeVisible();
 
-    await page.goto(h.admin + '/#/more');
-    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    const more390 = await metrics(page, '更多功能');
-    expect(more390.overflow).toBe(390);
+    // #1369: 用量与成本 is a phone bar destination now; the page it opens fits the width.
+    await page.locator('#console-mobile-nav').getByRole('link', { name: '用量与成本', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
+    const costs390 = await metrics(page, '用量与成本');
+    expect(costs390.overflow).toBe(390);
 
     // --- 768 ---
     await page.setViewportSize({ width: 768, height: 1024 });
@@ -186,8 +187,8 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(tablet.sidebarWidth).toBeGreaterThan(150);
     expect(tablet.sidebarWidth).toBeLessThanOrEqual(200);
     expect(tablet.mobileNav).toBe('none');
-    await page.goto(h.admin + '/#/more');
-    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+    await page.goto(h.admin + '/#/costs');
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
 
     // --- 1440 ---
     await page.setViewportSize({ width: 1440, height: 1100 });

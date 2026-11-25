@@ -50,6 +50,7 @@ function contrastScript() {
       navLabel: sample('.console-project-picker > span'),
       chip: sample('.status'),
       role: sample('.current-user-role'),
+      accountLink: sample('#console-account-menu .console-link:not([hidden]) > span'),
     };
   };
 }
@@ -104,9 +105,6 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     expect(note.contrast).toBeGreaterThanOrEqual(4.5);
     expect(note.fontSize).toBeGreaterThanOrEqual(12);
 
-    await page.goto(h.admin + '/#/more');
-    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
@@ -114,13 +112,14 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     const mobile = await page.evaluate(contrastScript());
     if (mobile.mutedText) expect(mobile.mutedText.contrast).toBeGreaterThanOrEqual(4.5);
     await page.goto(h.admin + '/');
-    // already logged in — go via logout? login is only signed-out. Just shot costs and more.
     await page.goto(h.admin + '/#/costs');
     await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible({ timeout: 10000 });
-    await page.goto(h.admin + '/#/more');
-    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    // login at 390: logout first. Since #481 the phone header keeps sign-out in the account menu.
+    // login at 390: logout first. Since #481 the phone header keeps sign-out in the account menu, and since #1369 the
+    // settings entries too; they read like the rest of the menu.
     await page.getByRole('button', { name: '账号菜单' }).click();
+    await expect(page.locator('#console-account-menu .console-link:visible')).toHaveText(['个人设置', '全局设置']);
+    const menu = await page.evaluate(contrastScript());
+    expect(menu.accountLink.contrast).toBeGreaterThanOrEqual(4.5);
     await page.getByRole('button', { name: '退出登录' }).click();
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     const login390 = await page.evaluate(contrastScript());

@@ -5,15 +5,11 @@ import { transport, connector, bindFixture, envelope, post, finished } from '../
 
 const output = '.tmp/identity-display';
 async function navigateIdentity(page, width) {
+  // #1369: the phone reaches 个人设置 from the account menu, a wide screen from the pinned sidebar entry.
   if (width < 768) {
-    await page.locator('#console-mobile-nav a[href="#/more"]').click();
-    await page.locator('#console-page a[href="#/identity"]').click();
-  } else if (await page.locator('#tabs a[href="#/identity"]').isVisible()) {
-    await page.locator('#tabs a[href="#/identity"]').click();
-  } else {
-    await page.locator('#console-more-link').click();
-    await page.locator('#console-page a[href="#/identity"]').click();
-  }
+    await page.locator('#console-account').click();
+    await page.locator('#console-account-menu a[href="#/identity"]').click();
+  } else await page.locator('#tabs a[href="#/identity"]').click();
   await expect(page.locator('.identity-overview')).toBeVisible();
 }
 async function noOverflow(page) {

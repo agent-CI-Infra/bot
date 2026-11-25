@@ -43,12 +43,6 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     await expect(sidebar.getByRole('link', { name: '项目', exact: true })).toBeVisible();
     for (let i = 0; i < entryCount; i++) await expect(sidebarEntries.nth(i).locator('svg.console-icon')).toHaveCount(1);
 
-    await page.goto(h.admin + '/#/more');
-    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    const moreLinks = page.locator('.console-groups .console-link-with-icon');
-    expect(await moreLinks.count()).toBeGreaterThan(4);
-    expect(await moreLinks.locator('svg.console-icon').count()).toBe(await moreLinks.count());
-
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
@@ -56,7 +50,7 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     await expect(mobile).toBeVisible();
     // #1222: four phone destinations, each with one decorative SVG.
     await expect(mobile.locator('svg.console-icon')).toHaveCount(4);
-    for (const name of ['项目', '待处理', '助手', '更多']) {
+    for (const name of ['项目', '待处理', '助手', '用量与成本']) {
       const item = mobile.getByRole('link', { name, exact: true });
       await expect(item).toBeVisible();
       await expect(item.locator('svg.console-icon')).toBeVisible();
@@ -64,9 +58,9 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     expect(await mobile.innerText()).not.toMatch(glyphs);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 
-    await mobile.getByRole('link', { name: '更多', exact: true }).click();
-    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    expect(await page.locator('.console-groups .console-link-with-icon svg.console-icon').count()).toBeGreaterThan(4);
+    await mobile.getByRole('link', { name: '用量与成本', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
+    await expect(mobile.locator('.console-icon-chart')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 
     // Empty and error states carry an inline SVG mark (a data: mask image would be blocked by the console CSP).
@@ -87,8 +81,8 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
       await page.unrouteAll({ behavior: 'wait' });
       // Leave the inbox first: the second pass would otherwise keep the failed read from the first.
-      await page.goto(h.admin + '/#/more');
-      await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+      await page.goto(h.admin + '/#/costs');
+      await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
       await page.goto(h.admin + '/#/inbox');
       // Pages keep other (hidden) list states in the DOM since #553; read the one on screen. Phones use a 24px mark.
       await stateIcon('.console-state-empty:visible', 'tray', width === 390 ? 24 : 32);
@@ -99,7 +93,7 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
   } finally { await h.stop(); }
 });
 
-test('#554 项目管理员的桌面侧栏「更多功能」也用线性图标（1440）', async ({ browser }) => {
+test('#554 #1369 项目管理员的桌面侧栏与超管同样用线性图标，没有「更多功能」（1440）', async ({ browser }) => {
   const h = await harness();
   try {
     const { admin } = await setup(h);
@@ -112,10 +106,11 @@ test('#554 项目管理员的桌面侧栏「更多功能」也用线性图标（
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     await expect(page.locator('#who')).toContainText('项目管理员');
-    const more = page.locator('#console-sidebar #console-more-link');
-    await expect(more).toBeVisible();
-    await expect(more).toHaveAccessibleName('更多功能');
-    await expect(more.locator('svg.console-icon.console-icon-more')).toBeVisible();
+    const sidebar = page.locator('#console-sidebar'), entries = sidebar.locator('#tabs [data-console-nav]');
+    await expect(entries).toHaveText(['项目', '待处理', '管理助手', '用量与成本', '个人设置']);
+    for (let i = 0; i < 5; i++) await expect(entries.nth(i).locator('svg.console-icon')).toHaveCount(1);
+    await expect(sidebar.getByRole('link', { name: '用量与成本', exact: true }).locator('svg.console-icon-chart')).toBeVisible();
+    await expect(sidebar.getByRole('link', { name: '更多功能', exact: true })).toHaveCount(0);
     expect(await page.locator('#console-sidebar').innerText()).not.toMatch(glyphs);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
     await context.close();

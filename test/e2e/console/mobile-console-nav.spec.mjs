@@ -3,9 +3,10 @@ import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
 import { managementFixture } from '../../fixtures/management-fixture.mjs';
 
-// #481 Console UX 2/3 — the mobile shell owns five destinations (`项目 / 任务 / 待处理 / 助手 / 更多`), the assistant
-// moves into the bar at ≤767px, `更多` becomes supplemental navigation, the section selector keeps its groups, and the
-// header collapses identity, role and sign-out into one account menu. Desktop uses its sidebar without a floating launcher.
+// #481 Console UX 2/3 — the mobile shell owns its own destinations, the assistant moves into the bar at ≤767px, the
+// section selector keeps its groups, and the header collapses identity, role and sign-out into one account menu. Desktop
+// uses its sidebar without a floating launcher. #1369: 更多 is gone; the bar carries the sidebar's all-projects pages
+// (项目 / 待处理 / 助手 / 用量与成本) and the account menu the settings, with 全局设置 as the one role difference.
 
 async function login(page, h, password, hash = '#/projects', username = 'administrator') {
   await page.goto(h.admin + '/' + hash);
@@ -37,7 +38,7 @@ test('390px 底栏是四个稳定目的地，各自至少 44px 并标明当前�
     await expect(bar).toBeVisible();
     await expect(destinations(page)).toHaveCount(4);
     expect(await destinations(page).evaluateAll(links => links.map(link => [link.dataset.page, link.innerText.trim()])))
-      .toEqual([['projects', '项目'], ['inbox', '待处理'], ['assistant', '助手'], ['more', '更多']]);
+      .toEqual([['projects', '项目'], ['inbox', '待处理'], ['assistant', '助手'], ['costs', '用量与成本']]);
     // 44px is the touch target, not the label: the anchor itself has to be big enough to hit.
     for (const link of await destinations(page).all()) {
       const box = await link.boundingBox();
@@ -45,7 +46,7 @@ test('390px 底栏是四个稳定目的地，各自至少 44px 并标明当前�
       expect(box.width).toBeGreaterThanOrEqual(44);
     }
     // Each destination reports the route it stands on, and only that one.
-    for (const [page_, hash] of [['projects', '#/projects'], ['inbox', '#/inbox'], ['more', '#/more']]) {
+    for (const [page_, hash] of [['projects', '#/projects'], ['inbox', '#/inbox'], ['costs', '#/costs']]) {
       await page.goto(h.admin + '/' + hash);
       await expect(page.locator(`#console-mobile-nav a[data-page="${page_}"]`)).toHaveAttribute('aria-current', 'page');
       expect(await destinations(page).evaluateAll(links => links.filter(link => link.getAttribute('aria-current') === 'page').length)).toBe(1);
@@ -156,41 +157,29 @@ test('进行中与未读状态在离开助手页后镜像到底栏「助手」',
   } finally { release(); await f.close(); }
 });
 
-test('「更多」不再重复底栏目的地，按三组补充且只保留当前用户可见的入口', async ({ page }) => {
+test('#1369 手机底栏两种角色相同，账号菜单只有超管多一个全局设置', async ({ page }) => {
   const { h, admin, password } = await fixture();
   try {
     await page.setViewportSize({ width: 390, height: 844 });
-    await login(page, h, password);
-    await page.goto(h.admin + '/#/projects/101/overview');
-    await expect(page.locator('#project-page')).toBeVisible();
-    // The project container is shown before bootstrap has populated the shell's repository picker.
-    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
-    await page.goto(h.admin + '/#/more');
-    await expect(page.locator('.console-group h2')).toHaveText(['当前项目', '个人与平台', '管理']);
-    const captions = await page.locator('.console-group a .console-link-copy > span').allInnerTexts();
-    const flat = captions.map(text => text.trim());
-    // A destination that the bar already offers is not repeated as a row here.
-    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理助手']) {
-      expect(flat).not.toContain(duplicate);
-    }
-    // Substantially shorter than the site map it replaces (which was ~40 links for a super administrator with a project).
-    expect(flat.length).toBeLessThanOrEqual(28);
-    expect(new Set(flat).size).toBe(flat.length);
-    // Role-based visibility still holds: a project administrator has no platform group.
     const member = await admin('/api/users', 'POST', { username: 'mobile-member', password: 'pw-mobile-member-1', repository_ids: ['101'] });
     expect(member.status).toBe(201);
-    await page.locator('#console-account').click();
-    await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
-    await expect(page.getByLabel('用户名', { exact: true })).toBeVisible();
-    await page.goto(h.admin + '/#/more');
-    await page.getByLabel('用户名', { exact: true }).fill('mobile-member');
-    await page.getByLabel('密码', { exact: true }).fill('pw-mobile-member-1');
-    await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.locator('#workspace')).toBeVisible();
-    await page.goto(h.admin + '/#/more');
-    await expect(page.locator('.console-group h2')).toHaveText(['设置', '管理']);
-    expect(await page.locator('.console-group h2').allInnerTexts()).not.toContain('个人与平台');
-    expect(await page.locator('#console-page').innerText()).not.toContain('全局设置');
+    const seen = {};
+    for (const [username, secret] of [['administrator', password], ['mobile-member', 'pw-mobile-member-1']]) {
+      await login(page, h, secret, '#/projects/101/overview', username);
+      await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
+      await expect(destinations(page).last()).toHaveAttribute('href', '#/projects/101/costs');
+      const bar = await destinations(page).evaluateAll(links => links.map(link => [link.dataset.page, link.innerText.trim(), link.getAttribute('href')]));
+      await page.locator('#console-account').click();
+      await expect(page.locator('#console-account-menu')).toBeVisible();
+      seen[username] = { bar, menu: (await page.locator('#console-account-menu .console-link:visible').allInnerTexts()).map(text => text.trim()) };
+      await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
+      await expect(page.getByLabel('用户名', { exact: true })).toBeVisible();
+    }
+    expect(seen.administrator.bar).toEqual([['projects', '项目', '#/projects/101/overview'], ['inbox', '待处理', '#/projects/101/inbox'],
+      ['assistant', '助手', '#/management'], ['costs', '用量与成本', '#/projects/101/costs']]);
+    expect(seen['mobile-member'].bar).toEqual(seen.administrator.bar);
+    expect(seen.administrator.menu).toEqual(['个人设置', '全局设置']);
+    expect(seen['mobile-member'].menu).toEqual(['个人设置']);
   } finally { await h.stop(); }
 });
 
@@ -250,7 +239,9 @@ test('移动头部把身份、角色与退出登录收进账号菜单，键盘�
     await expect(trigger).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole('link', { name: '身份与权限', exact: true })).toHaveAttribute('href', '#/identity');
+    // #1369: the settings entries the sidebar pins live here on the phone; 全局设置 only for a super administrator.
+    await expect(menu.getByRole('link', { name: '个人设置', exact: true })).toHaveAttribute('href', '#/identity');
+    await expect(menu.getByRole('link', { name: '全局设置', exact: true })).toHaveAttribute('href', '#/settings/work-computers');
     await expect(menu.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
     // A real sign-out still works from the menu.
     await menu.getByRole('button', { name: '退出登录', exact: true }).click();
@@ -291,7 +282,7 @@ test('账号菜单跟随页面与断点关闭，不会盖在新页面或停在�
     // Choosing a destination closes the disclosure instead of leaving it open over the page it just navigated to.
     await trigger.click();
     await expect(menu).toBeVisible();
-    await menu.getByRole('link', { name: '身份与权限', exact: true }).click();
+    await menu.getByRole('link', { name: '个人设置', exact: true }).click();
     await expect(page).toHaveURL(/#\/identity$/);
     await expect(menu).toBeHidden();
     await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:identity');

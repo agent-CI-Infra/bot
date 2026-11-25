@@ -1,21 +1,19 @@
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
 
-
-async function login(page, h, username, password, hash = '#/more') {
+async function login(page, h, username, password, hash = '#/projects') {
   await page.goto(h.admin + '/' + hash);
   await page.getByLabel('用户名', { exact: true }).fill(username);
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.locator('#workspace')).toBeVisible();
-  await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+  await expect(page.locator('#rows .row')).toHaveCount(1);
 }
+const accountLinks = page => page.locator('#console-account-menu .console-link:visible');
 
-function adminCaptions(page) {
-  return page.getByTestId('console-admin-group').locator('a .console-link-copy > span').allInnerTexts().then(rows => rows.map(t => t.trim()));
-}
-
-test('#550 管理区按角色可见：项目管理员看不到接入向导，超级管理员能从管理区到达', async ({ page, browser }) => {
+// #550, #1369: the platform pages (系统初始化, 安装档案, 机器人账号) live under 全局设置, the one entry only a super
+// administrator has: the desktop sidebar pins it and the phone's account menu carries it. 存储 is a personal page too.
+test('#550 #1369 全局设置是超管唯一多出的入口：桌面侧栏与手机账号菜单都能进入，项目管理员都看不到', async ({ page, browser }) => {
   test.setTimeout(90000);
   const h = await harness();
   try {
@@ -24,50 +22,54 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     const memberPassword = testPassword();
     expect((await admin('/api/users', 'POST', { username: 'admin-area-member', password: memberPassword, repository_ids: ['101'] })).status).toBe(201);
 
-    // Super administrator: 管理 lists platform pages and opens 系统初始化.
+    // Super administrator: 全局设置 lists the platform pages and opens 系统初始化.
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, 'administrator', password);
-    await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
-    expect(await adminCaptions(page)).toEqual([
-      '用量与成本', '外部执行端', '存储', '系统初始化', '安装档案', '机器人账号', '全局设置'
-    ]);
-    await page.getByTestId('console-admin-group').getByRole('link', { name: /^系统初始化/ }).click();
+    await page.locator('.console-settings-nav').getByRole('link', { name: '全局设置', exact: true }).click();
+    const platformNav = page.getByRole('navigation', { name: '全局设置类别' });
+    for (const name of ['系统初始化', '安装档案', '机器人账号', '存储']) await expect(platformNav.getByRole('link', { name, exact: true })).toBeVisible();
+    await platformNav.getByRole('link', { name: '系统初始化', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding/);
     await expect(page.locator('#onboarding-panel')).toBeVisible();
-    await page.goto(h.admin + '/#/more');
+    // 个人设置 lists 存储 for a super administrator as well; it opens the same page, which stays under 全局设置.
+    await page.locator('.console-settings-nav').getByRole('link', { name: '个人设置', exact: true }).click();
+    await page.getByRole('navigation', { name: '个人设置类别' }).getByRole('link', { name: '存储', exact: true }).click();
+    await expect(page).toHaveURL(/#\/settings\/storage$/);
+    await expect(page.locator('.console-settings-nav').getByRole('link', { name: '全局设置', exact: true })).toHaveAttribute('aria-current', 'page');
 
+    // On the phone the account menu carries both settings entries.
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
-    await expect(page.getByTestId('console-admin-group')).toBeVisible();
-    expect(await adminCaptions(page)).toContain('系统初始化');
-    expect(await adminCaptions(page)).toContain('机器人账号');
+    await page.goto(h.admin + '/#/projects');
+    await page.locator('#console-account').click();
+    await expect(accountLinks(page)).toHaveText(['个人设置', '全局设置']);
+    await page.locator('#console-account-menu').getByRole('link', { name: '全局设置', exact: true }).click();
+    await expect(page).toHaveURL(/#\/settings\/work-computers$/);
+    const picker = page.getByLabel('当前页面', { exact: true });
+    await expect(picker).toBeVisible();
+    for (const key of ['onboarding', 'installations', 'accounts']) await expect(picker.locator(`option[value="#/settings/${key}"]`)).toHaveCount(1);
+    await picker.selectOption('#/settings/onboarding');
+    await expect(page.locator('#onboarding-panel')).toBeVisible();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
 
-    // Project administrator: 管理 is limited, platform pages stay hidden, 存储 still opens.
+    // Project administrator: no 全局设置 anywhere, and the platform pages stay closed.
     const context = await browser.newContext(), member = await context.newPage();
     try {
       await member.setViewportSize({ width: 1440, height: 900 });
       await login(member, h, 'admin-area-member', memberPassword);
-      for (const name of ['用量与成本', '存储', '全局设置']) {
-        await expect(member.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
-      }
+      await expect(member.locator('.console-settings-nav a')).toHaveText(['个人设置']);
+      await expect(member.locator('#console-sidebar').getByRole('link', { name: '全局设置', exact: true })).toHaveCount(0);
       await expect(member.locator('#console-sidebar').getByRole('button', { name: '仓库事件', exact: true })).toHaveCount(0);
-      expect(await adminCaptions(member)).toEqual(['用量与成本', '外部执行端', '存储']);
-      for (const name of ['系统初始化', '安装档案', '机器人账号', '全局设置']) {
-        await expect(member.getByTestId('console-admin-group').getByRole('link', { name, exact: true })).toHaveCount(0);
-        await expect(member.locator('#console-page')).not.toContainText(name);
-      }
-      await member.getByTestId('console-admin-group').getByRole('link', { name: /^存储/ }).click();
-      await expect(member).toHaveURL(/#\/settings\/storage/);
-      await expect(member.locator('#settings-panel')).toBeVisible();
-      await member.goto(h.admin + '/#/more');
+      // A typed platform address falls back to the project list (the server refuses its reads anyway).
+      await member.goto(h.admin + '/#/settings/onboarding');
+      await expect(member.locator('#rows .row')).toHaveCount(1);
+      await expect(member.locator('#onboarding-panel')).toBeHidden();
+      await expect(member.locator('#settings-panel')).toBeHidden();
 
       await member.setViewportSize({ width: 390, height: 844 });
-      await member.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
-      await expect(member.getByTestId('console-admin-group')).toBeVisible();
-      expect(await adminCaptions(member)).toEqual(['用量与成本', '外部执行端', '存储']);
-      await expect(member.locator('#console-page')).not.toContainText('系统初始化');
-      await expect(member.locator('#console-page')).not.toContainText('全局设置');
+      await member.goto(h.admin + '/#/projects');
+      await member.locator('#console-account').click();
+      await expect(accountLinks(member)).toHaveText(['个人设置']);
+      await expect(member.locator('#console-account-settings')).toBeHidden();
       await expect(member.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
 
       // Remaining management addresses still open. #/events is not a page.

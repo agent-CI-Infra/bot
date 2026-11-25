@@ -159,7 +159,8 @@ test('settings keep platform mutations in global settings and project administra
     const prefs = page.locator('#tabs [data-console-nav=preferences]');
     await expect(prefs).toHaveCount(1);
     await expect(prefs).toHaveAttribute('aria-current', 'page');
-    await expect(page.getByTestId('console-more-link')).toBeVisible();
+    // #1369: the same sidebar entries as a super administrator, without 全局设置.
+    await expect(page.locator('#tabs [data-console-nav=costs]')).toBeVisible();
     await expect(page.locator('#tabs [data-console-nav=settings]')).toBeHidden();
     await switchConsoleProject(page, '101');
     await page.evaluate(() => { location.hash = '#/projects/101/basic'; });
@@ -167,7 +168,8 @@ test('settings keep platform mutations in global settings and project administra
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toHaveCount(0);
     await page.goto(f.h.admin + '/#/settings/projects/101'); await expect(page.locator('#settings-panel')).toBeHidden();
-    await page.goto(f.h.admin + '/#/more'); await expect(page.getByRole('heading', { name: '全局设置', exact: true })).toHaveCount(0);
+    await page.goto(f.h.admin + '/#/settings/work-computers'); await expect(page.locator('#rows .row')).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: '全局设置', exact: true })).toHaveCount(0);
   } finally { await f.close(); }
 });
 
@@ -345,35 +347,36 @@ test('个人设置与全局设置类别只列出真正能打开的页面，目�
     // The group caption was a <p> that looked clickable: every entry in this bar must be a real link.
     await expect(nav.locator('p')).toHaveCount(0);
     await expect(nav.locator(':scope > :not(a)')).toHaveCount(0);
-    await expect(nav.getByRole('link')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端']);
+    await expect(nav.getByRole('link')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端', '存储']);
     // At 390 the horizontal bar itself is display:none, so a role query over it can never fail. The phone's real control
     // is the 当前页面 picker, which mirrors the same groups as optgroups: no group label means no optgroup at all.
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/identity');
     await expect(page.locator('#console-secondary-nav')).toBeHidden();
     const sectionPicker = page.locator('#console-section');
     await expect(sectionPicker).toBeVisible(); await expect(sectionPicker).toHaveAccessibleName('当前页面');
-    await expect(sectionPicker.locator('option')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端']);
+    await expect(sectionPicker.locator('option')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端', '存储']);
     await expect(sectionPicker.locator('optgroup')).toHaveCount(0);
     await expect(sectionPicker).not.toContainText('个人设置');
-    // The directory entry names the page it opens instead of pointing at 个人设置 that renders 身份与权限.
-    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/more');
-    const directory = page.locator('#console-page'), identityEntry = directory.locator('a[href="#/identity"]');
-    await expect(identityEntry).toHaveCount(1); await expect(identityEntry).toContainText('身份与权限');
-    await expect(directory.locator('a[href="#/preferences"]')).toHaveCount(0); await expect(directory).not.toContainText('个人设置');
-    // A project administrator has one settings category; a lone group needs no heading, and 系统与算力 must not appear.
+    // The category entry names the page it opens instead of pointing at 个人设置 that renders 身份与权限.
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/identity');
+    const identityEntry = nav.locator('a[href="#/identity"]');
+    await expect(identityEntry).toHaveCount(1); await expect(identityEntry).toHaveText('身份与权限');
+    await expect(page.locator('#console-sidebar a[href="#/preferences"]')).toHaveCount(0);
+    // #1369: a project administrator's one settings category, 存储, is an entry of 个人设置; 系统与算力 must not appear.
     const memberPassword = testPassword(); await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: ['101'] });
     const context = await browser.newContext(), member = await context.newPage(); await member.goto(h.admin + '/#/settings/storage');
     await member.getByLabel('用户名', { exact: true }).fill('member'); await member.getByLabel('密码', { exact: true }).fill(memberPassword);
     await member.getByRole('button', { name: '登录', exact: true }).click();
     await member.goto(h.admin + '/#/settings/storage');
-    const settingsNav = member.getByRole('navigation', { name: '设置类别' });
-    await expect(settingsNav.getByRole('link')).toHaveText(['存储']);
+    const settingsNav = member.getByRole('navigation', { name: '个人设置类别' });
+    await expect(settingsNav.getByRole('link', { name: '存储', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(settingsNav.locator('p')).toHaveCount(0);
+    await expect(member.getByRole('navigation', { name: '设置类别', exact: true })).toHaveCount(0);
     await expect(member.locator('#settings-panel')).not.toContainText('系统与算力');
-    // The same check on the control a phone actually shows: one settings group, so no heading and no optgroup named 系统与算力.
+    // The same check on the control a phone actually shows: no group heading and no optgroup named 系统与算力.
     await member.setViewportSize({ width: 390, height: 844 });
     const memberPicker = member.locator('#console-section');
-    await expect(memberPicker).toBeVisible(); await expect(memberPicker.locator('option')).toHaveText(['存储']);
+    await expect(memberPicker).toBeVisible(); await expect(memberPicker).toHaveValue('#/settings/storage');
     await expect(memberPicker.locator('optgroup')).toHaveCount(0);
     await expect(memberPicker).not.toContainText('系统与算力');
     await context.close();

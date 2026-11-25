@@ -26,9 +26,11 @@ const settingsCaption = (captions, key, caption) => (captions[key] ? t(captions[
 // and views.css restates the old h3 sizes on .side-card>h2 so the change is tag-only.
 const settingsCard = (title, level = 'h2') => card(title, level);
 // #799: the settings shell names the category it shows, not the whole platform: 存储 is a page a project administrator
-// may open, and the first crumb says 工作区 for them, 平台管理 only for a super administrator.
+// may open too.
 function settingsPageTitle(section = settingsRoute().section) { return section === 'storage' ? t('nav.storage') : t('nav.settings'); }
-function settingsScope() { return typeof me === 'object' && me && me.role === 'super_admin' ? t('nav.platform') : t('nav.workspace'); }
+// #1369: 存储, the one settings page a project administrator may open, is listed under 个人设置 with their other own pages,
+// so the shell draws it with that category bar. A super administrator keeps it under 全局设置.
+function storageInPersonalSettings() { return tab === 'settings' && typeof me === 'object' && !!me && me.role !== 'super_admin'; }
 // A project administrator reaches global settings only for 存储, which lists their own projects.
 const visibleSettingsGroups = () => {
   const groups = typeof me === 'object' && me && me.role !== 'super_admin'
