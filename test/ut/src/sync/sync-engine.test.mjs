@@ -18,11 +18,13 @@ import {
   createProjectNotesDirectoryAdapter,
   deleteAssistantSyncData,
   deleteProjectSyncData,
+  isSensitiveSyncPath,
   normalizeSyncPath,
   pruneSyncData,
   sha256Buffer,
   validateInternalSymlinkTarget,
 } from '../../../../dist/sync/index.js';
+import { isSensitiveSyncPath as clientIsSensitiveSyncPath } from '../../../../runner/sync-client.mjs';
 import { HttpError } from '../../../../dist/core/security.js';
 import { Notes } from '../../../../runner/notes.mjs';
 import { noteComponent, notePath } from '../../../../runner/note-path.mjs';
@@ -84,8 +86,44 @@ test('path validation blocks traversal, control chars, reserved internals (.sync
     assert.throws(() => notePath(internalSync), /invalid_note_path/);
   }
 
-  for (const sensitive of ['.env', '.env.production', 'keys/server.pem', 'certs/app.key', '.ssh/id_rsa', '.aws/credentials', 'secrets.json']) {
+  for (const sensitive of [
+    '.env',
+    '.env.production',
+    'keys/server.pem',
+    'certs/app.key',
+    '.ssh/id_rsa',
+    '.aws/credentials',
+    'secrets.json',
+    'secrets.yaml',
+    'secrets.yml',
+    '.pgpass',
+    '.my.cnf',
+    '.git-credentials',
+    'netrc',
+    '_netrc',
+    'auth.json',
+    '.credentials.json',
+    'service-account.json',
+    'kubeconfig',
+    '.kube/config',
+    '.claude/.credentials.json',
+    '.codex/auth.json',
+    'manager.token',
+    'shadow',
+    'gshadow',
+    '.htpasswd',
+    'keys/ssh.ppk',
+    'vault.kdbx',
+    'corp.ovpn',
+    'cert.pkcs12',
+  ]) {
+    assert.equal(isSensitiveSyncPath(sensitive), true, `server sensitive: ${sensitive}`);
+    assert.equal(clientIsSensitiveSyncPath(sensitive), true, `client sensitive: ${sensitive}`);
     assert.throws(() => normalizeSyncPath(sensitive, { rejectSensitivePaths: true }), /sync_sensitive_path/, sensitive);
+  }
+  for (const benign of ['guides/testing.md', 'bot/.claude-plugin/plugin.json', 'src/credentials.ts', 'docs/auth-notes.md']) {
+    assert.equal(isSensitiveSyncPath(benign), false, `server benign: ${benign}`);
+    assert.equal(clientIsSensitiveSyncPath(benign), false, `client benign: ${benign}`);
   }
 
   assert.equal(normalizeSyncPath('guides/testing.md', { rejectSensitivePaths: true }), 'guides/testing.md');

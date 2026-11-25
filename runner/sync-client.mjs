@@ -16,19 +16,15 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { dirname, join, posix, resolve, sep } from 'node:path';
+import { isSensitiveSyncPath } from './sensitive-paths.mjs';
 
+export { isSensitiveSyncPath };
 export const SYNC_BASE_FILENAME = '.sync-base.json';
 export const SYNC_BASE_SCHEMA = 'bot.sync-base/1';
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-const SENSITIVE_SYNC_PATH_RE =
-  /(^|\/)(?:\.env(?:\.[^/]*)?|\.git|\.ssh|\.aws|\.gnupg|\.npmrc|\.netrc|\.pypirc|\.docker\/config\.json|secrets\.json|credentials(?:\.(?!ts$|tsx$|js$|mjs$|cjs$|jsx$|py$|md$|mdx$|html$|css$|scss$|vue$|svelte$|rs$|go$|java$|kt$|rb$|php$|sh$)[^/]*)?|id_(?:rsa|ed25519|ecdsa|dsa)|[^/]+\.(?:pem|key|p12|pfx|jks|keystore))(?:\/|$)/i;
 const DEFAULT_BATCH_BLOBS = 64;
 const DEFAULT_BATCH_BYTES = 4 * 1024 * 1024;
-
-export function isSensitiveSyncPath(relPath) {
-  return typeof relPath === 'string' && SENSITIVE_SYNC_PATH_RE.test(relPath);
-}
 
 export class SyncClientError extends Error {
   constructor(code, status = 400, detail = null) {

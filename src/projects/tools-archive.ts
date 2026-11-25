@@ -5,6 +5,9 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createGunzip, createInflateRaw } from 'node:zlib';
 import { fail, HttpError } from '../core/security.js';
 import { githubTokenSource } from '../core/redaction.js';
+import { isSensitiveToolPath } from '../../runner/sensitive-paths.mjs';
+
+export { isSensitiveToolPath };
 
 export const MAX_TOOL_FILES = 50_000;
 export const MAX_TOOL_PATH_LENGTH = 1024;
@@ -14,47 +17,6 @@ export const MAX_SYMLINK_TARGET_LENGTH = 4096;
 const PROVIDER_TOKEN_SOURCE = String.raw`\b(?:sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|rrt_(?:[\w-]{12}\.[\w-]{43}|[\w-]{16,}))`;
 const SECRET_TOKEN_RE = new RegExp(githubTokenSource + '|' + PROVIDER_TOKEN_SOURCE);
 const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
-
-const SENSITIVE_BASENAMES = new Set([
-  '.env',
-  'id_rsa',
-  'id_dsa',
-  'id_ecdsa',
-  'id_ed25519',
-  'id_xmss',
-  '.netrc',
-  'netrc',
-  '_netrc',
-  '.npmrc',
-  '.pypirc',
-  '.pgpass',
-  '.my.cnf',
-  '.git-credentials',
-  '.dockerconfigjson',
-  'master.key',
-  'manager.token',
-  'credentials.json',
-  '.credentials.json',
-  'auth.json',
-  'secrets.json',
-  'secrets.yaml',
-  'secrets.yml',
-  'service-account.json',
-  'kubeconfig',
-  'shadow',
-  'gshadow',
-  '.htpasswd',
-]);
-
-const SENSITIVE_EXTENSIONS = /\.(?:pem|key|p12|pfx|jks|keystore|ppk|kdbx|ovpn|pkcs12)$/i;
-const SENSITIVE_PATH_PATTERNS = [
-  /(?:^|\/)\.aws\/(?:credentials|config)$/i,
-  /(?:^|\/)\.ssh\/id_[^/]+$/i,
-  /(?:^|\/)\.kube\/config$/i,
-  /(?:^|\/)\.docker\/config\.json$/i,
-  /(?:^|\/)\.claude\/\.credentials\.json$/i,
-  /(?:^|\/)\.codex\/auth\.json$/i,
-];
 
 /** Normalizes and validates a relative path inside a project tools snapshot. */
 export function normalizeToolRelativePath(raw: string, options: { allowBackslash?: boolean } = {}): string {
@@ -71,25 +33,6 @@ export function normalizeToolRelativePath(raw: string, options: { allowBackslash
     if (!part || part === '.' || part === '..') fail(400, 'unsafe_tool_path');
   }
   return parts.join('/');
-}
-
-/**
- * Fail-closed filename/path check for common credential and key files.
- * Benign template suffixes (`.env.example`, `.env.sample`, `.env.template`) are allowlisted ONLY as an exact single suffix.
- */
-export function isSensitiveToolPath(relPath: string): string | null {
-  const lower = relPath.toLowerCase();
-  const base = basename(lower);
-  if (SENSITIVE_BASENAMES.has(base)) return `sensitive_filename:${base}`;
-  if (/^\.env\./.test(base) && !/^\.env\.(?:example|sample|template)$/.test(base)) return `sensitive_filename:${base}`;
-  if (/^id_(?:rsa|dsa|ecdsa|ed25519|xmss)\./.test(base) && !/^id_(?:rsa|dsa|ecdsa|ed25519|xmss)\.pub$/.test(base)) {
-    return `sensitive_filename:${base}`;
-  }
-  if (SENSITIVE_EXTENSIONS.test(base)) return `sensitive_extension:${base}`;
-  for (const pattern of SENSITIVE_PATH_PATTERNS) {
-    if (pattern.test(lower)) return `sensitive_path:${relPath}`;
-  }
-  return null;
 }
 
 /** Streams a regular file in bounded chunks to detect PEM private keys, self-identifying tokens, and registered secrets. */
