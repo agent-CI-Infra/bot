@@ -3,6 +3,7 @@ import type { Json } from '../core/security.js';
 import type { ChannelEvent } from './types.js';
 import { chatContextBytes, requestBytes } from '../agent/tool-context.js';
 import { HttpError } from '../core/security.js';
+import { messageRelationFields } from './reply-target.js';
 
 // What the model is told about messages merged into its turn (#458). The platform gives facts about each message; whether a
 // message concerns the assistant, and whether it needs an answer, is the model's own judgement.
@@ -11,6 +12,7 @@ export const groupTurnMessageInstructions = ' Messages that arrive in this group
   + ' They are not necessarily addressed to you: people also talk to each other. Judge each one yourself from its sender, its mentions, whether it replies in the thread of your request, and its content.'
   + ' Take in what continues the current request (an addition, correction or cancellation, which may change your next tools), answer what is clearly asked of you, and leave other conversation as background: do not answer it, and do not mention it in your reply, not even to say that you are not answering it.'
   + ' is_direct_mention is the only verified mention of you. group_setting_invites_reply tells whether, in this group\'s working mode, that message would have started a reply on its own: a hint, not an obligation.'
+  + ' Each merged message carries its message_id and, when present, parent_id / reply_to_message_id, root_id, and thread_id.'
   + ' When one answer covers several people, make clear whom each part is for. You never need to wait for further messages.' + recovered;
 // Whether a group message asks for something, in the working mode that answers questions (#534). A question mark anywhere
 // outside a link or code counts, not only at its end: "这个怎么弄？谢谢" is the same question. People also ask without one
@@ -37,7 +39,8 @@ const workingModes: Record<string, string> = {
 };
 export const groupWorkingMode = (participation: unknown): string => workingModes[String(participation)] ?? workingModes.mentions!;
 export const privateTurnMessageInstructions = ' Messages the person sends while you work are added before your next step as a user message marked incoming_during_turn.'
-  + ' In this private chat they come from the person you serve and are addressed to you: take them in (an addition, correction or cancellation may change your next tools) and answer them together with the request. You never need to wait for further messages.' + recovered;
+  + ' In this private chat they come from the person you serve and are addressed to you: take them in (an addition, correction or cancellation may change your next tools) and answer them together with the request.'
+  + ' Each merged message carries its message_id and, when present, parent_id / reply_to_message_id, root_id, and thread_id. You never need to wait for further messages.' + recovered;
 // A private message is always addressed to the assistant, even without an @. Prefer normalized mention targets (#460).
 export const directMention = (event: ChannelEvent): boolean => event.mentions?.some(mention => mention.is_self) ?? (event.chat_type === 'group' && !!event.addressed);
 // In a private chat every message is for the assistant; in a group only a verified mention of it is.
@@ -137,8 +140,9 @@ export class ChannelTurnMessages {
       const inThread = !!request && (event.root_id === request.message_id || event.parent_id === request.message_id || !!thread(request) && thread(event) === thread(request));
       return { message_id: event.message_id, sender_id: event.actor_id, ...(name ? { sender_name: name } : {}),
         ...(request ? { same_sender_as_request: event.actor_id === request.actor_id && event.actor_tenant === request.actor_tenant } : {}),
-        ...(group ? { is_direct_mention: directMention(event), mentions: event.mentions ?? [], group_setting_invites_reply: !!row.needs_reply,
-          ...(event.parent_id ? { reply_to_message_id: event.parent_id } : {}), ...(inThread ? { in_request_thread: true } : {}) } : {}),
+        ...(group ? { is_direct_mention: directMention(event), mentions: event.mentions ?? [], group_setting_invites_reply: !!row.needs_reply } : {}),
+        ...messageRelationFields(event),
+        ...(inThread ? { in_request_thread: true } : {}),
         created_at: event.created_at, content: event.content.slice(0, 14000),
         ...(event.content.length > 14000 ? { truncated: true, notice: 'Use read_message_text to read the rest of this message.' } : {}) };
     };
@@ -183,25 +187,15 @@ export class ChannelTurnMessages {
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE state='merged' AND message_id=?", turn);
     this.store.run("UPDATE channel_turn_inputs SET state='answered',outbox_id=? WHERE turn_id=? AND state IN ('pending','injected')", outbox ?? null, turn);
   }
-  /** The last merged message certainly meant for the assistant that it actually saw, in arrival order; the answer quotes it. */
-  replyEvent(turn: string): ChannelEvent | undefined {
-    for (const row of this.store.all("SELECT i.* FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.state IN ('injected','answered') ORDER BY i.created_at DESC,i.rowid DESC", turn)) {
-      const event = this.event(row);
-      const current = this.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?',row.chat_ref,event.message_id);
-      if(!current||current.deleted||current.sensitive)continue;
-      const payload=this.store.secrets.open(current.payload,'channel-message:'+row.chat_ref+':'+event.message_id);
-      if(payload.content!==event.content)continue;
-      if (addressed(event)) return event;
-    }
-    return undefined;
-  }
   /** Private conversation history must keep supplemental user selections, not only the first request and final answer. */
   history(turn: string): Json[] {
     return this.store.all("SELECT i.*,m.chat_id FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.needs_reply=1 AND m.state='answered' ORDER BY i.created_at,i.rowid", turn).flatMap(row => {
       const event = this.event(row), current = this.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?', row.chat_id, event.message_id);
       if (!current || current.deleted || current.sensitive) return [];
       const message = this.store.secrets.open(current.payload, 'channel-message:' + row.chat_id + ':' + event.message_id);
-      return [{ message_id: event.message_id, sender_id: event.actor_id, content: String(message.content).slice(0, 4000) }];
+      return [{ message_id: event.message_id, sender_id: event.actor_id,
+        ...messageRelationFields({ parent_id: current.parent_id || event.parent_id, root_id: current.root_id || event.root_id, thread_id: current.thread_id || event.thread_id }),
+        content: String(message.content).slice(0, 4000) }];
     });
   }
   list(turn: string, senderName?: (event: ChannelEvent) => string | undefined): Json[] {

@@ -56,6 +56,16 @@ const sensitive = (message: StoredMessage): boolean =>
   // Self mentions may touch a binding command; inspect the same text that command parsing receives.
   [message.content, message.command_text ?? ''].some(value => /(?:^|\s)(?:\/(?:bind|confirm|reauth)(?:\s|$)|(?:确认绑定|绑定|重新认证)\s+(?:FSB-[A-Z0-9]+|[A-Za-z0-9._~+/-]{16,}))/i.test(value));
 
+/** Shared local visibility filter for `channel_messages` (scope and authorization fence). */
+export function ledgerVisibility(projects?: string[], fence?: string): { sql: string; args: string[] } {
+  if (projects === undefined && fence === undefined) return { sql: '', args: [] };
+  const denied = projects === undefined ? '0' : projects.length ? 's.project_id NOT IN (' + projects.map(() => '?').join(',') + ')' : '1';
+  return {
+    sql: ` AND NOT EXISTS(SELECT 1 FROM channel_message_scopes s WHERE s.chat_id=channel_messages.chat_id AND s.message_id=channel_messages.message_id AND (${denied}${fence !== undefined ? ' OR (s.fence IS NOT NULL AND s.fence<>?)' : ''}))`,
+    args: [...(projects ?? []), ...(fence !== undefined ? [fence] : [])],
+  };
+}
+
 /** Only local persistence and reads. This repository deliberately has no provider client. */
 export class ChannelLedger {
   constructor(readonly store: Store) {}
@@ -283,9 +293,7 @@ export class ChannelLedger {
         }) };
   }
   private visibility(projects?:string[],fence?:string):{sql:string;args:string[]} {
-    if(projects===undefined&&fence===undefined)return {sql:'',args:[]};
-    const denied=projects===undefined?'0':projects.length?'s.project_id NOT IN ('+projects.map(()=>'?').join(',')+')':'1';
-    return {sql:` AND NOT EXISTS(SELECT 1 FROM channel_message_scopes s WHERE s.chat_id=channel_messages.chat_id AND s.message_id=channel_messages.message_id AND (${denied}${fence!==undefined?' OR (s.fence IS NOT NULL AND s.fence<>?)':''}))`,args:[...(projects??[]),...(fence!==undefined?[fence]:[])]};
+    return ledgerVisibility(projects, fence);
   }
   query(id: string, query: MessageQuery = {}, projects?:string[],fence?:string): Json {
     const diagnostics = this.diagnostics(id), limit = query.limit ?? 50;

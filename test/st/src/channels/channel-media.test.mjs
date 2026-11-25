@@ -87,12 +87,16 @@ test('a bound private chat reads real file bytes and sends a rich reply with mul
   assert.equal(local.messages[0].resources[0].state, 'ready'); assert.ok(!JSON.stringify(local).includes('file_notes'));
 });
 
-test('a bound group inspects a real post image through the model and sends previews and files in the source thread', async t => {
+test('a bound group inspects a real post image through the model and sends previews and files in the selected thread', async t => {
   const f = await channelFixture(t), chat = await group(f); let ids;
   for (const key of ['img_v3_one', 'img_v3_two']) f.wire.state.resources.set(key, { data: png, mime: 'image/png' });
   f.modelState.respond = async (body, res) => {
     const observations = results(body), step = observations.length;
-    if (!step) return call(res, 'list_message_resources', {});
+    if (!step) {
+      const current = JSON.parse(body.messages[1].content).context.current_message;
+      assert.equal(current.thread_id, 'omt_source');
+      return call(res, 'list_message_resources', {});
+    }
     if (step === 1) { ids = observations[0].resources.map(r => r.resource_id); assert.equal(ids.length, 2); return call(res, 'view_message_image', { resource_id: ids[0] }); }
     if (step === 2) {
       const image = body.messages.find(m => Array.isArray(m.content))?.content.find(p => p.type === 'image_url');
@@ -101,6 +105,7 @@ test('a bound group inspects a real post image through the model and sends previ
     }
     if (step === 3) return call(res, 'attach_message_resource', { resource_id: ids[1] });
     if (step === 4) return call(res, 'create_reply_file', { name: 'report.md', content: '# Two image resources inspected through the supported input path' });
+    if (step === 5) return call(res, 'set_reply_target', { thread_id: 'omt_source' });
     return say(res, '**Image received**\n\n- [x] available\n\n```txt\nfixture pixels\n```');
   };
   const event = inGroup(''), message = event.event.message;
