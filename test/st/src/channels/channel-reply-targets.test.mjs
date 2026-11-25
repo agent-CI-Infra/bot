@@ -384,3 +384,140 @@ test('group and private timer turns refuse set_reply_target and reply target fie
   await runTimer(f.chat, '群');
   await runTimer(dm, '私聊');
 });
+
+test('outbox delivery revalidates reply target before sending and falls back to main stream or re-anchors thread when anchor is recalled after queueing (#1385)', async t => {
+  // 1) Group: anchor recalled locally AFTER turn completes & queues outbox, BEFORE outbox tick -> falls back to main stream
+  const f = await group(t);
+  const targetMsg = inGroup('稍后在入队后撤回的目标消息', 'ou_bob');
+  targetMsg.event.message.mentions = [];
+  await post(f.h, f.id, targetMsg);
+
+  // Pause outbox timer while completing the turn so the outbox row stays queued
+  clearInterval(f.service.timer);
+  const req = inGroup('帮我回复 Bob 的那条消息', 'ou_alice');
+  f.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { reply_to_message_id: targetMsg.event.message.message_id });
+    return say(res, '入队后锚点撤回仍须送达的最终答复');
+  };
+  const receipt = await post(f.h, f.id, req);
+  await f.service.tick();
+  assert.equal((await done(f, receipt)).state, 'completed');
+  const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', receipt.value.operation_id + ':business-result');
+  assert.equal(outbox.state, 'queued');
+  assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, targetMsg.event.message.message_id);
+
+  // Recall the chosen anchor BEFORE the outbox tick delivers it
+  await post(f.h, f.id, {
+    header: { ...targetMsg.header, event_id: 'recall-post-queue-' + targetMsg.header.event_id, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: 'oc_group', message_id: targetMsg.event.message.message_id, recall_time: String(Date.now()) },
+  });
+  await f.service.tick();
+  assert.equal(f.h.store.get('SELECT state FROM channel_outbox WHERE id=?', outbox.id).state, 'sent');
+  assert.equal(f.wire.sent.length, 1);
+  assert.ok(f.wire.sent[0].url.endsWith('/im/v1/messages?receive_id_type=chat_id'), 'expected main-stream fallback');
+  assert.equal(f.wire.sent[0].reply_in_thread, undefined);
+  assert.match(JSON.stringify(f.wire.sent[0].content), /入队后锚点撤回仍须送达的最终答复/);
+  const recorded = f.h.store.get("SELECT parent_id, root_id, thread_id FROM channel_messages WHERE chat_id=? AND sender_type='app' ORDER BY created_at DESC LIMIT 1", f.chat.id);
+  assert.deepEqual({ parent_id: recorded.parent_id, root_id: recorded.root_id, thread_id: recorded.thread_id }, { parent_id: '', root_id: '', thread_id: '' });
+
+  // 2) Group thread: root recalled after queueing while active child remains -> re-anchors to child in same thread
+  const rootMsg = inGroup('话题根消息', 'ou_bob');
+  rootMsg.event.message.mentions = [];
+  rootMsg.event.message.thread_id = 'omt_reanchor';
+  await post(f.h, f.id, rootMsg);
+  const childMsg = inGroup('话题子消息', 'ou_bob');
+  childMsg.event.message.mentions = [];
+  Object.assign(childMsg.event.message, { parent_id: rootMsg.event.message.message_id, root_id: rootMsg.event.message.message_id, thread_id: 'omt_reanchor' });
+  await post(f.h, f.id, childMsg);
+
+  const reqThread = inGroup('发到话题 omt_reanchor', 'ou_alice');
+  f.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { thread_id: 'omt_reanchor' });
+    return say(res, '根消息撤回后重锚到话题子消息');
+  };
+  const rThread = await post(f.h, f.id, reqThread);
+  await f.service.tick();
+  assert.equal((await done(f, rThread)).state, 'completed');
+  const threadOutbox = f.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', rThread.value.operation_id + ':business-result');
+  assert.equal(threadOutbox.state, 'queued');
+  assert.equal(f.h.store.secrets.open(threadOutbox.payload, 'channel-outbox:' + threadOutbox.id).delivery.reply_to, rootMsg.event.message.message_id);
+
+  await post(f.h, f.id, {
+    header: { ...rootMsg.header, event_id: 'recall-thread-root-' + rootMsg.header.event_id, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: 'oc_group', message_id: rootMsg.event.message.message_id, recall_time: String(Date.now()) },
+  });
+  await f.service.tick();
+  assert.equal(f.h.store.get('SELECT state FROM channel_outbox WHERE id=?', threadOutbox.id).state, 'sent');
+  assert.ok(f.wire.sent.at(-1).url.endsWith('/' + childMsg.event.message.message_id + '/reply'));
+  assert.equal(f.wire.sent.at(-1).reply_in_thread, true);
+
+  // 3) Remote Feishu rejection on /reply (e.g. code 230011 withdrawn remotely before local recall arrives) -> retries once to main stream
+  const remoteMsg = inGroup('远端刚撤回但本地未同步的消息', 'ou_bob');
+  remoteMsg.event.message.mentions = [];
+  await post(f.h, f.id, remoteMsg);
+  let replyRejections = 0;
+  f.wire.state.sendHandler = async url => {
+    if (url.endsWith('/' + remoteMsg.event.message.message_id + '/reply')) {
+      replyRejections++;
+      return Response.json({ code: 230011, msg: 'message has been withdrawn' }, { status: 400 });
+    }
+  };
+  const reqRemote = inGroup('回复那条远端已撤回的消息', 'ou_alice');
+  f.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { reply_to_message_id: remoteMsg.event.message.message_id });
+    return say(res, '远端拒绝后自动回退到主消息流');
+  };
+  const rRemote = await post(f.h, f.id, reqRemote);
+  await f.service.tick();
+  assert.equal((await done(f, rRemote)).state, 'completed');
+  const remoteOutbox = f.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', rRemote.value.operation_id + ':business-result');
+  await f.service.tick();
+  assert.equal(replyRejections, 1);
+  assert.equal(f.h.store.get('SELECT state FROM channel_outbox WHERE id=?', remoteOutbox.id).state, 'sent');
+  assert.ok(f.wire.sent.at(-1).url.endsWith('/im/v1/messages?receive_id_type=chat_id'));
+  assert.equal(f.wire.sent.at(-1).reply_in_thread, undefined);
+  assert.match(JSON.stringify(f.wire.sent.at(-1).content), /远端拒绝后自动回退到主消息流/);
+  const recordedRemote = f.h.store.get("SELECT parent_id, root_id, thread_id FROM channel_messages WHERE chat_id=? AND sender_type='app' ORDER BY created_at DESC LIMIT 1", f.chat.id);
+  assert.deepEqual({ parent_id: recordedRemote.parent_id, root_id: recordedRemote.root_id, thread_id: recordedRemote.thread_id }, { parent_id: '', root_id: '', thread_id: '' });
+
+  // 4) Private chat: anchor recalled AFTER queueing (between retry 1 and retry 2) -> falls back to main stream
+  const pf = await channelFixture(t);
+  await privateChat(pf);
+  const dmAnchor = envelope('私聊稍后撤回的目标消息');
+  pf.modelState.respond = async (_body, res) => say(res, '收到锚点');
+  assert.equal((await finished(pf.h, (await post(pf.h, pf.id, dmAnchor)).value.operation_id)).state, 'completed');
+  await until(() => pf.wire.sent.length >= 1);
+
+  clearInterval(pf.service.timer);
+  const dmReq = envelope('请引用刚才那条私聊');
+  pf.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { reply_to_message_id: dmAnchor.event.message.message_id });
+    return say(res, '私聊锚点撤回后回退直发');
+  };
+  const dmReceipt = await post(pf.h, pf.id, dmReq);
+  await pf.service.tick(); // starts personalMessage -> submits to ManagementAgent
+  const dmInbox = await until(() => pf.h.store.get('SELECT * FROM channel_inbox WHERE id=?', dmReceipt.value.operation_id), r => r?.message_id);
+  await until(() => pf.h.store.get('SELECT state FROM management_messages WHERE id=?', dmInbox.message_id)?.state === 'completed');
+  // Fail first send transiently so the outbox is queued with reply_to and waiting for retry
+  pf.wire.state.sendFailures = 1;
+  await pf.service.tick();
+  const dmOutbox = pf.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', dmReceipt.value.operation_id + ':result');
+  assert.equal(dmOutbox.state, 'retry');
+  assert.equal(pf.h.store.secrets.open(dmOutbox.payload, 'channel-outbox:' + dmOutbox.id).delivery.reply_to, dmAnchor.event.message.message_id);
+
+  // Recall the anchor locally before the retry tick
+  await post(pf.h, pf.id, {
+    header: { ...dmAnchor.header, event_id: 'recall-dm-post-queue-' + dmAnchor.header.event_id, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: 'oc_private', message_id: dmAnchor.event.message.message_id, recall_time: String(Date.now()) },
+  });
+  pf.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', dmOutbox.id);
+  await pf.service.tick();
+  assert.equal(pf.h.store.get('SELECT state FROM channel_outbox WHERE id=?', dmOutbox.id).state, 'sent');
+  assert.ok(pf.wire.sent.at(-1).url.endsWith('/im/v1/messages?receive_id_type=chat_id'), 'private post-queue recall must fall back to main stream');
+  assert.equal(pf.wire.sent.at(-1).reply_in_thread, undefined);
+  assert.match(JSON.stringify(pf.wire.sent.at(-1).content), /私聊锚点撤回后回退直发/);
+});

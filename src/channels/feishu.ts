@@ -189,6 +189,12 @@ export class FeishuAdapter implements ChannelAdapter {
           fail(400, 'channel_card_rejected');
         }
       }
+      const isReplySend = /^\/im\/v1\/messages\/[^/?]+\/reply$/.test(path) && (init.method ?? 'POST') === 'POST';
+      if (isReplySend && (!r.ok || data.code !== 0)) {
+        if (r.status === 404 || [230009, 230010, 230011, 230035, 230071, 230072, 230073, 231003].includes(data.code)) {
+          fail(400, 'channel_reply_target_rejected');
+        }
+      }
       if (message?.fields?.msg_type === 'interactive' && (!r.ok || data.code !== 0)) {
         if (r.status === 400 || [200220, 200800, 200860, 230001, 230099, 300302, 300303].includes(data.code)) {
           logCardRejected();
