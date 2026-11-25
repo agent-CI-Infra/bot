@@ -214,7 +214,7 @@ export function resolveReplyTarget(
 }
 
 /**
- * Re-check a previously resolved target right before queueing delivery.
+ * Re-check a previously resolved target both before queueing and right before each outbox part is sent.
  * If the specific anchor message was recalled after staging, retries resolving the thread_id (when set),
  * otherwise falls back to main-stream delivery (`undefined`) rather than failing a completed answer.
  */

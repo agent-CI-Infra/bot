@@ -1005,11 +1005,53 @@ export class ChannelService {
       for(const id of delivery.resources??[])parts.push({delivery:{...delivery,resources:undefined,content:{}},resource_id:id});
       parts.forEach((part,i)=>store.run('INSERT INTO channel_outbox_parts(outbox_id,part,payload,first_attempt) VALUES(?,?,?,?)',row.id,i,store.secrets.seal(part,'channel-outbox-part:'+row.id+':'+i),part.legacy?row.created_at:null));
     });
-    let last='';
+    const targetChatId = String(protection?.chat_id ?? protection?.personal_chat ?? '')
+      || String(store.get('SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?',
+        event.provider, event.app_id, event.installation_tenant, event.chat_id)?.id ?? '');
+    const targetVisibility = event.chat_type === 'group' && protection?.binding_id
+      ? { projects: [bindingScope(String(protection.binding_id))], ...(protection.source_fence !== undefined ? { fence: String(protection.source_fence) } : {}) }
+      : {};
+    let last = '', droppedReplyTo: string | undefined;
     for(const part of store.all('SELECT * FROM channel_outbox_parts WHERE outbox_id=? ORDER BY part',row.id)){
       if(part.state==='sent'){last=part.remote_id;continue;}
       guard();
       const payload=store.secrets.open(part.payload,'channel-outbox-part:'+row.id+':'+part.part) as any, next=payload.delivery as ChannelDelivery;
+      const persistPart = () => {
+        store.run('UPDATE channel_outbox_parts SET payload=? WHERE outbox_id=? AND part=?',
+          store.secrets.seal(payload, 'channel-outbox-part:' + row.id + ':' + part.part), row.id, part.part);
+      };
+      const stripReplyTarget = (reason: 'ledger_revalidated' | 'feishu_rejected') => {
+        delete next.reply_to;
+        delete next.reply_in_thread;
+        delete next.reply_thread_id;
+        payload.target_fallback = 'main-stream';
+        persistPart();
+        console.warn('feishu_reply_target_fallback', { outbox_id: row.id, part: part.part, chat_id: targetChatId || null, reason, mode: 'main_stream' });
+      };
+      // Re-check any selected reply target against the current local visible ledger right before sending this part (#1385).
+      if (next.reply_to) {
+        if (droppedReplyTo && next.reply_to === droppedReplyTo) {
+          stripReplyTarget('feishu_rejected');
+        } else if (targetChatId) {
+          const currentTarget = {
+            reply_to: next.reply_to,
+            reply_in_thread: !!next.reply_in_thread,
+            ...(next.reply_thread_id ? { thread_id: next.reply_thread_id } : {}),
+          };
+          const revalidated = revalidateReplyTarget(store, targetChatId, currentTarget, targetVisibility);
+          if (!revalidated) {
+            stripReplyTarget('ledger_revalidated');
+          } else if (revalidated.reply_to !== next.reply_to || revalidated.reply_in_thread !== !!next.reply_in_thread || revalidated.thread_id !== next.reply_thread_id) {
+            next.reply_to = revalidated.reply_to;
+            next.reply_in_thread = revalidated.reply_in_thread;
+            if (revalidated.thread_id) next.reply_thread_id = revalidated.thread_id;
+            else delete next.reply_thread_id;
+            if (part.first_attempt) payload.target_fallback = 'reanchored:' + revalidated.reply_to;
+            persistPart();
+            console.warn('feishu_reply_target_fallback', { outbox_id: row.id, part: part.part, chat_id: targetChatId, reason: 'ledger_revalidated', mode: 'reanchored' });
+          }
+        }
+      }
       const checkResource=()=>{
         guard();const resource=store.get('SELECT * FROM channel_resources WHERE id=?',payload.resource_id);
         const chat=resource&&store.get('SELECT * FROM channel_chats WHERE id=?',resource.chat_id);
@@ -1037,37 +1079,55 @@ export class ChannelService {
           const file=await this.media.bytes(resource,()=>{checkResource();});
           const key=await this.adapter(this.source(event),()=>{checkResource();}).upload(file.data,file.name,file.mime,file.image);
           checkResource();next.message_type=file.image?'image':'file';next.content={ [file.image?'image_key':'file_key']:key };
-          store.run('UPDATE channel_outbox_parts SET payload=? WHERE outbox_id=? AND part=?',store.secrets.seal(payload,'channel-outbox-part:'+row.id+':'+part.part),row.id,part.part);
+          persistPart();
         }
       }
       // Feishu's UUID only deduplicates for one hour. After that, an unknown send needs human reconciliation, never a fresh UUID.
       if(part.first_attempt&&Date.now()-part.first_attempt>55*60_000)fail(409,'channel_delivery_unknown');
       store.run("UPDATE channel_outbox_parts SET state='sending',first_attempt=coalesce(first_attempt,?) WHERE outbox_id=? AND part=?",Date.now(),row.id,part.part);
       const check=()=>{guard();if(payload.resource_id)checkResource();};
-      try {
-        last=await this.adapter(this.source(event),check).send(next,digest(payload.legacy?row.id:row.id+':'+part.part));
-        if(this.stopped)fail(409,'channel_stopped');
-        store.transaction(()=>{
-          store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?",last,row.id,part.part);
-          if(payload.card_id)this.cards.attachMessage(String(payload.card_id),last,row.id);
-          record?.(last,next);
-        });
-      } catch (error) {
-        // If Feishu definitively rejected a rich Card JSON 2.0 (HTTP 400 / card schema error), degrade gracefully to native post Markdown.
-        if (!(error instanceof HttpError && error.code === 'channel_card_rejected' && next.rich_card)) throw error;
-        const fallbackText = String(payload.fallback || cardText(next.content));
-        const fallbackPosts = markdownPosts(publicText(fallbackText, configuredRedactor(store)), this.options.origin);
-        const sentFallbacks: { id: string; part: ChannelDelivery }[] = [];
-        for (let fi = 0; fi < fallbackPosts.length; fi++) {
-          const fallbackPart: ChannelDelivery = { ...next, rich_card: undefined, card_id: undefined, card_fallback: undefined, content: fallbackPosts[fi]!, message_type: 'post' };
-          last = await this.adapter(this.source(event), check).send(fallbackPart, digest(row.id + ':' + part.part + ':fallback:' + fi));
-          sentFallbacks.push({ id: last, part: fallbackPart });
+      const partUuid = () => payload.legacy
+        ? digest(row.id)
+        : digest(row.id + ':' + part.part + (payload.target_fallback ? ':' + String(payload.target_fallback) : ''));
+      const deliverPart = async (targetDelivery: ChannelDelivery, key: string): Promise<string> => {
+        try {
+          const remote = await this.adapter(this.source(event), check).send(targetDelivery, key);
+          if (this.stopped) fail(409, 'channel_stopped');
+          store.transaction(() => {
+            store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?", remote, row.id, part.part);
+            if (payload.card_id) this.cards.attachMessage(String(payload.card_id), remote, row.id);
+            record?.(remote, targetDelivery);
+          });
+          return remote;
+        } catch (error) {
+          // If Feishu definitively rejected a rich Card JSON 2.0 (HTTP 400 / card schema error), degrade gracefully to native post Markdown.
+          if (!(error instanceof HttpError && error.code === 'channel_card_rejected' && targetDelivery.rich_card)) throw error;
+          const fallbackText = String(payload.fallback || cardText(targetDelivery.content));
+          const fallbackPosts = markdownPosts(publicText(fallbackText, configuredRedactor(store)), this.options.origin);
+          const sentFallbacks: { id: string; part: ChannelDelivery }[] = [];
+          for (let fi = 0; fi < fallbackPosts.length; fi++) {
+            const fallbackPart: ChannelDelivery = { ...targetDelivery, rich_card: undefined, card_id: undefined, card_fallback: undefined, content: fallbackPosts[fi]!, message_type: 'post' };
+            const fallbackKey = digest(row.id + ':' + part.part + (payload.target_fallback ? ':' + String(payload.target_fallback) : '') + ':fallback:' + fi);
+            const sentId = await this.adapter(this.source(event), check).send(fallbackPart, fallbackKey);
+            sentFallbacks.push({ id: sentId, part: fallbackPart });
+          }
+          if (this.stopped) fail(409, 'channel_stopped');
+          const finalId = sentFallbacks.at(-1)?.id ?? '';
+          store.transaction(() => {
+            store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?", finalId, row.id, part.part);
+            for (const item of sentFallbacks) record?.(item.id, item.part);
+          });
+          return finalId;
         }
-        if (this.stopped) fail(409, 'channel_stopped');
-        store.transaction(() => {
-          store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?", last, row.id, part.part);
-          for (const item of sentFallbacks) record?.(item.id, item.part);
-        });
+      };
+      try {
+        last = await deliverPart(next, partUuid());
+      } catch (error) {
+        // If Feishu definitively rejected the reply target (e.g. withdrawn remotely before recall arrived locally), retry once directly to the main stream.
+        if (!(error instanceof HttpError && error.code === 'channel_reply_target_rejected' && next.reply_to)) throw error;
+        droppedReplyTo = next.reply_to;
+        stripReplyTarget('feishu_rejected');
+        last = await deliverPart(next, partUuid());
       }
     }
     return last;
