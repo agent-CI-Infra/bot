@@ -532,10 +532,12 @@ test('IM commands and revision conflicts retain the shared business outcome with
   const wrong = await submit('obsolete-revision');
   // #533: a stale revision is an observation the assistant can correct, so the turn finishes; the refused command still writes nothing.
   assert.equal(h.store.get('SELECT state FROM management_messages WHERE id=?', wrong.message_id).state, 'completed');
-  assert.equal(JSON.parse(f.requests[1].messages.filter(m => m.role === 'tool')[0].content).error, 'management_revision_conflict');
+  const refused = JSON.parse(f.requests[1].messages.filter(m => m.role === 'tool')[0].content);
+  // #1361: the refusal names the current revision, so the assistant can check and retry once instead of reading again.
+  assert.equal(refused.error, 'management_revision_conflict'); assert.deepEqual(refused.detail, { current_revision: revision });
   assert.equal(h.store.get('SELECT count(*) n FROM management_commands WHERE expected_revision=?', 'obsolete-revision').n, 0);
   const webConflict = await admin('/api/management/commands', 'POST', { operation: 'manager.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: 'obsolete-revision', idempotency_key: 'web-conflict', source_conversation: 'web', source_message: 'web-conflict' });
-  assert.equal(webConflict.value.error, 'management_revision_conflict');
+  assert.equal(webConflict.status, 409); assert.equal(webConflict.value.error, 'management_revision_conflict'); assert.equal(webConflict.value.detail.current_revision, revision);
   // A policy left by an older version is no longer read: the private chat's command runs at once, with the console's receipt.
   h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"manager.update\"]')");
   const pending = await submit(), op = h.store.get("SELECT * FROM management_commands WHERE channel='im'");

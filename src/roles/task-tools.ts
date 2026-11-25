@@ -154,7 +154,8 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
           observation = spec.execute ? await spec.execute(name, args) : { error: 'tool_not_allowed' };
         } catch (error) {
           await spec.guard();
-          if(error instanceof HttpError&&[400,403,404,409,413,415].includes(error.status))observation={error:error.code,...(error.field?{field:error.field}:{}),instruction:'Correct this call or choose another authorized action. The session remains active.'};
+          // detail carries the facts needed to correct the call (such as a conflict's current revision); redacted below.
+          if(error instanceof HttpError&&[400,403,404,409,413,415].includes(error.status))observation={error:error.code,...(error.field?{field:error.field}:{}),...(error.detail!==undefined?{detail:error.detail}:{}),instruction:'Correct this call or choose another authorized action. The session remains active.'};
           else{const feedback = submissionFeedback(spec,error);
           if (!feedback) throw error;
           observation = feedback;}

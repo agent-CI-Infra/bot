@@ -36,7 +36,8 @@ test('a recoverable tool status returns the tool result to the model and the tur
 
 test('a conflicting command revision also returns to the model instead of ending the turn', async t => {
   const f = await managementFixture(t);
-  const revision = (await f.admin('/api/management/query', 'POST', { operation: 'get_effective_config', target: { project_id: '101' }, arguments: {} })).value.revision;
+  const config = async () => (await f.admin('/api/management/query', 'POST', { operation: 'get_effective_config', target: { project_id: '101' }, arguments: {} })).value.revision;
+  const revision = await config();
   await f.admin('/api/management/commands', 'POST', { operation: 'manager.update', target: { project_id: '101' }, arguments: { prompt: 'New default' }, expected_revision: revision, idempotency_key: 'stale-anchor', source_conversation: 'fixture-conversation', source_message: 'stale-anchor' });
   f.modelState.respond = async (body, res) => {
     const observations = toolResults(body);
@@ -44,9 +45,12 @@ test('a conflicting command revision also returns to the model instead of ending
     assert.equal(observations[0].error, 'management_revision_conflict');
     reply(res, '配置已经被改过，我按最新版本重试。');
   };
+  const current = await config(); assert.notEqual(current, revision);
   const w = await web(f, '把提示词改成第二版');
   assert.equal(w.history.messages[0].state, 'completed', w.history.messages[0].error);
-  assert.equal(JSON.parse(toolMessages(f.requests[1])[0].content).error, 'management_revision_conflict');
+  // #1361: the observation names the current revision, the one the model retries with.
+  const refused = JSON.parse(toolMessages(f.requests[1])[0].content);
+  assert.equal(refused.error, 'management_revision_conflict'); assert.deepEqual(refused.detail, { current_revision: current });
 });
 
 // A refusal (403) or a business-state 409 (#533, maintainers' decision on #1256) comes back to the model as an observation

@@ -140,8 +140,12 @@ export class ManagementService {
       if(!t)fail(404,'task_not_found');
       return parameterHash({task:t,record:this.store.get('SELECT * FROM task_records WHERE task_id=?',target.task_id!),instructions:this.store.get("SELECT max(id) AS id FROM task_history WHERE task_id=? AND type='supplemental_instruction'",target.task_id!)});
     }
+    // A project's revision covers its configuration only (#1361). Of the computer, only its generation (a reset) and desired
+    // state count: a person sets desired by starting or stopping it, and the manager sets it to stopped when recovery fails,
+    // which moves the revision once. state and revision are what the manager reports as the computer works; a busy computer
+    // changes them every few seconds, so no read-then-submit caller could ever match them.
     return parameterHash({policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',target.project_id),
-      environment:this.store.hasTable('project_environments')?this.store.get('SELECT generation,state,desired,revision FROM project_environments WHERE repository_id=?',target.project_id):null,
+      environment:this.store.hasTable('project_environments')?this.store.get('SELECT generation,desired FROM project_environments WHERE repository_id=?',target.project_id):null,
       console_spec:this.store.hasTable('computer_console_specs')?this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',target.project_id):null,
       schedules:this.store.all('SELECT id,revision FROM schedules WHERE project_id=? ORDER BY id',target.project_id),
       subscriptions:this.store.all('SELECT id,revision FROM notification_subscriptions WHERE project_id=? ORDER BY id',target.project_id),
@@ -150,6 +154,12 @@ export class ManagementService {
       sources:this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',target.project_id),
       models:this.store.all(`SELECT id,version,model_name,api_url,api_key FROM models WHERE repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
         (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))) ORDER BY id`,target.project_id,target.project_id)});
+  }
+  /** Refuses a command read against an older revision; the refusal names the current one, so the caller can check and retry once. */
+  expectRevision(target:ManagementCommand['target'],expected:string):string{
+    const current=this.revision(target);
+    if(current!==expected)fail(409,'management_revision_conflict','expected_revision',{current_revision:current});
+    return current;
   }
   private policy(actor:ActorContext,project:string): Row|undefined {
     const tenant=this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',project)?.tenant_id;
@@ -324,8 +334,7 @@ export class ManagementService {
     const previous=this.store.get('SELECT * FROM management_commands WHERE principal_id=? AND idempotency_key=?',actor.principal_id,command.idempotency_key);
     if(previous){if(previous.parameter_hash!==hash)fail(409,'idempotency_conflict');return this.receipt(previous);}
     const row=this.store.transaction(()=>{
-      this.check(actor,command);const current=this.revision(command.target);
-      if(current!==command.expected_revision)fail(409,'management_revision_conflict');
+      this.check(actor,command);const current=this.expectRevision(command.target,command.expected_revision);
       // Authorized commands execute directly: what an actor may do is configured in the console, with no approval step.
       const id=randomId(),time=now();
       const tenantId=command.target.project_id==='platform'?'':this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id;
@@ -358,18 +367,18 @@ export class ManagementService {
           const found=await extension.reconcile(actor,command,id);this.sourceGuard?.(row);this.check(actor,command);
           if(found)this.finish(id,'succeeded',found);else this.finish(id,'unknown',{error:'external_result_unknown',reconcile_required:true});
         }else{
-          if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
+          this.expectRevision(command.target,command.expected_revision);
           this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
           const result=await extension.execute(actor,command,id);this.sourceGuard?.(row);this.check(actor,command);this.finish(id,'succeeded',result);
         }
       }else if(asyncComputerOperations.has(command.operation)){
-        if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
+        this.expectRevision(command.target,command.expected_revision);
         this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
         const result=await this.executeComputerCommand(actor,command);
         this.finish(id,'succeeded',result);
       }else this.store.transaction(()=>{
         this.check(actor,command);
-        if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
+        this.expectRevision(command.target,command.expected_revision);
         const user=this.user(actor),{operation,target,arguments:args}=command;
         let result:Json;
         if(operation==='project.update'){

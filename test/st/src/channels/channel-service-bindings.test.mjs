@@ -330,6 +330,12 @@ test('other roles\' tasks follow the binding\'s items: read lists progress, writ
   assert.equal(command.principal_id, binding.principal_id); assert.equal(command.channel, 'im'); assert.equal(command.source_conversation, f.chat.id);
   assert.equal(command.source_message, 'feishu:' + pause.value.operation_id);
   assert.equal((await f.admin('/api/management/commands/' + receipt.id)).value.state, 'succeeded');
+  // A stale revision is refused and the observation names the task's current one (#1361); nothing changes.
+  const paused = (await f.admin('/api/management/query', 'POST', { operation: 'get_task', target: { project_id: '101', task_id: 'blocked' }, arguments: {} })).value.revision;
+  script = (body, res, seen) => !seen.length ? call(res, 'manage_project_task', { repository: repo(101), task_id: 'blocked', operation: 'cancel', expected_revision: 'obsolete-revision' }) : say(res, '任务已变化。');
+  await done(f, await post(f.h, f.id, groupMessage('取消 blocked 任务')));
+  assert.deepEqual(observations(f.requests.at(-1))[0], { error: 'management_revision_conflict', detail: { current_revision: paused } });
+  assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status, 'paused');
   // The foreign task is out of scope even with write access.
   script = (body, res, seen) => !seen.length ? call(res, 'manage_project_task', { repository: repo(201), task_id: 'foreign', operation: 'cancel', expected_revision: 'x' }) : say(res, '不在范围内。');
   await done(f, await post(f.h, f.id, groupMessage('取消 foreign 任务')));

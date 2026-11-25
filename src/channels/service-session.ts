@@ -56,7 +56,7 @@ export const serviceTools = [readToolResult,
     { repository, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, ['repository']),
   fn('read_project_task', 'Read one task of a repository in scope: detail (default), logs, runs or events, with pagination.',
     { repository, task_id: { type: 'string' }, section: { type: 'string', enum: ['detail', 'logs', 'runs', 'events'] }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50 } }, ['repository', 'task_id']),
-  fn('manage_project_task', 'Change a task of a repository in scope through the management service, after reading its current revision: add an instruction for the task (instructions), change its goal, scope or acceptance criteria (contract), cancel, pause or retry it. Which operations you may use depends on your permissions; you never direct a single role. The receipt alone proves the effect.',
+  fn('manage_project_task', 'Change a task of a repository in scope through the management service, after reading its current revision: add an instruction for the task (instructions), change its goal, scope or acceptance criteria (contract), cancel, pause or retry it. Which operations you may use depends on your permissions; you never direct a single role. The receipt alone proves the effect. A management_revision_conflict refusal carries the task\'s current revision in detail.current_revision: check that the change still fits the task, then retry once with it.',
     { repository, task_id: { type: 'string' }, operation: { type: 'string', enum: ['pause', 'cancel', 'retry', 'instructions', 'contract'] }, instruction: { type: 'string', maxLength: 8000 },
       contract: contractSchema, expected_revision: { type: 'string' } },
     ['repository', 'task_id', 'operation', 'expected_revision']),
@@ -342,7 +342,8 @@ export class ChannelServiceSessions {
         check();
         if (error.code === 'operation_not_allowed') return { error: error.code, detail: 'The group binding does not permit this operation.' };
         if (error.code === 'channel_service_task_not_owned') return { error: error.code, detail: 'This group may add instructions to or cancel only tasks created through its own binding.' };
-        return { error: error.code, ...(error instanceof TaskError && error.detail ? { detail: redactor.text(error.detail) } : {}) };
+        if (error instanceof HttpError) return { error: error.code, ...(error.detail !== undefined ? { detail: redactor.clean(error.detail) } : {}) };
+        return { error: error.code, ...(error.detail ? { detail: redactor.text(error.detail) } : {}) };
       }
     };
     const resultFiles=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>assistantResultOwner(ownerId({kind:'group',subject:chat.id,tenant:String(chat.installation_tenant??'')})),check,redactor.values,()=>computing&&permitsTool(permissions(),'run_command'));
