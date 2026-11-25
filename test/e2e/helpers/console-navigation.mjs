@@ -38,10 +38,19 @@ export async function consoleNavigate(page, name) {
   if (['项目', '用量与成本'].includes(name) && await bar.isVisible()) { await bar.click(); return; }
   const settings = name === '全局设置' ? '全局设置' : personal.includes(name) || name === '设置' || name === '个人设置' ? '个人设置' : null;
   if (!settings) return goHash();
-  await page.locator('#console-account').click();
-  const entry = page.locator('#console-account-menu').getByRole('link', { name: settings, exact: true });
-  if (!await entry.isVisible()) { await page.keyboard.press('Escape'); return goHash(); }
-  await entry.click();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.locator('#console-account').click();
+    const entry = page.locator('#console-account-menu').getByRole('link', { name: settings, exact: true });
+    if (!await entry.isVisible()) { await page.keyboard.press('Escape'); return goHash(); }
+    try {
+      // An async post-login shell sync (e.g. channel-console personalCanManageApps) can close the menu between
+      // isVisible() and click(); re-open once rather than waiting out the full 30s test timeout on a hidden menu.
+      await entry.click({ timeout: 2000 });
+      break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+    }
+  }
   // A personal page other than the first one is picked from the phone's 当前页面 list.
   if (settings === '个人设置' && address !== '#/identity' && address !== '#/preferences') {
     await page.getByLabel('当前页面', { exact: true }).selectOption(address);
