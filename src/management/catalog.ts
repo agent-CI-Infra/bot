@@ -1,7 +1,7 @@
 import { fail, type Json } from '../core/security.js';
 import { str, obj } from './catalog-base.js';
 import { planSchema, subscriptionSchema, schedulingCommands } from '../schedules/schema.js';
-import { MAX_SKILL_BUNDLES, SKILL_MAX_FILES } from '../roles/skill-library.js';
+import { MAX_SKILL_BUNDLES, SKILL_MAX_FILES } from '../roles/builtin-skills.js';
 
 export { str, obj } from './catalog-base.js';
 const bool = { type: 'boolean' }, integer = { type: 'integer', minimum: 0 };
