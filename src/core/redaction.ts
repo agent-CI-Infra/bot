@@ -9,7 +9,10 @@ const fields: Record<string, string[]> = {
   'ssh-target': ['password', 'private_key'],
   'channel-credential': ['app_secret', 'verification_token', 'encrypt_key', 'app_ticket']
 };
-const cache = new WeakMap<Store, { revision: string; redactor: Redactor }>();
+// One entry per project (and '' for deployment-wide callers): a project's SSH secrets make its row set differ, and
+// callers with and without a project alternate on the trace path, so one shared entry would be rebuilt every time.
+const cache = new WeakMap<Store, Map<string, { revision: string; redactor: Redactor }>>();
+const cachedProjects = 256;
 
 // Rotations, deletions and rolled-back updates must take effect immediately. Reuse the compiled
 // literals while the sealed rows are unchanged, including on the trace and message-history paths.
@@ -20,7 +23,8 @@ export function configuredRedactor(store: Store, project: string | null = null):
     UNION ALL SELECT 'ssh-target',id,sealed FROM ssh_targets WHERE owner_project=? OR id IN
         (SELECT target_id FROM ssh_target_projects WHERE repository_id=?)
     UNION ALL SELECT 'channel-credential',id,sealed FROM channel_credentials`,project,project);
-  const revision = JSON.stringify(rows), current = cache.get(store);
+  const revision = JSON.stringify(rows), entries = cache.get(store) ?? new Map(), key = project ?? '', current = entries.get(key);
+  if (!cache.has(store)) cache.set(store, entries);
   if (current?.revision === revision) return current.redactor;
   const redactor = new Redactor();
   for (const row of rows) {
@@ -30,7 +34,8 @@ export function configuredRedactor(store: Store, project: string | null = null):
       else redactor.add(credential[field]);
     }
   }
-  cache.set(store,{revision,redactor});
+  entries.delete(key); entries.set(key, { revision, redactor });
+  if (entries.size > cachedProjects) entries.delete(entries.keys().next().value!);
   return redactor;
 }
 

@@ -99,6 +99,9 @@ export function sshTargetsApi(store: Store, user: Actor, method: string, url: UR
   if (secret === undefined && identityChanged) return fail(400,'ssh_credential_required');
   if (secret !== undefined && (typeof secret !== 'string' || !secret.length || secret.includes('\0') || secret.length > 65536 ||
       (auth === 'password' && /[\r\n]/.test(secret)))) return fail(400,'invalid_ssh_credential');
+  // Every output of the project is redacted for the password literally, whatever its length: one or two characters
+  // would garble ordinary text, so a password has at least four.
+  if (auth === 'password' && typeof secret === 'string' && secret.length < 4) return fail(400,'invalid_ssh_credential','password_too_short');
   if (auth === 'key' && typeof secret === 'string' &&
       !/^-----BEGIN ((?:OPENSSH |RSA |EC )?PRIVATE KEY)-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END \1-----\s*$/.test(secret))
     return fail(400,'invalid_ssh_credential');

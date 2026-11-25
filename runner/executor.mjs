@@ -79,6 +79,7 @@ async function executeInner(input, options = {}) {
       ...(options.onOutput ? { _onOutput: options.onOutput } : {}),
       ...(options.onSpawn ? { _onSpawn: options.onSpawn } : {}),
       ...(options.sshEnv ? { _sshEnv: options.sshEnv } : {}),
+      ...(options.onAttach ? { _onAttach: options.onAttach } : {}),
     });
   }
   if (input.type.startsWith('git_')) return storeOperation(input);

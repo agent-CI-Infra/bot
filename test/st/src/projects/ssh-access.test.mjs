@@ -20,7 +20,15 @@ import { publicKeyLine, renderSshConfig } from '../../../../runner/ssh-config.mj
 // Real OpenSSH (ssh, sshd-side ssh2 on loopback) against the control plane's grant checks and the computer's agent
 // broker: what a task's `ssh <alias>` does on a project computer, with -F instead of the image's system include.
 const code = fileURLToPath(new URL('../../../../runner', import.meta.url));
-const keyPair = () => ssh2.utils.generateKeyPairSync('ed25519').private;
+// ssh2's generator drops a leading zero byte of some ed25519 keys (about 1 in 250) and then cannot parse them itself;
+// ssh-keygen keys are not affected. Draw again until both halves parse.
+function generated(type, options) {
+  for (;;) {
+    const pair = ssh2.utils.generateKeyPairSync(type, options);
+    if (!(ssh2.utils.parseKey(pair.private) instanceof Error) && !(ssh2.utils.parseKey(pair.public) instanceof Error)) return pair;
+  }
+}
+const keyPair = () => generated('ed25519').private;
 const rsaKey = () => generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ format: 'pem', type: 'pkcs1' });
 
 function sshServer(users) {
@@ -61,9 +69,9 @@ function run(file, args, env) {
 test('a registered process group uses its run\'s targets with native ssh; other processes, setsid and revoked runs get ssh_target_denied', { timeout: 120_000 }, async t => {
   const h = await harness(t), { admin } = await setup(h), acc = await account(admin);
   await repository(admin, acc.id, '101');
-  const keys = { direct: keyPair(), tunnel: ssh2.utils.generateKeyPairSync('rsa', { bits: 2048 }).private, qa: keyPair(), pinned: keyPair() };
+  const keys = { direct: keyPair(), tunnel: generated('rsa', { bits: 2048 }).private, qa: keyPair(), pinned: keyPair() };
   const parsed = Object.fromEntries(Object.entries(keys).map(([name, key]) => [name, ssh2.utils.parseKey(key)]));
-  const { server, seen } = sshServer({ deploy: { key: parsed.direct }, tunnel: { key: parsed.tunnel }, board: { password: 'p!4' }, qa: { key: parsed.qa } });
+  const { server, seen } = sshServer({ deploy: { key: parsed.direct }, tunnel: { key: parsed.tunnel }, board: { password: 'p!4z' }, qa: { key: parsed.qa } });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
   // A slow echo service behind a tunnel: it answers after the caller has finished sending.
@@ -90,11 +98,11 @@ test('a registered process group uses its run\'s targets with native ssh; other 
   const ids = {
     direct: await create({ ...base, alias: 'build-box', username: 'deploy', auth: 'key', private_key: keys.direct }),
     tunnel: await create({ ...base, alias: 'lab-board', username: 'tunnel', auth: 'key', private_key: keys.tunnel, route: 'tunnel' }),
-    password: await create({ ...base, alias: 'old-board', username: 'board', auth: 'password', password: 'p!4' }),
+    password: await create({ ...base, alias: 'old-board', username: 'board', auth: 'password', password: 'p!4z' }),
     qa: await create({ ...base, alias: 'qa-only', username: 'qa', auth: 'key', private_key: keys.qa, allowed_roles: ['qa'] }),
     pinned: await create({ ...base, alias: 'wrong-pin', username: 'deploy', auth: 'key', private_key: keys.pinned, host_key_sha256: 'SHA256:' + 'B'.repeat(43) }),
-    relayed: await create({ ...base, alias: 'relay-box', username: 'relay', auth: 'password', password: 'r3', route: 'tunnel', relay_node: 'lab-node-1' }),
-    echo: await create({ ...base, port: echo.address().port, alias: 'echo-box', username: 'echo', auth: 'password', password: 'e1', route: 'tunnel' }),
+    relayed: await create({ ...base, alias: 'relay-box', username: 'relay', auth: 'password', password: 'r3r3', route: 'tunnel', relay_node: 'lab-node-1' }),
+    echo: await create({ ...base, port: echo.address().port, alias: 'echo-box', username: 'echo', auth: 'password', password: 'e1e1', route: 'tunnel' }),
   };
   // A relay node is a tunnel setting; it is reserved for compute nodes and refused on other routes.
   assert.equal((await admin(`${project}/${ids.relayed}`, 'PUT', { route: 'direct' })).status, 400);
@@ -117,7 +125,7 @@ test('a registered process group uses its run\'s targets with native ssh; other 
   const grant = sshAccess.issue({ store: h.store, repository: '101', task: 'task-1', role: 'dev', trusted: true, live: () => running });
   assert.deepEqual(new Set(grant.payload.allowed), new Set([ids.direct, ids.tunnel, ids.password, ids.pinned, ids.relayed, ids.echo]));
   assert.equal(grant.payload.password, true);
-  assert.ok(!JSON.stringify(grant.payload).includes('p!4') && !JSON.stringify(grant.payload).includes('PRIVATE KEY'));
+  assert.ok(!JSON.stringify(grant.payload).includes('p!4z') && !JSON.stringify(grant.payload).includes('PRIVATE KEY'));
   mkdirSync(keyDir);
   for (const row of grant.payload.targets) if (row.auth === 'key') writeFileSync(join(keyDir, row.id + '.pub'), publicKeyLine(row));
   const config = join(dir, 'ssh_config');
@@ -147,7 +155,7 @@ test('a registered process group uses its run\'s targets with native ssh; other 
   assert.equal(tunnel.code, 0, tunnel.stderr);
   const password = await registered(ssh('old-board'));
   assert.equal(password.code, 0, password.stderr);
-  assert.ok(!password.stdout.includes('p!4') && !password.stderr.includes('p!4'));
+  assert.ok(!password.stdout.includes('p!4z') && !password.stderr.includes('p!4z'));
   assert.equal(decoy, 0);
   // Through daemon and control plane, the last answer arrives after the caller ended its side.
   const halfClosed = await registered('printf ping | "$NODE" "$GATE" tunnel "$AGENT_SOCKET" "$ECHO_ID"');
@@ -188,18 +196,18 @@ test('a registered process group uses its run\'s targets with native ssh; other 
   const audit = h.store.all("SELECT action,resource_id,user_id FROM audit WHERE action LIKE 'ssh_target.%'");
   for (const action of ['ssh_target.sign.ok', 'ssh_target.password.released', 'ssh_target.tunnel.opened', 'ssh_target.check.denied'])
     assert.ok(audit.some(row => row.action === action), action);
-  assert.ok(!JSON.stringify(audit).includes('p!4'));
+  assert.ok(!JSON.stringify(audit).includes('p!4z'));
 });
 
 test('short registered passwords are redacted from trace events and the tool output of the project', async t => {
   const h = await harness(t), { admin } = await setup(h), acc = await account(admin);
   await repository(admin, acc.id, '101');
   const created = await admin('/api/repositories/101/ssh-targets', 'POST', { alias: 'board', host: 'board.invalid', username: 'root',
-    host_key_sha256: 'SHA256:' + 'A'.repeat(43), auth: 'password', password: 'pw7', allowed_roles: ['dev'] });
+    host_key_sha256: 'SHA256:' + 'A'.repeat(43), auth: 'password', password: 'pw7!', allowed_roles: ['dev'] });
   assert.equal(created.status, 201);
-  assert.equal(configuredRedactor(h.store, '101').text('login pw7 ok'), 'login [REDACTED] ok');
+  assert.equal(configuredRedactor(h.store, '101').text('login pw7! ok'), 'login [REDACTED] ok');
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('ssh-task','101','task.request','running','ssh fixture','{}')");
-  traceEvent(h.store, 'ssh-task', 'command', { output: 'echo pw7' });
+  traceEvent(h.store, 'ssh-task', 'command', { output: 'echo pw7!' });
   const stored = JSON.stringify(h.store.all("SELECT * FROM task_history WHERE task_id='ssh-task'"));
-  assert.ok(stored.length > 2 && !stored.includes('pw7'), stored);
+  assert.ok(stored.length > 2 && !stored.includes('pw7!'), stored);
 });

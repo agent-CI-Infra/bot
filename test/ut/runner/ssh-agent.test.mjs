@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer as createHttpServer } from 'node:http';
 import { connect } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -231,4 +231,46 @@ test('commands inherit the SSH environment only from an agent the daemon started
 
 test('a socket path the kernel would truncate is refused instead of bound elsewhere', async () => {
   await assert.rejects(new SshAgentBroker({ socketPath: '/tmp/' + 'x'.repeat(110) + '.sock' }).start(), /ssh_agent_socket_path_too_long/);
+});
+
+test('a running agent the daemon started moves to a newer grant; a process it did not start never gets one', async t => {
+  const { broker, socket } = await fixture(t);
+  const first = payload([id(1)], [target(1), target(2)], 'a'), second = payload([id(2)], [target(1), target(2)], 'b');
+  // The agent waits for a line on stdin before each child, so the test can re-arm between them.
+  const script = `
+    const { spawn } = await import('node:child_process');
+    const child = () => new Promise(resolve => { const c = spawn(process.execPath, ['--input-type=module', '-e', process.env.CLIENT], { detached: true, stdio: ['ignore', 'pipe', 'inherit'] }); let out = ''; c.stdout.on('data', d => out += d); c.on('close', () => resolve(out.trim())); });
+    const lines = (await import('node:readline')).createInterface({ input: process.stdin });
+    for await (const _ of lines) console.log(await child());`;
+  const agent = spawn(process.execPath, ['--input-type=module', '-e', script], { detached: true, env: { ...process.env, CLIENT: client(socket) }, stdio: ['pipe', 'pipe', 'inherit'] });
+  t.after(() => { try { process.kill(-agent.pid, 'SIGKILL'); } catch {} });
+  assert.ok(broker.register(agent.pid, first, 'agent'));
+  const answers = [];
+  agent.stdout.on('data', data => answers.push(...String(data).trim().split('\n').map(line => JSON.parse(line).keys)));
+  const ask = async count => { agent.stdin.write('next\n'); while (answers.length < count) await new Promise(resolve => setTimeout(resolve, 20)); };
+  await ask(1);
+  assert.ok(broker.rearm(agent.pid, second));
+  await ask(2);
+  assert.deepEqual(answers, [['host-1'], ['host-2']]);
+  // Only a process registered as an agent can be re-armed: not a pid read from a file a task could write.
+  const stranger = spawn('sleep', ['5'], { detached: true });
+  t.after(() => { try { process.kill(stranger.pid, 'SIGKILL'); } catch {} });
+  assert.equal(broker.rearm(stranger.pid, second), false);
+  assert.equal(broker.rearm(agent.pid, { ...second, grant: 'not-a-grant' }), false);
+  agent.stdin.end();
+});
+
+test('starting or continuing a session that is already running hands its pid to the daemon instead of spawning', async t => {
+  const { agentOperation } = await import('../../../runner/agent.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'agent-attach-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stat = readFileSync('/proc/1/stat', 'utf8'), boot = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+  mkdirSync(join(root, 'agent'), { recursive: true });
+  writeFileSync(join(root, 'agent', 'state.json'), JSON.stringify({ state: 'running', pid: process.pid, boot }));
+  const attached = [], spawned = [];
+  const hooks = { _onAttach: pid => attached.push(pid), _onSpawn: pid => spawned.push(pid) };
+  assert.deepEqual(await agentOperation({ type: 'workspace_agent_start', ...hooks }, root), { started: true });
+  assert.deepEqual(await agentOperation({ type: 'workspace_agent_continue', ...hooks }, root), { written: true });
+  assert.deepEqual(attached, [process.pid, process.pid]);
+  assert.deepEqual(spawned, []);
 });
