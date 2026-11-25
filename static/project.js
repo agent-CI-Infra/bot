@@ -6,6 +6,7 @@
  * project/page.js
  * project/basic.js
  * project/triggers.js
+ * project/ssh-targets.js
  * project/machine.js
  * project/task-models.js
  * project/model-catalog.js

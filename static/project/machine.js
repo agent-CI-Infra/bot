@@ -2,7 +2,8 @@ function machineSection(globalSettings = false) {
   const { environment } = current, pc = environment?.environment.computer, isSuper = me.role === 'super_admin';
   const canConfigure = isSuper || environment?.can_configure === true, editable = canConfigure && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
-  if (!pc) return [status, ...(globalSettings ? [] : [concurrencyPage()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
+  const sshCard = !globalSettings && (canConfigure || me.role === 'super_admin') ? sshTargetsCard(current.id, isSuper) : null;
+  if (!pc) return [status, ...(sshCard ? [sshCard] : []), ...(globalSettings ? [] : [concurrencyPage()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
   // The saved spec is the project's own layer (#935: no repository file adds to it); without it the form cannot tell
   // the project's values from the defaults.
   const unread = !current.rules;
@@ -228,6 +229,7 @@ function machineSection(globalSettings = false) {
   if (concurrency) page.append(concurrency);
   if (nodeBinding) page.append(nodeBinding);
   page.append(form);
+  if (sshCard) page.append(sshCard);
   if (projectTools) page.append(projectTools);
   if (cliConfig) page.append(cliConfig);
   if (canEdit) {

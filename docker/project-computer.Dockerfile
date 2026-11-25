@@ -2,7 +2,7 @@ FROM node:22-bookworm-slim
 # Common toolchains for reviewing and developing repositories. Repositories add their own system packages through the
 # manager (a derived image) and user-level tools through their setup script; nothing inside the computer runs as root.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git git-lfs gh ca-certificates openssh-client curl wget jq ripgrep file less procps \
+      git git-lfs gh ca-certificates openssh-client rsync curl wget jq ripgrep file less procps \
       zip unzip xz-utils bzip2 patch make gcc g++ pkg-config sqlite3 \
       python3 python3-pip python3-venv python3-dev python-is-python3 \
       python3-pil imagemagick \
@@ -30,7 +30,7 @@ RUN chmod 755 /usr/local/bin/bot-chromium /usr/local/bin/bot-desktop && chmod -R
 ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium \
     PREINSTALLED_DIR=/opt/preinstalled \
     PATH=/opt/preinstalled/bin:/opt/preinstalled/home/.local/bin:/opt/preinstalled/npm-global/bin:/opt/preinstalled/python/bin:/opt/preinstalled/cargo/bin:/opt/preinstalled/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/project-tools/bin
-LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium, xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg"
+LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, openssh-client, rsync, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium, xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg"
 USER 10001:10001
 WORKDIR /workspace
 CMD ["node", "/opt/runner/daemon.mjs"]
