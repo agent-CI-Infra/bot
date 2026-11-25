@@ -1048,10 +1048,9 @@ export class ClusterHub extends EventEmitter {
       if (method !== 'GET') fail(405, 'method_not_allowed');
       req.setTimeout(0);
       res.setTimeout(0);
-      const requestedWait = Number(url.searchParams.get('timeout_ms') || this.longPollMaxMs);
-      const waitMs = Number.isFinite(requestedWait)
-        ? Math.max(100, Math.min(this.longPollMaxMs, Math.trunc(requestedWait)))
-        : this.longPollMaxMs;
+      // Long-poll hold duration is strictly controlled by the server's bounded longPollMaxMs (<= 25s),
+      // never derived from client query parameters.
+      const waitMs = this.longPollMaxMs;
       this.clusterStore.recordHeartbeat(nodeId, { transport: 'long_poll' });
       if (url.searchParams.get('resume') === '1') {
         this._resumeOperationsForNode(nodeId);

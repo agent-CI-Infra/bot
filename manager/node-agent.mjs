@@ -533,7 +533,6 @@ export class NodeAgent extends EventEmitter {
         const controller = new AbortController();
         this._pollAbort = controller;
         const pollUrl = new URL('/cluster/nodes/poll', this.centerUrl);
-        pollUrl.searchParams.set('timeout_ms', String(this.longPollTimeoutMs));
         if (needsResume) pollUrl.searchParams.set('resume', '1');
 
         let res;
