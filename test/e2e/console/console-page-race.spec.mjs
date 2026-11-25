@@ -40,10 +40,22 @@ test('#1369 旧地址 #/more 打开当前范围的控制台首页，不请求 /a
     await expect(page.locator('.workspace-overview')).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
-    // A reload of a saved #/more starts in the remembered scope.
-    await page.goto(h.admin + '/#/more');
-    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
-    await expect(page.locator('.workspace-overview')).toBeVisible();
+    // Whatever a saved link appended to the address redirects the same way.
+    for (const saved of ['#/more/', '#/more/old-entry', '#/more?from=bookmark']) {
+      await page.evaluate(hash => { location.hash = hash; }, saved);
+      await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+      await expect(page.locator('[data-page-not-found]')).toHaveCount(0);
+    }
+    // A fresh load of a saved #/more starts in the remembered scope. page.goto() to an address that differs only in its
+    // fragment would stay in the same document, so a new tab of the same session (same localStorage) does the real load.
+    for (const saved of ['#/more', '#/more?from=bookmark']) {
+      const fresh = await page.context().newPage();
+      watch(fresh, tabs, errors);
+      await fresh.goto(h.admin + '/' + saved);
+      await expect(fresh).toHaveURL(/#\/projects\/101\/overview$/);
+      await expect(fresh.locator('.workspace-overview')).toBeVisible();
+      await fresh.close();
+    }
     expect(tabs.join('\n')).toBe('');
     expect(errors).toEqual([]);
   } finally { await h.stop(); }

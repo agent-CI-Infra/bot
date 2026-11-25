@@ -10,7 +10,7 @@ test('unknownAddress separates unknown console addresses from known ones and in-
   for (const hash of ['#/nonexistent', '#/nonexistent/deeper', '#/events', '#/projects/abc', '#/projects/101/Members', '#/projects/101/a-b', '#/Projects', '#/123'])
     assert.equal(unknown(hash), true, hash);
   for (const hash of ['', '#', '#/', '#main-content', '#external', '#/projects', '#/projects/101', '#/projects/101/overview', '#/projects/101/bogus',
-    '#/board', '#/costs', '#/inbox', '#/inbox/101', '#/more', '#/new-task', '#/new-task/2', '#/conversations', '#/identity',
+    '#/board', '#/costs', '#/inbox', '#/inbox/101', '#/more', '#/more/', '#/more?from=bookmark', '#/new-task', '#/new-task/2', '#/conversations', '#/identity',
     '#/identity/feishu?section=groups', '#/preferences', '#/management', '#/settings', '#/settings/users', '#/settings/onboarding/3', '#/design',
     '#/reviews', '#/developments', '#/accounts', '#/users'])
     assert.equal(unknown(hash), false, hash);
