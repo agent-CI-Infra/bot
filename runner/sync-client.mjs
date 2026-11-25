@@ -22,6 +22,7 @@ export const SYNC_BASE_SCHEMA = 'bot.sync-base/1';
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const DEFAULT_BATCH_BLOBS = 64;
+const DEFAULT_BATCH_BYTES = 4 * 1024 * 1024;
 
 export class SyncClientError extends Error {
   constructor(code, status = 400, detail = null) {
@@ -322,6 +323,12 @@ export class SyncClient {
     this.maxBatchBlobs = Number.isSafeInteger(options.maxBatchBlobs) && options.maxBatchBlobs > 0
       ? options.maxBatchBlobs
       : DEFAULT_BATCH_BLOBS;
+    this.maxBatchBytes = Number.isSafeInteger(options.maxBatchBytes) && options.maxBatchBytes > 0
+      ? options.maxBatchBytes
+      : DEFAULT_BATCH_BYTES;
+    this.maxFileBytes = Number.isSafeInteger(options.maxFileBytes) && options.maxFileBytes > 0
+      ? options.maxFileBytes
+      : null;
   }
 
   routePrefix() {
@@ -365,6 +372,7 @@ export class SyncClient {
       mode,
       revision: Number(base.revision ?? 0),
       updated_at: new Date().toISOString(),
+      ...(base.limits ? { limits: base.limits } : {}),
       files: base.files ?? {},
     };
     await writeAtomicFile(file, JSON.stringify(next, null, 2) + '\n', 0o644);
@@ -493,9 +501,9 @@ export class SyncClient {
       if (mode === 'rw' && !options.force && info.isFile() && !info.isSymbolicLink()) {
         const local = await hashFileIfRegular(full);
         const prev = base.files?.[relPath];
-        if (local && prev && local.sha256 !== prev.sha256) {
+        if (local && (!prev || local.sha256 !== prev.sha256)) {
           skippedDirty.push(relPath);
-          nextFiles[relPath] = prev;
+          if (prev) nextFiles[relPath] = prev;
           return false;
         }
       }
@@ -568,9 +576,9 @@ export class SyncClient {
             };
             continue;
           }
-          if (mode === 'rw' && !options.force && local && prev && local.sha256 !== prev.sha256) {
+          if (mode === 'rw' && !options.force && local && (!prev || local.sha256 !== prev.sha256)) {
             skippedDirty.push(rel);
-            nextFiles[rel] = prev;
+            if (prev) nextFiles[rel] = prev;
             continue;
           }
         }
@@ -594,7 +602,10 @@ export class SyncClient {
     const updatedRevision = lazyPaths || skippedDirty.length > 0
       ? Number(base.revision ?? 0)
       : Number(manifest.revision ?? 0);
-    await this.writeBaseline({ revision: updatedRevision, files: nextFiles }, mode);
+    await this.writeBaseline(
+      { revision: updatedRevision, limits: manifest.limits ?? base.limits ?? null, files: nextFiles },
+      mode,
+    );
 
     return {
       namespace: this.namespace,
@@ -676,13 +687,36 @@ export class SyncClient {
       ? new Set(options.paths.map(validateRelativeSyncPath))
       : null;
 
+    const policyMaxBlobs = Number.isSafeInteger(base.limits?.max_batch_blobs) && base.limits.max_batch_blobs > 0
+      ? base.limits.max_batch_blobs
+      : this.maxBatchBlobs;
+    const effectiveMaxBlobs = Math.max(1, Math.min(this.maxBatchBlobs, policyMaxBlobs));
+    const policyMaxBatchBytes = Number.isSafeInteger(base.limits?.max_batch_bytes) && base.limits.max_batch_bytes > 0
+      ? base.limits.max_batch_bytes
+      : this.maxBatchBytes;
+    const effectiveMaxBatchBytes = Math.max(1, Math.min(this.maxBatchBytes, policyMaxBatchBytes));
+    const effectiveMaxFileBytes = this.maxFileBytes ??
+      (Number.isSafeInteger(base.limits?.max_file_bytes) && base.limits.max_file_bytes > 0
+        ? base.limits.max_file_bytes
+        : null);
+    const allowSkipOversized = options.skipOversized === true || (options.skipOversized !== false && pushMode === 'background');
+
     const changes = [];
     const blobsToUpload = new Map();
+    const shaToPaths = new Map();
+    const skippedOversized = [];
 
     for (const [rel, file] of localFiles) {
       if (pathFilter && !pathFilter.has(rel)) continue;
       const prev = base.files?.[rel];
       if (prev && prev.sha256 === file.sha256) continue;
+      if (effectiveMaxFileBytes !== null && file.size > effectiveMaxFileBytes) {
+        if (allowSkipOversized) {
+          skippedOversized.push({ path: rel, size: file.size, limit: effectiveMaxFileBytes, reason: 'sync_file_too_large' });
+          continue;
+        }
+        throw new SyncClientError('sync_file_too_large', 413, { path: rel, size: file.size, limit: effectiveMaxFileBytes });
+      }
       changes.push({
         path: rel,
         base_revision: prev ? Number(prev.revision) : 0,
@@ -692,6 +726,9 @@ export class SyncClient {
         mode: file.mode,
       });
       blobsToUpload.set(file.sha256, file.data);
+      const list = shaToPaths.get(file.sha256) ?? [];
+      list.push({ path: rel, size: file.size });
+      shaToPaths.set(file.sha256, list);
     }
 
     for (const [rel, prev] of Object.entries(base.files ?? {})) {
@@ -716,86 +753,197 @@ export class SyncClient {
         uploaded_bytes: 0,
         results: [],
         conflicts: [],
+        skipped_oversized: skippedOversized,
       };
     }
 
-    // Upload changed/new blobs to control plane CAS and remember any server-side redactions.
+    // Upload changed/new blobs to control plane CAS using count- AND byte-bounded batches,
+    // with adaptive batch splitting on 413 so one large batch or single oversized file never bricks the scope.
     const uploadEntries = [...blobsToUpload.entries()];
+    const batches = [];
+    let currentBatch = [];
+    let currentBatchBytes = 0;
+    for (const entry of uploadEntries) {
+      const entryBytes = entry[1].length;
+      if (
+        currentBatch.length > 0 &&
+        (currentBatch.length >= effectiveMaxBlobs || currentBatchBytes + entryBytes > effectiveMaxBatchBytes)
+      ) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentBatchBytes = 0;
+      }
+      currentBatch.push(entry);
+      currentBatchBytes += entryBytes;
+    }
+    if (currentBatch.length > 0) batches.push(currentBatch);
+
     const redactedMap = new Map();
+    const skippedShas = new Set();
     let uploadedBlobs = 0;
     let uploadedBytes = 0;
 
-    for (let i = 0; i < uploadEntries.length; i += this.maxBatchBlobs) {
-      const batch = uploadEntries.slice(i, i + this.maxBatchBlobs);
+    const uploadBatch = async batch => {
       const payload = batch.map(([sha256, data]) => ({
         sha256,
         content_base64: data.toString('base64'),
       }));
-      const { data } = await this.requestJson('POST', '/blobs/put', { blobs: payload });
-      const stored = Array.isArray(data?.stored) ? data.stored : [];
-      for (const item of stored) {
-        const origSha = assertSha256(item.original_sha256 ?? item.sha256);
-        const storedSha = assertSha256(item.sha256);
-        uploadedBlobs++;
-        uploadedBytes += Number(item.size ?? 0);
-        if (item.redacted && typeof item.content_base64 === 'string') {
-          const cleanBytes = Buffer.from(item.content_base64, 'base64');
-          await this.cas.put(cleanBytes, storedSha);
-          redactedMap.set(origSha, { sha256: storedSha, bytes: cleanBytes });
-        } else {
-          const origBytes = blobsToUpload.get(origSha);
-          if (origBytes) await this.cas.put(origBytes, storedSha);
+      try {
+        const { data } = await this.requestJson('POST', '/blobs/put', { blobs: payload });
+        const stored = Array.isArray(data?.stored) ? data.stored : [];
+        for (const item of stored) {
+          const origSha = assertSha256(item.original_sha256 ?? item.sha256);
+          const storedSha = assertSha256(item.sha256);
+          uploadedBlobs++;
+          uploadedBytes += Number(item.size ?? 0);
+          if (item.redacted && typeof item.content_base64 === 'string') {
+            const cleanBytes = Buffer.from(item.content_base64, 'base64');
+            await this.cas.put(cleanBytes, storedSha);
+            redactedMap.set(origSha, { sha256: storedSha, bytes: cleanBytes });
+          } else {
+            const origBytes = blobsToUpload.get(origSha);
+            if (origBytes) await this.cas.put(origBytes, storedSha);
+          }
         }
+      } catch (error) {
+        if (error instanceof SyncClientError && error.status === 413) {
+          if (batch.length > 1) {
+            const mid = Math.floor(batch.length / 2);
+            await uploadBatch(batch.slice(0, mid));
+            await uploadBatch(batch.slice(mid));
+            return;
+          }
+          const [oversizedSha, oversizedBuf] = batch[0];
+          const affected = shaToPaths.get(oversizedSha) ?? [];
+          if (allowSkipOversized) {
+            skippedShas.add(oversizedSha);
+            for (const item of affected) {
+              skippedOversized.push({
+                path: item.path,
+                size: item.size,
+                limit: effectiveMaxFileBytes,
+                reason: error.code || 'sync_file_too_large',
+              });
+            }
+            return;
+          }
+          throw new SyncClientError(error.code || 'sync_file_too_large', 413, {
+            paths: affected.map(a => a.path),
+            size: oversizedBuf.length,
+            limit: effectiveMaxFileBytes,
+          });
+        }
+        throw error;
       }
+    };
+
+    for (const batch of batches) {
+      await uploadBatch(batch);
     }
 
-    // Remap commit changes to redacted blob hashes when control-plane Redactor scrubbed secrets.
+    // Remap commit changes to redacted blob hashes and omit any blobs skipped as oversized.
     const redactedPaths = new Map();
-    const commitChanges = changes.map(change => {
+    const commitChanges = [];
+    for (const change of changes) {
+      if (!change.deleted && change.content_sha256 && skippedShas.has(change.content_sha256)) {
+        continue;
+      }
       if (!change.deleted && change.content_sha256 && redactedMap.has(change.content_sha256)) {
         const mapped = redactedMap.get(change.content_sha256);
         redactedPaths.set(change.path, mapped);
-        return { ...change, content_sha256: mapped.sha256 };
+        commitChanges.push({ ...change, content_sha256: mapped.sha256 });
+      } else {
+        commitChanges.push(change);
       }
-      return change;
-    });
+    }
 
-    const { status, data: commitRes } = await this.requestJson(
-      'POST',
-      '/commit',
-      {
-        mode: pushMode,
-        ...(options.actorTag ?? this.actorTag ? { actor_tag: options.actorTag ?? this.actorTag } : {}),
-        ...(options.skipIfHumanEdited ? { skip_if_human_edited: true } : {}),
-        changes: commitChanges,
-      },
-      { allowStatuses: [409] },
-    );
+    if (commitChanges.length === 0) {
+      return {
+        ok: true,
+        status: 200,
+        revision: Number(base.revision ?? 0),
+        uploaded_blobs: uploadedBlobs,
+        uploaded_bytes: uploadedBytes,
+        results: [],
+        conflicts: [],
+        skipped_oversized: skippedOversized,
+      };
+    }
 
     const nextFiles = { ...(base.files ?? {}) };
-    const results = Array.isArray(commitRes?.results) ? commitRes.results : [];
+    const allResults = [];
+    const allConflicts = [];
+    let overallOk = true;
+    let overallStatus = 200;
+    let overallError;
+    let latestRevision = Number(base.revision ?? 0);
 
-    for (const item of results) {
-      const rel = validateRelativeSyncPath(item.path);
-      const full = join(rootReal, rel);
-      const putRedacted = redactedPaths.get(rel);
-      if (putRedacted && !item.redacted) item.redacted = true;
-      if (item.status === 'committed' || item.status === 'unchanged') {
-        if (item.deleted) {
-          delete nextFiles[rel];
-        } else {
-          if (item.redacted || putRedacted || typeof item.merged_content_base64 === 'string') {
-            const bytes = typeof item.merged_content_base64 === 'string'
-              ? Buffer.from(item.merged_content_base64, 'base64')
-              : putRedacted
-                ? putRedacted.bytes
-                : item.sha256
-                  ? await this.cas.get(item.sha256)
-                  : null;
-            if (bytes) {
-              await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
-              await writeAtomicFile(full, bytes, 0o644);
+    // Chunk commits by `effectiveMaxBlobs` so large batches never hit server `maxBatchBlobs` limits.
+    for (let i = 0; i < commitChanges.length; i += effectiveMaxBlobs) {
+      const chunk = commitChanges.slice(i, i + effectiveMaxBlobs);
+      const { status, data: commitRes } = await this.requestJson(
+        'POST',
+        '/commit',
+        {
+          mode: pushMode,
+          ...(options.actorTag ?? this.actorTag ? { actor_tag: options.actorTag ?? this.actorTag } : {}),
+          ...(options.skipIfHumanEdited ? { skip_if_human_edited: true } : {}),
+          changes: chunk,
+        },
+        { allowStatuses: [409] },
+      );
+
+      if (!commitRes?.ok) {
+        overallOk = false;
+        overallStatus = status;
+        if (commitRes?.error) overallError = commitRes.error;
+      }
+      if (Number.isSafeInteger(commitRes?.revision)) {
+        latestRevision = Number(commitRes.revision);
+      }
+
+      const results = Array.isArray(commitRes?.results) ? commitRes.results : [];
+      const conflicts = Array.isArray(commitRes?.conflicts) ? commitRes.conflicts : [];
+      allResults.push(...results);
+      allConflicts.push(...conflicts);
+
+      for (const item of results) {
+        const rel = validateRelativeSyncPath(item.path);
+        const full = join(rootReal, rel);
+        const putRedacted = redactedPaths.get(rel);
+        if (putRedacted && !item.redacted) item.redacted = true;
+        if (item.status === 'committed' || item.status === 'unchanged') {
+          if (item.deleted) {
+            delete nextFiles[rel];
+          } else {
+            if (item.redacted || putRedacted || typeof item.merged_content_base64 === 'string') {
+              const bytes = typeof item.merged_content_base64 === 'string'
+                ? Buffer.from(item.merged_content_base64, 'base64')
+                : putRedacted
+                  ? putRedacted.bytes
+                  : item.sha256
+                    ? await this.cas.get(item.sha256)
+                    : null;
+              if (bytes) {
+                await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
+                await writeAtomicFile(full, bytes, 0o644);
+              }
             }
+            nextFiles[rel] = {
+              revision: Number(item.revision),
+              sha256: item.sha256 ?? null,
+              size: Number(item.size ?? 0),
+              mode: 0o644,
+            };
+          }
+        } else if (item.status === 'merged') {
+          const mergedBytes = typeof item.merged_content_base64 === 'string'
+            ? Buffer.from(item.merged_content_base64, 'base64')
+            : null;
+          if (mergedBytes && item.sha256) {
+            await this.cas.put(mergedBytes, item.sha256);
+            await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
+            await writeAtomicFile(full, mergedBytes, 0o644);
           }
           nextFiles[rel] = {
             revision: Number(item.revision),
@@ -803,87 +951,72 @@ export class SyncClient {
             size: Number(item.size ?? 0),
             mode: 0o644,
           };
+        } else if (item.status === 'conflict_copy') {
+          if (item.deleted) {
+            await unlink(full).catch(err => { if (err?.code !== 'ENOENT') throw err; });
+            delete nextFiles[rel];
+          } else if (typeof item.current_content_base64 === 'string' && item.sha256) {
+            const curBytes = Buffer.from(item.current_content_base64, 'base64');
+            await this.cas.put(curBytes, item.sha256);
+            await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
+            await writeAtomicFile(full, curBytes, 0o644);
+            nextFiles[rel] = {
+              revision: Number(item.revision),
+              sha256: item.sha256,
+              size: curBytes.length,
+              mode: 0o644,
+            };
+          }
+          if (item.conflict_path && typeof item.conflict_content_base64 === 'string' && item.conflict_sha256) {
+            const copyRel = validateRelativeSyncPath(item.conflict_path);
+            const copyFull = join(rootReal, copyRel);
+            const copyBytes = Buffer.from(item.conflict_content_base64, 'base64');
+            await this.cas.put(copyBytes, item.conflict_sha256);
+            await ensureNoSymlinkAncestors(rootReal, copyRel, { create: true });
+            await writeAtomicFile(copyFull, copyBytes, 0o644);
+            nextFiles[copyRel] = {
+              revision: Number(item.conflict_revision ?? 1),
+              sha256: item.conflict_sha256,
+              size: copyBytes.length,
+              mode: 0o644,
+            };
+          }
+        } else if (item.status === 'skipped_human_edited') {
+          if (item.deleted) {
+            await unlink(full).catch(err => { if (err?.code !== 'ENOENT') throw err; });
+            delete nextFiles[rel];
+          } else if (typeof item.current_content_base64 === 'string' && item.sha256) {
+            const curBytes = Buffer.from(item.current_content_base64, 'base64');
+            await this.cas.put(curBytes, item.sha256);
+            await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
+            await writeAtomicFile(full, curBytes, 0o644);
+            nextFiles[rel] = {
+              revision: Number(item.revision),
+              sha256: item.sha256,
+              size: curBytes.length,
+              mode: 0o644,
+            };
+          }
         }
-      } else if (item.status === 'merged') {
-        const mergedBytes = typeof item.merged_content_base64 === 'string'
-          ? Buffer.from(item.merged_content_base64, 'base64')
-          : null;
-        if (mergedBytes && item.sha256) {
-          await this.cas.put(mergedBytes, item.sha256);
-          await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
-          await writeAtomicFile(full, mergedBytes, 0o644);
-        }
-        nextFiles[rel] = {
-          revision: Number(item.revision),
-          sha256: item.sha256 ?? null,
-          size: Number(item.size ?? 0),
-          mode: 0o644,
-        };
-      } else if (item.status === 'conflict_copy') {
-        // Restore main file to authoritative server `current` and materialize the conflict copy locally.
-        if (item.deleted) {
-          await unlink(full).catch(err => { if (err?.code !== 'ENOENT') throw err; });
-          delete nextFiles[rel];
-        } else if (typeof item.current_content_base64 === 'string' && item.sha256) {
-          const curBytes = Buffer.from(item.current_content_base64, 'base64');
-          await this.cas.put(curBytes, item.sha256);
-          await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
-          await writeAtomicFile(full, curBytes, 0o644);
-          nextFiles[rel] = {
-            revision: Number(item.revision),
-            sha256: item.sha256,
-            size: curBytes.length,
-            mode: 0o644,
-          };
-        }
-        if (item.conflict_path && typeof item.conflict_content_base64 === 'string' && item.conflict_sha256) {
-          const copyRel = validateRelativeSyncPath(item.conflict_path);
-          const copyFull = join(rootReal, copyRel);
-          const copyBytes = Buffer.from(item.conflict_content_base64, 'base64');
-          await this.cas.put(copyBytes, item.conflict_sha256);
-          await ensureNoSymlinkAncestors(rootReal, copyRel, { create: true });
-          await writeAtomicFile(copyFull, copyBytes, 0o644);
-          nextFiles[copyRel] = {
-            revision: Number(item.conflict_revision ?? 1),
-            sha256: item.conflict_sha256,
-            size: copyBytes.length,
-            mode: 0o644,
-          };
-        }
-      } else if (item.status === 'skipped_human_edited') {
-        if (item.deleted) {
-          await unlink(full).catch(err => { if (err?.code !== 'ENOENT') throw err; });
-          delete nextFiles[rel];
-        } else if (typeof item.current_content_base64 === 'string' && item.sha256) {
-          const curBytes = Buffer.from(item.current_content_base64, 'base64');
-          await this.cas.put(curBytes, item.sha256);
-          await ensureNoSymlinkAncestors(rootReal, rel, { create: true });
-          await writeAtomicFile(full, curBytes, 0o644);
-          nextFiles[rel] = {
-            revision: Number(item.revision),
-            sha256: item.sha256,
-            size: curBytes.length,
-            mode: 0o644,
-          };
-        }
+        // For `status === 'conflict'` (interactive 409): keep local file & its old baseline intact for resolution.
       }
-      // For `status === 'conflict'` (interactive 409): keep local file & its old baseline intact for resolution.
     }
 
-    const nextScopeRev = commitRes?.ok
-      ? Number(commitRes.revision ?? base.revision ?? 0)
+    const nextScopeRev = overallOk && skippedOversized.length === 0
+      ? latestRevision
       : Number(base.revision ?? 0);
-    await this.writeBaseline({ revision: nextScopeRev, files: nextFiles }, 'rw');
+    await this.writeBaseline({ revision: nextScopeRev, limits: base.limits ?? null, files: nextFiles }, 'rw');
 
     return {
-      ok: Boolean(commitRes?.ok),
-      status,
-      ...(commitRes?.error ? { error: commitRes.error } : {}),
-      revision: Number(commitRes?.revision ?? base.revision ?? 0),
+      ok: overallOk,
+      status: overallStatus,
+      ...(overallError ? { error: overallError } : {}),
+      revision: latestRevision,
       uploaded_blobs: uploadedBlobs,
       uploaded_bytes: uploadedBytes,
-      results,
-      conflicts: Array.isArray(commitRes?.conflicts) ? commitRes.conflicts : [],
+      results: allResults,
+      conflicts: allConflicts,
+      skipped_oversized: skippedOversized,
     };
   }
 }

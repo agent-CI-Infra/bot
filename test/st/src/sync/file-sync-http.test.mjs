@@ -706,3 +706,116 @@ test('Super-admin /api/sync/tokens issues, lists (redacted), authenticates, audi
   const audits = h.store.all("SELECT action,resource_id FROM audit WHERE resource_id=? ORDER BY rowid", tokenId);
   assert.deepEqual(audits.map(a => a.action), ['sync.token.issued', 'sync.token.revoked']);
 });
+
+test('SyncClient protects untracked local files on pull, supports same-dir baseline coexistence, and splits/isolates oversized batches on push', async () => {
+  const env = await startServer();
+  try {
+    const cas = new CasCache(join(env.dir, 'cas-edge'));
+    const token = env.sync.tokens.issue({
+      actor: 'agent:edge',
+      actorTag: 'edge',
+      grants: [{ namespace: 'project-notes', scope: '42', mode: 'rw' }],
+    }).token;
+
+    // 1. Same-directory coexistence: targetDir === server project-notes/42 dir writes `.sync-base.json` in-place
+    //    and subsequent pulls never choke on `.sync-base.json`!
+    const sameDir = join(env.projectNotesRoot, '42');
+    mkdirSync(sameDir, { recursive: true });
+    writeFileSync(join(sameDir, 'seed.md'), 'seeded directly\n');
+    const sameDirClient = new SyncClient({
+      baseUrl: env.baseUrl,
+      token,
+      namespace: 'project-notes',
+      scope: '42',
+      targetDir: sameDir,
+      cas,
+    });
+    const samePull1 = await sameDirClient.pull();
+    assert.equal(existsSync(join(sameDir, '.sync-base.json')), true);
+    assert.equal(samePull1.entries_count, 1);
+    const samePull2 = await sameDirClient.pull({ full: true });
+    assert.equal(samePull2.entries_count, 1);
+
+    // 2. Untracked local file dirty protection: Client B has an uncommitted local `shared-name.md` (NOT in .sync-base.json)
+    //    when Client A pushes `shared-name.md` -> Client B's pull MUST NOT silently overwrite it!
+    const dirA = join(env.dir, 'edge-a');
+    const dirB = join(env.dir, 'edge-b');
+    const clientA = new SyncClient({ baseUrl: env.baseUrl, token, namespace: 'project-notes', scope: '42', targetDir: dirA, cas });
+    const clientB = new SyncClient({ baseUrl: env.baseUrl, token, namespace: 'project-notes', scope: '42', targetDir: dirB, cas });
+    await clientA.pull();
+    await clientB.pull();
+
+    writeFileSync(join(dirA, 'shared-name.md'), 'from client A\n');
+    assert.equal((await clientA.push({ mode: 'interactive' })).ok, true);
+
+    writeFileSync(join(dirB, 'shared-name.md'), 'untracked precious local work on B\n');
+    const protectedPull = await clientB.pull();
+    assert.deepEqual(protectedPull.skipped_dirty, ['shared-name.md']);
+    assert.equal(readFileSync(join(dirB, 'shared-name.md'), 'utf8'), 'untracked precious local work on B\n');
+
+    // Explicit `pull({ force: true })` overrides the dirty untracked file.
+    const forcedPull = await clientB.pull({ force: true });
+    assert.deepEqual(forcedPull.skipped_dirty, []);
+    assert.equal(readFileSync(join(dirB, 'shared-name.md'), 'utf8'), 'from client A\n');
+
+    // 3. Byte-bounded batching & commit chunking + oversized file isolation in background mode:
+    //    Client configured with small maxBatchBytes (32 KiB) & maxBatchBlobs (2) pushes 5 valid 20 KiB files
+    //    plus 1 oversized 1.2 MiB file (> project-notes 1 MiB maxFileBytes).
+    const dirBatch = join(env.dir, 'edge-batch');
+    const batchClient = new SyncClient({
+      baseUrl: env.baseUrl,
+      token,
+      namespace: 'project-notes',
+      scope: '42',
+      targetDir: dirBatch,
+      cas,
+      maxBatchBlobs: 2,
+      maxBatchBytes: 32 * 1024,
+    });
+    await batchClient.pull();
+    for (let i = 1; i <= 5; i++) {
+      writeFileSync(join(dirBatch, `batch-${i}.md`), `file ${i}\n` + 'x'.repeat(20 * 1024));
+    }
+    writeFileSync(join(dirBatch, 'too-big.md'), 'z'.repeat(1200 * 1024));
+
+    // Interactive mode rejects oversized file cleanly with 413 + path detail.
+    await assert.rejects(
+      () => batchClient.push({ mode: 'interactive' }),
+      err => err.status === 413 && err.code === 'sync_file_too_large' && err.detail?.path === 'too-big.md',
+    );
+
+    // Background mode skips the single oversized file and commits all 5 valid files across multiple byte/count chunks!
+    const bgPush = await batchClient.push({ mode: 'background' });
+    assert.equal(bgPush.ok, true);
+    assert.equal(bgPush.results.length, 5);
+    assert.equal(bgPush.skipped_oversized.length, 1);
+    assert.equal(bgPush.skipped_oversized[0].path, 'too-big.md');
+    for (let i = 1; i <= 5; i++) {
+      assert.equal(existsSync(join(env.projectNotesRoot, '42', `batch-${i}.md`)), true);
+    }
+    assert.equal(existsSync(join(env.projectNotesRoot, '42', 'too-big.md')), false);
+
+    // Adaptive 413 split even WITHOUT a prior pull() (no cached manifest.limits):
+    const dirNoPull = join(env.dir, 'edge-no-pull');
+    mkdirSync(dirNoPull, { recursive: true });
+    writeFileSync(join(dirNoPull, 'small-ok.md'), 'valid without prior pull\n');
+    writeFileSync(join(dirNoPull, 'huge-no-pull.md'), 'w'.repeat(1200 * 1024));
+    const noPullClient = new SyncClient({
+      baseUrl: env.baseUrl,
+      token,
+      namespace: 'project-notes',
+      scope: '42',
+      targetDir: dirNoPull,
+      cas,
+    });
+    const adaptivePush = await noPullClient.push({ mode: 'background' });
+    assert.equal(adaptivePush.ok, true);
+    assert.equal(adaptivePush.results.length, 1);
+    assert.equal(adaptivePush.results[0].path, 'small-ok.md');
+    assert.equal(adaptivePush.skipped_oversized.length, 1);
+    assert.equal(adaptivePush.skipped_oversized[0].path, 'huge-no-pull.md');
+    assert.equal(existsSync(join(env.projectNotesRoot, '42', 'small-ok.md')), true);
+  } finally {
+    await env.close();
+  }
+});
