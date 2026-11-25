@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConsole } from '../../fixtures/console-page.mjs';
 
-// #355: a failed management call says why in words, not only in the server's code. The sentences are the ones the receipt
-// page already uses (static/management/receipts.js); a code the console cannot explain keeps its bare value.
+// #355: a failed management call says why in words, not only in the server's code. A failed command reuses the sentences
+// the receipt page already uses (static/management/receipts.js `managementFailureHints`), because those sentences describe
+// a command that was submitted. A turn that stopped before submitting anything uses the access sentences instead, so it
+// never claims a command was submitted. A code the console cannot explain keeps its bare value.
 async function failureNotices(turns) {
   const at = '2026-11-24T08:00:00.000Z', conversation = { id: 'c1', scope: 'project:101', title: '会话', created_at: at, last_activity_at: at };
   const messages = turns.map((_, index) => ({ id: 'm' + index, state: 'completed', input: { content: '请求 ' + index }, created_at: at, updated_at: at }));
@@ -41,5 +43,10 @@ test('a code the console cannot explain keeps its bare value, not a guess', asyn
 
 test('a finished turn that failed on a known code does not send the reader to the model and permission settings', async () => {
   const [notice] = await failureNotices([[['model_start', { turn: 0 }], ['error', { error: 'authorization_changed' }]]]);
-  assert.equal(notice, '这次处理未完成：发起人的权限在命令提交之后变了，命令没有执行。');
+  assert.equal(notice, '这次处理未完成：权限已变化，请刷新页面后按当前权限重试。');
+});
+
+test('a turn that stopped before submitting a command does not borrow the receipt sentence about a submitted command', async () => {
+  const [notice] = await failureNotices([[['model_start', { turn: 0 }], ['error', { error: 'management_revision_conflict' }]]]);
+  assert.equal(notice, '这次处理未完成：management_revision_conflict。可以检查管理助手的模型与权限配置后继续。');
 });

@@ -123,9 +123,11 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   // assistant says the same sentence and keeps the code as secondary text; a code the console cannot explain keeps its
   // bare value, exactly as before, rather than being guessed at.
   const failedNotice = code => managementFailureHints[code] ? '操作未完成：' + managementFailureHints[code] + '（' + code + '）' : '操作未完成：' + code;
+  // A turn-level failure can stop before any command was submitted (the permission guard runs mid-turn), so it speaks in
+  // access terms instead of borrowing a receipt sentence that says a submitted command did not run.
   const turnFailureText = data => data.notice ? '这次处理未完成：' + data.notice
     : data.detail ? '这次处理未完成：' + data.detail + '（' + data.error + '）'
-    : managementFailureHints[data.error] ? '这次处理未完成：' + managementFailureHints[data.error]
+    : managementAccessHints[data.error] ? '这次处理未完成：' + managementAccessHints[data.error]
     : '这次处理未完成：' + data.error + '。可以检查管理助手的模型与权限配置后继续。';
   const showConversation = () => {
     accessSlot.hidden = true; accessSlot.replaceChildren();
