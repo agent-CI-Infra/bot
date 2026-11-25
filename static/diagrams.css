@@ -30,7 +30,7 @@
 /* Prompt cards (#1123): a reading view by default; 编辑源码 shows the textarea the form saves next to a live preview. */
 .prompt-reader { display: grid; gap: var(--space-4); min-width: 0; }
 .prompt-reader-bar { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
-.prompt-reader-bar [aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand); }
+.prompt-reader-bar [aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
 .prompt-reading, .prompt-preview { min-width: 0; padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface-alt); }
 .prompt-reading:focus-visible, .prompt-preview:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 2px; }
 .prompt-source { display: grid; gap: var(--space-4); min-width: 0; }

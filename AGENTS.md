@@ -33,7 +33,7 @@ launchpad 是一个基于 **Node.js 22.13+ / TypeScript** 的多账号 GitHub �
    - 仓库行为统一在控制台项目配置（Manager 提示词、角色配置、项目设置、机器配置）中维护；仓库内只读取可信基准分支的 `.agents/skills/`。
 4. **单一声明源同步**：
    - **飞书权限**：仅在 `src/channels/feishu.ts` 的 `FEISHU_SCOPES` 声明，并同步更新 `docs/features/assistants-and-channels.md` 的权限表（`test/st/src/channels/channel-setup.test.mjs` 强校验）。
-   - **前端静态文件与令牌**：新增 `static/` 资源须同步更新 `static/index.html` 与 `src/server.ts` 白名单；控制台公共 CSS 变量只在 `static/shell.css` 的 `:root` 声明（`test/ut/static/console-tokens.test.mjs` 强校验）。
+   - **前端静态文件与令牌**：新增 `static/` 资源须同步更新 `static/index.html` 与 `src/server.ts` 白名单；控制台公共 CSS 变量只在 `static/shell.css` 声明（浅色 `:root` 与两块深色令牌块，`test/ut/static/theme.test.mjs`、`test/ut/static/console-tokens.test.mjs` 强校验）。
    - **Pi SDK 版本**：`src/agent/pi.ts` 中固定版本须与 `runner/package.json` 一致（`npm run check` 强校验）。
    - **Docker COPY 清单**：新增跨目录导入、脚本或静态资产时，核对 `docker/*.Dockerfile` 的多阶段 `COPY`。
 5. **仓库内容卫生**：

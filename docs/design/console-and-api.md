@@ -10,7 +10,8 @@
   - 基于 Hash 路由，状态可刷新、可分享；采用三断点自适应（`≤767px` 四入口底栏 + 单列、`768–1023px` 192px 窄侧栏、`≥1024px` 224px 侧栏 + 右侧固定顶栏）。
   - 范围切换器是唯一项目切换入口，切项目、失权或退出登录时同步清除旧项目头部、选中态与内存草稿，并丢弃迟到的异步响应。
 - **单源设计令牌与公共组件**：
-  - 全部 `--color-*`、`--space-*`、`--radius-*`、`--font-size-*`、`--line-height-*`、`--control-min`、`--shadow-*` 变量**唯一声明在 `static/shell.css` 的 `:root`**（`test/ut/static/console-tokens.test.mjs` 强校验唯一性与 ≥ 4.5:1 对比度）。
+  - 全部 `--color-*`、`--space-*`、`--radius-*`、`--font-size-*`、`--line-height-*`、`--control-min`、`--shadow-*` 变量**只在 `static/shell.css` 声明**：浅色 `:root`、`@media (prefers-color-scheme: dark) :root:not([data-theme="light"])`（跟随系统）与 `:root[data-theme="dark"]`（手动选择）三处。三处声明同一套 `--color-*`，逐对满足 ≥ 4.5:1 的对比度，`test/ut/static/theme.test.mjs` 校验令牌集合一致与对比度，`test/ut/static/console-tokens.test.mjs` 校验唯一声明、`var()` 闭合与模块样式不写第二套色值。`--color-brand` 是填充色（配 `--color-text-inverse`），`--color-brand-text` 只画文字、链接与图标（深色 `#96b4ff`）；代码块用 `--color-code-bg` / `--color-code-text`。
+  - **深色主题（`#750`）**：读者在个人身份页（`#/identity`）选「跟随系统 / 浅色 / 深色」，三态存 `localStorage` 的 `launchpad.theme`（`system` / `light` / `dark`，`system` 与缺省等价）。`static/index.html` 把 `<script src="/theme-boot.js">` 放在第一个 `<link rel="stylesheet">` 之前且不带 `defer`/`async`；它只读该键并写 `<html data-theme>` 与 `color-scheme`，所以首屏不闪。`<html data-theme>` 只表达手动选择，跟随系统时不写。深色只换令牌；原本硬编码浅色底色的任务详情、项目列表表头 / owner bar、项目页等由 `static/views.css` 末尾两块只作用于深色的覆盖改读令牌，其余深色专用覆盖（muted 文本、悬停、确认对话框状态等）同样只写在深色块里，浅色基线不动。`test/e2e/console/theme.spec.mjs` 在 390 / 768 / 1440 三档实测登录页、项目列表、全局设置、确认对话框、任务详情与项目详情，逐项断言计算后对比度 ≥ 4.5:1 且底色不是白卡，并按实测值钉住颜色与边框；看板、发布、模型、管理窗口与流程图节点不在本期范围。
   - 公共原语：`consoleState`（统一空/加载/失败态）、`askConfirm`（危险操作二次确认）、统一顶部保存栏（角色/基本设置/模型/机器配置共用）以及唯一错误文案出口 `readErrorText(err)`（屏蔽浏览器原生网络报错差异）。
   - 内置超级管理员专属设计样例页 `#/design` 用于令牌与组件视觉回归验证。
 - **严格 CSP 下的安全 Markdown 与 Mermaid 渲染**：

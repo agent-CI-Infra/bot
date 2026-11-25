@@ -18,7 +18,11 @@
   --color-danger-bg: #fbeaea; --color-danger-weak: #edc5c8; --color-danger-soft: #fffafa;
   --color-info: #2c5791; --color-info-bg: #e8f0fb; --color-info-border: #b9cdec;
   --color-status-neutral: #536c78; --color-status-neutral-bg: #edf1f4;
-  --color-overlay: #16374470; --shadow-card: 0 2px 6px #182d4b03;
+  --color-overlay: #16374470;
+  /* #750: the confirmation backdrop keeps its exact light value; dark replaces the tint instead of its alpha. */
+  --color-modal-backdrop: #16374485;
+  /* #750: the confirmation dialog keeps its light shadow; dark only swaps the tint. */
+  --shadow-confirm: 0 20px 56px #0f2f3b47; --shadow-card: 0 2px 6px #182d4b03;
   --shadow-card-hover: 0 3px 10px #182d4b14; --shadow-popover: 0 8px 24px #182d4b26;
   --font-size-micro: 11px; --font-size-label: 13px; --font-size-row: 15px;
   --font-size-touch: 16px; --font-size-brand: 22px; --font-size-display: 24px;
@@ -27,7 +31,62 @@
   --space-7: 24px; --space-8: 32px; --space-9: 40px; --space-10: 48px;
   --radius-control: 7px;
   --content-max: 1120px;
+  /* #750: the brand colour has two jobs. `--color-brand` fills a control and carries white text (5.65:1 on
+     #245de0); `--color-brand-text` paints text, links and icons, where dark needs a lighter value. In light they
+     are the same colour, so this line changes nothing until the dark blocks below override it. */
+  --color-brand-text: #245de0;
+  /* #750: code and output blocks. `pre.command` and `pre.output.snapshot-output` paint the text colour as a
+     background in light (a terminal look); in dark that inverts into light-on-light, so all three read these two
+     tokens instead. The light values are the ones `pre.output` already had. */
+  --color-code-bg: #f5f8fa; --color-code-text: #17243b;
+  /* #1067: views.css reads `var(--surface, #fff)` for its sticky save bars (role-save, console-save-bar); this token
+     root never declared it, so the fallback was the only value and those bars stayed white in dark. Light keeps the
+     old fallback so no light pixel moves; both dark blocks below override it. */
+  --surface: #fff;
+  color-scheme: light dark;
 }
+/* #750: one dark palette, declared twice on purpose. The media query is the system preference and stays in force only
+   while the reader has no manual choice (`:not([data-theme="light"])`); the attribute block is the manual override and
+   is written by /theme-boot.js before the first stylesheet paints. Both blocks declare the same colour tokens as the
+   light :root — test/ut/static/theme.test.mjs fails when one of them drifts. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-bg: #0f141b; --color-surface: #161d27; --color-surface-alt: #1b2430;
+    --color-text: #e7edf6; --color-text-muted: #a3b3c7; --color-border: #55688a;
+    --color-brand: #245de0; --color-brand-text: #96b4ff; --color-brand-weak: #1b2c4d;
+    --color-danger: #ff9c9c; --color-danger-bg: #3a1d1f; --color-danger-weak: #6b2f35; --color-danger-soft: #1a1113;
+    --focus-ring: #96b4ff;
+    --color-text-inverse: #fff; --color-hover: #1d2733; --color-nav: #b9c6d8; --color-nav-muted: #8ea0b6;
+    --color-warning: #f0c882; --color-warning-bg: #382d16; --color-warning-border: #6b5524;
+    --color-success: #93d6ab; --color-success-bg: #16301f;
+    --color-info: #a8c6f5; --color-info-bg: #16233a; --color-info-border: #2d4570;
+    --color-status-neutral: #b3c1ce; --color-status-neutral-bg: #1e2733;
+    --color-overlay: #000000a6; --color-modal-backdrop: #000000a6; --shadow-confirm: 0 8px 24px #00000073; --shadow-card: 0 2px 6px #00000040;
+    --shadow-card-hover: 0 3px 10px #00000059; --shadow-popover: 0 8px 24px #00000073;
+    --color-code-bg: #1b2430; --color-code-text: #e7edf6;
+    --surface: #161d27;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #0f141b; --color-surface: #161d27; --color-surface-alt: #1b2430;
+  --color-text: #e7edf6; --color-text-muted: #a3b3c7; --color-border: #55688a;
+  --color-brand: #245de0; --color-brand-text: #96b4ff; --color-brand-weak: #1b2c4d;
+  --color-danger: #ff9c9c; --color-danger-bg: #3a1d1f; --color-danger-weak: #6b2f35; --color-danger-soft: #1a1113;
+  --focus-ring: #96b4ff;
+  --color-text-inverse: #fff; --color-hover: #1d2733; --color-nav: #b9c6d8; --color-nav-muted: #8ea0b6;
+  --color-warning: #f0c882; --color-warning-bg: #382d16; --color-warning-border: #6b5524;
+  --color-success: #93d6ab; --color-success-bg: #16301f;
+  --color-info: #a8c6f5; --color-info-bg: #16233a; --color-info-border: #2d4570;
+  --color-status-neutral: #b3c1ce; --color-status-neutral-bg: #1e2733;
+  --color-overlay: #000000a6; --color-modal-backdrop: #000000a6; --shadow-confirm: 0 8px 24px #00000073; --shadow-card: 0 2px 6px #00000040;
+  --shadow-card-hover: 0 3px 10px #00000059; --shadow-popover: 0 8px 24px #00000073;
+  --color-code-bg: #1b2430; --color-code-text: #e7edf6;
+  --surface: #161d27;
+}
+/* A manual light choice wins over a dark system: this block comes after the media query on purpose. */
+:root[data-theme="light"] { color-scheme: light; }
 .skip-link { position: fixed; top: 8px; left: 12px; z-index: 150; padding: 12px; background: var(--color-surface); color: var(--color-text); transform: translateY(-150%); border-radius: var(--radius-3); }
 .skip-link:focus { transform: none; }
 body { background: var(--color-bg); color: var(--color-text); }
@@ -81,7 +140,7 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 .console-scope-copy :is(strong,small) { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .console-scope-copy strong { font-size: var(--font-size-2); }
 .console-scope-copy small { font-size: var(--font-size-1); color: var(--color-text-muted); }
-.console-scope-mark { display: grid; place-items: center; flex: 0 0 28px; height: 28px; border-radius: var(--radius-2); background: var(--color-brand-weak); color: var(--color-brand); font-weight: 650; }
+.console-scope-mark { display: grid; place-items: center; flex: 0 0 28px; height: 28px; border-radius: var(--radius-2); background: var(--color-brand-weak); color: var(--color-brand-text); font-weight: 650; }
 .console-scope-arrow { color: var(--color-text-muted); }
 .console-mobile-scope { display: none; }
 .console-ready dialog.console-scope-picker { position: fixed; inset: calc(var(--console-header) + 96px) auto auto 12px; width: min(380px,calc(100vw - 24px)); max-width: none; height: auto; max-height: calc(100dvh - var(--console-header) - 112px); margin: 0; padding: 0; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-popover); z-index: 120; overflow: hidden; }
@@ -93,7 +152,7 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 #console-scope-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px; }
 .console-scope-option { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 12px; border-radius: var(--radius-control); cursor: pointer; font-size: var(--font-size-2); }
 .console-scope-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.console-scope-option[aria-selected=true] { background: var(--color-brand-weak); color: var(--color-brand); font-weight: 650; }
+.console-scope-option[aria-selected=true] { background: var(--color-brand-weak); color: var(--color-brand-text); font-weight: 650; }
 .console-scope-option.is-active { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .console-scope-option:hover { background: var(--color-hover); }
 .console-scope-disabled { color: var(--color-text-muted); white-space: nowrap; font-size: var(--font-size-1); font-weight: 400; }
@@ -117,7 +176,7 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-settings-nav { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); }
 #console-sidebar #tabs button, #console-sidebar .console-link { display: flex; align-items: center; width: 100%; min-height: var(--control-min); height: auto; padding: 10px 14px; border: 0; border-radius: var(--radius-control); color: var(--color-nav); background: transparent; text-align: left; text-decoration: none; font-size: var(--font-size-2); font-weight: 550; }
 #console-sidebar #tabs button:hover, #console-sidebar .console-link:hover { background: var(--color-hover); filter: none; }
-#console-sidebar #tabs :is(button,a)[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
+#console-sidebar #tabs :is(button,a)[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand-text); border: 0; }
 #console-secondary-nav { margin: 0 0 var(--space-5); }
 #console-secondary-nav .project-nav { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px 12px; margin: 0; }
 #console-secondary-nav .project-nav .console-nav-label { margin: 0 4px 0 8px; padding: 0; font-size: var(--font-size-1); font-weight: 650; color: var(--color-text-muted); letter-spacing: .04em; }
@@ -147,7 +206,7 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .cost-note, .cost-incomplete, .cost-scope { max-width: 40em; line-height: var(--line-height-relaxed); }
 .console-page-head { margin: 0 0 var(--space-7); }
 .console-page-head h1 { font-size: var(--font-size-5); font-weight: 650; margin: 8px 0; letter-spacing: -.02em; line-height: var(--line-height-tight); }
-.console-page-head .eyebrow { color: var(--color-brand); font-weight: 650; font-size: var(--font-size-1); }
+.console-page-head .eyebrow { color: var(--color-brand-text); font-weight: 650; font-size: var(--font-size-1); }
 .console-page-head .muted { max-width: 40em; font-size: var(--font-size-2); line-height: var(--line-height-relaxed); }
 .console-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); align-items: stretch; }
 .console-group { display: flex; flex-direction: column; background: var(--color-surface); padding: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; height: 100%; }
@@ -155,7 +214,7 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-group-wide > h2 { grid-column: 1 / -1; }
 .console-group h2 { font-size: var(--font-size-touch); margin: 0 0 var(--space-5); }
 .console-link { display: flex; flex-direction: column; justify-content: center; gap: 4px; color: var(--color-text); text-decoration: none; min-height: 52px; padding: 12px; border-radius: var(--radius-control); }
-.console-link:hover { background: var(--color-brand-weak); color: var(--color-brand); }
+.console-link:hover { background: var(--color-brand-weak); color: var(--color-brand-text); }
 .console-link > span { font-weight: 550; }
 .console-link small { color: var(--color-text-muted); font-size: var(--font-size-1); font-weight: 400; }
 /* #554: linear SVG icons share currentColor and a 24px viewBox. */
@@ -163,24 +222,24 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-nav-icon { width: 22px; height: 22px; line-height: 0; }
 #console-sidebar #tabs button, #console-sidebar .console-link { gap: 10px; }
 .console-link-with-icon { flex-direction: row; justify-content: flex-start; align-items: flex-start; gap: 12px; }
-.console-link-with-icon .console-icon { margin-top: 2px; color: var(--color-brand); }
+.console-link-with-icon .console-icon { margin-top: 2px; color: var(--color-brand-text); }
 .console-link-copy { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; }
 .console-link-copy > span { overflow-wrap: anywhere; font-weight: 550; }
 /* Empty / error state: a quiet tray or alert mark, decorative only. It is an inline SVG from consoleIcon():
    the console CSP (img-src 'self') blocks data: mask images. */
-.console-state-icon { width: 32px; height: 32px; color: var(--color-brand); }
+.console-state-icon { width: 32px; height: 32px; color: var(--color-brand-text); }
 .console-state-error .console-state-icon { color: var(--color-danger); }
 /* #553: empty, loading and error share one component (consoleState()). */
 .console-state { display: grid; justify-items: center; gap: var(--space-4); padding: var(--space-8) var(--space-6); background: var(--color-surface); text-align: center; border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
 .console-state h2 { font-size: var(--font-size-4); margin: 0; font-weight: 650; }
 .console-state p { color: var(--color-text-muted); max-width: 36em; margin: 0; line-height: var(--line-height-relaxed, 1.65); }
 .console-state-loading { border-style: dashed; }
-.console-state-loading::before { content: ''; width: 28px; height: 28px; border: 2px solid var(--color-border); border-top-color: var(--color-brand); border-radius: 50%; animation: console-state-spin .8s linear infinite; }
+.console-state-loading::before { content: ''; width: 28px; height: 28px; border: 2px solid var(--color-border); border-top-color: var(--color-brand-text); border-radius: 50%; animation: console-state-spin .8s linear infinite; }
 @keyframes console-state-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .console-state-loading::before { animation: none; } }
 /* #708: the GitHub permission check that runs after signing in, shown above every page until it ends. */
 .github-verification { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4); background: var(--color-surface); color: var(--color-text); border: 1px dashed var(--color-border); border-radius: var(--radius-card); line-height: var(--line-height-tight); overflow-wrap: anywhere; }
-.github-verification::before { content: ''; flex: none; width: 16px; height: 16px; border: 2px solid var(--color-border); border-top-color: var(--color-brand); border-radius: 50%; animation: console-state-spin .8s linear infinite; }
+.github-verification::before { content: ''; flex: none; width: 16px; height: 16px; border: 2px solid var(--color-border); border-top-color: var(--color-brand-text); border-radius: 50%; animation: console-state-spin .8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .github-verification::before { animation: none; } }
 /* #754: a progress read that keeps failing stops spinning — the line says so and offers a read now. */
 .github-verification[data-state="failed"] { border-style: solid; border-color: var(--color-warning-border); background: var(--color-warning-bg); }
@@ -210,7 +269,7 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-attention-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: var(--space-6); align-items: center; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: var(--space-6) var(--space-7); margin-bottom: var(--space-4); }
 .console-attention-row h2 { font-size: var(--font-size-3); margin: 6px 0; }
 .console-attention-row p { margin: 5px 0; font-size: var(--font-size-label); }
-.console-attention-row .eyebrow { color: #826022; font-size: var(--font-size-1); }
+.console-attention-row .eyebrow { color: var(--color-warning); font-size: var(--font-size-1); }
 .console-inbox-paging { display: flex; justify-content: flex-end; gap: 12px; border: 0; }
 body.console-ready .management-page { left: var(--console-rail); }
 @media (min-width:768px) and (max-width:1439px) {
@@ -263,8 +322,8 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-section-picker { display: flex; flex-basis: 100%; gap: 6px; font-size: var(--font-size-1); margin-top: 4px; }
   .console-mobile-nav { position: fixed; z-index: 48; inset: auto 0 0; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); min-height: var(--console-mobile-height); margin: 0; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); background: var(--color-surface); border: 0; border-top: 1px solid var(--color-border); box-shadow: 0 -3px 16px #142b4b05; }
   .console-mobile-nav .console-link { position: relative; align-items: center; text-align: center; gap: 4px; padding: 6px 4px; min-height: 52px; font-size: var(--font-size-1); color: var(--color-text-muted); }
-  .console-mobile-nav .console-link[aria-current=page] { color: var(--color-brand); background: var(--color-brand-weak); }
-  .console-mobile-nav .console-link.console-nav-busy { color: var(--color-brand); }
+  .console-mobile-nav .console-link[aria-current=page] { color: var(--color-brand-text); background: var(--color-brand-weak); }
+  .console-mobile-nav .console-link.console-nav-busy { color: var(--color-brand-text); }
   .console-mobile-nav .console-nav-icon { width: 22px; height: 22px; margin: 0 auto; }
   .console-mobile-nav .console-nav-badge { position: absolute; top: 5px; left: calc(50% + 8px); display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color-danger); }
   .console-mobile-nav a[data-active="1"] .console-nav-badge, .console-mobile-nav a[data-unread="1"] .console-nav-badge { display: block; }
@@ -330,9 +389,9 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 :is(button, .button-link).quiet { background: var(--color-surface); background-color: var(--color-surface); border: 1px solid var(--color-border); color: var(--color-text); }
 :is(button, .button-link).btn-danger,
 :is(button, .button-link).quiet.destructive { background: var(--color-surface); background-color: var(--color-surface); border: 1px solid var(--color-danger); color: var(--color-danger); }
-:is(button, .button-link).btn-text { background: transparent; background-color: transparent; border-color: transparent; color: var(--color-brand); box-shadow: none; font-weight: 600; }
+:is(button, .button-link).btn-text { background: transparent; background-color: transparent; border-color: transparent; color: var(--color-brand-text); box-shadow: none; font-weight: 600; }
 :is(button, .button-link).btn-text:hover { background: var(--color-hover); filter: none; }
-button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: var(--color-brand); text-align: left; font-weight: 600; overflow-wrap: anywhere; }
+button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: var(--color-brand-text); text-align: left; font-weight: 600; overflow-wrap: anywhere; }
 .card:not(.list-panel), .side-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); min-width: 0; }
 
 /* #556: technical notes stay closed until the reader opens them. */
@@ -380,11 +439,11 @@ button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: 
   .console-filters-fold > summary { padding: 10px 16px; }
 }
 
-.locale-switch { display: inline-flex; flex-shrink: 0; border: 1px solid var(--color-border, #cedbe2); border-radius: 7px; overflow: hidden; background: #fff; }
-.locale-switch button, .console-ready .locale-switch button { border: 0; border-radius: 0; background: transparent; color: var(--color-text, #183142); min-height: 36px; padding: 4px 12px; font-size: 12px; font-weight: 550; }
-.locale-switch button + button { border-left: 1px solid var(--color-border, #cedbe2); }
-.locale-switch button[aria-pressed=true], .console-ready .locale-switch button[aria-pressed=true] { background: var(--color-brand-weak, #edf2ff); color: var(--color-brand, #245de0); font-weight: 650; }
-body:not(.console-ready) header .locale-switch { background: #fff; }
+.locale-switch { display: inline-flex; flex-shrink: 0; border: 1px solid var(--color-border); border-radius: 7px; overflow: hidden; background: var(--color-surface); }
+.locale-switch button, .console-ready .locale-switch button { border: 0; border-radius: 0; background: transparent; color: var(--color-text); min-height: 36px; padding: 4px 12px; font-size: 12px; font-weight: 550; }
+.locale-switch button + button { border-left: 1px solid var(--color-border); }
+.locale-switch button[aria-pressed=true], .console-ready .locale-switch button[aria-pressed=true] { background: var(--color-brand-weak); color: var(--color-brand-text); font-weight: 650; }
+body:not(.console-ready) header .locale-switch { background: var(--color-surface); }
 @media (max-width: 700px) {
   .locale-switch button { min-height: 32px; padding: 4px 8px; }
 }
@@ -499,3 +558,11 @@ html { scroll-padding-top: var(--console-header); }
 @media (max-width: 767px) and (max-height: 600px) {
   body.management-page-mode .console-mobile-scope { display: none; }
 }
+
+/* #750: light / dark / follow-the-system on the personal settings page. Native radios keep the keyboard and the platform
+   semantics; the rows only give them the console's spacing. */
+.identity-appearance .theme-options { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
+.identity-appearance .theme-option { flex-direction: row; align-items: center; gap: var(--space-3); color: var(--color-text); font-size: var(--font-size-2); }
+.identity-appearance .theme-option input { width: auto; min-width: 0; min-height: 0; }
+.identity-appearance .theme-status:empty { display: none; }
+.identity-appearance .theme-status { margin: var(--space-3) 0 0; }

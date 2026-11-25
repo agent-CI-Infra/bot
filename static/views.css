@@ -28,7 +28,7 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .step-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.step-head strong{font-size:var(--font-size-label)}
 .step-meta{display:flex;align-items:center;gap:6px;color:var(--color-text-muted);font-size:var(--font-size-1)}.step p{margin:5px 0 0;font-size:var(--font-size-label);overflow-wrap:anywhere}.say{white-space:pre-wrap}.fault-action{color:#24414f}
 pre.command{margin:7px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-text);color:var(--color-text-inverse);max-height:none}
-pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:#f5f8fa;border:1px solid #e3eaf0;max-height:340px}
+pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:var(--color-code-bg);border:1px solid #e3eaf0;max-height:340px}
 .fold{margin-top:6px;font-size:var(--font-size-1);color:var(--color-text-muted)}.fold summary{cursor:pointer;width:fit-content}
 .snapshot-progress>summary{cursor:pointer;overflow-wrap:anywhere;font-size:var(--font-size-label)}.snapshot-progress>summary:focus-visible{outline:2px solid var(--color-brand);outline-offset:4px;border-radius:3px}
 .snapshot-heading{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px 10px;width:calc(100% - 20px);vertical-align:top}.snapshot-heading>time{margin-left:auto;color:var(--color-text-muted);font-size:var(--font-size-1)}
@@ -47,7 +47,7 @@ a.call-link{background:#e5f2e9;color:#24603d}
 .findings{margin:8px 0 0;padding-left:18px;font-size:var(--font-size-label)}.findings li+li{margin-top:10px}
 .history{list-style:none;margin:0;padding:0}.history li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:3px 10px;padding:7px 0;border-bottom:1px solid #edf1f4;font-size:var(--font-size-label)}
 .history li:last-child{border-bottom:0}.history.wrap li{overflow-wrap:anywhere}.history .wide-cell{grid-column:1/-1}.history code{overflow-wrap:anywhere;font-size:var(--font-size-1)}
-button.linkish{border:0;background:none;padding:0;min-height:0;color:var(--color-brand);text-align:left;font-weight:600;overflow-wrap:anywhere}
+button.linkish{border:0;background:none;padding:0;min-height:0;color: var(--color-brand-text);text-align:left;font-weight:600;overflow-wrap:anywhere}
 .environment-layout{flex:1;min-height:0;overflow:auto;padding:14px 16px;display:grid;grid-template-columns:minmax(280px,380px) minmax(0,1fr);gap:12px;align-items:start;background:#f7fafb}
 .stack{display:flex;flex-direction:column;gap:12px;min-width:0}
 .raw summary{font-weight:600}
@@ -70,7 +70,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .project-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 16px;border-bottom:1px solid #e3eaf0}
 /* #707: the project name keeps 16rem; when the header actions do not fit beside it they wrap below instead of squeezing it. */
 .project-head .title-group{flex:1 1 16rem;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.project-head h1{font-size:19px;margin:0;overflow-wrap:anywhere}
-.back-link{flex-basis:100%;font-size:var(--font-size-1);color:var(--color-brand);text-decoration:none}.back-link:hover{text-decoration:underline}
+.back-link{flex-basis:100%;font-size:var(--font-size-1);color: var(--color-brand-text);text-decoration:none}.back-link:hover{text-decoration:underline}
 .project-body{display:grid;grid-template-columns:minmax(0,1fr);min-height:calc(100svh - 200px)}
 .project-nav{display:flex;flex-direction:column;gap:2px;padding:12px 8px;border-right:1px solid #e3eaf0;background:#f7fafb}
 .project-nav a{padding:8px 12px;border-radius:5px;color:var(--color-text-muted);text-decoration:none;font-weight:600;font-size:var(--font-size-2)}
@@ -86,7 +86,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .login-guide>li>*{display:block;margin-top:8px}.login-guide>li>strong{margin-top:0;font-size:var(--font-size-2)}.login-guide>li>label{display:flex}
 .github-login-callback{padding:8px;background:#edf2f5;white-space:normal;overflow-wrap:anywhere;word-break:break-word;min-width:0}
 .login-addresses{min-width:0}.login-addresses code{overflow-wrap:anywhere;word-break:break-word}
-.release-panel>label,.release-panel>details,.release-record>label,.release-record>details{margin-top:10px}.release-history{display:grid;gap:12px;margin-top:10px}.release-panel .release-jobs{display:grid;gap:8px;margin-top:10px}.release-job{padding:8px 10px;border:1px solid #e3eaf0;border-radius:5px}.release-job p{margin:0 0 4px}.release-panel summary{cursor:pointer;color:var(--color-brand);font-size:var(--font-size-label)}.release-record textarea{font:var(--font-size-label)/1.5 ui-monospace,monospace;min-height:240px}.release-record .actions a{font-size:var(--font-size-label)}.release-panel>.view-error:empty{display:none}.release-panel .release-check-failed{color:#a2292b;font-weight:600}
+.release-panel>label,.release-panel>details,.release-record>label,.release-record>details{margin-top:10px}.release-history{display:grid;gap:12px;margin-top:10px}.release-panel .release-jobs{display:grid;gap:8px;margin-top:10px}.release-job{padding:8px 10px;border:1px solid #e3eaf0;border-radius:5px}.release-job p{margin:0 0 4px}.release-panel summary{cursor:pointer;color: var(--color-brand-text);font-size:var(--font-size-label)}.release-record textarea{font:var(--font-size-label)/1.5 ui-monospace,monospace;min-height:240px}.release-record .actions a{font-size:var(--font-size-label)}.release-panel>.view-error:empty{display:none}.release-panel .release-check-failed{color:#a2292b;font-weight:600}
 .form-actions{justify-content:flex-start}.view-success{margin:0;color:#24603d}.flash{padding:8px 12px;border-radius:5px;background:#e5f2e9}.view-progress{margin:0;color:#2c5791}.view-success:empty,.view-progress:empty{display:none}
 .status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-6);align-items:stretch}.status-grid>.side-card{min-width:0;height:100%;display:flex;flex-direction:column}
 #activity-status{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -110,7 +110,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .other-rule-rows{border-top:2px solid #d7e3e8}
 @media(max-width:650px){.project-table th,.project-table td{padding:10px 4px}.project-table button{padding:6px;min-height:36px;font-size:var(--font-size-1)}.task-model-editor{grid-template-columns:minmax(0,1fr)}.task-model-editor>.actions{grid-column:1;justify-content:flex-start}.task-model-editor select{font-size:var(--font-size-label)}.project-table[aria-label="工作流模型"] th:first-child{width:28%}
 .common-rule summary>.muted{margin-left:0}.rule-sync{align-items:flex-start}.rule-sync>.muted{flex-basis:100%}}
-.add-model{margin-top:8px}.add-model>summary{font-weight:600;color:var(--color-brand)}.add-model .side-card{border:0;padding:8px 0 0}
+.add-model{margin-top:8px}.add-model>summary{font-weight:600;color: var(--color-brand-text)}.add-model .side-card{border:0;padding:8px 0 0}
 .member-add{margin-top:8px}.member-add select{width:auto;min-width:220px}
 @media(max-width:760px){
   .project-body{grid-template-columns:minmax(0,1fr);min-height:0}
@@ -246,7 +246,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .switch-track::after{content:'';position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff}
 .project-feature-switch[aria-checked=true] .switch-track{background:var(--color-brand)}.project-feature-switch[aria-checked=true] .switch-track::after{left:14px}.switch-value{min-width:1em}
 .project-task-preview{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;font-size:var(--font-size-1);padding:6px;border-radius:4px;text-decoration:none}
-.project-task-preview:hover{background:#edf4f6;text-decoration:underline}.task-count-active{color:var(--color-brand);font-weight:700}.project-control-feedback{max-width:460px;text-align:right;overflow-wrap:anywhere}.project-control-feedback:empty{display:none}.project-control-feedback.control-error{color:#a2292b}
+.project-task-preview:hover{background:#edf4f6;text-decoration:underline}.task-count-active{color: var(--color-brand-text);font-weight:700}.project-control-feedback{max-width:460px;text-align:right;overflow-wrap:anywhere}.project-control-feedback:empty{display:none}.project-control-feedback.control-error{color:#a2292b}
 /* Below the table breakpoint the same cells become labelled pairs, so the category is still named and the page never
    scrolls sideways; the list container itself is the only thing that may scroll. */
 @media(max-width:1279px){
@@ -285,16 +285,16 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 }
 
 @media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
-.permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:var(--color-brand);text-underline-offset:3px}
+.permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color: var(--color-brand-text);text-underline-offset:3px}
 button.quiet.destructive{color:#a02b31}
 @media(min-width:761px){.external-group .row.has-actions{grid-template-columns:minmax(0,1fr) auto max-content}}
 /* In-page confirmation (confirmDialog in views.js) */
-dialog.confirm-dialog{width:min(500px,calc(100vw - 24px));padding:0;border:0;border-radius:10px;box-shadow:0 20px 56px #0f2f3b47;overflow:hidden}
-dialog.confirm-dialog::backdrop{background:#16374485}
+dialog.confirm-dialog{width:min(500px,calc(100vw - 24px));padding:0;border:0;border-radius:10px;box-shadow:var(--shadow-confirm);overflow:hidden;background:var(--color-surface);color:var(--color-text)}
+dialog.confirm-dialog::backdrop{background:var(--color-modal-backdrop)}
 .confirm-form{gap:0}
 .confirm-head{display:flex;align-items:center;gap:12px;padding:22px 24px 8px}
 .confirm-head h2{font-size:var(--font-size-touch);line-height:1.45;overflow-wrap:anywhere}
-.confirm-icon{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:var(--font-size-touch);font-weight:700;background:#e8f0fb;color:#2c5791}
+.confirm-icon{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:var(--font-size-touch);font-weight:700;background:var(--color-info-bg);color:var(--color-info)}
 .confirm-icon.danger{background:#fbeaea;color:#a02b31}
 .confirm-body{display:grid;gap:8px;padding:2px 24px 16px 68px;color:var(--color-text-muted);font-size:var(--font-size-label);line-height:1.7;overflow-wrap:anywhere}
 .confirm-body p,.confirm-body ul{margin:0}.confirm-body ul{padding-left:18px}.confirm-body li+li{margin-top:2px}
@@ -326,7 +326,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 }
 
 /* Provider connection settings are edited once, separately from model-specific operations. */
-.provider-create{margin-top:12px}#provider-edit{width:min(800px,calc(100vw - 24px))}#provider-edit form{gap:16px}.provider-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:10px}.provider-fields h3{margin:8px 0 0;font-size:var(--font-size-2)}.provider-fields p{margin:0}.provider-fields .model-chips:empty,.provider-fields .probe-result:empty{display:none}.provider-fields>button{align-self:flex-start}.provider-manual{align-items:flex-end}.provider-manual label{flex:1 1 220px}.provider-selected .model-chip{border-color:var(--color-brand);color:var(--color-brand)}.provider-editor-actions{justify-content:flex-end}.provider-editor-actions .destructive{margin-right:auto}.provider-fields .model-chips{max-height:220px;overflow:auto;padding:2px}.provider-fields input[type=search]{max-width:320px}
+.provider-create{margin-top:12px}#provider-edit{width:min(800px,calc(100vw - 24px))}#provider-edit form{gap:16px}.provider-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:10px}.provider-fields h3{margin:8px 0 0;font-size:var(--font-size-2)}.provider-fields p{margin:0}.provider-fields .model-chips:empty,.provider-fields .probe-result:empty{display:none}.provider-fields>button{align-self:flex-start}.provider-manual{align-items:flex-end}.provider-manual label{flex:1 1 220px}.provider-selected .model-chip{border-color:var(--color-brand);color: var(--color-brand-text)}.provider-editor-actions{justify-content:flex-end}.provider-editor-actions .destructive{margin-right:auto}.provider-fields .model-chips{max-height:220px;overflow:auto;padding:2px}.provider-fields input[type=search]{max-width:320px}
 @media(max-width:760px){#provider-edit{padding:16px}.provider-head>button{margin-left:0}.provider-manual label{flex-basis:100%}.provider-editor-actions{gap:8px}}
 /* Workflows: a list beside a tabbed editor over the whole width, the chat as a side panel, and the flowchart drawn from the prompt. */
 .release-advice{margin:6px 0 10px;font-size:var(--font-size-label);line-height:1.6;overflow-wrap:anywhere;color:#24414f}.release-advice h4{margin:10px 0 4px;font-size:var(--font-size-label)}.release-advice p{margin:4px 0}.release-advice ul,.release-advice ol{margin:4px 0;padding-left:20px}.release-advice code{font:var(--font-size-1) ui-monospace,monospace;background:#eef3f5;border-radius:3px;padding:0 3px}
@@ -498,7 +498,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:var(--font-size-1);padding:4px 10px}
-.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand);background:#e8f3f4}
+.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand-text);background:#e8f3f4}
 /* #698: one audit row reads as a sentence (action · who), then time and the object link; codes fold under 技术信息. */
 .history li.audit-row{display:block;padding:9px 0}
 .audit-row-head{font-size:var(--font-size-row,14px);overflow-wrap:anywhere}.audit-row-head .audit-actor{color:var(--color-text-muted,#4b5563)}
@@ -600,7 +600,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-repo-link {
   text-decoration: none;
   font-weight: 600;
-  color: var(--color-brand);
+  color: var(--color-brand-text);
 }
 .task-repo-link:hover { text-decoration: underline; }
 .task-cancel-btn { color: #991b1b; border-color: #fecaca; }
@@ -686,7 +686,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   white-space: nowrap;
 }
 .task-ext-link {
-  color: var(--color-brand);
+  color: var(--color-brand-text);
   font-weight: 600;
   text-decoration: none;
   overflow-wrap: anywhere;
@@ -694,7 +694,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-ext-link:hover { text-decoration: underline; }
 .task-ext-sublink {
   font-size: var(--font-size-1);
-  color: var(--color-brand);
+  color: var(--color-brand-text);
   text-decoration: none;
   white-space: nowrap;
 }
@@ -1101,3 +1101,134 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media (max-width: 600px){
   .agent-tools-actions input{flex:1 1 100%;width:100%}
 }
+/* #750 phase 1, reviewed gap: the task detail, project list and project pages keep their own values hardcoded in
+   light (white cards, #f7fafb side rails, #fbfdfe table head), so a dark console painted the dark text token on a
+   white card there — 1.09:1 on the owner bar, 1.12:1 on the task side rail, 1.18:1 on a step, 2.09:1 on the table
+   head. These blocks are scoped to dark only, exactly like the token blocks in shell.css: in light every value below
+   is untouched, so the light baseline does not move. `pre.command` and `pre.output.snapshot-output` paint
+   `--color-text` as a background, which inverts correctly in light and paints light-on-light in dark, so they take a
+   raised surface with normal text instead. Both dark blocks must stay identical. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
+  :root:not([data-theme="light"]) .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
+  :root:not([data-theme="light"]) .step-running { border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .fault-action { color: var(--color-text); }
+  :root:not([data-theme="light"]) .project-nav a:hover { background: var(--color-hover); }
+  :root:not([data-theme="light"]) .task-archive-body { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(#rows[data-view=projects], .global-project-table) .project-table-head { background: var(--color-surface-alt); border-bottom-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(#rows[data-view=projects], .global-project-table) :is(.project-list-row, .project-feature-switch, .project-task-preview):hover { background: var(--color-hover); }
+  :root:not([data-theme="light"]) :is(.task-goal-box, .role-run-conclusion, .role-run-summary) { background: var(--color-surface-alt); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(.task-next-text, .task-ext-label, .step-fold-num, .step-fold-meta, .role-run-brief, .role-run-meta, .task-archive-fold > summary, .task-metrics, .workbench-live-stats, .role-backend-line, .role-mobile-label, .workbench-filter-pill, .role-chip-time) { color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .step-fold-title::before, :root:not([data-theme="light"]) .role-run-title-row::before, :root:not([data-theme="light"]) .task-archive-fold > summary::before { color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .step-fold-summary:hover { background: var(--color-hover); }
+:root:not([data-theme="light"]) .workbench-task-row:hover { background: var(--color-hover); }
+  :root:not([data-theme="light"]) .live { color: var(--color-info); }
+  :root:not([data-theme="light"]) .live::before { background: var(--color-info); }
+  :root:not([data-theme="light"]) .task-cancel-btn { color: var(--color-danger); border-color: var(--color-danger-weak); }
+  :root:not([data-theme="light"]) .workbench-tab { color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .workbench-tab:hover { background: var(--color-hover); color: var(--color-text); }
+  :root:not([data-theme="light"]) .workbench-tab[aria-current=page] { color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .workbench-tab[aria-current=page] .workbench-tab-count { background: var(--color-brand-weak); color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .workbench-quick-link { color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .role-board-row:hover { background: var(--color-hover); }
+  :root:not([data-theme="light"]) .workbench-filter-pill[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) button.role-task-chip { background: var(--color-surface-alt); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) button.role-task-chip.role-task-running { background: var(--color-info-bg); border-color: var(--color-info-border); }
+  :root:not([data-theme="light"]) button.role-task-chip:hover { background: var(--color-hover); }
+  :root:not([data-theme="light"]) .role-chip-ref { color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .confirm-icon.danger { background: var(--color-danger-bg); color: var(--color-danger); }
+  :root:not([data-theme="light"]) .confirm-status.error { color: var(--color-danger); }
+  :root:not([data-theme="light"]) .confirm-status.progress { color: var(--color-info); }
+  :root:not([data-theme="light"]) .view-success { color: var(--color-success); }
+  :root:not([data-theme="light"]) .view-progress { color: var(--color-info); }
+  :root:not([data-theme="light"]) .machine-config-error { color: var(--color-danger); }
+  /* `.flash` is a light plate with token text; in dark it takes the success background token. */
+  :root:not([data-theme="light"]) .flash { background: var(--color-success-bg); }
+  /* The costs page paints its plates with light literals; in dark they have to come from the palette too. */
+  :root:not([data-theme="light"]) #costs-panel { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) :is(.cost-filters, .cost-stat, .cost-table-scroll th) { background: var(--color-surface-alt); }
+  :root:not([data-theme="light"]) :is(.cost-stat, .cost-chart-section) { border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .cost-table-scroll :is(th, td) { border-bottom-color: var(--color-border); }
+  :root:not([data-theme="light"]) .cost-incomplete { color: var(--color-warning); background: var(--color-warning-bg); }
+  :root:not([data-theme="light"]) .cost-chart-detail { color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .cost-chart-scroll rect:focus { outline-color: var(--focus-ring); }
+  :root:not([data-theme="light"]) .step-fold-body { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .step-io-block { background: var(--color-surface-alt); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .step-io-title { color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .step-fold-stat { background: var(--color-surface); color: var(--color-text-muted); }
+  :root:not([data-theme="light"]) .confirm-body label { color: var(--color-text); }
+  :root:not([data-theme="light"]) .confirm-actions { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .settings-body { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .settings-rows { border-top-color: var(--color-border); }
+  :root:not([data-theme="light"]) .audit-filters button[aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
+  /* This head still renders the overview capability card from its base; main removes the card in #1123, so after
+     the merge this override is dead code. Kept rather than dropped: on this head it is the difference between
+     brand blue on a dark card and the readable link colour. */
+  :root:not([data-theme="light"]) .capability-links a { color: var(--color-brand-text); }
+  :root:not([data-theme="light"]) .role-run-fold { background: var(--color-surface); border-color: var(--color-border); }
+  :root:not([data-theme="light"]) .role-run-fold.role-run-running { border-color: var(--color-info-border); }
+  :root:not([data-theme="light"]) .role-run-fold.role-run-returned, :root:not([data-theme="light"]) .role-run-fold.role-run-paused { border-color: var(--color-warning-border); }
+  :root:not([data-theme="light"]) .role-run-findings { color: var(--color-warning); }
+}
+:root[data-theme="dark"] :is(.step, .task-side, .task-choice-row, .project-page, .project-nav, .project-owner-bar, .project-table-head, .task-archive-body) { background: var(--color-surface); border-color: var(--color-border); }
+:root[data-theme="dark"] :is(pre.output, pre.command, pre.output.snapshot-output) { background: var(--color-code-bg); border-color: var(--color-border); color: var(--color-code-text); }
+:root[data-theme="dark"] .step::before { box-shadow: 0 0 0 3px var(--color-surface); }
+:root[data-theme="dark"] .step-running { border-color: var(--color-border); }
+:root[data-theme="dark"] .fault-action { color: var(--color-text); }
+:root[data-theme="dark"] .project-nav a:hover { background: var(--color-hover); }
+:root[data-theme="dark"] .task-archive-body { border-top-color: var(--color-border); }
+:root[data-theme="dark"] :is(#rows[data-view=projects], .global-project-table) .project-table-head { background: var(--color-surface-alt); border-bottom-color: var(--color-border); }
+:root[data-theme="dark"] :is(#rows[data-view=projects], .global-project-table) :is(.project-list-row, .project-feature-switch, .project-task-preview):hover { background: var(--color-hover); }
+:root[data-theme="dark"] :is(.task-goal-box, .role-run-conclusion, .role-run-summary) { background: var(--color-surface-alt); border-color: var(--color-border); }
+:root[data-theme="dark"] :is(.task-next-text, .task-ext-label, .step-fold-num, .step-fold-meta, .role-run-brief, .role-run-meta, .task-archive-fold > summary, .task-metrics, .workbench-live-stats, .role-backend-line, .role-mobile-label, .workbench-filter-pill, .role-chip-time) { color: var(--color-text-muted); }
+:root[data-theme="dark"] .step-fold-title::before, :root[data-theme="dark"] .role-run-title-row::before, :root[data-theme="dark"] .task-archive-fold > summary::before { color: var(--color-text-muted); }
+:root[data-theme="dark"] .step-fold-summary:hover { background: var(--color-hover); }
+:root[data-theme="dark"] .workbench-task-row:hover { background: var(--color-hover); }
+:root[data-theme="dark"] .live { color: var(--color-info); }
+:root[data-theme="dark"] .live::before { background: var(--color-info); }
+:root[data-theme="dark"] .task-cancel-btn { color: var(--color-danger); border-color: var(--color-danger-weak); }
+:root[data-theme="dark"] .workbench-tab { color: var(--color-text-muted); }
+:root[data-theme="dark"] .workbench-tab:hover { background: var(--color-hover); color: var(--color-text); }
+:root[data-theme="dark"] .workbench-tab[aria-current=page] { color: var(--color-brand-text); }
+:root[data-theme="dark"] .workbench-tab[aria-current=page] .workbench-tab-count { background: var(--color-brand-weak); color: var(--color-brand-text); }
+:root[data-theme="dark"] .workbench-quick-link { color: var(--color-brand-text); }
+:root[data-theme="dark"] .role-board-row:hover { background: var(--color-hover); }
+:root[data-theme="dark"] .workbench-filter-pill[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand-text); }
+:root[data-theme="dark"] button.role-task-chip { background: var(--color-surface-alt); border-color: var(--color-border); }
+:root[data-theme="dark"] button.role-task-chip.role-task-running { background: var(--color-info-bg); border-color: var(--color-info-border); }
+:root[data-theme="dark"] button.role-task-chip:hover { background: var(--color-hover); }
+:root[data-theme="dark"] .role-chip-ref { color: var(--color-brand-text); }
+  :root[data-theme="dark"] .confirm-icon.danger { background: var(--color-danger-bg); color: var(--color-danger); }
+  :root[data-theme="dark"] .confirm-status.error { color: var(--color-danger); }
+  :root[data-theme="dark"] .confirm-status.progress { color: var(--color-info); }
+  :root[data-theme="dark"] .view-success { color: var(--color-success); }
+  :root[data-theme="dark"] .view-progress { color: var(--color-info); }
+  :root[data-theme="dark"] .machine-config-error { color: var(--color-danger); }
+  /* `.flash` is a light plate with token text; in dark it takes the success background token. */
+  :root[data-theme="dark"] .flash { background: var(--color-success-bg); }
+  /* The costs page paints its plates with light literals; in dark they have to come from the palette too. */
+  :root[data-theme="dark"] #costs-panel { border-top-color: var(--color-border); }
+  :root[data-theme="dark"] :is(.cost-filters, .cost-stat, .cost-table-scroll th) { background: var(--color-surface-alt); }
+  :root[data-theme="dark"] :is(.cost-stat, .cost-chart-section) { border-color: var(--color-border); }
+  :root[data-theme="dark"] .cost-table-scroll :is(th, td) { border-bottom-color: var(--color-border); }
+  :root[data-theme="dark"] .cost-incomplete { color: var(--color-warning); background: var(--color-warning-bg); }
+  :root[data-theme="dark"] .cost-chart-detail { color: var(--color-text-muted); }
+  :root[data-theme="dark"] .cost-chart-scroll rect:focus { outline-color: var(--focus-ring); }
+  :root[data-theme="dark"] .step-fold-body { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .step-io-block { background: var(--color-surface-alt); border-color: var(--color-border); }
+  :root[data-theme="dark"] .step-io-title { color: var(--color-text-muted); }
+  :root[data-theme="dark"] .step-fold-stat { background: var(--color-surface); color: var(--color-text-muted); }
+  :root[data-theme="dark"] .confirm-body label { color: var(--color-text); }
+  :root[data-theme="dark"] .confirm-actions { background: var(--color-surface-alt); border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .settings-body { border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .settings-rows { border-top-color: var(--color-border); }
+  :root[data-theme="dark"] .audit-filters button[aria-pressed=true] { background: var(--color-brand-weak); border-color: var(--color-brand); color: var(--color-brand-text); }
+  /* This head still renders the overview capability card from its base; main removes the card in #1123, so after
+     the merge this override is dead code. Kept rather than dropped: on this head it is the difference between
+     brand blue on a dark card and the readable link colour. */
+  :root[data-theme="dark"] .capability-links a { color: var(--color-brand-text); }
+  :root[data-theme="dark"] .role-run-fold { background: var(--color-surface); border-color: var(--color-border); }
+  :root[data-theme="dark"] .role-run-fold.role-run-running { border-color: var(--color-info-border); }
+  :root[data-theme="dark"] .role-run-fold.role-run-returned, :root[data-theme="dark"] .role-run-fold.role-run-paused { border-color: var(--color-warning-border); }
+  :root[data-theme="dark"] .role-run-findings { color: var(--color-warning); }

@@ -15,7 +15,7 @@
 .knowledge-tree-row .knowledge-tree-entry{grid-column:2;grid-row:1}
 .knowledge-tree-entry span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .knowledge-tree-entry .console-icon{flex:none;width:16px;height:16px;color:var(--color-text-muted)}
-.knowledge-tree button.quiet[aria-current]{background:var(--color-brand-weak);color:var(--color-brand)}
+.knowledge-tree button.quiet[aria-current]{background:var(--color-brand-weak);color:var(--color-brand-text)}
 .knowledge-tree button[aria-current] .console-icon{color:inherit}
 .knowledge-tree .knowledge-tree-toggle{grid-column:1;grid-row:1;display:grid;place-items:center;padding:0;width:24px}
 .knowledge-tree-toggle::after{content:"";width:6px;height:6px;border:solid var(--color-text-muted);border-width:0 1.5px 1.5px 0;transform:rotate(-45deg)}
