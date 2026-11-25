@@ -1,5 +1,3 @@
-// Legacy conversation fixtures verify gateway accounting and use a synthetic non-streaming provider.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import { modelSnapshot } from '../../../../dist/storage/payloads.js';
 import assert from 'node:assert/strict';
@@ -19,6 +17,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { beginModelRequest,finishModelRequest,externalModelRecorder } from '../../../../dist/metrics/accounting.js';
 import { instanceUsage, activeCliVersions } from '../../../../dist/roles/role-run.js';
 import { interruptRuns } from '../../../../dist/tasks/trace.js';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 import '../../../fixtures/scripted-driver.mjs';
 
 async function fixture(t,harness,budget,stall=false){
@@ -29,7 +28,7 @@ async function fixture(t,harness,budget,stall=false){
     if(req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:claudeModel}]}));return;}
     let text='';for await(const c of req)text+=c;const body=JSON.parse(text);requests.push(body);began();if(stall)await stallGate;
     if(harness==='claude_code'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture-provider-response',type:'message',model:claudeModel,role:'assistant',content:[{type:'text',text:'Fixture response'}],usage:{input_tokens:9,output_tokens:3}}));return;}
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:response(body)}],usage:{prompt_tokens:9,completion_tokens:3}}));});
+    replyChatCompletion(res,response(body),{stream:Boolean(body.stream),usage:{prompt_tokens:9,completion_tokens:3}});});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   if(external){
     const name=harness==='codex'?'BOT_CODEX_CONFIG':'BOT_CLAUDE_CODE_CONFIG',file=join(root,'config.json'),prior=process.env[name];
@@ -40,7 +39,8 @@ async function fixture(t,harness,budget,stall=false){
   }
   t.after(async()=>{await manager.recover();await new Promise(r=>{server.close(r);server.closeAllConnections();});store.close();rmSync(root,{recursive:true,force:true});});
   store.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
-  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','101',?,'fixture',?,'now')",'http://127.0.0.1:'+server.address().port+'/v1',store.secrets.seal({value:'fixture-model-secret'},'model:m'));
+  const modelUrlSuffix = harness === 'codex' ? '/v1/responses' : harness === 'claude_code' ? '/v1/messages' : '/v1';
+  store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','101',?,'fixture',?,'now')",'http://127.0.0.1:'+server.address().port+modelUrlSuffix,store.secrets.seal({value:'fixture-model-secret'},'model:m'));
   store.run("INSERT INTO policies(repository_id,enabled,model_id) VALUES('101',1,'m')");
   roleApi(store,{id:'operator',role:'project_admin',repositories:['101']},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:false,
     roles:[{role_id:'reviewer',harness_ref:{id:harness},permissions:{task_management:'none',conversation_history:'read'},...(budget?{budget_policy_ref:budget}:{})}]});

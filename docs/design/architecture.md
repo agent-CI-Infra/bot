@@ -15,7 +15,8 @@ flowchart LR
   Bot --> Manager["manager (control net + Docker socket)"]
   Manager --> ProjComp["Project Computers (per-repo bridge net, UID 10001)"]
   Manager --> AsstComp["Assistant Computers (isolated ICC-off bridge or none, UID 10001)"]
-  Bot -. "read-only /opt/agent-tools, /opt/bot-skills & /results" .-> ProjComp
+  Bot -. "read-only /opt/agent-tools, /opt/bot-skills, /results & /run/model-gateway (UDS)" .-> ProjComp
+  Bot -. "read-only /opt/bot-skills & /run/model-gateway (UDS)" .-> AsstComp
 ```
 
 | 服务 | 源码目录 | 核心职责 |
@@ -31,7 +32,7 @@ flowchart LR
 
 1. **控制面是唯一权威与凭据边界**：
    - GitHub App 私钥、机器人 Token、模型长期 API Key、OAuth Secret 与飞书凭据全部使用 **AES-256-GCM（`SecretBox`）绑定记录 AAD** 密封在控制面，绝不进入项目电脑、助手电脑、浏览器响应或日志。
-   - 项目容器内仅能通过短期受限机制访问外部能力：控制面代理或受控网关负责模型转发与 GitHub 写入，容器内按需签发单仓只读短期安装令牌（结束即撤销）。
+   - 项目容器与助手容器内仅能通过短期受限机制访问外部能力：所有平台模型调用统一经控制面只读挂载的 Unix Domain Socket 透传网关（`/run/model-gateway/gateway.sock`）持短期运行令牌（`rrt_…`）访问，容器内仅运行内存态回环 TCP→UDS 字节转发桥，长期模型 API Key 永不进入容器，在 `egress=false` / `NetworkMode: none` 下同样可用；GitHub 写入经控制面 `github_write` 执行，容器内按需签发单仓只读短期安装令牌（结束即撤销）。
 2. **授权收敛与失败关闭**：
    - 任何外部输入（Issue/PR 文本、仓库文件、`.agents/skills/`、模型输出、飞书卡片参数）均视为不可信数据，不能扩大工具集、权限或改变平台规则。
    - 权限计算在控制面每次落库或外部写入前按实时授权、项目能力上限（`capability_ceiling`）、任务写授权（`task_write_grants`）与 GitHub App 安装范围取交集。
@@ -46,9 +47,9 @@ flowchart LR
 - **项目电脑（每仓库一台长期容器）**：
   - 非特权用户 UID `10001`、只读根文件系统、`cap_drop: [ALL]`、`no-new-privileges`、`init` 回收僵尸进程、禁宿主 swap。
   - 每个仓库独立 bridge 网络，项目间互不可达，与控制面 `control` 网络隔离；默认开启外网（可按部署或项目关闭）。
-  - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、只读工具卷（`/opt/agent-tools`）、只读项目工具卷（`/opt/project-tools`）、只读 Skill 卷（`/opt/bot-skills`，`skill-store` 子路径 `projects/<repository_id>`）与只读工具结果卷（`/results`）划分数据边界。
+  - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、只读工具卷（`/opt/agent-tools`）、只读项目工具卷（`/opt/project-tools`）、只读 Skill 卷（`/opt/bot-skills`，`skill-store` 子路径 `projects/<repository_id>`）、只读工具结果卷（`/results`）与只读模型网关套接字卷（`/run/model-gateway`）划分数据边界。
 - **助手电脑（按对话归属短时容器）**：
-  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）以及公共服务 Skill 只读子路径（`/opt/bot-skills`，`skill-store` 子路径 `service`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
+  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）以及公共服务 Skill 只读子路径（`/opt/bot-skills`，`skill-store` 子路径 `service`），并只读挂载模型网关套接字卷（`/run/model-gateway`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
   - 默认连接关闭容器间通信（`enable_icc=false`）的独立外网 bridge 网络，与 `control` 及其他助手容器隔离；全局关闭外网时切换为 `NetworkMode: none`。
 - **可信与不可信代码检出区分**：
   - PR 检视、续修未合入 bot PR 属于非受信任检出：控制面禁止任何后端从该检出自动加载 `.agents/skills/`、`.pi/skills/`、`.codex/skills/`、根目录 `AGENTS.md`/`CLAUDE.md` 或任何本地 hooks/MCP，仅从受控基准分支注入可信配置并将可信 Skill 物化至只读 `/opt/bot-skills` 卷。

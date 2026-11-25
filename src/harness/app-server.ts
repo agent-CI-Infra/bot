@@ -105,11 +105,32 @@ export const deniedFeatures:readonly string[] = [];
 const quietNativeItems = new Set(['commandExecution', 'fileChange', 'imageView', 'collabAgentToolCall', 'subAgentActivity']);
 
 class RpcError extends Error {
-  constructor(readonly method: string, readonly code: number, message: string) {
+  constructor(
+    readonly method: string,
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+  ) {
     super(message);
   }
 }
 const threadMissing = (error: RpcError) => error.code === -32600 && /^no rollout found for thread id /.test(error.message);
+
+function classifyDeterministicRpcConfigError(error: RpcError, redactor: Redactor): TaskError | null {
+  const dataText = error.data !== undefined ? (() => { try { return JSON.stringify(error.data); } catch { return String(error.data); } })() : '';
+  const combined = `${error.message} ${dataText}`;
+  const detail = clip(redactor.text(dataText ? `${error.message} (${dataText})` : error.message), 500);
+  if (/modelProviderMismatch|model_provider_mismatch|model provider mismatch|unknown model provider|model_provider.*not found|provider.*mismatch/i.test(combined)) {
+    return new TaskError('codex_model_mismatch', 'waiting_configuration', `${error.method}：${detail}`);
+  }
+  if (/unauthorized|authentication|invalid[_ ]api[_ ]key|missing environment variable.*(?:TOKEN|KEY)|env_key/i.test(combined)) {
+    return new TaskError('codex_authentication_failed', 'waiting_configuration', `${error.method}：${detail}`);
+  }
+  if (/model[_ ]not[_ ]found|unsupported[_ ]model|unknown model\b|invalid[_ ]config|config(?:uration)?[_ ]error/i.test(combined)) {
+    return new TaskError('codex_configuration_invalid', 'waiting_configuration', `${error.method}：${detail}`);
+  }
+  return null;
+}
 const invalid = (at: string): never => stop('codex_protocol_invalid', 'retry_wait', at);
 const need = (ok: unknown, at: string) => { if (!ok) invalid(at); };
 const id = (v: unknown) => typeof v === 'string' && v.length > 0 && v.length <= 256;
@@ -202,7 +223,7 @@ export class LineRpc {
         }
         this.pending.delete(m.id);
         if (m.error) {
-          p.reject(new RpcError(p.method, Number(m.error?.code ?? 0), String(m.error?.message ?? 'error')));
+          p.reject(new RpcError(p.method, Number(m.error?.code ?? 0), String(m.error?.message ?? 'error'), m.error?.data));
           return;
         }
         let value: any;
@@ -789,6 +810,8 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
             thread = check.thread(await rpc.request('thread/resume', { threadId: prior.sessionId, excludeTurns: true, ...overrides }), 'thread/resume.result');
           } catch (error) {
             if (!(error instanceof RpcError)) throw error;
+            const configErr = classifyDeterministicRpcConfigError(error, redactor);
+            if (configErr) throw configErr;
             if (!threadMissing(error)) {
               stop('codex_resume_failed', 'retry_wait', `thread/resume ${prior.sessionId}：${clip(redactor.text(error.message), 300)}（${error.code}）；保留原 thread 绑定。`);
             }
@@ -832,7 +855,15 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
       }
 
       if (!thread) {
-        thread = check.thread(await rpc.request('thread/start', overrides), 'thread/start.result');
+        try {
+          thread = check.thread(await rpc.request('thread/start', overrides), 'thread/start.result');
+        } catch (error) {
+          if (error instanceof RpcError) {
+            const configErr = classifyDeterministicRpcConfigError(error, redactor);
+            if (configErr) throw configErr;
+          }
+          throw error;
+        }
         if (switched(thread.model, thread.modelProvider)) {
           stop(
             'codex_resume_incompatible',
@@ -940,6 +971,8 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
         }
         if (error instanceof RpcError) {
           persist(before.turn, before.known);
+          const configErr = classifyDeterministicRpcConfigError(error, redactor);
+          if (configErr) throw configErr;
         } else {
           const endedHint = waiter.hint ? early.get(waiter.hint) : undefined;
           if (endedHint) persist({ id: waiter.hint, status: endedHint.status }, waiter.hint);

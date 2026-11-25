@@ -189,25 +189,38 @@ test('workspace review conversations leave history to the Pi session and tell it
     f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('review','r','review.pr','running','Review')");
     const configBytes = [], stages = [], operations = [];
     const ready = {summary:'Reviewed',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
-    let config, boundaryDone = false, replies = 0;
+    let config, gateway = {}, boundaryDone = false, replies = 0;
     const workspace = { log() {}, async call(_key, request) {
       operations.push(request.type);
       if (request.type === 'workspace_agent_poll') assert.fail('Conversation polls must use deliver, not the old cached path');
+      if (request.type === 'workspace_agent_gateway') {
+        gateway = JSON.parse(Buffer.from(request.base64, 'base64').toString('utf8'));
+      }
       if (request.type === 'workspace_agent_config') {
         configBytes.push(Buffer.from(request.base64,'base64'));
         if (request.final) config = JSON.parse(Buffer.concat(configBytes));
       }
       if (request.type === 'workspace_agent_boundary' && request.final) boundaryDone = true;
-      if (request.type === 'workspace_agent_reply' && request.final) {
-        replies++;
-        if (changeModel && replies === 1) f.store.run("UPDATE models SET version=version+1,model_name='changed' WHERE id='m'");
-      }
       return {};
     }, async deliver(request) {
       operations.push(request.type);
+      if (request.type === 'workspace_agent_gateway') {
+        gateway = JSON.parse(Buffer.from(request.base64, 'base64').toString('utf8'));
+        return { written: true };
+      }
       if (request.type === 'workspace_agent_poll') {
         if (!boundaryDone) return {state:'running',boundary:{id:'b'.repeat(48),stage:'start',recovery:'native_resume'}};
-        if (!replies || changeModel && replies === 1) return {state:'running',request:{id:(replies?'d':'c').repeat(48),body:{messages:[{role:'user',content:'Current review'}],tools:config.tools}}};
+        if (!replies || changeModel && replies === 1) {
+          const res = await fetch(gateway.model_gateway_url + '/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: 'Bearer ' + gateway.run_token },
+            body: JSON.stringify({ model: config.model_name, stream: false, messages: [{ role: 'user', content: 'Current review' }], tools: config.tools }),
+          });
+          await res.text();
+          replies++;
+          if (changeModel && replies === 1) f.store.run("UPDATE models SET version=version+1,model_name='changed' WHERE id='m'");
+          return {state:'running',events:[],offset:0};
+        }
         return {state:'review_ready',offset:12,result:ready};
       }
       return {};

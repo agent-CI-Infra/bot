@@ -26,15 +26,19 @@ import { agentOperation, waitingAgent } from '../../../../runner/agent.mjs';
 const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 
 function proxyWorkspace(logs=[]) {
-  let configBytes=[],config,replyBytes=[],replied=false,publication;
+  let configBytes=[],config,gateway={},replyBody=null,publication;
   return {log:value=>logs.push(value),call:async(_key,request)=>{
+    if(request.type==='workspace_agent_gateway'){gateway=JSON.parse(Buffer.from(request.base64,'base64').toString('utf8'));return {written:true};}
     if(request.type==='workspace_agent_config'){configBytes.push(Buffer.from(request.base64,'base64'));if(request.final)config=JSON.parse(Buffer.concat(configBytes));return {written:true};}
     if(request.type==='workspace_agent_start')return {started:true};
-    if(request.type==='workspace_agent_reply'){replyBytes.push(Buffer.from(request.base64,'base64'));if(request.final)replied=true;return {written:true};}
     if(request.type==='workspace_agent_tool'){if(request.final)publication=true;return {written:true};}
     if(request.type==='workspace_agent_poll'){
-      if(!replied)return {state:'running',request:{id:'a'.repeat(48),body:{stream:true,messages:[{role:'system',content:config.system},{role:'user',content:config.prompt}]}},events:[],offset:0};
-      const reply=JSON.parse(Buffer.concat(replyBytes)),chunk=JSON.parse(reply.body.split('\n')[0].slice(6)),call=chunk.choices[0].delta.tool_calls[0];
+      if(!replyBody){
+        const res=await fetch(gateway.model_gateway_url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gateway.run_token},body:JSON.stringify({model:config.model_name,stream:false,messages:[{role:'system',content:config.system},{role:'user',content:config.prompt}]})});
+        assert.equal(res.status,200);replyBody=await res.json();
+        return {state:'running',events:[],offset:0};
+      }
+      const call=replyBody.choices[0].message.tool_calls[0];
       if(call.function.name==='create_pull_request'&&!publication)return {state:'running',tool_requests:[{id:'b'.repeat(48),kind:'pull_request',name:'create_pull_request',arguments:JSON.parse(call.function.arguments)}]};
       return {state:'completed',result:JSON.parse(call.function.arguments),events:[{type:'model',content:'Pi finished',tool_calls:[{name:call.function.name}]}],offset:1};
     }
@@ -64,21 +68,26 @@ test('a task may make any number of model requests, and a request still visible 
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'budget-fixture-key',model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('many','101','review.pr','running','pr',4,'claim')");
-  // 40 model requests, more than the former limit of 32. After every tenth reply the same request is still visible once, as can happen in the container.
-  let step=0,stale=false;const total=40,request=n=>({id:String(n).padStart(48,'0'),body:{messages:[{role:'user',content:'step '+n}]}});
+  // 40 model requests over the passthrough gateway, more than the former limit of 32, without mailbox polling overhead.
+  let configBytes=[],config,gateway={},step=0,polls=0;const total=40;
   const workspace={log:()=>{},call:async(_key,input)=>{
+    if(input.type==='workspace_agent_gateway'){gateway=JSON.parse(Buffer.from(input.base64,'base64').toString('utf8'));return {written:true};}
+    if(input.type==='workspace_agent_config'){configBytes.push(Buffer.from(input.base64,'base64'));if(input.final)config=JSON.parse(Buffer.concat(configBytes));return {written:true};}
     if(input.type==='workspace_agent_poll'){
-      if(stale){stale=false;return {state:'running',request:request(step),events:[],offset:0};}
-      return step<total?{state:'running',request:request(++step),events:[],offset:0}:{state:'completed',result:finish,events:[],offset:0};
+      polls++;
+      while(step<total){
+        step++;
+        const res=await fetch(gateway.model_gateway_url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gateway.run_token},body:JSON.stringify({model:config.model_name,stream:false,messages:[{role:'user',content:'step '+step}]})});
+        assert.equal(res.status,200);await res.json();
+      }
+      return {state:'completed',result:finish,events:[],offset:0};
     }
-    if(input.type==='workspace_agent_reply'){stale=step%10===0;return {written:true};}
     return {written:true,started:true};
   }};
-  const started=Date.now(),result=await legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='many'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+  const result=await legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='many'"),workspace,new Redactor(),async()=>{},{mode:'review'});
   assert.equal(result.summary,'Done after many steps.');assert.equal(received,total);
-  assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,total,'stale polls do not create extra usage entries');
-  // Answered requests are followed by an immediate poll, so 40 steps do not wait 40 polling intervals.
-  assert.ok(Date.now()-started<total*500,'polls right after a reply');
+  assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,total,'each gateway call creates one usage entry');
+  assert.equal(polls,1,'passthrough requests run directly without mailbox polling rounds');
 });
 
 test('the control plane drains paged events before returning a completed or failed agent',async t=>{
@@ -113,18 +122,25 @@ test('a relayed model request carries exactly one output limit, the field the ru
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('limit','101','review.pr','running','pr',4,'claim')");
   // Inbound limit fields and the single field expected on the wire.
-  const shapes=[[{max_completion_tokens:8192,max_tokens:8192},'max_completion_tokens'],[{max_completion_tokens:1024},'max_completion_tokens'],[{max_tokens:1024},'max_tokens'],[{},'max_completion_tokens']];
-  let step=0;const workspace={log:()=>{},call:async(_key,input)=>{
-    if(input.type==='workspace_agent_poll')return step<shapes.length
-      ?{state:'running',request:{id:String(++step).padStart(48,'0'),body:{model:'runner-model',stream:true,stream_options:{include_usage:true},messages:[{role:'user',content:'step '+step}],...shapes[step-1][0]}},events:[],offset:0}
-      :{state:'completed',result:finish,events:[],offset:0};
+  const shapes=[[{max_completion_tokens:16384,max_tokens:16384},'max_completion_tokens',8192],[{max_completion_tokens:1024},'max_completion_tokens',1024],[{max_tokens:1024},'max_tokens',1024],[{},'max_completion_tokens',8192]];
+  let configBytes=[],config,gateway={};
+  const workspace={log:()=>{},call:async(_key,input)=>{
+    if(input.type==='workspace_agent_gateway'){gateway=JSON.parse(Buffer.from(input.base64,'base64').toString('utf8'));return {written:true};}
+    if(input.type==='workspace_agent_config'){configBytes.push(Buffer.from(input.base64,'base64'));if(input.final)config=JSON.parse(Buffer.concat(configBytes));return {written:true};}
+    if(input.type==='workspace_agent_poll'){
+      for(let i=0;i<shapes.length;i++){
+        const res=await fetch(gateway.model_gateway_url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gateway.run_token},body:JSON.stringify({model:config.model_name,stream:true,stream_options:{include_usage:true},messages:[{role:'user',content:'step '+(i+1)}],...shapes[i][0]})});
+        assert.equal(res.status,200);await res.json();
+      }
+      return {state:'completed',result:finish,events:[],offset:0};
+    }
     return {written:true,started:true};
   }};
   await legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='limit'"),workspace,new Redactor(),async()=>{},{mode:'review'});
   assert.equal(received.length,shapes.length);
   received.forEach((body,i)=>{
-    const field=shapes[i][1],other=field==='max_tokens'?'max_completion_tokens':'max_tokens';
-    assert.equal(body[field],8192,`request ${i+1} sets ${field}`);assert.ok(!(other in body),`request ${i+1} omits ${other}`);
+    const field=shapes[i][1],expected=shapes[i][2],other=field==='max_tokens'?'max_completion_tokens':'max_tokens';
+    assert.equal(body[field],expected,`request ${i+1} sets ${field}`);assert.ok(!(other in body),`request ${i+1} omits ${other}`);
     assert.equal(body.stream,true);assert.deepEqual(body.stream_options,{include_usage:true});assert.equal(body.model,'fixture');
   });
 });
@@ -233,14 +249,19 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,generation,workspace_id) VALUES('tok','101','review.pr','running','pr',4,'claim',1,?),('none','101','review.pr','running','pr',5,'claim',1,?)",'d'.repeat(48),'e'.repeat(48));
   const token='ghs_'+randomBytes(18).toString('hex');
   // The manager plays the runner: the agent asks for a token, then a command echoes it into the next model request.
-  const runner=()=>{const delivered=[];let phase='token';return {delivered,manager:{call:async(_method,_path,input)=>{const r=input.request;
+  const runner=()=>{const delivered=[];let configBytes=[],config,gateway={},phase='token';return {delivered,manager:{call:async(_method,_path,input)=>{const r=input.request;
+    if(r.type==='workspace_agent_gateway'){gateway=JSON.parse(Buffer.from(r.base64,'base64').toString('utf8'));return {ok:true,result:{written:true}};}
+    if(r.type==='workspace_agent_config'){configBytes.push(Buffer.from(r.base64,'base64'));if(r.final)config=JSON.parse(Buffer.concat(configBytes));return {ok:true,result:{written:true}};}
     if(r.type==='workspace_agent_token'){delivered.push(JSON.parse(Buffer.from(r.base64,'base64')));phase='model';return {ok:true,result:{written:true}};}
     if(r.type==='workspace_agent_poll'){
       if(phase==='token')return {ok:true,result:{state:'running',token_requests:[{id:'b'.repeat(48)}],events:[],offset:0}};
-      if(phase==='model')return {ok:true,result:{state:'running',request:{id:'c'.repeat(48),body:{messages:[{role:'tool',content:'GH_TOKEN='+token}]}},events:[],offset:0}};
+      if(phase==='model'){
+        const res=await fetch(gateway.model_gateway_url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gateway.run_token},body:JSON.stringify({model:config.model_name,stream:false,messages:[{role:'tool',content:'GH_TOKEN='+token}]})});
+        assert.equal(res.status,200);await res.json();phase='done';
+        return {ok:true,result:{state:'running',events:[],offset:0}};
+      }
       return {ok:true,result:{state:'completed',result:finish,events:[],offset:0}};
     }
-    if(r.type==='workspace_agent_reply')phase='done';
     return {ok:true,result:{written:true,started:true}};
   }}};};
   const redactor=new Redactor(),logs=[];let revoked=0;

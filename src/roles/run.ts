@@ -338,7 +338,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
          source:snapshot.model.source,
          api_url:model.url,
          interface_type:snapshot.model.api??null,
-         transport:containerOptions?.modelTransport??null,
+         transport:snapshot.harness.model_source==='local_config'?'local_config':'gateway',
         },
         harness:{
          id:harness,
@@ -434,7 +434,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    const initialCliVersion=wrapped.harnessBinding?.cli_version??(typeof (wrapped.harnessPreparation as any)?.version==='string'?(wrapped.harnessPreparation as any).version:undefined)??(driver.tool_volume?driver.runtime?.version:undefined);
    if(initialCliVersion)recordRunCliVersion(s,runId,initialCliVersion);
    if(ctx.task_id===null)stop('role_run_protocol_invalid','waiting_configuration','Task RoleRun requires task scope.');
-   const runCapabilities=[...gatewayCapabilities(snapshot),'tools:invoke','model:invoke',...(githubReadScopes(resolved.definition.permissions).length?['github:read_token']:[]),'events:write','checkpoint:write'];
+   const localModelConfig=snapshot.harness.model_source==='local_config';
+   const runCapabilities=[...gatewayCapabilities(snapshot),'tools:invoke',...(!localModelConfig?['model:invoke']:[]),...(githubReadScopes(resolved.definition.permissions).length?['github:read_token']:[]),'events:write','checkpoint:write'];
    const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch,role},runCapabilities,tokenTtl);
    spec.redactor.add(issued.token);
    live.bound={ctx,token:issued.token,token_id:issued.id,run_id:runId,epoch:lease.epoch};

@@ -15,6 +15,7 @@ import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
 import { configureModelRetry } from '../../../../dist/agent/runtime.js';
 import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 
 const pass={outcome:'pass',reason:'Read the actual submitted report from its pinned Git object',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 const call=(name,args,id)=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -32,7 +33,7 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
   const accepting=messages[0].content.includes('independent delivery acceptance evaluator');
-  const send=message=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}]}));};
+  const send=message=>replyChatCompletion(res,message,{stream:Boolean(body.stream)});
   const calls=messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]),names=calls.map(c=>c.function.name);
   if(accepting){
    acceptanceCalls++;
@@ -153,9 +154,7 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
 
 test('default and saved-disabled projects execute an ordinary request with Manager, Dev and fresh QA',async t=>{
  // Without a configuration the roles run the recommended Pi backend (#1068); its sessions reach this fixture model
- // through the control plane's model relay.
- const transport=process.env.BOT_HARNESS_MODEL_TRANSPORT;process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
- t.after(()=>{if(transport===undefined)delete process.env.BOT_HARNESS_MODEL_TRANSPORT;else process.env.BOT_HARNESS_MODEL_TRANSPORT=transport;});
+ // through the control plane's unified passthrough model gateway.
  for(const saved of [false,true])await t.test(saved?'saved disabled coordination':'no role configuration',async t=>{
   const root=mkdtempSync(join(tmpdir(),'manager-default-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);
   github.listen(0,'127.0.0.1');await once(github,'listening');
@@ -182,7 +181,7 @@ test('default and saved-disabled projects execute an ordinary request with Manag
     message=!names.includes(write)?call(write,{path:'report.md',content:'Observed repository fact: calc.mjs contains arithmetic.'},'write')
      :call('submit_delivery',{summary:'Observed report',artifacts:[{path:'report.md',description:'Observed report'}],evidence:[],unknowns:[]},'submit');
    }
-   res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}]}));
+   replyChatCompletion(res,message,{stream:Boolean(body.stream)});
   });
   model.listen(0,'127.0.0.1');await once(model,'listening');
   const engine=new TaskEngine(store,manager,gh+'/github');

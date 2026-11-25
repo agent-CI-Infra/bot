@@ -13,7 +13,6 @@ import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, satisfiesCliRange, sel
 import type { ModelAuthHeader, ModelInterfaceType } from '../models/catalog.js';
 import type { FileBackedModelProvider } from './model-gateway.js';
 import { filterPlatformTools, withContainerHarnessSession, type RunningContainerHarness } from './container-session.js';
-import { modelTransport, type ModelTransport } from './model-connection.js';
 import type { HarnessModelSource } from './subscription.js';
 
 export interface CodexProviderConfig {
@@ -24,7 +23,6 @@ export interface CodexProviderConfig {
 }
 
 export interface CodexConfiguration {
-  modelTransport?: ModelTransport;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -41,7 +39,6 @@ export interface CodexConfiguration {
 }
 
 export interface CodexPreparation {
-  modelTransport: ModelTransport;
   modelSource?: HarnessModelSource;
   mode: 'volume' | 'config_file';
   config?: CodexConfiguration;
@@ -140,7 +137,6 @@ export function codexConfiguration(): CodexConfiguration {
     };
   }
   return {
-    modelTransport: modelTransport(c.modelTransport),
     command: c.command,
     args,
     env: c.env,
@@ -164,6 +160,24 @@ function stripTrailingAppServerArg(args: string[]): string[] {
   return copy;
 }
 
+function assertCodexProtocol(primaryModel?: RuntimeModel, fileProvider?: FileBackedModelProvider) {
+  const iface = fileProvider
+    ? (fileProvider.interfaceType ??
+      (/\/messages$/.test(fileProvider.baseUrl.replace(/\/$/, ''))
+        ? 'anthropic-messages'
+        : /\/chat\/completions$/.test(fileProvider.baseUrl.replace(/\/$/, ''))
+          ? 'openai-chat-completions'
+          : 'openai-responses'))
+    : primaryModel?.protocol?.interface_type;
+  if (iface && iface !== 'openai-responses') {
+    stop(
+      'harness_model_api_unsupported',
+      'waiting_configuration',
+      `Codex 仅支持 OpenAI Responses (openai-responses) 协议模型，当前模型协议为 ${iface}；网关不执行跨协议格式转换。`,
+    );
+  }
+}
+
 export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparation> {
   if (process.env.BOT_CODEX_CONFIG) {
     const config = codexConfiguration();
@@ -173,7 +187,6 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     const command = resolveExecutableOnPath(config.command);
     const executableArgs = stripTrailingAppServerArg(config.args);
     const localConfig = spec.containerOptions?.modelSource === 'local_config';
-    const connectionMode = localConfig ? 'direct' : modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport);
     let fileProvider: FileBackedModelProvider | undefined = localConfig ? undefined : spec.containerOptions?.fileProvider;
     let primaryModel: RuntimeModel | undefined;
     if (!localConfig && !fileProvider && config.provider) {
@@ -185,22 +198,22 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
         interfaceType: config.provider.interfaceType ?? 'openai-responses',
         authHeader: config.provider.authHeader ?? 'bearer',
       };
-    } else if (!localConfig && !fileProvider && connectionMode === 'gateway') {
+    } else if (!localConfig && !fileProvider) {
       try {
         primaryModel = (spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel);
       } catch {
         primaryModel = undefined;
       }
     }
+    if (!localConfig) assertCodexProtocol(primaryModel, fileProvider);
+    const modelProvider = !localConfig ? (config.modelProvider ?? 'bot_relay') : undefined;
     const configurationHash = contentHash({
       ...config,
       command,
-      modelTransport: connectionMode,
-      ...(localConfig ? { modelSource: 'local_config' } : {}),
+      ...(localConfig ? { modelSource: 'local_config' } : { modelProvider }),
       protocol: 'codex-app-server',
     });
     const prepared: CodexPreparation = {
-      modelTransport: connectionMode,
       modelSource: localConfig ? 'local_config' : 'gateway',
       mode: 'config_file',
       config,
@@ -208,7 +221,7 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
       executableArgs,
       version: config.version,
       ...(!localConfig && config.model ? { model: config.model } : {}),
-      ...(!localConfig ? (connectionMode === 'direct' && (fileProvider || primaryModel) ? { modelProvider: 'bot_direct' } : config.modelProvider ? { modelProvider: config.modelProvider } : {}) : {}),
+      ...(modelProvider ? { modelProvider } : {}),
       ...(primaryModel ? { primaryModel } : {}),
       ...(fileProvider ? { fileProvider } : {}),
       configurationHash,
@@ -248,7 +261,6 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
       protocol: 'codex-app-server',
     });
     const prepared: CodexPreparation = {
-      modelTransport: 'direct',
       modelSource: 'local_config',
       mode: 'volume',
       command,
@@ -269,9 +281,9 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
   const primaryModel = fileProvider
     ? undefined
     : ((spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel));
+  assertCodexProtocol(primaryModel, fileProvider);
   const modelName = fileProvider ? fileProvider.model : primaryModel!.model;
-  const connectionMode = modelTransport(spec.containerOptions?.modelTransport);
-  const modelProvider = connectionMode === 'gateway' ? 'bot_relay' : 'bot_direct';
+  const modelProvider = 'bot_relay';
   const configurationHash = contentHash({
     cli: 'codex',
     version: cliVersion,
@@ -279,10 +291,8 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     model: modelName,
     model_id: primaryModel?.id ?? fileProvider?.id ?? 'provider',
     protocol: 'codex-app-server',
-    modelTransport: connectionMode,
   });
   const prepared: CodexPreparation = {
-    modelTransport: connectionMode,
     mode: 'volume',
     command,
     executableArgs,
@@ -374,7 +384,6 @@ export async function runCodex<T>(
       spec,
       {
         cli: 'codex',
-        modelTransport: prepared.modelTransport,
         ...(prepared.modelSource ? { modelSource: prepared.modelSource } : {}),
         ...(prepared.modelSource !== 'local_config' ? {
           modelProvider: prepared.modelProvider,
@@ -507,7 +516,7 @@ export async function runCodex<T>(
             agentInfo: opened.agentInfo ?? null,
             configuredModel: prepared.model ?? (typeof opened.bound?.model === 'string' ? opened.bound.model : null),
             ...(prepared.modelSource === 'local_config' ? { modelSource: 'local_config' } : {}),
-            usage: prepared.modelSource !== 'local_config' && prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
+            usage: prepared.modelSource !== 'local_config' ? 'gateway' : 'native_events',
             protocol: 'codex-app-server',
             ...opened.bound,
           });

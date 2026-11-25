@@ -24,7 +24,20 @@ const lookup = { type: 'function', function: { name: 'lookup', description: 'Loo
 const text = message => typeof message.content === 'string' ? message.content : (message.content ?? []).map(part => part.text ?? '').join('');
 const users = body => body.messages.filter(m => m.role === 'user').map(text);
 const toolResults = body => body.messages.filter(m => m.role === 'tool').map(text);
-const json = (res, message) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 10, completion_tokens: 5 } })); };
+const json = (res, message, usage = { prompt_tokens: 10, completion_tokens: 5 }) => {
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  const delta = { role: 'assistant' };
+  if (message.content != null) delta.content = message.content;
+  if (Array.isArray(message.tool_calls)) {
+    delta.tool_calls = message.tool_calls.map((tc, index) => ({
+      index, id: tc.id, type: tc.type || 'function',
+      function: { name: tc.function.name, arguments: tc.function.arguments },
+    }));
+  }
+  res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', object: 'chat.completion.chunk', model: 'fixture', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id: 'chatcmpl-1', object: 'chat.completion.chunk', model: 'fixture', choices: [{ index: 0, delta: {}, finish_reason: message.tool_calls?.length ? 'tool_calls' : 'stop' }], usage })}\n\n`);
+  res.end('data: [DONE]\n\n');
+};
 const call = (res, name, args = {}) => json(res, { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + randomBytes(4).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 // An answer streamed in parts, as a provider sends it.
 async function stream(res, parts) {
@@ -41,13 +54,13 @@ function arrivals() {
     take() { if (paused || !queue.length) return undefined; const messages = queue.splice(0); injected += messages.length; log.push('take:' + messages.map(m => m.content).join('|'));
       return { content: { incoming_during_turn: true, messages }, direct: messages.some(m => m.direct) }; } };
 }
-async function piService(t, respond, { transport = 'gateway' } = {}) {
+async function piService(t, respond) {
   const root = mkdtempSync(join(tmpdir(), 'bot-service-turn-pi-')), store = new Store(':memory:', randomBytes(32)), manager = new LocalManager('101', root), bodies = [];
   const model = createServer(async (req, res) => { let raw = ''; for await (const part of req) raw += part; const body = JSON.parse(raw); bodies.push(body); await respond(body, res, bodies.length); });
   model.listen(0, '127.0.0.1'); await once(model, 'listening');
   t.after(async () => { await manager.recover(); model.closeAllConnections(); await new Promise(r => model.close(r)); store.close(); rmSync(root, { recursive: true, force: true }); });
   store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m',NULL,?,'fixture',?,'now')", 'http://127.0.0.1:' + model.address().port + '/v1', store.secrets.seal({ value: 'fixture-key' }, 'model:m'));
-  if (transport === 'direct') saveModelMetadata(store, 'm', { interface_type: 'openai-chat-completions' });
+  saveModelMetadata(store, 'm', { interface_type: 'openai-chat-completions' });
   const before = serviceRole(store, managementAssistant);
   updateServiceRole(store, 'admin', managementAssistant, { expected_revision: before.revision, harness: 'pi', model_id: 'm' });
   const role = serviceRole(store, managementAssistant); await manager.call('PUT', '/v1/projects/101');
@@ -56,7 +69,7 @@ async function piService(t, respond, { transport = 'gateway' } = {}) {
     await workspace.call('init', { type: 'workspace_init' }); return workspace; } };
   const run = (spec, control) => {
     const full = { store, task: { id: randomBytes(24).toString('hex'), kind: 'management.agent', repository_id: null, service_role_id: role.id, conversation_id: 'pi-turn', source_message: 'one' },
-      redactor: new Redactor(), guard: async () => {}, system: 'Answer the service conversation.', model: serviceRoleModel(store, role.id), containerOptions: { modelTransport: transport }, ...spec };
+      redactor: new Redactor(), guard: async () => {}, system: 'Answer the service conversation.', model: serviceRoleModel(store, role.id), ...spec };
     return runAgent({ ...full, adapter: services => serviceHarnessTurn(full, services, role, computer, 'owner:' + randomBytes(4).toString('hex'), undefined, control) });
   };
   return { store, bodies, run };
@@ -116,16 +129,16 @@ test('stay_silent ends a Pi service turn without a reply; a refused call is an o
   assert.deepEqual(calls, [{ reason: '闲聊' }, { reason: '闲聊' }]);
 });
 
-test('over a direct connection a Pi service turn streams its answer from the runner and reports Pi\'s own retries', { skip: piSkip, timeout: 90000 }, async t => {
+test('over the unified passthrough gateway a Pi service turn streams its answer and reports Pi\'s own retries', { skip: piSkip, timeout: 90000 }, async t => {
   const deltas = [], retries = [];
   const f = await piService(t, async (_body, res, n) => {
     if (n === 1) { res.writeHead(503, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'Server overloaded', type: 'overloaded_error' } })); }
-    return stream(res, ['直连', '回答']);
-  }, { transport: 'direct' });
-  const answer = await f.run({ prompt: 'Answer directly.', tools: [lookup], execute: async () => ({}), onModelRetry: retry => { retries.push(retry); } },
+    return stream(res, ['透传', '回答']);
+  });
+  const answer = await f.run({ prompt: 'Answer over gateway.', tools: [lookup], execute: async () => ({}), onModelRetry: retry => { retries.push(retry); } },
     { text: async delta => { deltas.push(delta); } });
-  assert.equal(answer, '直连回答');
-  assert.equal(deltas.join(''), '直连回答');
+  assert.equal(answer, '透传回答');
+  assert.equal(deltas.join(''), '透传回答');
   assert.equal(retries.length, 1); assert.equal(retries[0].retry, 1); assert.equal(retries[0].code, 'model_unavailable');
   // Streamed text reaches the conversation only; the session log keeps the model event that holds all of it.
   const logged = JSON.stringify(f.store.all('SELECT * FROM service_harness_events'));
@@ -137,13 +150,12 @@ test('a long Pi service turn with many large tool results compacts its session i
   // Usage as a provider reports it, so Pi compacts at its own threshold before the window is full.
   const usage = body => ({ prompt_tokens: Math.ceil(JSON.stringify(body.messages).length / 4), completion_tokens: 20 });
   const f = await piService(t, async (body, res) => {
-    res.setHeader('content-type', 'application/json');
     if (text(body.messages[0] ?? {}).startsWith('You are a context summarization assistant')) {
-      compactions++; return res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '## Goal\nLook up 16 facts.\n## Progress\nFacts so far were looked up.' } }], usage: usage(body) }));
+      compactions++; return json(res, { role: 'assistant', content: '## Goal\nLook up 16 facts.\n## Progress\nFacts so far were looked up.' }, usage(body));
     }
     const message = executed < 16 ? { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + executed, type: 'function', function: { name: 'lookup', arguments: JSON.stringify({ q: 'fact ' + executed }) } }] }
       : { role: 'assistant', content: 'All 16 facts were looked up.' };
-    res.end(JSON.stringify({ choices: [{ message }], usage: usage(body) }));
+    json(res, message, usage(body));
   });
   // Each result is about 10k tokens: the turn needs about 160k, over the 128k window of the fixture model.
   const answer = await f.run({ prompt: 'Look up 16 facts one at a time.', tools: [lookup], execute: async (_name, args) => { executed++; return { q: args.q, fact: (args.q + ' ').repeat(6000).slice(0, 40000) }; } }, {});

@@ -222,22 +222,21 @@ test('Pi gateway serviceHarnessTurn delivers 4.5 MiB view_message_image, auto-re
     const body = JSON.parse(raw);
     seenBodies.push(body);
     step++;
-    res.setHeader('content-type', 'application/json');
     if (step === 1) {
-      res.end(JSON.stringify({ choices: [{ message: chatToolCall('call_1', 'list_message_resources', {}) }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      writeChatSse(res, chatToolCall('call_1', 'list_message_resources', {}), { prompt_tokens: 10, completion_tokens: 5 });
       return;
     }
     if (step === 2) {
       const toolMsg = body.messages.find(m => m.role === 'tool');
       const resId = JSON.parse(toolMsg.content).resources[0].resource_id;
-      res.end(JSON.stringify({ choices: [{ message: chatToolCall('call_2', 'view_message_image', { resource_id: resId }) }], usage: { prompt_tokens: 12, completion_tokens: 5 } }));
+      writeChatSse(res, chatToolCall('call_2', 'view_message_image', { resource_id: resId }), { prompt_tokens: 12, completion_tokens: 5 });
       return;
     }
     if (step === 3) {
-      res.end(JSON.stringify({ choices: [{ message: chatToolCall('call_3', 'view_workspace_image', { path: '~/hd-chart.png' }) }], usage: { prompt_tokens: 14, completion_tokens: 5 } }));
+      writeChatSse(res, chatToolCall('call_3', 'view_workspace_image', { path: '~/hd-chart.png' }), { prompt_tokens: 14, completion_tokens: 5 });
       return;
     }
-    res.end(JSON.stringify({ choices: [{ message: chatToolCall('call_4', 'finish', { message: 'Verified both 4.5 MiB message image and auto-resized 2400x2400 workspace image.' }) }], usage: { prompt_tokens: 16, completion_tokens: 10 } }));
+    writeChatSse(res, chatToolCall('call_4', 'finish', { message: 'Verified both 4.5 MiB message image and auto-resized 2400x2400 workspace image.' }), { prompt_tokens: 16, completion_tokens: 10 });
   });
   modelServer.listen(0, '127.0.0.1');
   await once(modelServer, 'listening');
@@ -278,7 +277,6 @@ test('Pi gateway serviceHarnessTurn delivers 4.5 MiB view_message_image, auto-re
     prompt: 'Inspect the message image and ~/hd-chart.png.',
     model: serviceRoleModel(store, role.id),
     tools: mediaTools,
-    containerOptions: { modelTransport: 'gateway' },
     execute: async (name, args) => mediaTurn.execute(name, args),
   };
 
@@ -327,8 +325,8 @@ test('Pi gateway serviceHarnessTurn delivers 4.5 MiB view_message_image, auto-re
 });
 
 for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'anthropic-messages']) {
-  test(`Pi direct transport forwards view_message_image directly over ${interfaceType}`, { skip: piSkip, timeout: 90000 }, async t => {
-    const root = mkdtempSync(join(tmpdir(), `bot-mm-pi-direct-${interfaceType}-`));
+  test(`Pi unified passthrough gateway forwards view_message_image over ${interfaceType} without leaking API keys`, { skip: piSkip, timeout: 90000 }, async t => {
+    const root = mkdtempSync(join(tmpdir(), `bot-mm-pi-pass-${interfaceType}-`));
     const store = new Store(':memory:', randomBytes(32));
     const manager = new LocalManager('101', root);
     const redactor = new Redactor();
@@ -348,7 +346,7 @@ for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'ant
           const resId = JSON.parse(body.messages.find(m => m.role === 'tool').content).resources[0].resource_id;
           return writeChatSse(res, chatToolCall('c2', 'view_message_image', { resource_id: resId }));
         }
-        return writeChatSse(res, chatToolCall('c3', 'finish', { message: 'direct chat ok' }));
+        return writeChatSse(res, chatToolCall('c3', 'finish', { message: 'passthrough chat ok' }));
       }
       if (interfaceType === 'openai-responses') {
         if (step === 1) return writeResponsesSse(res, { type: 'function_call', call_id: 'c1', name: 'list_message_resources', arguments: '{}' });
@@ -357,7 +355,7 @@ for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'ant
           const resId = JSON.parse(typeof outItem.output === 'string' ? outItem.output : outItem.output[0].text).resources[0].resource_id;
           return writeResponsesSse(res, { type: 'function_call', call_id: 'c2', name: 'view_message_image', arguments: JSON.stringify({ resource_id: resId }) });
         }
-        return writeResponsesSse(res, { type: 'function_call', call_id: 'c3', name: 'finish', arguments: JSON.stringify({ message: 'direct responses ok' }) });
+        return writeResponsesSse(res, { type: 'function_call', call_id: 'c3', name: 'finish', arguments: JSON.stringify({ message: 'passthrough responses ok' }) });
       }
       // anthropic-messages
       if (step === 1) return writeAnthropicSse(res, { type: 'tool_use', id: 'toolu_1', name: 'list_message_resources', input: {} });
@@ -367,7 +365,7 @@ for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'ant
         const resId = JSON.parse(trText).resources[0].resource_id;
         return writeAnthropicSse(res, { type: 'tool_use', id: 'toolu_2', name: 'view_message_image', input: { resource_id: resId } });
       }
-      return writeAnthropicSse(res, { type: 'tool_use', id: 'toolu_3', name: 'finish', input: { message: 'direct anthropic ok' } });
+      return writeAnthropicSse(res, { type: 'tool_use', id: 'toolu_3', name: 'finish', input: { message: 'passthrough anthropic ok' } });
     });
     provider.listen(0, '127.0.0.1');
     await once(provider, 'listening');
@@ -379,8 +377,9 @@ for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'ant
       rmSync(root, { recursive: true, force: true });
     });
 
+    const secretApiKey = 'passthrough-secret-key-' + interfaceType;
     store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m',NULL,?,'fixture-model',?,'now')",
-      `http://127.0.0.1:${provider.address().port}/v1`, store.secrets.seal({ value: 'direct-key' }, 'model:m'));
+      `http://127.0.0.1:${provider.address().port}/v1`, store.secrets.seal({ value: secretApiKey }, 'model:m'));
     saveModelMetadata(store, 'm', { interface_type: interfaceType, capabilities: { image_input: true } });
     const before = serviceRole(store, managementAssistant);
     updateServiceRole(store, 'admin', managementAssistant, { expected_revision: before.revision, harness: 'pi', model_id: 'm' });
@@ -397,23 +396,24 @@ for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'ant
     };
     const spec = {
       store,
-      task: { id: randomBytes(24).toString('hex'), kind: 'management.agent', repository_id: null, service_role_id: role.id, conversation_id: 'mm-pi-direct-' + interfaceType, source_message: 'm1' },
+      task: { id: randomBytes(24).toString('hex'), kind: 'management.agent', repository_id: null, service_role_id: role.id, conversation_id: 'mm-pi-pass-' + interfaceType, source_message: 'm1' },
       redactor,
       guard: async () => {},
-      system: 'Inspect images directly.',
+      system: 'Inspect images via passthrough gateway.',
       prompt: 'Inspect the message image.',
       model: serviceRoleModel(store, role.id),
       tools: mediaTools,
-      containerOptions: { modelTransport: 'direct' },
       execute: async (name, args) => mediaTurn.execute(name, args),
     };
 
     const reply = await runAgent({
       ...spec,
-      adapter: services => serviceHarnessTurn(spec, services, role, computer, 'owner:direct:' + interfaceType, mediaTurn),
+      adapter: services => serviceHarnessTurn(spec, services, role, computer, 'owner:pass:' + interfaceType, mediaTurn),
     });
     assert.match(reply, /ok/);
     assert.equal(captured.length, 3);
+    assert.equal(store.get('SELECT count(*) n FROM model_requests').n, 3);
+    assert.ok(!JSON.stringify(findPiModelsJson(root)).includes(secretApiKey), 'long-lived API key must never enter container models.json');
     const third = captured[2].body;
     if (interfaceType === 'openai-chat-completions') {
       const img = third.messages.flatMap(m => Array.isArray(m.content) ? m.content : []).find(p => p.type === 'image_url');
@@ -432,9 +432,12 @@ for (const interfaceType of ['openai-chat-completions', 'openai-responses', 'ant
   });
 }
 
-for (const mode of ['gateway', 'direct']) {
-  test(`Pi recovers cleanly from upstream image rejection (${mode}) and strips offending image with recovery guidance`, { skip: piSkip, timeout: 90000 }, async t => {
-    const root = mkdtempSync(join(tmpdir(), `bot-mm-pi-recover-${mode}-`));
+for (const scenario of [
+  { name: '413 payload', status: 413, message: 'Request Entity Too Large' },
+  { name: '400 vision unsupported', status: 400, message: 'This model does not support image inputs' },
+]) {
+  test(`Pi recovers cleanly from upstream image rejection (${scenario.name}) and strips offending image with recovery guidance`, { skip: piSkip, timeout: 90000 }, async t => {
+    const root = mkdtempSync(join(tmpdir(), `bot-mm-pi-recover-${scenario.status}-`));
     const store = new Store(':memory:', randomBytes(32));
     const manager = new LocalManager('101', root);
     const redactor = new Redactor();
@@ -450,11 +453,11 @@ for (const mode of ['gateway', 'direct']) {
       const hasImg = body.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === 'image_url'));
       if (hasImg && !rejectedOnce) {
         rejectedOnce = true;
-        res.writeHead(mode === 'gateway' ? 413 : 400, { 'content-type': 'application/json' });
+        res.writeHead(scenario.status, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           error: {
             type: 'invalid_request_error',
-            message: mode === 'gateway' ? 'Request Entity Too Large' : 'This model does not support image inputs',
+            message: scenario.message,
           },
         }));
         return;
@@ -462,21 +465,11 @@ for (const mode of ['gateway', 'direct']) {
       if (rejectedOnce) {
         assert.equal(hasImg, false, 'rejected image must be stripped before retry');
         sawRecoveryNotice = JSON.stringify(body.messages).includes('Image input omitted') && JSON.stringify(body.messages).includes('import_message_resource');
-        if (mode === 'direct') return writeChatSse(res, chatToolCall('c_fin', 'finish', { message: 'Recovered after image rejection.' }));
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ choices: [{ message: chatToolCall('c_fin', 'finish', { message: 'Recovered after image rejection.' }) }], usage: { prompt_tokens: 10, completion_tokens: 10 } }));
-        return;
+        return writeChatSse(res, chatToolCall('c_fin', 'finish', { message: 'Recovered after image rejection.' }));
       }
-      if (step === 1) {
-        if (mode === 'direct') return writeChatSse(res, chatToolCall('c1', 'list_message_resources', {}));
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ choices: [{ message: chatToolCall('c1', 'list_message_resources', {}) }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
-        return;
-      }
+      if (step === 1) return writeChatSse(res, chatToolCall('c1', 'list_message_resources', {}));
       const resId = JSON.parse(body.messages.find(m => m.role === 'tool').content).resources[0].resource_id;
-      if (mode === 'direct') return writeChatSse(res, chatToolCall('c2', 'view_message_image', { resource_id: resId }));
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ choices: [{ message: chatToolCall('c2', 'view_message_image', { resource_id: resId }) }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      return writeChatSse(res, chatToolCall('c2', 'view_message_image', { resource_id: resId }));
     });
     provider.listen(0, '127.0.0.1');
     await once(provider, 'listening');
@@ -505,19 +498,18 @@ for (const mode of ['gateway', 'direct']) {
     };
     const spec = {
       store,
-      task: { id: randomBytes(24).toString('hex'), kind: 'management.agent', repository_id: null, service_role_id: role.id, conversation_id: 'mm-pi-rec-' + mode, source_message: 'm1' },
+      task: { id: randomBytes(24).toString('hex'), kind: 'management.agent', repository_id: null, service_role_id: role.id, conversation_id: 'mm-pi-rec-' + scenario.status, source_message: 'm1' },
       redactor,
       guard: async () => {},
       system: 'Inspect images and recover on errors.',
       prompt: 'Inspect the message image.',
       model: serviceRoleModel(store, role.id),
       tools: mediaTools,
-      containerOptions: { modelTransport: mode },
       execute: async (name, args) => mediaTurn.execute(name, args),
     };
     const reply = await runAgent({
       ...spec,
-      adapter: services => serviceHarnessTurn(spec, services, role, computer, 'owner:rec:' + mode, mediaTurn),
+      adapter: services => serviceHarnessTurn(spec, services, role, computer, 'owner:rec:' + scenario.status, mediaTurn),
     });
     assert.equal(rejectedOnce, true);
     assert.equal(sawRecoveryNotice, true);
@@ -583,7 +575,6 @@ test('Pi models.json writes input:["text"] when image_input=false and view_messa
     prompt: 'Try to inspect the image.',
     model,
     tools: mediaTools,
-    containerOptions: { modelTransport: 'direct' },
     execute: async (name, args) => mediaTurn.execute(name, args),
   };
 
@@ -666,7 +657,6 @@ test('Pi task agent native read tool sends workspace image when image_input=true
     roleRun: { instance_id: 'ri-mm-1', role: 'reviewer', version: '1', harness: 'pi', harness_version: '1', recovery_mode: 'fresh' },
     roleWorkspace: workspace,
     harnessAccess: { workspace: 'read', fileTools: 'read', commands: false, network: false, github: { repository: 'fixture/repo', scopes: [] } },
-    containerOptions: { modelTransport: 'gateway' },
     pi: { workspace, key: 'task-mm-pi', resume: false },
   };
   const summary = await runAgent({ ...spec, adapter: roleHarness('pi').adapter(spec) });

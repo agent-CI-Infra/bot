@@ -227,10 +227,21 @@ test('task model calls use the shared address rule and keep their single 8192 ou
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('probe','101','review.pr','running','pr',4,'claim')");
   const finish = { summary: 'Done.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
   let asked = false;
+  let configBytes = [], config, gateway = {};
   const workspace = { log: () => {}, call: async (_key, input) => {
+    if (input.type === 'workspace_agent_gateway') { gateway = JSON.parse(Buffer.from(input.base64, 'base64').toString('utf8')); return { written: true }; }
+    if (input.type === 'workspace_agent_config') { configBytes.push(Buffer.from(input.base64, 'base64')); if (input.final) config = JSON.parse(Buffer.concat(configBytes)); return { written: true }; }
     if (input.type !== 'workspace_agent_poll') return { written: true, started: true };
     if (asked) return { state: 'completed', result: finish, events: [], offset: 0 };
-    asked = true; return { state: 'running', request: { id: '1'.padStart(48, '0'), body: { model: 'runner', messages: [{ role: 'user', content: 'hi' }], max_tokens: 100 } }, events: [], offset: 0 };
+    asked = true;
+    const res = await fetch(gateway.model_gateway_url + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + gateway.run_token },
+      body: JSON.stringify({ model: config.model_name, stream: false, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16384 }),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    return { state: 'running', events: [], offset: 0 };
   } };
   pinLegacyTaskConfiguration(h.store, 'probe');
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='probe'"), workspace, new Redactor(), async () => {}, { mode: 'review' });

@@ -34,6 +34,7 @@ function roleModelResolution(role, state, access) {
         subscription_mode_not_implemented: '仅 Claude Code 与 Codex 支持项目电脑内自行配置模式。',
         claude_local_config_missing: '项目电脑 /workspace/home 下未找到 Claude Code 配置文件，请先在机器配置中写入。',
         codex_local_config_missing: '项目电脑 /workspace/home 下未找到 Codex 配置文件，请先在机器配置中写入。',
+        harness_model_api_unsupported: '当前执行后端不支持该模型的接口协议（统一透传网关不做跨协议转换），请更换兼容协议的模型或切换执行后端。',
         harness_model_profile_unsupported: '此执行器使用自带模型，不能指定项目模型。', harness_role_unsupported: '执行器不支持此角色类型。' };
       status.textContent = `解析失败，当前结果未知：${reasons[err.code] || readErrorText(err)}${err.field ? '（配置项：' + err.field + '）' : ''}`;
     } finally { if (live() && sequence === request) read.disabled = false; }

@@ -48,28 +48,35 @@ const gaps = mailbox => { const polls = mailbox.calls.filter(call => call.type =
 test('with a runner that holds polls, one call starts the session and polls follow each other, naming what is already handled', async t => {
   const mailbox = computer({ polls: (_request, n) => [
     { state: 'running', long_poll: true, events: [], offset: 0, tool_requests: [{ id: T, kind: 'control', name: 'probe', arguments: {} }] },
-    { state: 'running', long_poll: true, events: [], offset: 0, request: { id: M, body: { messages: [{ role: 'user', content: 'hello' }] } } },
-    { state: 'running', long_poll: true, events: [], offset: 0, tool_requests: [{ id: T, stub: true }], request: { id: M, body: { messages: [] } } },
+    { state: 'running', long_poll: true, events: [], offset: 0, tool_requests: [{ id: T, stub: true }], token_requests: [{ id: M }] },
+    { state: 'running', long_poll: true, events: [], offset: 0, tool_requests: [{ id: T, stub: true }], token_requests: [{ id: M, stub: true }] },
     { state: 'completed', long_poll: true, events: [], offset: 0, result: { summary: 'done' } },
   ][n - 1] });
   assert.deepEqual(await run(t, mailbox), { summary: 'done' });
-  const [config, ...rest] = mailbox.calls;
+  const [gateway, config, ...rest] = mailbox.calls;
+  assert.equal(gateway.type, 'workspace_agent_gateway');
   assert.deepEqual([config.type, config.request.start, config.request.runtime_version], ['workspace_agent_config', true, '1.4.0']);
   assert.ok(!types(mailbox).includes('workspace_agent_runtime') && !types(mailbox).includes('workspace_agent_start'), types(mailbox).join());
+  const parsedGateway = JSON.parse(Buffer.from(gateway.request.base64, 'base64').toString('utf8'));
+  const parsedConfig = JSON.parse(Buffer.from(config.request.base64, 'base64').toString('utf8'));
+  assert.ok(typeof parsedGateway.model_gateway_url === 'string' && parsedGateway.model_gateway_url.startsWith('http://127.0.0.1:'));
+  assert.ok(typeof parsedGateway.run_token === 'string' && parsedGateway.run_token.length > 10);
+  assert.equal(parsedConfig.run_token, undefined);
+  assert.equal(parsedConfig.model_gateway_url, undefined);
   const polls = rest.filter(call => call.type === 'workspace_agent_poll').map(call => call.request);
   // The control plane asks for exactly what the runner allows (runner/agent.mjs).
   assert.ok(polls.every(request => request.wait_ms === agentPollWaitLimit));
-  // The control tool runs in the background and the model request was answered: the next polls wait past both.
-  assert.deepEqual([polls[0].known_tool_ids, polls[0].known_model_ids], [undefined, undefined]);
-  assert.deepEqual(polls[1].known_tool_ids, [T]); assert.deepEqual(polls[2].known_model_ids, [M]);
-  assert.deepEqual([polls[3].known_tool_ids, polls[3].known_model_ids], [[T], [M]]);
+  // The control tool and token request are tracked as known IDs across subsequent polls (model requests go over the HTTP/UDS gateway, not the mailbox).
+  assert.deepEqual([polls[0].known_tool_ids, polls[0].known_token_ids], [undefined, undefined]);
+  assert.deepEqual(polls[1].known_tool_ids, [T]); assert.deepEqual(polls[2].known_token_ids, [M]);
+  assert.deepEqual([polls[3].known_tool_ids, polls[3].known_token_ids], [[T], [M]]);
   assert.ok(gaps(mailbox).every(gap => gap < 450), gaps(mailbox).join());
 });
 
 test('with a runner that answers at once, the runtime query and start follow the configuration and polls keep 500 ms apart', async t => {
   const mailbox = computer({ legacy: true, polls: (_request, n) => n < 3 ? { state: 'running', events: [], offset: 0 } : { state: 'completed', events: [], offset: 0, result: { summary: 'done' } } });
   assert.deepEqual(await run(t, mailbox), { summary: 'done' });
-  assert.deepEqual(types(mailbox).slice(0, 4), ['workspace_agent_config', 'workspace_agent_runtime', 'workspace_agent_start', 'workspace_agent_poll']);
+  assert.deepEqual(types(mailbox).slice(0, 5), ['workspace_agent_gateway', 'workspace_agent_config', 'workspace_agent_runtime', 'workspace_agent_start', 'workspace_agent_poll']);
   assert.ok(gaps(mailbox).length === 2 && gaps(mailbox).every(gap => gap >= 450), gaps(mailbox).join());
 });
 

@@ -73,10 +73,17 @@ function roleModelPicker(role, state, redraw) {
   const { data } = state, backend = data.harnesses.find(entry => entry.id === role.harness_ref.id);
   const localConfig = isRoleLocalConfigSource(role.harness_ref?.model_source);
   const external = !!backend?.externalModel;
+  const supportedApis = backend?.model_api || [];
   const defaultLabel = localConfig ? '模型由项目电脑内的配置决定' : external ? 'Agent 自带模型' : '继承项目默认模型';
-  const select = roleSelect(role.role_id + ' 模型', localConfig ? '' : (role.model_profile_ref?.model_id || ''), [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.provider_name ? ' · ' + model.provider_name : '') + (model.shared ? '（共享）' : '')])], id => {
+  const select = roleSelect(role.role_id + ' 模型', localConfig ? '' : (role.model_profile_ref?.model_id || ''), [['', defaultLabel], ...(data.models || []).map(model => {
+    const iface = model.protocol?.interface_type || null;
+    const unsupported = iface && supportedApis.length && !supportedApis.includes(iface);
+    const label = model.name + (model.provider_name ? ' · ' + model.provider_name : '') + (iface ? ` [${iface}]` : '') + (model.shared ? '（共享）' : '') + (unsupported ? '（协议不兼容）' : '');
+    return [model.id, label];
+  })], id => {
     markRoleDirty(state);
-    role.model_profile_ref = id ? { model_id: id, api: backend?.model_api?.[0] || 'openai-chat-completions', tool_calls: true, structured_output: backend?.structured_output?.includes('tool_call') ? 'tool_call' : backend?.structured_output?.[0] || 'tool_call' } : null;
+    const chosen = id ? (data.models || []).find(entry => entry.id === id) : null;
+    role.model_profile_ref = id ? { model_id: id, api: chosen?.protocol?.interface_type || backend?.model_api?.[0] || 'openai-chat-completions', tool_calls: true, structured_output: backend?.structured_output?.includes('tool_call') ? 'tool_call' : backend?.structured_output?.[0] || 'tool_call' } : null;
   });
   if (redraw) select.addEventListener('change', redraw);
   select.disabled = external || localConfig; return select;
@@ -106,7 +113,7 @@ function roleBackendPicker(role, state, redraw) {
 function roleModelSourcePicker(role, state, redraw) {
   const currentSource = isRoleLocalConfigSource(role.harness_ref?.model_source) ? 'local_config' : 'gateway';
   return roleSelect(role.role_id + ' 模型来源', currentSource, [
-    ['gateway', '平台模型（直连或中转）'],
+    ['gateway', '平台模型（统一透传网关）'],
     ['local_config', '项目电脑内自行配置（不注入模型配置）'],
   ], source => {
     role.harness_ref = { id: role.harness_ref.id, model_source: source === 'local_config' ? 'local_config' : 'gateway' };
@@ -141,7 +148,9 @@ function roleBackendRuntimeBox(role, state) {
   const cliReady = !!(rt.config_override || rt.selected_version);
   const isLocalConfig = isRoleLocalConfigSource(role.harness_ref?.model_source);
   const localStatus = rt.subscription || null;
-  let roleModelReady = false, targetModelId = null, targetModelName = null, targetSourceLabel = '', conn = null, relayText = '';
+  const backendMeta = (state.data.harnesses || []).find(entry => entry.id === role.harness_ref.id);
+  const supportedApis = backendMeta?.model_api || [];
+  let roleModelReady = false, targetModelId = null, targetModelName = null, targetModelApi = null, targetSourceLabel = '', conn = null, relayText = '';
   if (isLocalConfig) {
     if (localStatus?.configured === true) {
       roleModelReady = true;
@@ -156,15 +165,27 @@ function roleBackendRuntimeBox(role, state) {
   } else if (role.model_profile_ref?.model_id) {
     const chosen = (state.data.models || []).find(entry => entry.id === role.model_profile_ref.model_id);
     if (chosen) {
-      roleModelReady = true; targetModelId = chosen.id; targetModelName = chosen.name; targetSourceLabel = '角色指定模型'; conn = chosen.connectivity || null;
+      targetModelId = chosen.id; targetModelName = chosen.name; targetModelApi = chosen.protocol?.interface_type || role.model_profile_ref.api || null; targetSourceLabel = '角色指定模型'; conn = chosen.connectivity || null;
+      if (targetModelApi && supportedApis.length && !supportedApis.includes(targetModelApi)) {
+        roleModelReady = false;
+        relayText = `${targetModelName} 使用 ${targetModelApi} 协议，${info.name} 仅支持 ${supportedApis.join('、')}（统一透传网关不做跨协议转换）`;
+      } else {
+        roleModelReady = true;
+      }
     } else {
       relayText = '未就绪（本角色指定的模型不可用或缺少凭据）';
     }
   } else if (rt.resolved_model && rt.resolved_model.source !== 'role') {
     const chosen = (state.data.models || []).find(entry => entry.id === rt.resolved_model.id);
-    roleModelReady = true; targetModelId = rt.resolved_model.id; targetModelName = rt.resolved_model.name;
+    targetModelId = rt.resolved_model.id; targetModelName = rt.resolved_model.name; targetModelApi = chosen?.protocol?.interface_type || null;
     targetSourceLabel = '项目默认模型';
     conn = chosen?.connectivity || rt.connectivity || null;
+    if (targetModelApi && supportedApis.length && !supportedApis.includes(targetModelApi)) {
+      roleModelReady = false;
+      relayText = `${targetModelName} 使用 ${targetModelApi} 协议，${info.name} 仅支持 ${supportedApis.join('、')}（统一透传网关不做跨协议转换）`;
+    } else {
+      roleModelReady = true;
+    }
   } else if (rt.config_override) {
     roleModelReady = true;
     relayText = '本地配置覆盖（连通性未探测）';

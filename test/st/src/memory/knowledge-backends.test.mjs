@@ -1,5 +1,3 @@
-// These fixtures model the control-plane model boundary, so explicitly select gateway mode.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -18,6 +16,7 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 
 const finish={type:'function',function:{name:'finish',description:'Submit observed knowledge results',parameters:{type:'object',properties:{summary:{type:'string'}},required:['summary'],additionalProperties:true}}};
 const writeFileTool={type:'function',function:{name:'write_file',description:'Write workspace or ../notes/ file',parameters:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content']}}};
@@ -46,7 +45,7 @@ test('real Pi mailbox and container Codex stdio MCP share physical project notes
       ()=>{assert.equal(done.at(-1).path,'pi.candidate.md');return call('write_file',{path:'../notes/pi-direct-note.md',content:'Direct Pi note pi-registered-secret-77'});},
       ()=>call('finish',{summary:'Pi knowledge tools completed'}),
     ];
-    const message=actions[step++]();res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));});
+    const message=actions[step++]();replyChatCompletion(res,message,{stream:Boolean(body.stream),usage:{prompt_tokens:10,completion_tokens:5}});});
   model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
   s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',s.secrets.seal({value:'knowledge-fixture-key'},'model:m'),'now');s.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
   saveConfiguration(s,'101',{expected_revision:0,roles:[{role_id:'reviewer',permissions:{project_memory:'read'}}]},'owner');
@@ -64,7 +63,10 @@ test('real Pi mailbox and container Codex stdio MCP share physical project notes
   const directPiRead=await workspace.call('check-pi-direct-note',{type:'workspace_read',path:'../notes/pi-direct-note.md'});
   assert.equal(directPiRead.content,'Direct Pi note [REDACTED]');
 
-  // Container Codex stdio MCP uses the exact same physical notes backend.
+  // Container Codex stdio MCP uses the exact same physical notes backend (with a Codex-compatible Responses model).
+  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m_codex','101','http://127.0.0.1:'+model.address().port+'/v1/responses','codex-fixture',s.secrets.seal({value:'knowledge-fixture-key'},'model:m_codex'),'now');
+  s.run("UPDATE policies SET model_id='m_codex' WHERE repository_id='101'");
+  s.run("DELETE FROM task_execution_configs WHERE task_id='t'");
   const codexHome=join(root,'codex-home'),codexSessions=join(root,'codex-sessions');
   mkdirSync(codexHome,{recursive:true,mode:0o700});mkdirSync(codexSessions,{recursive:true,mode:0o700});
   const codexConfig=join(root,'codex.json');writeFileSync(codexConfig,JSON.stringify({command:process.execPath,args:[resolve('test/fixtures/codex-app-server.mjs'),'app-server'],version:'0.166.0',env:{CODEX_HOME:codexHome,FIXTURE_KNOWLEDGE:'true'},stateDirectory:codexSessions,cancelGraceMs:400,toolStartupMs:3000}));

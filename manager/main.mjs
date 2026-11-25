@@ -16,12 +16,14 @@ const projects = new Projects({ database, docker: new Docker(),
   deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project-computer:local',
   projectTools: process.env.BOT_PROJECT_TOOLS_DIR || null,
   skillStore: process.env.BOT_SKILL_STORE_DIR || null,
+  modelGateway: process.env.BOT_MODEL_GATEWAY_DIR || null,
   results: process.env.BOT_TOOL_RESULTS_DIR || null, egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
 projects.db.prepare("INSERT INTO settings VALUES('compaction',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(compaction));
 // Assistant computers share the unified global computer defaults and precompiled image unless BOT_ASSISTANT_IMAGE overrides it.
 const assistants = new AssistantComputers({ docker: projects.docker, db: projects.db, deployment: projects.deployment, disk: projects.disk,
   allocatedMemoryMb: () => projects.busyMemoryMb(),
   resultMount:owner=>projects.resultMount(computerResultOwner('assistant',owner)), agentTools:()=>projects.agentToolsVolume(),
+  modelGateway: () => projects.modelGatewayVolume(),
   projectToolsMount: projects.projectToolsMount, projectToolsVolume: () => projects.projectToolsVolume(),
   skillStoreMount: projects.skillStoreMount, skillStoreVolume: () => projects.skillStoreVolume(),
   image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes',

@@ -1,13 +1,14 @@
 import { ResultSession, projectResultOwner, resultScope, commandResult } from './tool-results.js';
 import { randomId } from '../core/security.js';
 import { stop, TaskError, type Redactor } from './common.js';
-import type { AgentServices, ToolImageBlock } from './runtime.js';
+import type { AgentServices, AgentSpec, ToolImageBlock } from './runtime.js';
 import type { Workspace } from './workspace.js';
 import type { AgentModel } from './gateway.js';
-import type { Store } from '../storage/database.js';
+import type { Row, Store } from '../storage/database.js';
 import { finalizationReserve, hasImageContent, imageRequestLimit, requestLimit, textRequestBytes } from './tool-context.js';
 import { deliverMailboxToolReply } from '../roles/task-tools.js';
-import { modelTransport, nativeModelConnection } from '../harness/model-connection.js';
+import { registerModelGatewaySession } from '../harness/model-gateway.js';
+import type { ModelInterfaceType } from '../models/catalog.js';
 import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
@@ -27,9 +28,9 @@ export interface PiConversation { resume?: boolean; offset?: number; model?: Age
 /**
  * A service assistant's turn (#1253): the control plane's side of the conversation around each model request.
  * `steer` gives the messages to send after the prompt, read just before the session starts; `boundary` answers each turn
- * boundary between tool batches with more of them. `text` hears the answer as it is written (from the gateway's stream, or
- * from the runner with a direct connection), `responded` each model response ending, with or without tool calls, and
- * `retry` each retry Pi makes itself over a direct connection.
+ * boundary between tool batches with more of them. `text` hears the answer as it is written (tapped directly from the
+ * control-plane passthrough gateway stream), `responded` each model response ending, with or without tool calls, and
+ * `retry` each retry Pi makes itself.
  */
 export interface PiServiceTurn {
   steer(): string[];
@@ -39,16 +40,22 @@ export interface PiServiceTurn {
   retry(retry: { retry: number; retries: number; delay_ms: number; error: string }): Promise<void>;
 }
 /**
- * One Pi session in a task workspace, driven through the runner mailbox. The control plane keeps the provider boundary
- * for explicit gateway mode, the tool allowlist and every platform write; direct mode lets the native SDK connect to its provider. The runner process runs
- * the Pi SDK loop with the tools named in config.
+ * One Pi session in a task workspace, driven through the runner mailbox for lifecycle/tools and the control-plane
+ * passthrough model gateway for model requests. Credentials stay inside the control plane.
  */
 export interface PiSession<T> {
   store: Store;
   results?: ResultSession;
   taskId: string;
-  /** The task lifecycle guard, checked before every mailbox exchange. */
+  /** Live task/service-turn context (service_role_id, conversation_id, consolidation_scope, trace_run_id, ...). */
+  task?: Row;
+  /** The task lifecycle guard, checked before every mailbox exchange and model request. */
   guard: () => Promise<void>;
+  /** Shared budget gate before billable model requests. */
+  beforeModel?: () => Promise<void>;
+  /** Run capability token & live verifier when invoked via RoleRun. */
+  runAccess?: AgentSpec<any>['runAccess'];
+  leaseEpoch?: number;
   /** The runner mailbox of one task workspace; only call, deliver and log are used. */
   workspace: Pick<Workspace, 'call' | 'deliver' | 'log'>;
   redactor: Redactor;
@@ -92,10 +99,37 @@ export interface PiSession<T> {
   service?: PiServiceTurn;
 }
 
+function toolNameOf(tool: any): string {
+  if (!tool || typeof tool !== 'object') return '';
+  if (typeof tool.name === 'string') return tool.name;
+  if (tool.function && typeof tool.function.name === 'string') return tool.function.name;
+  return '';
+}
+
+function appendUserMessageNative(format: ModelInterfaceType, body: Record<string, any>, text: string) {
+  if (format === 'openai-responses') {
+    if (!Array.isArray(body.input)) body.input = typeof body.input === 'string' ? [{ role: 'user', content: body.input }] : [];
+    body.input.push({ role: 'user', content: [{ type: 'input_text', text }] });
+    return;
+  }
+  if (!Array.isArray(body.messages)) body.messages = [];
+  body.messages.push({ role: 'user', content: text });
+}
+
+function forceToolChoiceNative(format: ModelInterfaceType, body: Record<string, any>, names: string[]) {
+  if (format === 'anthropic-messages') {
+    body.tool_choice = names.length === 1 ? { type: 'tool', name: names[0] } : { type: 'any' };
+  } else if (format === 'openai-responses') {
+    body.tool_choice = names.length === 1 ? { type: 'function', name: names[0] } : 'required';
+  } else {
+    body.tool_choice = names.length === 1 ? { type: 'function', function: { name: names[0] } } : 'required';
+  }
+}
+
 export function piAdapter<T>(session: PiSession<T>) {
   const { store, taskId, guard, workspace, redactor, config, conversation, signal, service } = session, key = session.key ?? 'pi';
-  const task=store.get('SELECT * FROM tasks WHERE id=?',taskId)??{id:taskId};
-  const resultFiles=session.results??new ResultSession(store,resultScope(store,task),()=>projectResultOwner(task.repository_id),guard,redactor.values,()=>true);
+  const task = session.task ?? store.get('SELECT * FROM tasks WHERE id=?', taskId) ?? { id: taskId };
+  const resultFiles = session.results ?? new ResultSession(store, resultScope(store, task), () => projectResultOwner(task.repository_id), guard, redactor.values, () => true);
   // Every wait of the control plane ends as soon as the session is cancelled. A cancelled session is never reported as a
   // resumable interruption: the caller releases its workspace, and the next run starts from task records.
   const cancelled = () => signal?.reason ?? new TaskError('harness_cancelled', 'cancelled');
@@ -107,19 +141,18 @@ export function piAdapter<T>(session: PiSession<T>) {
     ? workspace.deliver(request)
     : workspace.call(fallbackKey, request);
   const pause = (ms: number) => abortable(new Promise(resolve => setTimeout(resolve, ms)));
-  return async ({ request, model, outputTokens }: AgentServices): Promise<T> => {
-    config.model_transport = modelTransport(config.model_transport);
-    if(config.model_transport==='direct'){
-      config.native_model={...nativeModelConnection(model),model:model.model};
-      redactor.add(model.key);
-    }
+  return async ({ model, outputTokens }: AgentServices): Promise<T> => {
+    redactor.add(model.key);
     config.model = model.capabilities
       ? { context_window: model.capabilities.context_window, max_output_tokens: model.capabilities.max_output_tokens, reasoning: model.capabilities.reasoning, image_input: model.capabilities.image_input !== false }
       : { context_window: 128000, max_output_tokens: 8192, reasoning: false, image_input: true };
+    config.model_name = model.model;
+    config.model_interface_type = model.protocol?.interface_type ?? 'openai-chat-completions';
     config.output_tokens = outputTokens ?? config.model.max_output_tokens;
-    const finishingNames=new Set(session.finalizationTools??config.finish_tools??[]);
-    if(session.maxRequests!==undefined&&finishingNames.size&&session.maxRequests<=finalizationReserve(session.maxRequests))
-      stop('role_budget_exhausted','waiting_configuration','剩余请求不足以保留至少一轮工作和收尾，Pi 会话尚未启动。');
+    const finishingNames = new Set(session.finalizationTools ?? config.finish_tools ?? []);
+    if (session.maxRequests !== undefined && finishingNames.size && session.maxRequests <= finalizationReserve(session.maxRequests)) {
+      stop('role_budget_exhausted', 'waiting_configuration', '剩余请求不足以保留至少一轮工作和收尾，Pi 会话尚未启动。');
+    }
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;
     const checkRuntime = (runtime: any) => {
@@ -128,76 +161,235 @@ export function piAdapter<T>(session: PiSession<T>) {
       session.runtime!.report(runtime);
       if (runtime.version !== session.runtime!.version) stop('harness_version_mismatch', 'waiting_configuration', `项目电脑的 Pi 版本是 ${runtime.version}，角色配置固定的是 ${session.runtime!.version}；不会换用其他版本。`);
     };
-    const fresh = !conversation?.resume && !session.resume;
-    // A continued or reattached session has no configuration to carry the check: the runtime is asked first, as before.
-    if (session.runtime && !fresh) checkRuntime(await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
-    // Messages that arrived before the session starts join right after its prompt, as they would before a first native request.
-    if (service) { config.service_turn = true; config.steer = service.steer(); }
-    // The private runner bootstrap carries a native provider credential and run token, never a tool result or prompt.
-    const wireConfig=redactor.clean(config);if(config.model_transport==='direct')wireConfig.native_model=config.native_model;if(config.run_token)wireConfig.run_token=config.run_token;
-    const bytes = Buffer.from(JSON.stringify(wireConfig)); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
-    // The last piece of a new session's configuration also starts it (#1277), checking the pinned Pi version before the
-    // process runs. A runner older than that ignores start: its answer has no runtime, and the runtime query and the start
-    // call follow as before. Pieces stay 30000 bytes, what those runners accept.
-    let launched: any = null;
-    if (fresh) {
-      for (let offset = 0; offset < bytes.length; offset += 30000) {
-        const final = offset + 30000 >= bytes.length;
-        const saved = await workspace.call(key + ':config:' + offset, { type: 'workspace_agent_config', base64: bytes.subarray(offset, offset + 30000).toString('base64'), offset, final,
-          ...(final ? { start: true, ...(session.runtime ? { runtime_version: session.runtime.version } : {}) } : {}) });
-        if (saved.error) stop('execution_interrupted', 'waiting_environment', `写入执行配置时中断，offset=${offset}。`);
-        if (final && saved.runtime && typeof saved.runtime === 'object') launched = saved;
-      }
-    }
-    if (session.runtime && fresh) checkRuntime(launched ? launched.runtime : await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
-    // A stored started receipt is not evidence that its PID still exists. Ask the runner again on every entry;
-    // it checks the saved process before returning started, including after a control-plane restart. A start that rode
-    // with the configuration can be such a receipt too: the first poll checks the saved process the same way.
-    const started = launched ?? await workspace.call(key + ':' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' });
-    if (started.error || launched && started.started !== true) stop('execution_interrupted', 'waiting_environment', '启动任务执行进程时中断。');
+
+    const runToken = typeof config.run_token === 'string' && config.run_token
+      ? config.run_token
+      : session.runAccess?.token || ('pi_gw_' + randomId());
+    redactor.add(runToken);
+    delete config.run_token;
+    const runAccess = session.runAccess ?? {
+      token: runToken,
+      check: (presented: unknown) => {
+        if (presented !== runToken) stop('run_token_invalid', 'failed');
+      },
+    };
 
     let offset = conversation?.offset || 0, publication: any, requests = 0, finalizing = false;
     const answered = new Set<string>(), inFlight = new Map<string, Promise<void>>();
     let backgroundError: unknown = null, wakePoll: (() => void) | null = null, wakePending = false, pollFailed: ((error: unknown) => void) | null = null;
-    // What the last poll showed that this loop already handles, so a long poll waits past it (#1277): tool and token
-    // requests answered or still running in the background, the model request and turn boundary already answered (Pi
-    // removes them a moment after reading the reply). A boundary nobody here answers counts as seen, never as news.
-    let last: any = null;
-    const handled = (list: unknown, prefix: string) => (Array.isArray(list) ? list : []).map(item => String(item?.id ?? ''))
-      .filter(id => /^[a-f0-9]{48}$/.test(id) && (answered.has(prefix + id) || inFlight.has(prefix + id))).slice(0, 512);
-    const seenIds = () => {
-      const request = String(last?.request?.id ?? ''), boundary = String(last?.boundary?.id ?? ''), ids: Record<string, string[]> = {
-        known_tool_ids: handled(last?.tool_requests, 'tool:'), known_token_ids: handled(last?.token_requests, 'token:'),
-        known_model_ids: /^[a-f0-9]{48}$/.test(request) && answered.has(request) ? [request] : [],
-        known_boundary_ids: /^[a-f0-9]{48}$/.test(boundary) && (answered.has('boundary:' + boundary) || !(conversation || service)) ? [boundary] : [] };
-      return Object.fromEntries(Object.entries(ids).filter(([, value]) => value.length));
-    };
-    // A long poll ends early when the session is cancelled or background work fails; its answer is then dropped.
-    const polled = <V>(work: Promise<V>) => abortable(new Promise<V>((resolve, reject) => {
-      pollFailed = reject;
-      work.then(resolve, reject).finally(() => { if (pollFailed === reject) pollFailed = null; });
-      if (backgroundError !== null) reject(backgroundError);
-    }));
     const notifyWake = () => {
       if (wakePoll) { const fn = wakePoll; wakePoll = null; fn(); }
       else wakePending = true;
     };
-    const waitNextPoll = (ms: number) => {
-      if (wakePending) { wakePending = false; return abortable(Promise.resolve()); }
-      return abortable(new Promise<void>(resolve => {
-        const timer = setTimeout(() => { if (wakePoll === done) wakePoll = null; resolve(); }, ms);
-        const done = () => { clearTimeout(timer); resolve(); };
-        wakePoll = done;
-      }));
+    const failSession = (error: unknown) => {
+      backgroundError ??= error;
+      pollFailed?.(backgroundError);
+      notifyWake();
     };
-    const startBackground = (idKey: string, work: () => Promise<void>) => {
-      if (answered.has(idKey) || inFlight.has(idKey)) return;
-      const run = work().then(() => { answered.add(idKey); }, error => { backgroundError ??= error; pollFailed?.(backgroundError); })
-        .finally(() => { inFlight.delete(idKey); notifyWake(); });
-      inFlight.set(idKey, run);
+    const emitPollEvents = async (state: any) => {
+      const list = Array.isArray(state?.events) ? state.events : [];
+      const hasOffset = Number.isSafeInteger(state?.offset);
+      const nextOffset = hasOffset ? Number(state.offset) : offset + list.length;
+      const start = hasOffset ? Math.max(0, nextOffset - list.length) : offset;
+      for (let i = 0; i < list.length; i++) {
+        const idx = start + i;
+        if (idx < offset) continue;
+        offset = idx + 1;
+        const event = list[i];
+        // Streamed text comes directly from the control-plane model gateway; ignore any legacy text_delta events.
+        if (event.type === 'text_delta') continue;
+        if (service && event.type === 'model_retry') await service.retry({ retry: Number(event.retry) || 1, retries: Number(event.retries) || 1, delay_ms: Number(event.delay_ms) || 0, error: redactor.text(String(event.error ?? '')) });
+        if (service && event.type === 'model' && !event.agent) service.responded(Array.isArray(event.tool_calls) && event.tool_calls.length > 0);
+        workspace.log(redactor.clean(Object.fromEntries(Object.entries(event).filter(([name]) => !/^(reasoning.*|thinking.*|analysis)$/i.test(name)))));
+      }
+      if (nextOffset > offset) offset = nextOffset;
+      if (conversation) conversation.offset = offset;
+    };
+    let drainingEvents: Promise<void> | null = null;
+    const drainRunnerEvents = async () => {
+      if (drainingEvents) return drainingEvents;
+      drainingEvents = (async () => {
+        for (let page = 0; page < 8; page++) {
+          const snap = await deliver(`${key}:drain:${randomId()}`, { type: 'workspace_agent_poll', offset });
+          await emitPollEvents(snap);
+          if (!snap?.has_more) break;
+        }
+      })().finally(() => { drainingEvents = null; });
+      return drainingEvents;
     };
 
+    const maxImageBytes = Number.isSafeInteger(config.image_request_limit) && config.image_request_limit > 0
+      ? config.image_request_limit
+      : imageRequestLimit;
+    const modelGateway = await registerModelGatewaySession({
+      store,
+      task,
+      runId: String(task.trace_run_id ?? taskId),
+      leaseEpoch: session.leaseEpoch ?? 0,
+      runAccess,
+      redactor,
+      primaryModel: model,
+      allowVisibleModels: false,
+      guard,
+      beforeModel: session.beforeModel,
+      maxRequestBytes: maxImageBytes,
+      maxOutputTokens: outputTokens ?? config.model.max_output_tokens,
+      signal,
+      beforeRequest: async ({ format, body, rawBytes, isSubagent }) => {
+        const hasImages = hasImageContent(body);
+        const maxBytes = hasImages ? maxImageBytes : requestLimit;
+        if (rawBytes > maxBytes || (hasImages && textRequestBytes(body) > requestLimit)) {
+          if (hasImages) {
+            return {
+              status: 413,
+              code: 'request_too_large',
+              message: `Model request exceeded limits (2 MiB text ceiling or ${Math.round(maxImageBytes / (1024 * 1024))} MiB image request ceiling).`,
+            };
+          }
+          return {
+            status: 413,
+            code: 'context_length_exceeded',
+            message: `Request exceeds the 2 MiB text request limit (${rawBytes} bytes).`,
+          };
+        }
+        if (Array.isArray(body.tools) && body.tools.some((tool: any) => ['read_playbook', 'select_playbooks'].includes(toolNameOf(tool)))) {
+          stop('execution_interrupted', 'waiting_environment', '旧执行会话仍包含已退役指南工具；保留任务记录并在新工作区恢复。');
+        }
+        if (Array.isArray(body.tools) && body.tools.some((tool: any) => {
+          const name = toolNameOf(tool);
+          return ['create_task', 'manage_task', 'list_managed_tasks'].includes(name) && !session.offered(name);
+        })) {
+          stop('execution_interrupted', 'waiting_environment', '旧执行会话仍包含不再获准的任务管理工具；保留任务记录并在新工作区恢复。');
+        }
+        await session.checkpoint?.();
+        const turn = requests++;
+        if (session.maxRequests !== undefined) {
+          if (turn >= session.maxRequests) stop('agent_turn_limit', 'failed', `Pi 会话达到 ${session.maxRequests} 次模型请求上限。`);
+          const reserve = finalizationReserve(session.maxRequests);
+          finalizing = finishingNames.size > 0 && turn >= session.maxRequests - reserve;
+          if (finalizing) {
+            body.tools = (Array.isArray(body.tools) ? body.tools : []).filter((tool: any) => finishingNames.has(toolNameOf(tool)));
+            appendUserMessageNative(
+              format,
+              body,
+              `Execution has ${session.maxRequests - turn} turns left. ${session.finalizationMessage ?? 'Save the bounded artifact and submit the honest current result using the finish tool. Exploration tools are closed.'}`,
+            );
+            if (turn === session.maxRequests - 1) {
+              const names = (body.tools as any[]).map(toolNameOf).filter(Boolean);
+              if (names.length) forceToolChoiceNative(format, body, names);
+            }
+          }
+        }
+        if (!conversation && turn > 0 && taskId) {
+          const continuedUpdates = consumePendingTaskUpdates(store, taskId);
+          if (continuedUpdates.length) {
+            appendUserMessageNative(
+              format,
+              body,
+              'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n' + JSON.stringify(redactor.clean(continuedUpdates)),
+            );
+          }
+        }
+        if (service && !isSubagent) await drainRunnerEvents().catch(() => {});
+        store.run('UPDATE tasks SET model_started=1 WHERE id=?', taskId);
+      },
+      onTextDelta: service ? async delta => { await service.text(delta); } : undefined,
+      onResponseComplete: (_summary, tap, isSubagent) => {
+        const msg = tap.assistantMessage();
+        session.inspect?.(msg);
+        if (service && !isSubagent) service.responded(Boolean(msg.tool_calls?.length));
+      },
+      onUpstreamHttpError: (status, detail) => {
+        if (status === 401 || status === 403) {
+          failSession(new TaskError(
+            'model_authentication_failed',
+            'waiting_configuration',
+            `模型 ${model.model} 拒绝认证或访问，HTTP ${status}${detail ? '：' + redactor.text(detail) : ''}。请检查模型 API Key 和权限。`,
+          ));
+        }
+      },
+      onSessionFault: err => failSession(err),
+    });
+
     try {
+      const fresh = !conversation?.resume && !session.resume;
+      // Deliver the ephemeral gateway connection (short-lived run_token + UDS/loopback address) out-of-band before
+      // starting or resuming the Pi process so workspace_agent_config stays deterministic across retries/restarts
+      // and run_token never enters persisted tool_operations.
+      if (!fresh && session.runtime) checkRuntime(await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
+      const gwUpdate = {
+        run_token: runToken,
+        ...(modelGateway.gatewayUrl ? { model_gateway_url: modelGateway.gatewayUrl } : {}),
+        ...(modelGateway.socketPath ? { model_gateway_socket: modelGateway.socketPath } : {}),
+      };
+      await deliver(key + ':gateway:' + randomId(), {
+        type: 'workspace_agent_gateway',
+        base64: Buffer.from(JSON.stringify(gwUpdate)).toString('base64'),
+      });
+      // Messages that arrived before the session starts join right after its prompt, as they would before a first native request.
+      if (service) { config.service_turn = true; config.steer = service.steer(); }
+      const wireConfig = redactor.clean(config);
+      const bytes = Buffer.from(JSON.stringify(wireConfig));
+      if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
+      // The last piece of a new session's configuration also starts it (#1277), checking the pinned Pi version before the
+      // process runs. A runner older than that ignores start: its answer has no runtime, and the runtime query and the start
+      // call follow as before. Pieces stay 30000 bytes, what those runners accept.
+      let launched: any = null;
+      if (fresh) {
+        for (let offset = 0; offset < bytes.length; offset += 30000) {
+          const final = offset + 30000 >= bytes.length;
+          const saved = await workspace.call(key + ':config:' + offset, {
+            type: 'workspace_agent_config',
+            base64: bytes.subarray(offset, offset + 30000).toString('base64'),
+            offset,
+            final,
+            ...(final ? { start: true, ...(session.runtime ? { runtime_version: session.runtime.version } : {}) } : {}),
+          });
+          if (saved.error) stop('execution_interrupted', 'waiting_environment', `写入执行配置时中断，offset=${offset}。`);
+          if (final && saved.runtime && typeof saved.runtime === 'object') launched = saved;
+        }
+      }
+      if (session.runtime && fresh) checkRuntime(launched ? launched.runtime : await deliver(key + ':runtime', { type: 'workspace_agent_runtime' }));
+      // A stored started receipt is not evidence that its PID still exists. Ask the runner again on every entry;
+      // it checks the saved process before returning started, including after a control-plane restart. A start that rode
+      // with the configuration can be such a receipt too: the first poll checks the saved process the same way.
+      const started = launched ?? await workspace.call(key + ':' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' });
+      if (started.error || launched && started.started !== true) stop('execution_interrupted', 'waiting_environment', '启动任务执行进程时中断。');
+
+      // What the last poll showed that this loop already handles, so a long poll waits past it (#1277): tool and token
+      // requests answered or still running in the background, and the turn boundary already answered.
+      let last: any = null;
+      const handled = (list: unknown, prefix: string) => (Array.isArray(list) ? list : []).map(item => String(item?.id ?? ''))
+        .filter(id => /^[a-f0-9]{48}$/.test(id) && (answered.has(prefix + id) || inFlight.has(prefix + id))).slice(0, 512);
+      const seenIds = () => {
+        const boundary = String(last?.boundary?.id ?? ''), ids: Record<string, string[]> = {
+          known_tool_ids: handled(last?.tool_requests, 'tool:'),
+          known_token_ids: handled(last?.token_requests, 'token:'),
+          known_boundary_ids: /^[a-f0-9]{48}$/.test(boundary) && (answered.has('boundary:' + boundary) || !(conversation || service)) ? [boundary] : [],
+        };
+        return Object.fromEntries(Object.entries(ids).filter(([, value]) => value.length));
+      };
+      // A long poll ends early when the session is cancelled or background work fails; its answer is then dropped.
+      const polled = <V>(work: Promise<V>) => abortable(new Promise<V>((resolve, reject) => {
+        pollFailed = reject;
+        work.then(resolve, reject).finally(() => { if (pollFailed === reject) pollFailed = null; });
+        if (backgroundError !== null) reject(backgroundError);
+      }));
+      const waitNextPoll = (ms: number) => {
+        if (wakePending) { wakePending = false; return abortable(Promise.resolve()); }
+        return abortable(new Promise<void>(resolve => {
+          const timer = setTimeout(() => { if (wakePoll === done) wakePoll = null; resolve(); }, ms);
+          const done = () => { clearTimeout(timer); resolve(); };
+          wakePoll = done;
+        }));
+      };
+      const startBackground = (idKey: string, work: () => Promise<void>) => {
+        if (answered.has(idKey) || inFlight.has(idKey)) return;
+        const run = work().then(() => { answered.add(idKey); }, error => { failSession(error); })
+          .finally(() => { inFlight.delete(idKey); notifyWake(); });
+        inFlight.set(idKey, run);
+      };
+
       for (;;) {
         if (backgroundError !== null) throw backgroundError;
         await guard();
@@ -208,15 +400,7 @@ export function piAdapter<T>(session: PiSession<T>) {
         last = state;
         await guard();
         if (backgroundError !== null) throw backgroundError;
-        for (const event of state.events || []) {
-          // A service turn's streamed text goes to its conversation, not the log: the model event that ends it has it all.
-          if (service && event.type === 'text_delta') { if (event.text) await service.text(redactor.text(String(event.text))); continue; }
-          if (service && event.type === 'model_retry') await service.retry({ retry: Number(event.retry) || 1, retries: Number(event.retries) || 1, delay_ms: Number(event.delay_ms) || 0, error: redactor.text(String(event.error ?? '')) });
-          if (service && event.type === 'model' && !event.agent) service.responded(Array.isArray(event.tool_calls) && event.tool_calls.length > 0);
-          workspace.log(redactor.clean(Object.fromEntries(Object.entries(event).filter(([name]) => !/^(reasoning.*|thinking.*|analysis)$/i.test(name)))));
-        }
-        offset = state.offset || offset;
-        if (conversation) conversation.offset = offset;
+        await emitPollEvents(state);
         // A finished agent can leave more than one page of events; retain the tail before exiting.
         if (state.has_more && ['completed', 'review_ready', 'failed', 'interrupted'].includes(state.state)) continue;
         if (conversation?.resume && state.state === 'review_ready' && !answered.has('resumed')) {
@@ -237,6 +421,7 @@ export function piAdapter<T>(session: PiSession<T>) {
         }
         if (state.state === 'completed' || state.state === 'review_ready') {
           if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
+          await modelGateway.drain();
           if (backgroundError !== null) throw backgroundError;
           return session.complete({ ...state, result: redactor.clean(state.result) }, publication);
         }
@@ -287,14 +472,14 @@ export function piAdapter<T>(session: PiSession<T>) {
               await deliverMailboxToolReply(redactor.clean(reply), id, chunk => workspace.deliver(chunk), '发送工作区结果时中断。');
               return;
             }
-            if (kind === 'repository' && ['store_command_result','store_tool_result','read_tool_result'].includes(name)) {
+            if (kind === 'repository' && ['store_command_result', 'store_tool_result', 'read_tool_result'].includes(name)) {
               await guard();
-              let result: any = {error:'tool_not_allowed'};
+              let result: any = { error: 'tool_not_allowed' };
               if (name === 'read_tool_result' && session.offered(name)) result = await resultFiles.read(args);
-              else if (name === 'store_tool_result' && session.offered(args?.name)) result = resultFiles.preserve(args.value,args.name);
+              else if (name === 'store_tool_result' && session.offered(args?.name)) result = resultFiles.preserve(args.value, args.name);
               else if (name === 'store_command_result' && session.offered('run_command') && /^[a-f0-9]{48}$/.test(args?.output_id ?? '')) {
-                result=await resultFiles.run(()=>commandResult({...args.preview,truncated:true,output_file:'journal'},'pi:'+args.output_id,
-                  offset=>workspace.deliver({type:'workspace_agent_result',request_id:args.output_id,offset})),true);
+                result = await resultFiles.run(() => commandResult({ ...args.preview, truncated: true, output_file: 'journal' }, 'pi:' + args.output_id,
+                  offset => workspace.deliver({ type: 'workspace_agent_result', request_id: args.output_id, offset })), true);
               }
               await guard();
               await deliverMailboxToolReply(redactor.clean(result), id, chunk => workspace.deliver(chunk), '发送完整工具结果时中断。');
@@ -331,119 +516,17 @@ export function piAdapter<T>(session: PiSession<T>) {
             const offered = session.offered(name);
             let result: any;
             if (session.platform && Object.hasOwn(session.platform, name)) result = offered ? await abortable(session.platform[name]!(id, args)) : { error: 'write_not_allowed' };
-            else result = !offered || !session.repository ? { error: 'tool_not_allowed' } : await resultFiles.execute(name,args,()=>abortable(session.repository!(name,args)));
+            else result = !offered || !session.repository ? { error: 'tool_not_allowed' } : await resultFiles.execute(name, args, () => abortable(session.repository!(name, args)));
             await deliverMailboxToolReply(redactor.clean(result), id, chunk => workspace.deliver(chunk), '发送仓库读取结果时中断。');
           });
         }
 
-        if (state.request && !answered.has(state.request.id)) {
-          if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
-          if (backgroundError !== null) throw backgroundError;
-          let fullRequest = state.request;
-          if (state.request.chunked) {
-            const parts: Buffer[] = [];
-            let readAt = 0;
-            for (;;) {
-              const chunkRes = await workspace.deliver({ type: 'workspace_agent_request', request_id: state.request.id, offset: readAt });
-              if (chunkRes?.error === 'agent_request_changed' || (chunkRes?.error === 'runner_operation_failed' && typeof chunkRes?.detail === 'string' && chunkRes.detail.includes('agent_request_changed'))) {
-                fullRequest = null;
-                break;
-              }
-              if (chunkRes?.error) stop('execution_interrupted', 'waiting_environment', `读取大型模型请求时中断：${String(chunkRes.detail || chunkRes.error)}。`);
-              const buf = Buffer.from(String(chunkRes.base64 || ''), 'base64');
-              parts.push(buf);
-              readAt += buf.length;
-              if (readAt > imageRequestLimit + 256 * 1024) stop('model_request_invalid', undefined, `含图模型请求超过 ${Math.round(imageRequestLimit / (1024 * 1024))} MiB 上限。`);
-              if (!buf.length || readAt >= Number(chunkRes.size || 0)) break;
-            }
-            if (!fullRequest) continue;
-            fullRequest = JSON.parse(Buffer.concat(parts).toString('utf8'));
-          }
-          const sendModelReply = async (replyStatus: number, replyContentType: string, replyBody: string) => {
-            const replyBuf = Buffer.from(JSON.stringify({ status: replyStatus, content_type: replyContentType, body: replyBody }));
-            for (let at = 0; at < replyBuf.length; at += 30000) {
-              const wrote = await workspace.call(`${key}:reply:${state.request.id}:${at}`, { type: 'workspace_agent_reply', request_id: state.request.id, base64: replyBuf.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= replyBuf.length });
-              if (wrote.error) stop('execution_interrupted', 'waiting_environment', `向任务执行进程发送模型响应时中断，offset=${at}。`);
-            }
-            answered.add(state.request.id);
-          };
-          const body = fullRequest.body;
-          const hasImages = hasImageContent(body);
-          const maxBytes = hasImages ? imageRequestLimit : requestLimit;
-          if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > maxBytes || (hasImages && textRequestBytes(body) > requestLimit)) {
-            if (hasImages) {
-              const message = `Model request exceeded limits (2 MiB text ceiling or ${Math.round(imageRequestLimit / (1024 * 1024))} MiB image request ceiling).`;
-              await sendModelReply(413, 'application/json', JSON.stringify({ error: { type: 'invalid_request_error', code: 'request_too_large', message } }));
-              continue;
-            }
-            stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
-          }
-          if(body.tools?.some((tool:any)=>['read_playbook','select_playbooks'].includes(tool.function?.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含已退役指南工具；保留任务记录并在新工作区恢复。');
-          if(body.tools?.some((tool:any)=>['create_task','manage_task','list_managed_tasks'].includes(tool.function?.name)&&!session.offered(tool.function.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含不再获准的任务管理工具；保留任务记录并在新工作区恢复。');
-          await session.checkpoint?.();
-          const turn=requests++;
-          if (session.maxRequests !== undefined) {
-            if(turn>=session.maxRequests)stop('agent_turn_limit', 'failed', `Pi 会话达到 ${session.maxRequests} 次模型请求上限。`);
-            const reserve=finalizationReserve(session.maxRequests);
-            finalizing=finishingNames.size>0&&turn>=session.maxRequests-reserve;
-            if(finalizing){
-              body.tools=(body.tools??[]).filter((tool:any)=>finishingNames.has(tool.function?.name));
-              body.messages.push({role:'user',content:`Execution has ${session.maxRequests-turn} turns left. ${session.finalizationMessage??'Save the bounded artifact and submit the honest current result using the finish tool. Exploration tools are closed.'}`});
-              if(turn===session.maxRequests-1){const names=(body.tools as any[]).map(tool=>tool.function.name);body.tool_choice=names.length===1?{type:'function',function:{name:names[0]}}:'required';}
-            }
-          }
-          if (!conversation && turn > 0 && taskId) {
-            const continuedUpdates = consumePendingTaskUpdates(store, taskId);
-            if (continuedUpdates.length) {
-              body.messages.push({
-                role: 'user',
-                content: 'New events continued into this task while it was running; incorporate these facts before finishing (recorded contract and authority remain binding):\n' + JSON.stringify(redactor.clean(continuedUpdates)),
-              });
-            }
-          }
-          store.run('UPDATE tasks SET model_started=1 WHERE id=?', taskId);
-          let lastProgress = -Infinity, sequence = 0, heartbeat: ReturnType<typeof setInterval> | undefined;
-          const ping = async () => {
-            const sent = await workspace.deliver({ type: 'workspace_agent_progress', request_id: state.request.id, sequence: ++sequence });
-            if (sent.error) stop('execution_interrupted', 'waiting_environment', '向任务执行进程发送模型 token 活动通知时中断。');
-          };
-          const onRetry = async () => { await ping(); heartbeat ??= setInterval(() => { void ping().catch(() => {}); }, 30000); };
-          let modelResult: Awaited<ReturnType<typeof request>>;
-          try {
-            modelResult = await abortable(request(body, String(state.request.id), async delta => {
-              if (service && typeof delta?.content === 'string' && delta.content) await service.text(redactor.text(delta.content));
-              if (Date.now() - lastProgress < 1000) return;
-              lastProgress = Date.now();
-              await ping();
-            }, undefined, { onRetry })).finally(() => clearInterval(heartbeat));
-          } catch (error) {
-            const recoverableImageRejection = hasImages && error instanceof TaskError
-              && (error.code === 'model_request_invalid' || /^model_http_(400|413|415|422)$/.test(error.code));
-            if (!recoverableImageRejection) throw error;
-            const match = /^model_http_(\d+)$/.exec(error.code);
-            const httpStatus = match ? Number(match[1]) : 413;
-            const detail = redactor.text(String(error.detail || error.code)).slice(0, 500);
-            await sendModelReply(httpStatus, 'application/json', JSON.stringify({ error: { type: 'invalid_request_error', code: error.code, message: `${error.code}: ${detail}` } }));
-            continue;
-          }
-          const { value, status, model: used } = modelResult;
-          session.inspect?.(value?.choices?.[0]?.message);
-          const cleaned = redactor.clean(value);
-          let responseBody = JSON.stringify(cleaned), contentType = 'application/json';
-          if (body.stream) {
-            const value = JSON.parse(responseBody), message = value.choices?.[0]?.message; if (!message) stop('model_response_invalid', undefined, '转换模型流式响应时缺少 choices[0].message。');
-            const delta = { ...message, ...(message.tool_calls ? { tool_calls: message.tool_calls.map((call: any, index: number) => ({ ...call, index })) } : {}) };
-            const chunk = (part: any, finish: any = null) => JSON.stringify({ id: value.id || state.request.id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: used.model, choices: [{ index: 0, delta: part, finish_reason: finish }], usage: value.usage });
-            responseBody = 'data: ' + chunk(delta) + '\n\ndata: ' + chunk({}, message.tool_calls?.length ? 'tool_calls' : 'stop') + '\n\ndata: [DONE]\n\n'; contentType = 'text/event-stream';
-          }
-          await sendModelReply(status, contentType, responseBody);
-          continue;
-        }
         // A runner that held the poll already waited; one that answered at once (an older image, a test double) gets the
         // 500 ms pause it always had.
         if (state.long_poll !== true) await waitNextPoll(500);
       }
     } finally {
+      await modelGateway.close();
       if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
     }
   };

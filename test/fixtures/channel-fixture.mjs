@@ -7,6 +7,7 @@ import { FEISHU_SCOPES } from '../../dist/channels/feishu.js';
 import { resolvePrincipalActor } from '../../dist/identity/authorization.js';
 import { GitHubIdentity } from '../../dist/identity/github.js';
 import { githubIdentityServer, seedInstallation, githubSignIn } from './identity-fixture.mjs';
+import { replyChatCompletion } from './openai-sse.mjs';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
@@ -184,7 +185,7 @@ export function scriptedModel(f, steps) {
     if (typeof step === 'function') step = step(done, JSON.parse(body.messages[1].content));
     const message = typeof step === 'string' ? { role: 'assistant', content: step }
       : { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + done.length, type: 'function', function: { name: step[0], arguments: JSON.stringify(step[1]) } }] };
-    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
+    replyChatCompletion(res, message, { stream: Boolean(body.stream), usage: { prompt_tokens: 12, completion_tokens: 4 } });
   };
 }
 /** A private message's management outcome: the inbox row, its management message state, the error event code and the code

@@ -1,5 +1,3 @@
-// These legacy protocol fixtures exercise the explicitly enabled gateway transport.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -14,12 +12,13 @@ import {roleApi} from '../../../../dist/roles/api.js';
 import {recordEvent} from '../../../../dist/dispatch/store.js';
 import {Dispatcher} from '../../../../dist/dispatch/worker.js';
 import {managerDecision} from '../../../../dist/dispatch/manager.js';
+import {replyChatCompletion} from '../../../fixtures/openai-sse.mjs';
 
 test('event dispatch uses a real Pi session and retains native binding without a business Task',{timeout:60000},async t=>{
  const root=mkdtempSync(join(tmpdir(),'dispatch-pi-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let calls=0;const bodies=[];
  const provider=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);calls++;bodies.push(body);
   assert.ok(body.tools.some(t=>t.function.name==='bash'));
-  res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',tool_calls:[{id:'d'+calls,type:'function',function:{name:'ignore_event',arguments:JSON.stringify({reason:'This event is informational.'})}}]}}],usage:{prompt_tokens:10,completion_tokens:10}}));
+  replyChatCompletion(res,{role:'assistant',tool_calls:[{id:'d'+calls,type:'function',function:{name:'ignore_event',arguments:JSON.stringify({reason:'This event is informational.'})}}]},{stream:Boolean(body.stream),usage:{prompt_tokens:10,completion_tokens:10}});
  });provider.listen(0,'127.0.0.1');await once(provider,'listening');
  t.after(async()=>{await manager.recover();provider.closeAllConnections();await new Promise(r=>provider.close(r));s.close();rmSync(root,{recursive:true,force:true});});
  s.run("INSERT INTO accounts VALUES('a','fixture','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/repo','10','a')");

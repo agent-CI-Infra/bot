@@ -1,19 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseDownstreamRequest,serializeUpstreamRequest,DownstreamResponseBuilder} from '../../../../dist/harness/model-formats.js';
+import { patchPassthroughRequest, PassthroughTap } from '../../../../dist/harness/model-formats.js';
 
-test('Responses namespace members survive translation to chat and back, including the next-turn call history',()=>{
- const request=parseDownstreamRequest('openai-responses',{model:'fixture',input:[{type:'function_call',namespace:'mcp__bot',name:'read_task_record',call_id:'c1',arguments:'{"ref":"task:t"}'},{type:'function_call_output',call_id:'c1',output:'{}'}],tools:[{type:'namespace',name:'mcp__bot',description:'Bot collaboration',tools:[{type:'function',name:'read_task_record',parameters:{type:'object',properties:{ref:{type:'string'}}}}]}]});
- const chat=serializeUpstreamRequest('openai-chat-completions',request,'fixture');
- assert.equal(chat.tools.length,1);assert.equal(chat.tools[0].function.name,'mcp__bot__read_task_record');assert.ok(chat.tools[0].function.parameters.properties.ref);
- assert.equal(chat.messages.find(m=>m.tool_calls)?.tool_calls[0].function.name,'mcp__bot__read_task_record');
- const names=new Map(request.tools.map(t=>[t.name,{namespace:t.namespace,name:t.localName}]));
- for(const stream of [false,true]){
-  const builder=new DownstreamResponseBuilder('openai-responses',stream,'fixture',new Set(),names);
-  const wire=builder.push([{type:'start',id:'r1',model:'fixture'},{type:'tool_call_start',index:0,callId:'c2',name:'mcp__bot__read_task_record'},{type:'tool_call_delta',index:0,delta:'{"ref":"task:t"}'},{type:'finish',stopReason:'tool_use'}]);
-  const final=builder.finalize();
-  const output=final.jsonSnapshot.output.find(item=>item.type==='function_call');
-  assert.equal(output.namespace,'mcp__bot');assert.equal(output.name,'read_task_record');
-  if(stream){assert.match(wire,/"namespace":"mcp__bot"/);assert.ok(!wire.includes('"name":"mcp__bot__read_task_record"'));}
- }
+test('Responses passthrough preserves namespace tools and function_call history verbatim without conversion', () => {
+  const inputBody = {
+    model: 'client-model',
+    stream: true,
+    max_output_tokens: 32000,
+    input: [
+      { type: 'function_call', namespace: 'mcp__bot', name: 'read_task_record', call_id: 'c1', arguments: '{"ref":"task:t"}' },
+      { type: 'function_call_output', call_id: 'c1', output: '{}' },
+    ],
+    tools: [
+      {
+        type: 'namespace',
+        name: 'mcp__bot',
+        description: 'Bot collaboration',
+        tools: [{ type: 'function', name: 'read_task_record', parameters: { type: 'object', properties: { ref: { type: 'string' } } } }],
+      },
+    ],
+  };
+  const patched = patchPassthroughRequest('openai-responses', inputBody, 'gpt-5-codex', 8192);
+  assert.equal(patched.model, 'gpt-5-codex');
+  assert.equal(patched.max_output_tokens, 8192);
+  assert.deepEqual(patched.tools, inputBody.tools);
+  assert.deepEqual(patched.input, inputBody.input);
+
+  // Sideband tap extracts namespaced tool call and usage from Responses SSE without mutating the wire stream.
+  const sse = [
+    `event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { id: 'r1', model: 'gpt-5-codex', status: 'in_progress' } })}\n\n`,
+    `event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', namespace: 'mcp__bot', name: 'read_task_record', call_id: 'c2', arguments: '{"ref":"task:t"}' } })}\n\n`,
+    `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: 'r1', model: 'gpt-5-codex', status: 'completed', output: [{ type: 'function_call', namespace: 'mcp__bot', name: 'read_task_record', call_id: 'c2', arguments: '{"ref":"task:t"}' }], usage: { input_tokens: 20, output_tokens: 8 } } })}\n\n`,
+  ].join('');
+  const tap = new PassthroughTap('openai-responses', true, 'gpt-5-codex');
+  tap.push(Buffer.from(sse, 'utf8'));
+  const summary = tap.end();
+  assert.equal(summary.id, 'r1');
+  assert.deepEqual(summary.usage, { input_tokens: 20, output_tokens: 8, cached_input_tokens: null });
+  assert.deepEqual(summary.tool_calls, [{ id: 'c2', name: 'read_task_record', arguments: '{"ref":"task:t"}' }]);
 });

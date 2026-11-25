@@ -76,16 +76,13 @@ function sanitizeTrajectoryValue(value) {
   return out;
 }
 export function sanitizeTrajectoryInput(input) {
-  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_tool'].includes(input.request.type) && typeof input.request.base64 === 'string') {
+  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_gateway', 'workspace_agent_tool'].includes(input.request.type) && typeof input.request.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
   }
   return sanitizeTrajectoryValue(input);
 }
 export function sanitizeTrajectoryResult(type, result) {
   if (type === 'workspace_agent_poll' || type === 'workspace_harness_poll') return sanitizeAgentPollTrajectory(sanitizeTrajectoryValue(result));
-  if ((type === 'workspace_agent_request' || type === 'workspace_agent_model_request') && result && typeof result === 'object' && typeof result.base64 === 'string') {
-    return sanitizeTrajectoryValue({ ...result, base64: '[omitted]' });
-  }
   return result;
 }
 // WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
@@ -93,11 +90,11 @@ export function sanitizeTrajectoryResult(type, result) {
 export const walSizeLimit = 512 * 1024 * 1024;
 
 export class Projects {
-  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, skillStore = null, results = null }) {
+  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, skillStore = null, modelGateway = null, results = null }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
-    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.skillStoreMount = skillStore; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.skillStoreMount = skillStore; this.modelGatewayMount = modelGateway; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
@@ -873,6 +870,18 @@ export class Projects {
     if (!volume || !trusted) throw new ManagerError('project_tools_volume_invalid', 503);
     return name;
   }
+  async modelGatewayVolume() {
+    if (!this.modelGatewayMount) return null;
+    const name = await this.docker.volumeName(this.modelGatewayMount);
+    if (!name) return null;
+    const volume = await this.docker.request('GET', '/volumes/' + encodeURIComponent(name));
+    const labels = volume?.Labels;
+    const trusted = typeof name === 'string' && /^(?:[a-z0-9][a-z0-9._-]*[_-])?model-gateway$/i.test(name) &&
+      labels && typeof labels === 'object' &&
+      (labels['com.docker.compose.volume'] === 'model-gateway' || labels['department.bot.kind'] === 'model-gateway');
+    if (!volume || !trusted) throw new ManagerError('model_gateway_volume_invalid', 503);
+    return name;
+  }
   async projectToolsSpecMount(repo, revision) {
     this.validate(repo);
     if (!Number.isSafeInteger(revision) || revision < 1) throw new ManagerError('invalid_tools_revision', 400);
@@ -1006,6 +1015,7 @@ export class Projects {
     await this.inspect(repo, generation, 'volume');
     await this.notesVolume(repo);
     const toolsVolume = await this.agentToolsVolume();
+    const modelGatewayVolume = await this.modelGatewayVolume();
     const desiredToolsRevision = Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null;
     const projectToolsMounts = desiredToolsRevision ? [await this.projectToolsSpecMount(repo, desiredToolsRevision)] : [];
     const projectSkillsMounts = await this.projectSkillsMount(repo);
@@ -1021,6 +1031,9 @@ export class Projects {
     const toolsMountStale = toolsVolume
       ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === toolsVolume && m.Target === '/opt/agent-tools' && m.ReadOnly === true)
       : !!host?.Mounts?.some(m => m.Target === '/opt/agent-tools');
+    const modelGatewayMountStale = modelGatewayVolume
+      ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === modelGatewayVolume && m.Target === '/run/model-gateway' && m.ReadOnly === true)
+      : !!host?.Mounts?.some(m => m.Target === '/run/model-gateway');
     const existingProjectToolsMounts = host?.Mounts?.filter(m => m.Target === '/opt/project-tools') ?? [];
     const projectToolsMountStale = existingProjectToolsMounts.length !== projectToolsMounts.length
       || projectToolsMounts.some(expected => !existingProjectToolsMounts.some(m => m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath));
@@ -1030,7 +1043,7 @@ export class Projects {
     if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
       || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
-      || toolsMountStale || projectToolsMountStale || skillsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
+      || toolsMountStale || modelGatewayMountStale || projectToolsMountStale || skillsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -1043,6 +1056,7 @@ export class Projects {
         { Type: 'volume', Source: names.volume, Target: '/workspace' },
         { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
         ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
+        ...(modelGatewayVolume ? [{ Type: 'volume', Source: modelGatewayVolume, Target: '/run/model-gateway', ReadOnly: true }] : []),
         ...projectToolsMounts,
         ...projectSkillsMounts,
         ...resultMounts,

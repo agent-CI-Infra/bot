@@ -36,7 +36,7 @@ async function run(t, { binding = {}, events = [], final }) {
   const spec = { store, task, redactor: new Redactor(), guard: async () => {}, runAccess: runAccess(), system: 's', prompt: 'p', tools: [],
     roleRun: { instance_id: 'inst-1', role: 'dev', version: '1', harness: 'pi', recovery_mode: 'rebuilt_from_task_records' },
     harnessAccess: { workspace: 'read', fileTools: 'read', commands: false, network: false, github: { repository: null, scopes: [] } },
-    harnessState: { value: binding, save: value => saved.push(value) }, containerOptions: { modelTransport: 'gateway' }, pi: { workspace } };
+    harnessState: { value: binding, save: value => saved.push(value) }, pi: { workspace } };
   const outcome = await roleHarness('pi').adapter(spec)({ guard: async () => {}, model: { id: 'm', model: 'test' }, request: async () => ({ value: {} }) }).then(value => ({ value }), error => ({ error }));
   return { store, outcome, saved, logs, config: JSON.parse(Buffer.concat(config).toString('utf8')), workspace_id };
 }

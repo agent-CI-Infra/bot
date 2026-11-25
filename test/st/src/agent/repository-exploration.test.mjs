@@ -162,7 +162,7 @@ test('real Workspace delivery ignores only abandoned repository replies, includi
     { error: 'agent_reply_offset' },
     { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_reply_offset' },
     { error: 'runner_operation_failed' },
-    { error: 'runner_operation_failed', detail: 'workspace_agent_progress: agent_request_changed' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_boundary: agent_request_changed' },
     { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_request_changed unexpectedly' }
   ];
   for (const [index, { continues, ...failure }] of cases.entries()) await t.test(JSON.stringify(failure), async () => {

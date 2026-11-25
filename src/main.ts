@@ -30,6 +30,7 @@ import { agentToolsRetainCount } from './app/agent-tools.js';
 import { activeCliVersions } from './roles/role-run.js';
 import { ensureServiceSkillScope, resolveSkillStoreRoot } from './roles/skill-store.js';
 import { migrateLegacyProjectMemories } from './memory/migration.js';
+import { startModelGatewayServer } from './harness/model-gateway.js';
 
 process.umask(0o077);
 commandTimeoutLimit();
@@ -167,6 +168,10 @@ const { server } = createControlPlane({ store, staticDirectory: resolve(import.m
   assistantHomes: existsSync(process.env.BOT_ASSISTANT_HOMES || '/assistant-homes') ? process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' : undefined },
   // BOT_TRUSTED_PROXIES: comma-separated proxy addresses/CIDRs allowed to name the password-login client.
   { trustedProxies: (process.env.BOT_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) });
+// Dedicated UDS passthrough model gateway for project and assistant computers (mounted read-only at /run/model-gateway).
+const modelGatewaySocket = process.env.BOT_MODEL_GATEWAY_SOCKET;
+const modelGatewayServer = modelGatewaySocket ? await startModelGatewayServer(modelGatewaySocket) : null;
+if (modelGatewayServer) console.log(`model gateway listening on ${modelGatewayServer.socketPath}`);
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
 server.on('error', () => { console.error('listener failed'); process.exit(1); });
 server.listen(8791, '0.0.0.0', () => {
@@ -195,7 +200,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   forceConnections.unref?.();
   server.close(async () => {
     clearTimeout(forceConnections);
-    const settled = await Promise.allSettled([projectTools.stop(), agentToolsAuto.stop(), storage.stop(), githubRefresh.close(), modelCatalog(store).close(), installations.close(), engine.close(), external.forwarder.close(), releases.close(), boards.close(), actionsFailures.close(), migration.stop(), vacuum.stop(), retention.stop()]);
+    const settled = await Promise.allSettled([modelGatewayServer?.close(), projectTools.stop(), agentToolsAuto.stop(), storage.stop(), githubRefresh.close(), modelCatalog(store).close(), installations.close(), engine.close(), external.forwarder.close(), releases.close(), boards.close(), actionsFailures.close(), migration.stop(), vacuum.stop(), retention.stop()]);
     for (const entry of settled) if (entry.status === 'rejected') console.error('[bot] shutdown step failed:', entry.reason);
     try { store.close(); } catch (error) { console.error('[bot] store close failed:', error); }
     clearTimeout(forceExit);

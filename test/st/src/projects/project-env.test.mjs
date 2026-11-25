@@ -207,13 +207,13 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
   await execute({ type: 'workspace_agent_tool', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
   assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_tool'));
-  for(const type of ['workspace_agent_boundary','workspace_agent_continue','workspace_agent_progress']){
-    await execute({type,workspace_id,request_id:id(),base64:Buffer.from('{}').toString('base64'),offset:0,final:true,sequence:1});
+  for(const type of ['workspace_agent_boundary','workspace_agent_continue']){
+    await execute({type,workspace_id,request_id:id(),base64:Buffer.from('{}').toString('base64'),offset:0,final:true});
     assert.ok(f.docker.runs.some(r=>r.type===type),type);
   }
-  // A review's history is Pi's own session file (#1040); the calls that copied it in and out are gone.
-  for(const type of ['workspace_agent_history','workspace_agent_session'])
-    await assert.rejects(execute({type,workspace_id,base64:Buffer.from('[]').toString('base64'),offset:0,final:true}),/invalid_runner_request/,type);
+  // A review's history is Pi's own session file (#1040) and model requests use the UDS passthrough gateway (#1358); the old mailbox calls are gone.
+  for(const type of ['workspace_agent_history','workspace_agent_session','workspace_agent_request','workspace_agent_reply','workspace_agent_progress','workspace_agent_model_request','workspace_agent_model_reply'])
+    await assert.rejects(execute({type,workspace_id,request_id:id(),base64:Buffer.from('[]').toString('base64'),offset:0,final:true,sequence:1}),/invalid_runner_request/,type);
   // #769: a shared worktree is named only by the calls that create or bind it, by a 48-hex id; the review cache calls it
   // replaced are gone.
   const worktree_id=id(),commit={sha:'a'.repeat(40),tree_sha:'b'.repeat(40)};
@@ -513,11 +513,11 @@ test('the project computer accepts the control plane\'s three-way integration ca
 test('the project computer passes an ACP session poll that renews its lease, and only that call', async t => {
   const f = fixture(t); await f.projects.register('101');
   const poll = { type: 'workspace_harness_poll', workspace_id: 'a'.repeat(48), offset: 0, instance_id: 'b'.repeat(48), wait_ms: 250,
-    known_tool_ids: [], known_token_ids: [], known_model_ids: [], lease_heartbeat: true };
+    known_tool_ids: [], known_token_ids: [], lease_heartbeat: true };
   await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: poll });
   assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).lease_heartbeat], ['workspace_harness_poll', true]);
   const count = f.docker.runs.length;
-  for (const request of [{ ...poll, lease_heartbeat: false }, { ...poll, lease_heartbeat: 'yes' },
+  for (const request of [{ ...poll, lease_heartbeat: false }, { ...poll, lease_heartbeat: 'yes' }, { ...poll, known_model_ids: [] },
     { type: 'workspace_harness_interrupt', workspace_id: 'a'.repeat(48), mode: 'kill', instance_id: 'b'.repeat(48), lease_heartbeat: true }])
     await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request }), /invalid_runner_request/, JSON.stringify(request));
   assert.equal(f.docker.runs.length, count);
@@ -548,7 +548,7 @@ test('the project computer accepts conflict import and merge check calls through
 test('a Pi session may hold its poll up to 3 s, name what it already handles and start with its last configuration piece', async t => {
   const f = fixture(t); await f.projects.register('101');
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
-  const known = { known_tool_ids: [id()], known_token_ids: [id()], known_model_ids: [id()], known_boundary_ids: [id()] };
+  const known = { known_tool_ids: [id()], known_token_ids: [id()], known_boundary_ids: [id()] };
   // The manager passes on the runner's own limit (runner/agent.mjs) and nothing longer.
   await execute({ type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: agentPollWaitLimit, ...known });
   assert.deepEqual([f.docker.runs.at(-1).wait_ms, f.docker.runs.at(-1).known_boundary_ids], [agentPollWaitLimit, known.known_boundary_ids]);
@@ -558,6 +558,7 @@ test('a Pi session may hold its poll up to 3 s, name what it already handles and
   const count = f.docker.runs.length;
   for (const bad of [
     { type: 'workspace_agent_poll', workspace_id, offset: 0, wait_ms: agentPollWaitLimit + 1 },
+    { type: 'workspace_agent_poll', workspace_id, offset: 0, known_model_ids: [id()] },
     { type: 'workspace_harness_poll', workspace_id, offset: 0, wait_ms: 1001 },
     { type: 'workspace_agent_poll', workspace_id, offset: 0, known_boundary_ids: ['x'] },
     { ...config, final: false, start: true },

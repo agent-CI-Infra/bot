@@ -43,7 +43,6 @@ function fixture(t, env = {}, config = {}) {
         env: { CODEX_HOME: home, ...e },
         stateDirectory: sessionsDir,
         version: '0.166.0',
-        modelTransport: 'gateway',
         timeoutMs: 15000,
         cancelGraceMs: 800,
         toolStartupMs: 5000,
@@ -92,7 +91,9 @@ test('Codex app-server: handshake, stdio MCP task tools, thread/turn binding, qu
   const out = await runRole(f.spec, 'dev', undefined, 'codex');
   assert.equal(out.result.summary, 'actual fixture result');
   const state = f.state();
-  assert.deepEqual([state.protocol, state.model, state.modelProvider, state.cliVersion, state.lastTurnStatus, state.recoveryMode], ['codex-app-server', 'gpt-fixture', 'openai', '0.166.0', 'completed', 'new_session']);
+  assert.deepEqual([state.protocol, state.model, state.modelProvider, state.cliVersion, state.lastTurnStatus, state.recoveryMode], ['codex-app-server', 'gpt-fixture', 'bot_relay', '0.166.0', 'completed', 'new_session']);
+  const launch = JSON.parse(readFileSync(join(f.home, 'launch.json'), 'utf8'));
+  assert.ok(launch.args.some(a => String(a) === 'model_provider="bot_relay"'), 'platform Codex must pin process-level -c model_provider="bot_relay"');
   const methods = f.lines('requests.jsonl').map(r => r.method);
   assert.deepEqual(methods.slice(0, 4), ['initialize', 'initialized', 'skills/list', 'thread/start']);
   assert.ok(methods.indexOf('mcpServerStatus/list') < methods.indexOf('turn/start'), 'tools are verified before the first turn');
@@ -791,37 +792,55 @@ test('legacy absolute Harness timeout no longer kills active execution; explicit
   assert.ok(f.events().some(event=>event.type==='tool'&&event.title==='github.push_files'));
  });
 
-test('default direct Codex preserves its native provider/login configuration and resumes the same thread',async t=>{
- const f=fixture(t,{}, {modelTransport:undefined});mkdirSync(f.home,{recursive:true});
- const original='model = "gpt-fixture"\n# native provider settings must survive Bot startup\n';
- writeFileSync(join(f.home,'config.toml'),original);writeFileSync(join(f.home,'auth.json'),'{"fixture_login":true}',{mode:0o600});
- await runRole(f.spec,'dev',undefined,'codex');const thread=f.state().sessionId;
- await runRole(f.spec,'dev',undefined,'codex');
- assert.equal(f.state().sessionId,thread);assert.equal(f.state().recoveryMode,'native_resume');
- assert.equal(readFileSync(join(f.home,'config.toml'),'utf8'),original);
- assert.equal(readFileSync(join(f.home,'auth.json'),'utf8'),'{"fixture_login":true}');
- assert.ok(f.events().some(e=>e.type==='session_bound'&&e.usage==='native_events'));
- assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source NOT IN ('codex_events')").n,0);
+test('platform Codex uses the unified passthrough gateway with bot_relay provider and keeps provider keys out of container', async t => {
+  const requests = [];
+  const upstream = createServer(async (req, res) => {
+    let raw = '';
+    for await (const c of req) raw += c;
+    requests.push({ url: req.url, authorization: req.headers.authorization, body: JSON.parse(raw) });
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ id: 'resp_gateway_unified', object: 'response', model: 'gpt-5-codex', output: [], usage: { input_tokens: 5, output_tokens: 2 } }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => upstream.close());
+  const f = fixture(t, { FIXTURE_NATIVE_WORKSPACE: 'true' }, { model: 'gpt-5-codex' });
+  const keyFile = join(f.root, 'provider.key');
+  writeFileSync(keyFile, 'gateway-only-secret-key', { mode: 0o600 });
+  f.configure({ FIXTURE_NATIVE_WORKSPACE: 'true' }, { model: 'gpt-5-codex', provider: { baseUrl: `http://127.0.0.1:${upstream.address().port}/v1/responses`, credentialFile: keyFile, interfaceType: 'openai-responses' } });
+  const out = await runRole(f.spec, 'dev', undefined, 'codex');
+  assert.equal(out.result.relayId, 'resp_gateway_unified');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/v1/responses');
+  assert.equal(requests[0].authorization, 'Bearer gateway-only-secret-key');
+  const launch = JSON.parse(readFileSync(join(f.home, 'launch.json'), 'utf8'));
+  assert.equal(launch.env_names.includes('BOT_NATIVE_MODEL_KEY'), false, 'provider key must never enter container');
+  assert.ok(launch.args.some(a => String(a) === 'model_provider="bot_relay"'));
+  assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source NOT IN ('codex_events','provider_requests') AND state='received'").n, 1);
+  assert.doesNotMatch(JSON.stringify(f.events()), /gateway-only-secret-key/);
 });
 
-test('direct Codex uses its native provider client without opening the Bot model gateway',async t=>{
- const requests=[];const upstream=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;requests.push({url:req.url,authorization:req.headers.authorization,body:JSON.parse(raw)});res.setHeader('content-type','application/json');res.end(JSON.stringify({id:'resp_direct_native',object:'response',model:'gpt-5-codex',output:[],usage:{input_tokens:5,output_tokens:2}}));});
- upstream.listen(0,'127.0.0.1');await once(upstream,'listening');t.after(()=>upstream.close());
- const f=fixture(t,{FIXTURE_NATIVE_WORKSPACE:'true'},{model:'gpt-5-codex',modelTransport:undefined});
- const keyFile=join(f.root,'native-provider.key');writeFileSync(keyFile,'direct-native-key',{mode:0o600});
- f.configure({FIXTURE_NATIVE_WORKSPACE:'true'},{model:'gpt-5-codex',modelTransport:undefined,provider:{baseUrl:`http://127.0.0.1:${upstream.address().port}/v1/responses`,credentialFile:keyFile}});
- const out=await runRole(f.spec,'dev',undefined,'codex');
- assert.equal(out.result.relayId,'resp_direct_native');assert.equal(requests.length,1);assert.equal(requests[0].url,'/v1/responses');assert.equal(requests[0].authorization,'Bearer direct-native-key');
- assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source NOT IN ('codex_events')").n,0);
- assert.equal(existsSync(join(f.home,'config.toml')),false,'direct startup does not write a proxy config over native settings');
- assert.doesNotMatch(JSON.stringify(f.events()),/direct-native-key/);
+test('platform Codex rejects an incompatible non-Responses provider protocol upfront', async t => {
+  const f = fixture(t);
+  const keyFile = join(f.root, 'provider.key');
+  writeFileSync(keyFile, 'provider-key', { mode: 0o600 });
+  f.configure({}, { model: 'gpt-fixture', provider: { baseUrl: 'http://127.0.0.1:1/v1', credentialFile: keyFile, interfaceType: 'openai-chat-completions' } });
+  await assert.rejects(runRole(f.spec, 'dev', undefined, 'codex'), e => e.code === 'harness_model_api_unsupported' && e.state === 'waiting_configuration');
+  assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, 0);
 });
 
-test('direct Codex reports an incompatible provider protocol without silently enabling a gateway',async t=>{
- const f=fixture(t,{}, {modelTransport:'direct'}),keyFile=join(f.root,'native.key');writeFileSync(keyFile,'native-key',{mode:0o600});
- f.configure({}, {modelTransport:'direct',model:'gpt-fixture',provider:{baseUrl:'http://127.0.0.1:1/v1',credentialFile:keyFile,interfaceType:'openai-chat-completions'}});
- await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code:'harness_direct_protocol_unsupported'});
- assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n,0);
+test('Codex classifies deterministic modelProviderMismatch RPC errors as waiting_configuration instead of retry_wait', async t => {
+  for (const [label, env] of [
+    ['thread/start', { FIXTURE_PROVIDER_MISMATCH: 'true' }],
+    ['turn/start', { FIXTURE_TURN_PROVIDER_MISMATCH: 'true' }],
+  ]) {
+    const f = fixture(t, env);
+    await assert.rejects(
+      runRole(f.spec, 'dev', undefined, 'codex'),
+      err => err instanceof TaskError && err.state === 'waiting_configuration' && /modelProviderMismatch|provider mismatch/i.test(String(err.detail)),
+      `${label} modelProviderMismatch must map to waiting_configuration`,
+    );
+  }
 });
 
 test('#1171 Codex disables checkout AGENTS.md on untrusted PR checkouts, injects trusted base AGENTS.md, and fails closed on leaked instructionSources', async t => {
@@ -921,7 +940,9 @@ test('#1260 Codex local_config mode injects zero platform model config, stages /
   for (const forbidden of ['CODEX_RELAY_URL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'BOT_NATIVE_MODEL_KEY']) {
     assert.equal(launch.env_names.includes(forbidden), false, `must not inject ${forbidden}`);
   }
-  assert.equal(launch.args.some(a => String(a).includes('model_providers.bot_direct')), false, 'must not inject bot_direct config flag');
+  assert.equal(launch.args.some(a => String(a).includes('model_provider')), false, 'must not inject model_provider config flag in local_config mode');
+  const tokenRow = f.s.get('SELECT capabilities FROM role_run_tokens ORDER BY rowid DESC LIMIT 1');
+  assert.ok(tokenRow && !JSON.parse(tokenRow.capabilities).includes('model:invoke'), 'local_config must omit model:invoke capability from run token');
   assert.equal(launch.staged_files.config_toml.exists, true);
   assert.equal(launch.staged_files.config_toml.mode, 0o600);
   assert.match(launch.staged_files.config_toml.content, /gpt-local-1260/);

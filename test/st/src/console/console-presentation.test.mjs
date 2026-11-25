@@ -456,8 +456,9 @@ test('a custom role called constructor shows its own name and responsibility on 
   // and that its historical definition is unavailable.
   p.h.store.run("INSERT INTO role_assignments VALUES('c-0','custom','c-constructor',1,NULL,'completed','c-input-0',NULL)");
   p.h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,role_instance_id,assignment_id,role_snapshot,harness) VALUES('c-run-0','custom','role',1,1,?,'succeeded','{}','{}','constructor','c-constructor','c-0',NULL,'native')", p.now);
+  const codexFixture = (await p.admin('/api/models', 'POST', { repository_id: '101', model_name: 'codex-fixture', api_url: 'http://127.0.0.1:9/v1/responses', api_key: 'fixture-key' })).value.model;
   const v2 = await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: 2, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
-    roles: [{ role_id: 'constructor', name: 'Construction inspector v2', responsibility: 'Inspect the changed construction paths.', harness_ref: { id: 'codex' } }] });
+    roles: [{ role_id: 'constructor', name: 'Construction inspector v2', responsibility: 'Inspect the changed construction paths.', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: codexFixture.id } }] });
   assert.equal(v2.status, 200, JSON.stringify(v2.value));
   const third = await snapshot(); p.h.store.run("UPDATE role_instances SET snapshot_id=?,harness='codex' WHERE id='c-constructor'", third.snapshot_id);
   const roles = (await p.admin('/api/tasks/custom/roles?limit=100&after=0')).value;

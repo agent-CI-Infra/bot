@@ -1,5 +1,3 @@
-// Controlled provider fixtures exercise the explicit gateway transport.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 // Real Git + runner + SQLite + engine/publication; GitHub and the repair model are controlled transports.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,6 +23,7 @@ import {candidateKey,deliveryCandidate,latestRoleCandidate} from '../../../../di
 import {acceptanceFixture} from '../../../fixtures/acceptance-fixture.mjs';
 import {scriptedHarnesses} from '../../../fixtures/scripted-roles.mjs';
 import {randomWorkspaceId} from '../../../fixtures/helpers.mjs';
+import {replyChatCompletion} from '../../../fixtures/openai-sse.mjs';
 
 const toolCall=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:randomBytes(8).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 export async function fixture(t,mode='clean',options={}){
@@ -53,7 +52,7 @@ export async function fixture(t,mode='clean',options={}){
     else if(devStep++===0)message=mode==='conflict'?toolCall('write_file',{path:'a.txt',content:'2'}):toolCall('write_file',{path:'calc.cjs',content:"const fs=require('fs');module.exports=Math.min(2,Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt')));"});
     else message=toolCall('submit_delivery',{summary:'Reconciled combined behavior',test_command:'node check.cjs'});
    }else throw Error('Unexpected model execution');
-   return send({choices:[{message}]});
+   return replyChatCompletion(res,message,{stream:Boolean(body.stream)});
   }
   if(p==='/user')return send({id:999,login:'fixture-bot'});
   if(p==='/repositories/101')return send({id:101,owner:{id:10},full_name:'fixture/project',default_branch:'main'});

@@ -1,5 +1,3 @@
-// Cancellation/recovery fixtures use a controlled model via the explicit gateway.
-process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import { legacySkillBinding } from '../../../fixtures/skill-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,6 +18,7 @@ import { roleTemplate, systemInstructions } from '../../../../dist/roles/pool.js
 import { roleAssignmentContext } from '../../../../dist/agent/profiles.js';
 import { controllerWorkspace } from '../../../../dist/roles/workspace.js';
 import { Redactor, TaskError } from '../../../../dist/agent/common.js';
+import { openModel } from '../../../../dist/agent/model.js';
 import { roleHarness, harnesses } from '../../../../dist/roles/harness.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { agentLoop } from '../../../../dist/agent/loop.js';
@@ -52,8 +51,8 @@ async function fixture(t, handler) {
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const url = 'http://127.0.0.1:' + server.address().port + '/v1';
-  for (const [id, repo, name] of [['m', 'r', 'fixture'], ['m2', 'r', 'reviewer-model'], ['m3', 'r', 'workflow-model'], ['other', 'other', 'private-model']])
-    s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', id, repo, url, name, s.secrets.seal({ value: 'fixture-private-value-' + id }, 'model:' + id), 'now');
+  for (const [id, repo, name, mUrl] of [['m', 'r', 'fixture', url], ['m2', 'r', 'reviewer-model', url], ['m_codex', 'r', 'codex-model', url + '/responses'], ['m3', 'r', 'workflow-model', url], ['other', 'other', 'private-model', url]])
+    s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', id, repo, mUrl, name, s.secrets.seal({ value: 'fixture-private-value-' + id }, 'model:' + id), 'now');
   s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,review_enabled) VALUES('r','m',1,1,1)");
   t.after(() => new Promise(resolve => { s.close(); server.close(resolve); server.closeAllConnections(); }));
   const task = s.get("SELECT * FROM tasks WHERE id='t'");
@@ -232,7 +231,7 @@ test('saving RoleDefinitionV2 checks expected_revision, project scope and the ha
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', version: '9' } }] }), 'harness_version_unavailable', 'roles.reviewer.harness_ref.version');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', model_profile_ref: { model_id: 'm2', structured_output: 'json_schema' } }] }), 'harness_structured_output_unsupported', 'roles.manager.model_profile_ref.structured_output');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', model_profile_ref: { model_id: 'm2', tool_calls: false } }] }), 'harness_tool_calls_required', 'roles.reviewer.model_profile_ref.tool_calls');
-  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', model_profile_ref: { model_id: 'm2', api: 'anthropic-messages' } }] }), 'harness_model_api_unsupported', 'roles.reviewer.model_profile_ref.api');
+  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2', api: 'anthropic-messages' } }] }), 'harness_model_api_unsupported', 'roles.reviewer.model_profile_ref.api');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', model_profile_ref: { model_id: 'other' } }] }), 'role_model_not_available', 'roles.reviewer.model_profile_ref.model_id');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'dev', permissions: { repository: 'execute' } }] }), 'invalid_role_permission', 'roles.dev.permissions.repository');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', permissions: { unknown: 'allow' } }] }), 'invalid_role_permission', 'roles.manager.permissions.unknown');
@@ -281,20 +280,20 @@ test('two roles resolve different supported models, pinned skills and harnesses;
   const config = f.put({ skills: [
     { id: 'review-kit', source: { type: 'inline', files: [{ path: 'checklist.md', content: 'Check boundaries and error paths.' }] } },
     { id: 'repo-sec', source: { type: 'repository', commit: 'b'.repeat(40), paths: ['.agents/skills/sec/SKILL.md'] } }],
-    roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' }, skill_bundle_ref: { id: 'review-kit' } },
+    roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm_codex' }, skill_bundle_ref: { id: 'review-kit' } },
       { role_id: 'test', skill_bundle_ref: { id: 'repo-sec' } }] });
   const repo = config.skills.find(b => b.id === 'repo-sec');
   assert.equal(repo.source.commit, 'b'.repeat(40)); assert.equal(repo.files[0].path, '.agents/skills/sec/SKILL.md'); assert.match(repo.files[0].sha256, /^[a-f0-9]{64}$/);
   const reviewer = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot, tester = resolveRole(f.s, 'r', 'test', 'task.request').snapshot;
-  assert.deepEqual([reviewer.model.id, reviewer.model.source, reviewer.harness.id, reviewer.skills.id], ['m2', 'role', 'codex', 'review-kit']);
+  assert.deepEqual([reviewer.model.id, reviewer.model.source, reviewer.harness.id, reviewer.skills.id], ['m_codex', 'role', 'codex', 'review-kit']);
   assert.deepEqual([tester.model.id, tester.model.source, tester.harness.id, tester.skills.id], ['m', 'project', 'scripted', 'repo-sec']);
   assert.notEqual(reviewer.skills.content_hash, tester.skills.content_hash);
   // Retired task_models overrides are ignored; only role profile and project default model apply (#1122).
   f.s.run(`UPDATE policies SET task_models='{"development.issue":"m3"}' WHERE repository_id='r'`);
   assert.deepEqual([resolveRole(f.s, 'r', 'test', 'development.issue').snapshot.model.id, resolveRole(f.s, 'r', 'test', 'development.issue').snapshot.model.source], ['m', 'project']);
-  assert.equal(resolveRole(f.s, 'r', 'reviewer', 'development.issue').snapshot.model.id, 'm2');
+  assert.equal(resolveRole(f.s, 'r', 'reviewer', 'development.issue').snapshot.model.id, 'm_codex');
   // A pinned model whose endpoint changed is a configuration error at start, not a silent switch.
-  f.s.run("UPDATE models SET model_name='renamed',version=version+1 WHERE id='m2'");
+  f.s.run("UPDATE models SET model_name='renamed',version=version+1 WHERE id='m_codex'");
   assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'task.request'), e => e.code === 'role_model_profile_changed' && /roles\.reviewer\.model_profile_ref\.profile_hash/.test(e.detail));
   // The API preview reports the same field and stores nothing.
   const before = f.s.get('SELECT count(*) n FROM role_snapshots').n;
@@ -728,13 +727,13 @@ test('worker roles choose their backend, Manager and QA only Pi; container CLIs 
   // Codex and Claude Code run worker roles inside the shared project computer through the platform model relay. Only Pi
   // declares the Manager's and QA's kinds (#1337).
   const codex = view.harnesses.find(h => h.id === 'codex');
-  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'none']);
+  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer'], 'external_session', false, ['openai-responses'], '0.166.0', 'none']);
   assert.deepEqual(view.harnesses.filter(h => h.kinds.includes('controller') || h.kinds.includes('evaluator')).map(h => h.id), ['pi']);
-  const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' } }] }).configuration;
+  const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm_codex' } }] }).configuration;
   assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'codex');
   assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'pi']);
   const { snapshot, model } = resolveRole(f.s, 'r', 'reviewer', 'development.issue');
-  assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.harness.id, model.model], ['role', 'm2', 'codex', 'reviewer-model']);
+  assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.harness.id, model.model], ['role', 'm_codex', 'codex', 'codex-model']);
   assert.ok(!JSON.stringify(snapshot).includes('fixture-private-value'));
   // Local config mode (including legacy 'subscription' alias) saves cleanly on Claude Code / Codex and resolves without platform model.
   const localSaved = put({ expected_revision: 1, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', model_source: 'subscription' } }] }).configuration;
@@ -757,7 +756,7 @@ test('cancelling a Pi session ends the control-plane wait with harness_cancelled
   // The managed session factory: an abort while Pi waits for its model reply.
   const f = await fixture(t, () => new Promise(() => {}));
   const runner = fakeRunner({ reapKills: false }), workspace = new Workspace(f.s, runner.manager, { ...f.task, workspace_id: 'c'.repeat(48) }, f.spec.redactor, async () => {}, () => {});
-  const services = { guard: async () => {}, model: {}, request: () => new Promise(() => {}) };
+  const services = { guard: async () => {}, model: openModel(f.s, f.s.get("SELECT * FROM models WHERE id='m'")), request: () => new Promise(() => {}) };
   const session = roleHarness('pi').createSession({ ...f.spec, pi: { workspace } }, services);
   const pending = session.run();
   setTimeout(() => void session.cancel(), 80);
@@ -928,4 +927,40 @@ test('rebuilding an old Pi role reaps its obsolete live mailbox before starting 
  const run=await runRole(f.spec,'manager',undefined,undefined,{prepare:controllerWorkspace(workspace)});
  assert.equal(run.result.summary,'continued');assert.equal(run.instance_id,instance.id);assert.equal(runner.spaces.get(workspace.task.workspace_id).alive,false);
  assert.ok(f.requests.every(body=>!body.tools.some(t=>['read_playbook','select_playbooks'].includes(t.function.name))));
+});
+
+test('#1358 role save and resolve enforce backend model protocol compatibility while keeping local_config orthogonal', async t => {
+  const f = await fixture(t, () => call('finish', { summary: 'ok' }));
+  f.s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m-anth','r','http://127.0.0.1:1/v1/messages','claude-sonnet-4-5',?,'now')", f.s.secrets.seal({ value: 'k' }, 'model:m-anth'));
+
+  // 1. Codex rejects inherited openai-chat-completions and explicit anthropic-messages, accepts openai-responses.
+  rejects(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }), 'harness_model_api_unsupported', 'roles.dev.model_profile_ref.api');
+  rejects(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm-anth' } }] }), 'harness_model_api_unsupported', 'roles.dev.model_profile_ref.api');
+  const codexSaved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm_codex' } }] });
+  assert.equal(codexSaved.roles.find(r => r.role_id === 'dev').model_profile_ref.api, 'openai-responses');
+
+  // 2. Claude Code rejects openai-responses and openai-chat-completions, accepts anthropic-messages.
+  rejects(() => f.put({ roles: [{ role_id: 'reviewer', harness_ref: { id: 'claude_code' }, model_profile_ref: { model_id: 'm_codex' } }] }), 'harness_model_api_unsupported', 'roles.reviewer.model_profile_ref.api');
+  const claudeSaved = f.put({ roles: [{ role_id: 'reviewer', harness_ref: { id: 'claude_code' }, model_profile_ref: { model_id: 'm-anth' } }] });
+  assert.equal(claudeSaved.roles.find(r => r.role_id === 'reviewer').model_profile_ref.api, 'anthropic-messages');
+
+  // 3. Pi accepts all 3 protocols.
+  for (const [modelId, expectedApi] of [['m', 'openai-chat-completions'], ['m_codex', 'openai-responses'], ['m-anth', 'anthropic-messages']]) {
+    const saved = f.put({ roles: [{ role_id: 'test', harness_ref: { id: 'pi' }, model_profile_ref: { model_id: modelId } }] });
+    assert.equal(saved.roles.find(r => r.role_id === 'test').model_profile_ref.api, expectedApi);
+  }
+
+  // 4. local_config is completely orthogonal to platform model protocol (succeeds even when project default is chat-completions).
+  const localSaved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex', model_source: 'local_config' }, model_profile_ref: null }] });
+  assert.equal(localSaved.roles.find(r => r.role_id === 'dev').harness_ref.model_source, 'local_config');
+  const resolved = resolveRole(f.s, 'r', 'dev', 'task.request');
+  assert.equal(resolved.snapshot.model.source, 'local_config');
+
+  // 5. GET /api/repositories/r/roles exposes model protocol & backend supported_model_apis.
+  const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
+  assert.equal(view.models.find(m => m.id === 'm_codex').protocol.interface_type, 'openai-responses');
+  assert.equal(view.models.find(m => m.id === 'm-anth').protocol.interface_type, 'anthropic-messages');
+  assert.deepEqual(view.backends.find(b => b.id === 'codex').supported_model_apis, ['openai-responses']);
+  assert.deepEqual(view.backends.find(b => b.id === 'claude_code').supported_model_apis, ['anthropic-messages']);
+  assert.deepEqual(view.backends.find(b => b.id === 'pi').supported_model_apis, ['openai-chat-completions', 'openai-responses', 'anthropic-messages']);
 });

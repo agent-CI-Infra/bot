@@ -176,6 +176,22 @@ const threadView = t => ({
 });
 
 const cliProjectDocZero = process.argv.some((arg, idx) => arg === '-c' && process.argv[idx + 1] === 'project_doc_max_bytes=0');
+function configuredModelProvider() {
+  for (let idx = 0; idx < process.argv.length; idx++) {
+    if (process.argv[idx] === '-c' && typeof process.argv[idx + 1] === 'string') {
+      const m = /^model_provider\s*=\s*"?([A-Za-z0-9._-]+)"?$/.exec(process.argv[idx + 1].trim());
+      if (m) return m[1];
+    }
+  }
+  const cfgPath = join(home, 'config.toml');
+  if (existsSync(cfgPath)) {
+    const content = readFileSync(cfgPath, 'utf8');
+    const m = /^model_provider\s*=\s*"([^"]+)"/m.exec(content);
+    if (m) return m[1];
+  }
+  return 'openai';
+}
+const processModelProvider = configuredModelProvider();
 
 // The applied policy echoes what the client asked for; SANDBOX_IGNORED and FEATURE_IGNORED model a server that did not apply it.
 const opened = t => ({
@@ -328,15 +344,13 @@ async function runTurn(turnId, prompt) {
       status: 'completed',
       result: { content },
     });
-    const directProvider = process.argv.find(arg => arg.startsWith('model_providers.bot_direct ='));
-    const directBase = directProvider ? /base_url = ("(?:[^"\\]|\\.)*")/.exec(directProvider)?.[1] : null;
     const outputItems = [
       ...(textPart ? [{ type: 'input_text', text: textPart }] : []),
       ...imageParts.map(img => ({ type: 'input_image', image_url: `data:${img.mimeType};base64,${img.data}` })),
     ];
-    const relayResp = await fetch((directBase ? JSON.parse(directBase) : env.OPENAI_BASE_URL) + '/responses', {
+    const relayResp = await fetch(env.OPENAI_BASE_URL + '/responses', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + (directBase ? env.BOT_NATIVE_MODEL_KEY : env.OPENAI_API_KEY), 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + env.OPENAI_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: thread.model,
         stream: false,
@@ -360,11 +374,9 @@ async function runTurn(turnId, prompt) {
     const shellOut = execFileSync('/bin/bash', ['-lc', 'cat native-codex.txt'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
     const projectToolOut = env.FIXTURE_PROJECT_TOOL ? execFileSync('/bin/bash',['-lc',env.FIXTURE_PROJECT_TOOL],{cwd:thread.cwd,encoding:'utf8'}).trim() : null;
     const loginGhPath = execFileSync('/bin/bash', ['-lc', 'command -v gh'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
-    const directProvider=process.argv.find(arg=>arg.startsWith('model_providers.bot_direct ='));
-    const directBase=directProvider?/base_url = ("(?:[^"\\]|\\.)*")/.exec(directProvider)?.[1]:null;
-    const relayResp = await fetch((directBase?JSON.parse(directBase):env.OPENAI_BASE_URL) + '/responses', {
+    const relayResp = await fetch(env.OPENAI_BASE_URL + '/responses', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + (directBase?env.BOT_NATIVE_MODEL_KEY:env.OPENAI_API_KEY), 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + env.OPENAI_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: thread.model, input: 'native codex relay check' }),
     });
     const relayJson = await relayResp.json();
@@ -441,7 +453,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
     waiting.delete(m.id);
     return;
   }
-  const reply = result => send({ id: m.id, result }), error = (code, message) => send({ id: m.id, error: { code, message } });
+  const reply = result => send({ id: m.id, result }), error = (code, message, data) => send({ id: m.id, error: { code, message, ...(data !== undefined ? { data } : {}) } });
   log('requests.jsonl', { method: m.method, keys: Object.keys(m.params ?? {}).sort() });
   if (m.method === 'initialize') {
     reply({ userAgent: `${m.params.clientInfo.name}/${env.FIXTURE_VERSION ?? '0.166.0'} (fixture) unknown`, codexHome: env.FIXTURE_HOME ?? home, platformFamily: 'unix', platformOs: 'linux' });
@@ -475,13 +487,25 @@ createInterface({ input: process.stdin }).on('line', async line => {
     log('skills-rpc.jsonl', { method: m.method, path: targetPath, enabled, effectiveEnabled });
     reply({ effectiveEnabled });
   } else if (m.method === 'thread/start') {
+    if (flag('PROVIDER_MISMATCH')) {
+      error(-32600, `model provider mismatch: server=${processModelProvider}`, {
+        codexErrorInfo: { modelProviderMismatch: { expected: processModelProvider, actual: m.params?.modelProvider ?? 'openai' } },
+      });
+      return;
+    }
     bind(m.params);
-    thread = { id: randomUUID(), cwd: m.params.cwd, model: env.FIXTURE_MODEL ?? m.params.model ?? 'gpt-fixture', modelProvider: env.FIXTURE_PROVIDER ?? m.params.modelProvider ?? 'openai', turns: [], usage: null };
+    thread = { id: randomUUID(), cwd: m.params.cwd, model: env.FIXTURE_MODEL ?? m.params.model ?? 'gpt-fixture', modelProvider: env.FIXTURE_PROVIDER ?? m.params.modelProvider ?? processModelProvider, turns: [], usage: null };
     store(thread);
     reply(opened(thread));
     notify('thread/started', { thread: threadView(thread) });
     await startTools();
   } else if (m.method === 'thread/resume') {
+    if (flag('PROVIDER_MISMATCH')) {
+      error(-32600, `model provider mismatch: server=${processModelProvider}`, {
+        codexErrorInfo: { modelProviderMismatch: { expected: processModelProvider, actual: m.params?.modelProvider ?? 'openai' } },
+      });
+      return;
+    }
     if (env.FIXTURE_RESUME_ERROR) {
       const [code, ...message] = env.FIXTURE_RESUME_ERROR.split(':');
       error(Number(code), message.join(':'));
@@ -546,6 +570,12 @@ createInterface({ input: process.stdin }).on('line', async line => {
       process.exit(0);
     }
     if (flag('START_REFUSED')) { error(-32600, 'turn start refused'); return; }
+    if (flag('TURN_PROVIDER_MISMATCH')) {
+      error(-32600, 'model provider mismatch on turn/start', {
+        codexErrorInfo: { modelProviderMismatch: { expected: 'bot_relay', actual: 'openai' } },
+      });
+      return;
+    }
     if (flag('START_HANG')) {
       const turnId = randomUUID(), t = load(thread.id);
       t.turns.push({ id: turnId, status: 'inProgress' });

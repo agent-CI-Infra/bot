@@ -68,7 +68,6 @@ export async function claudeFixture(t, { mode = 'normal', native = false, respon
   const config = {
     command: native ? claudeBinary() : resolve('test/fixtures/claude-code.mjs'),
     version: claudeCodeRuntime.version,
-    modelTransport: 'gateway',
     stateDirectory: sessionsDir,
     model,
     timeoutMs: native ? 30_000 : 5000,
@@ -793,18 +792,23 @@ test('Claude smoke probe requires an explicit public launch profile', () => {
   assert.equal(existsSync(join(root, 'must-not-create')), false);
 });
 
-test('default direct Claude uses the native provider and keeps MCP authority without a model proxy',async t=>{
- const old=process.env.BOT_HARNESS_MODEL_TRANSPORT;delete process.env.BOT_HARNESS_MODEL_TRANSPORT;t.after(()=>{if(old===undefined)delete process.env.BOT_HARNESS_MODEL_TRANSPORT;else process.env.BOT_HARNESS_MODEL_TRANSPORT=old;});
- const f=await claudeFixture(t,{mode:'native_workspace'});
- const config={...f.config};delete config.modelTransport;
- writeFileSync(f.file,JSON.stringify(config));
- const out=await runRole(f.spec,'dev',undefined,'claude_code');
- assert.equal(out.result.summary,'native container tools verified');
- assert.equal(out.result.shellOut,'written natively by claude_code');
- assert.equal(f.modelCalls,1);
- assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE request_ref IS NOT NULL").n,0);
- assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE request_snapshot IS NOT NULL").n,0);
- assert.ok(f.s.get("SELECT count(*) n FROM task_history WHERE type='harness_event' AND json_extract(data,'$.usage')='native_events'").n>0);
+test('platform Claude Code uniformly uses the passthrough gateway and rejects non-Anthropic provider protocols upfront', async t => {
+  const f = await claudeFixture(t, {
+    mode: 'native_workspace',
+    respond: async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'msg_gw_1', type: 'message', role: 'assistant', model, content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 7, output_tokens: 3 } }));
+    },
+  });
+  const out = await runRole(f.spec, 'dev', undefined, 'claude_code');
+  assert.equal(out.result.summary, 'native container tools verified');
+  assert.equal(out.result.shellOut, 'written natively by claude_code');
+  assert.equal(f.modelCalls, 1);
+  assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source NOT IN ('codex_events','provider_requests') AND state='received'").n, 1);
+  assert.ok(f.s.get("SELECT count(*) n FROM task_history WHERE type='harness_event' AND json_extract(data,'$.usage')='gateway'").n > 0);
+  // Incompatible non-Anthropic provider protocol fails upfront before launch.
+  writeFileSync(f.file, JSON.stringify({ ...f.config, provider: { ...f.config.provider, interfaceType: 'openai-chat-completions' } }));
+  await assert.rejects(runRole(f.spec, 'dev', undefined, 'claude_code'), e => e.code === 'harness_model_api_unsupported' && e.state === 'waiting_configuration');
 });
 
 test('operator extra env cannot inject runtime loaders, model routing or credentials',async t=>{
@@ -876,6 +880,8 @@ test('#1260 Claude Code local_config mode injects zero platform model config, st
     assert.equal(launch.env_names.includes(forbidden), false, `must not inject ${forbidden}`);
   }
   assert.equal(launch.args.includes('--model'), false, 'must not inject --model');
+  const tokenRow = f.s.get('SELECT capabilities FROM role_run_tokens ORDER BY rowid DESC LIMIT 1');
+  assert.ok(tokenRow && !JSON.parse(tokenRow.capabilities).includes('model:invoke'), 'local_config must omit model:invoke capability from run token');
   assert.equal(launch.args[launch.args.indexOf('--setting-sources') + 1], 'user', 'passes --setting-sources user in local_config mode');
   // Staged copies were present with 0600 permissions during launch.
   assert.equal(launch.staged_files.settings.exists, true);

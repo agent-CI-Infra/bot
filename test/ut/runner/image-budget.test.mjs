@@ -82,54 +82,28 @@ test('sanitizeAgentPollTrajectory scrubs inline base64 from parsed object and st
   assert.ok(!JSON.stringify(sanitizedString).includes(sampleBase64), 'JSON string request.body must have base64 scrubbed');
 });
 
-test('manager validateCall accepts workspace_agent_request chunked reads', () => {
-  assert.doesNotThrow(() => validateCall({
-    type: 'workspace_agent_request',
-    request_id: 'a'.repeat(48),
-    offset: 0,
-    workspace_id: 'b'.repeat(48),
-  }));
+test('manager validateCall rejects removed file-mailbox model relay operations', () => {
+  for (const type of ['workspace_agent_request', 'workspace_agent_reply', 'workspace_agent_progress', 'workspace_agent_model_request', 'workspace_agent_model_reply']) {
+    assert.throws(() => validateCall({
+      type,
+      request_id: 'a'.repeat(48),
+      offset: 0,
+      workspace_id: 'b'.repeat(48),
+    }), /invalid_runner_request/, type);
+  }
 });
 
-test('manager trajectory sanitizers keep inline image base64 and chunked payloads off manager trajectories', () => {
+test('manager trajectory sanitizers keep inline image base64 and tool payloads off manager trajectories', () => {
   const pollResult = {
     state: 'running',
-    request: {
-      id: 'a'.repeat(48),
-      body: {
-        messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${sampleBase64}` } }] }],
-      },
-    },
-    model_requests: [
-      {
-        id: 'b'.repeat(48),
-        size: 512,
-        chunked: false,
-        data: {
-          method: 'POST',
-          path: '/v1/messages',
-          body: {
-            messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: sampleBase64 } }] }],
-          },
-        },
-      },
-    ],
+    events: [{ type: 'tool_end', content: [{ type: 'image', data: sampleBase64, mimeType: 'image/png' }] }],
   };
   const cleanPoll = sanitizeTrajectoryResult('workspace_agent_poll', pollResult);
-  assert.ok(!JSON.stringify(cleanPoll).includes(sampleBase64), 'workspace_agent_poll trajectory must scrub request and model_requests image base64');
+  assert.ok(!JSON.stringify(cleanPoll).includes(sampleBase64), 'workspace_agent_poll trajectory must scrub image base64');
   assert.ok(JSON.stringify(pollResult).includes(sampleBase64), 'in-memory poll result must remain intact');
 
   const cleanHarnessPoll = sanitizeTrajectoryResult('workspace_harness_poll', pollResult);
-  assert.ok(!JSON.stringify(cleanHarnessPoll).includes(sampleBase64), 'workspace_harness_poll trajectory must scrub inline model_requests image base64');
-
-  const chunkResult = { base64: sampleBase64, size: 12345 };
-  const cleanReqChunk = sanitizeTrajectoryResult('workspace_agent_request', chunkResult);
-  assert.equal(cleanReqChunk.base64, '[omitted]');
-  assert.equal(cleanReqChunk.size, 12345);
-  assert.equal(chunkResult.base64, sampleBase64);
-
-  const cleanModelChunk = sanitizeTrajectoryResult('workspace_agent_model_request', chunkResult);
-  assert.equal(cleanModelChunk.base64, '[omitted]');
+  assert.ok(!JSON.stringify(cleanHarnessPoll).includes(sampleBase64), 'workspace_harness_poll trajectory must scrub image base64');
 
   const cleanToolInput = sanitizeTrajectoryInput({
     operation_id: 'op1',

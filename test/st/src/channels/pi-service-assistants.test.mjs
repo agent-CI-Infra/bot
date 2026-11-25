@@ -1,5 +1,3 @@
-// The fixture provider answers in the gateway's chat format; Pi's model requests go through the control plane.
-process.env.BOT_HARNESS_MODEL_TRANSPORT = 'gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -8,12 +6,13 @@ import { join } from 'node:path';
 import { channelFixture, repositoryAssistant, boundGroup, privateChat, envelope, inGroup, post, until } from '../../../fixtures/channel-fixture.mjs';
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 
 // The management assistant and group assistants on Pi (#1253) work their turns as the native loop does: the console shows
 // the answer as it is written, the group's context is the native one, merged messages join the turn and stay_silent ends it.
 const piSkip = !existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json') && process.env.BOT_REQUIRE_PI !== '1'
   ? 'Pi SDK not installed: npm ci --prefix runner --omit=dev --ignore-scripts' : false;
-const answer = (res, message) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); };
+const answer = (res, message) => replyChatCompletion(res, message, { stream: true, usage: { prompt_tokens: 12, completion_tokens: 4 } });
 const say = (res, content) => answer(res, { role: 'assistant', content });
 const call = (res, name, args = {}) => answer(res, { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + name, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 async function stream(res, parts) {

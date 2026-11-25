@@ -9,16 +9,6 @@ import {acpLeaseFile,acpRunHome,reapAcpDescendants} from './acp-lease.mjs';
 import {releaseWorkSwarmPorts} from './workswarm.mjs';
 import {requiresAcpRunHome,workswarmProductId} from './acp-products.mjs';
 
-async function readRequestId(path){
-  const fh=await open(path,'r').catch(()=>null);
-  if(!fh)return null;
-  try{
-    const head=Buffer.alloc(128);
-    const {bytesRead}=await fh.read(head,0,head.length,0);
-    const m=/"id":"([a-f0-9]{48})"/.exec(head.subarray(0,bytesRead).toString('utf8'));
-    return m?m[1]:null;
-  }finally{await fh.close();}
-}
 async function currentRequestFile(path){
   return readFile(path,'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
 }
@@ -56,38 +46,6 @@ async function readRequestDirectory(subdir,options={}){
     if(data&&data.id===item.id){
       if(budget)budget.remaining=Math.max(0,budget.remaining-item.size);
       results.push(data);
-    }
-  }
-  return results;
-}
-
-async function readModelRequestsForPoll(agentDir,knownIds=null){
-  const subdir=agentDir+'/model-requests',repDir=agentDir+'/model-replies';
-  const names=await readdir(subdir).catch(error=>{if(error.code==='ENOENT')return [];throw error;});
-  const candidates=[];
-  for(const name of names){
-    if(!/^[a-f0-9]{48}\.json$/.test(name))continue;
-    const id=name.slice(0,48),path=subdir+'/'+name;
-    if(await stat(repDir+'/'+id+'.cursor.json').catch(()=>null))continue;
-    const info=await stat(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
-    if(info)candidates.push({mtime:info.mtimeMs,id,path,size:info.size});
-  }
-  candidates.sort((a,b)=>a.mtime-b.mtime||a.id.localeCompare(b.id));
-  let inlineBudget=512*1024;
-  const results=[];
-  for(const item of candidates){
-    if(knownIds?.has(item.id)){
-      results.push({id:item.id,size:item.size,chunked:false,stub:true});
-      continue;
-    }
-    if(item.size<=256*1024&&item.size<=inlineBudget){
-      const data=await currentRequestFile(item.path);
-      if(data&&data.id===item.id){
-        inlineBudget-=item.size;
-        results.push({id:item.id,size:item.size,chunked:false,data});
-      }
-    }else if(item.size<=24*1024*1024){
-      results.push({id:item.id,size:item.size,chunked:true});
     }
   }
   return results;
@@ -221,26 +179,17 @@ async function agentState(dir,boot){
   if(['running','review_ready','review_resuming'].includes(state.state)&&state.pid)try{if(state.boot!==undefined&&state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
   return state;
 }
-// The id of the model request waiting in request.json, as the poll would report it.
-async function pendingRequestId(dir){
-  const info=await stat(dir+'/request.json').catch(()=>null);
-  if(!info?.isFile()||info.size>24*1024*1024)return null;
-  return readRequestId(dir+'/request.json');
-}
 const unseenRequestFile=async(subdir,known)=>(await readdir(subdir).catch(()=>[])).some(name=>/^[a-f0-9]{48}\.json$/.test(name)&&!known.has(name.slice(0,48)));
 /**
  * What the session has that the control plane has not seen, judged against what it says it knows (its event offset and
  * the ids it already handles), not against the start of the wait: 'urgent' for a state it must act on, a turn boundary,
- * a model request or a new tool or token request, or a page of events beyond this one; 'events' for new events only;
- * null for nothing. model_requests (the other harnesses' relay) are not the Pi session's and do not count. The events
- * file is read again only when its size changed.
+ * a new tool or token request, or a page of events beyond this one; 'events' for new events only; null for nothing.
+ * The events file is read again only when its size changed.
  */
 async function unseenAgentWork(dir,boot,offset,known,watch){
   if(!activeAgentStates.includes((await agentState(dir,boot)).state))return 'urgent';
   const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
   if(boundary?.id&&!known.boundaries.has(boundary.id))return 'urgent';
-  const request=await pendingRequestId(dir);
-  if(request&&!known.requests.has(request))return 'urgent';
   if(await unseenRequestFile(dir+'/tool-requests',known.tools)||await unseenRequestFile(dir+'/token-requests',known.tokens))return 'urgent';
   const size=(await stat(dir+'/events.jsonl').catch(()=>null))?.size??0;
   if(size!==watch.eventsSize){
@@ -258,24 +207,13 @@ async function readAgentPoll(dir,boot,offset,known){
   // not be written either.
   if(state.state==='interrupted'&&!state.error&&volume()?.full)state.error='disk_full';
   const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
-  let request=null;
-  const reqStat=await stat(dir+'/request.json').catch(()=>null);
-  if(reqStat&&reqStat.isFile()){
-    if(reqStat.size<=256*1024){
-      request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
-    }else if(reqStat.size<=24*1024*1024){
-      const id=await readRequestId(dir+'/request.json');
-      if(id)request={id,size:reqStat.size,chunked:true};
-    }
-  }
   const token_requests=await readRequestDirectory(dir+'/token-requests',{knownIds:known.tokens});
   const tool_requests=await readRequestDirectory(dir+'/tool-requests',{knownIds:known.tools});
-  const model_requests=await readModelRequestsForPoll(dir);
   // An append can still be in progress, especially for large tool arguments. Only consume
   // newline-terminated records so the next poll retries the unfinished tail at the same offset.
   const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').slice(0,-1).filter(Boolean);
   const events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-  return {...state,boundary,request,token_requests,tool_requests,model_requests,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
+  return {...state,boundary,token_requests,tool_requests,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
 }
 
 // The project has no path to the control network. A task-owned mailbox transports model data, never provider keys.
@@ -330,7 +268,7 @@ export async function agentOperation(input,root){
       if(previous?.state==='running'){try{process.kill(previous.pid,0);throw new Error('agent_session_busy');}catch(error){if(error.message==='agent_session_busy')throw error;}}
       // Pi's session files live in its session store; only the completed process's mailbox is reset, with the history
       // files that runners before #1040 left behind.
-      for(const name of ['state.json','events.jsonl','boundary.json','continue.json','restore.json','history.json'])await unlink(dir+'/'+name).catch(error=>{if(error.code!=='ENOENT')throw error;});
+      for(const name of ['state.json','events.jsonl','boundary.json','continue.json','restore.json','history.json','gateway.tmp'])await unlink(dir+'/'+name).catch(error=>{if(error.code!=='ENOENT')throw error;});
       // So are the requests it left unanswered (a session ended during a tool call or model request, #1253): the next
       // session's control plane would otherwise see them as its own and run them.
       await Promise.all(['tool-requests','tool-replies','token-requests','token-replies'].map(name=>rm(dir+'/'+name,{recursive:true,force:true})));
@@ -344,7 +282,7 @@ export async function agentOperation(input,root){
   if(input.type==='workspace_agent_start')return startAgent(dir,root,boot,input.workspace_id);
   if(input.type==='workspace_agent_poll'){
     const offset=Number(input.offset)||0;
-    const known={tools:knownIds(input.known_tool_ids),tokens:knownIds(input.known_token_ids),requests:knownIds(input.known_model_ids),boundaries:knownIds(input.known_boundary_ids)};
+    const known={tools:knownIds(input.known_tool_ids),tokens:knownIds(input.known_token_ids),boundaries:knownIds(input.known_boundary_ids)};
     const waitMs=Number.isSafeInteger(input.wait_ms)&&input.wait_ms>0?Math.min(input.wait_ms,agentPollWaitLimit):0;
     // Without wait_ms (an older control plane, a probe) the poll answers at once, as before.
     if(!waitMs)return readAgentPoll(dir,boot,offset,known);
@@ -358,6 +296,14 @@ export async function agentOperation(input,root){
       await delay(Math.max(1,Math.min(agentPollCheck,deadline-Date.now(),seen==='events'?began+agentEventInterval-Date.now():Infinity)));
     }
     return {...await readAgentPoll(dir,boot,offset,known),long_poll:true};
+  }
+  if(input.type==='workspace_agent_gateway'){
+    if(typeof input.base64!=='string'||input.base64.length>8192)throw new Error('invalid_agent_gateway');
+    await mkdir(dir,{recursive:true,mode:0o700});
+    const bytes=Buffer.from(input.base64,'base64');
+    await writeFile(dir+'/gateway.tmp',bytes,{mode:0o600});
+    await rename(dir+'/gateway.tmp',dir+'/gateway.json');
+    return {written:true};
   }
   // The answer to a github_read_token request in token-requests/<id>.json: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
@@ -375,12 +321,6 @@ export async function agentOperation(input,root){
     }
     await unlink(prefix+'.tmp').catch(()=>{});await unlink(prefix+'.json').catch(()=>{});
     throw new Error('agent_request_changed');
-  }
-  if(input.type==='workspace_agent_progress'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.sequence)||input.sequence<1)throw new Error('invalid_agent_progress');
-    if(await readRequestId(dir+'/request.json')!==input.request_id)throw new Error('agent_request_changed');
-    const path=dir+'/progress-'+input.request_id;
-    await writeFile(path+'.tmp',JSON.stringify({sequence:input.sequence}),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
   if(input.type==='workspace_agent_runtime')return piRuntime();
   if(input.type==='workspace_agent_tool'){
@@ -400,72 +340,6 @@ export async function agentOperation(input,root){
     }
     await unlink(path).catch(()=>{});await unlink(prefix+'.json').catch(()=>{});
     throw new Error('agent_request_changed');
-  }
-  if(input.type==='workspace_agent_request'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_model_request_read');
-    const fh=await open(dir+'/request.json','r').catch(error=>{if(error.code==='ENOENT')throw new Error('agent_request_changed');throw error;});
-    try{
-      const size=(await fh.stat()).size;
-      const headBuf=Buffer.alloc(128);
-      const {bytesRead:headLen}=await fh.read(headBuf,0,headBuf.length,0);
-      const m=/"id":"([a-f0-9]{48})"/.exec(headBuf.subarray(0,headLen).toString('utf8'));
-      if(!m||m[1]!==input.request_id)throw new Error('agent_request_changed');
-      const len=Math.max(0,Math.min(512*1024,size-input.offset));
-      const chunk=Buffer.alloc(len);
-      const {bytesRead}=len>0?await fh.read(chunk,0,len,input.offset):{bytesRead:0};
-      return {base64:chunk.subarray(0,bytesRead).toString('base64'),size};
-    }finally{await fh.close();}
-  }
-  if(input.type==='workspace_agent_model_request'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_model_request_read');
-    const fh=await open(dir+'/model-requests/'+input.request_id+'.json','r').catch(error=>{if(error.code==='ENOENT')throw new Error('agent_request_changed');throw error;});
-    try{
-      const size=(await fh.stat()).size;
-      const len=Math.max(0,Math.min(512*1024,size-input.offset));
-      const chunk=Buffer.alloc(len);
-      const {bytesRead}=len>0?await fh.read(chunk,0,len,input.offset):{bytesRead:0};
-      return {base64:chunk.subarray(0,bytesRead).toString('base64'),size};
-    }finally{await fh.close();}
-  }
-  if(input.type==='workspace_agent_model_reply'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>32*1024*1024)throw new Error('invalid_agent_reply');
-    if(input.status!==undefined&&(!Number.isInteger(input.status)||input.status<100||input.status>599))throw new Error('invalid_agent_reply');
-    const reqPath=dir+'/model-requests/'+input.request_id+'.json';
-    if(!(await stat(reqPath).catch(()=>null)))throw new Error('agent_request_changed');
-    await mkdir(dir+'/model-replies',{recursive:true,mode:0o700});
-    const prefix=dir+'/model-replies/'+input.request_id,streamPath=prefix+'.stream',cursorTmp=prefix+'.cursor.tmp',cursorPath=prefix+'.cursor.json';
-    const bytes=Buffer.from(input.base64,'base64');
-    try{
-      if((input.offset===0&&(bytes.length>0||input.status!==undefined||input.final))||bytes.length>0){
-        const file=await open(streamPath,input.offset===0?'w':'r+',0o600);
-        try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');if(bytes.length>0)await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
-      }
-      const prev=input.status===undefined?await currentRequestFile(cursorPath):null;
-      const cursor={
-        status:input.status??prev?.status??(input.final&&!input.error?200:null),
-        headers:input.headers??prev?.headers??(input.final&&!input.error?{'content-type':'application/json'}:null),
-        written:input.offset+bytes.length,
-        done:Boolean(input.final),
-        error:typeof input.error==='string'?input.error:null,
-        keepalive:Number.isInteger(input.sequence)?input.sequence:(prev?.keepalive??0),
-      };
-      await writeFile(cursorTmp,JSON.stringify(cursor),{mode:0o600});
-      await rename(cursorTmp,cursorPath);
-      if(await stat(reqPath).catch(()=>null))return {written:true};
-    }catch(error){
-      if(await stat(reqPath).catch(()=>null))throw error;
-    }
-    await Promise.all([unlink(streamPath).catch(()=>{}),unlink(cursorTmp).catch(()=>{}),unlink(cursorPath).catch(()=>{})]);
-    throw new Error('agent_request_changed');
-  }
-  if(input.type==='workspace_agent_reply'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
-    if(await readRequestId(dir+'/request.json')!==input.request_id)throw new Error('agent_request_changed');
-    const prefix=dir+'/reply-'+input.request_id,path=prefix+'.tmp',bytes=Buffer.from(input.base64,'base64');
-    const file=await open(path,input.offset===0?'w':'r+',0o600);
-    try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
-    if(input.final)await rename(path,prefix+'.json');
-    return {written:true};
   }
   if(input.type==='workspace_harness_config'){
     if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_harness_config');
@@ -568,12 +442,11 @@ export async function agentOperation(input,root){
     const expectedInstanceId=/^[a-f0-9]{48}$/.test(input.instance_id||'')?input.instance_id:null;
     const knownToolIds=new Set(Array.isArray(input.known_tool_ids)?input.known_tool_ids.filter(id=>typeof id==='string'&&/^[a-f0-9]{48}$/.test(id)):[]);
     const knownTokenIds=new Set(Array.isArray(input.known_token_ids)?input.known_token_ids.filter(id=>typeof id==='string'&&/^[a-f0-9]{48}$/.test(id)):[]);
-    const knownModelIds=new Set(Array.isArray(input.known_model_ids)?input.known_model_ids.filter(id=>typeof id==='string'&&/^[a-f0-9]{48}$/.test(id)):[]);
 
     const readOnce=async()=>{
       const state=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
       if(expectedInstanceId&&state.instance_id&&state.instance_id!==expectedInstanceId){
-        return {state:'superseded',instance_id:state.instance_id,expected_instance_id:expectedInstanceId,stdout_base64:'',next_offset:offset,stdout_size:0,has_more:false,token_requests:[],tool_requests:[],model_requests:[]};
+        return {state:'superseded',instance_id:state.instance_id,expected_instance_id:expectedInstanceId,stdout_base64:'',next_offset:offset,stdout_size:0,has_more:false,token_requests:[],tool_requests:[]};
       }
       if(['starting','running'].includes(state.state)&&state.pid){
         if(!(await isLiveHarnessProcess(state.pid,state.boot,boot,root))){
@@ -600,9 +473,8 @@ export async function agentOperation(input,root){
       const budget={remaining:MAX_POLL_REQUEST_BUDGET_BYTES,deferred:false};
       const token_requests=await readRequestDirectory(dir+'/token-requests',{knownIds:knownTokenIds,budget});
       const tool_requests=await readRequestDirectory(dir+'/tool-requests',{knownIds:knownToolIds,budget});
-      const model_requests=await readModelRequestsForPoll(dir,knownModelIds);
       const has_more=next_offset<stdout_size||budget.deferred;
-      return {...state,stdout_base64,next_offset,stdout_size,has_more,token_requests,tool_requests,model_requests};
+      return {...state,stdout_base64,next_offset,stdout_size,has_more,token_requests,tool_requests};
     };
 
     if (expectedInstanceId && input.lease_heartbeat === true) {
@@ -619,8 +491,7 @@ export async function agentOperation(input,root){
         snapshot.next_offset>offset||
         snapshot.has_more||
         snapshot.token_requests.some(r=>!r.stub)||
-        snapshot.tool_requests.some(r=>!r.stub)||
-        snapshot.model_requests.some(r=>!r.stub);
+        snapshot.tool_requests.some(r=>!r.stub);
       if(hasActivity||Date.now()>=deadline)return snapshot;
       await delay(Math.min(25,Math.max(1,deadline-Date.now())));
     }

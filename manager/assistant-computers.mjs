@@ -113,8 +113,8 @@ export function validateAssistantSettings(input, host = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, projectToolsMount = null, projectToolsVolume = null, skillStoreMount = null, skillStoreVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
-    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.skillStoreMount = skillStoreMount; this.skillStoreVolume = skillStoreVolume; this.resultMount=resultMount;
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, modelGateway = null, projectToolsMount = null, projectToolsVolume = null, skillStoreMount = null, skillStoreVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
+    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.modelGateway = modelGateway; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.skillStoreMount = skillStoreMount; this.skillStoreVolume = skillStoreVolume; this.resultMount=resultMount;
     this.globalEnvironment = globalEnvironment; this.disk = disk; this.allocatedMemoryMb = allocatedMemoryMb; this.lastHost = null;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
@@ -464,7 +464,7 @@ export class AssistantComputers {
     const tmpVol = await this.createScratchVolume(this.tmpVolumeName(owner), owner, 'assistant-tmp');
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
     const networkMode = lease.egress ? await this.ensureNetwork() : 'none';
-    const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
+    const tools=lease.harness?await this.agentTools?.():null, modelGatewayVol = await this.modelGateway?.(), results=await this.resultMount?.(owner)??[];
     const skillMounts = await this.serviceSkillsMount();
     lease.skillsMounted = skillMounts.length > 0;
     const projectToolMounts = [];
@@ -507,6 +507,7 @@ export class AssistantComputers {
           { Type: 'volume', Source: tmpVol, Target: '/tmp', ReadOnly: false },
           ...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[]),
           ...skillMounts,
+          ...(modelGatewayVol ? [{ Type: 'volume', Source: modelGatewayVol, Target: '/run/model-gateway', ReadOnly: true }] : []),
           ...projectToolMounts,
         ] } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });

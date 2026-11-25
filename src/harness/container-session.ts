@@ -21,8 +21,7 @@ import { taskPermissions } from '../tasks/configuration.js';
 import { taskReadScopes } from '../tasks/management.js';
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, selectCompatibleCliVersion, type AgentToolCli } from './agent-tools.js';
 import type { HarnessModelSource } from './subscription.js';
-import { createMailboxModelGateway, type FileBackedModelProvider, type PolledModelRequestEntry } from './model-gateway.js';
-import { modelTransport, nativeModelConnection, type ModelTransport } from './model-connection.js';
+import { registerModelGatewaySession, type FileBackedModelProvider } from './model-gateway.js';
 import { LocalManager } from '../projects/local-manager.js';
 import { toHarnessSkillSetConfig } from '../roles/skill-store.js';
 
@@ -55,7 +54,6 @@ export const persistentCliStateWorkspaceId = (instanceId: string): string =>
   createHash('sha256').update('cli-state:' + instanceId).digest('hex').slice(0, 48);
 
 export interface ContainerHarnessLaunch {
-  modelTransport?: ModelTransport;
   modelSource?: HarnessModelSource;
   modelProvider?: string;
   claudeHomeOverride?: string;
@@ -430,30 +428,37 @@ export async function withContainerHarnessSession<T, R>(
   const icode = acp && launch.acpProduct?.id === icodeProductId;
   const workswarm = acp && launch.acpProduct?.id === workswarmProductId;
   const localConfig = !acp && (launch.modelSource ?? spec.containerOptions?.modelSource) === 'local_config';
-  const connectionMode = localConfig ? 'local_config' : acp ? 'gateway' : modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
-  const supported = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
-  const nativeModel = connectionMode === 'direct' ? nativeModelConnection(launch.primaryModel, launch.fileProvider ?? spec.containerOptions?.fileProvider,supported) : undefined;
-  if (nativeModel) {
-    spec.redactor.add(nativeModel.key);
-    if (nativeModel.interfaceType !== supported) stop('harness_direct_protocol_unsupported', 'waiting_configuration', `${launch.cli} needs ${supported} for this provider. Configure a native-compatible provider or explicitly select modelTransport: gateway; no automatic protocol proxy is used.`);
+  const fileProvider = launch.fileProvider ?? spec.containerOptions?.fileProvider;
+  if (!localConfig && !acp) {
+    const required = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
+    const effective = fileProvider
+      ? (fileProvider.interfaceType ?? (/\/messages$/.test(fileProvider.baseUrl.replace(/\/$/, '')) ? 'anthropic-messages' : /\/responses$/.test(fileProvider.baseUrl.replace(/\/$/, '')) ? 'openai-responses' : /\/chat\/completions$/.test(fileProvider.baseUrl.replace(/\/$/, '')) ? 'openai-chat-completions' : required))
+      : launch.primaryModel?.protocol?.interface_type;
+    if (effective && effective !== required) {
+      stop(
+        'harness_model_api_unsupported',
+        'waiting_configuration',
+        `${launch.cli} 仅支持 ${required} 协议模型，当前模型协议为 ${effective}；网关不执行跨协议格式转换。`,
+      );
+    }
   }
-  const modelGateway = connectionMode === 'gateway' ? createMailboxModelGateway({
+  const modelGateway = !localConfig ? await registerModelGatewaySession({
     store: spec.store,
     task: spec.task,
     runId,
     leaseEpoch,
     runAccess,
     redactor: spec.redactor,
-    runner: input => transport.deliver(input),
-    workspaceId: transport.workspaceId,
     primaryModel: launch.primaryModel,
-    fileProvider: launch.fileProvider ?? spec.containerOptions?.fileProvider,
+    fileProvider,
     allowVisibleModels: !icode && !workswarm,
+    ...(workswarm ? { allowedTools: new Set(platformTools.map(t => 'mcp_bot_' + t.function.name)) } : {}),
     guard: spec.guard,
     beforeModel: spec.beforeModel,
     maxOutputTokens: launch.maxOutputTokens ?? spec.maxOutputTokens,
     signal,
     ...(launch.gatewayTiming ? { timing: launch.gatewayTiming } : {}),
+    preferLoopback: transport.kind === 'local',
   }) : undefined;
 
   const githubApiUrl = spec.containerOptions?.githubApiUrl;
@@ -482,9 +487,10 @@ export async function withContainerHarnessSession<T, R>(
       max_output_tokens: Math.min(spec.maxOutputTokens ?? 8192, launch.primaryModel?.capabilities?.max_output_tokens ?? 8192),
       image_input: launch.primaryModel?.capabilities?.image_input ?? false,
     } } : {}),
-    model_transport: connectionMode,
+    model_transport: localConfig ? 'local_config' : 'gateway',
     ...(localConfig ? { model_source: 'local_config' } : {}),
-    ...(nativeModel ? { native_model: nativeModel } : {}),
+    ...(modelGateway?.gatewayUrl ? { model_gateway_url: modelGateway.gatewayUrl } : {}),
+    ...(modelGateway?.socketPath ? { model_gateway_socket: modelGateway.socketPath } : {}),
     ...(!localConfig && launch.modelProvider ? { model_provider: launch.modelProvider } : {}),
     ...(launch.claudeHomeOverride ? { claude_home_override: launch.claudeHomeOverride } : {}),
     executable,
@@ -712,7 +718,6 @@ export async function withContainerHarnessSession<T, R>(
           wait_ms: pollWaitMs,
           known_tool_ids: collectKnownIds('tool:'),
           known_token_ids: collectKnownIds('token:'),
-          known_model_ids: modelGateway?.knownIds() ?? [],
           ...(renew ? { lease_heartbeat: true } : {}),
         });
         if (polled?.error === 'disk_full') {
@@ -796,12 +801,6 @@ export async function withContainerHarnessSession<T, R>(
           startBackground('tool:' + id, async () => {
             await handleMailboxToolRequest(dispatcher, spec.redactor, toolReq, chunk => transport.deliver(chunk));
           });
-        }
-
-        const modelEntries = polled.model_requests as PolledModelRequestEntry[] | undefined;
-        if (!cancelSignaled) {
-          if (Array.isArray(modelEntries) && modelEntries.some(e => !e?.stub)) hadNewRequests = true;
-          modelGateway?.dispatchPoll(modelEntries);
         }
 
         if (polled.has_more) {

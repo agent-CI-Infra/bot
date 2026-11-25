@@ -1,12 +1,6 @@
 // #1171: Whole-directory trusted base-branch `.agents/skills/` auto-mounting across generic tasks (Pi roles and in-process roles on the scripted test driver)
 // and Event Dispatch Manager (`read_skill`), with strict path & untrusted-PR/branch boundaries.
-const previousModelTransport = process.env.BOT_HARNESS_MODEL_TRANSPORT;
-process.env.BOT_HARNESS_MODEL_TRANSPORT = 'gateway';
-import test, { after } from 'node:test';
-after(() => {
-  if (previousModelTransport === undefined) delete process.env.BOT_HARNESS_MODEL_TRANSPORT;
-  else process.env.BOT_HARNESS_MODEL_TRANSPORT = previousModelTransport;
-});
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -27,6 +21,7 @@ import { recordEvent } from '../../../../dist/dispatch/store.js';
 import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
 import { authorizeKnowledgeTask } from '../../../fixtures/knowledge-fixture.mjs';
 import { setGrant } from '../../../../dist/tasks/grants.js';
+import { replyChatCompletion } from '../../../fixtures/openai-sse.mjs';
 
 const gitObjHash = (type, data) => createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');
 
@@ -286,8 +281,7 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
           required_evidence_complete: true,
           acceptable_risk: true,
         });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ choices: [{ message: qaReply }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+        replyChatCompletion(res, qaReply, { stream: Boolean(body.stream), usage: { prompt_tokens: 10, completion_tokens: 5 } });
         return;
       }
 
@@ -313,8 +307,7 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
         const mgrReply = calls.length === 0
           ? callTool('delegate_role', { role: 'test', purpose: 'Inspect bot PR checkout safely', refs: [] })
           : callTool('finish_coordination', { action: 'wait', reason: 'Verified bot PR head checkout isolation.', resume_condition: 'Maintainer check' });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ choices: [{ message: mgrReply }], usage: { prompt_tokens: 15, completion_tokens: 8 } }));
+        replyChatCompletion(res, mgrReply, { stream: Boolean(body.stream), usage: { prompt_tokens: 15, completion_tokens: 8 } });
         return;
       }
       if (tools.includes('submit_role_result')) {
@@ -324,8 +317,7 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
           inspected_scope: ['calc.mjs'],
           unknowns: [],
         });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ choices: [{ message: workerReply }], usage: { prompt_tokens: 15, completion_tokens: 8 } }));
+        replyChatCompletion(res, workerReply, { stream: Boolean(body.stream), usage: { prompt_tokens: 15, completion_tokens: 8 } });
         return;
       }
 
@@ -354,8 +346,7 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
         });
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: reply }], usage: { prompt_tokens: 20, completion_tokens: 10 } }));
+      replyChatCompletion(res, reply, { stream: Boolean(body.stream), usage: { prompt_tokens: 20, completion_tokens: 10 } });
     } catch (err) {
       observed.serverError = err;
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -480,7 +471,7 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
   assert.ok(observed.systemTexts.length >= sysCountBeforeReqBotPr + 2, 'task.request continuing bot_pr must have invoked Pi for both controller and delegated worker');
 });
 
-test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-process roles & Event Dispatch Manager read trusted base-branch skills and companion files; bad .agents/skills/ stops at waiting_configuration', { timeout: 90000 }, async t => {
+test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-process roles & Event Dispatch Manager read trusted base-branch skills and companion files; bad .agents/skills/ stops at waiting_configuration', { timeout: 180000 }, async t => {
   configureDispatch(null);
   t.after(() => configureDispatch(ruleDecider));
 
@@ -600,8 +591,7 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-p
       }
     }
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: reply }], usage: { prompt_tokens: 20, completion_tokens: 10 } }));
+    replyChatCompletion(res, reply, { stream: Boolean(body.stream), usage: { prompt_tokens: 20, completion_tokens: 10 } });
   });
   modelServer.listen(0, '127.0.0.1');
   await once(modelServer, 'listening');

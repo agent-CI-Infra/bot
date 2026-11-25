@@ -37,6 +37,6 @@ test('default direct Pi dispatch uses native model streaming, platform task tool
  const binding=s.get('SELECT * FROM dispatch_harness_sessions');assert.equal(binding.harness,'pi');assert.ok(JSON.parse(binding.state).sessionId);
  assert.equal(s.get('SELECT count(*) n FROM tasks').n,0);assert.equal(calls,1);
  let privateConfigs=0;for(const row of s.all('SELECT * FROM service_role_operations')){const recorded=JSON.parse(operationRequestText(s,'service_role_operations',row));if(recorded.request?.type==='workspace_agent_config'){privateConfigs++;assert.equal(recorded.request.base64,'[redacted]');assert.ok(row.request_sha256);}}assert.ok(privateConfigs>0,'real direct Pi config is redacted in retained operation trajectories');
- assert.equal(s.get('SELECT count(*) n FROM model_requests WHERE request_ref IS NOT NULL').n,0);
+ assert.equal(s.get('SELECT count(*) n FROM model_requests WHERE request_ref IS NOT NULL').n,1);
  assert.equal(s.get('SELECT count(*) n FROM model_requests WHERE request_snapshot IS NOT NULL').n,0);
 });

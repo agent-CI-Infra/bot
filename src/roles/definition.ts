@@ -3,6 +3,7 @@ import type { Store } from '../storage/database.js';
 import { fail } from '../core/security.js';
 import { stop, TaskError } from '../agent/common.js';
 import { selectedModel, visibleModel, openModel } from '../agent/model.js';
+import { modelProtocol } from '../models/catalog.js';
 import { rolePool, systemInstructions, roleTemplate, requiredRoles, configuredRoles } from './pool.js';
 import { roleKind, builtinKinds, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
 import { harnesses, runsInTaskCheckout } from './harness.js';
@@ -767,10 +768,19 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       if (!row?.api_key) invalid('role_model_not_available', mfield + '.model_id');
       const hash = modelProfileHash(row!);
       if (ref.profile_hash !== undefined && ref.profile_hash !== hash) fail(409, 'role_model_profile_changed', mfield + '.profile_hash');
-      const profile = { api: ref.api ?? 'openai-chat-completions', tool_calls: ref.tool_calls ?? true, structured_output: ref.structured_output ?? 'tool_call' };
+      const actualApi = modelProtocol(s, row as any).interface_type;
+      const profile = { api: ref.api ?? actualApi, tool_calls: ref.tool_calls ?? true, structured_output: ref.structured_output ?? 'tool_call' };
       if (typeof profile.api !== 'string' || typeof profile.tool_calls !== 'boolean' || typeof profile.structured_output !== 'string') invalid('invalid_role_reference', mfield);
       checkMatrix(harness!, profile, mfield, invalid);
+      if (!harness!.model_api.includes(actualApi)) invalid('harness_model_api_unsupported', mfield + '.api');
       model = { model_id: String(row!.id), name: String(row!.model_name), profile_hash: hash, version: Number(row!.version), ...profile };
+    } else if (enabled && !harness!.externalModel && modelSource !== 'local_config') {
+      const defaultModelId = s.get('SELECT model_id FROM policies WHERE repository_id=?', repositoryId)?.model_id;
+      const defaultRow = defaultModelId ? visibleModel(s, repositoryId, String(defaultModelId)) : undefined;
+      if (defaultRow?.api_key) {
+        const actualApi = modelProtocol(s, defaultRow as any).interface_type;
+        if (!harness!.model_api.includes(actualApi)) invalid('harness_model_api_unsupported', `${field}.model_profile_ref.api`);
+      }
     }
     let skill: SkillBundleRef | null = null;
     if (given.skill_bundle_ref !== undefined && given.skill_bundle_ref !== null) {
@@ -936,12 +946,15 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     const ref = definition.model_profile_ref, row = visibleModel(s, repositoryId, ref.model_id);
     if (!row?.api_key) return stop('role_model_not_available', 'waiting_configuration', `${field}.model_profile_ref.model_id：模型 ${ref.model_id} 已删除、撤销或没有凭据；不会换用其他模型。`);
     if (modelProfileHash(row) !== ref.profile_hash) return stop('role_model_profile_changed', 'waiting_configuration', `${field}.model_profile_ref.profile_hash：模型 ${ref.model_id} 的地址或名称已变化，请重新保存角色配置。`);
-    model = openModel(s, row); source = 'role'; profile = { api: ref.api, tool_calls: ref.tool_calls, structured_output: ref.structured_output }; profileHash = ref.profile_hash;
+    model = openModel(s, row); source = 'role';
+    const effectiveApi = model.protocol?.interface_type ?? ref.api;
+    profile = { api: effectiveApi, tool_calls: ref.tool_calls, structured_output: ref.structured_output }; profileHash = ref.profile_hash;
   } else {
     try {
       const fallback = options.fallbackModel?.();
       model = fallback?.model ?? selectedModel(s, repositoryId);
       source = fallback?.source ?? 'project';
+      profile = { api: model.protocol?.interface_type ?? 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' };
       profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
     } catch (err) {
       if (hasConfigOverride && (err as any)?.code === 'model_not_configured') {
@@ -954,7 +967,14 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
       }
     }
   }
-  if (!harness.externalModel && source !== 'external_harness' && source !== 'local_config') checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });
+  if (!harness.externalModel && source !== 'external_harness' && source !== 'local_config') {
+    checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => {
+      const detail = code === 'harness_model_api_unsupported'
+        ? `${at}：${harness.id} 不支持模型接口协议 ${profile.api}（支持：${harness.model_api.join('、')}）；统一透传网关不做跨协议转换。`
+        : `${at}：${harness.id} 不支持这个模型配置。`;
+      throw new TaskError(code, 'waiting_configuration', detail);
+    });
+  }
   if (!harness.kinds.includes(definition.kind) && !harnessOverride && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
   const permission = permissionSnapshot(definition.permissions,definition.kind);
   const environment = environmentProfiles.find(e => e.id === definition.environment_profile_ref.id)!, schema = outputSchemas.find(o => o.id === definition.output_schema_ref.id)!;
