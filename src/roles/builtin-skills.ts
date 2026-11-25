@@ -13,6 +13,9 @@ export interface BuiltinSkillDirectoryFile {
   data: Buffer;
   executable: boolean;
 }
+export const SKILL_MAX_FILES = 256;
+export const MAX_SKILL_BUNDLES = 32;
+
 const defaultRoot=new URL('../../skills/',import.meta.url);
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
 const BUILTIN_SKILL_ID_PATTERN=/^[a-z0-9][a-z0-9._-]{0,63}$/i;

@@ -101,7 +101,7 @@ export function resolveServiceRoleSkills(
     for (const item of resolved.source.items) {
       if (seenSlugs.has(item.slug)) continue;
       seenSlugs.add(item.slug);
-      const skillFiles = resolved.fullFiles.filter(f => f.path.startsWith(`${item.slug}/`));
+      const skillFiles = resolved.fullFiles.filter(f => f.path.startsWith(`${item.slug}/`) && f.path !== `${item.slug}/LICENSE`);
       const md = skillFiles.find(f => f.path === `${item.slug}/SKILL.md`)?.content ?? '';
       const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(md)?.[1] ?? '';
       const name = /^name:\s*(.+)$/m.exec(front)?.[1]?.trim().replace(/^['"]|['"]$/g, '') || item.slug;

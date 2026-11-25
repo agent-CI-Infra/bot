@@ -8,7 +8,7 @@ import { Redactor, TaskError } from '../agent/common.js';
 import { GitHub, repositoryTree } from '../github/client.js';
 import type { Mirror } from '../agent/git-cache.js';
 import { safeSkillSubpath, skillEntryPath, skillTreePath, trustedCachedRuleFiles } from '../rules/service.js';
-import { listBuiltinSkillSlugs, readBuiltinSkillDirectory } from './builtin-skills.js';
+import { listBuiltinSkillSlugs, MAX_SKILL_BUNDLES, readBuiltinSkillDirectory, SKILL_MAX_FILES } from './builtin-skills.js';
 import type { SkillStoreFile } from './skill-store.js';
 
 export type SkillOrigin = 'builtin' | 'repository' | 'console';
@@ -17,12 +17,11 @@ export type SkillFileEncoding = 'utf8' | 'base64';
 
 export const SKILL_SLUG_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const SKILL_ID_PATTERN = /^(?:builtin:[a-z0-9][a-z0-9._-]{0,63}|(?:repository|console):[A-Za-z0-9._-]{1,64}:[a-z0-9][a-z0-9._-]{0,63})$/;
-export const SKILL_MAX_FILES = 256;
+export { SKILL_MAX_FILES, MAX_SKILL_BUNDLES };
 export const SKILL_MAX_FILE_BYTES = 512 * 1024;
 export const SKILL_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 export const SKILL_MAX_NAME_LENGTH = 120;
 export const SKILL_MAX_DESCRIPTION_LENGTH = 1000;
-export const MAX_SKILL_BUNDLES = 32;
 export const LIBRARY_BUNDLE_MAX_ITEMS = 64;
 export const LIBRARY_BUNDLE_MAX_FILES = 512;
 export const LIBRARY_BUNDLE_MAX_BYTES = 16 * 1024 * 1024;
